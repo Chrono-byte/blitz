@@ -275,11 +275,41 @@ try {
         // shapes at call sites that expect `console` to have certain keys.
         const hostConsole = g.console;
         const useConsole: any = {};
-        useConsole.log = hostConsole.log ? hostConsole.log : builtConsole.log;
-        useConsole.info = hostConsole.info ? hostConsole.info : builtConsole.info;
-        useConsole.warn = hostConsole.warn ? hostConsole.warn : builtConsole.warn;
-        useConsole.error = hostConsole.error ? hostConsole.error : builtConsole.error;
-        useConsole.debug = hostConsole.debug ? hostConsole.debug : builtConsole.debug;
+        useConsole.log = hostConsole.log
+          ? function (...args: any[]) {
+              try {
+                return hostConsole.log.apply(hostConsole, args);
+              } catch (_) {}
+            }
+          : builtConsole.log;
+        useConsole.info = hostConsole.info
+          ? function (...args: any[]) {
+              try {
+                return hostConsole.info.apply(hostConsole, args);
+              } catch (_) {}
+            }
+          : builtConsole.info;
+        useConsole.warn = hostConsole.warn
+          ? function (...args: any[]) {
+              try {
+                return hostConsole.warn.apply(hostConsole, args);
+              } catch (_) {}
+            }
+          : builtConsole.warn;
+        useConsole.error = hostConsole.error
+          ? function (...args: any[]) {
+              try {
+                return hostConsole.error.apply(hostConsole, args);
+              } catch (_) {}
+            }
+          : builtConsole.error;
+        useConsole.debug = hostConsole.debug
+          ? function (...args: any[]) {
+              try {
+                return hostConsole.debug.apply(hostConsole, args);
+              } catch (_) {}
+            }
+          : builtConsole.debug;
         try {
           g.console = useConsole;
         } catch (_) {}
