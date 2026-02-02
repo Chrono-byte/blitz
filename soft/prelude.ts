@@ -190,60 +190,18 @@ try {
   // For `log` we provide a small wrapper that resolves the native printer
   // once and calls it. This avoids a property lookup + host-bridge lookup
   // at every `console.log` call site.
+  // Use the original `globalConsole` implementation as the default printer.
+  // This avoids invoking host accessor helpers during prelude initialization
+  // which can fail in some bootstrap orders. `globalConsole.log` is a safe
+  // JS function that formats arguments and calls into the host through the
+  // runtime wrapper; it's wrapped in try/catch to avoid crashing the runtime
+  // if the host environment behaves unexpectedly.
   builtConsole.log = function (...args: Value[]): void {
     try {
-      const printer = getNativePrinter();
-      // If the resolved printer is the raw host function that expects a
-      // single string argument, join with spaces. If it's `native_print`
-      // wrapper imported above, it can accept varargs; call accordingly.
-      if (printer === host_print) {
-        let out = "";
-        let sep = "";
-        let i = 0;
-        while (i < (args as any).length) {
-          const a = (args as any)[i];
-          let s: string;
-          if (a === null) s = "null";
-          else if (typeof a === "undefined") s = "undefined";
-          else if (typeof a === "string") s = a as any;
-          else if (typeof a === "number") s = String(a as any);
-          else if (typeof a === "boolean") s = a ? "true" : "false";
-          else s = "[object Object]";
-          out = out + sep + s;
-          sep = " ";
-          i = i + 1;
-        }
-        try {
-          printer(out);
-        } catch (_) {}
-      } else {
-        // Printer likely accepts varargs
-        try {
-          printer(...args);
-        } catch (_) {
-          // If varargs call fails, fall back to string join
-          let out = "";
-          let sep = "";
-          let i = 0;
-          while (i < (args as any).length) {
-            const a = (args as any)[i];
-            let s: string;
-            if (a === null) s = "null";
-            else if (typeof a === "undefined") s = "undefined";
-            else if (typeof a === "string") s = a as any;
-            else if (typeof a === "number") s = String(a as any);
-            else if (typeof a === "boolean") s = a ? "true" : "false";
-            else s = "[object Object]";
-            out = out + sep + s;
-            sep = " ";
-            i = i + 1;
-          }
-          try {
-            host_print(out);
-          } catch (_) {}
-        }
-      }
-    } catch (_) {}
+      return (globalConsole as any).log.apply(globalConsole, args);
+    } catch (_) {
+      // swallow errors during bootstrap
+    }
   };
   builtConsole.info = globalConsole.info;
   builtConsole.warn = globalConsole.warn;
