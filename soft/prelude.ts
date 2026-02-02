@@ -225,35 +225,35 @@ try {
         useConsole.log = hostConsole.log
           ? function (...args: any[]) {
               try {
-                return hostConsole.log.apply(hostConsole, args);
+                return hostConsole.log(...args);
               } catch (_) {}
             }
           : builtConsole.log;
         useConsole.info = hostConsole.info
           ? function (...args: any[]) {
               try {
-                return hostConsole.info.apply(hostConsole, args);
+                return hostConsole.info(...args);
               } catch (_) {}
             }
           : builtConsole.info;
         useConsole.warn = hostConsole.warn
           ? function (...args: any[]) {
               try {
-                return hostConsole.warn.apply(hostConsole, args);
+                return hostConsole.warn(...args);
               } catch (_) {}
             }
           : builtConsole.warn;
         useConsole.error = hostConsole.error
           ? function (...args: any[]) {
               try {
-                return hostConsole.error.apply(hostConsole, args);
+                return hostConsole.error(...args);
               } catch (_) {}
             }
           : builtConsole.error;
         useConsole.debug = hostConsole.debug
           ? function (...args: any[]) {
               try {
-                return hostConsole.debug.apply(hostConsole, args);
+                return hostConsole.debug(...args);
               } catch (_) {}
             }
           : builtConsole.debug;
