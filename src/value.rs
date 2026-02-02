@@ -48,13 +48,21 @@ pub type BuiltinFn = fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, String>;
 /// Full runtime type descriptor structure so the VM can perform stricter checks.
 #[derive(Clone, Debug)]
 pub enum RuntimeType {
+    /// Number type
     Number,
+    /// String type
     String,
+    /// Boolean type
     Boolean,
+    /// Null type
     Null,
+    /// Void type
     Void,
+    /// Array type
     Array(Box<RuntimeType>),
-    Object,          // structural runtime checks not implemented yet
+    /// Object type
+    Object,
+    /// Function type
     Function(usize), // arity
 }
 

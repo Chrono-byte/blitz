@@ -5,16 +5,22 @@ use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::rc::Rc;
-use std::thread_local;
 
 use tsblitz::bytecode;
 use tsblitz::{Program, bundle_entry, compile, parser::Parser, typecheck, value::Value, vm::Vm};
 
 /// Minimal native hook: print to stdout. The TS soft layer wraps this as console.log.
 fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+    // Diagnostic wrapper: emit arg debug then print joined string
     if tsblitz::trace::enabled() {
+        eprintln!("[diag] host.native_print called nargs={}", args.len());
         for (i, v) in args.iter().enumerate() {
-            tsblitz::trace::value_string(&format!("native_print arg[{}]", i), v);
+            tsblitz::trace::value_string(&format!("host.native_print arg[{}]", i), v);
+            eprintln!(
+                "[diag] host.native_print debug arg[{}] type={}",
+                i,
+                v.type_name()
+            );
         }
     }
     let s: String = args
@@ -23,44 +29,22 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
         .collect::<Vec<_>>()
         .join(" ");
     if tsblitz::trace::enabled() {
-        eprintln!("[trace] native_print joined len={} repr={:?}", s.len(), s);
+        eprintln!(
+            "[diag] host.native_print joined len={} repr={:?}",
+            s.len(),
+            s
+        );
     }
-    println!("{}", s);
+    // Print without adding a newline (preserve previous behavior) but
+    // explicitly flush stdout so short-lived processes still show output.
+    use std::io::Write;
+    print!("{}", s);
+    let _ = std::io::stdout().flush();
     Ok(Value::Null)
 }
 
-thread_local! {
-    // Per-thread host table reference. We store an Rc to the real table so
-    // the builtin `host_get` can access host-provided Values without making
-    // the table a Sync static.
-    static HOST_TABLE_TLS: RefCell<Option<Rc<RefCell<HashMap<String, Value>>>>> = const { RefCell::new(None) };
-}
-
-/// Accessor: return a host-provided Value by name from the private host table.
-fn host_get(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
-    if args.is_empty() {
-        return Err("host_get: name required".into());
-    }
-    match &args[0] {
-        Value::String(s) => HOST_TABLE_TLS.with(|cell| {
-            let opt = cell.borrow();
-            let table_rc = opt
-                .as_ref()
-                .ok_or("host table not initialized".to_string())?;
-            let tbl = table_rc.borrow();
-            let res = tbl.get(s).cloned();
-            if tsblitz::trace::enabled() {
-                if let Some(v) = &res {
-                    tsblitz::trace::value_string(&format!("host_get('{}') ->", s), v);
-                } else {
-                    eprintln!("[trace] host_get('{}') -> None", s);
-                }
-            }
-            res.ok_or(format!("host_get: '{}' not found", s))
-        }),
-        _ => Err("host_get: name must be string".into()),
-    }
-}
+// Host bindings are published directly into the VM globals (`globalThis`) so
+// soft-layer code can access them as regular globals (e.g. `globalThis.__native_print`).
 
 /// Runs source code through the full compilation pipeline
 ///
@@ -160,24 +144,15 @@ fn main() -> Result<(), String> {
         .borrow_mut()
         .insert("globalThis".to_string(), global_this);
 
-    // Kernel <-> blitzlib private host table: native hooks live here and are
-    // not exposed to user code. Populate the global OnceLock so `host_get`
-    // can access entries; never place raw host functions directly into the
-    // VM globals table.
-    let host_map_rc: Rc<RefCell<HashMap<String, Value>>> = Rc::new(RefCell::new(HashMap::new()));
-    // Populate host_map_rc with native entries
-    host_map_rc
+    // Publish native host bindings directly into globals so soft code can read
+    // them as ordinary globals (e.g. `globalThis.__native_print`). This keeps
+    // the runtime simpler and avoids an extra indirection.
+    globals
         .borrow_mut()
         .insert("__native_print".to_string(), Value::Builtin(native_print));
 
-    // Note: host-provided primitives (like __native_print) live in the
-    // private host_map_rc table. They are intentionally not placed directly
-    // into the VM globals to avoid leaking raw host functions into user code.
-
-    // Native helper to create a raw VM object (HashMap-backed) from Rust.
-    // This bypasses any soft-layer constructor and is useful during bootstrap
-    // when the soft Object API may not be fully initialized or when we want
-    // a guaranteed object Value to use as a prototype.
+    // Provide a raw native_new_object builtin that returns a VM-backed object
+    // suitable for use as a prototype during bootstrap.
     fn native_new_object(_vm: &mut Vm, _args: &[Value]) -> Result<Value, String> {
         use std::cell::RefCell;
         use std::collections::HashMap;
@@ -188,25 +163,97 @@ fn main() -> Result<(), String> {
         }
         Ok(v)
     }
-    host_map_rc.borrow_mut().insert(
+
+    // Minimal callable placeholder for `Object` constructor used only for
+    // early bootstrap. It creates a plain object and links its `__proto__`
+    // to the canonical `Object` prototype stored under the private key
+    // `__Object_ctor_obj` (inserted below).
+    fn native_object_ctor(vm: &mut Vm, _args: &[Value]) -> Result<Value, String> {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        use std::rc::Rc;
+        // Create a fresh object instance.
+        let new_obj = Value::Object(Rc::new(RefCell::new(HashMap::new())));
+        // Try to link its __proto__ from the stored canonical constructor object.
+        if let Some(ctor_obj) = vm.get_global("__Object_ctor_obj")
+            && let Value::Object(map) = ctor_obj
+            && let Some(proto) = map.borrow().get("prototype")
+            && let Value::Object(inst_map) = &new_obj
+        {
+            inst_map
+                .borrow_mut()
+                .insert("__proto__".to_string(), proto.clone());
+        }
+        Ok(new_obj)
+    }
+
+    // Minimal callable placeholder for `Array` constructor used only for
+    // early bootstrap. It creates a fresh array and links its `__proto__`
+    // to the canonical `Array.prototype` stored under `__Array_ctor_obj`.
+    fn native_array_ctor(vm: &mut Vm, _args: &[Value]) -> Result<Value, String> {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        use std::rc::Rc;
+        // Create an empty dense array and empty props map.
+        let new_arr = Value::Array(
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::new(RefCell::new(HashMap::new())),
+        );
+        // Link props.__proto__ from stored ctor object if available.
+        if let Some(ctor_obj) = vm.get_global("__Array_ctor_obj")
+            && let Value::Object(map) = ctor_obj
+            && let Some(proto) = map.borrow().get("prototype")
+            && let Value::Array(_arr, props) = &new_arr
+        {
+            props
+                .borrow_mut()
+                .insert("__proto__".to_string(), proto.clone());
+        }
+        Ok(new_arr)
+    }
+
+    globals.borrow_mut().insert(
         "__native_new_object".to_string(),
         Value::Builtin(native_new_object),
     );
 
-    // Initialize TLS host table so `host_get` can access host-provided values.
-    HOST_TABLE_TLS.with(|cell| {
-        *cell.borrow_mut() = Some(Rc::clone(&host_map_rc));
-    });
+    // Provide a minimal host-backed `console` object so early bootstrap code
+    // that expects `console.log` to be callable does not fail if the soft
+    // prelude or host environment provides a non-callable value. We expose
+    // simple builtins that forward to `native_print` so any call is treated
+    // as a VM-callable builtin rather than a plain object property.
+    {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        use std::rc::Rc;
 
-    // Insert a single, minimal accessor into globals so blitzlib can call it
-    // during bootstrap and capture host references into its private bindings.
+        let mut console_map: HashMap<String, Value> = HashMap::new();
+        // All console methods forward to the same native printer for now.
+        console_map.insert("log".to_string(), Value::Builtin(native_print));
+        console_map.insert("info".to_string(), Value::Builtin(native_print));
+        console_map.insert("warn".to_string(), Value::Builtin(native_print));
+        console_map.insert("error".to_string(), Value::Builtin(native_print));
+        console_map.insert("debug".to_string(), Value::Builtin(native_print));
+
+        globals.borrow_mut().insert(
+            "console".to_string(),
+            Value::Object(Rc::new(RefCell::new(console_map))),
+        );
+    }
+
+    // Note: no host accessor indirection is published. Soft code should read
+    // direct globals like `__native_print` and `__native_new_object`.
+
+    // Enable soft-layer debugValue prints when tracing is desired. This sets
+    // the JS-visible `__TSBLITZ_TRACE` flag so the soft `host.debugValue`
+    // helper will emit additional diagnostic lines during bootstrap.
     globals
         .borrow_mut()
-        .insert("__host_get".to_string(), Value::Builtin(host_get));
+        .insert("__TSBLITZ_TRACE".to_string(), Value::Bool(true));
 
-    // Do not expose host shims (host_print / __native_print) directly in
-    // the globals table — soft layer code should obtain host helpers via
-    // __host_get to preserve the separation between host and VM.
+    // Note: we intentionally publish native host bindings into `globals` so
+    // soft code can read them directly. This simplifies the runtime and
+    // removes the `__host_get` indirection.
 
     // Load the soft layer.
     // Bundle the TypeScript soft layer (prelude + relative imports) into a single Program
@@ -234,14 +281,89 @@ fn main() -> Result<(), String> {
     // soft prelude isn't blocked by runtime type checks that expect stricter
     // static types.
     let chunk = clear_slot_types_in_chunk(chunk);
-    // One-time diagnostic: print compiled chunk constants so we can map
-    // bytecode ip locations back to source-level constants during debugging.
+    // One-time diagnostic: print compiled chunk constants and function prototypes
+    // so we can map bytecode ip locations back to source-level functions during debugging.
     if tsblitz::trace::enabled() {
         eprintln!(
             "[trace] Prelude chunk: code_len={} constants={}",
             chunk.code.len(),
             chunk.constants.len()
         );
+        eprintln!("[trace] Prelude functions (index -> name, arity, bytecode_len):");
+        for (i, f) in chunk.functions.iter().enumerate() {
+            eprintln!(
+                "[trace]  fn[{}] name='{}' arity={} bytecode_len={}",
+                i,
+                f.name,
+                f.arity,
+                f.chunk.code.len()
+            );
+        }
+        // Print annotated bytecode for each function: opcode, operand preview, and source line
+        for (i, f) in chunk.functions.iter().enumerate() {
+            eprintln!(
+                "[trace] --- fn[{}] '{}' bytecode (len={}) ---",
+                i,
+                f.name,
+                f.chunk.code.len()
+            );
+            let mut ip = 0usize;
+            while ip < f.chunk.code.len() {
+                let b = f.chunk.code[ip];
+                let op = bytecode::Op::from_byte(b)
+                    .map_or_else(|| format!("0x{:02x}", b), |o| format!("{:?}", o));
+                // line number for this opcode if available
+                let line = if ip < f.chunk.lines.len() {
+                    f.chunk.lines[ip]
+                } else {
+                    0
+                };
+                let mut extra = String::new();
+                match bytecode::Op::from_byte(b) {
+                    Some(bytecode::Op::Const)
+                    | Some(bytecode::Op::GetGlobal)
+                    | Some(bytecode::Op::SetGlobal)
+                    | Some(bytecode::Op::GetBuiltin)
+                    | Some(bytecode::Op::MakeClosure)
+                    | Some(bytecode::Op::GetPropertyIC)
+                    | Some(bytecode::Op::Call) => {
+                        if ip + 1 < f.chunk.code.len() {
+                            let v = f.chunk.code[ip + 1] as usize;
+                            extra = format!(" {}", v);
+                        }
+                    }
+                    Some(bytecode::Op::Jump)
+                    | Some(bytecode::Op::JumpIfFalse)
+                    | Some(bytecode::Op::PushHandler) => {
+                        if ip + 2 < f.chunk.code.len() {
+                            let hi = f.chunk.code[ip + 1] as usize;
+                            let lo = f.chunk.code[ip + 2] as usize;
+                            let short = ((hi << 8) | lo) as i16;
+                            extra = format!(" {}", short);
+                        }
+                    }
+                    _ => {}
+                }
+                eprintln!(
+                    "[trace] fn[{}] {:04} (line {})  {}{}",
+                    i, ip, line, op, extra
+                );
+                ip += 1;
+                match bytecode::Op::from_byte(b) {
+                    Some(bytecode::Op::Const)
+                    | Some(bytecode::Op::GetGlobal)
+                    | Some(bytecode::Op::SetGlobal)
+                    | Some(bytecode::Op::GetBuiltin)
+                    | Some(bytecode::Op::MakeClosure)
+                    | Some(bytecode::Op::GetPropertyIC)
+                    | Some(bytecode::Op::Call) => ip += 1,
+                    Some(bytecode::Op::Jump)
+                    | Some(bytecode::Op::JumpIfFalse)
+                    | Some(bytecode::Op::PushHandler) => ip += 2,
+                    _ => {}
+                }
+            }
+        }
         for (i, c) in chunk.constants.iter().enumerate() {
             match c {
                 Value::String(s) => eprintln!("[trace] const[{}] (string) = {:?}", i, s),
@@ -388,14 +510,123 @@ fn main() -> Result<(), String> {
         // Insert into globals so VM and soft layer see canonical entries. Do not
         // overwrite if the prelude or environment already set them earlier.
         let mut g = globals.borrow_mut();
-        g.entry("Object".to_string()).or_insert(object_ctor);
+        // Store raw ctor objects under private keys so the callable placeholders
+        // below can use their `prototype` slots to link new instances.
+        g.entry("__Object_ctor_obj".to_string())
+            .or_insert(object_ctor);
         g.entry("Function".to_string()).or_insert(function_ctor);
-        g.entry("Array".to_string()).or_insert(array_ctor);
+        g.entry("__Array_ctor_obj".to_string())
+            .or_insert(array_ctor);
+
+        // Prefer to leave an explicitly provided `Object`/`Array` in place, but
+        // ensure that a callable placeholder exists if the current entry isn't
+        // callable (callable = Builtin or Closure). This avoids "Call: not a
+        // function" during early bootstrap while keeping constructor prototype
+        // objects available via the private keys above.
+        // Insert placeholders only when the global is missing or not callable.
+        match g.get("Object") {
+            Some(v) => {
+                if !matches!(v, Value::Builtin(_) | Value::Closure { .. }) {
+                    g.insert("Object".to_string(), Value::Builtin(native_object_ctor));
+                    if tsblitz::trace::enabled() {
+                        eprintln!("[trace] Inserted callable placeholder for Object");
+                    }
+                }
+            }
+            None => {
+                g.insert("Object".to_string(), Value::Builtin(native_object_ctor));
+                if tsblitz::trace::enabled() {
+                    eprintln!("[trace] Inserted callable placeholder for Object (missing)");
+                }
+            }
+        }
+
+        match g.get("Array") {
+            Some(v) => {
+                if !matches!(v, Value::Builtin(_) | Value::Closure { .. }) {
+                    g.insert("Array".to_string(), Value::Builtin(native_array_ctor));
+                    if tsblitz::trace::enabled() {
+                        eprintln!("[trace] Inserted callable placeholder for Array");
+                    }
+                }
+            }
+            None => {
+                g.insert("Array".to_string(), Value::Builtin(native_array_ctor));
+                if tsblitz::trace::enabled() {
+                    eprintln!("[trace] Inserted callable placeholder for Array (missing)");
+                }
+            }
+        }
     }
 
-    repl_vm
-        .run(chunk)
-        .map_err(|e| format!("Runtime error in soft layer: {}", e))?;
+    // Run prelude and capture errors to emit additional diagnostics useful when
+    // host/soft bridging fails (e.g. Call: not a function). When the prelude
+    // fails, print selected globals and their runtime types to stderr so the
+    // developer can inspect what the soft layer saw at bootstrap time.
+    if tsblitz::trace::enabled() {
+        eprintln!("[diag pre-prelude] Snapshot of globals before running prelude:");
+        for name in &[
+            "console",
+            "__native_print",
+            "__native_new_object",
+            "globalThis",
+            "Object",
+            "Array",
+        ] {
+            match globals.borrow().get(*name) {
+                Some(v) => eprintln!(
+                    "[diag pre-prelude] global '{}' type={}",
+                    name,
+                    v.type_name()
+                ),
+                None => eprintln!("[diag pre-prelude] global '{}' NOT present", name),
+            }
+        }
+    }
+    match repl_vm.run(chunk) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Runtime error in soft layer: {}", e);
+            if tsblitz::trace::enabled() {
+                eprintln!("[diag] Dumping selected globals for diagnosis:");
+            }
+            // Inspect common suspects
+            for name in &[
+                "console",
+                "__native_print",
+                "__native_new_object",
+                "globalThis",
+                "Object",
+                "Array",
+            ] {
+                match repl_vm.get_global(name) {
+                    Some(v) => {
+                        eprintln!("[diag] global '{}' type={}", name, v.type_name());
+                        if tsblitz::trace::enabled() {
+                            if let Some(keys) = repl_vm.list_global_own_keys(name) {
+                                eprintln!("[diag]   own keys = {:?}", keys);
+                            }
+                            if *name == "console"
+                                && let Some(val) = repl_vm.get_global("console")
+                            {
+                                // Try to print the console object's own keys and whether
+                                // it has a 'log' key; avoid calling private helpers.
+                                if let Some(keys) = repl_vm.list_own_keys_of_value(&val) {
+                                    eprintln!("[diag]   console own keys = {:?}", keys);
+                                    eprintln!(
+                                        "[diag]   console.has_log = {}",
+                                        keys.iter().any(|k| k == "log")
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    None => eprintln!("[diag] global '{}' NOT present", name),
+                }
+            }
+            return Err(format!("Runtime error in soft layer: {}", e));
+        }
+    }
 
     // Ensure Array.prototype exists: some bootstrap paths in the soft prelude
     // may not have been able to attach a prototype object onto the soft
@@ -415,10 +646,6 @@ fn main() -> Result<(), String> {
             map.insert("prototype".to_string(), proto);
         }
     }
-
-    // Do not inject an ad-hoc callable `String` builtin here. The soft
-    // prelude should use __host_get to resolve host values or rely on the
-    // runtime to provide canonical constructors when available.
 
     if tsblitz::trace::enabled() {
         eprintln!("[trace] Globals after prelude:");
@@ -468,10 +695,10 @@ fn main() -> Result<(), String> {
     }
 
     // REPL with line-editing and history
-    println!("tsblitz — TypeScript VM (Rust runtime). Type exit to quit.");
+    println!("Blitz — TypeScript VM (Rust runtime). Type exit to quit.");
     let mut rl = rustyline::Editor::<(), rustyline::history::DefaultHistory>::new()
         .map_err(|e| format!("Readline init error: {}", e))?;
-    let history_path = env::temp_dir().join("tsblitz_repl_history");
+    let history_path = env::temp_dir().join("blitz_repl_history");
     let _ = rl.load_history(&history_path);
     loop {
         match rl.readline("> ") {

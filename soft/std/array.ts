@@ -21,7 +21,8 @@ function ensureArrayInstaller(installer: ArrayInstaller): void {
     if (typeof globalThis !== "undefined") {
       const g: any = globalThis as any;
       const hostCtor = g && g.Array;
-      const usableHostCtor = hostCtor != null && (typeof hostCtor === "object" || typeof hostCtor === "function");
+      const usableHostCtor =
+        hostCtor != null && (typeof hostCtor === "object" || typeof hostCtor === "function");
       if (usableHostCtor) {
         // Ensure prototype exists before calling installer
         try {
@@ -45,7 +46,11 @@ function ensureArrayInstaller(installer: ArrayInstaller): void {
       // a safe constructor (host when available or the soft fallback).
       try {
         const existing = g.__tsblitz_post_bootstrap;
-        const looksLikeArray = existing != null && typeof existing === "object" && typeof (existing as any).length === "number" && typeof (existing as any).push === "function";
+        const looksLikeArray =
+          existing != null &&
+          typeof existing === "object" &&
+          typeof (existing as any).length === "number" &&
+          typeof (existing as any).push === "function";
         if (!looksLikeArray) g.__tsblitz_post_bootstrap = [];
         // Store a simple descriptor so prelude can distinguish legacy function
         // entries and richer installer descriptors in future.
@@ -65,7 +70,8 @@ try {
   try {
     if (typeof globalThis !== "undefined") {
       const g: any = globalThis as any;
-      const ctor: any = g && g.Array ? g.Array : (typeof Array !== "undefined" ? (Array as any) : undefined);
+      const ctor: any =
+        g && g.Array ? g.Array : typeof Array !== "undefined" ? (Array as any) : undefined;
       if (ctor) {
         let proto = ctor.prototype;
         if (proto == null) {
@@ -202,7 +208,11 @@ ensureArrayInstaller(function installFilter(ctor: any) {
           if (Object.prototype.hasOwnProperty.call(this, String(i))) {
             const value = this[i];
             let ok;
-            if (predicate && (predicate as any).call && typeof (predicate as any).call === "function") {
+            if (
+              predicate &&
+              (predicate as any).call &&
+              typeof (predicate as any).call === "function"
+            ) {
               ok = (predicate as any).call(thisArg, value, i, this);
             } else {
               ok = (predicate as any)(value, i, this);

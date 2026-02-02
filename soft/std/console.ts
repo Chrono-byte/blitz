@@ -15,13 +15,16 @@ const __native_print: any = host.native_print
 
 /** Print all args joined with spaces (JS-like behavior). */
 export function log(...args: unknown[]): void {
-  __native_print(args.map((a) => String(a)).join(" "));
+  const out = args.map((a) => String(a)).join(" ");
+  if (out !== "") __native_print(out);
 }
 
 export function warn(...args: unknown[]): void {
-  __native_print(args.map((a) => String(a)).join(" "));
+  const out = args.map((a) => String(a)).join(" ");
+  if (out !== "") __native_print(out);
 }
 
 export function error(...args: unknown[]): void {
-  __native_print(args.map((a) => String(a)).join(" "));
+  const out = args.map((a) => String(a)).join(" ");
+  if (out !== "") __native_print(out);
 }

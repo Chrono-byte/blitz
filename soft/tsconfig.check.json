@@ -13,8 +13,5 @@
     "isolatedModules": false,
     "skipLibCheck": true
   },
-  "include": [
-    "core/**/*.ts",
-    "host.ts"
-  ]
+  "include": ["core/**/*.ts", "host.ts", "predule.ts"]
 }

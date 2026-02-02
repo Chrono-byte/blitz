@@ -51,10 +51,8 @@ pub fn check(program: &Program) -> Result<(), String> {
     // Provide the host accessor used by blitzlib to capture host primitives.
     // The accessor takes a string name and returns any host value; use `Void`
     // as the return type in the typechecker to keep checks permissive.
-    ctx.scope_mut().insert(
-        "__host_get".to_string(),
-        Type::Function(vec![Type::String], Box::new(Type::Void)),
-    );
+    // NOTE: __host_get indirection removed; runtime publishes native helpers
+    // directly (e.g. __native_print). Do not add __host_get to builtins.
 
     // Provide a builtin `console` object with `log: (...args: any[]) => void`.
     // The typechecker will allow passing any arguments to `console.log` (they are coerced to strings by the prelude).

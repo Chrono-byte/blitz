@@ -223,6 +223,54 @@ fn parse_program_from_estree(root: &Value) -> Result<Program, String> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::Parser;
+    use crate::ast::*;
+
+    #[test]
+    fn object_expression_preserves_order_and_last_wins_value() {
+        let src = "const o = { a: 1, b: 2, a: 3 };";
+        let program = Parser::parse_source(src).expect("parse ok");
+        assert_eq!(program.body.len(), 1);
+        match &program.body[0] {
+            Statement::VarDecl(v) => {
+                assert_eq!(v.name, "o");
+                let init = v.init.as_ref().expect("init present");
+                match init {
+                    Expr::ObjectExpr(obj) => {
+                        // Keys should preserve source insertion order with first-occurrence position
+                        let keys: Vec<&str> =
+                            obj.properties.iter().map(|p| p.key.as_str()).collect();
+                        assert_eq!(keys, vec!["a", "b"]);
+                        // 'a' should have the last-assigned value (3)
+                        if let Expr::Literal(lit) = &obj.properties[0].value {
+                            if let LiteralValue::Number(n) = lit.value {
+                                assert_eq!(n, 3.0);
+                            } else {
+                                panic!("expected number literal for 'a'");
+                            }
+                        } else {
+                            panic!("expected literal for 'a'");
+                        }
+                        if let Expr::Literal(lit_b) = &obj.properties[1].value {
+                            if let LiteralValue::Number(n) = lit_b.value {
+                                assert_eq!(n, 2.0);
+                            } else {
+                                panic!("expected number literal for 'b'");
+                            }
+                        } else {
+                            panic!("expected literal for 'b'");
+                        }
+                    }
+                    _ => panic!("expected object expr"),
+                }
+            }
+            _ => panic!("expected var decl"),
+        }
+    }
+}
+
 fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
     let typ = node
         .get("type")
@@ -919,7 +967,10 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
                 .get("properties")
                 .and_then(|p| p.as_array())
                 .ok_or_else(|| "ObjectExpression missing properties".to_string())?;
-            let mut map = HashMap::new();
+            // Preserve source order and implement last-wins for duplicate keys:
+            // - keep the first insertion position for enumeration order
+            // - update the value when a later property with the same key appears
+            let mut properties: Vec<ObjectProperty> = Vec::new();
             for prop in props {
                 let ptype = prop.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 if ptype == "Property" {
@@ -947,16 +998,29 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
                         .get("value")
                         .ok_or_else(|| "Property missing value".to_string())?;
                     let vexpr = convert_expr_estree(value)?;
-                    map.insert(key_str, vexpr);
+                    // If the key already exists preserve its position and update the value.
+                    let mut replaced = false;
+                    let mut i = 0;
+                    while i < properties.len() {
+                        if properties[i].key == key_str {
+                            // clone to avoid moving `vexpr` when we still need it below
+                            properties[i].value = vexpr.clone();
+                            replaced = true;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    if !replaced {
+                        properties.push(ObjectProperty {
+                            key: key_str,
+                            value: vexpr,
+                        });
+                    }
                 } else {
                     // skip spread properties and others
                     continue;
                 }
             }
-            let properties: Vec<ObjectProperty> = map
-                .into_iter()
-                .map(|(k, v)| ObjectProperty { key: k, value: v })
-                .collect();
             Ok(Expr::ObjectExpr(ObjectExpr { properties }))
         }
 

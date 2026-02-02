@@ -15,7 +15,39 @@ const LINE: u32 = 1;
 /// Returns an error string if compilation fails
 pub fn compile(program: &Program) -> Result<Chunk, String> {
     let mut c = Compiler::new();
-    c.compile(program)
+    let res = c.compile(program);
+
+    // Emit helpful debug information after compilation when tracing is enabled.
+    // This prints the compiled chunk summary, the compiler's locals and global
+    // mappings which is useful when debugging name-resolution or bootstrap
+    // ordering issues (e.g. missing imports/exports during bundling).
+    if crate::trace::enabled() {
+        match &res {
+            Ok(chunk) => {
+                eprintln!(
+                    "[trace] compiler: compiled chunk code_len={} constants={} functions={}",
+                    chunk.code.len(),
+                    chunk.constants.len(),
+                    chunk.functions.len()
+                );
+                // Print locals so we can see which top-level identifiers were bound
+                // as locals during compilation (helps diagnose missing local refs).
+                eprintln!("[trace] compiler: locals = {:?}", c.locals);
+                eprintln!("[trace] compiler: globals = {:?}", c.globals);
+                eprintln!("[trace] compiler: global name -> const_index:");
+                for (name, idx) in c.globals.iter() {
+                    eprintln!("[trace]   {} -> {}", name, idx);
+                }
+            }
+            Err(err) => {
+                eprintln!("[trace] compiler error: {}", err);
+                eprintln!("[trace] compiler: locals = {:?}", c.locals);
+                eprintln!("[trace] compiler: globals = {:?}", c.globals);
+            }
+        }
+    }
+
+    res
 }
 
 /// Compiles AST to bytecode
@@ -83,12 +115,28 @@ impl Compiler {
         idx
     }
 
+    /// Pre-declare any function declarations in `stmts` so forward references
+    /// to those functions will compile to `GetLocal` (hoisting semantics).
+    fn pre_declare_functions(&mut self, stmts: &[Statement]) {
+        for stmt in stmts {
+            if let Statement::FunctionDecl(f) = stmt {
+                if self.resolve_local(&f.name).is_none() {
+                    // Reserve a local slot with no type annotation for now.
+                    self.add_local(f.name.clone(), None);
+                }
+            }
+        }
+    }
+
     /// Compiles a program to bytecode
     ///
     /// # Errors
     ///
     /// Returns an error string if compilation fails
     pub fn compile(&mut self, program: &Program) -> Result<Chunk, String> {
+        // Pre-declare top-level function names so forward references compile to GetLocal.
+        self.pre_declare_functions(&program.body);
+
         for stmt in &program.body {
             self.compile_statement(stmt)?;
         }
@@ -280,9 +328,35 @@ impl Compiler {
                         .collect(),
                     Box::new(f.return_type.clone().unwrap_or(Type::Void)),
                 );
-                let slot = self.add_local(f.name.clone(), Some(fn_type));
+
+                // Reuse a pre-declared local slot when available (hoisting).
+                let slot = if let Some(slot) = self.resolve_local(&f.name) {
+                    // If reserved without a type, update the slot type now.
+                    if self.local_types[slot].is_none() {
+                        self.local_types[slot] = Some(fn_type.clone());
+                    }
+                    slot
+                } else {
+                    self.add_local(f.name.clone(), Some(fn_type.clone()))
+                };
+
+                if self.is_root {
+                    // Record global type and duplicate the closure so we can set
+                    // both the local and the global binding in a stable way.
+                    self.chunk
+                        .global_types
+                        .insert(f.name.clone(), Some(fn_type.clone()));
+                    self.emit(Op::Dup, LINE);
+                }
+
                 self.emit(Op::SetLocal, LINE);
                 self.emit_byte(slot as u8, LINE);
+
+                if self.is_root {
+                    let gidx = self.global_name_index(&f.name);
+                    self.emit(Op::SetGlobal, LINE);
+                    self.emit_byte(gidx as u8, LINE);
+                }
             }
             Statement::Return(r) => {
                 if let Some(arg) = &r.argument {
@@ -342,6 +416,11 @@ impl Compiler {
         for p in params {
             inner.add_local(p.name.clone(), p.type_ann.clone());
         }
+
+        // Pre-declare nested function names so forward references inside the
+        // function body resolve to locals instead of falling back to globals.
+        inner.pre_declare_functions(&body.body);
+
         for stmt in &body.body {
             inner.compile_statement(stmt)?;
         }
@@ -542,5 +621,55 @@ impl Compiler {
 impl Default for Compiler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::Op;
+    use crate::parser::Parser;
+    use crate::value::Value;
+
+    #[test]
+    fn hoist_top_level_function_names_into_locals() {
+        let src = "f(); function f() { return 42; }";
+        let program = Parser::parse_source(src).expect("parse ok");
+        let chunk = compile(&program).expect("compile ok");
+
+        // If a constant "f" exists, ensure it is not referenced via GetGlobal/SetGlobal.
+        let mut f_const_idx: Option<usize> = None;
+        for (i, c) in chunk.constants.iter().enumerate() {
+            if let Value::String(s) = c {
+                if s == "f" {
+                    f_const_idx = Some(i);
+                    break;
+                }
+            }
+        }
+
+        if let Some(idx) = f_const_idx {
+            let mut i = 0usize;
+            while i < chunk.code.len() {
+                if let Some(op) = Op::from_byte(chunk.code[i]) {
+                    match op {
+                        Op::GetGlobal | Op::SetGlobal => {
+                            let ref_idx = chunk.code.get(i + 1).cloned().unwrap_or(0) as usize;
+                            assert_ne!(ref_idx, idx, "found GetGlobal/SetGlobal referencing 'f'");
+                            i += 2;
+                        }
+                        Op::Jump | Op::JumpIfFalse | Op::PushHandler => i += 3,
+                        Op::Const
+                        | Op::MakeClosure
+                        | Op::GetPropertyIC
+                        | Op::Call
+                        | Op::GetBuiltin => i += 2,
+                        _ => i += 1,
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
     }
 }
