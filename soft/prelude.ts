@@ -50,26 +50,15 @@ const getNativePrinter = (() => {
   return function (): any {
     if (initialized) return cached;
     initialized = true;
+    // Prefer the imported `native_print` wrapper which handles host lookup
+    // safely. Avoid calling global helper functions here because some
+    // bundling/initialization variants reference internal helpers as globals
+    // which can be unavailable during certain bootstrap orders.
     try {
-      if (typeof globalThis !== "undefined") {
-        const g: any = globalThis as any;
-        if (g && typeof g.getHostGetter === "function" && typeof g.getBuiltinCached === "function") {
-          try {
-            const getter = g.getHostGetter();
-            if (typeof getter === "function") {
-              const p = g.getBuiltinCached(getter, "__native_print");
-              if (typeof p === "function") {
-                cached = p;
-                return cached;
-              }
-            }
-          } catch (_) {}
-        }
+      if (typeof native_print === "function") {
+        cached = native_print;
+        return cached;
       }
-    } catch (_) {}
-    // Fallbacks
-    try {
-      if (typeof native_print === "function") cached = native_print;
     } catch (_) {}
     if (!cached) cached = host_print;
     return cached;
