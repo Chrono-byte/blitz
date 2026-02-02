@@ -1,0 +1,131 @@
+VM V2 Threading & Isolation Plan (Updated for single-VM multithreading)
+
+Purpose
+-------
+This document describes how to evolve the existing `tsblitz` interpreter into a
+multithreaded, single-VM runtime that provides BEAM-style process isolation without
+spawning multiple full `Vm` instances. The design keeps one executable VM, shares
+immutable/runtime-shared code, and isolates per-process mutable state and heaps.
+
+High-level goals
+----------------
+- Keep a single VM image (no multiple full `Vm` copies). Extract per-process mutable
+  state so many lightweight processes can run concurrently on multiple scheduler threads.
+- Provide per-process heap/stack isolation (mmap + guard pages) and enforce quotas.
+- Use pinned scheduler threads (one per CPU/core) with work-stealing for load balance.
+- Cooperative scheduling via reductions at interpreter op boundaries; timer watchdogs only.
+- Kernel services (async IO, NIF manager, metrics, recovery) run in tokio runtimes; schedulers
+  communicate with kernel via bounded channels.
+- Fault containment via sigaltstack + minimal SIGSEGV/SIGBUS handler that reports faults to a
+  recovery thread which cleans up the offending process.
+
+Design — concrete pieces
+------------------------
+
+Process (single-VM, multithreaded)
+  - The runtime continues to use one VM executable. Instead of multiple `Vm` instances,
+    introduce a small per-process mutable state struct `ProcessState` holding registers,
+    IP, stack, frames, locals, and per-process inline caches.
+  - Process fields:
+    - `pid`: unique identifier
+    - `exec_level`: user | kernel
+    - `state`: Running | Suspended | Exited
+    - `mailbox`: bounded MPSC queue (messages are owned blobs)
+    - `heap`: mmap region with guard pages
+    - `stack`: coroutine stack or pointer into heap region
+    - `reductions_left`: u32 (quota per tick)
+    - `quotas`: { memory_bytes, mailbox_len, fds }
+    - `links/monitors`: supervisor metadata
+    - `process_state`: mutable interpreter state (chunk, ip, stack vec, locals, frames,
+       current_slot_types, per-process IC caches)
+  - Access rules: only the scheduler thread that holds a process may mutate its `ProcessState`.
+    Ownership is transferred between schedulers via stealing and a CAS on a process run-state.
+
+Memory isolation
+  - Per-process heap is allocated with mmap + guard pages (`mmap(len + 2*guard)`).
+  - Per-process allocator: bump allocator for small allocations backed by the process heap.
+  - Kernel objects (IO buffers, global structures) use kernel allocators (system or jemalloc).
+  - OOM or guard page hit results in process exit with a clear reason (oom/segfault).
+
+Scheduler & execution model (single-VM)
+  - N pinned scheduler threads (one per core) each own a local `Worker` deque and `Stealer`s.
+  - Scheduler run-loop: pop a process handle, claim exclusive right to run it (CAS), set
+    thread-local `current_pid`, and call `interpreter::run_step(&mut ProcessState, &mut budget)`.
+  - `run_step` executes up to `budget` reductions; it returns `RunResult` (Yield, Suspended,
+    Exited, KernelReq) indicating why it stopped.
+  - Stealing: when local deque empty, steal from other schedulers; stolen process ownership
+    transfers by atomically changing its owner marker.
+
+Fault containment (signals)
+  - Install `sigaltstack` and a minimal SIGSEGV/SIGBUS handler that is async-signal-safe.
+  - Handler writes a `FaultRecord` to an eventfd/pipe (pid, rip, addr, sig). Do not attempt
+    heavy unwinds inside the handler.
+  - Recovery thread (in kernel runtime) reads the pipe and marks the process as crashed; it
+    schedules cleanup (heap unmap, notify monitors) on the owning scheduler thread.
+
+Async IO and kernel runtime
+  - Kernel services run on tokio runtimes for async IO, NIF management, metrics, and recovery.
+  - Schedulers submit `KernelReq` via bounded channels and suspend the process; kernel replies
+    with `KernelRes` to resume the process.
+  - IO: kernel uses tokio TcpStream, UnixStream, epoll, and kernel-managed buffers to perform
+    non-blocking IO on behalf of user processes.
+
+Native extensions (NIFs)
+  - Unsafe NIFs run in supervised external worker processes. Kernel manager spawns workers and
+    communicates over Unix domain sockets using framed bincode messages.
+  - NIF calls are async and have timeouts; worker crashes map to `NifError::WorkerCrashed` for
+    the caller only.
+
+Message passing & mailboxes
+  - Mailbox stores opaque `Vec<u8>` message blobs. On `recv`, the scheduler deserializes into
+    the process heap according to interpreter value format.
+  - Enforce mailbox length quotas; apply backpressure or drop policy as configured.
+
+Concurrency and shared data
+  - Convert global/shared structures from `Rc<RefCell<...>>` to `Arc<RwLock<...>>` or other
+    concurrent containers gradually. Keep hot-read paths optimized for concurrency.
+  - Avoid making all `Value` representations `Arc` by default; prefer process-local `Rc` for
+    objects that never cross process boundaries. When sharing is necessary, use `Arc<Mutex<...>>`
+    or immutable off-heap blobs.
+
+IPC & serialization
+  - Use serde + bincode with little-endian fixed-int encoding for kernel↔worker and worker IPC.
+  - Framing: 4-byte length prefix (u32 LE) followed by bincode payload envelope.
+
+Scheduler safety notes
+  - The interpreter must expose a reentrant `run_step` entrypoint that operates purely on a
+    mutable `ProcessState` and accepts a `KernelHandle` for emitting `KernelReq` events.
+  - Keep the kernel surface minimal and avoid running unverified code in kernel context.
+
+Testing & rollout
+  - Start with `Vm::run_step` unit tests: exercise reductions, yields, and kernel-request paths
+    without threaded schedulers.
+  - Add scheduler integration tests that run multiple scheduler threads with many processes.
+  - Fault-injection tests: purposely overflow a process heap and verify process-only failure.
+  - Add ASAN/UBSAN sanitizer jobs for kernel code if possible.
+
+Incremental implementation roadmap
+---------------------------------
+1) Extract `ProcessState` and `run_step` (4–7 days)
+   - Minimal changes to `src/vm.rs`: move mutable state into `ProcessState` and implement
+     `run_step` that executes up to a budget.
+2) Scheduler basic scaffolding (3–6 days)
+   - Add `src/scheduler.rs` with pinned scheduler threads, crossbeam deques, and a simple
+     main loop calling `run_step`.
+3) Thread-safety for shared globals (4–8 days)
+   - Replace `Rc<RefCell<...>>` globals with `Arc<RwLock<...>>` and add read-only helpers.
+4) Per-process mmap allocator + quotas (5–9 days)
+5) Kernel tokio runtime + IO/NIF manager (5–9 days)
+6) SIGALTSTACK handler + recovery thread and heavy tests (8–14 days)
+7) Supervisors, metrics, and hardening (3–6 days)
+
+Estimated total: 6–12 weeks for 1–2 engineers depending on refactor complexity.
+
+Deliverables
+------------
+- `docs/VM_IPC_SPEC.md` (existing) — IPC spec and message formats
+- `src/process.rs` — Process and ProcessState definitions (to add)
+- `src/scheduler.rs` — scheduler implementation (to add)
+- `src/vm.rs` modifications — `run_step` and concurrency-safe access points
+
+File: docs/VM_V2

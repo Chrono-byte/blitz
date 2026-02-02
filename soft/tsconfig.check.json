@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Relax strict checking for the bulk type-check step used in CI/dev.
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "allowJs": true,
+    "checkJs": false,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "moduleResolution": "node",
+    "isolatedModules": false,
+    "skipLibCheck": true
+  },
+  "include": [
+    "core/**/*.ts",
+    "host.ts"
+  ]
+}

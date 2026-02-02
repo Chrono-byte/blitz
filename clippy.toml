@@ -1,0 +1,34 @@
+# Duplicate code detection
+allowed-duplicate-crates = ["bitflags"]
+
+# Maximum complexity before warning (kernel prefers simple functions)
+cognitive-complexity-threshold = 10
+too-many-arguments-threshold = 7
+
+# Enforce short functions (kernel style preference)
+too-many-lines-threshold = 50
+
+# Memory safety (kernel is very strict about memory)
+allow-expect-in-tests = false
+allow-unwrap-in-tests = false
+allow-dbg-in-tests = false
+
+# Discourage complex expressions (kernel prefers simplicity)
+allow-mixed-uninlined-format-args = false
+allow-private-module-inception = false
+
+# Enforce proper error handling (kernel style)
+allow-panic-in-tests = false
+
+# Type size limits (kernel is memory-conscious)
+trivial-copy-size-limit = 256
+
+# Documentation requirements (kernel values good documentation)
+missing-docs-in-crate-items = true
+
+# Avoid performance issues (kernel is performance-conscious)
+vec-box-size-threshold = 4096
+verbose-bit-mask-threshold = 1
+
+# Memory allocation patterns (kernel is careful about allocations)
+enum-variant-size-threshold = 200

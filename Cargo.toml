@@ -1,0 +1,89 @@
+[package]
+name = "tsblitz"
+version = "0.1.0"
+edition = "2024"
+description = "TypeScript VM: Rust base layer + self-hosted TS soft layer"
+
+[[bin]]
+name = "tsblitz"
+path = "src/main.rs"
+
+[dependencies]
+# Optional: for better errors later
+# thiserror = "1.0"
+# miette = "5"
+
+# Oxc parser and support crates (parser, allocator, span)
+oxc_parser = "0.111.0"
+oxc_allocator = "0.111.0"
+oxc_span = "0.111.0"
+# Oxc AST with `serialize` feature enabled so we can produce ESTree JSON
+oxc_ast = { version = "0.111.0", features = ["serialize"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rustyline = "11"
+
+[lints.rust]
+# Enforce good practices similar to kernel coding style
+missing_docs = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unused_extern_crates = "warn"
+unused_import_braces = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+cognitive_complexity = "warn"
+too_many_arguments = "warn"
+too_many_lines = "warn"
+similar_names = "warn"
+
+expect_used = "warn"
+unwrap_used = "warn"
+panic = "warn"
+unimplemented = "warn"
+todo = "warn"
+unreachable = "warn"
+
+box_vec = "warn"
+large_enum_variant = "warn"
+large_stack_arrays = "warn"
+vec_box = "warn"
+
+module_name_repetitions = "warn"
+multiple_crate_versions = "warn"
+
+missing_docs_in_private_items = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+
+blocks_in_conditions = "warn"
+bool_comparison = "warn"
+cast_possible_truncation = "warn"
+cast_precision_loss = "warn"
+cast_sign_loss = "warn"
+clone_on_ref_ptr = "warn"
+default_numeric_fallback = "warn"
+explicit_iter_loop = "warn"
+filter_map_next = "warn"
+flat_map_identity = "warn"
+float_cmp = "warn"
+inefficient_to_string = "warn"
+into_iter_on_ref = "warn"
+iter_not_returning_iterator = "warn"
+map_clone = "warn"
+map_unwrap_or = "warn"
+needless_borrow = "warn"
+needless_collect = "warn"
+needless_for_each = "warn"
+option_option = "warn"
+or_fun_call = "warn"
+range_plus_one = "warn"
+redundant_clone = "warn"
+redundant_closure_for_method_calls = "warn"
+single_char_pattern = "warn"
+unused_async = "warn"
+wrong_self_convention = "warn"
+
+[dev-dependencies]
+serde_yaml = "0.9"

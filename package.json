@@ -1,0 +1,19 @@
+{
+  "name": "tsblitz",
+  "version": "0.1.0",
+  "description": "TypeScript VM: Rust base layer + self-hosted TS soft layer",
+  "type": "module",
+  "scripts": {
+    "build": "cargo build --release && tsc",
+    "vm": "cargo run --",
+    "repl": "cargo run -- --repl",
+    "run": "cargo run --release --"
+  },
+  "keywords": ["typescript", "vm", "rust", "self-hosted"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
