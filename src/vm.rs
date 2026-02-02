@@ -1024,9 +1024,14 @@ fn get_property(obj: &Value, key: &str) -> Result<Value, String> {
             Ok(Value::Null)
         }
         Value::Closure { props, .. } => Ok(props.borrow().get(key).cloned().unwrap_or(Value::Null)),
-        _ => Err("GetProperty: not an object".into()),
+        // Be permissive during bootstrap: property access on non-object-like
+        // values returns `null` rather than raising a VM-level error. This
+        // helps the soft prelude avoid hard crashes when it defensively probes
+        // globals that may be missing or primitive during initialization.
+        _ => Ok(Value::Null),
     }
 }
+
 
 fn set_property(obj: &Value, key: &str, value: Value) -> Result<(), String> {
     match obj {

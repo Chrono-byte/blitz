@@ -2,33 +2,18 @@
 // Resolve the VM-provided `__host_get` builtin via a safe typeof check
 // and export wrapper functions so modules can `import * as host`.
 
-// Helper to resolve the VM-provided host accessor at call-time. We avoid
-// capturing its value at module initialization because the bundling /
-// execution ordering can vary and the global builtin `__host_get` may not be
-// visible at module init time in some bootstrap scenarios.
-function get_host_get(): any {
-  try {
-    // The runtime exposes a builtin accessor named `__host_get` in some
-    // environments; in others the accessor may be inlined or renamed. Use a
-    // defensive lookup and fall back to any available globals captured on
-    // `globalThis` under common names. This keeps typechecking happy while
-    // allowing the runtime to provide the real accessor at startup.
-    // Use `typeof` to avoid a TS error when `__host_get` isn't declared.
-    // The emitted JS will still reference the global if present.
-    if (typeof (globalThis as any).__host_get !== "undefined") return ((globalThis as any).__host_get as any);
-    const g: any = (typeof globalThis !== "undefined" ? (globalThis as any) : undefined);
-    if (g && typeof g.__host_get === "function") return g.__host_get;
-    return undefined;
-  } catch (_) {
-    return undefined;
-  }
-}
+// Resolve the VM-provided host accessor once and cache it. Historically we
+// performed a defensive inline lookup at every call site to avoid ordering
+// bugs during bundling. That is robust but expensive (many lookups on hot
+// paths). Instead, resolve once on first use and fall back to a defensive
+// lookup if needed. This keeps boot-time safety while removing repetitive
+// host-bridge overhead.
 
 export function host_print(msg: string): void {
   try {
-    const g = get_host_get();
+    const g = getHostGetter();
     if (typeof g === "function") {
-      const p = g("__native_print");
+      const p = getBuiltinCached(g, "__native_print");
       if (typeof p === "function") {
         try {
           p(msg);
@@ -43,9 +28,9 @@ export function host_print(msg: string): void {
 // become `null`/`undefined` due to bundling/initialization ordering.
 export function native_new_object(): any {
   try {
-    const g = get_host_get();
+    const g = getHostGetter();
     if (typeof g === "function") {
-      const f = g("__native_new_object");
+      const f = getBuiltinCached(g, "__native_new_object");
       if (typeof f === "function") {
         try {
           return f();
@@ -60,9 +45,9 @@ export function native_new_object(): any {
 
 export function native_print(...args: any[]): void {
   try {
-    const g = get_host_get();
+    const g = getHostGetter();
     if (typeof g === "function") {
-      const f = g("__native_print");
+      const f = getBuiltinCached(g, "__native_print");
       if (typeof f === "function") {
         try {
           f(...args);
@@ -98,8 +83,51 @@ export function debugValue(name: string, v: any): void {
     } else {
       repr = "[object]";
     }
+    // Avoid heavy formatting when tracing is disabled. If the host wants
+    // tracing it should set a global flag `__TSBLITZ_TRACE` to a truthy value.
+    try {
+      const traceEnabled = typeof globalThis !== "undefined" && (globalThis as any).__TSBLITZ_TRACE;
+      if (!traceEnabled) return;
+    } catch (_) {}
     host_print(name + " -> typeof=" + typ + " repr=" + repr);
   } catch (_) {}
+}
+
+// --- internal cached helpers ---
+let cachedHostGetter: any | null | undefined = undefined;
+const builtinCache: Record<string, any> = {};
+
+function resolveHostGetter(): any | null {
+  try {
+    if (typeof globalThis !== "undefined") {
+      const gg: any = (globalThis as any);
+      if (typeof gg.__host_get === "function") return gg.__host_get;
+      if (typeof gg.__host_get_fn === "function") return gg.__host_get_fn;
+      // Fall back to top-level `__host_get` if present
+      const top = (globalThis as any).__host_get;
+      if (typeof top === "function") return top;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function getHostGetter(): any | null {
+  if (cachedHostGetter !== undefined) return cachedHostGetter;
+  const g = resolveHostGetter();
+  cachedHostGetter = g;
+  return g;
+}
+
+function getBuiltinCached(getter: any, name: string): any {
+  if (Object.prototype.hasOwnProperty.call(builtinCache, name)) return builtinCache[name];
+  try {
+    const v = getter(name);
+    builtinCache[name] = v;
+    return v;
+  } catch (_) {
+    builtinCache[name] = undefined;
+    return undefined;
+  }
 }
 
 // Provide a global `host` object so modules that were written as
@@ -138,6 +166,13 @@ try {
           if (typeof getter === "function") {
             g.__host_get_fn = getter;
           }
+        } catch (_) {}
+        // Expose cached resolver helpers on the global to avoid bundler/init
+        // ordering problems: some bundle variants reference these helpers as
+        // globals. Publishing them here keeps them available to inlined code.
+        try {
+          (g as any).getHostGetter = getHostGetter;
+          (g as any).getBuiltinCached = getBuiltinCached;
         } catch (_) {}
       }
     } catch (_) {}

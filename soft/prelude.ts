@@ -18,48 +18,77 @@ import { BlitzObject as ObjectImpl, BlitzFunction as FunctionImpl } from "./core
 import { toString } from "./core/runtime.js";
 // Host helpers are provided by the inlined `soft/host.ts` module and expose
 // top-level functions such as `host_print`, `native_new_object`, `native_print`
-// and `debugValue`. We access them directly as globals after bundling.
+// and `debugValue`. Import them explicitly from the host module so the soft
+// prelude doesn't accidentally shadow or redefine these helpers.
+import {
+  host_print,
+  native_new_object,
+  native_print,
+  debugValue as host_debugValue,
+  host as host_ns,
+} from "./host.js";
 
-// Load the standard library so Array.prototype, Object helpers and other
-// std APIs are available during bootstrap. The bundler will inline the
-// referenced modules into the prelude program.
-// Import std modules explicitly (avoid `export *` patterns the bundler
-// currently doesn't support).
-import "./std/console.js";
-import "./std/object.js";
-import "./std/array.js";
-import "./std/string.js";
+// Note: std modules are imported after we establish canonical runtime
+// constructors (Object, Array, String, console). The std code mutates
+// `.prototype` on those constructors, so we must ensure the host/runtime
+// provides a usable prototype object before evaluating std modules.
 
-// Access host-provided primitives via the single accessor the kernel exposes.
-// We avoid `declare`/TS ambient declarations because the project's parser
-// doesn't accept `TSDeclareFunction`. Instead capture the runtime global
-// accessor (if present) into a safe local function reference.
-// Reuse host helper module for safe access to VM-provided primitives.
-// Local aliases to host helpers (these are defined by the inlined host.ts).
-// Use `typeof` checks to be defensive during bootstrap.
-const __host_get_fn: any = typeof __host_get_fn !== "undefined" ? __host_get_fn : undefined;
-function host_print(msg: string): void {
-  try {
-    if (typeof host_print === "function") {
-      (host_print as any)(msg);
-    }
-  } catch (_) {}
-}
-const native_new_object: any = typeof native_new_object !== "undefined" ? native_new_object : undefined;
+// Note: we imported the runtime helpers above. For clarity expose local
+// aliases used by the rest of the prelude.
+const host = host_ns;
+const debugValue = host_debugValue;
+
+// Lazy resolver that caches the host/native print function to avoid
+// performing host-bridge lookups on every console call. It first tries
+// to use globally published helpers (getHostGetter/getBuiltinCached) which
+// `soft/host.ts` exposes during bootstrap. If those are not available it
+// falls back to the imported `native_print` wrapper and finally to
+// `host_print` as a last resort.
+const getNativePrinter = (() => {
+  let cached: any = undefined;
+  let initialized = false;
+  return function (): any {
+    if (initialized) return cached;
+    initialized = true;
+    try {
+      if (typeof globalThis !== "undefined") {
+        const g: any = globalThis as any;
+        if (g && typeof g.getHostGetter === "function" && typeof g.getBuiltinCached === "function") {
+          try {
+            const getter = g.getHostGetter();
+            if (typeof getter === "function") {
+              const p = g.getBuiltinCached(getter, "__native_print");
+              if (typeof p === "function") {
+                cached = p;
+                return cached;
+              }
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+    // Fallbacks
+    try {
+      if (typeof native_print === "function") cached = native_print;
+    } catch (_) {}
+    if (!cached) cached = host_print;
+    return cached;
+  };
+})();
 
 // Declare global variables
 // Capture runtime globals (console, Object, Array, String) when available so
 // the bundler-generated TypeScript files can reference them without
 // relying on unsupported `declare` statements.
-const console: any =
+let console: any =
   typeof globalThis !== "undefined" && (globalThis as any).console
     ? (globalThis as any).console
     : { log: function (..._args: any[]) {} };
-const Object: any =
+let Object: any =
   typeof globalThis !== "undefined" && (globalThis as any).Object ? (globalThis as any).Object : {};
-const Array: any =
+let Array: any =
   typeof globalThis !== "undefined" && (globalThis as any).Array ? (globalThis as any).Array : {};
-const String: any =
+let String: any =
   typeof globalThis !== "undefined" && (globalThis as any).String ? (globalThis as any).String : {};
 
 // Bootstrap global console with basic implementation
@@ -81,7 +110,7 @@ const globalConsole: Console = {
       sep = " ";
       i = i + 1;
     }
-    host_print(out);
+    native_print(out);
   },
   warn: function (...args: Value[]): void {
     let out = "";
@@ -100,7 +129,7 @@ const globalConsole: Console = {
       sep = " ";
       i = i + 1;
     }
-    host_print(out);
+    native_print(out);
   },
   error: function (...args: Value[]): void {
     let out = "";
@@ -119,7 +148,7 @@ const globalConsole: Console = {
       sep = " ";
       i = i + 1;
     }
-    host_print(out);
+    native_print(out);
   },
   info: function (...args: Value[]): void {
     let out = "";
@@ -138,7 +167,7 @@ const globalConsole: Console = {
       sep = " ";
       i = i + 1;
     }
-    host_print(out);
+    native_print(out);
   },
   debug: function (...args: Value[]): void {
     let out = "";
@@ -157,16 +186,125 @@ const globalConsole: Console = {
       sep = " ";
       i = i + 1;
     }
-    host_print(out);
+    native_print(out);
   },
 };
 
-// Assign to global console
-(console as unknown) = globalConsole;
-// Debug: print the assigned console
+// Build and assign `console` with a single stable assignment to avoid creating
+// multiple intermediate hidden classes during bootstrap. Construct `console`
+// privately, set its properties in a stable order, then publish it to
+// `globalThis` in one write. If a host-provided console already exists, prefer
+// it but still copy methods in a stable way.
+try {
+  const builtConsole: any = {};
+  // Set properties in a fixed order to stabilize hidden classes.
+  // For `log` we provide a small wrapper that resolves the native printer
+  // once and calls it. This avoids a property lookup + host-bridge lookup
+  // at every `console.log` call site.
+  builtConsole.log = function (...args: Value[]): void {
+    try {
+      const printer = getNativePrinter();
+      // If the resolved printer is the raw host function that expects a
+      // single string argument, join with spaces. If it's `native_print`
+      // wrapper imported above, it can accept varargs; call accordingly.
+      if (printer === host_print) {
+        let out = "";
+        let sep = "";
+        let i = 0;
+        while (i < (args as any).length) {
+          const a = (args as any)[i];
+          let s: string;
+          if (a === null) s = "null";
+          else if (typeof a === "undefined") s = "undefined";
+          else if (typeof a === "string") s = a as any;
+          else if (typeof a === "number") s = String(a as any);
+          else if (typeof a === "boolean") s = a ? "true" : "false";
+          else s = "[object Object]";
+          out = out + sep + s;
+          sep = " ";
+          i = i + 1;
+        }
+        try {
+          printer(out);
+        } catch (_) {}
+      } else {
+        // Printer likely accepts varargs
+        try {
+          printer(...args);
+        } catch (_) {
+          // If varargs call fails, fall back to string join
+          let out = "";
+          let sep = "";
+          let i = 0;
+          while (i < (args as any).length) {
+            const a = (args as any)[i];
+            let s: string;
+            if (a === null) s = "null";
+            else if (typeof a === "undefined") s = "undefined";
+            else if (typeof a === "string") s = a as any;
+            else if (typeof a === "number") s = String(a as any);
+            else if (typeof a === "boolean") s = a ? "true" : "false";
+            else s = "[object Object]";
+            out = out + sep + s;
+            sep = " ";
+            i = i + 1;
+          }
+          try {
+            host_print(out);
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  };
+  builtConsole.info = globalConsole.info;
+  builtConsole.warn = globalConsole.warn;
+  builtConsole.error = globalConsole.error;
+  builtConsole.debug = globalConsole.debug;
+
+  if (typeof globalThis !== "undefined") {
+    const g: any = globalThis as any;
+    try {
+      // If host did not provide a console, publish our built console.
+      if (!g.console) {
+        try {
+          g.console = builtConsole;
+        } catch (_) {}
+      } else {
+        // If host provided one, ensure we use a stable set of methods.
+        // Copy host methods into a fixed-shape wrapper to avoid polymorphic
+        // shapes at call sites that expect `console` to have certain keys.
+        const hostConsole = g.console;
+        const useConsole: any = {};
+        useConsole.log = hostConsole.log ? hostConsole.log : builtConsole.log;
+        useConsole.info = hostConsole.info ? hostConsole.info : builtConsole.info;
+        useConsole.warn = hostConsole.warn ? hostConsole.warn : builtConsole.warn;
+        useConsole.error = hostConsole.error ? hostConsole.error : builtConsole.error;
+        useConsole.debug = hostConsole.debug ? hostConsole.debug : builtConsole.debug;
+        try {
+          g.console = useConsole;
+        } catch (_) {}
+      }
+    } catch (_) {
+      try {
+        g.console = builtConsole;
+      } catch (_) {}
+    }
+    try {
+      console = g.console ? g.console : builtConsole;
+    } catch (_) {
+      console = builtConsole;
+    }
+  } else {
+    console = builtConsole;
+  }
+} catch (_) {
   try {
-    host.debugValue("global console assigned", console);
+    console = globalConsole;
   } catch (_) {}
+// Debug: print the assigned console
+try {
+  host.debugValue("global console assigned", console);
+} catch (_) {}
 
 // Basic Object implementation
 const ObjectImplInstance: ObjectConstructor = {
@@ -316,8 +454,33 @@ const ObjectImplInstance: ObjectConstructor = {
   },
 } as ObjectConstructor;
 
-// Assign to global Object
-(Object as unknown) = ObjectImplInstance;
+// Construct `Object` constructor object privately and then assign it to
+// `globalThis` in a single stable write to avoid producing many transient
+// hidden classes during bootstrap.
+try {
+  const builtObjectCtor: any = ObjectImplInstance;
+  if (typeof globalThis !== "undefined") {
+    const g: any = globalThis as any;
+    try {
+      if (!g.Object) {
+        try {
+          g.Object = builtObjectCtor;
+        } catch (_) {}
+      }
+    } catch (_) {}
+    try {
+      Object = g.Object ? g.Object : builtObjectCtor;
+    } catch (_) {
+      Object = builtObjectCtor;
+    }
+  } else {
+    Object = builtObjectCtor;
+  }
+} catch (_) {
+  try {
+    Object = ObjectImplInstance;
+  } catch (_) {}
+}
 
 // Basic String constructor
 const StringImplInstance: StringConstructor = {
@@ -339,8 +502,31 @@ const StringImplInstance: StringConstructor = {
   },
 } as StringConstructor;
 
-// Assign to global String
-(String as unknown) = StringImplInstance;
+// Construct `String` constructor and publish it with a single stable write.
+try {
+  const builtStringCtor: any = StringImplInstance;
+  if (typeof globalThis !== "undefined") {
+    const g: any = globalThis as any;
+    try {
+      if (!g.String) {
+        try {
+          g.String = builtStringCtor;
+        } catch (_) {}
+      }
+    } catch (_) {}
+    try {
+      String = g.String ? g.String : builtStringCtor;
+    } catch (_) {
+      String = builtStringCtor;
+    }
+  } else {
+    String = builtStringCtor;
+  }
+} catch (_) {
+  try {
+    String = StringImplInstance;
+  } catch (_) {}
+}
 
 // Basic Array implementation
 const ArrayImplInstance: ArrayConstructor = {
@@ -369,8 +555,31 @@ const ArrayImplInstance: ArrayConstructor = {
   },
 } as ArrayConstructor;
 
-// Assign to global Array
-(Array as unknown) = ArrayImplInstance;
+// Construct `Array` constructor and publish it with a single stable write.
+try {
+  const builtArrayCtor: any = ArrayImplInstance;
+  if (typeof globalThis !== "undefined") {
+    const g: any = globalThis as any;
+    try {
+      if (!g.Array) {
+        try {
+          g.Array = builtArrayCtor;
+        } catch (_) {}
+      }
+    } catch (_) {}
+    try {
+      Array = g.Array ? g.Array : builtArrayCtor;
+    } catch (_) {
+      Array = builtArrayCtor;
+    }
+  } else {
+    Array = builtArrayCtor;
+  }
+} catch (_) {
+  try {
+    Array = ArrayImplInstance;
+  } catch (_) {}
+}
 
 // Ensure an Array.prototype object exists so std library can install methods
 // (the runtime's BlitzObject exposes `set`/`defineProperty` and prototype
@@ -402,30 +611,91 @@ const ArrayImplInstance: ArrayConstructor = {
   } else {
     protoObj = new ObjectImpl();
   }
-  // Set constructor on the prototype using plain property assignment so we
-  // don't depend on a `.set` helper being present during bootstrap.
-  // Only set properties if we actually have an object. Some bootstrap
-  // environments may return `null`/`undefined` or reject assignments; be
-  // defensive so the prelude still completes.
-  if (protoObj !== null && typeof protoObj !== "undefined") {
+  // Set constructor on the prototype and attach the prototype to whichever
+  // Array constructor we are using (runtime-provided or our soft one). Be
+  // defensive: do not overwrite an existing prototype object if present.
+    if (protoObj !== null && typeof protoObj !== "undefined") {
     try {
-      (protoObj as any)["constructor"] = ArrayImplInstance as any;
+      (protoObj as any)["constructor"] = (Array as any) || ArrayImplInstance;
     } catch (e) {
-      // Ignore failures here; the runtime may not accept assignment to the
-      // host-provided object in some bootstrap scenarios.
+      // Ignore failures here; host-provided objects may be immutable during
+      // certain bootstrap scenarios.
     }
-    // Attach prototype to the ArrayImplInstance so `Array.prototype` lookups work
+
+    // Attach to the active Array constructor's prototype if it's missing.
     try {
-      (ArrayImplInstance as any).prototype = protoObj;
-    } catch (e) {
-      // noop
-    }
-    // Debug: verify that prototype was set on the ArrayImplInstance
+      // Attach the prototype to the constructor we published above. Prefer
+      // the constructor we assigned to `globalThis` to ensure a stable shape.
+      const hostCtor = typeof globalThis !== "undefined" ? (globalThis as any).Array : undefined;
+      const ctorToUse = hostCtor ? hostCtor : ArrayImplInstance;
+      if (ctorToUse != null && (typeof ctorToUse === "object" || typeof ctorToUse === "function")) {
+        try {
+          if (ctorToUse.prototype == null) {
+            ctorToUse.prototype = protoObj;
+          }
+        } catch (_) {
+          // Ignore failures — host objects may be immutable during bootstrap.
+        }
+      }
+    } catch (_) {}
+
+    // Debug: verify that prototype was set on the active constructor
     try {
-      let readBack: any = (ArrayImplInstance as any).prototype;
+      let readBack: any = (typeof globalThis !== "undefined" && (globalThis as any).Array)
+        ? (globalThis as any).Array.prototype
+        : (ArrayImplInstance as any).prototype;
       try {
         host.debugValue("Array.prototype post-assign", readBack);
       } catch (_) {}
     } catch (_) {}
   }
+}
+
+// Run any postponed std installers that were queued while std modules
+// initialized before the prelude completed. These installers expect the
+// runtime-provided constructors (Array, String, etc.) to exist and will
+// attach prototype methods. Run them now, best-effort.
+  try {
+    if (typeof globalThis !== "undefined") {
+      const g: any = globalThis as any;
+    const arr = g.__tsblitz_post_bootstrap;
+    // Use a defensive array detection because `Array` may be null/host-provided
+    // and calling `Array.isArray` could itself throw. Treat a value as an array
+    // if it looks like an array (has numeric `length` and `push` function).
+    const looksLikeArray = arr != null && typeof arr === "object" && typeof (arr as any).length === "number" && typeof (arr as any).push === "function";
+    if (looksLikeArray) {
+        const remaining: any[] = [];
+        let i = 0;
+        while (i < arr.length) {
+          try {
+            const entry = arr[i];
+            // Support both legacy function installers and the new descriptor
+            // objects pushed by std modules.
+            const installer = typeof entry === "function" ? entry : entry && entry.fn;
+            const targetName = entry && entry.target ? entry.target : "Array";
+            if (typeof installer === "function") {
+              try {
+                const hostCtor = g && g[targetName];
+                const usableHostCtor = hostCtor != null && (typeof hostCtor === "object" || typeof hostCtor === "function");
+                // If host ctor is usable, pass it; otherwise pass undefined and
+                // allow the installer or prelude fallback to handle it.
+                const ok = installer(usableHostCtor ? hostCtor : undefined);
+                // If installer explicitly returned false, keep it for later
+                if (ok === false) remaining.push(entry);
+              } catch (_) {
+                // If installer threw, keep it for a single retry later.
+                remaining.push(entry);
+              }
+            }
+          } catch (_) {
+            // Swallow and continue
+          }
+          i = i + 1;
+        }
+        try {
+          g.__tsblitz_post_bootstrap = remaining;
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
 }

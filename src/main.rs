@@ -234,6 +234,69 @@ fn main() -> Result<(), String> {
     // soft prelude isn't blocked by runtime type checks that expect stricter
     // static types.
     let chunk = clear_slot_types_in_chunk(chunk);
+    // One-time diagnostic: print compiled chunk constants so we can map
+    // bytecode ip locations back to source-level constants during debugging.
+    if tsblitz::trace::enabled() {
+        eprintln!("[trace] Prelude chunk: code_len={} constants={}", chunk.code.len(), chunk.constants.len());
+        for (i, c) in chunk.constants.iter().enumerate() {
+            match c {
+                Value::String(s) => eprintln!("[trace] const[{}] (string) = {:?}", i, s),
+                Value::Number(n) => eprintln!("[trace] const[{}] (number) = {}", i, n),
+                Value::Bool(b) => eprintln!("[trace] const[{}] (bool) = {}", i, b),
+                Value::Null => eprintln!("[trace] const[{}] = null", i),
+                other => eprintln!("[trace] const[{}] (other) = {}", i, other.type_name()),
+            }
+        }
+        // Very small disassembly to map ip -> opcode and operand (one-time)
+        eprintln!("[trace] Prelude chunk disassembly (first 2000 bytes):");
+        let mut ip = 0usize;
+        while ip < chunk.code.len() {
+            let b = chunk.code[ip];
+            let op = bytecode::Op::from_byte(b).map(|o| format!("{:?}", o)).unwrap_or_else(|| format!("0x{:02x}", b));
+            // Prepare a short operand preview depending on opcode
+            let mut extra = String::new();
+            match bytecode::Op::from_byte(b) {
+                Some(bytecode::Op::Const)
+                | Some(bytecode::Op::GetGlobal)
+                | Some(bytecode::Op::SetGlobal)
+                | Some(bytecode::Op::GetBuiltin)
+                | Some(bytecode::Op::MakeClosure)
+                | Some(bytecode::Op::GetPropertyIC)
+                | Some(bytecode::Op::Call) => {
+                    if ip + 1 < chunk.code.len() {
+                        let v = chunk.code[ip + 1] as usize;
+                        extra = format!(" {}", v);
+                    }
+                }
+                Some(bytecode::Op::Jump) | Some(bytecode::Op::JumpIfFalse) | Some(bytecode::Op::PushHandler) => {
+                    if ip + 2 < chunk.code.len() {
+                        let hi = chunk.code[ip + 1] as usize;
+                        let lo = chunk.code[ip + 2] as usize;
+                        let short = ((hi << 8) | lo) as i16;
+                        extra = format!(" {}", short);
+                    }
+                }
+                _ => {}
+            }
+            eprintln!("[trace] {:04}  {}{}", ip, op, extra);
+            // Advance ip by opcode + operand length heuristically
+            ip += 1;
+            match bytecode::Op::from_byte(b) {
+                Some(bytecode::Op::Const)
+                | Some(bytecode::Op::GetGlobal)
+                | Some(bytecode::Op::SetGlobal)
+                | Some(bytecode::Op::GetBuiltin)
+                | Some(bytecode::Op::MakeClosure)
+                | Some(bytecode::Op::GetPropertyIC)
+                | Some(bytecode::Op::Call) => ip += 1,
+                Some(bytecode::Op::Jump)
+                | Some(bytecode::Op::JumpIfFalse)
+                | Some(bytecode::Op::PushHandler) => ip += 2,
+                _ => {}
+            }
+            if ip > 2000 { break; }
+        }
+    }
     // Create a persistent VM for the REPL and reuse it for every input so
     // we don't recompile and recreate the VM on each line. The soft layer
     // (prelude) is executed into the same VM so its globals and any
