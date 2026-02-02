@@ -113,14 +113,44 @@ function resolveHostGetter(): any | null {
 
 function getHostGetter(): any | null {
   if (cachedHostGetter !== undefined) return cachedHostGetter;
-  const g = resolveHostGetter();
-  cachedHostGetter = g;
-  return g;
+  // Inline resolution here to avoid relying on a separate `resolveHostGetter`
+  // symbol that may not be visible when this function is invoked via a
+  // global lookup during certain bundling/bootstrap orders.
+  try {
+    if (typeof globalThis !== "undefined") {
+      const gg: any = (globalThis as any);
+      if (typeof gg.__host_get === "function") {
+        cachedHostGetter = gg.__host_get;
+        return cachedHostGetter;
+      }
+      if (typeof gg.__host_get_fn === "function") {
+        cachedHostGetter = gg.__host_get_fn;
+        return cachedHostGetter;
+      }
+      const top = (globalThis as any).__host_get;
+      if (typeof top === "function") {
+        cachedHostGetter = top;
+        return cachedHostGetter;
+      }
+    }
+  } catch (_) {}
+  cachedHostGetter = null;
+  return null;
 }
 
 function getBuiltinCached(getter: any, name: string): any {
-  if (Object.prototype.hasOwnProperty.call(builtinCache, name)) return builtinCache[name];
+  // Avoid using Function.prototype.call during bootstrap; use
+  // `Object.getOwnPropertyDescriptor` which does not rely on calling
+  // host/VM function `.call` helpers.
   try {
+    // Simple indexed check avoids calling host/global helpers during bootstrap.
+    if ((builtinCache as any)[name] !== undefined) return builtinCache[name];
+  } catch (_) {}
+  try {
+    if (typeof getter !== "function") {
+      builtinCache[name] = undefined;
+      return undefined;
+    }
     const v = getter(name);
     builtinCache[name] = v;
     return v;

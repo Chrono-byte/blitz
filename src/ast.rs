@@ -97,6 +97,9 @@ pub enum Statement {
     /// Expression statement
     #[serde(rename = "ExpressionStatement")]
     ExpressionStatement(ExpressionStatement),
+    /// Continue statement
+    #[serde(rename = "Continue")]
+    Continue,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -197,11 +197,84 @@ try {
   // runtime wrapper; it's wrapped in try/catch to avoid crashing the runtime
   // if the host environment behaves unexpectedly.
   builtConsole.log = function (...args: Value[]): void {
+    // Minimal Node-like console.log formatting: support %s, %d/%i, %j and %%.
+    const inspect = function (v: any): string {
+      try {
+        if (v === null) return "null";
+        if (typeof v === "undefined") return "undefined";
+        if (typeof v === "string") return v;
+        if (typeof v === "number") return String(v);
+        if (typeof v === "boolean") return v ? "true" : "false";
+        try {
+          return JSON.stringify(v);
+        } catch (_) {
+          return toString(v as any);
+        }
+      } catch (_) {
+        return "[object]";
+      }
+    };
+
     try {
-      return (globalConsole as any).log.apply(globalConsole, args);
-    } catch (_) {
-      // swallow errors during bootstrap
-    }
+      let out = "";
+      if ((args as any).length > 0 && typeof (args as any)[0] === "string") {
+        const fmt: string = (args as any)[0];
+        let i = 1;
+        let j = 0;
+        while (j < fmt.length) {
+          const ch = fmt[j];
+          if (ch === "%" && j + 1 < fmt.length) {
+            const spec = fmt[j + 1];
+            if (spec === "%") {
+              out += "%";
+              j += 2;
+              continue;
+            }
+            const arg = (args as any)[i];
+            let rep = "";
+            if (typeof arg === "undefined") {
+              rep = "undefined";
+            } else if (spec === "s") {
+              rep = String(arg);
+              i += 1;
+            } else if (spec === "d" || spec === "i") {
+              rep = Number(arg).toString();
+              i += 1;
+            } else if (spec === "j") {
+              try { rep = JSON.stringify(arg); } catch (_) { rep = "[Circular]"; }
+              i += 1;
+            } else {
+              // unknown spec -> emit literally
+              out += "%" + spec;
+              j += 2;
+              continue;
+            }
+            out += rep;
+            j += 2;
+          } else {
+            out += ch;
+            j += 1;
+          }
+        }
+        // append remaining args
+        while (i < (args as any).length) {
+          out += (out === "" ? "" : " ") + inspect((args as any)[i]);
+          i += 1;
+        }
+      } else {
+        // join inspected args with spaces
+        let sep = "";
+        let kk = 0;
+        while (kk < (args as any).length) {
+          out += sep + inspect((args as any)[kk]);
+          sep = " ";
+          kk += 1;
+        }
+      }
+
+      const printer = getNativePrinter();
+      try { printer(out); } catch (_) { try { host_print(out); } catch (_) {} }
+    } catch (_) {}
   };
   builtConsole.info = globalConsole.info;
   builtConsole.warn = globalConsole.warn;

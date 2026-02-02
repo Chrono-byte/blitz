@@ -1032,7 +1032,6 @@ fn get_property(obj: &Value, key: &str) -> Result<Value, String> {
     }
 }
 
-
 fn set_property(obj: &Value, key: &str, value: Value) -> Result<(), String> {
     match obj {
         Value::Object(map) => {

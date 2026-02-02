@@ -1,5 +1,5 @@
-function hello(): null {
+function main(): null {
     console.log("hello");
     return null;
 }
-hello()
+main()

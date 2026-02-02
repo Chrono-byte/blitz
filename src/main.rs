@@ -237,7 +237,11 @@ fn main() -> Result<(), String> {
     // One-time diagnostic: print compiled chunk constants so we can map
     // bytecode ip locations back to source-level constants during debugging.
     if tsblitz::trace::enabled() {
-        eprintln!("[trace] Prelude chunk: code_len={} constants={}", chunk.code.len(), chunk.constants.len());
+        eprintln!(
+            "[trace] Prelude chunk: code_len={} constants={}",
+            chunk.code.len(),
+            chunk.constants.len()
+        );
         for (i, c) in chunk.constants.iter().enumerate() {
             match c {
                 Value::String(s) => eprintln!("[trace] const[{}] (string) = {:?}", i, s),
@@ -252,7 +256,8 @@ fn main() -> Result<(), String> {
         let mut ip = 0usize;
         while ip < chunk.code.len() {
             let b = chunk.code[ip];
-            let op = bytecode::Op::from_byte(b).map(|o| format!("{:?}", o)).unwrap_or_else(|| format!("0x{:02x}", b));
+            let op = bytecode::Op::from_byte(b)
+                .map_or_else(|| format!("0x{:02x}", b), |o| format!("{:?}", o));
             // Prepare a short operand preview depending on opcode
             let mut extra = String::new();
             match bytecode::Op::from_byte(b) {
@@ -268,7 +273,9 @@ fn main() -> Result<(), String> {
                         extra = format!(" {}", v);
                     }
                 }
-                Some(bytecode::Op::Jump) | Some(bytecode::Op::JumpIfFalse) | Some(bytecode::Op::PushHandler) => {
+                Some(bytecode::Op::Jump)
+                | Some(bytecode::Op::JumpIfFalse)
+                | Some(bytecode::Op::PushHandler) => {
                     if ip + 2 < chunk.code.len() {
                         let hi = chunk.code[ip + 1] as usize;
                         let lo = chunk.code[ip + 2] as usize;
@@ -294,7 +301,9 @@ fn main() -> Result<(), String> {
                 | Some(bytecode::Op::PushHandler) => ip += 2,
                 _ => {}
             }
-            if ip > 2000 { break; }
+            if ip > 2000 {
+                break;
+            }
         }
     }
     // Create a persistent VM for the REPL and reuse it for every input so

@@ -30,6 +30,10 @@ pub struct Compiler {
     globals: HashMap<String, usize>,
     /// True only for the top-level compiler (so we can record global_types).
     is_root: bool,
+    /// Stack of continue patch sites for nested loops. Each entry holds a list
+    /// of code offsets (index of the first placeholder byte) that must be
+    /// patched to jump to the loop's continue target when the loop is closed.
+    continue_patches: Vec<Vec<usize>>,
 }
 
 impl Compiler {
@@ -41,6 +45,7 @@ impl Compiler {
             local_types: Vec::new(),
             globals: HashMap::new(),
             is_root: true,
+            continue_patches: Vec::new(),
         }
     }
 
@@ -216,6 +221,8 @@ impl Compiler {
                 }
             }
             Statement::While(w) => {
+                // Prepare continue patch list for this loop
+                self.continue_patches.push(Vec::new());
                 let loop_start = self.chunk.code.len();
                 self.compile_expr(&w.test)?;
                 self.emit(Op::JumpIfFalse, LINE);
@@ -223,10 +230,42 @@ impl Compiler {
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
                 self.compile_statement(&w.body)?;
+
+                // Emit jump back to loop start
                 self.emit(Op::Jump, LINE);
+                let back_jump_pos = self.chunk.code.len();
                 let back_offset = loop_start as isize - (self.chunk.code.len() + 3) as isize;
                 self.emit_short_signed(back_offset, LINE);
+
+                // Patch any continue sites to jump to just before the back-jump
+                if let Some(patches) = self.continue_patches.pop() {
+                    for patch_pos in patches {
+                        // patch_pos is the index of the first placeholder byte we wrote
+                        let target = back_jump_pos as isize - (patch_pos as isize) - 2;
+                        let v = target as i16;
+                        self.chunk.code[patch_pos] = (v >> 8) as u8;
+                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                    }
+                }
+
                 self.patch_jump(exit_jump);
+            }
+            Statement::Continue => {
+                // Emit a Jump with a two-byte placeholder offset and record the
+                // placeholder position so the enclosing loop can patch it to the
+                // correct continue target. If there is no enclosing loop, it's
+                // an error.
+                if self.continue_patches.is_empty() {
+                    return Err("'continue' not allowed outside loops".to_string());
+                }
+                self.emit(Op::Jump, LINE);
+                let placeholder_pos = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                // record the placeholder position for the innermost loop
+                if let Some(top) = self.continue_patches.last_mut() {
+                    top.push(placeholder_pos);
+                }
             }
             Statement::FunctionDecl(f) => {
                 let (proto, _env_len) =
@@ -295,6 +334,7 @@ impl Compiler {
             local_types: Vec::new(),
             globals: HashMap::new(),
             is_root: false,
+            continue_patches: Vec::new(),
         };
         // Keep parameter type *options* so missing annotations are represented as None.
         let param_type_opts: Vec<Option<Type>> =

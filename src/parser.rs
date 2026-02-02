@@ -399,6 +399,10 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
                 body: Box::new(convert_statement_estree(body)?),
             }))
         }
+        "ContinueStatement" => {
+            // Continue has no payload in our simplified AST. Represent as Statement::Continue
+            Ok(Statement::Continue)
+        }
 
         "ReturnStatement" => {
             let arg = node.get("argument");
@@ -726,13 +730,6 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
                 .and_then(|s| s.as_str())
                 .ok_or_else(|| "AssignmentExpression missing operator".to_string())?;
 
-            if op != "=" {
-                return Err(format!(
-                    "Only simple assignment '=' is supported, got '{}'",
-                    op
-                ));
-            }
-
             let left = node
                 .get("left")
                 .ok_or_else(|| "Assignment missing left".to_string())?;
@@ -741,12 +738,44 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
             let right = node
                 .get("right")
                 .ok_or_else(|| "Assignment missing right".to_string())?;
-            let value = convert_expr_estree(right)?;
+            let rhs = convert_expr_estree(right)?;
 
-            Ok(Expr::Assignment(AssignmentExpr {
-                target,
-                value: Box::new(value),
-            }))
+            // Support simple '=' as well as compound assignments like '+=', '-=', '*=', '/=', '%='
+            if op == "=" {
+                Ok(Expr::Assignment(AssignmentExpr {
+                    target,
+                    value: Box::new(rhs),
+                }))
+            } else {
+                // Map compound operator to BinaryOperator
+                let bop = match &op[..op.len() - 1] {
+                    "+" => BinaryOperator::Plus,
+                    "-" => BinaryOperator::Minus,
+                    "*" => BinaryOperator::Star,
+                    "/" => BinaryOperator::Slash,
+                    "%" => BinaryOperator::Percent,
+                    other => {
+                        return Err(format!(
+                            "Unsupported compound assignment operator: {}",
+                            other
+                        ));
+                    }
+                };
+
+                // Build binary expression: (left_expr <bop> rhs)
+                // We need the left as an Expr for the binary op. Convert the left node to an Expr.
+                let left_expr = convert_expr_estree(left)?;
+                let bin = Expr::BinaryExpr(BinaryExpr {
+                    operator: bop,
+                    left: Box::new(left_expr),
+                    right: Box::new(rhs),
+                });
+
+                Ok(Expr::Assignment(AssignmentExpr {
+                    target,
+                    value: Box::new(bin),
+                }))
+            }
         }
 
         "BinaryExpression" => {

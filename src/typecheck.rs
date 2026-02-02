@@ -200,6 +200,9 @@ impl TypeContext {
                 let _ = self.type_of_expr(&w.test)?;
                 self.check_statement(&w.body)?;
             }
+            Statement::Continue => {
+                // Continue has no type-level effects; accept for now.
+            }
             Statement::FunctionDecl(f) => {
                 // Skip strict mode checking for library functions (those starting with __ or common stdlib functions)
                 let is_library_function = f.name.starts_with("__")
