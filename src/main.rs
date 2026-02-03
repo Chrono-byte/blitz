@@ -23,11 +23,15 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
             );
         }
     }
+
+    // Join the arguments into a single string to send to host stdout.
     let s: String = args
         .iter()
         .map(|v| format!("{}", v))
         .collect::<Vec<_>>()
         .join(" ");
+
+    // Preserve existing trace logging when enabled.
     if tsblitz::trace::enabled() {
         eprintln!(
             "[diag] host.native_print joined len={} repr={:?}",
@@ -35,11 +39,20 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
             s
         );
     }
+
+    // Additional unconditional diagnostic: write a single-line debug to stderr so
+    // we can see what the runtime attempted to print even when trace is not enabled.
+    // This helps diagnose cases where stdout output appears missing.
+    eprintln!("[diag] host.native_print -> {:?}", s);
+
     // Print without adding a newline (preserve previous behavior) but
     // explicitly flush stdout so short-lived processes still show output.
     use std::io::Write;
     print!("{}", s);
     let _ = std::io::stdout().flush();
+    // Also flush stderr to ensure the diagnostic line is visible immediately.
+    let _ = std::io::stderr().flush();
+
     Ok(Value::Null)
 }
 
@@ -669,6 +682,32 @@ fn main() -> Result<(), String> {
             } else {
                 eprintln!("[trace] console global present (own keys unavailable)");
             }
+
+            // Extra diagnostics: dump console.log property type and a short value
+            // representation to help diagnose broken consoles (e.g. non-callable or
+            // host-backed values that don't behave like normal JS functions).
+            if let Some(console_val) = repl_vm.get_global("console") {
+                eprintln!("[trace] console global type={}", console_val.type_name());
+                // If it's an object, inspect the 'log' property directly.
+                if let Value::Object(map) = console_val {
+                    let m = map.borrow();
+                    if let Some(log_val) = m.get("log") {
+                        eprintln!("[trace] console.log present type={}", log_val.type_name());
+                        // Use the trace helper to print a short, helpful representation
+                        // of the value when tracing is enabled.
+                        if tsblitz::trace::enabled() {
+                            tsblitz::trace::value_string("console.log value", log_val);
+                        }
+                    } else {
+                        eprintln!("[trace] console.log NOT present");
+                    }
+                } else {
+                    eprintln!(
+                        "[trace] console global is not an object (actual={})",
+                        console_val.type_name()
+                    );
+                }
+            }
         } else {
             eprintln!("[trace] console global NOT present");
         }
@@ -683,6 +722,50 @@ fn main() -> Result<(), String> {
             eprintln!("[trace] __native_print present type={}", v.type_name());
         } else {
             eprintln!("[trace] __native_print NOT present");
+        }
+
+        // Extra diagnostics: inspect core constructors (String, Object, Number)
+        if let Some(v) = repl_vm.get_global("String") {
+            eprintln!("[trace] String global present type={}", v.type_name());
+            // Print a rich debug representation of the runtime value for deeper inspection.
+            tsblitz::trace::value_string("String global value", &v);
+            if let Some(keys) = repl_vm.list_global_own_keys("String") {
+                eprintln!("[trace] String own keys = {:?}", keys);
+            } else {
+                eprintln!("[trace] String own keys unavailable");
+            }
+            if let Some(pkeys) = repl_vm.list_global_prototype_keys("String") {
+                eprintln!("[trace] String.prototype own keys = {:?}", pkeys);
+            } else {
+                eprintln!("[trace] String.prototype not found or not object");
+            }
+        } else {
+            eprintln!("[trace] String global NOT present");
+        }
+
+        if let Some(v) = repl_vm.get_global("Object") {
+            eprintln!("[trace] Object global present type={}", v.type_name());
+            // Also dump a value_string for the Object global so its representation
+            // and internal structure are visible in diagnostics.
+            tsblitz::trace::value_string("Object global value", &v);
+            if let Some(keys) = repl_vm.list_global_own_keys("Object") {
+                eprintln!("[trace] Object own keys = {:?}", keys);
+            } else {
+                eprintln!("[trace] Object own keys unavailable");
+            }
+            if let Some(pkeys) = repl_vm.list_global_prototype_keys("Object") {
+                eprintln!("[trace] Object.prototype own keys = {:?}", pkeys);
+            } else {
+                eprintln!("[trace] Object.prototype not found or not object");
+            }
+        } else {
+            eprintln!("[trace] Object global NOT present");
+        }
+
+        if let Some(v) = repl_vm.get_global("Number") {
+            eprintln!("[trace] Number global present type={}", v.type_name());
+        } else {
+            eprintln!("[trace] Number global NOT present");
         }
     }
 

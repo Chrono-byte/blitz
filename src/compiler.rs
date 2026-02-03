@@ -35,7 +35,7 @@ pub fn compile(program: &Program) -> Result<Chunk, String> {
                 eprintln!("[trace] compiler: locals = {:?}", c.locals);
                 eprintln!("[trace] compiler: globals = {:?}", c.globals);
                 eprintln!("[trace] compiler: global name -> const_index:");
-                for (name, idx) in c.globals.iter() {
+                for (name, idx) in &c.globals {
                     eprintln!("[trace]   {} -> {}", name, idx);
                 }
             }
@@ -119,12 +119,11 @@ impl Compiler {
     /// to those functions will compile to `GetLocal` (hoisting semantics).
     fn pre_declare_functions(&mut self, stmts: &[Statement]) {
         for stmt in stmts {
-            if let Statement::FunctionDecl(f) = stmt {
-                if self.resolve_local(&f.name).is_none() {
+            if let Statement::FunctionDecl(f) = stmt
+                && self.resolve_local(&f.name).is_none() {
                     // Reserve a local slot with no type annotation for now.
                     self.add_local(f.name.clone(), None);
                 }
-            }
         }
     }
 
@@ -345,7 +344,7 @@ impl Compiler {
                     // both the local and the global binding in a stable way.
                     self.chunk
                         .global_types
-                        .insert(f.name.clone(), Some(fn_type.clone()));
+                        .insert(f.name.clone(), Some(fn_type));
                     self.emit(Op::Dup, LINE);
                 }
 

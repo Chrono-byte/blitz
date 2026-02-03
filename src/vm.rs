@@ -330,7 +330,7 @@ impl Vm {
 
                                     // Disassembly window to help locate the offending bytecode.
                                     // Show a small window before and after the current ip.
-                                    let start = if self.ip >= 8 { self.ip - 8 } else { 0 };
+                                    let start = self.ip.saturating_sub(8);
                                     let end = usize::min(self.ip + 8, self.chunk.code.len());
                                     eprintln!("[diag] disasm window ({}..{}):", start, end);
 
@@ -354,7 +354,7 @@ impl Vm {
                                                         Some(Value::String(s)) => {
                                                             format!("'{}'", s)
                                                         }
-                                                        Some(v) => format!("{}", v.type_name()),
+                                                        Some(v) => v.type_name().to_string(),
                                                         None => "<undef>".to_string(),
                                                     };
                                                     eprintln!(
@@ -451,8 +451,7 @@ impl Vm {
                                 return Err(format!(
                                     "BuildObject: key must be string (actual={})",
                                     other.type_name()
-                                )
-                                .into());
+                                ));
                             }
                         };
                         map.insert(key, value);
@@ -571,7 +570,7 @@ impl Vm {
                     }
 
                     // Disassembly window to help locate the offending bytecode.
-                    let start = if self.ip >= 8 { self.ip - 8 } else { 0 };
+                    let start = self.ip.saturating_sub(8);
                     let end = std::cmp::min(self.ip + 8, self.chunk.code.len());
                     eprintln!("[diag] disasm window ({}..{}):", start, end);
 
@@ -584,7 +583,7 @@ impl Vm {
                                     let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
                                     let arg_repr = match self.chunk.constants.get(arg as usize) {
                                         Some(Value::String(s)) => format!("'{}'", s),
-                                        Some(v) => format!("{}", v.type_name()),
+                                        Some(v) => v.type_name().to_string(),
                                         None => "<undef>".to_string(),
                                     };
                                     eprintln!(
@@ -637,7 +636,7 @@ impl Vm {
                         }
                     }
                 }
-                return Err(format!("Call: not a function (actual={})", callee.type_name()).into());
+                return Err(format!("Call: not a function (actual={})", callee.type_name()));
             }
         }
 
