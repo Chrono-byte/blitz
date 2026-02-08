@@ -91,9 +91,12 @@ fn builtin_eval_script(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 
     // Build a minimal new realm
     let new_globals = Rc::new(RefCell::new(HashMap::new()));
-    new_globals
-        .borrow_mut()
-        .insert("print".to_string(), Value::Builtin(builtin_print));
+    new_globals.borrow_mut().insert(
+        "print".to_string(),
+        Value::Builtin(|vm, args| {
+            builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+        }),
+    );
 
     // Parse / typecheck / compile / run. Ignore errors and return Null on failure.
     match Parser::parse_source_into_local_ast(&src) {

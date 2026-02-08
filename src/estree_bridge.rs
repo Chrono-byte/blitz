@@ -37,6 +37,25 @@ fn convert_stmt(v: &Value) -> Result<la::Statement, String> {
 
     match typ {
         "VariableDeclaration" => {
+            // If this declaration is a `declare` form, treat it as a top-level Declare
+            if v.get("declare").and_then(|d| d.as_bool()) == Some(true) {
+                // Best-effort: pull the declared name where possible
+                if let Some(id) = v
+                    .get("declarations")
+                    .and_then(|d| d.as_array())
+                    .and_then(|arr| arr.get(0))
+                    .and_then(|dec| dec.get("id"))
+                {
+                    if let Some(name) = id.get("name").and_then(|n| n.as_str()) {
+                        return Ok(la::Statement::Declare(la::Declare {
+                            name: name.to_string(),
+                            type_ann: None,
+                        }));
+                    }
+                }
+                return Err("Unsupported declare form".to_string());
+            }
+
             // handle simple single-declarator case
             let decls = v
                 .get("declarations")
@@ -186,7 +205,7 @@ fn convert_stmt(v: &Value) -> Result<la::Statement, String> {
             ))
         }
         "EmptyStatement" => Err("EmptyStatement not supported".to_string()),
-        "TSDeclareFunction" | "DeclareVariable" | "VariableDeclaration"
+        "TSDeclareFunction" | "DeclareVariable"
             if v.get("declare").and_then(|d| d.as_bool()) == Some(true) =>
         {
             // Best-effort: pull the declared name where possible
