@@ -12,9 +12,10 @@
 //! it simply concatenates module bodies in an order that satisfies direct
 //! dependencies. Cycles are handled by visiting nodes once.
 
-use crate::ast::{Program, ProgramKind, Statement, TypeStrictness};
 use crate::errors::BundlerError;
+use crate::oast as ast;
 use crate::parser::Parser;
+use ast::Program;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +29,7 @@ use std::path::{Path, PathBuf};
 /// # Errors
 /// Returns an error if the entry module or any of its dependencies cannot be
 /// read or parsed.
-pub fn bundle_entry(entry: &Path) -> Result<Program, BundlerError> {
+pub fn bundle_entry(entry: &Path) -> Result<crate::parser::ParserSession, BundlerError> {
     // Resolve the entry to a canonical path where possible to avoid duplicates.
     let entry_canon = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf());
 
@@ -93,8 +94,9 @@ pub fn bundle_entry(entry: &Path) -> Result<Program, BundlerError> {
     // Build the module ordering
     visit(entry_canon, &mut visited, &mut order)?;
 
-    // Now parse each module (again) and collect statements into a single Program.
-    let mut combined: Vec<Statement> = Vec::new();
+    // Concatenate module sources in dependency-first order and parse the
+    // combined source to produce a single oxc AST `Program`.
+    let mut combined_src = String::new();
     for path in &order {
         let src = std::fs::read_to_string(path).map_err(|e| {
             BundlerError::from(format!("Failed to read module {}: {}", path.display(), e))
@@ -103,19 +105,17 @@ pub fn bundle_entry(entry: &Path) -> Result<Program, BundlerError> {
         // Debug: print bundling order
         eprintln!("Loading module: {}", path.display());
 
-        let program = Parser::parse_source(&src).map_err(|e| {
-            BundlerError::from(format!("Failed to parse module {}: {}", path.display(), e))
-        })?;
-        for stmt in program.body {
-            combined.push(stmt);
-        }
+        // Insert a newline and a simple file marker to keep boundaries clear
+        combined_src.push_str(&format!("// --- {} ---\n", path.display()));
+        combined_src.push_str(&src);
+        combined_src.push('\n');
     }
 
-    Ok(Program {
-        kind: ProgramKind::Module,
-        type_strictness: TypeStrictness::Soft,
-        body: combined,
-    })
+    // Parse the combined source into a ParserSession which owns backing data.
+    let session = Parser::parse_source(&combined_src)
+        .map_err(|e| BundlerError::from(format!("Failed to parse bundled program: {}", e)))?;
+
+    Ok(session)
 }
 
 #[cfg(test)]
@@ -149,28 +149,12 @@ mod tests {
 
         let program = bundle_entry(&mod_a).expect("bundle ok");
 
-        // Expect that the bundled program contains the function `b`.
-        let mut found_b = false;
-        let mut found_consumer = false;
-        for s in &program.body {
-            match s {
-                Statement::FunctionDecl(fd) => {
-                    if fd.name == "b" {
-                        found_b = true;
-                    }
-                }
-                Statement::ExpressionStatement(_) => {
-                    // simple heuristic to detect the consumer expression was preserved
-                    found_consumer = true;
-                }
-                _ => {}
-            }
-        }
-        assert!(found_b, "bundled program should contain function 'b'");
-        assert!(
-            found_consumer,
-            "bundled program should contain the consumer expression"
-        );
+        // Expect that the bundled program contains the function `b` and the
+        // consumer expression. Use the ESTree JSON output to keep assertions
+        // independent of the internal AST node layout.
+        let estree = program.to_pretty_estree_ts_json(false);
+        assert!(estree.contains("\"FunctionDeclaration\"") && estree.contains("b"));
+        assert!(estree.contains("globalX") && estree.contains("b()"));
     }
 
     #[test]

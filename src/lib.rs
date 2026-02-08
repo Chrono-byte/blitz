@@ -13,7 +13,7 @@
 //!   (console, Array, Object, String, …) and any extra runtime APIs. All written
 //!   in TS and executed by this VM. No high-level APIs are implemented in Rust.
 
-pub mod ast;
+// The `ast` module is provided by oxc_ast and re-exported below.
 pub mod bundler;
 pub mod bytecode;
 pub mod compiler;
@@ -26,12 +26,14 @@ pub mod typecheck;
 pub mod value;
 pub mod vm;
 
-pub use ast::*;
+// Re-export oxc_ast::ast under the `ast` namespace for compatibility.
 pub use bundler::*;
 pub use bytecode::*;
 pub use compiler::*;
 pub use errors::*;
 pub use lexer::*;
+pub use oast as ast;
+pub use oxc_ast::ast as oast;
 pub use oxc_typecheck::{
     TypeIssue, TypecheckConfig, TypecheckResult, check_file as oxc_check_file, check_soft_layer,
 };

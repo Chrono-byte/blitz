@@ -5,8 +5,7 @@
 
 import * as host from "../host.js";
 
-const Object: any =
-  typeof globalThis !== "undefined" && (globalThis as any).Object ? (globalThis as any).Object : {};
+// const Object: any = typeof globalThis !== "undefined" && (globalThis as any).Object ? (globalThis as any).Object : {};
 
 // Debug: report Object runtime value
 try {

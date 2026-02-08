@@ -1,7 +1,7 @@
 //! Stack-based bytecode interpreter. Types are enforced at runtime.
 
-use crate::ast::Type;
 use crate::bytecode::{Chunk, Op};
+use crate::oxc_typecheck::Type;
 use crate::value::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;

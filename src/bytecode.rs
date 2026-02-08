@@ -1,8 +1,25 @@
 //! Bytecode format: opcodes and chunk. Types are retained for runtime checks.
+//!
+//! Improvements in this revision:
+//! - Safe conversions from/to `u8` for `Op` (no unsafe `transmute`).
+//! - `Op::is_jump` predicate and a static `jumps()` slice (no allocations).
+//! - `Chunk` helpers to read/write 16-bit operands and to hotwire jumps:
+//!   - `hotwire_jump_to_next` (make jump target the next instruction)
+//!   - `hotwire_make_unconditional` (convert conditional jump to unconditional)
+//!   - `hotwire_redirect` (change jump target to a specified instruction index)
+//!
+//! Notes:
+//! - Instruction layout assumptions for jump instructions:
+//!   - opcode byte at `ip`
+//!   - a signed 16-bit little-endian relative offset (i16) immediately follows the opcode
+//!   - the offset is measured relative to the "next instruction" (i.e., ip + 1 + 2)
+//! - Hotpatching is only safe when no other thread may concurrently execute the bytecode
+//!   being patched. This module does not perform synchronization; callers must ensure safety.
 
-use crate::ast::Type;
+use crate::oxc_typecheck::Type;
 use crate::value::Value;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
@@ -70,6 +87,131 @@ impl Chunk {
         self.functions.push(proto);
         self.functions.len() - 1
     }
+
+    // --- Helpers for reading/writing 16-bit operands (little-endian) ---
+
+    /// Reads a signed 16-bit little-endian value from `code` at `pos`.
+    /// Returns `None` if the two bytes are out of bounds.
+    pub fn read_i16_at(&self, pos: usize) -> Option<i16> {
+        if pos + 1 >= self.code.len() {
+            return None;
+        }
+        let lo = self.code[pos] as u16;
+        let hi = self.code[pos + 1] as u16;
+        let val = ((hi << 8) | lo) as i16;
+        Some(val)
+    }
+
+    /// Writes a signed 16-bit little-endian value into `code` at `pos`.
+    /// Returns `false` if out of bounds.
+    pub fn write_i16_at(&mut self, pos: usize, val: i16) -> bool {
+        if pos + 1 >= self.code.len() {
+            return false;
+        }
+        let bytes = val.to_le_bytes();
+        self.code[pos] = bytes[0];
+        self.code[pos + 1] = bytes[1];
+        true
+    }
+
+    /// Helper: returns the instruction index of the jump target for a jump located at `ip`.
+    /// `ip` is the index of the opcode byte. Returns `None` if `ip` is out of bounds,
+    /// the opcode at `ip` is not a jump, or the computed target is out of bounds.
+    pub fn jump_target_from_ip(&self, ip: usize) -> Option<usize> {
+        // need opcode + 2 bytes for i16 operand
+        if ip + 1 + 1 >= self.code.len() {
+            return None;
+        }
+        let b = self.code[ip];
+        let op = Op::from_byte(b)?;
+        if !op.is_jump() {
+            return None;
+        }
+        // operand starts at ip + 1
+        let offset = self.read_i16_at(ip + 1)? as i32;
+        let next_instr = ip + 1 + 2;
+        // offset is relative to the next instruction
+        let target = (next_instr as i32).checked_add(offset)?;
+        if target < 0 {
+            return None;
+        }
+        let t = target as usize;
+        if t >= self.code.len() {
+            return None;
+        }
+        Some(t)
+    }
+
+    /// Hotwire the jump at `ip` so it jumps to the following instruction (i.e. becomes a no-op jump).
+    /// Returns the original `Op` if successful or `None` on error (non-jump opcode, OOB, etc).
+    ///
+    /// Safety: callers must ensure no concurrent execution is reading/executing this `Chunk`.
+    pub fn hotwire_jump_to_next(&mut self, ip: usize) -> Option<Op> {
+        // verify opcode + operand is present
+        if ip + 1 + 1 >= self.code.len() {
+            return None;
+        }
+        let byte = self.code[ip];
+        let op = Op::from_byte(byte)?;
+        if !op.is_jump() {
+            return None;
+        }
+        // set relative offset to 0 so target == next instruction
+        let ok = self.write_i16_at(ip + 1, 0);
+        if !ok {
+            return None;
+        }
+        Some(op)
+    }
+
+    /// Convert `JumpIfFalse` at `ip` to unconditional `Jump`.
+    /// Returns the original `Op` if successful or `None` on error.
+    ///
+    /// This changes only the opcode byte; the operand layout must be identical
+    /// between the two opcodes (same size and semantics).
+    pub fn hotwire_make_unconditional(&mut self, ip: usize) -> Option<Op> {
+        if ip >= self.code.len() {
+            return None;
+        }
+        let byte = self.code[ip];
+        let op = Op::from_byte(byte)?;
+        match op {
+            Op::JumpIfFalse => {
+                self.code[ip] = Op::Jump.to_byte();
+                Some(op)
+            }
+            Op::Jump => Some(op), // already unconditional
+            _ => None,
+        }
+    }
+
+    /// Redirect the jump at `ip` to a new absolute instruction index `target_ip`.
+    /// Returns the original `Op` if successful, or `None` on error.
+    ///
+    /// The `target_ip` must be the byte index of the instruction to jump to.
+    pub fn hotwire_redirect(&mut self, ip: usize, target_ip: usize) -> Option<Op> {
+        // verify opcode + operand is present
+        if ip + 1 + 1 >= self.code.len() || target_ip >= self.code.len() {
+            return None;
+        }
+        let byte = self.code[ip];
+        let op = Op::from_byte(byte)?;
+        if !op.is_jump() {
+            return None;
+        }
+        // offset = target_ip - next_instr
+        let next_instr = ip + 1 + 2;
+        let next_i = next_instr as i32;
+        let t = target_ip as i32;
+        let offset = t.checked_sub(next_i)?;
+        // ensure offset fits in i16
+        let offset_i16 = i16::try_from(offset).ok()?;
+        let ok = self.write_i16_at(ip + 1, offset_i16);
+        if !ok {
+            return None;
+        }
+        Some(op)
+    }
 }
 
 impl Default for Chunk {
@@ -81,6 +223,10 @@ impl Default for Chunk {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 /// Bytecode operation codes
+///
+/// NOTE: The numeric discriminant of each `Op` variant is part of the runtime
+/// bytecode format. Do not reorder or insert variants in the middle without
+/// updating the bytecode version and migration logic.
 pub enum Op {
     /// Push constant from constant pool
     Const = 0,
@@ -169,13 +315,174 @@ pub enum Op {
 impl Op {
     /// Converts a byte to an Op if valid, returns None otherwise
     pub fn from_byte(b: u8) -> Option<Op> {
-        // Accept any byte that is a valid discriminant for the Op enum.
-        // Compare against the maximum defined opcode value (PopHandler).
-        if b <= Op::PopHandler as u8 {
-            // SAFETY: `b` is within the enum range, transmute is safe.
-            Some(unsafe { std::mem::transmute::<u8, Op>(b) })
-        } else {
-            None
+        Op::try_from(b).ok()
+    }
+
+    /// Converts an Op to a byte
+    pub fn to_byte(&self) -> u8 {
+        u8::from(*self)
+    }
+
+    /// Returns a static slice of jump opcodes (no allocation).
+    pub fn jumps() -> &'static [Op] {
+        static JUMPS: [Op; 2] = [Op::Jump, Op::JumpIfFalse];
+        &JUMPS
+    }
+
+    /// Returns whether this opcode is a jump (conditional or unconditional).
+    pub fn is_jump(&self) -> bool {
+        matches!(self, Op::Jump | Op::JumpIfFalse)
+    }
+
+    /// Hotwire a jump instruction (deprecated—use `Chunk` helpers instead).
+    /// Kept for compatibility: returns an op transformed to an "equivalent"
+    /// hotwired opcode when possible.
+    /// NOTE: This function does not mutate `Chunk` bytes; it only returns a
+    /// suggested opcode to use when writing out the opcode byte.
+    pub fn hotwire_jump(op: Op) -> Op {
+        match op {
+            Op::Jump => Op::Jump,
+            Op::JumpIfFalse => Op::Jump,
+            _ => panic!("Cannot hotwire non-jump instruction"),
         }
+    }
+
+    /// Returns whether this opcode performs an arithmetic operation that
+    /// expects two operands.
+    pub fn is_arithmetic(&self) -> bool {
+        matches!(
+            self,
+            Op::Add | Op::AddNumber | Op::Sub | Op::Mul | Op::Div | Op::Mod
+        )
+    }
+
+    /// Returns whether this opcode performs a comparison operation.
+    pub fn is_comparison(&self) -> bool {
+        matches!(self, Op::Eq | Op::Neq | Op::Lt | Op::Le | Op::Gt | Op::Ge)
+    }
+
+    /// Returns whether this opcode is a logical or boolean operator.
+    pub fn is_logical(&self) -> bool {
+        matches!(self, Op::And | Op::Or | Op::Not)
+    }
+
+    /// Returns whether this opcode manipulates the value stack directly
+    /// without invoking arithmetic or logical semantics.
+    pub fn is_stack_operation(&self) -> bool {
+        matches!(self, Op::Pop | Op::Dup)
+    }
+}
+
+// Safe conversions between `u8` and `Op`.
+// Implementing TryFrom<u8> avoids the previous unsafe `transmute` approach.
+impl TryFrom<u8> for Op {
+    type Error = ();
+
+    fn try_from(b: u8) -> Result<Self, Self::Error> {
+        match b {
+            0 => Ok(Op::Const),
+            1 => Ok(Op::Null),
+            2 => Ok(Op::True),
+            3 => Ok(Op::False),
+            4 => Ok(Op::GetLocal),
+            5 => Ok(Op::SetLocal),
+            6 => Ok(Op::GetGlobal),
+            7 => Ok(Op::SetGlobal),
+            8 => Ok(Op::Pop),
+            9 => Ok(Op::Dup),
+            10 => Ok(Op::Add),
+            11 => Ok(Op::AddNumber),
+            12 => Ok(Op::Sub),
+            13 => Ok(Op::Mul),
+            14 => Ok(Op::Div),
+            15 => Ok(Op::Mod),
+            16 => Ok(Op::Eq),
+            17 => Ok(Op::Neq),
+            18 => Ok(Op::Lt),
+            19 => Ok(Op::Le),
+            20 => Ok(Op::Gt),
+            21 => Ok(Op::Ge),
+            22 => Ok(Op::And),
+            23 => Ok(Op::Or),
+            24 => Ok(Op::Neg),
+            25 => Ok(Op::Not),
+            26 => Ok(Op::Typeof),
+            27 => Ok(Op::Call),
+            28 => Ok(Op::Return),
+            29 => Ok(Op::Jump),
+            30 => Ok(Op::JumpIfFalse),
+            31 => Ok(Op::BuildArray),
+            32 => Ok(Op::BuildObject),
+            33 => Ok(Op::GetProperty),
+            34 => Ok(Op::GetPropertyIC),
+            35 => Ok(Op::SetProperty),
+            36 => Ok(Op::MakeClosure),
+            37 => Ok(Op::GetBuiltin),
+            38 => Ok(Op::Throw),
+            39 => Ok(Op::PushHandler),
+            40 => Ok(Op::PopHandler),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<Op> for u8 {
+    fn from(op: Op) -> Self {
+        op as u8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn op_round_trip() {
+        for i in 0u8..=Op::PopHandler as u8 {
+            let op = Op::try_from(i).expect("valid op");
+            let b = u8::from(op);
+            assert_eq!(b, i);
+            let op2 = Op::from_byte(b).expect("from_byte");
+            assert_eq!(op2, op);
+        }
+        assert!(Op::try_from(255u8).is_err());
+    }
+
+    #[test]
+    fn hotwire_jump_helpers() {
+        // Build a simple chunk with: Jump <offset to later>, followed by a small body.
+        // Layout: [Jump opcode][offset lo][offset hi][...]
+        let mut c = Chunk::new();
+        // reserve some code so indices are meaningful
+        // instruction at 0: Jump -> target will be at instruction index 6 (for example)
+        c.code = vec![
+            Op::Jump.to_byte(),
+            0x03,
+            0x00, // offset = 3 (little-endian) => target = next_instr (0+1+2=3) + 3 = 6
+            // filler bytes for instructions at indices 3..6
+            0xFF,
+            0xFF,
+            0xFF,
+            0x00,
+        ];
+        // verify jump_target_from_ip
+        let target = c.jump_target_from_ip(0).expect("target");
+        // compute expected: next_instr = 3, offset = 3 -> target = 6
+        assert_eq!(target, 6usize);
+        // hotwire to next: sets offset = 0 => target becomes next_instr (3)
+        let orig = c.hotwire_jump_to_next(0).expect("hotwire");
+        assert_eq!(orig, Op::Jump);
+        let t2 = c.jump_target_from_ip(0).expect("target2");
+        assert_eq!(t2, 3usize);
+
+        // make unconditional should be a no-op for Jump
+        let orig2 = c.hotwire_make_unconditional(0).expect("make_uncond");
+        assert_eq!(orig2, Op::Jump);
+
+        // redirect to absolute ip 4
+        let orig3 = c.hotwire_redirect(0, 4).expect("redirect");
+        assert_eq!(orig3, Op::Jump);
+        let t3 = c.jump_target_from_ip(0).expect("target3");
+        assert_eq!(t3, 4usize);
     }
 }

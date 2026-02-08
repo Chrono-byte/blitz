@@ -1,7 +1,9 @@
 /*! Type checker: strict type checking before compile. Types are not erased. */
 
-use crate::ast::*;
 use crate::errors::TypeCheckerError;
+use crate::oast as ast;
+use crate::oxc_typecheck::Type;
+use ast::*;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 

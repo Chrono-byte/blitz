@@ -1,5 +1,5 @@
 /*!
-Test262 connector for tsblitz.
+Test262 connector script for tsblitz.
 
 Usage:
 - Set the `TEST262_DIR` environment variable to point at a checkout of
@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::exit;
 use std::rc::Rc;
 
 use serde::Deserialize;
@@ -54,7 +55,7 @@ fn extract_front_matter(src: &str) -> Option<String> {
 /// Parse Test262 metadata YAML into `Meta`
 fn parse_meta(src: &str) -> Option<Meta> {
     let fm = extract_front_matter(src)?;
-    // serde_yaml is available via dev-dependencies
+    // serde_yaml is available via Cargo dependencies for this binary
     match serde_yaml::from_str::<Meta>(&fm) {
         Ok(m) => Some(m),
         Err(e) => {
@@ -440,10 +441,9 @@ fn run_test_file(
     Ok(Some(()))
 }
 
-#[test]
-fn test_test262_connector() {
+fn main() {
     // Locate the Test262 checkout
-    // Require a local Test262 checkout via TEST262_DIR or local 'test262' folder; otherwise skip.
+    // Require a local Test262 checkout via TEST262_DIR or local 'test262' folder; otherwise exit.
     let test262_dir = match env::var("TEST262_DIR") {
         Ok(s) => PathBuf::from(s),
         Err(_) => {
@@ -454,7 +454,7 @@ fn test_test262_connector() {
                 eprintln!(
                     "TEST262_DIR not set and local 'test262' not found; skipping Test262 connector"
                 );
-                return;
+                exit(0);
             }
         }
     };
@@ -545,8 +545,9 @@ fn test_test262_connector() {
         for (p, m) in failed.iter().take(20) {
             eprintln!("  {}: {}", p.display(), m);
         }
-        panic!("Some Test262 connector tests failed (see stderr for details)");
+        exit(1);
     } else {
         eprintln!("Test262 connector: ran {} tests (no failures)", ran);
+        exit(0);
     }
 }

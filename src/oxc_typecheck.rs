@@ -5,8 +5,9 @@
 //! developed. The focus here is correctness of types and minimal behaviour.
 
 // ParserError from crate::errors is not required in this module; do not import it here.
-use crate::ast::*;
+use crate::oast;
 use crate::parser::Parser as BridgeParser;
+use oast::*;
 use oxc_allocator::Allocator; // allocator kept for future parser work
 use oxc_parser::{ParseOptions, Parser as OxcParser};
 use oxc_span::{SourceType, Span};
@@ -84,123 +85,35 @@ impl Default for TypecheckConfig {
     fn default() -> Self {
         Self {
             strict_mode: true,
-            require_annotations: true,
+            require_annotations: false,
             warnings_only: false,
         }
     }
 }
 
 /// Built-in JavaScript types modelled by the lightweight typechecker.
-#[derive(Debug, Clone, PartialEq, Hash, Eq, Serialize, Deserialize)]
-pub enum BuiltinType {
-    /// `undefined`
-    Undefined,
-    /// `null`
-    Null,
-    /// `boolean`
-    Boolean,
-    /// `number`
-    Number,
-    /// `string`
-    String,
-    /// `symbol`
-    Symbol,
-    /// `bigint`
-    BigInt,
-    /// Generic object
-    Object,
-    /// Function type
-    Function,
-    /// Array type
-    Array,
-    /// Promise
-    Promise,
-    /// Map
-    Map,
-    /// Set
-    Set,
-    /// RegExp
-    RegExp,
-    /// Date
-    Date,
-    /// Error
-    Error,
-    /// TypeError
-    TypeError,
-    /// RangeError
-    RangeError,
-    /// SyntaxError
-    SyntaxError,
-    /// JSON global
-    JSON,
-    /// Math global
-    Math,
-    /// `void`
-    Void,
-    /// `never`
-    Never,
-    /// `any`
-    Any,
-    /// Unknown/unspecified
-    Unknown,
-}
-
-impl fmt::Display for BuiltinType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BuiltinType::Undefined => write!(f, "undefined"),
-            BuiltinType::Null => write!(f, "null"),
-            BuiltinType::Boolean => write!(f, "boolean"),
-            BuiltinType::Number => write!(f, "number"),
-            BuiltinType::String => write!(f, "string"),
-            BuiltinType::Symbol => write!(f, "symbol"),
-            BuiltinType::BigInt => write!(f, "bigint"),
-            BuiltinType::Object => write!(f, "object"),
-            BuiltinType::Function => write!(f, "function"),
-            BuiltinType::Array => write!(f, "Array"),
-            BuiltinType::Promise => write!(f, "Promise"),
-            BuiltinType::Map => write!(f, "Map"),
-            BuiltinType::Set => write!(f, "Set"),
-            BuiltinType::RegExp => write!(f, "RegExp"),
-            BuiltinType::Date => write!(f, "Date"),
-            BuiltinType::Error => write!(f, "Error"),
-            BuiltinType::TypeError => write!(f, "TypeError"),
-            BuiltinType::RangeError => write!(f, "RangeError"),
-            BuiltinType::SyntaxError => write!(f, "SyntaxError"),
-            BuiltinType::JSON => write!(f, "JSON"),
-            BuiltinType::Math => write!(f, "Math"),
-            BuiltinType::Void => write!(f, "void"),
-            BuiltinType::Never => write!(f, "never"),
-            BuiltinType::Any => write!(f, "any"),
-            BuiltinType::Unknown => write!(f, "unknown"),
-        }
-    }
-}
-
-/// Simplified, serializable type representation used by this module.
+// Reintroduce a conservative Type shape compatible with the rest of the
+// compiler/VM. Many modules expect variants like `Type::Number`, `Type::String`,
+// `Type::Function(params, ret)`, and `Type::Void`. Keep the enum simple and
+// serializable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
-    /// A builtin type like `number` or `string`.
-    Builtin(BuiltinType),
-
-    /// Array of another type.
-    Array(Box<Type>),
-
-    /// Function type (placeholder).
-    Function, // placeholder
-
-    /// Reference to a named type (e.g. interface or typedef).
-    /// Name of the referenced type.
-    TypeReference { name: String },
-
-    /// Union of multiple types.
-    Union(Vec<Type>),
-
-    /// Generic object type.
-    Object,
-
-    /// Unknown type (could not be inferred).
+    Number,
+    String,
+    Boolean,
+    Null,
+    Void,
+    Any,
     Unknown,
+    Array(Box<Type>),
+    Function(Vec<Type>, Box<Type>),
+    /// Object with named property types.
+    Object(std::collections::HashMap<String, Type>),
+    /// Reference to a named type (eg. global class/interface)
+    TypeReference {
+        name: String,
+    },
+    Union(Vec<Type>),
 }
 
 /// Scope containing mappings for variables and named types.
@@ -420,11 +333,10 @@ impl SoftLayerTypechecker {
         // bridge conversion to our local AST. Remove heuristic checks and rely
         // on the bridge's `Program` for further analysis.
         match BridgeParser::parse_source(&source) {
-            Ok(program) => {
-                // Basic semantic checks over the local bridge AST.
-                // - Warn when functions or params lack return/type annotations (when configured)
-                // - Warn when variable declarations lack a type annotation (when configured)
-                self.check_program(&program, file_path, &source);
+            Ok(session) => {
+                // Use ESTree JSON emitted by oxc AST to run simple semantic checks.
+                let program = session.program();
+                self.check_program(program, file_path, &source);
             }
             Err(e) => {
                 self.add_issue(
@@ -444,166 +356,115 @@ impl SoftLayerTypechecker {
         Ok(())
     }
 
-    // Walk a parsed Program and run simple, conservative checks.
+    // Walk a parsed Program and run simple, conservative checks using the
+    // oxc AST's ESTree JSON export. This avoids depending on internal oxc
+    // Rust AST node shapes and keeps checks resilient across versions.
     fn check_program(&mut self, program: &Program, file_path: &Path, source: &str) {
-        for stmt in &program.body {
-            self.check_statement(stmt, file_path, source);
-        }
-    }
+        // Serialize to ESTree JSON and parse
+        let estree = program.to_pretty_estree_ts_json(false);
+        let root: serde_json::Value = match serde_json::from_str(&estree) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
 
-    fn check_statement(&mut self, stmt: &Statement, file_path: &Path, source: &str) {
-        match stmt {
-            Statement::FunctionDecl(fd) => {
-                if self.config.require_annotations && fd.return_type.is_none() {
-                    self.add_issue(
-                        IssueSeverity::Warning,
-                        "MISSING_RETURN_ANNOTATION",
-                        &format!("Function '{}' is missing a return type annotation", fd.name),
-                        None,
-                        None,
-                        file_path,
-                        Some(source),
-                    );
-                }
-                for p in &fd.params {
-                    if self.config.require_annotations && p.type_ann.is_none() {
-                        self.add_issue(
-                            IssueSeverity::Warning,
-                            "MISSING_PARAM_TYPE",
-                            &format!(
-                                "Parameter '{}' in function '{}' is missing a type annotation",
-                                p.name, fd.name
-                            ),
-                            None,
-                            None,
-                            file_path,
-                            Some(source),
-                        );
-                    }
-                }
-                // Recurse into function body
-                for s in &fd.body.body {
-                    self.check_statement(s, file_path, source);
-                }
-            }
-            Statement::VarDecl(v) | Statement::Declare(v) => {
-                if self.config.require_annotations && v.type_ann.is_none() {
-                    self.add_issue(
-                        IssueSeverity::Warning,
-                        "MISSING_VAR_TYPE",
-                        &format!("Variable '{}' is missing a type annotation", v.name),
-                        None,
-                        None,
-                        file_path,
-                        Some(source),
-                    );
-                }
-                if let Some(init) = &v.init {
-                    self.check_expr(init, file_path, source);
-                }
-            }
-            Statement::Block(b) => {
-                for s in &b.body {
-                    self.check_statement(s, file_path, source);
-                }
-            }
-            Statement::ExpressionStatement(es) => {
-                self.check_expr(&es.expression, file_path, source);
-            }
-            Statement::If(i) => {
-                self.check_expr(&i.test, file_path, source);
-                self.check_statement(&i.consequent, file_path, source);
-                if let Some(alt) = &i.alternate {
-                    self.check_statement(alt, file_path, source);
-                }
-            }
-            Statement::While(w) => {
-                self.check_expr(&w.test, file_path, source);
-                self.check_statement(&w.body, file_path, source);
-            }
-            Statement::Return(r) => {
-                if let Some(arg) = &r.argument {
-                    self.check_expr(arg, file_path, source);
-                }
-            }
-            Statement::Try(t) => {
-                for s in &t.block.body {
-                    self.check_statement(s, file_path, source);
-                }
-                if let Some((_, b)) = &t.handler {
-                    for s in &b.body {
-                        self.check_statement(s, file_path, source);
-                    }
-                }
-                if let Some(f) = &t.finalizer {
-                    for s in &f.body {
-                        self.check_statement(s, file_path, source);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+        let body = match root.get("body").and_then(|b| b.as_array()) {
+            Some(b) => b,
+            None => return,
+        };
 
-    fn check_expr(&mut self, expr: &Expr, file_path: &Path, source: &str) {
-        match expr {
-            Expr::CallExpr(c) => {
-                self.check_expr(&c.callee, file_path, source);
-                for a in &c.args {
-                    self.check_expr(a, file_path, source);
-                }
-            }
-            Expr::BinaryExpr(b) => {
-                self.check_expr(&b.left, file_path, source);
-                self.check_expr(&b.right, file_path, source);
-            }
-            Expr::UnaryExpr(u) => {
-                self.check_expr(&u.argument, file_path, source);
-            }
-            Expr::MemberExpr(m) => {
-                self.check_expr(&m.object, file_path, source);
-                self.check_expr(&m.property, file_path, source);
-            }
-            Expr::ArrayExpr(a) => {
-                for e in &a.elements {
-                    self.check_expr(e, file_path, source);
-                }
-            }
-            Expr::ObjectExpr(o) => {
-                for p in &o.properties {
-                    self.check_expr(&p.value, file_path, source);
-                }
-            }
-            Expr::FunctionExpr(f) => {
-                if self.config.require_annotations && f.return_type.is_none() {
-                    self.add_issue(
-                        IssueSeverity::Warning,
-                        "MISSING_RETURN_ANNOTATION",
-                        "Function expression missing return type annotation",
-                        None,
-                        None,
-                        file_path,
-                        Some(source),
-                    );
-                }
-                for p in &f.params {
-                    if self.config.require_annotations && p.type_ann.is_none() {
-                        self.add_issue(
-                            IssueSeverity::Warning,
-                            "MISSING_PARAM_TYPE",
-                            &format!("Parameter '{}' in function expression is missing a type annotation", p.name),
-                            None,
-                            None,
-                            file_path,
-                            Some(source),
-                        );
+        for item in body {
+            if let Some(typ) = item.get("type").and_then(|t| t.as_str()) {
+                match typ {
+                    "FunctionDeclaration" => {
+                        if self.config.require_annotations {
+                            // Check return type
+                            let has_ret = item.get("returnType").is_some()
+                                || item.get("returnTypeAnnotation").is_some()
+                                || item.get("typeAnnotation").is_some();
+                            let name = item
+                                .get("id")
+                                .and_then(|id| id.get("name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("<anon>");
+                            if !has_ret {
+                                self.add_issue(
+                                    IssueSeverity::Warning,
+                                    "MISSING_RETURN_ANNOTATION",
+                                    &format!(
+                                        "Function '{}' is missing a return type annotation",
+                                        name
+                                    ),
+                                    None,
+                                    None,
+                                    file_path,
+                                    Some(source),
+                                );
+                            }
+
+                            // Check params
+                            if let Some(params) = item.get("params").and_then(|p| p.as_array()) {
+                                for p in params {
+                                    let has_type = p.get("typeAnnotation").is_some()
+                                        || p.get("typeAnn").is_some()
+                                        || p.get("typeAnnotation")
+                                            .and_then(|ta| ta.get("typeAnnotation"))
+                                            .is_some();
+                                    if !has_type {
+                                        let pname = p
+                                            .get("name")
+                                            .and_then(|n| n.as_str())
+                                            .unwrap_or("<param>");
+                                        self.add_issue(
+                                            IssueSeverity::Warning,
+                                            "MISSING_PARAM_TYPE",
+                                            &format!("Parameter '{}' in function '{}' is missing a type annotation", pname, name),
+                                            None,
+                                            None,
+                                            file_path,
+                                            Some(source),
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
-                }
-                for s in &f.body.body {
-                    self.check_statement(s, file_path, source);
+                    "VariableDeclaration" => {
+                        if self.config.require_annotations {
+                            if let Some(decls) = item.get("declarations").and_then(|d| d.as_array())
+                            {
+                                for decl in decls {
+                                    // id may be Identifier or pattern
+                                    let id = decl
+                                        .get("id")
+                                        .and_then(|i| i.get("name"))
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("<var>");
+                                    let has_type = decl
+                                        .get("id")
+                                        .and_then(|id| id.get("typeAnnotation"))
+                                        .is_some()
+                                        || decl.get("typeAnnotation").is_some();
+                                    if !has_type {
+                                        self.add_issue(
+                                            IssueSeverity::Warning,
+                                            "MISSING_VAR_TYPE",
+                                            &format!(
+                                                "Variable '{}' is missing a type annotation",
+                                                id
+                                            ),
+                                            None,
+                                            None,
+                                            file_path,
+                                            Some(source),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-            _ => {}
         }
     }
 

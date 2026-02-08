@@ -5,9 +5,11 @@
 //! Needs to prefetch code and then optimize using multiple passes. in order to optimize the code.
 //! Will identify loops, and other control flow structures. that may be optimized.
 
-use crate::ast::*;
 use crate::bytecode::{Chunk, FunctionProto, Op};
+use crate::oast as ast;
+use crate::oxc_typecheck::Type;
 use crate::value::Value;
+use ast::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 

@@ -65,9 +65,10 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 ///
 /// Returns an error string if any stage of compilation fails
 fn run_source(vm: &mut Vm, source: &str) -> Result<Value, tsblitz::errors::Error> {
-    let program = Parser::parse_source(source).map_err(tsblitz::errors::ParserError::from)?;
-    typecheck(&program).map_err(tsblitz::errors::TypeCheckerError::from)?;
-    let chunk = compile(&program).map_err(tsblitz::errors::CompilerError::from)?;
+    let session = Parser::parse_source(source).map_err(tsblitz::errors::ParserError::from)?;
+    let program = session.program();
+    typecheck(program).map_err(tsblitz::errors::TypeCheckerError::from)?;
+    let chunk = compile(program).map_err(tsblitz::errors::CompilerError::from)?;
     vm.run(chunk).map_err(tsblitz::errors::Error::from)
 }
 
@@ -182,11 +183,11 @@ fn main() -> Result<(), tsblitz::errors::Error> {
 
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let prelude_path = manifest_dir.join("soft/prelude.ts");
-    let prelude_program =
+    let prelude_session =
         bundle_entry(&prelude_path).map_err(tsblitz::errors::BundlerError::from)?;
 
     // Skip type checking for soft layer prelude (has dynamic patterns that typechecker doesn't handle yet)
-    let chunk = compile(&prelude_program).map_err(tsblitz::errors::CompilerError::from)?;
+    let chunk = compile(prelude_session.program()).map_err(tsblitz::errors::CompilerError::from)?;
     // The soft prelude is written in TypeScript and contains dynamic patterns
     // and annotated helper types that the static compiler may record as
     // parameter types. The prelude is intended to run untyped at runtime,

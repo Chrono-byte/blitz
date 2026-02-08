@@ -33,7 +33,7 @@
     }
   },
   "env": {
-    "builtin": true
+    "builtin": false
   },
   "globals": {},
   "ignorePatterns": ["node_modules"]
