@@ -41,9 +41,10 @@ pub enum Value {
 ///
 /// Builtins are invoked by the VM and receive a mutable reference to the
 /// running `Vm` so they can perform VM-level operations (for example, to
-/// call closures or manipulate frames). They return `Result<Value, String>`
-/// so they can signal runtime errors back to the VM.
-pub type BuiltinFn = fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, String>;
+/// call closures or manipulate frames). They return `Result<Value, RuntimeError>`
+/// so they can signal runtime errors back to the VM using the structured
+/// error type defined in `crate::errors`.
+pub type BuiltinFn = fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, crate::errors::RuntimeError>;
 
 /// Full runtime type descriptor structure so the VM can perform stricter checks.
 #[derive(Clone, Debug)]

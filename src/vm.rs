@@ -128,7 +128,7 @@ impl Vm {
     }
 
     /// Run a chunk of bytecode.
-    pub fn run(&mut self, chunk: Chunk) -> Result<Value, String> {
+    pub fn run(&mut self, chunk: Chunk) -> Result<Value, crate::errors::RuntimeError> {
         let chunk_rc = Rc::new(chunk);
         self.root_chunk = Some(Rc::clone(&chunk_rc));
         self.chunk = chunk_rc;
@@ -140,11 +140,11 @@ impl Vm {
         loop {
             let op_byte = self.read_byte_checked()?;
             let op = Op::from_byte(op_byte).ok_or_else(|| {
-                format!(
+                crate::errors::RuntimeError::from(format!(
                     "Invalid opcode 0x{:02x} at ip {}",
                     op_byte,
                     self.ip.saturating_sub(1)
-                )
+                ))
             })?;
 
             match op {
@@ -155,7 +155,7 @@ impl Vm {
                         .constants
                         .get(idx)
                         .cloned()
-                        .ok_or("Bad constant")?;
+                        .ok_or_else(|| crate::errors::RuntimeError::from("Bad constant"))?;
                     crate::trace::value_string("vm Const push", &v);
                     // Emit a stack snapshot before the push, push the constant into
                     // the runtime stack, then emit a snapshot after the push so the
@@ -173,7 +173,11 @@ impl Vm {
                 Op::False => self.stack.push(Value::Bool(false)),
                 Op::GetLocal => {
                     let slot = self.read_byte_checked()? as usize;
-                    let v = self.locals.get(slot).cloned().ok_or("Bad local slot")?;
+                    let v = self
+                        .locals
+                        .get(slot)
+                        .cloned()
+                        .ok_or_else(|| crate::errors::RuntimeError::from("Bad local slot"))?;
                     self.stack.push(v);
                 }
                 Op::SetLocal => {
@@ -448,10 +452,10 @@ impl Vm {
                                         }
                                     }
                                 }
-                                return Err(format!(
+                                return Err(crate::errors::RuntimeError::from(format!(
                                     "BuildObject: key must be string (actual={})",
                                     other.type_name()
-                                ));
+                                )));
                             }
                         };
                         map.insert(key, value);
@@ -475,12 +479,10 @@ impl Vm {
                 }
                 Op::MakeClosure => {
                     let idx = self.read_byte_checked()? as usize;
-                    let proto = self
-                        .chunk
-                        .functions
-                        .get(idx)
-                        .cloned()
-                        .ok_or("Bad function index")?;
+                    let proto =
+                        self.chunk.functions.get(idx).cloned().ok_or_else(|| {
+                            crate::errors::RuntimeError::from("Bad function index")
+                        })?;
 
                     let proto_obj_map = Rc::new(RefCell::new(HashMap::new()));
                     let proto_obj = Value::Object(Rc::clone(&proto_obj_map));
@@ -505,13 +507,20 @@ impl Vm {
                     let idx = self.read_byte_checked()? as usize;
                     let name = self.get_string_constant(idx)?;
                     let g = self.globals.borrow();
-                    let v = g
-                        .get(&name)
-                        .cloned()
-                        .ok_or_else(|| format!("GetBuiltin: '{}' not found", name))?;
+                    let v = g.get(&name).cloned().ok_or_else(|| {
+                        crate::errors::RuntimeError::from(format!(
+                            "GetBuiltin: '{}' not found",
+                            name
+                        ))
+                    })?;
                     match v {
                         Value::Builtin(_) => self.stack.push(v),
-                        _ => return Err(format!("GetBuiltin: '{}' is not a builtin", name)),
+                        _ => {
+                            return Err(crate::errors::RuntimeError::from(format!(
+                                "GetBuiltin: '{}' is not a builtin",
+                                name
+                            )));
+                        }
                     }
                 }
                 Op::PushHandler => {
@@ -536,7 +545,7 @@ impl Vm {
         }
     }
 
-    fn execute_call(&mut self) -> Result<(), String> {
+    fn execute_call(&mut self) -> Result<(), crate::errors::RuntimeError> {
         let nargs = self.read_byte_checked()? as usize;
         let mut args: Vec<Value> = Vec::with_capacity(nargs);
         for _ in 0..nargs {
@@ -636,14 +645,17 @@ impl Vm {
                         }
                     }
                 }
-                return Err(format!("Call: not a function (actual={})", callee.type_name()));
+                return Err(crate::errors::RuntimeError::from(format!(
+                    "Call: not a function (actual={})",
+                    callee.type_name()
+                )));
             }
         }
 
         Ok(())
     }
 
-    fn execute_return(&mut self) -> Result<(), String> {
+    fn execute_return(&mut self) -> Result<(), crate::errors::RuntimeError> {
         let result = match self.pop() {
             Ok(v) => v,
             Err(_) => Value::Null,
@@ -659,7 +671,9 @@ impl Vm {
             self.locals = frame.locals;
             self.stack.push(result);
         } else {
-            return Err("Return without call frame".into());
+            return Err(crate::errors::RuntimeError::from(
+                "Return without call frame",
+            ));
         }
 
         Ok(())
@@ -669,7 +683,7 @@ impl Vm {
         &self,
         args: &[Value],
         proto: &crate::bytecode::FunctionProto,
-    ) -> Result<Vec<Value>, String> {
+    ) -> Result<Vec<Value>, crate::errors::RuntimeError> {
         let mut call_args = args.to_vec();
 
         if proto.has_rest {
@@ -714,7 +728,7 @@ impl Vm {
         &self,
         call_args: &[Value],
         proto: &crate::bytecode::FunctionProto,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::errors::RuntimeError> {
         for (i, (arg, expected_opt)) in call_args
             .iter()
             .zip(proto.slot_types.iter().take(proto.arity))
@@ -724,7 +738,9 @@ impl Vm {
                 if *expected == Type::Void {
                     continue;
                 }
-                check_assign(expected, arg).map_err(|e| format!("Argument {}: {}", i + 1, e))?;
+                check_assign(expected, arg).map_err(|e| {
+                    crate::errors::RuntimeError::from(format!("Argument {}: {}", i + 1, e))
+                })?;
             }
         }
         Ok(())
@@ -734,7 +750,7 @@ impl Vm {
         &mut self,
         proto: &Rc<crate::bytecode::FunctionProto>,
         call_args: Vec<Value>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::errors::RuntimeError> {
         self.frames.push(Frame {
             chunk: Rc::clone(&self.chunk),
             ip: self.ip,
@@ -756,7 +772,7 @@ impl Vm {
         Ok(())
     }
 
-    fn build_array(&mut self) -> Result<(), String> {
+    fn build_array(&mut self) -> Result<(), crate::errors::RuntimeError> {
         let n = self.read_byte_checked()? as usize;
         let mut elems: Vec<Value> = Vec::with_capacity(n);
         for _ in 0..n {
@@ -783,7 +799,7 @@ impl Vm {
         Ok(())
     }
 
-    fn get_property_ic(&mut self) -> Result<(), String> {
+    fn get_property_ic(&mut self) -> Result<(), crate::errors::RuntimeError> {
         let slot = self.read_byte_checked()? as usize;
         let key_val = self.pop()?;
         let obj = self.pop()?;
@@ -819,19 +835,19 @@ impl Vm {
         Ok(())
     }
 
-    fn jump(&mut self, offset: isize) -> Result<(), String> {
+    fn jump(&mut self, offset: isize) -> Result<(), crate::errors::RuntimeError> {
         let new_ip = (self.ip as isize) + offset;
         if new_ip < 0 || (new_ip as usize) >= self.chunk.code.len() {
-            return Err(format!(
+            return Err(crate::errors::RuntimeError::from(format!(
                 "Jump target out of bounds (ip={} offset={})",
                 self.ip, offset
-            ));
+            )));
         }
         self.ip = new_ip as usize;
         Ok(())
     }
 
-    fn unwind_to_handler(&mut self, thrown: Value) -> Result<(), String> {
+    fn unwind_to_handler(&mut self, thrown: Value) -> Result<(), crate::errors::RuntimeError> {
         if let Some(h) = self.handlers.pop() {
             while self.frames.len() > h.frame_count {
                 if let Some(frame) = self.frames.pop() {
@@ -861,16 +877,16 @@ impl Vm {
             Ok(())
         } else {
             Err(match thrown {
-                Value::String(s) => format!("Uncaught: {}", s),
-                _ => "Uncaught exception".to_string(),
+                Value::String(s) => crate::errors::RuntimeError::from(format!("Uncaught: {}", s)),
+                _ => crate::errors::RuntimeError::from("Uncaught exception"),
             })
         }
     }
 
-    fn get_string_constant(&self, idx: usize) -> Result<String, String> {
+    fn get_string_constant(&self, idx: usize) -> Result<String, crate::errors::RuntimeError> {
         match self.chunk.constants.get(idx) {
             Some(Value::String(s)) => Ok(s.clone()),
-            _ => Err("Constant not a string".into()),
+            _ => Err(crate::errors::RuntimeError::from("Constant not a string")),
         }
     }
 
@@ -899,65 +915,86 @@ impl Vm {
         }
     }
 
-    fn pop(&mut self) -> Result<Value, String> {
+    fn pop(&mut self) -> Result<Value, crate::errors::RuntimeError> {
         self.stack
             .pop()
-            .ok_or_else(|| "Stack underflow".to_string())
+            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))
     }
 
-    fn read_byte_checked(&mut self) -> Result<u8, String> {
+    fn read_byte_checked(&mut self) -> Result<u8, crate::errors::RuntimeError> {
         if self.ip >= self.chunk.code.len() {
-            return Err(format!("Unexpected end of bytecode at ip {}", self.ip));
+            return Err(crate::errors::RuntimeError::from(format!(
+                "Unexpected end of bytecode at ip {}",
+                self.ip
+            )));
         }
         let b = self.chunk.code[self.ip];
         self.ip = self.ip.saturating_add(1);
         Ok(b)
     }
 
-    fn read_short_signed(&mut self) -> Result<isize, String> {
+    fn read_short_signed(&mut self) -> Result<isize, crate::errors::RuntimeError> {
         let hi = self.read_byte_checked()? as u16;
         let lo = self.read_byte_checked()? as u16;
         let u = (hi << 8) | lo;
         Ok((u as i16) as isize)
     }
 
-    fn binary_num<F>(&mut self, f: F) -> Result<(), String>
+    fn binary_num<F>(&mut self, f: F) -> Result<(), crate::errors::RuntimeError>
     where
         F: FnOnce(f64, f64) -> f64,
     {
-        let b = self.stack.pop().ok_or("Stack underflow")?;
-        let a = self.stack.pop().ok_or("Stack underflow")?;
+        let b = self
+            .stack
+            .pop()
+            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))?;
+        let a = self
+            .stack
+            .pop()
+            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))?;
         let (x, y) = (to_number(&a)?, to_number(&b)?);
         self.stack.push(Value::Number(f(x, y)));
         Ok(())
     }
 
-    fn binary_num_or_str<F>(&mut self, f: F) -> Result<(), String>
+    fn binary_num_or_str<F>(&mut self, f: F) -> Result<(), crate::errors::RuntimeError>
     where
         F: FnOnce(Value, Value) -> Result<Value, &'static str>,
     {
-        let b = self.stack.pop().ok_or("Stack underflow")?;
-        let a = self.stack.pop().ok_or("Stack underflow")?;
-        let v = f(a, b).map_err(ToString::to_string)?;
+        let b = self
+            .stack
+            .pop()
+            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))?;
+        let a = self
+            .stack
+            .pop()
+            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))?;
+        let v = f(a, b).map_err(|s| crate::errors::RuntimeError::from(s))?;
         self.stack.push(v);
         Ok(())
     }
 
-    fn binary_cmp<F>(&mut self, f: F) -> Result<(), String>
+    fn binary_cmp<F>(&mut self, f: F) -> Result<(), crate::errors::RuntimeError>
     where
         F: FnOnce(Value, Value) -> Value,
     {
-        let b = self.stack.pop().ok_or("Stack underflow")?;
-        let a = self.stack.pop().ok_or("Stack underflow")?;
+        let b = self
+            .stack
+            .pop()
+            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))?;
+        let a = self
+            .stack
+            .pop()
+            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))?;
         self.stack.push(f(a, b));
         Ok(())
     }
 }
 
-fn to_number(v: &Value) -> Result<f64, String> {
+fn to_number(v: &Value) -> Result<f64, crate::errors::RuntimeError> {
     match v {
         Value::Number(n) => Ok(*n),
-        _ => Err("Expected number".into()),
+        _ => Err(crate::errors::RuntimeError::from("Expected number")),
     }
 }
 
@@ -986,30 +1023,29 @@ fn runtime_assignable(expected: &Type, actual: &Value) -> bool {
     }
 }
 
-fn check_assign(expected: &Type, actual: &Value) -> Result<(), String> {
+fn check_assign(expected: &Type, actual: &Value) -> Result<(), crate::errors::RuntimeError> {
     if runtime_assignable(expected, actual) {
         Ok(())
     } else {
-        Err(runtime_type_error(
-            &crate::typecheck::type_to_string(expected),
-            &crate::typecheck::type_to_string(&value_to_type(actual)),
-        ))
+        Err(crate::errors::RuntimeError::from(format!(
+            "Runtime type error: expected {}, got {}",
+            crate::typecheck::type_to_string(expected),
+            crate::typecheck::type_to_string(&value_to_type(actual))
+        )))
     }
 }
 
-fn runtime_type_error(expected: &str, got: &str) -> String {
-    format!("Runtime type error: expected {}, got {}", expected, got)
-}
-
-fn property_key(v: &Value) -> Result<String, String> {
+fn property_key(v: &Value) -> Result<String, crate::errors::RuntimeError> {
     match v {
         Value::String(s) => Ok(s.clone()),
         Value::Number(n) => Ok(n.to_string()),
-        _ => Err("Property key must be string or number".into()),
+        _ => Err(crate::errors::RuntimeError::from(
+            "Property key must be string or number",
+        )),
     }
 }
 
-fn get_property(obj: &Value, key: &str) -> Result<Value, String> {
+fn get_property(obj: &Value, key: &str) -> Result<Value, crate::errors::RuntimeError> {
     match obj {
         Value::Object(map) => {
             let m = map.borrow();
@@ -1043,7 +1079,7 @@ fn get_property(obj: &Value, key: &str) -> Result<Value, String> {
     }
 }
 
-fn set_property(obj: &Value, key: &str, value: Value) -> Result<(), String> {
+fn set_property(obj: &Value, key: &str, value: Value) -> Result<(), crate::errors::RuntimeError> {
     match obj {
         Value::Object(map) => {
             map.borrow_mut().insert(key.to_string(), value);
@@ -1065,10 +1101,7 @@ fn set_property(obj: &Value, key: &str, value: Value) -> Result<(), String> {
             props.borrow_mut().insert(key.to_string(), value);
             Ok(())
         }
-        _ => Err(format!(
-            "SetProperty: not an object (actual={})",
-            obj.type_name()
-        )),
+        _ => Err(format!("SetProperty: not an object (actual={})", obj.type_name()).into()),
     }
 }
 

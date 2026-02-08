@@ -20,6 +20,7 @@
 //! - Add more tests that exercise the conversion paths.
 
 use crate::ast::*;
+use crate::errors::ParserError;
 use std::collections::HashMap;
 
 use oxc_allocator::Allocator;
@@ -45,6 +46,11 @@ pub struct Parser {
 impl Parser {
     /// Legacy constructor kept for API compatibility. This will return an error
     /// at parse time instructing users to switch to `new_from_source`.
+    // add a warning tag so if users call this method, they will be warned to switch to `new_from_source`
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use `Parser::new_from_source(...)` or `parse_source(...)` instead"
+    )]
     pub fn new(_tokens: Vec<crate::lexer::Token>) -> Self {
         Self { source: None }
     }
@@ -59,7 +65,7 @@ impl Parser {
 
     /// Convenience top-level API: parse source text (same as calling
     /// `Parser::new_from_source(source).parse()`).
-    pub fn parse_source(source: &str) -> Result<Program, String> {
+    pub fn parse_source(source: &str) -> Result<Program, ParserError> {
         let mut p = Parser::new_from_source(source);
         p.parse()
     }
@@ -68,11 +74,13 @@ impl Parser {
     ///
     /// If `self.source` is None, returns an error explaining that the token
     /// based constructor is no longer supported.
-    pub fn parse(&mut self) -> Result<Program, String> {
+    pub fn parse(&mut self) -> Result<Program, ParserError> {
         let source = match &self.source {
             Some(s) => s.clone(),
             None => {
-                return Err("Parser::new(tokens) is no longer supported. Please use Parser::new_from_source(source) or Parser::parse_source(source).".into());
+                return Err(ParserError::from(
+                    "Parser::new(tokens) is no longer supported. Please use Parser::new_from_source(source) or Parser::parse_source(source).",
+                ));
             }
         };
 
@@ -86,13 +94,12 @@ impl Parser {
             .parse();
 
         if !ret.errors.is_empty() {
-            // Format errors with source context where possible and return a combined error.
             let mut msgs = Vec::new();
             for e in ret.errors {
                 let err = e.with_source_code(source.clone());
                 msgs.push(format!("{:?}", err));
             }
-            return Err(msgs.join("\n"));
+            return Err(ParserError::from(msgs.join("\n")));
         }
 
         // Convert Oxc's program AST to ESTree (TS-flavored) JSON, then walk the JSON.
@@ -100,7 +107,7 @@ impl Parser {
         // on the internal Rust types of oxc_ast directly.
         let estree_json = ret.program.to_pretty_estree_ts_json(false);
         let root: Value = serde_json::from_str(&estree_json)
-            .map_err(|e| format!("Failed to parse Oxc ESTree JSON: {}", e))?;
+            .map_err(|e| ParserError::from(format!("Failed to parse Oxc ESTree JSON: {}", e)))?;
 
         parse_program_from_estree(&root)
     }
@@ -108,7 +115,7 @@ impl Parser {
     /// Extract top-level static import specifiers (e.g. "./mod") from a source
     /// text without converting the entire ESTree into the internal AST. This
     /// helper is used by the bundler/loader to build the module graph.
-    pub fn extract_imports_from_source(source: &str) -> Result<Vec<String>, String> {
+    pub fn extract_imports_from_source(source: &str) -> Result<Vec<String>, ParserError> {
         // Run Oxc parser
         let allocator = Allocator::default();
         let ret = OxcParser::new(&allocator, source, SourceType::ts())
@@ -124,17 +131,17 @@ impl Parser {
                 let err = e.with_source_code(source.to_string());
                 msgs.push(format!("{:?}", err));
             }
-            return Err(msgs.join("\n"));
+            return Err(ParserError::from(msgs.join("\n")));
         }
 
         let estree_json = ret.program.to_pretty_estree_ts_json(false);
         let root: Value = serde_json::from_str(&estree_json)
-            .map_err(|e| format!("Failed to parse Oxc ESTree JSON: {}", e))?;
+            .map_err(|e| ParserError::from(format!("Failed to parse Oxc ESTree JSON: {}", e)))?;
 
         let body = root
             .get("body")
             .and_then(|b| b.as_array())
-            .ok_or_else(|| "Expected program 'body' array".to_string())?;
+            .ok_or_else(|| ParserError::from("Expected program 'body' array".to_string()))?;
 
         let mut imports = Vec::new();
         for item in body {
@@ -156,11 +163,11 @@ impl Parser {
 
 // ---------- ESTree JSON -> tsblitz::ast conversion helpers ---------- //
 
-fn parse_program_from_estree(root: &Value) -> Result<Program, String> {
+fn parse_program_from_estree(root: &Value) -> Result<Program, ParserError> {
     let body = root
         .get("body")
         .and_then(|b| b.as_array())
-        .ok_or_else(|| "Expected program 'body' array".to_string())?;
+        .ok_or_else(|| ParserError::from("Expected program 'body' array".to_string()))?;
 
     let mut stmts = Vec::new();
     for item in body {
@@ -271,17 +278,17 @@ mod tests {
     }
 }
 
-fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
+fn convert_statement_estree(node: &Value) -> Result<Statement, ParserError> {
     let typ = node
         .get("type")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "Statement without type".to_string())?;
+        .ok_or_else(|| ParserError::from("Statement without type".to_string()))?;
 
     match typ {
         "ExpressionStatement" => {
-            let expr = node
-                .get("expression")
-                .ok_or_else(|| "ExpressionStatement missing expression".to_string())?;
+            let expr = node.get("expression").ok_or_else(|| {
+                ParserError::from("ExpressionStatement missing expression".to_string())
+            })?;
             let e = convert_expr_estree(expr)?;
             Ok(Statement::ExpressionStatement(ExpressionStatement {
                 expression: e,
@@ -294,7 +301,9 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
             let decls = node
                 .get("declarations")
                 .and_then(|d| d.as_array())
-                .ok_or_else(|| "VariableDeclaration missing declarations".to_string())?;
+                .ok_or_else(|| {
+                    ParserError::from("VariableDeclaration missing declarations".to_string())
+                })?;
 
             // kind is `var` | `let` | `const` - const is immutable
             let kind = node.get("kind").and_then(|k| k.as_str()).unwrap_or("var");
@@ -307,20 +316,20 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
 
             let mut stmts = Vec::new();
             for decl in decls {
-                let id = decl
-                    .get("id")
-                    .ok_or_else(|| "VariableDeclarator missing id".to_string())?;
+                let id = decl.get("id").ok_or_else(|| {
+                    ParserError::from("VariableDeclarator missing id".to_string())
+                })?;
                 let name = match id.get("type").and_then(|t| t.as_str()) {
                     Some("Identifier") => id
                         .get("name")
                         .and_then(|n| n.as_str())
-                        .ok_or_else(|| "Identifier missing name".to_string())?
+                        .ok_or_else(|| ParserError::from("Identifier missing name".to_string()))?
                         .to_string(),
                     other => {
-                        return Err(format!(
+                        return Err(ParserError::from(format!(
                             "Unsupported variable declarator id type: {:?}",
                             other
-                        ));
+                        )));
                     }
                 };
 
@@ -368,11 +377,11 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
         "FunctionDeclaration" => {
             let id = node
                 .get("id")
-                .ok_or_else(|| "FunctionDeclaration missing id".to_string())?;
+                .ok_or_else(|| ParserError::from("FunctionDeclaration missing id".to_string()))?;
             let name = id
                 .get("name")
                 .and_then(|n| n.as_str())
-                .ok_or_else(|| "Function id missing name".to_string())?
+                .ok_or_else(|| ParserError::from("Function id missing name".to_string()))?
                 .to_string();
 
             let params_arr: Vec<Value> = node
@@ -389,7 +398,7 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
 
             let body = node
                 .get("body")
-                .ok_or_else(|| "FunctionDeclaration missing body".to_string())?;
+                .ok_or_else(|| ParserError::from("FunctionDeclaration missing body".to_string()))?;
             let block = parse_block_estree(body)?;
 
             Ok(Statement::FunctionDecl(FunctionDecl {
@@ -404,7 +413,7 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
             let body = node
                 .get("body")
                 .and_then(|b| b.as_array())
-                .ok_or_else(|| "BlockStatement missing body".to_string())?;
+                .ok_or_else(|| ParserError::from("BlockStatement missing body".to_string()))?;
             let mut stmts = Vec::new();
             for s in body {
                 stmts.push(convert_statement_estree(s)?);
@@ -415,10 +424,10 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
         "IfStatement" => {
             let test = node
                 .get("test")
-                .ok_or_else(|| "IfStatement missing test".to_string())?;
+                .ok_or_else(|| ParserError::from("IfStatement missing test".to_string()))?;
             let consequent = node
                 .get("consequent")
-                .ok_or_else(|| "IfStatement missing consequent".to_string())?;
+                .ok_or_else(|| ParserError::from("IfStatement missing consequent".to_string()))?;
             let alt = node.get("alternate");
 
             let test_e = convert_expr_estree(test)?;
@@ -438,10 +447,10 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
         "WhileStatement" => {
             let test = node
                 .get("test")
-                .ok_or_else(|| "WhileStatement missing test".to_string())?;
+                .ok_or_else(|| ParserError::from("WhileStatement missing test".to_string()))?;
             let body = node
                 .get("body")
-                .ok_or_else(|| "WhileStatement missing body".to_string())?;
+                .ok_or_else(|| ParserError::from("WhileStatement missing body".to_string()))?;
             Ok(Statement::While(While {
                 test: convert_expr_estree(test)?,
                 body: Box::new(convert_statement_estree(body)?),
@@ -467,7 +476,7 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
             // (like catch binding patterns) are not supported yet.
             let block = node
                 .get("block")
-                .ok_or_else(|| "TryStatement missing block".to_string())?;
+                .ok_or_else(|| ParserError::from("TryStatement missing block".to_string()))?;
             let try_block = parse_block_estree(block)?;
 
             let handler_node = node.get("handler");
@@ -476,7 +485,7 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
             {
                 let param = h
                     .get("param")
-                    .ok_or_else(|| "Catch handler missing param".to_string())?;
+                    .ok_or_else(|| ParserError::from("Catch handler missing param".to_string()))?;
                 let param_name = if param.get("type").and_then(|t| t.as_str()) == Some("Identifier")
                 {
                     param
@@ -485,11 +494,13 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
                         .unwrap_or("")
                         .to_string()
                 } else {
-                    return Err("Unsupported catch parameter pattern".to_string());
+                    return Err(ParserError::from(
+                        "Unsupported catch parameter pattern".to_string(),
+                    ));
                 };
                 let body = h
                     .get("body")
-                    .ok_or_else(|| "Catch body missing".to_string())?;
+                    .ok_or_else(|| ParserError::from("Catch body missing".to_string()))?;
                 Some((param_name, parse_block_estree(body)?))
             } else {
                 None
@@ -519,7 +530,7 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
             // Convert ESTree ThrowStatement -> internal Throw statement
             let arg = node
                 .get("argument")
-                .ok_or_else(|| "ThrowStatement missing argument".to_string())?;
+                .ok_or_else(|| ParserError::from("ThrowStatement missing argument".to_string()))?;
             let expr = convert_expr_estree(arg)?;
             Ok(Statement::Throw(Throw { argument: expr }))
         }
@@ -529,16 +540,19 @@ fn convert_statement_estree(node: &Value) -> Result<Statement, String> {
             Ok(Statement::Block(Block { body: vec![] }))
         }
 
-        other => Err(format!("Unsupported statement type: {}", other)),
+        other => Err(ParserError::from(format!(
+            "Unsupported statement type: {}",
+            other
+        ))),
     }
 }
 
-fn parse_block_estree(node: &Value) -> Result<Block, String> {
+fn parse_block_estree(node: &Value) -> Result<Block, ParserError> {
     // Node is expected to be a BlockStatement
     let body = node
         .get("body")
         .and_then(|b| b.as_array())
-        .ok_or_else(|| "Block missing body".to_string())?;
+        .ok_or_else(|| ParserError::from("Block missing body".to_string()))?;
     let mut stmts = Vec::new();
     for s in body {
         stmts.push(convert_statement_estree(s)?);
@@ -546,7 +560,7 @@ fn parse_block_estree(node: &Value) -> Result<Block, String> {
     Ok(Block { body: stmts })
 }
 
-fn parse_params_estree(params: &[Value]) -> Result<Vec<Param>, String> {
+fn parse_params_estree(params: &[Value]) -> Result<Vec<Param>, ParserError> {
     let mut out = Vec::new();
     for p in params {
         // handle Identifier and RestElement(argument: Identifier), and simple AssignmentPattern
@@ -555,7 +569,7 @@ fn parse_params_estree(params: &[Value]) -> Result<Vec<Param>, String> {
                 let name = p
                     .get("name")
                     .and_then(|n| n.as_str())
-                    .ok_or_else(|| "Param Identifier missing name".to_string())?
+                    .ok_or_else(|| ParserError::from("Param Identifier missing name".to_string()))?
                     .to_string();
                 let typ = p
                     .get("typeAnnotation")
@@ -568,14 +582,14 @@ fn parse_params_estree(params: &[Value]) -> Result<Vec<Param>, String> {
                 });
             }
             Some("AssignmentPattern") => {
-                let left = p
-                    .get("left")
-                    .ok_or_else(|| "AssignmentPattern missing left".to_string())?;
+                let left = p.get("left").ok_or_else(|| {
+                    ParserError::from("AssignmentPattern missing left".to_string())
+                })?;
                 if left.get("type").and_then(|v| v.as_str()) == Some("Identifier") {
                     let name = left
                         .get("name")
                         .and_then(|n| n.as_str())
-                        .ok_or_else(|| "Identifier missing name".to_string())?
+                        .ok_or_else(|| ParserError::from("Identifier missing name".to_string()))?
                         .to_string();
                     let typ = left
                         .get("typeAnnotation")
@@ -587,18 +601,20 @@ fn parse_params_estree(params: &[Value]) -> Result<Vec<Param>, String> {
                         rest: false,
                     });
                 } else {
-                    return Err("Unsupported assignment pattern param".to_string());
+                    return Err(ParserError::from(
+                        "Unsupported assignment pattern param".to_string(),
+                    ));
                 }
             }
             Some("RestElement") => {
                 let arg = p
                     .get("argument")
-                    .ok_or_else(|| "RestElement missing argument".to_string())?;
+                    .ok_or_else(|| ParserError::from("RestElement missing argument".to_string()))?;
                 if arg.get("type").and_then(|v| v.as_str()) == Some("Identifier") {
                     let name = arg
                         .get("name")
                         .and_then(|n| n.as_str())
-                        .ok_or_else(|| "Identifier missing name".to_string())?
+                        .ok_or_else(|| ParserError::from("Identifier missing name".to_string()))?
                         .to_string();
                     let typ = arg
                         .get("typeAnnotation")
@@ -610,11 +626,14 @@ fn parse_params_estree(params: &[Value]) -> Result<Vec<Param>, String> {
                         rest: true,
                     });
                 } else {
-                    return Err("Unsupported rest param".to_string());
+                    return Err(ParserError::from("Unsupported rest param".to_string()));
                 }
             }
             other => {
-                return Err(format!("Unsupported param node type: {:?}", other));
+                return Err(ParserError::from(format!(
+                    "Unsupported param node type: {:?}",
+                    other
+                )));
             }
         }
     }
@@ -722,11 +741,11 @@ fn parse_ts_type(node: &Value) -> Option<Type> {
     }
 }
 
-fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
+fn convert_expr_estree(node: &Value) -> Result<Expr, ParserError> {
     let typ = node
         .get("type")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "Expression without type".to_string())?;
+        .ok_or_else(|| ParserError::from("Expression without type".to_string()))?;
 
     match typ {
         "Literal" => {
@@ -749,7 +768,7 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
                         value: LiteralValue::Null,
                     }))
                 } else {
-                    Err("Unsupported literal value".to_string())
+                    Err(ParserError::from("Unsupported literal value".to_string()))
                 }
             } else {
                 // Historic ESTree uses `raw` and `value` may be missing for null; treat as null
@@ -763,7 +782,7 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
             let name = node
                 .get("name")
                 .and_then(|n| n.as_str())
-                .ok_or_else(|| "Identifier missing name".to_string())?
+                .ok_or_else(|| ParserError::from("Identifier missing name".to_string()))?
                 .to_string();
             Ok(Expr::Identifier(Identifier { name }))
         }
@@ -776,16 +795,18 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
             let op = node
                 .get("operator")
                 .and_then(|s| s.as_str())
-                .ok_or_else(|| "AssignmentExpression missing operator".to_string())?;
+                .ok_or_else(|| {
+                    ParserError::from("AssignmentExpression missing operator".to_string())
+                })?;
 
             let left = node
                 .get("left")
-                .ok_or_else(|| "Assignment missing left".to_string())?;
+                .ok_or_else(|| ParserError::from("Assignment missing left".to_string()))?;
             let target = expr_to_assignment_target(left)?;
 
             let right = node
                 .get("right")
-                .ok_or_else(|| "Assignment missing right".to_string())?;
+                .ok_or_else(|| ParserError::from("Assignment missing right".to_string()))?;
             let rhs = convert_expr_estree(right)?;
 
             // Support simple '=' as well as compound assignments like '+=', '-=', '*=', '/=', '%='
@@ -803,10 +824,10 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
                     "/" => BinaryOperator::Slash,
                     "%" => BinaryOperator::Percent,
                     other => {
-                        return Err(format!(
+                        return Err(ParserError::from(format!(
                             "Unsupported compound assignment operator: {}",
                             other
-                        ));
+                        )));
                     }
                 };
 
@@ -830,15 +851,17 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
             let op = node
                 .get("operator")
                 .and_then(|s| s.as_str())
-                .ok_or_else(|| "BinaryExpression missing operator".to_string())?;
-            let left = convert_expr_estree(
-                node.get("left")
-                    .ok_or_else(|| "BinaryExpression left missing".to_string())?,
-            )?;
-            let right = convert_expr_estree(
-                node.get("right")
-                    .ok_or_else(|| "BinaryExpression right missing".to_string())?,
-            )?;
+                .ok_or_else(|| {
+                    ParserError::from("BinaryExpression missing operator".to_string())
+                })?;
+            let left =
+                convert_expr_estree(node.get("left").ok_or_else(|| {
+                    ParserError::from("BinaryExpression left missing".to_string())
+                })?)?;
+            let right =
+                convert_expr_estree(node.get("right").ok_or_else(|| {
+                    ParserError::from("BinaryExpression right missing".to_string())
+                })?)?;
             let bop = match op {
                 "+" => BinaryOperator::Plus,
                 "-" => BinaryOperator::Minus,
@@ -858,7 +881,12 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
                 "<=" => BinaryOperator::Le,
                 ">" => BinaryOperator::Gt,
                 ">=" => BinaryOperator::Ge,
-                other => return Err(format!("Unsupported binary operator: {}", other)),
+                other => {
+                    return Err(ParserError::from(format!(
+                        "Unsupported binary operator: {}",
+                        other
+                    )));
+                }
             };
             Ok(Expr::BinaryExpr(BinaryExpr {
                 operator: bop,
@@ -871,19 +899,25 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
             let op = node
                 .get("operator")
                 .and_then(|s| s.as_str())
-                .ok_or_else(|| "LogicalExpression missing operator".to_string())?;
-            let left = convert_expr_estree(
-                node.get("left")
-                    .ok_or_else(|| "LogicalExpression left missing".to_string())?,
-            )?;
-            let right = convert_expr_estree(
-                node.get("right")
-                    .ok_or_else(|| "LogicalExpression right missing".to_string())?,
-            )?;
+                .ok_or_else(|| {
+                    ParserError::from("LogicalExpression missing operator".to_string())
+                })?;
+            let left =
+                convert_expr_estree(node.get("left").ok_or_else(|| {
+                    ParserError::from("LogicalExpression left missing".to_string())
+                })?)?;
+            let right = convert_expr_estree(node.get("right").ok_or_else(|| {
+                ParserError::from("LogicalExpression right missing".to_string())
+            })?)?;
             let bop = match op {
                 "&&" => BinaryOperator::AndAnd,
                 "||" => BinaryOperator::OrOr,
-                other => return Err(format!("Unsupported logical operator: {}", other)),
+                other => {
+                    return Err(ParserError::from(format!(
+                        "Unsupported logical operator: {}",
+                        other
+                    )));
+                }
             };
             Ok(Expr::BinaryExpr(BinaryExpr {
                 operator: bop,
@@ -896,16 +930,20 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
             let op = node
                 .get("operator")
                 .and_then(|s| s.as_str())
-                .ok_or_else(|| "UnaryExpression missing operator".to_string())?;
-            let arg = convert_expr_estree(
-                node.get("argument")
-                    .ok_or_else(|| "UnaryExpression missing argument".to_string())?,
-            )?;
+                .ok_or_else(|| ParserError::from("UnaryExpression missing operator".to_string()))?;
+            let arg = convert_expr_estree(node.get("argument").ok_or_else(|| {
+                ParserError::from("UnaryExpression missing argument".to_string())
+            })?)?;
             let uop = match op {
                 "!" => UnaryOperator::Bang,
                 "-" => UnaryOperator::Minus,
                 "typeof" => UnaryOperator::Typeof,
-                other => return Err(format!("Unsupported unary operator: {}", other)),
+                other => {
+                    return Err(ParserError::from(format!(
+                        "Unsupported unary operator: {}",
+                        other
+                    )));
+                }
             };
             Ok(Expr::UnaryExpr(UnaryExpr {
                 operator: uop,
@@ -914,10 +952,10 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
         }
 
         "CallExpression" => {
-            let callee = convert_expr_estree(
-                node.get("callee")
-                    .ok_or_else(|| "CallExpression missing callee".to_string())?,
-            )?;
+            let callee =
+                convert_expr_estree(node.get("callee").ok_or_else(|| {
+                    ParserError::from("CallExpression missing callee".to_string())
+                })?)?;
             let mut args = Vec::new();
             if let Some(a) = node.get("arguments").and_then(|arr| arr.as_array()) {
                 for arg in a {
@@ -947,7 +985,7 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
             let elements = node
                 .get("elements")
                 .and_then(|e| e.as_array())
-                .ok_or_else(|| "ArrayExpression missing elements".to_string())?;
+                .ok_or_else(|| ParserError::from("ArrayExpression missing elements".to_string()))?;
             let mut elems = Vec::new();
             for el in elements {
                 if el.is_null() {
@@ -966,7 +1004,9 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
             let props = node
                 .get("properties")
                 .and_then(|p| p.as_array())
-                .ok_or_else(|| "ObjectExpression missing properties".to_string())?;
+                .ok_or_else(|| {
+                    ParserError::from("ObjectExpression missing properties".to_string())
+                })?;
             // Preserve source order and implement last-wins for duplicate keys:
             // - keep the first insertion position for enumeration order
             // - update the value when a later property with the same key appears
@@ -977,7 +1017,7 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
                     // key
                     let key = prop
                         .get("key")
-                        .ok_or_else(|| "Property missing key".to_string())?;
+                        .ok_or_else(|| ParserError::from("Property missing key".to_string()))?;
                     let key_str = match key.get("type").and_then(|t| t.as_str()) {
                         Some("Identifier") => key
                             .get("name")
@@ -990,13 +1030,16 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
                             .unwrap_or("")
                             .to_string(),
                         other => {
-                            return Err(format!("Unsupported object key type: {:?}", other));
+                            return Err(ParserError::from(format!(
+                                "Unsupported object key type: {:?}",
+                                other
+                            )));
                         }
                     };
                     // value
                     let value = prop
                         .get("value")
-                        .ok_or_else(|| "Property missing value".to_string())?;
+                        .ok_or_else(|| ParserError::from("Property missing value".to_string()))?;
                     let vexpr = convert_expr_estree(value)?;
                     // If the key already exists preserve its position and update the value.
                     let mut replaced = false;
@@ -1037,7 +1080,7 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
                 .and_then(parse_ts_type);
             let body_node = node
                 .get("body")
-                .ok_or_else(|| "Function body missing".to_string())?;
+                .ok_or_else(|| ParserError::from("Function body missing".to_string()))?;
             // For arrow function, body may be an expression or a block statement.
             let block = if body_node.get("type").and_then(|t| t.as_str()) == Some("BlockStatement")
             {
@@ -1067,16 +1110,16 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
         }
         "ParenthesizedExpression" => {
             // Handle parentheses by just parsing the inner expression
-            let expr = node
-                .get("expression")
-                .ok_or_else(|| "ParenthesizedExpression missing expression".to_string())?;
+            let expr = node.get("expression").ok_or_else(|| {
+                ParserError::from("ParenthesizedExpression missing expression".to_string())
+            })?;
             convert_expr_estree(expr)
         }
         "TSAsExpression" => {
             // Skip TypeScript 'as' expressions - just use original expression
-            let expr = node
-                .get("expression")
-                .ok_or_else(|| "TSAsExpression missing expression".to_string())?;
+            let expr = node.get("expression").ok_or_else(|| {
+                ParserError::from("TSAsExpression missing expression".to_string())
+            })?;
             convert_expr_estree(expr)
         }
         "NewExpression" => {
@@ -1085,18 +1128,21 @@ fn convert_expr_estree(node: &Value) -> Result<Expr, String> {
                 value: LiteralValue::Null,
             }))
         }
-        other => Err(format!("Unsupported expression type: {}", other)),
+        other => Err(ParserError::from(format!(
+            "Unsupported expression type: {}",
+            other
+        ))),
     }
 }
 
-fn convert_member_estree(node: &Value) -> Result<MemberExpr, String> {
+fn convert_member_estree(node: &Value) -> Result<MemberExpr, ParserError> {
     // node is MemberExpression
     let obj = node
         .get("object")
-        .ok_or_else(|| "MemberExpression missing object".to_string())?;
+        .ok_or_else(|| ParserError::from("MemberExpression missing object".to_string()))?;
     let prop = node
         .get("property")
-        .ok_or_else(|| "MemberExpression missing property".to_string())?;
+        .ok_or_else(|| ParserError::from("MemberExpression missing property".to_string()))?;
     let computed = node
         .get("computed")
         .and_then(Value::as_bool)
@@ -1112,13 +1158,13 @@ fn convert_member_estree(node: &Value) -> Result<MemberExpr, String> {
     })
 }
 
-fn expr_to_assignment_target(node: &Value) -> Result<AssignmentTarget, String> {
+fn expr_to_assignment_target(node: &Value) -> Result<AssignmentTarget, ParserError> {
     let mut node = node;
     // Handle nested TSAsExpression
     while let Some("TSAsExpression") = node.get("type").and_then(|t| t.as_str()) {
         node = node
             .get("expression")
-            .ok_or_else(|| "TSAsExpression missing expression".to_string())?;
+            .ok_or_else(|| ParserError::from("TSAsExpression missing expression".to_string()))?;
     }
 
     match node.get("type").and_then(|t| t.as_str()) {
@@ -1126,7 +1172,7 @@ fn expr_to_assignment_target(node: &Value) -> Result<AssignmentTarget, String> {
             let name = node
                 .get("name")
                 .and_then(|n| n.as_str())
-                .ok_or_else(|| "Identifier missing name".to_string())?
+                .ok_or_else(|| ParserError::from("Identifier missing name".to_string()))?
                 .to_string();
             Ok(AssignmentTarget::Identifier(Identifier { name }))
         }
@@ -1134,6 +1180,9 @@ fn expr_to_assignment_target(node: &Value) -> Result<AssignmentTarget, String> {
             let m = convert_member_estree(node)?;
             Ok(AssignmentTarget::MemberExpr(m))
         }
-        other => Err(format!("Unsupported assignment target type: {:?}", other)),
+        other => Err(ParserError::from(format!(
+            "Unsupported assignment target type: {:?}",
+            other
+        ))),
     }
 }

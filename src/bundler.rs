@@ -13,6 +13,7 @@
 //! dependencies. Cycles are handled by visiting nodes once.
 
 use crate::ast::{Program, ProgramKind, Statement, TypeStrictness};
+use crate::errors::BundlerError;
 use crate::parser::Parser;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -27,7 +28,7 @@ use std::path::{Path, PathBuf};
 /// # Errors
 /// Returns an error if the entry module or any of its dependencies cannot be
 /// read or parsed.
-pub fn bundle_entry(entry: &Path) -> Result<Program, String> {
+pub fn bundle_entry(entry: &Path) -> Result<Program, BundlerError> {
     // Resolve the entry to a canonical path where possible to avoid duplicates.
     let entry_canon = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf());
 
@@ -40,7 +41,7 @@ pub fn bundle_entry(entry: &Path) -> Result<Program, String> {
         path: PathBuf,
         visited: &mut HashSet<PathBuf>,
         order: &mut Vec<PathBuf>,
-    ) -> Result<(), String> {
+    ) -> Result<(), BundlerError> {
         if visited.contains(&path) {
             return Ok(());
         }
@@ -48,11 +49,18 @@ pub fn bundle_entry(entry: &Path) -> Result<Program, String> {
         visited.insert(path.clone());
 
         // Read source
-        let src = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read module {}: {}", path.display(), e))?;
+        let src = std::fs::read_to_string(&path).map_err(|e| {
+            BundlerError::from(format!("Failed to read module {}: {}", path.display(), e))
+        })?;
 
         // Extract import specifiers (static top-level imports)
-        let imports = Parser::extract_imports_from_source(&src)?;
+        let imports = Parser::extract_imports_from_source(&src).map_err(|e| {
+            BundlerError::from(format!(
+                "Failed to parse imports in {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
 
         // Resolve relative imports and visit them
         for spec in imports {
@@ -88,13 +96,16 @@ pub fn bundle_entry(entry: &Path) -> Result<Program, String> {
     // Now parse each module (again) and collect statements into a single Program.
     let mut combined: Vec<Statement> = Vec::new();
     for path in &order {
-        let src = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read module {}: {}", path.display(), e))?;
+        let src = std::fs::read_to_string(path).map_err(|e| {
+            BundlerError::from(format!("Failed to read module {}: {}", path.display(), e))
+        })?;
 
         // Debug: print bundling order
         eprintln!("Loading module: {}", path.display());
 
-        let program = Parser::parse_source(&src)?;
+        let program = Parser::parse_source(&src).map_err(|e| {
+            BundlerError::from(format!("Failed to parse module {}: {}", path.display(), e))
+        })?;
         for stmt in program.body {
             combined.push(stmt);
         }
@@ -164,13 +175,21 @@ mod tests {
 
     #[test]
     fn missing_file_emits_error() {
+        use crate::errors::Error;
         let tmp = make_temp_dir();
         let mod_a = tmp.join("nonexistent_main.ts");
-        let err = bundle_entry(&mod_a).expect_err("should fail on missing entry");
-        assert!(
-            err.contains("Failed to read module"),
-            "unexpected error: {}",
-            err
-        );
+        let result = bundle_entry(&mod_a);
+        assert!(result.is_err(), "should fail on missing entry");
+        let err = result.unwrap_err();
+        match err {
+            crate::errors::Error::Bundler(be) => {
+                assert!(
+                    be.message.contains("Failed to read module"),
+                    "unexpected error: {}",
+                    be.message
+                );
+            }
+            _ => panic!("expected BundlerError, got: {:?}", err),
+        }
     }
 }

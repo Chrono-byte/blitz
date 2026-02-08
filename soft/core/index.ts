@@ -1,5 +1,5 @@
 /**
- * Core runtime entry (more than std).
+ * Core runtime entry.
  */
 
 export * from "./runtime.js";

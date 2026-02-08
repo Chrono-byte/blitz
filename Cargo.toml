@@ -1,6 +1,6 @@
 [package]
 name = "tsblitz"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "TypeScript VM: Rust base layer + self-hosted TS soft layer"
 
@@ -10,18 +10,21 @@ path = "src/main.rs"
 
 [dependencies]
 # Optional: for better errors later
-# thiserror = "1.0"
+thiserror = "2.0"
 # miette = "5"
 
 # Oxc parser and support crates (parser, allocator, span)
 oxc_parser = "0.111.0"
 oxc_allocator = "0.111.0"
 oxc_span = "0.111.0"
+oxc_semantic = "0.111.0"
+oxc_syntax = "0.111.0"
 # Oxc AST with `serialize` feature enabled so we can produce ESTree JSON
 oxc_ast = { version = "0.111.0", features = ["serialize"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rustyline = "11"
+clap = { version = "4.5.57", features = ["derive"] }
 
 [lints.rust]
 # Enforce good practices similar to kernel coding style
@@ -45,7 +48,7 @@ unimplemented = "warn"
 todo = "warn"
 unreachable = "warn"
 
-box_vec = "warn"
+box_collection = "warn"
 large_enum_variant = "warn"
 large_stack_arrays = "warn"
 vec_box = "warn"

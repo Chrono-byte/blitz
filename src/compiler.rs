@@ -1,4 +1,9 @@
 //! Compile AST to bytecode.
+//!
+//! TODO: Add JIT compilation support.
+//!
+//! Needs to prefetch code and then optimize using multiple passes. in order to optimize the code.
+//! Will identify loops, and other control flow structures. that may be optimized.
 
 use crate::ast::*;
 use crate::bytecode::{Chunk, FunctionProto, Op};
@@ -13,7 +18,7 @@ const LINE: u32 = 1;
 /// # Errors
 ///
 /// Returns an error string if compilation fails
-pub fn compile(program: &Program) -> Result<Chunk, String> {
+pub fn compile(program: &Program) -> Result<Chunk, crate::errors::CompilerError> {
     let mut c = Compiler::new();
     let res = c.compile(program);
 
@@ -120,10 +125,11 @@ impl Compiler {
     fn pre_declare_functions(&mut self, stmts: &[Statement]) {
         for stmt in stmts {
             if let Statement::FunctionDecl(f) = stmt
-                && self.resolve_local(&f.name).is_none() {
-                    // Reserve a local slot with no type annotation for now.
-                    self.add_local(f.name.clone(), None);
-                }
+                && self.resolve_local(&f.name).is_none()
+            {
+                // Reserve a local slot with no type annotation for now.
+                self.add_local(f.name.clone(), None);
+            }
         }
     }
 
@@ -132,7 +138,7 @@ impl Compiler {
     /// # Errors
     ///
     /// Returns an error string if compilation fails
-    pub fn compile(&mut self, program: &Program) -> Result<Chunk, String> {
+    pub fn compile(&mut self, program: &Program) -> Result<Chunk, crate::errors::CompilerError> {
         // Pre-declare top-level function names so forward references compile to GetLocal.
         self.pre_declare_functions(&program.body);
 
@@ -143,7 +149,7 @@ impl Compiler {
         Ok(std::mem::take(&mut self.chunk))
     }
 
-    fn compile_statement(&mut self, stmt: &Statement) -> Result<(), String> {
+    fn compile_statement(&mut self, stmt: &Statement) -> Result<(), crate::errors::CompilerError> {
         match stmt {
             Statement::VarDecl(v) => {
                 if let Some(init) = &v.init {
@@ -303,7 +309,9 @@ impl Compiler {
                 // correct continue target. If there is no enclosing loop, it's
                 // an error.
                 if self.continue_patches.is_empty() {
-                    return Err("'continue' not allowed outside loops".to_string());
+                    return Err(crate::errors::CompilerError::from(
+                        "'continue' not allowed outside loops",
+                    ));
                 }
                 self.emit(Op::Jump, LINE);
                 let placeholder_pos = self.chunk.code.len();
@@ -399,7 +407,7 @@ impl Compiler {
         params: &[Param],
         body: &Block,
         return_type: Option<Type>,
-    ) -> Result<(FunctionProto, usize), String> {
+    ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
         let _env_len = self.locals.len();
         let mut inner = Compiler {
             chunk: Chunk::new(),
@@ -443,7 +451,7 @@ impl Compiler {
         ))
     }
 
-    fn compile_expr(&mut self, expr: &Expr) -> Result<(), String> {
+    fn compile_expr(&mut self, expr: &Expr) -> Result<(), crate::errors::CompilerError> {
         match expr {
             Expr::Literal(l) => {
                 if let LiteralValue::String(s) = &l.value {

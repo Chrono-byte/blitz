@@ -1,6 +1,7 @@
 /*! Type checker: strict type checking before compile. Types are not erased. */
 
 use crate::ast::*;
+use crate::errors::TypeCheckerError;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -36,7 +37,7 @@ pub fn set_strict_override(v: Option<bool>) {
 /// # Errors
 ///
 /// Returns an error string if type checking fails
-pub fn check(program: &Program) -> Result<(), String> {
+pub fn check(program: &Program) -> Result<(), TypeCheckerError> {
     let mut ctx = TypeContext {
         scopes: vec![Scope::new()],
     };
@@ -110,7 +111,7 @@ impl TypeContext {
         None
     }
 
-    fn check_statement(&mut self, stmt: &Statement) -> Result<(), String> {
+    fn check_statement(&mut self, stmt: &Statement) -> Result<(), TypeCheckerError> {
         match stmt {
             // Ambient declaration (declare) - record type but do not expect runtime init
             Statement::Declare(d) => {
@@ -130,10 +131,10 @@ impl TypeContext {
                 } else if let Some(ref init) = v.init {
                     self.type_of_expr(init)?
                 } else {
-                    return Err(format!(
+                    return Err(TypeCheckerError::from(format!(
                         "Variable '{}' needs a type annotation or initializer",
                         v.name
-                    ));
+                    )));
                 };
 
                 if let Some(ref init) = v.init {
@@ -150,12 +151,12 @@ impl TypeContext {
                         assignable(&var_type, &init_type)
                     };
                     if !assign_ok {
-                        return Err(format!(
+                        return Err(TypeCheckerError::from(format!(
                             "Type '{}' is not assignable to type '{}' for variable '{}'",
                             type_to_string(&self.type_of_expr(init)?),
                             type_to_string(&var_type),
                             v.name
-                        ));
+                        )));
                     }
                 }
 
@@ -220,17 +221,17 @@ impl TypeContext {
                 if strict_mode() && !is_library_function {
                     for p in &f.params {
                         if p.type_ann.is_none() {
-                            return Err(format!(
+                            return Err(TypeCheckerError::from(format!(
                                 "Parameter '{}' requires a type annotation in strict mode",
                                 p.name
-                            ));
+                            )));
                         }
                     }
                     if f.return_type.is_none() {
-                        return Err(format!(
+                        return Err(TypeCheckerError::from(format!(
                             "Function '{}' return type required in strict mode",
                             f.name
-                        ));
+                        )));
                     }
                 }
                 // In non-strict mode, accept missing annotations by treating them as `void`.
@@ -260,11 +261,11 @@ impl TypeContext {
                         .transpose()?
                         .unwrap_or(Type::Void);
                     if !assignable(&return_type, &ret_type) && !is_library_function {
-                        return Err(format!(
+                        return Err(TypeCheckerError::from(format!(
                             "Return type {} is not assignable to declared {}",
                             type_to_string(&ret_type),
                             type_to_string(&return_type)
-                        ));
+                        )));
                     }
                 }
                 self.scopes.pop();
@@ -289,19 +290,19 @@ impl TypeContext {
                             match self.lookup(name) {
                                 Some(expected) => {
                                     if !assignable(&expected, &value_type) {
-                                        return Err(format!(
+                                        return Err(TypeCheckerError::from(format!(
                                             "Assignment: type {} is not assignable to {}",
                                             type_to_string(&value_type),
                                             type_to_string(&expected)
-                                        ));
+                                        )));
                                     }
                                 }
                                 // Undeclared variables are an error only in strict mode.
                                 None if strict_mode() => {
-                                    return Err(format!(
+                                    return Err(TypeCheckerError::from(format!(
                                         "Undeclared variable '{}'. Declare it with let or const first.",
                                         name
-                                    ));
+                                    )));
                                 }
                                 None => {}
                             }
@@ -315,7 +316,7 @@ impl TypeContext {
         Ok(())
     }
 
-    fn type_of_expr(&self, expr: &Expr) -> Result<Type, String> {
+    fn type_of_expr(&self, expr: &Expr) -> Result<Type, TypeCheckerError> {
         match expr {
             Expr::Literal(l) => Ok(match &l.value {
                 LiteralValue::Number(_) => Type::Number,
@@ -326,7 +327,7 @@ impl TypeContext {
             Expr::Identifier(ident) => {
                 let name = &ident.name;
                 self.lookup(name)
-                    .ok_or_else(|| format!("Unknown variable '{}'", name))
+                    .ok_or_else(|| TypeCheckerError::from(format!("Unknown variable '{}'", name)))
             }
             Expr::BinaryExpr(b) => {
                 let l = self.type_of_expr(&b.left)?;
@@ -338,11 +339,11 @@ impl TypeContext {
                         } else if l == Type::String || r == Type::String {
                             Ok(Type::String)
                         } else {
-                            Err(format!(
+                            Err(TypeCheckerError::from(format!(
                                 "Cannot add {} and {}",
                                 type_to_string(&l),
                                 type_to_string(&r)
-                            ))
+                            )))
                         }
                     }
                     BinaryOperator::Minus
@@ -352,11 +353,11 @@ impl TypeContext {
                         if assignable(&Type::Number, &l) && assignable(&Type::Number, &r) {
                             Ok(Type::Number)
                         } else {
-                            Err(format!(
+                            Err(TypeCheckerError::from(format!(
                                 "Arithmetic requires number, got {} and {}",
                                 type_to_string(&l),
                                 type_to_string(&r)
-                            ))
+                            )))
                         }
                     }
                     BinaryOperator::EqEq
@@ -383,7 +384,9 @@ impl TypeContext {
                         if assignable(&Type::Number, &a) {
                             Ok(Type::Number)
                         } else {
-                            Err("- unary requires number".into())
+                            Err(TypeCheckerError::from(
+                                "- unary requires number".to_string(),
+                            ))
                         }
                     }
                     UnaryOperator::Typeof => Ok(Type::String),
@@ -418,11 +421,11 @@ impl TypeContext {
                     Type::Function(params, ret) => {
                         // Allow empty parameter list to accept any number of arguments (for variadic functions like console.log)
                         if !params.is_empty() && params.len() != c.args.len() {
-                            return Err(format!(
+                            return Err(TypeCheckerError::from(format!(
                                 "Expected {} arguments, got {}",
                                 params.len(),
                                 c.args.len()
-                            ));
+                            )));
                         }
                         for (i, (arg, param)) in c.args.iter().zip(params.iter()).enumerate() {
                             let arg_type = self.type_of_expr(arg)?;
@@ -437,20 +440,20 @@ impl TypeContext {
                                     continue;
                                 }
 
-                                return Err(format!(
+                                return Err(TypeCheckerError::from(format!(
                                     "Argument {}: type {} is not assignable to {}",
                                     i + 1,
                                     type_to_string(&arg_type),
                                     type_to_string(param)
-                                ));
+                                )));
                             }
                         }
                         Ok((**ret).clone())
                     }
-                    _ => Err(format!(
+                    _ => Err(TypeCheckerError::from(format!(
                         "Cannot call non-function type {}",
                         type_to_string(&callee_type)
-                    )),
+                    ))),
                 }
             }
             Expr::MemberExpr(m) => {
@@ -481,26 +484,37 @@ impl TypeContext {
                             if let Some(t) = props.get(&k) {
                                 Ok(t.clone())
                             } else {
-                                Err(format!("Property '{}' not found on object", k))
+                                Err(TypeCheckerError::from(format!(
+                                    "Property '{}' not found on object",
+                                    k
+                                )))
                             }
                         } else {
-                            Err("Unsupported property access in type context".into())
+                            Err(TypeCheckerError::from(String::from(
+                                "Unsupported property access in type context",
+                            )))
                         }
                     }
-                    _ => Err("GetProperty on non-object type".into()),
+                    _ => Err(TypeCheckerError::from(String::from(
+                        "GetProperty on non-object type",
+                    ))),
                 }
             }
             Expr::Assignment(a) => self.type_of_expr(&a.value),
             Expr::ArrayExpr(arr) => {
                 if arr.elements.is_empty() {
                     // Empty array needs an annotation where it is used; signal that it's unsupported here.
-                    return Err("Empty array literal requires an explicit type annotation".into());
+                    return Err(TypeCheckerError::from(String::from(
+                        "Empty array literal requires an explicit type annotation",
+                    )));
                 }
                 let elem = self.type_of_expr(&arr.elements[0])?;
                 for e in &arr.elements[1..] {
                     let t = self.type_of_expr(e)?;
                     if !assignable(&elem, &t) && !assignable(&t, &elem) {
-                        return Err("Array elements must have same type".into());
+                        return Err(TypeCheckerError::from(String::from(
+                            "Array elements must have same type",
+                        )));
                     }
                 }
                 Ok(Type::Array(Box::new(elem)))
@@ -518,10 +532,10 @@ impl TypeContext {
                 if strict_mode() {
                     for p in &f.params {
                         if p.type_ann.is_none() {
-                            return Err(format!(
+                            return Err(TypeCheckerError::from(format!(
                                 "Parameter '{}' requires a type annotation in strict mode",
                                 p.name
-                            ));
+                            )));
                         }
                     }
                 }

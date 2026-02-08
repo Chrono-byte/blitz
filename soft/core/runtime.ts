@@ -1,6 +1,5 @@
 /**
  * JavaScript Runtime: Type coercion and operations.
- * Implements JavaScript runtime behavior without TypeScript 'any' type.
  */
 
 import type { Value, BlitzObject, BlitzFunction } from "./types.js";

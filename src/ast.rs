@@ -374,7 +374,7 @@ pub struct MemberExpr {
     pub object: Box<Expr>,
     /// Property being accessed
     pub property: Box<Expr>,
-    /// Whether property access is computed (obj[prop] vs obj.prop)
+    /// Whether property access is computed (obj\[prop\] vs obj.prop)
     pub computed: bool,
 }
 

@@ -1,4 +1,9 @@
-//! Tsblitz VM: **actual runtime in Rust**, **std + more in TypeScript**.
+//! Blitz VM: **Rust JavaScript VM**. Kernel bootstraps into the TypeScript runtime.
+//
+// Provide crate-level documentation while keeping linting strict.
+//! The tsblitz crate contains the Rust kernel (lexer, parser, VM, compiler)
+//! and exposes types used by the TypeScript soft layer. Public items are
+//! documented in their respective modules.
 //!
 //! - **Rust (this crate)** = the runtime: lexer, parser, bytecode compiler, bytecode
 //!   interpreter, heap/stack, opcodes. All execution lives here. Only minimal
@@ -12,7 +17,9 @@ pub mod ast;
 pub mod bundler;
 pub mod bytecode;
 pub mod compiler;
+pub mod errors;
 pub mod lexer;
+pub mod oxc_typecheck;
 pub mod parser;
 pub mod trace;
 pub mod typecheck;
@@ -23,8 +30,13 @@ pub use ast::*;
 pub use bundler::*;
 pub use bytecode::*;
 pub use compiler::*;
+pub use errors::*;
 pub use lexer::*;
+pub use oxc_typecheck::{
+    TypeIssue, TypecheckConfig, TypecheckResult, check_file as oxc_check_file, check_soft_layer,
+};
 pub use parser::*;
+pub use trace::*;
 pub use typecheck::{check as typecheck, type_to_string as type_to_string_display};
 pub use value::*;
 pub use vm::*;
