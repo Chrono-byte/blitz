@@ -35,7 +35,7 @@
 //! ```
 
 use crate::errors::TypeCheckerError;
-use crate::oast as ast;
+use crate::local_ast as ast;
 use crate::oxc_typecheck::Type;
 use ast::*;
 use std::collections::HashMap;
@@ -621,6 +621,9 @@ pub fn type_to_string(t: &Type) -> String {
         Type::Boolean => "boolean".to_string(),
         Type::Null => "null".to_string(),
         Type::Void => "void".to_string(),
+        Type::Any => "any".to_string(),
+        Type::Unknown => "unknown".to_string(),
+        Type::Builtin(b) => format!("builtin::{:?}", b),
         Type::Array(inner) => format!("{}[]", type_to_string(inner)),
         Type::Object(_) => "object".to_string(),
         Type::Function(params, ret) => {
@@ -634,6 +637,12 @@ pub fn type_to_string(t: &Type) -> String {
                 type_to_string(ret)
             )
         }
+        Type::TypeReference { name } => name.clone(),
+        Type::Union(variants) => variants
+            .iter()
+            .map(type_to_string)
+            .collect::<Vec<_>>()
+            .join(" | "),
     }
 }
 
@@ -651,28 +660,32 @@ mod tests {
             var y = a && b;
             var z = 1 && 2;
         "#;
-        let program = Parser::parse_source(src).expect("parse");
-        assert!(check(&program).is_ok());
+        let session = Parser::parse_source(src).expect("parse");
+        let program = session.program();
+        assert!(check(program).is_ok());
     }
 
     #[test]
     fn unary_bang_accepts_non_boolean() {
         let src = "var a = !1;";
-        let program = Parser::parse_source(src).expect("parse");
-        assert!(check(&program).is_ok());
+        let session = Parser::parse_source(src).expect("parse");
+        let program = session.program();
+        assert!(check(program).is_ok());
     }
 
     #[test]
     fn if_condition_accepts_non_boolean() {
         let src = "if (1) { var x = 1; }";
-        let program = Parser::parse_source(src).expect("parse");
-        assert!(check(&program).is_ok());
+        let session = Parser::parse_source(src).expect("parse");
+        let program = session.program();
+        assert!(check(program).is_ok());
     }
 
     #[test]
     fn while_condition_accepts_non_boolean() {
         let src = "var i = 0; while (i) { i = i - 1; }";
-        let program = Parser::parse_source(src).expect("parse");
-        assert!(check(&program).is_ok());
+        let session = Parser::parse_source(src).expect("parse");
+        let program = session.program();
+        assert!(check(program).is_ok());
     }
 }

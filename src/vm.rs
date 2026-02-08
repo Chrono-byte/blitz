@@ -1062,6 +1062,8 @@ fn runtime_assignable(expected: &Type, actual: &Value) -> bool {
         Type::Array(_) => matches!(actual, Value::Array(_, _)),
         Type::Object(_) => matches!(actual, Value::Object(_)),
         Type::Function(_, _) => matches!(actual, Value::Closure { .. } | Value::Builtin(_)),
+        // Accept other type forms at runtime conservatively.
+        Type::Any | Type::Unknown | Type::Builtin(_) | Type::TypeReference { .. } | Type::Union(_) => true,
     }
 }
 

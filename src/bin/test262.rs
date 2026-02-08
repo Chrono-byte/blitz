@@ -25,6 +25,7 @@ use std::rc::Rc;
 
 use serde::Deserialize;
 
+use tsblitz::local_ast::Program;
 use tsblitz::{bundle_entry, compile, parser::Parser, typecheck, value::Value, vm::Vm};
 
 /// Minimal subset of metadata we care about.
@@ -95,7 +96,7 @@ fn builtin_eval_script(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
         .insert("print".to_string(), Value::Builtin(builtin_print));
 
     // Parse / typecheck / compile / run. Ignore errors and return Null on failure.
-    match Parser::parse_source(&src) {
+    match Parser::parse_source_into_local_ast(&src) {
         Ok(program) => {
             if let Err(e) = typecheck(&program) {
                 eprintln!("[evalScript] typecheck failed: {}", e);
@@ -130,7 +131,8 @@ fn run_source_in_realm(
     globals: Rc<RefCell<HashMap<String, Value>>>,
     source: &str,
 ) -> Result<Value, String> {
-    let program = Parser::parse_source(source).map_err(|e| format!("parse: {}", e))?;
+    let program =
+        Parser::parse_source_into_local_ast(source).map_err(|e| format!("parse: {}", e))?;
     typecheck(&program).map_err(|e| format!("typecheck: {}", e))?;
     let chunk = compile(&program).map_err(|e| format!("compile: {}", e))?;
     let mut vm = Vm::new(globals);
@@ -290,7 +292,7 @@ fn run_test_file(
                     let hsrc = fs::read_to_string(&p)
                         .map_err(|e| format!("Failed to read harness {}: {}", p.display(), e))?;
                     // Parse/typecheck/compile the harness and run it in the provided VM
-                    let program = match Parser::parse_source(&hsrc) {
+                    let program = match Parser::parse_source_into_local_ast(&hsrc) {
                         Ok(p) => p,
                         Err(e) => {
                             eprintln!(
@@ -370,7 +372,7 @@ fn run_test_file(
         }
 
         // Otherwise, parse must succeed
-        let program = match Parser::parse_source(&run_src) {
+        let session = match Parser::parse_source_into_local_ast(&run_src) {
             Ok(p) => p,
             Err(e) => {
                 return Err(format!(
@@ -381,6 +383,7 @@ fn run_test_file(
                 ));
             }
         };
+        let program = session;
 
         // Typecheck - if this errors unexpectedly, test fails for this mode
         if let Err(e) = typecheck(&program) {
@@ -476,16 +479,24 @@ fn main() {
 
     // Create a persistent VM and globals, install host builtins and the soft-prelude
     let globals = Rc::new(RefCell::new(HashMap::new()));
-    globals
-        .borrow_mut()
-        .insert("__native_print".to_string(), Value::Builtin(builtin_print));
-    globals
-        .borrow_mut()
-        .insert("print".to_string(), Value::Builtin(builtin_print));
+    globals.borrow_mut().insert(
+        "__native_print".to_string(),
+        Value::Builtin(|vm, args| {
+            builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+        }),
+    );
+    globals.borrow_mut().insert(
+        "print".to_string(),
+        Value::Builtin(|vm, args| {
+            builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+        }),
+    );
     let mut obj: HashMap<String, Value> = HashMap::new();
     obj.insert(
         "evalScript".to_string(),
-        Value::Builtin(builtin_eval_script),
+        Value::Builtin(|vm, args| {
+            builtin_eval_script(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+        }),
     );
     globals.borrow_mut().insert(
         "$262".to_string(),

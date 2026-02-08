@@ -55,6 +55,8 @@
 pub mod bundler;
 pub mod bytecode;
 pub mod compiler;
+pub mod estree_bridge;
+pub mod local_ast;
 pub mod errors;
 pub mod lexer;
 pub mod oxc_typecheck;

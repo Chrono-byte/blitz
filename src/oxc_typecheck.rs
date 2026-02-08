@@ -123,6 +123,34 @@ impl Default for TypecheckConfig {
 // compiler/VM. Many modules expect variants like `Type::Number`, `Type::String`,
 // `Type::Function(params, ret)`, and `Type::Void`. Keep the enum simple and
 // serializable.
+/// Conservative enumeration of builtin named types used by the lightweight
+/// SoftLayerTypechecker. Kept small and stable so other modules can refer to
+/// builtins without depending on broader Oxc internals.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BuiltinType {
+    Undefined,
+    Null,
+    Boolean,
+    Number,
+    String,
+    Symbol,
+    BigInt,
+    Object,
+    Function,
+    Array,
+    Promise,
+    Map,
+    Set,
+    RegExp,
+    Date,
+    Error,
+    TypeError,
+    RangeError,
+    SyntaxError,
+    JSON,
+    Math,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
     Number,
@@ -132,6 +160,9 @@ pub enum Type {
     Void,
     Any,
     Unknown,
+    /// Builtin named type (e.g. Object, Array) represented separately for
+    /// concise global registration.
+    Builtin(BuiltinType),
     Array(Box<Type>),
     Function(Vec<Type>, Box<Type>),
     /// Object with named property types.
@@ -283,7 +314,7 @@ impl SoftLayerTypechecker {
         self.global_types
             .insert("BigInt".to_string(), Type::Builtin(BuiltinType::BigInt));
         self.global_types
-            .insert("Function".to_string(), Type::Function);
+            .insert("Function".to_string(), Type::Function(vec![], Box::new(Type::Void)));
         self.global_types
             .insert("Promise".to_string(), Type::Builtin(BuiltinType::Promise));
         self.global_types
@@ -297,9 +328,9 @@ impl SoftLayerTypechecker {
         self.global_types
             .insert("Error".to_string(), Type::Builtin(BuiltinType::Error));
 
-        let console_fn = Type::Function;
+        let console_fn = Type::Function(vec![], Box::new(Type::Void));
         self.global_types
-            .insert("console".to_string(), Type::Object);
+            .insert("console".to_string(), Type::Object(HashMap::new()));
         self.global_types
             .insert("console.log".to_string(), console_fn);
     }

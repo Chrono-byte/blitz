@@ -48,10 +48,21 @@ pub struct Parser {
     source: Option<String>,
 }
 
-// NOTE: ParserSession attempted earlier using ouroboros caused macro
-// collisions and complicated the migration. For now keep a pragmatic leak
-// approach so `parse_source` returns an `oast::Program` with a 'static
-// lifetime. We'll replace this with a safe wrapper in a follow-up step.
+// Helper methods for ParserSession are defined after the macro-generated type.
+
+// ParserSession: safe self-referencing wrapper that owns the allocator and
+// source string while exposing an `oxc_ast::ast::Program` that borrows them.
+// We use `ouroboros::self_referencing` to safely model the self-referencing
+// lifetime of `oast::Program<'this>`.
+
+#[self_referencing]
+pub struct ParserSession {
+    alloc: Allocator,
+    source: String,
+    #[borrows(alloc, source)]
+    #[covariant]
+    program: oast::Program<'this>,
+}
 
 impl Parser {
     /// Legacy constructor kept for API compatibility. This will return an error
@@ -72,18 +83,20 @@ impl Parser {
         }
     }
 
-    /// Convenience top-level API: parse source text (same as calling
-    /// `Parser::new_from_source(source).parse()`).
-    pub fn parse_source(source: &str) -> Result<oast::Program, ParserError> {
+    /// Convenience top-level API: parse source text and return a
+    /// `ParserSession` which owns backing data (allocator + source) and
+    /// exposes the parsed `Program` that borrows that backing data.
+    pub fn parse_source(source: &str) -> Result<ParserSession, ParserError> {
         let mut p = Parser::new_from_source(source);
         p.parse()
     }
 
-    /// Parse and return an `oxc_ast::ast::Program`.
+    /// Parse and return a `ParserSession` owning allocator+source and
+    /// exposing an `oxc_ast::ast::Program` that borrows them.
     ///
     /// If `self.source` is None, returns an error explaining that the token
     /// based constructor is no longer supported.
-    pub fn parse(&mut self) -> Result<oast::Program, ParserError> {
+    pub fn parse(&mut self) -> Result<ParserSession, ParserError> {
         let source_owned = match self.source.take() {
             Some(s) => s,
             None => {
@@ -93,35 +106,39 @@ impl Parser {
             }
         };
 
-        // Run Oxc parser (TypeScript mode by default)
-        let alloc = Allocator::default();
-        let ret = OxcParser::new(&alloc, &source_owned, SourceType::ts())
-            .with_options(ParseOptions {
-                parse_regular_expression: true,
-                ..ParseOptions::default()
-            })
-            .parse();
+        // Build a self-referencing ParserSession using try_new so we can return
+        // parsing errors as ParserError when the underlying Oxc parser fails.
+        ParserSession::try_new(Allocator::default(), source_owned, |alloc, source| {
+            let ret = OxcParser::new(alloc, source, SourceType::ts())
+                .with_options(ParseOptions {
+                    parse_regular_expression: true,
+                    ..ParseOptions::default()
+                })
+                .parse();
 
-        if !ret.errors.is_empty() {
-            let mut msgs = Vec::new();
-            for e in ret.errors {
-                let err = e.with_source_code(source_owned.clone());
-                msgs.push(format!("{:?}", err));
+            if !ret.errors.is_empty() {
+                let mut msgs = Vec::new();
+                for e in ret.errors {
+                    let err = e.with_source_code(source.to_string());
+                    msgs.push(format!("{:?}", err));
+                }
+                return Err(ParserError::from(msgs.join("\n")));
             }
-            return Err(ParserError::from(msgs.join("\n")));
-        }
 
-        // Return the parsed oxc AST program directly. The program borrows the
-        // allocator and source owned by this Parser instance.
-        Ok(ret.program)
+            Ok(ret.program)
+        })
     }
 
     // Backwards-compatible helper: parse_source_into_local_ast for consumers that
     // still expect the old `crate::ast::Program`. This converts oxc_ast -> crate::ast
     // using a minimal adapter so we can migrate the callsites incrementally.
     #[allow(dead_code)]
-    pub fn parse_source_into_local_ast(_source: &str) -> Result<crate::ast::Program, ParserError> {
-        Err(ParserError::from("parse_source_into_local_ast is removed; use parse_source which returns oxc_ast::ast::Program".to_string()))
+    pub fn parse_source_into_local_ast(source: &str) -> Result<crate::local_ast::Program, ParserError> {
+        let session = Parser::parse_source(source)?;
+        let estree = session.program().to_pretty_estree_ts_json(false);
+        let prog = crate::estree_bridge::estree_json_to_local_program(&estree)
+            .map_err(|e| ParserError::from(format!("ESTree -> local AST conversion failed: {}", e)))?;
+        Ok(prog)
     }
 
     /// Extract top-level static import specifiers (e.g. "./mod") from a source
@@ -172,6 +189,15 @@ impl Parser {
             }
         }
         Ok(imports)
+    }
+}
+
+// Implement a small accessor for the generated ParserSession type. The
+// `self_referencing` macro generates a `borrow_program` method; expose a
+// convenient `program()` method that returns the borrowed `Program`.
+impl ParserSession {
+    pub fn program(&self) -> &oast::Program {
+        self.borrow_program()
     }
 }
 

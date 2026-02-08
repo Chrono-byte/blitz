@@ -29,9 +29,8 @@
 //! ```
 
 use crate::errors::BundlerError;
-use crate::oast as ast;
+use crate::local_ast as la;
 use crate::parser::Parser;
-use ast::Program;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -45,7 +44,7 @@ use std::path::{Path, PathBuf};
 /// # Errors
 /// Returns an error if the entry module or any of its dependencies cannot be
 /// read or parsed.
-pub fn bundle_entry(entry: &Path) -> Result<crate::parser::ParserSession, BundlerError> {
+pub fn bundle_entry(entry: &Path) -> Result<la::Program, BundlerError> {
     // Resolve the entry to a canonical path where possible to avoid duplicates.
     let entry_canon = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf());
 
@@ -127,17 +126,24 @@ pub fn bundle_entry(entry: &Path) -> Result<crate::parser::ParserSession, Bundle
         combined_src.push('\n');
     }
 
-    // Parse the combined source into a ParserSession which owns backing data.
+    // Parse the combined source into a ParserSession which owns backing data,
+    // then convert Oxc's ESTree JSON into the owned `local_ast::Program` used
+    // by the compiler/typechecker. This keeps bundler callers working with an
+    // owned AST and avoids widespread changes across the codebase.
     let session = Parser::parse_source(&combined_src)
         .map_err(|e| BundlerError::from(format!("Failed to parse bundled program: {}", e)))?;
 
-    Ok(session)
+    let estree = session.program().to_pretty_estree_ts_json(false);
+    let prog = crate::estree_bridge::estree_json_to_local_program(&estree)
+        .map_err(|e| BundlerError::from(format!("ESTree -> local AST conversion failed: {}", e)))?;
+
+    Ok(prog)
 }
 
 #[cfg(test)]
 mod tests {
     use super::bundle_entry;
-    use crate::ast::Statement;
+    use crate::local_ast as la;
     use std::env;
     use std::fs;
     use std::path::PathBuf;
@@ -166,11 +172,31 @@ mod tests {
         let program = bundle_entry(&mod_a).expect("bundle ok");
 
         // Expect that the bundled program contains the function `b` and the
-        // consumer expression. Use the ESTree JSON output to keep assertions
-        // independent of the internal AST node layout.
-        let estree = program.to_pretty_estree_ts_json(false);
-        assert!(estree.contains("\"FunctionDeclaration\"") && estree.contains("b"));
-        assert!(estree.contains("globalX") && estree.contains("b()"));
+        // consumer expression `globalX = b();` by inspecting the local AST.
+        let has_b = program.body.iter().any(|s| match s {
+            la::Statement::FunctionDecl(fd) => fd.name == "b",
+            _ => false,
+        });
+
+        let has_call = program.body.iter().any(|s| match s {
+            la::Statement::ExpressionStatement(es) => match &es.expression {
+                la::Expr::Assignment(a) => match *a.value.clone() {
+                    la::Expr::CallExpr(ref call) => match *call.callee.clone() {
+                        la::Expr::Identifier(ref id) => id.name == "b",
+                        _ => false,
+                    },
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        });
+
+        assert!(has_b, "bundled program should contain function 'b'");
+        assert!(
+            has_call,
+            "bundled program should contain a call to 'b' assigned to globalX"
+        );
     }
 
     #[test]

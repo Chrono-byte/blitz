@@ -23,7 +23,7 @@
 //! - Constant folding
 
 use crate::bytecode::{Chunk, FunctionProto, Op};
-use crate::oast as ast;
+use crate::local_ast as ast;
 use crate::oxc_typecheck::Type;
 use crate::value::Value;
 use ast::*;
@@ -660,8 +660,9 @@ mod tests {
     #[test]
     fn hoist_top_level_function_names_into_locals() {
         let src = "f(); function f() { return 42; }";
-        let program = Parser::parse_source(src).expect("parse ok");
-        let chunk = compile(&program).expect("compile ok");
+        let session = Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program).expect("compile ok");
 
         // If a constant "f" exists, ensure it is not referenced via GetGlobal/SetGlobal.
         let mut f_const_idx: Option<usize> = None;
