@@ -132,7 +132,6 @@ impl Parser {
     // Backwards-compatible helper: parse_source_into_local_ast for consumers that
     // still expect the old `crate::ast::Program`. This converts oxc_ast -> crate::ast
     // using a minimal adapter so we can migrate the callsites incrementally.
-    #[allow(dead_code)]
     pub fn parse_source_into_local_ast(
         source: &str,
     ) -> Result<crate::local_ast::Program, ParserError> {

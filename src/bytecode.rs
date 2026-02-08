@@ -31,7 +31,7 @@
 //! chunk.write(0, 1); // Constant index
 //! ```
 
-use crate::oxc_typecheck::Type;
+use crate::typecheck::Type;
 use crate::value::Value;
 use std::collections::HashMap;
 use std::convert::TryFrom;

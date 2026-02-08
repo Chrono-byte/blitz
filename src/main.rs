@@ -39,8 +39,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use tsblitz::bytecode;
-use tsblitz::local_ast::Program;
-use tsblitz::{bundle_entry, compile, parser::Parser as TsParser, typecheck, value::Value, vm::Vm};
+use tsblitz::compiler;
+use tsblitz::{bundle_entry, parser::Parser as TsParser, typecheck, value::Value, vm::Vm};
 
 /// Minimal native hook: print to stdout. The TS soft layer wraps this as console.log.
 fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
@@ -69,7 +69,7 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     // host I/O (terminals, pipes, etc.). Only move the owned `String` into
     // the background task; do not move VM-internal values (which are not
     // Send/Sync).
-    let s_owned = s.clone();
+    let s_owned = s;
 
     // Keep a small synchronous trace for diagnostics, then schedule the
     // heavy lifting to the background runtime.
@@ -105,15 +105,20 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 ///
 /// Returns an error string if any stage of compilation fails
 fn run_source(vm: &mut Vm, source: &str) -> Result<Value, tsblitz::errors::Error> {
-    let program = TsParser::parse_source_into_local_ast(source)?;
-    typecheck(&program)?;
-    let chunk = compile(&program)?;
+    let session = TsParser::parse_source(source)?;
+    let oast_prog = session.program();
+    typecheck::check_oxc(oast_prog)?;
+    // Use the temporary compile_oxc shim so we can avoid converting to local_ast here.
+    let chunk = compiler::compile_oxc(oast_prog).map_err(tsblitz::errors::Error::from)?;
     vm.run(chunk).map_err(tsblitz::errors::Error::from)
 }
 
-fn run_program(vm: &mut Vm, program: Program) -> Result<Value, tsblitz::errors::Error> {
-    typecheck(&program)?;
-    let chunk = compile(&program)?;
+fn run_program(
+    vm: &mut Vm,
+    program: &oxc_ast::ast::Program<'_>,
+) -> Result<Value, tsblitz::errors::Error> {
+    typecheck::check_oxc(program)?;
+    let chunk = compiler::compile_oxc(program).map_err(tsblitz::errors::Error::from)?;
     vm.run(chunk).map_err(tsblitz::errors::Error::from)
 }
 
@@ -238,10 +243,11 @@ fn main() -> Result<(), tsblitz::errors::Error> {
 
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let prelude_path = manifest_dir.join("soft/prelude.ts");
-    let prelude_program = bundle_entry(&prelude_path)?;
+    let prelude_session = bundle_entry(&prelude_path)?;
+    let prelude_program = prelude_session.program();
 
     // Skip type checking for soft layer prelude (has dynamic patterns that typechecker doesn't handle yet)
-    let chunk = compile(&prelude_program)?;
+    let chunk = compiler::compile_oxc(prelude_program).map_err(tsblitz::errors::Error::from)?;
     // The soft prelude is written in TypeScript and contains dynamic patterns
     // and annotated helper types that the static compiler may record as
     // parameter types. The prelude is intended to run untyped at runtime,
@@ -479,7 +485,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
 
     // If a file was provided, run it and exit. Otherwise start REPL.
     if let Some(path) = cli.file {
-        let program = bundle_entry(&path)?;
+        let session = bundle_entry(&path)?;
+        let program = session.program();
         run_program(&mut repl_vm, program)?;
         return Ok(());
     }

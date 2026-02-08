@@ -43,14 +43,15 @@
 //! ```
 
 use crate::bytecode::{Chunk, Op};
-use crate::oxc_typecheck::Type;
+use crate::typecheck::Type;
 use crate::value::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::Arc;
-use tokio::runtime::Runtime;
+use std::env;
 use std::future::Future;
+use std::rc::Rc;
+use std::sync::{Arc, OnceLock};
+use tokio::runtime::Runtime;
 
 /// Virtual machine for executing bytecode.
 pub struct Vm {
@@ -75,6 +76,13 @@ pub struct Vm {
     /// Background runtime for offloading blocking or async host work.
     /// The runtime is multi-threaded so builtins and other host operations can
     /// perform I/O or CPU-bound work without blocking the main VM thread.
+    ///
+    /// NOTE: To avoid creating one Tokio runtime per `Vm` (which can
+    /// oversubscribe threads when multiple VMs exist), we use a shared
+    /// global runtime. You can adjust the worker count via the
+    /// `TSBLITZ_BG_THREADS` environment variable (integer > 0). By default
+    /// we use `max(1, available_parallelism() - 1)` to leave the main thread
+    /// available for the foreground VM loop.
     bg_runtime: Arc<Runtime>,
     /// Exception handler stack.
     handlers: Vec<HandlerRecord>,
@@ -103,19 +111,44 @@ struct IcEntry {
     value: Value,
 }
 
+// Shared global background runtime. Using `OnceLock` keeps runtime creation
+// lazy and ensures we don't create multiple runtimes when multiple `Vm`
+// instances are constructed.
+static GLOBAL_BG_RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
+
+fn get_global_bg_runtime() -> Arc<Runtime> {
+    GLOBAL_BG_RUNTIME
+        .get_or_init(|| {
+            // Allow an explicit override via env var for testing/tuning.
+            let threads_from_env = env::var("TSBLITZ_BG_THREADS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n > 0);
+
+            let workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
+
+            // Default: leave one core for the foreground VM thread if possible.
+            let threads =
+                threads_from_env.unwrap_or_else(|| if workers > 1 { workers - 1 } else { 1 });
+
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(threads)
+                .enable_all()
+                .build()
+                .expect("Failed to build Tokio runtime for VM background tasks");
+
+            Arc::new(rt)
+        })
+        .clone()
+}
+
 impl Vm {
     /// Create a new virtual machine.
     pub fn new(globals: Rc<RefCell<HashMap<String, Value>>>) -> Self {
-        // Build a small dedicated multi-threaded runtime for background work.
-        // We choose the worker count from available parallelism where possible.
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(threads)
-            .enable_all()
-            .build()
-            .expect("Failed to build Tokio runtime for VM background tasks");
+        // Use the shared global runtime instead of building one per-VM.
+        let rt = get_global_bg_runtime();
 
         Self {
             chunk: Rc::new(Chunk::new()),
@@ -127,7 +160,7 @@ impl Vm {
             root_chunk: None,
             current_slot_types: None,
             ic_caches: RefCell::new(HashMap::new()),
-            bg_runtime: Arc::new(rt),
+            bg_runtime: rt,
             handlers: Vec::new(),
         }
     }
@@ -884,7 +917,8 @@ impl Vm {
                     cache_vec.resize(slot + 1, None);
                 }
 
-                if let Some(Some(entry)) = cache_vec.get(slot).cloned() && entry.obj_ptr == obj_ptr
+                if let Some(Some(entry)) = cache_vec.get(slot).cloned()
+                    && entry.obj_ptr == obj_ptr
                 {
                     self.stack.push(entry.value);
                     return Ok(());
@@ -892,7 +926,10 @@ impl Vm {
 
                 let v = get_property(&obj, &key)?;
                 // Safe to index now because we've resized above when necessary.
-                cache_vec[slot] = Some(IcEntry { obj_ptr, value: v.clone() });
+                cache_vec[slot] = Some(IcEntry {
+                    obj_ptr,
+                    value: v.clone(),
+                });
                 self.stack.push(v);
             }
             _ => {
@@ -915,7 +952,7 @@ impl Vm {
     {
         let rt = Arc::clone(&self.bg_runtime);
         let handle = rt.spawn_blocking(f);
-        match rt.block_on(async { handle.await }) {
+        match rt.block_on(handle) {
             Ok(v) => Ok(v),
             Err(e) => Err(crate::errors::RuntimeError::from(format!(
                 "Background task failed: {}",
@@ -1005,8 +1042,7 @@ impl Vm {
         }
     }
 
-    #[allow(unused)]
-    fn trace_push(&self, label: &str, v: &Value) {
+    fn trace_push(&self, label: &str, _v: &Value) {
         if crate::trace::enabled() {
             self.trace_stack_snapshot(&format!("stack snapshot before {}", label));
             self.trace_stack_snapshot(&format!("stack snapshot after {}", label));

@@ -1,3 +1,5 @@
+//! Test the preload bootstrap that helps elevate us up to the level needed to run user code.
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
@@ -71,13 +73,19 @@ fn prelude_bootstrap_runs() {
         .insert("globalThis".to_string(), global_this);
 
     // Minimal builtin printer used by soft code during bootstrap.
-    fn test_native_print(_vm: &mut Vm, _args: &[Value]) -> Result<Value, String> {
+    fn test_native_print(
+        _vm: &mut Vm,
+        _args: &[Value],
+    ) -> Result<Value, tsblitz::errors::RuntimeError> {
         // Intentionally no-op for tests.
         Ok(Value::Null)
     }
 
     // Minimal native_new_object used during bootstrap.
-    fn test_native_new_object(_vm: &mut Vm, _args: &[Value]) -> Result<Value, String> {
+    fn test_native_new_object(
+        _vm: &mut Vm,
+        _args: &[Value],
+    ) -> Result<Value, tsblitz::errors::RuntimeError> {
         use std::cell::RefCell;
         use std::collections::HashMap;
         use std::rc::Rc;
@@ -93,6 +101,38 @@ fn prelude_bootstrap_runs() {
     globals.borrow_mut().insert(
         "__native_new_object".to_string(),
         Value::Builtin(test_native_new_object),
+    );
+    // Also publish convenience host-level wrappers so the bundled prelude can
+    // import them during bootstrap ordering variants in tests.
+    globals
+        .borrow_mut()
+        .insert("host_print".to_string(), Value::Builtin(test_native_print));
+    globals.borrow_mut().insert(
+        "native_print".to_string(),
+        Value::Builtin(test_native_print),
+    );
+    globals.borrow_mut().insert(
+        "debugValue".to_string(),
+        Value::Builtin(|_vm, _args| Ok(Value::Null)),
+    );
+    // Provide a minimal `host` object used by some prelude paths
+    let mut host_map: HashMap<String, Value> = HashMap::new();
+    host_map.insert("host_print".to_string(), Value::Builtin(test_native_print));
+    host_map.insert(
+        "native_new_object".to_string(),
+        Value::Builtin(test_native_new_object),
+    );
+    host_map.insert(
+        "native_print".to_string(),
+        Value::Builtin(test_native_print),
+    );
+    host_map.insert(
+        "debugValue".to_string(),
+        Value::Builtin(|_vm, _args| Ok(Value::Null)),
+    );
+    globals.borrow_mut().insert(
+        "host".to_string(),
+        Value::Object(Rc::new(RefCell::new(host_map))),
     );
 
     // Provide a simple console object backed by the builtin printer.
@@ -118,8 +158,9 @@ fn prelude_bootstrap_runs() {
     // Bundle and compile the soft prelude
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let prelude_path = manifest_dir.join("soft/prelude.ts");
-    let program = bundle_entry(&prelude_path).expect("bundle prelude ok");
-    let chunk = compile(&program).expect("compile prelude ok");
+    let session = bundle_entry(&prelude_path).expect("bundle prelude ok");
+    let program = session.program();
+    let chunk = compile(program).expect("compile prelude ok");
 
     // Clear slot types (the prelude is intentionally dynamic)
     let chunk = clear_slot_types_in_chunk(chunk);

@@ -7,7 +7,7 @@
 //! compiler/typecheck code. We construct this AST by converting from Oxc's
 //! ESTree JSON representation.
 
-use crate::oxc_typecheck::Type;
+use crate::typecheck::Type;
 
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -16,6 +16,7 @@ pub struct Program {
 
 #[derive(Debug, Clone)]
 pub enum Statement {
+    For(ForStmt),
     Declare(Declare),
     VarDecl(VarDecl),
     Block(Block),
@@ -24,6 +25,8 @@ pub enum Statement {
     Throw(ThrowStmt),
     While(WhileStmt),
     Continue,
+    Break,
+    Switch(SwitchStmt),
     FunctionDecl(FunctionDecl),
     ImportDecl(ImportDecl),
     ExportDecl(ExportDecl),
@@ -39,10 +42,15 @@ pub struct Declare {
 }
 
 #[derive(Debug, Clone)]
-pub struct VarDecl {
+pub struct VarDeclarator {
     pub name: String,
     pub type_ann: Option<Type>,
     pub init: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VarDecl {
+    pub decls: Vec<VarDeclarator>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +84,26 @@ pub struct WhileStmt {
 }
 
 #[derive(Debug, Clone)]
+pub struct ForStmt {
+    pub init: Option<Box<Statement>>,
+    pub test: Option<Expr>,
+    pub update: Option<Expr>,
+    pub body: Box<Statement>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchCase {
+    pub test: Option<Expr>,
+    pub consequent: Vec<Statement>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchStmt {
+    pub discriminant: Expr,
+    pub cases: Vec<SwitchCase>,
+}
+
+#[derive(Debug, Clone)]
 pub struct FunctionDecl {
     pub name: String,
     pub params: Vec<Param>,
@@ -101,6 +129,7 @@ pub enum AssignmentTarget {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
+    UpdateExpr(UpdateExpr),
     Literal(Literal),
     Identifier(Identifier),
     BinaryExpr(BinaryExpr),
@@ -110,8 +139,20 @@ pub enum Expr {
     Assignment(AssignmentExpr),
     ArrayExpr(ArrayExpr),
     ObjectExpr(ObjectExpr),
+    TemplateExpr(TemplateExpr),
     FunctionExpr(FunctionExpr),
     ThisExpression,
+}
+
+#[derive(Debug, Clone)]
+pub enum TemplatePart {
+    Literal(String),
+    Expr(Expr),
+}
+
+#[derive(Debug, Clone)]
+pub struct TemplateExpr {
+    pub parts: Vec<TemplatePart>,
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +232,19 @@ pub struct AssignmentExpr {
 }
 
 #[derive(Debug, Clone)]
+pub enum UpdateOperator {
+    Inc,
+    Dec,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateExpr {
+    pub operator: UpdateOperator,
+    pub argument: Box<Expr>,
+    pub prefix: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct ArrayExpr {
     pub elements: Vec<Expr>,
 }
@@ -239,6 +293,16 @@ pub struct FunctionExpr {
     pub return_type: Option<Type>,
 }
 
+/// Example: construct a minimal `Program` with a numeric literal expression.
+///
+/// ```
+/// let prog = tsblitz::local_ast::Program::new(vec![tsblitz::local_ast::Statement::ExpressionStatement(
+///     tsblitz::local_ast::ExpressionStatement { expression: tsblitz::local_ast::Expr::Literal(
+///         tsblitz::local_ast::Literal { value: tsblitz::local_ast::LiteralValue::Number(1.0) }
+///     ) }
+/// )]);
+/// assert_eq!(prog.body.len(), 1);
+/// ```
 impl Program {
     pub fn new(body: Vec<Statement>) -> Self {
         Self { body }

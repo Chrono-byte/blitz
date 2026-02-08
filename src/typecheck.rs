@@ -30,25 +30,119 @@
 //! use tsblitz::parser::Parser;
 //!
 //! let source = "let x: number = 42;";
-//! let program = Parser::parse_source(source).unwrap();
+//! let program = Parser::parse_source_into_local_ast(source).unwrap();
 //! check(&program).expect("Type checking should pass");
 //! ```
 
 use crate::errors::TypeCheckerError;
 use crate::local_ast as ast;
-use crate::oxc_typecheck::Type;
 use ast::*;
+use oxc_ast::ast as oast;
+
+// Reintroduce a compact Type enum here (previously in oxc_typecheck) so other
+// modules can reference `crate::typecheck::Type` after removing the duplicate
+// module. Keep it conservative and compatible with existing usage.
 use std::collections::HashMap;
 use std::sync::OnceLock;
+
+/// Lightweight, conservative representation of types used by the checker.
+///
+/// This `Type` enum is not a full TypeScript type system; it models the
+/// subset of types that the VM and the soft layer (blitzlib) need for
+/// basic static checks. It is intentionally small and pragmatic:
+///
+/// - Primitive kinds: `Number`, `String`, `Boolean`, `Null`, `Void`.
+/// - Top-like/unknown markers: `Any`, `Unknown`
+/// - Compound shapes: `Array`, `Function`, `Object`
+/// - `Builtin` enumerates host-provided runtime categories (see `BuiltinType`)
+/// - `TypeReference` names a type that should be resolved via lexical scope.
+/// - `Union` models simple union types (no type algebra beyond membership).
+///
+/// Notes on usage and semantics:
+/// - `Type::Array(inner)` denotes a homogeneous array of `inner` type.
+/// - `Type::Function(params, ret)` uses a `Vec<Type>` for parameters and a boxed return type.
+///   We treat empty parameter lists as a convention to mean "variadic" (e.g. `console.log` in the prelude).
+/// - `Type::Object` performs shallow structural checks in `assignable`:
+///   every property declared in the expected object must exist and be assignable.
+/// - `TypeReference` is a name-only reference; callers must resolve it via the checker `Scope`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Type {
+    /// Numeric values (JS `number`).
+    Number,
+    /// String values (JS `string`).
+    String,
+    /// Boolean values (JS `boolean`).
+    Boolean,
+    /// The `null` literal/marker.
+    Null,
+    /// Represents `void`/no-value (used for function returns and some host APIs).
+    Void,
+    /// A deliberately permissive top type. Used when the caller chooses to be lax.
+    Any,
+    /// An unknown type returned from incomplete inference; treated separately from `Any`.
+    Unknown,
+    /// Homogeneous array type.
+    Array(Box<Type>),
+    /// Function type with parameter types and return type.
+    Function(Vec<Type>, Box<Type>),
+    /// Object with named properties and their types.
+    Object(HashMap<String, Type>),
+    /// A builtin runtime category.
+    Builtin(BuiltinType),
+    /// A reference to a named type that should be looked up in the current scope.
+    TypeReference {
+        /// Name of the referred type.
+        name: String,
+    },
+    /// Union of other `Type` variants (simple, flat unions).
+    Union(Vec<Type>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Enumeration of runtime built-in type categories that the checker recognizes.
+///
+/// These correspond to the engine's coarse-grained runtime kinds. The
+/// typechecker uses `BuiltinType` when representing host-provided values
+/// and to format diagnostics that mention runtime types.
+///
+/// Note: this is not an extensible tag-scheme; if you add runtime categories
+/// you should update both this enum and call sites that map runtime values to
+/// builtins.
+pub enum BuiltinType {
+    /// Represents `undefined` values.
+    Undefined,
+    /// Represents `null`.
+    Null,
+    /// Boolean runtime kind.
+    Boolean,
+    /// Numeric runtime kind.
+    Number,
+    /// String runtime kind.
+    String,
+    /// Symbol runtime kind.
+    Symbol,
+    /// BigInt runtime kind.
+    BigInt,
+    /// Generic object runtime kind.
+    Object,
+    /// Function runtime kind.
+    Function,
+    /// Array runtime kind.
+    Array,
+}
 
 type Scope = HashMap<String, Type>;
 
 static STRICT_OVERRIDE: OnceLock<std::sync::Mutex<Option<bool>>> = OnceLock::new();
 
-/// Strict mode: no implicit any, undeclared variables error, params/return require annotations.
+/// Return whether strict mode is currently enabled.
 ///
-/// Configurable via the `TSBLITZ_STRICT` environment variable; defaults to enabled.
-/// A test-friendly override is available via `set_strict_override`.
+/// The checker consults this flag to decide whether to require parameter and
+/// return annotations, to reject undeclared variables, and to disallow implicit
+/// `any`. The effective strictness is determined by, in order:
+/// 1. The test-only override set via `set_strict_override(Some(bool))`.
+/// 2. The environment variable `TSBLITZ_STRICT` (non-zero means enabled).
+/// 3. Defaults to enabled when the environment variable is not set.
 fn strict_mode() -> bool {
     if let Some(m) = STRICT_OVERRIDE.get()
         && let Some(v) = *m.lock().unwrap()
@@ -60,19 +154,45 @@ fn strict_mode() -> bool {
         .unwrap_or(true)
 }
 
-/// Set a test-only strictness override. Passing `None` clears the override and
-/// falls back to the `TSBLITZ_STRICT` environment variable.
+/// Set or clear the test-only strictness override.
+///
+/// Passing `Some(true)` forces strict mode on; `Some(false)` forces it off.
+/// Passing `None` clears the override and returns the checker to environment-based
+/// behavior.
+///
+/// This exists primarily to make unit tests deterministic without mutating process
+/// environment state.
 pub fn set_strict_override(v: Option<bool>) {
     let m = STRICT_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None));
     let mut g = m.lock().unwrap();
     *g = v;
 }
 
-/// Type-check a program (top-level).
+/// Type-check a locally-represented AST (`crate::local_ast::Program`).
+///
+/// This function walks the program and validates declarations, assignments,
+/// function bodies, and expressions according to the conservative rules encoded
+/// in this module.
 ///
 /// # Errors
 ///
-/// Returns an error string if type checking fails
+/// Returns `TypeCheckerError` if any type-level invariant is violated.
+///
+/// # Notes
+///
+/// The checker seeds the global scope with a small set of host-provided
+/// bindings (e.g. `__native_print`, `console.log`, `isNaN`, etc.) so library
+/// and prelude code can be validated.
+///
+/// Example:
+///
+/// ```no_run
+/// # use tsblitz::typecheck::check;
+/// # use tsblitz::parser::Parser;
+/// # let src = "let x: number = 42;";
+/// # let program = Parser::parse_source_into_local_ast(src).unwrap();
+/// check(&program).expect("Type checking should pass");
+/// ```
 pub fn check(program: &Program) -> Result<(), TypeCheckerError> {
     let mut ctx = TypeContext {
         scopes: vec![Scope::new()],
@@ -129,6 +249,29 @@ pub fn check(program: &Program) -> Result<(), TypeCheckerError> {
     Ok(())
 }
 
+/// Typecheck an Oxc-produced AST (`oast::Program`).
+///
+/// This is provided as a compatibility shim: the checker currently understands
+/// the local `crate::local_ast::Program`. We convert the `oast::Program` to
+/// ESTree JSON and bridge it to the local AST representation via
+/// `estree_bridge::estree_json_to_local_program`.
+///
+/// Once callers migrate to the local AST (or the checker is rewritten to
+/// consume `oast` directly), this helper can be removed.
+///
+/// # Errors
+///
+/// Returns a `TypeCheckerError` if the ESTree conversion fails or if the
+/// resulting local AST does not typecheck.
+pub fn check_oxc(program: &oast::Program<'_>) -> Result<(), TypeCheckerError> {
+    // Serialize to ESTree JSON and convert to local_ast via the bridge.
+    let estree = program.to_pretty_estree_ts_json(false);
+    let prog = crate::estree_bridge::estree_json_to_local_program(&estree).map_err(|e| {
+        TypeCheckerError::from(format!("ESTree -> local AST conversion failed: {}", e))
+    })?;
+    check(&prog)
+}
+
 struct TypeContext {
     scopes: Vec<Scope>,
 }
@@ -162,41 +305,45 @@ impl TypeContext {
             }
 
             Statement::VarDecl(v) => {
-                let var_type = if let Some(ref ann) = v.type_ann {
-                    ann.clone()
-                } else if let Some(ref init) = v.init {
-                    self.type_of_expr(init)?
-                } else {
-                    return Err(TypeCheckerError::from(format!(
-                        "Variable '{}' needs a type annotation or initializer",
-                        v.name
-                    )));
-                };
+                // A VarDecl now contains multiple declarators. Type-check each
+                // declarator and insert its binding into the current scope.
+                for dec in &v.decls {
+                    let var_type = if let Some(ref ann) = dec.type_ann {
+                        ann.clone()
+                    } else if let Some(ref init) = dec.init {
+                        self.type_of_expr(init)?
+                    } else {
+                        return Err(TypeCheckerError::from(format!(
+                            "Variable '{}' needs a type annotation or initializer",
+                            dec.name
+                        )));
+                    };
 
-                if let Some(ref init) = v.init {
-                    // Special-case: allow assigning an empty array literal to an annotated array type.
-                    let assign_ok = if let Expr::ArrayExpr(arr) = init {
-                        if arr.elements.is_empty() {
-                            matches!(var_type, Type::Array(_))
+                    if let Some(ref init) = dec.init {
+                        // Special-case: allow assigning an empty array literal to an annotated array type.
+                        let assign_ok = if let Expr::ArrayExpr(arr) = init {
+                            if arr.elements.is_empty() {
+                                matches!(var_type, Type::Array(_))
+                            } else {
+                                let init_type = self.type_of_expr(init)?;
+                                assignable(&var_type, &init_type)
+                            }
                         } else {
                             let init_type = self.type_of_expr(init)?;
                             assignable(&var_type, &init_type)
+                        };
+                        if !assign_ok {
+                            return Err(TypeCheckerError::from(format!(
+                                "Type '{}' is not assignable to type '{}' for variable '{}'",
+                                type_to_string(&self.type_of_expr(init)?),
+                                type_to_string(&var_type),
+                                dec.name
+                            )));
                         }
-                    } else {
-                        let init_type = self.type_of_expr(init)?;
-                        assignable(&var_type, &init_type)
-                    };
-                    if !assign_ok {
-                        return Err(TypeCheckerError::from(format!(
-                            "Type '{}' is not assignable to type '{}' for variable '{}'",
-                            type_to_string(&self.type_of_expr(init)?),
-                            type_to_string(&var_type),
-                            v.name
-                        )));
                     }
-                }
 
-                self.scope_mut().insert(v.name.clone(), var_type);
+                    self.scope_mut().insert(dec.name.clone(), var_type);
+                }
             }
             Statement::Block(b) => {
                 self.scopes.push(Scope::new());
@@ -234,6 +381,20 @@ impl TypeContext {
                 // `while` conditions also accept any truthy/falsy value in JS.
                 let _ = self.type_of_expr(&w.test)?;
                 self.check_statement(&w.body)?;
+            }
+            Statement::For(f) => {
+                // for(init; test; update) { body }
+                // init may be a VarDecl or ExpressionStatement
+                if let Some(init_stmt) = &f.init {
+                    self.check_statement(init_stmt)?;
+                }
+                if let Some(test_expr) = &f.test {
+                    let _ = self.type_of_expr(test_expr)?;
+                }
+                if let Some(update_expr) = &f.update {
+                    let _ = self.type_of_expr(update_expr)?;
+                }
+                self.check_statement(&f.body)?;
             }
             Statement::Continue => {
                 // Continue has no type-level effects; accept for now.
@@ -354,6 +515,9 @@ impl TypeContext {
                 }
                 self.type_of_expr(&e.expression)?;
             }
+            // Other statement kinds not yet modelled here (Break, Switch, etc.).
+            // Accept them as no-ops for now to keep the incremental migration moving.
+            _ => {}
         }
         Ok(())
     }
@@ -589,6 +753,33 @@ impl TypeContext {
                 let return_type = f.return_type.clone().unwrap_or(Type::Void);
                 Ok(Type::Function(param_types, Box::new(return_type)))
             }
+            Expr::TemplateExpr(_t) => {
+                // Template expressions produce strings at runtime. Type as `string`.
+                Ok(Type::String)
+            }
+            Expr::UpdateExpr(u) => {
+                // ++x / x++ / --x / x-- : only allow numeric operands for now.
+                match &*u.argument {
+                    Expr::Identifier(ident) => {
+                        let name = &ident.name;
+                        let var_type = self.lookup(name).ok_or_else(|| {
+                            TypeCheckerError::from(format!("Unknown variable '{}'", name))
+                        })?;
+                        // must be number-compatible
+                        if assignable(&Type::Number, &var_type) {
+                            Ok(Type::Number)
+                        } else {
+                            Err(TypeCheckerError::from(format!(
+                                "UpdateExpression requires numeric operand, got {}",
+                                type_to_string(&var_type)
+                            )))
+                        }
+                    }
+                    _ => Err(TypeCheckerError::from(
+                        "UpdateExpression on unsupported target (only identifiers)".to_string(),
+                    )),
+                }
+            }
         }
     }
 }
@@ -620,6 +811,16 @@ fn assignable(expected: &Type, actual: &Type) -> bool {
 }
 
 /// Convert a `Type` to a human-readable string for diagnostics and error messages.
+///
+/// This function centralizes the textual representation used across the checker.
+/// It's intentionally simple (e.g. objects are rendered as `"object"`) and focuses
+/// on clarity for error messages rather than reversible or fully-specified type syntax.
+///
+/// # Examples
+///
+/// - `Type::Number` -> `"number"`
+/// - `Type::Array(Box::new(Type::String))` -> `"string[]"`
+/// - `Type::Function(vec![Type::Number], Box::new(Type::Void))` -> `"fn(number) -> void"`
 pub fn type_to_string(t: &Type) -> String {
     match t {
         Type::Number => "number".to_string(),
@@ -666,32 +867,32 @@ mod tests {
             var y = a && b;
             var z = 1 && 2;
         "#;
-        let session = Parser::parse_source(src).expect("parse");
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        assert!(check(program).is_ok());
+        assert!(check_oxc(program).is_ok());
     }
 
     #[test]
     fn unary_bang_accepts_non_boolean() {
         let src = "var a = !1;";
-        let session = Parser::parse_source(src).expect("parse");
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        assert!(check(program).is_ok());
+        assert!(check_oxc(program).is_ok());
     }
 
     #[test]
     fn if_condition_accepts_non_boolean() {
         let src = "if (1) { var x = 1; }";
-        let session = Parser::parse_source(src).expect("parse");
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        assert!(check(program).is_ok());
+        assert!(check_oxc(program).is_ok());
     }
 
     #[test]
     fn while_condition_accepts_non_boolean() {
         let src = "var i = 0; while (i) { i = i - 1; }";
-        let session = Parser::parse_source(src).expect("parse");
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        assert!(check(program).is_ok());
+        assert!(check_oxc(program).is_ok());
     }
 }

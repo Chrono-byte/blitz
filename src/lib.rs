@@ -32,21 +32,23 @@
 //! | [`lexer`] | Source tokenization |
 //! | [`parser`] | Token-to-AST parsing |
 //! | [`trace`] | Debug tracing and logging |
-//! | [`typecheck`] | TypeScript type checking integration |
+//! | [`mod@typecheck`] | TypeScript type checking integration |
 //! | [`value`] | Runtime value system |
 //! | [`vm`] - | Bytecode interpreter and execution engine |
 //!
 //! # Usage
 //!
 //! ```no_run
-//! use tsblitz::{Vm, compile_file};
+//! use tsblitz::Vm;
 //!
-//! // Compile TypeScript to bytecode
-//! let bytecode = compile_file("example.ts")?;
-//!
-//! // Execute in VM
-//! let mut vm = Vm::new();
-//! vm.run(&bytecode)?;
+//! // Example: construct a VM with an empty globals map. Compilation APIs are
+//! // available via the `compiler`/`parser` modules; this snippet shows VM usage.
+//! use std::rc::Rc;
+//! use std::cell::RefCell;
+//! use std::collections::HashMap;
+//! let globals = Rc::new(RefCell::new(HashMap::new()));
+//! let mut vm = Vm::new(globals);
+//! // vm.run(&bytecode)?; // run compiled bytecode when available
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -59,7 +61,6 @@ pub mod errors;
 pub mod estree_bridge;
 pub mod lexer;
 pub mod local_ast;
-pub mod oxc_typecheck;
 pub mod parser;
 pub mod trace;
 pub mod typecheck;
@@ -74,9 +75,7 @@ pub use errors::*;
 pub use lexer::*;
 pub use oast as ast;
 pub use oxc_ast::ast as oast;
-pub use oxc_typecheck::{
-    TypeIssue, TypecheckConfig, TypecheckResult, check_file as oxc_check_file, check_soft_layer,
-};
+// `oxc_typecheck` removed — use `typecheck` module which now provides oxc integrations.
 pub use parser::*;
 pub use trace::*;
 pub use typecheck::{check as typecheck, type_to_string as type_to_string_display};

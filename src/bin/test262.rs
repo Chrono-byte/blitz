@@ -3,7 +3,7 @@ Test262 connector script for tsblitz.
 
 Usage:
 - Set the `TEST262_DIR` environment variable to point at a checkout of
-  https://github.com/tc39/test262
+  <https://github.com/tc39/test262>
 - Optionally set `TEST262_FILTER` to a substring to limit which tests are run
 - Optionally set `TEST262_LIMIT` to limit how many tests are executed (default 50)
 
@@ -25,10 +25,10 @@ use std::rc::Rc;
 
 use serde::Deserialize;
 
-use tsblitz::{bundle_entry, compile, parser::Parser, typecheck, value::Value, vm::Vm};
+use tsblitz::compiler;
+use tsblitz::{bundle_entry, parser::Parser, typecheck, value::Value, vm::Vm};
 
 /// Minimal subset of metadata we care about.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct Negative {
     phase: String,
@@ -36,7 +36,6 @@ struct Negative {
     ty: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct Meta {
     flags: Option<Vec<String>>,
@@ -100,13 +99,17 @@ fn builtin_eval_script(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     );
 
     // Parse / typecheck / compile / run. Ignore errors and return Null on failure.
-    match Parser::parse_source_into_local_ast(&src) {
-        Ok(program) => {
-            if let Err(e) = typecheck(&program) {
+    match Parser::parse_source(&src) {
+        Ok(session) => {
+            let prog = session.program();
+            if let Err(e) = typecheck::check_oxc(prog) {
                 eprintln!("[evalScript] typecheck failed: {}", e);
                 return Ok(Value::Null);
             }
-            match compile(&program) {
+            // compile expects the owned local_ast for now; convert via ESTree JSON
+            let _estree = prog.to_pretty_estree_ts_json(false);
+            // Use the temporary compile_oxc shim so we can avoid an owned local_ast here.
+            match compiler::compile_oxc(prog) {
                 Ok(chunk) => {
                     let mut vm = Vm::new(new_globals);
                     match vm.run(chunk) {
@@ -135,10 +138,10 @@ fn run_source_in_realm(
     globals: Rc<RefCell<HashMap<String, Value>>>,
     source: &str,
 ) -> Result<Value, String> {
-    let program =
-        Parser::parse_source_into_local_ast(source).map_err(|e| format!("parse: {}", e))?;
-    typecheck(&program).map_err(|e| format!("typecheck: {}", e))?;
-    let chunk = compile(&program).map_err(|e| format!("compile: {}", e))?;
+    let session = Parser::parse_source(source).map_err(|e| format!("parse: {}", e))?;
+    let prog = session.program();
+    typecheck::check_oxc(prog).map_err(|e| format!("typecheck: {}", e))?;
+    let chunk = compiler::compile_oxc(prog).map_err(|e| format!("compile: {}", e))?;
     let mut vm = Vm::new(globals);
     vm.run(chunk).map_err(|e| format!("runtime: {}", e))
 }
@@ -290,8 +293,8 @@ fn run_test_file(
                     let hsrc = fs::read_to_string(&p)
                         .map_err(|e| format!("Failed to read harness {}: {}", p.display(), e))?;
                     // Parse/typecheck/compile the harness and run it in the provided VM
-                    let program = match Parser::parse_source_into_local_ast(&hsrc) {
-                        Ok(p) => p,
+                    let session = match Parser::parse_source(&hsrc) {
+                        Ok(s) => s,
                         Err(e) => {
                             eprintln!(
                                 "Skipping {} because harness {} parse failed: {}",
@@ -302,7 +305,8 @@ fn run_test_file(
                             return Ok(None);
                         }
                     };
-                    if let Err(e) = typecheck(&program) {
+                    let prog = session.program();
+                    if let Err(e) = typecheck::check_oxc(prog) {
                         eprintln!(
                             "Skipping {} because harness {} typecheck failed: {}",
                             path.display(),
@@ -311,7 +315,7 @@ fn run_test_file(
                         );
                         return Ok(None);
                     }
-                    let chunk = match compile(&program) {
+                    let chunk = match compiler::compile_oxc(prog) {
                         Ok(c) => c,
                         Err(e) => {
                             eprintln!(
@@ -369,8 +373,8 @@ fn run_test_file(
         }
 
         // Otherwise, parse must succeed
-        let session = match Parser::parse_source_into_local_ast(&run_src) {
-            Ok(p) => p,
+        let session = match Parser::parse_source(&run_src) {
+            Ok(s) => s,
             Err(e) => {
                 return Err(format!(
                     "{} ({}): unexpected parse error: {}",
@@ -380,10 +384,10 @@ fn run_test_file(
                 ));
             }
         };
-        let program = session;
+        let prog = session.program();
 
         // Typecheck - if this errors unexpectedly, test fails for this mode
-        if let Err(e) = typecheck(&program) {
+        if let Err(e) = typecheck::check_oxc(prog) {
             return Err(format!(
                 "{} ({}): typecheck error: {}",
                 path.display(),
@@ -392,8 +396,8 @@ fn run_test_file(
             ));
         }
 
-        // Compile
-        let chunk = match compile(&program) {
+        // Compile (convert to local_ast for now)
+        let chunk = match compiler::compile_oxc(prog) {
             Ok(c) => c,
             Err(e) => {
                 return Err(format!(
@@ -498,14 +502,17 @@ fn main() {
     let prelude_path = manifest_dir.join("soft/prelude.ts");
     if prelude_path.exists() {
         match bundle_entry(&prelude_path) {
-            Ok(prelude_program) => match compile(&prelude_program) {
-                Ok(chunk) => {
-                    if let Err(e) = vm.run(chunk) {
-                        eprintln!("Failed to execute soft prelude: {}", e);
+            Ok(session) => {
+                let prog = session.program();
+                match compiler::compile_oxc(prog) {
+                    Ok(chunk) => {
+                        if let Err(e) = vm.run(chunk) {
+                            eprintln!("Failed to execute soft prelude: {}", e);
+                        }
                     }
+                    Err(e) => eprintln!("Failed to compile soft prelude: {}", e),
                 }
-                Err(e) => eprintln!("Failed to compile soft prelude: {}", e),
-            },
+            }
             Err(e) => eprintln!("Failed to bundle soft prelude: {}", e),
         }
     }
