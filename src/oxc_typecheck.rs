@@ -490,35 +490,32 @@ impl SoftLayerTypechecker {
                     "VariableDeclaration" => {
                         if self.config.require_annotations
                             && let Some(decls) = item.get("declarations").and_then(|d| d.as_array())
-                            {
-                                for decl in decls {
-                                    // id may be Identifier or pattern
-                                    let id = decl
-                                        .get("id")
-                                        .and_then(|i| i.get("name"))
-                                        .and_then(|n| n.as_str())
-                                        .unwrap_or("<var>");
-                                    let has_type = decl
-                                        .get("id")
-                                        .and_then(|id| id.get("typeAnnotation"))
-                                        .is_some()
-                                        || decl.get("typeAnnotation").is_some();
-                                    if !has_type {
-                                        self.add_issue(
-                                            IssueSeverity::Warning,
-                                            "MISSING_VAR_TYPE",
-                                            &format!(
-                                                "Variable '{}' is missing a type annotation",
-                                                id
-                                            ),
-                                            None,
-                                            None,
-                                            file_path,
-                                            Some(source),
-                                        );
-                                    }
+                        {
+                            for decl in decls {
+                                // id may be Identifier or pattern
+                                let id = decl
+                                    .get("id")
+                                    .and_then(|i| i.get("name"))
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("<var>");
+                                let has_type = decl
+                                    .get("id")
+                                    .and_then(|id| id.get("typeAnnotation"))
+                                    .is_some()
+                                    || decl.get("typeAnnotation").is_some();
+                                if !has_type {
+                                    self.add_issue(
+                                        IssueSeverity::Warning,
+                                        "MISSING_VAR_TYPE",
+                                        &format!("Variable '{}' is missing a type annotation", id),
+                                        None,
+                                        None,
+                                        file_path,
+                                        Some(source),
+                                    );
                                 }
                             }
+                        }
                     }
                     _ => {}
                 }

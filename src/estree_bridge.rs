@@ -60,7 +60,8 @@ fn convert_stmt(v: &Value) -> Result<la::Statement, String> {
                         _ => s
                             .get("imported")
                             .and_then(|i| i.get("name"))
-                            .and_then(|n| n.as_str()).map_or_else(|| local.clone(), ToString::to_string),
+                            .and_then(|n| n.as_str())
+                            .map_or_else(|| local.clone(), ToString::to_string),
                     };
                     specs.push((local, imported));
                 }
@@ -211,12 +212,13 @@ fn convert_stmt(v: &Value) -> Result<la::Statement, String> {
                     .and_then(|d| d.as_array())
                     .and_then(|arr| arr.first())
                     .and_then(|dec| dec.get("id"))
-                    && let Some(name) = id.get("name").and_then(|n| n.as_str()) {
-                        return Ok(la::Statement::Declare(la::Declare {
-                            name: name.to_string(),
-                            type_ann: None,
-                        }));
-                    }
+                    && let Some(name) = id.get("name").and_then(|n| n.as_str())
+                {
+                    return Ok(la::Statement::Declare(la::Declare {
+                        name: name.to_string(),
+                        type_ann: None,
+                    }));
+                }
                 return Err("Unsupported declare form".to_string());
             }
 
@@ -378,13 +380,13 @@ fn convert_stmt(v: &Value) -> Result<la::Statement, String> {
                     .and_then(|d| d.as_array())
                     .and_then(|arr| arr.first())
                     .and_then(|dec| dec.get("id"))
-            })
-                && let Some(name) = id.get("name").and_then(|n| n.as_str()) {
-                    return Ok(la::Statement::Declare(la::Declare {
-                        name: name.to_string(),
-                        type_ann: None,
-                    }));
-                }
+            }) && let Some(name) = id.get("name").and_then(|n| n.as_str())
+            {
+                return Ok(la::Statement::Declare(la::Declare {
+                    name: name.to_string(),
+                    type_ann: None,
+                }));
+            }
             Err("Unsupported declare form".to_string())
         }
         other => Err(format!("Unsupported statement type: {}", other)),

@@ -160,13 +160,14 @@ fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>) {
                 collect_tests(&p, out);
             } else if ft.is_file()
                 && let Some(ext) = p.extension().and_then(|s| s.to_str())
-                    && ext == "js"
-                        && let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                            if name.contains("_FIXTURE") {
-                                continue;
-                            }
-                            out.push(p.clone());
-                        }
+                && ext == "js"
+                && let Some(name) = p.file_name().and_then(|s| s.to_str())
+            {
+                if name.contains("_FIXTURE") {
+                    continue;
+                }
+                out.push(p.clone());
+            }
         }
     }
 }
@@ -180,24 +181,25 @@ fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>) {
 fn should_skip_test(src: &str, meta: &Option<Meta>) -> bool {
     if let Some(m) = meta
         && let Some(flags) = &m.flags
-            && flags.iter().any(|f| {
-                matches!(
-                    f.as_str(),
-                    "module" | "raw" | "async" | "noStrict" | "onlyStrict" // onlyStrict/noStrict handled below, but we don't run `module/raw/async`
-                )
-            }) {
-                // We will still handle onlyStrict/noStrict below in a limited way,
-                // but module/raw/async are skipped entirely.
-                if flags
-                    .iter()
-                    .any(|f| f == "module" || f == "raw" || f == "async")
-                {
-                    return true;
-                }
-            }
-        // `includes` are not skipped here. Included harness files will be
-        // evaluated at runtime by the runner (see below) so that tests which
-        // reference helper files can be supported.
+        && flags.iter().any(|f| {
+            matches!(
+                f.as_str(),
+                "module" | "raw" | "async" | "noStrict" | "onlyStrict" // onlyStrict/noStrict handled below, but we don't run `module/raw/async`
+            )
+        })
+    {
+        // We will still handle onlyStrict/noStrict below in a limited way,
+        // but module/raw/async are skipped entirely.
+        if flags
+            .iter()
+            .any(|f| f == "module" || f == "raw" || f == "async")
+        {
+            return true;
+        }
+    }
+    // `includes` are not skipped here. Included harness files will be
+    // evaluated at runtime by the runner (see below) so that tests which
+    // reference helper files can be supported.
     // Very simple heuristic: skip tests that use `throw` (our runtime doesn't
     // yet support the ThrowStatement semantics required by many Test262 tests).
     if src.contains("throw") {
@@ -233,15 +235,16 @@ fn run_test_file(
     let mut run_non_strict = true;
     let mut run_strict = true;
     if let Some(m) = &meta
-        && let Some(flags) = &m.flags {
-            if flags.iter().any(|f| f == "onlyStrict") {
-                run_non_strict = false;
-                run_strict = true;
-            } else if flags.iter().any(|f| f == "noStrict") {
-                run_non_strict = true;
-                run_strict = false;
-            }
+        && let Some(flags) = &m.flags
+    {
+        if flags.iter().any(|f| f == "onlyStrict") {
+            run_non_strict = false;
+            run_strict = true;
+        } else if flags.iter().any(|f| f == "noStrict") {
+            run_non_strict = true;
+            run_strict = false;
         }
+    }
 
     // The VM and globals are provided by the caller. We'll reset VM state to
     // a clean run while keeping `keep_globals` intact.
@@ -347,22 +350,23 @@ fn run_test_file(
         // Handle parse-phase negative expectations first
         if let Some(m) = &meta
             && let Some(neg) = &m.negative
-                && neg.phase == "parse" {
-                    // Expect parse to fail
-                    match Parser::parse_source(&run_src) {
-                        Ok(_) => {
-                            return Err(format!(
-                                "{} ({}): expected parse error (phase=parse) but parse succeeded",
-                                path.display(),
-                                mode_name
-                            ));
-                        }
-                        Err(_) => {
-                            // got parse error as expected for this mode; continue to next mode
-                            continue;
-                        }
-                    }
+            && neg.phase == "parse"
+        {
+            // Expect parse to fail
+            match Parser::parse_source(&run_src) {
+                Ok(_) => {
+                    return Err(format!(
+                        "{} ({}): expected parse error (phase=parse) but parse succeeded",
+                        path.display(),
+                        mode_name
+                    ));
                 }
+                Err(_) => {
+                    // got parse error as expected for this mode; continue to next mode
+                    continue;
+                }
+            }
+        }
 
         // Otherwise, parse must succeed
         let session = match Parser::parse_source_into_local_ast(&run_src) {
@@ -407,18 +411,19 @@ fn run_test_file(
         // If the test expects a runtime error, ensure one occurred.
         if let Some(m) = &meta
             && let Some(neg) = &m.negative
-                && neg.phase == "runtime" {
-                    if run_result.is_err() {
-                        // ok - expected runtime error
-                        continue;
-                    } else {
-                        return Err(format!(
-                            "{} ({}): expected runtime error but execution succeeded",
-                            path.display(),
-                            mode_name
-                        ));
-                    }
-                }
+            && neg.phase == "runtime"
+        {
+            if run_result.is_err() {
+                // ok - expected runtime error
+                continue;
+            } else {
+                return Err(format!(
+                    "{} ({}): expected runtime error but execution succeeded",
+                    path.display(),
+                    mode_name
+                ));
+            }
+        }
 
         // For non-negative tests, execution must succeed.
         if run_result.is_err() {
@@ -520,9 +525,10 @@ fn main() {
             break;
         }
         if let Some(ref flt) = filter
-            && !f.to_string_lossy().contains(flt) {
-                continue;
-            }
+            && !f.to_string_lossy().contains(flt)
+        {
+            continue;
+        }
 
         eprintln!("Running test: {}", f.display());
         match run_test_file(&f, &test262_dir, &mut vm, &keep_globals) {

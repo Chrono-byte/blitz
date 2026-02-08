@@ -31,15 +31,16 @@
 //! TSBLITZ_TRACE=1 cargo run -- file.ts
 //! ```
 
+use clap::Parser;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use tsblitz::bytecode;
 use tsblitz::local_ast::Program;
-use tsblitz::{bundle_entry, compile, parser::Parser, typecheck, value::Value, vm::Vm};
+use tsblitz::{bundle_entry, compile, parser::Parser as TsParser, typecheck, value::Value, vm::Vm};
 
 /// Minimal native hook: print to stdout. The TS soft layer wraps this as console.log.
 fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
@@ -97,8 +98,7 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 ///
 /// Returns an error string if any stage of compilation fails
 fn run_source(vm: &mut Vm, source: &str) -> Result<Value, tsblitz::errors::Error> {
-    let program =
-        Parser::parse_source_into_local_ast(source)?;
+    let program = TsParser::parse_source_into_local_ast(source)?;
     typecheck(&program)?;
     let chunk = compile(&program)?;
     vm.run(chunk).map_err(tsblitz::errors::Error::from)
@@ -175,6 +175,19 @@ fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
 // combined `Program` for an entry file that resolves relative imports and
 // inlines module bodies in dependency order.
 
+/// Command line arguments for the tsblitz executable.
+#[derive(Parser, Debug)]
+#[command(name = "tsblitz", about = "Blitz — TypeScript VM (Rust runtime)")]
+struct Cli {
+    /// TypeScript file to execute. If omitted the REPL will be started.
+    #[arg(value_name = "FILE")]
+    file: Option<PathBuf>,
+
+    /// Start the REPL even when a file is not provided.
+    #[arg(short, long, action)]
+    repl: bool,
+}
+
 fn main() -> Result<(), tsblitz::errors::Error> {
     // Public globals visible to user code (populated by the prelude)
     let globals = Rc::new(RefCell::new(HashMap::new()));
@@ -213,10 +226,12 @@ fn main() -> Result<(), tsblitz::errors::Error> {
         }),
     );
 
+    // Parse CLI early so clap can handle --help/--version before doing work.
+    let cli = Cli::parse();
+
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let prelude_path = manifest_dir.join("soft/prelude.ts");
-    let prelude_program =
-        bundle_entry(&prelude_path)?;
+    let prelude_program = bundle_entry(&prelude_path)?;
 
     // Skip type checking for soft layer prelude (has dynamic patterns that typechecker doesn't handle yet)
     let chunk = compile(&prelude_program)?;
@@ -455,15 +470,14 @@ fn main() -> Result<(), tsblitz::errors::Error> {
         }
     }
 
-    let args: Vec<String> = env::args().collect();
-    if args.len() > 1 {
-        let path = Path::new(&args[1]);
-        let program = bundle_entry(path)?;
+    // If a file was provided, run it and exit. Otherwise start REPL.
+    if let Some(path) = cli.file {
+        let program = bundle_entry(&path)?;
         run_program(&mut repl_vm, program)?;
         return Ok(());
     }
 
-    // REPL with line-editing and history
+    // Start REPL (explicit flag or no file provided)
     println!("Blitz — TypeScript VM (Rust runtime). Type exit to quit.");
     let mut rl = rustyline::Editor::<(), rustyline::history::DefaultHistory>::new()
         .map_err(|e| tsblitz::errors::RuntimeError::from(format!("Readline init error: {}", e)))?;
