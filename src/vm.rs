@@ -48,6 +48,9 @@ use crate::value::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
+use tokio::runtime::Runtime;
+use std::future::Future;
 
 /// Virtual machine for executing bytecode.
 pub struct Vm {
@@ -69,6 +72,10 @@ pub struct Vm {
     current_slot_types: Option<Vec<Option<Type>>>,
     /// Inline-cache storage per chunk keyed by chunk pointer.
     ic_caches: RefCell<HashMap<usize, Vec<Option<IcEntry>>>>,
+    /// Background runtime for offloading blocking or async host work.
+    /// The runtime is multi-threaded so builtins and other host operations can
+    /// perform I/O or CPU-bound work without blocking the main VM thread.
+    bg_runtime: Arc<Runtime>,
     /// Exception handler stack.
     handlers: Vec<HandlerRecord>,
 }
@@ -99,6 +106,17 @@ struct IcEntry {
 impl Vm {
     /// Create a new virtual machine.
     pub fn new(globals: Rc<RefCell<HashMap<String, Value>>>) -> Self {
+        // Build a small dedicated multi-threaded runtime for background work.
+        // We choose the worker count from available parallelism where possible.
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(threads)
+            .enable_all()
+            .build()
+            .expect("Failed to build Tokio runtime for VM background tasks");
+
         Self {
             chunk: Rc::new(Chunk::new()),
             ip: 0,
@@ -109,6 +127,7 @@ impl Vm {
             root_chunk: None,
             current_slot_types: None,
             ic_caches: RefCell::new(HashMap::new()),
+            bg_runtime: Arc::new(rt),
             handlers: Vec::new(),
         }
     }
@@ -849,23 +868,31 @@ impl Vm {
 
         let chunk_id = Rc::as_ptr(&self.chunk) as usize;
         let mut caches = self.ic_caches.borrow_mut();
+        // Ensure a cache vector exists for this chunk. The vector is sized to
+        // 256 by default (single-byte slot immediates), but the VM should be
+        // defensive: if a slot value larger than the initial size appears,
+        // resize the cache vector to accommodate it instead of panicking.
         let cache_vec = caches.entry(chunk_id).or_insert_with(|| vec![None; 256]);
 
         match &obj {
             Value::Object(map_rc) => {
                 let obj_ptr = Rc::as_ptr(map_rc) as usize;
-                if let Some(Some(entry)) = cache_vec.get(slot).cloned()
-                    && entry.obj_ptr == obj_ptr
+
+                // Defensive: if the compiled bytecode uses a slot index that
+                // is larger than the current cache vector, grow the cache.
+                if slot >= cache_vec.len() {
+                    cache_vec.resize(slot + 1, None);
+                }
+
+                if let Some(Some(entry)) = cache_vec.get(slot).cloned() && entry.obj_ptr == obj_ptr
                 {
                     self.stack.push(entry.value);
                     return Ok(());
                 }
 
                 let v = get_property(&obj, &key)?;
-                cache_vec[slot] = Some(IcEntry {
-                    obj_ptr,
-                    value: v.clone(),
-                });
+                // Safe to index now because we've resized above when necessary.
+                cache_vec[slot] = Some(IcEntry { obj_ptr, value: v.clone() });
                 self.stack.push(v);
             }
             _ => {
@@ -875,6 +902,52 @@ impl Vm {
         }
 
         Ok(())
+    }
+
+    /// Run a blocking function on the VM's background runtime and wait for the
+    /// result synchronously. This is intended for builtins that want to
+    /// offload CPU‑intensive or blocking work to the runtime's worker threads
+    /// without changing the VM's synchronous execution model.
+    pub fn run_blocking<F, R>(&self, f: F) -> Result<R, crate::errors::RuntimeError>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let rt = Arc::clone(&self.bg_runtime);
+        let handle = rt.spawn_blocking(f);
+        match rt.block_on(async { handle.await }) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(crate::errors::RuntimeError::from(format!(
+                "Background task failed: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Synchronously execute an async future on the VM's runtime and return
+    /// its output. This is a convenience wrapper for host code that wants to
+    /// perform async I/O while remaining in the VM's synchronous call stack.
+    pub fn block_on<Fut>(&self, fut: Fut) -> Result<Fut::Output, crate::errors::RuntimeError>
+    where
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let rt = Arc::clone(&self.bg_runtime);
+        Ok(rt.block_on(fut))
+    }
+
+    /// Spawn a background task on the VM's runtime without waiting for it.
+    /// Use this for fire-and-forget host work (e.g. background I/O or logging)
+    /// that must not block the VM's synchronous execution loop.
+    pub fn spawn_bg<Fut>(&self, fut: Fut)
+    where
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let rt = Arc::clone(&self.bg_runtime);
+        // It's safe to ignore the JoinHandle here for best-effort background
+        // work; callers should use `block_on`/`run_blocking` when they require
+        // a result.
+        let _ = rt.spawn(fut);
     }
 
     fn jump(&mut self, offset: isize) -> Result<(), crate::errors::RuntimeError> {

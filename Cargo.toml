@@ -27,6 +27,7 @@ serde_yaml = "0.9"
 rustyline = "11"
 clap = { version = "4.5.57", features = ["derive"] }
 ouroboros = "0.15"
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "sync", "macros"] }
 
 [lints.rust]
 # Enforce good practices similar to kernel coding style

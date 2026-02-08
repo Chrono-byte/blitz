@@ -64,27 +64,34 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Preserve existing trace logging when enabled.
+    // Build the final joined string to print and offload actual IO to the
+    // background runtime so the VM main thread is not blocked on slow
+    // host I/O (terminals, pipes, etc.). Only move the owned `String` into
+    // the background task; do not move VM-internal values (which are not
+    // Send/Sync).
+    let s_owned = s.clone();
+
+    // Keep a small synchronous trace for diagnostics, then schedule the
+    // heavy lifting to the background runtime.
     if tsblitz::trace::enabled() {
         eprintln!(
-            "[diag] host.native_print joined len={} repr={:?}",
-            s.len(),
-            s
+            "[diag] host.native_print scheduled async write len={} repr={:?}",
+            s_owned.len(),
+            s_owned
         );
     }
 
-    // Additional unconditional diagnostic: write a single-line debug to stderr so
-    // we can see what the runtime attempted to print even when trace is not enabled.
-    // This helps diagnose cases where stdout output appears missing.
-    eprintln!("[diag] host.native_print -> {:?}", s);
-
-    // Print without adding a newline (preserve previous behavior) but
-    // explicitly flush stdout so short-lived processes still show output.
-    use std::io::Write;
-    print!("{}", s);
-    let _ = std::io::stdout().flush();
-    // Also flush stderr to ensure the diagnostic line is visible immediately.
-    let _ = std::io::stderr().flush();
+    // Schedule fire-and-forget async printing. We intentionally ignore the
+    // JoinHandle — printing is best-effort and we don't want to block the VM
+    // waiting for it. Background tasks must not access VM state.
+    _vm.spawn_bg(async move {
+        // Perform synchronous writes on the background thread. This keeps the
+        // main VM thread responsive while the OS performs potentially slow
+        // I/O.
+        use std::io::Write;
+        print!("{}", s_owned);
+        let _ = std::io::stdout().flush();
+    });
 
     Ok(Value::Null)
 }
