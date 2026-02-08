@@ -1,4 +1,38 @@
-//! Runtime values: number, string, bool, null, object, array, closure.
+//! Runtime value types for the VM.
+//!
+//! This module defines the core value types that the VM operates on:
+//! - [`Value`] enum: All runtime values (numbers, strings, objects, functions)
+//! - [`BuiltinFn`] type: Native function signature
+//! - [`RuntimeType`] enum: Runtime type descriptors
+//!
+//! # Value Types
+//!
+//! | Variant | Description |
+//! |---------|-------------|
+//! | `Number` | IEEE 754 double-precision float |
+//! | `String` | UTF-8 string |
+//! | `Bool` | Boolean value |
+//! | `Null` | Null value |
+//! | `Object` | Property map with prototype chain |
+//! | `Array` | Dense array with property bag |
+//! | `Closure` | Function with captured environment |
+//! | `Builtin` | Native Rust function |
+//!
+//! # Memory Management
+//!
+//! Objects, arrays, and closures use `Rc<RefCell<...>>` for shared mutable
+//! ownership within a single thread. The VM is not thread-safe.
+//!
+//! # Example
+//!
+//! ```
+//! use tsblitz::value::Value;
+//!
+//! let num = Value::Number(42.0);
+//! let s = Value::String("hello".to_string());
+//! assert!(num.is_truthy());
+//! assert_eq!(num.type_name(), "number");
+//! ```
 
 use std::cell::RefCell;
 use std::collections::HashMap;

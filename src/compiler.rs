@@ -1,9 +1,26 @@
-//! Compile AST to bytecode.
+//! AST-to-bytecode compiler.
 //!
-//! TODO: Add JIT compilation support.
+//! The compiler transforms parsed TypeScript/JavaScript AST into executable
+//! bytecode for the VM. It performs:
+//! - Variable resolution (locals vs globals)
+//! - Type annotation tracking for runtime checks
+//! - Control flow compilation (if/else, while, try/catch, etc.)
+//! - Function compilation with closure support
 //!
-//! Needs to prefetch code and then optimize using multiple passes. in order to optimize the code.
-//! Will identify loops, and other control flow structures. that may be optimized.
+//! # Architecture
+//!
+//! Compilation is single-pass over the AST:
+//! 1. Pre-declare function names for hoisting support
+//! 2. Compile statements sequentially
+//! 3. Emit bytecode directly into a [`Chunk`]
+//! 4. Track local variables and their types for runtime enforcement
+//!
+//! # Future Work
+//!
+//! - JIT compilation with multiple optimization passes
+//! - Loop identification and optimization
+//! - Dead code elimination
+//! - Constant folding
 
 use crate::bytecode::{Chunk, FunctionProto, Op};
 use crate::oast as ast;

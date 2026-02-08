@@ -1,4 +1,35 @@
-//! CLI: run TS files or REPL. Bootstrap soft layer (optional), then user code.
+//! CLI entry point for tsblitz VM.
+//!
+//! The CLI provides two main interfaces:
+//! - **File execution**: Run a TypeScript file directly
+//! - **REPL**: Interactive read-eval-print loop with history
+//!
+//! # Bootstrapping
+//!
+//! On startup, the CLI:
+//! 1. Creates a VM with native host bindings (`__native_print`, etc.)
+//! 2. Loads and executes the soft layer prelude (`soft/prelude.ts`)
+//! 3. The prelude installs standard library globals (console, Array, Object, etc.)
+//! 4. Executes user code in the initialized VM
+//!
+//! # Host Bindings
+//!
+//! Native functions exposed to the soft layer:
+//! - `__native_print` - Print to stdout
+//! - `__native_new_object` - Create VM-backed objects
+//!
+//! # Usage
+//!
+//! ```bash
+//! # Run a TypeScript file
+//! cargo run -- path/to/file.ts
+//!
+//! # Start REPL
+//! cargo run -- --repl
+//!
+//! # Enable tracing
+//! TSBLITZ_TRACE=1 cargo run -- file.ts
+//! ```
 
 use std::cell::RefCell;
 use std::collections::HashMap;

@@ -1,4 +1,38 @@
-/*! Type checker: strict type checking before compile. Types are not erased. */
+//! Static type checker for TypeScript/JavaScript programs.
+//!
+//! This module performs compile-time type checking before bytecode generation.
+//! It validates:
+//! - Variable declarations and assignments
+//! - Function parameter and return types
+//! - Binary and unary operations
+//! - Control flow constructs
+//! - Object and array literals
+//!
+//! # Strict Mode
+//!
+//! Strict mode (enabled by default via `TSBLITZ_STRICT`) enforces:
+//! - Required type annotations on parameters
+//! - Required return type annotations
+//! - No implicit any
+//! - Undeclared variables are errors
+//!
+//! Disable strict mode by setting `TSBLITZ_STRICT=0`.
+//!
+//! # Type System
+//!
+//! Supports primitive types (number, string, boolean, null, void), arrays,
+//! objects, and functions. Type compatibility is structural for objects.
+//!
+//! # Example
+//!
+//! ```
+//! use tsblitz::typecheck::check;
+//! use tsblitz::parser::Parser;
+//!
+//! let source = "let x: number = 42;";
+//! let program = Parser::parse_source(source).unwrap();
+//! check(&program).expect("Type checking should pass");
+//! ```
 
 use crate::errors::TypeCheckerError;
 use crate::oast as ast;

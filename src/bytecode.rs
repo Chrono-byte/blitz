@@ -1,20 +1,35 @@
-//! Bytecode format: opcodes and chunk. Types are retained for runtime checks.
+//! Bytecode representation and VM instruction set.
 //!
-//! Improvements in this revision:
-//! - Safe conversions from/to `u8` for `Op` (no unsafe `transmute`).
-//! - `Op::is_jump` predicate and a static `jumps()` slice (no allocations).
-//! - `Chunk` helpers to read/write 16-bit operands and to hotwire jumps:
-//!   - `hotwire_jump_to_next` (make jump target the next instruction)
-//!   - `hotwire_make_unconditional` (convert conditional jump to unconditional)
-//!   - `hotwire_redirect` (change jump target to a specified instruction index)
+//! This module defines the bytecode format used by the VM, including:
+//! - [`Op`] enum: All VM opcodes with safe conversions to/from `u8`
+//! - [`Chunk`] struct: Container for bytecode, constants, and function prototypes
+//! - [`FunctionProto`] struct: Metadata for compiled functions
 //!
-//! Notes:
-//! - Instruction layout assumptions for jump instructions:
-//!   - opcode byte at `ip`
-//!   - a signed 16-bit little-endian relative offset (i16) immediately follows the opcode
-//!   - the offset is measured relative to the "next instruction" (i.e., ip + 1 + 2)
-//! - Hotpatching is only safe when no other thread may concurrently execute the bytecode
-//!   being patched. This module does not perform synchronization; callers must ensure safety.
+//! # Instruction Format
+//!
+//! Jump instructions use a 3-byte encoding:
+//! - Byte 0: Opcode
+//! - Bytes 1-2: Signed 16-bit little-endian offset (relative to next instruction)
+//!
+//! # Hotpatching
+//!
+//! The [`Chunk`] type provides helpers for runtime bytecode modification:
+//! - [`Chunk::hotwire_jump_to_next`] - Convert jump to no-op
+//! - [`Chunk::hotwire_make_unconditional`] - Make conditional jump unconditional
+//! - [`Chunk::hotwire_redirect`] - Change jump target
+//!
+//! Safety: Hotpatching requires exclusive access to the bytecode. Callers must
+//! ensure no concurrent execution while modifying chunks.
+//!
+//! # Example
+//!
+//! ```
+//! use tsblitz::bytecode::{Chunk, Op};
+//!
+//! let mut chunk = Chunk::new();
+//! chunk.write(Op::Const as u8, 1);
+//! chunk.write(0, 1); // Constant index
+//! ```
 
 use crate::oxc_typecheck::Type;
 use crate::value::Value;

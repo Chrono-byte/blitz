@@ -1,7 +1,27 @@
 //! Error types for the tsblitz kernel.
 //!
-//! This module provides a structured error hierarchy using `thiserror` for
-//! ergonomic error handling throughout the parser, type checker, compiler, and VM.
+//! This module defines a structured error hierarchy using `thiserror` for
+//! ergonomic error handling throughout the VM subsystems.
+//!
+//! # Error Types
+//!
+//! | Error | Source | Description |
+//! |-------|--------|-------------|
+//! | [`ParserError`] | Parser | Lexical and syntactic errors |
+//! | [`TypeCheckerError`] | Type checker | Static type checking failures |
+//! | [`CompilerError`] | Compiler | Bytecode generation errors |
+//! | [`RuntimeError`] | VM | Runtime execution errors |
+//! | [`BundlerError`] | Bundler | Module resolution failures |
+//!
+//! # Usage
+//!
+//! ```
+//! use tsblitz::errors::{Error, ParserError};
+//!
+//! fn may_fail() -> Result<(), Error> {
+//!     Err(ParserError::from("Unexpected token"))?
+//! }
+//! ```
 
 use thiserror::Error;
 

@@ -1,4 +1,46 @@
-//! Stack-based bytecode interpreter. Types are enforced at runtime.
+//! Stack-based bytecode interpreter with runtime type enforcement.
+//!
+//! The VM executes compiled bytecode in a stack-based environment. It provides:
+//! - Stack and local variable management
+//! - Function call frames and closures
+//! - Property access with inline caching
+//! - Exception handling (try/catch)
+//! - Runtime type checking
+//!
+//! # Architecture
+//!
+//! The VM maintains:
+//! - A value stack for operands and intermediate results
+//! - A locals array for function-local variables
+//! - A globals map for global variables
+//! - A call stack of frames for function calls
+//! - Exception handler records for try/catch
+//!
+//! # Execution
+//!
+//! The VM uses a fetch-decode-execute loop over bytecode instructions.
+//! Each instruction manipulates the stack or control flow.
+//!
+//! # Type Safety
+//!
+//! When type annotations are available, the VM enforces them at runtime:
+//! - Local variable assignments check slot types
+//! - Global variable assignments check global types
+//! - Function arguments are validated on call
+//!
+//! # Example
+//!
+//! ```
+//! use tsblitz::vm::Vm;
+//! use tsblitz::bytecode::Chunk;
+//! use std::cell::RefCell;
+//! use std::collections::HashMap;
+//! use std::rc::Rc;
+//!
+//! let globals = Rc::new(RefCell::new(HashMap::new()));
+//! let mut vm = Vm::new(globals);
+//! // vm.run(chunk)?;
+//! ```
 
 use crate::bytecode::{Chunk, Op};
 use crate::oxc_typecheck::Type;

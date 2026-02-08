@@ -1,8 +1,35 @@
-//! Lightweight placeholder typechecker using oxc components where possible.
+//! TypeScript type checker integration using OXC components.
 //!
-//! This module provides a small, well-typed surface the rest of the crate can
-//! depend on while a more complete integration with `oxc_ast`/`oxc_parser` is
-//! developed. The focus here is correctness of types and minimal behaviour.
+//! This module provides type checking capabilities for the TypeScript soft layer,
+//! leveraging the OXC parser and AST. It supports:
+//! - Parse error detection and reporting
+//! - Missing type annotation detection (configurable)
+//! - Semantic analysis via ESTree JSON
+//! - Configurable strictness levels
+//!
+//! # Components
+//!
+//! - [`SoftLayerTypechecker`]: Main type checker instance
+//! - [`TypeIssue`]: Individual diagnostic with severity, location, and message
+//! - [`TypecheckConfig`]: Configuration for strictness and behavior
+//! - [`Type`]: Core type system (number, string, boolean, arrays, functions, etc.)
+//!
+//! # Example
+//!
+//! ```no_run
+//! use tsblitz::oxc_typecheck::{check_soft_layer, TypecheckConfig};
+//! use std::path::Path;
+//!
+//! let config = TypecheckConfig {
+//!     strict_mode: true,
+//!     require_annotations: true,
+//!     warnings_only: false,
+//! };
+//!
+//! let result = check_soft_layer(Path::new("soft/"), Some(config))?;
+//! println!("Found {} errors, {} warnings", result.errors_count, result.warnings_count);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 // ParserError from crate::errors is not required in this module; do not import it here.
 use crate::oast;

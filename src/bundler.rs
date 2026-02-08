@@ -1,16 +1,32 @@
-//! Simple module bundler / module-graph loader.
+//! Module bundler for resolving and combining TypeScript modules.
 //!
-//! This implements a minimal, pragmatic bundling strategy used by the CLI:
-//! - Resolve static top-level `import` declarations with relative specifiers.
-//! - Walk the module graph (DFS), inline module declarations in dependency
-//!   order so that dependencies appear before importers.
-//! - Skip bare (non-relative) imports (treated as external).
+//! The bundler implements a minimal, pragmatic module resolution strategy for the CLI:
+//! - Resolves static top-level `import` declarations with relative specifiers
+//! - Performs depth-first search (DFS) to walk the module graph
+//! - Inlines modules in dependency-first order (dependencies before importers)
+//! - Skips bare (non-relative) imports, treating them as external dependencies
+//! - Handles circular dependencies by tracking visited nodes
 //!
-//! This is intentionally small and conservative: it avoids textual source
-//! rewriting and relies on the parser to produce an AST for each module. The
-//! bundler does not perform renaming/namespacing or advanced symbol resolution;
-//! it simply concatenates module bodies in an order that satisfies direct
-//! dependencies. Cycles are handled by visiting nodes once.
+//! # Design
+//!
+//! This bundler is intentionally conservative and avoids:
+//! - Textual source rewriting
+//! - Renaming or namespacing of symbols
+//! - Advanced symbol resolution
+//!
+//! Instead, it relies on the parser to produce an AST and simply concatenates
+//! module bodies in an order that satisfies direct dependencies.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use tsblitz::bundler::bundle_entry;
+//! use std::path::Path;
+//!
+//! let program = bundle_entry(Path::new("src/main.ts"))?;
+//! // The bundled program contains all dependencies inlined
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use crate::errors::BundlerError;
 use crate::oast as ast;

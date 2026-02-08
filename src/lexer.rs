@@ -1,4 +1,27 @@
-//! Lexer: tokenize TypeScript/JavaScript source.
+//! Lexical analyzer for tokenizing TypeScript/JavaScript source.
+//!
+//! The lexer transforms raw source code into a stream of [`Token`] values that
+//! are consumed by the parser. It handles:
+//! - Keywords (let, const, function, if, etc.)
+//! - Operators (+, -, *, /, ===, etc.)
+//! - Literals (numbers, strings, booleans, null)
+//! - Identifiers and type annotations
+//! - Comments (single-line // and multi-line /* */)
+//!
+//! # Tokenization
+//!
+//! Use [`Lexer::tokenize`] to convert an entire source string into a vector
+//! of tokens, or [`Lexer::next_token`] for incremental lexing.
+//!
+//! # Example
+//!
+//! ```
+//! use tsblitz::lexer::Lexer;
+//!
+//! let mut lexer = Lexer::new("let x = 42;");
+//! let tokens = lexer.tokenize().unwrap();
+//! // tokens contains: Let, Ident("x"), Assign, Number(42.0), Semicolon, Eof
+//! ```
 
 use std::fmt;
 

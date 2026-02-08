@@ -1,19 +1,57 @@
-//! Blitz VM: **Rust JavaScript VM**. Kernel bootstraps into the TypeScript runtime.
-//
-// Provide crate-level documentation while keeping linting strict.
-//! The tsblitz crate contains the Rust kernel (lexer, parser, VM, compiler)
-//! and exposes types used by the TypeScript soft layer. Public items are
-//! documented in their respective modules.
+//! Blitz VM: **TypeScript/JavaScript VM in Rust**. A Rust kernel bootstraps into
+//! a TypeScript runtime that provides the standard library and high-level APIs.
 //!
-//! - **Rust (this crate)** = the runtime: lexer, parser, bytecode compiler, bytecode
-//!   interpreter, heap/stack, opcodes. All execution lives here. Only minimal
-//!   primitives (e.g. a single native I/O hook) are implemented in Rust.
+//! # Architecture
 //!
-//! - **TypeScript (soft layer)** = everything above that: full standard library
-//!   (console, Array, Object, String, …) and any extra runtime APIs. All written
-//!   in TS and executed by this VM. No high-level APIs are implemented in Rust.
+//! This crate provides the execution engine for JavaScript/TypeScript code:
+//!
+//! - **Kernel (Rust)** - The bare-metal runtime layer containing:
+//!   - [`lexer`] - Tokenizes source code into tokens
+//!   - [`parser`] - Parses tokens into AST (using oxc_ast)
+//!   - [`compiler`] - Compiles AST into bytecode instructions
+//!   - [`bytecode`] - Defines VM opcodes and instruction encoding
+//!   - [`vm`] - Stack-based bytecode interpreter with heap/stack management
+//!   - [`value`] - Runtime value types (numbers, strings, objects, closures)
+//!   - [`errors`] - Error types for all VM operations
+//!   - [`trace`] - Execution tracing and debugging utilities
+//!
+//! - **Soft Layer (TypeScript)** - Lives in the `soft/` directory and contains:
+//!   - `blitzlib` - Standard library (console, Array, Object, String, Math, etc.)
+//!   - Runtime APIs and host integration
+//!   - All written in TS, executed by the Rust VM
+//!
+//! # Module Overview
+//!
+//! | Module | Purpose |
+//! |--------|---------|
+//! | [`ast`] | Re-export of oxc_ast types for AST representation |
+//! | [`bundler`] | Entry point bundling and module resolution |
+//! | [`bytecode`] | VM instruction set and bytecode encoding/decoding |
+//! | [`compiler`] | AST-to-bytecode compilation |
+//! | [`errors`] | Error types for parsing, compilation, and runtime |
+//! | [`lexer`] | Source tokenization |
+//! | [`parser`] | Token-to-AST parsing |
+//! | [`trace`] | Debug tracing and logging |
+//! | [`typecheck`] | TypeScript type checking integration |
+//! | [`value`] | Runtime value system |
+//! | [`vm`] - | Bytecode interpreter and execution engine |
+//!
+//! # Usage
+//!
+//! ```no_run
+//! use tsblitz::{Vm, compile_file};
+//!
+//! // Compile TypeScript to bytecode
+//! let bytecode = compile_file("example.ts")?;
+//!
+//! // Execute in VM
+//! let mut vm = Vm::new();
+//! vm.run(&bytecode)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! See individual module documentation for detailed API usage.
 
-// The `ast` module is provided by oxc_ast and re-exported below.
 pub mod bundler;
 pub mod bytecode;
 pub mod compiler;

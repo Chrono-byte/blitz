@@ -1,11 +1,28 @@
-//! Parser adapter that delegates parsing to the Oxc parser and returns the
-//! produced Oxc AST (`oxc_ast::ast::Program`).
+//! Parser adapter using OXC for TypeScript/JavaScript parsing.
 //!
-//! Historically this module converted Oxc's ESTree JSON into an internal
-//! `tsblitz::ast` representation. During the migration to use `oxc_ast` natively
-//! the legacy conversion helpers were removed. Callers should use
-//! `Parser::parse_source(...)` which returns an `oast::Program` (an alias for
-//! `oxc_ast::ast::Program`).
+//! This module provides a thin wrapper around the OXC parser, delegating parsing
+//! to OXC and returning the produced AST (`oxc_ast::ast::Program`). It handles:
+//! - Source text parsing into AST
+//! - Import extraction for module bundling
+//! - Error conversion to tsblitz error types
+//!
+//! # Migration Note
+//!
+//! Historically this module converted Oxc's ESTree JSON into an internal AST.
+//! The legacy conversion helpers were removed during migration to use `oxc_ast`
+//! natively. Callers should use [`Parser::parse_source`] which returns an
+//! `oast::Program` (an alias for `oxc_ast::ast::Program`).
+//!
+//! # Example
+//!
+//! ```no_run
+//! use tsblitz::parser::Parser;
+//!
+//! let source = "let x: number = 42;";
+//! let program = Parser::parse_source(source)?;
+//! // Use program AST for compilation or analysis
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use crate::errors::ParserError;
 use oxc_ast::ast as oast;
@@ -31,60 +48,10 @@ pub struct Parser {
     source: Option<String>,
 }
 
-/// A ParserSession owns the source string and allocator and exposes the
-/// parsed `oast::Program` which borrows both. The self-referential struct is
-/// implemented using `ouroboros` so the owned data stays alive for the
-/// lifetime of the returned session without unsafe leaks.
-#[self_referencing]
-pub struct ParserSession {
-    // owned source string
-    source: String,
-    // owned allocator
-    allocator: Allocator,
-    // borrows from source and allocator
-    #[borrows(source, allocator)]
-    #[covariant]
-    program: oast::Program<'this>,
-}
-
-impl ParserSession {
-    /// Create a new ParserSession by parsing `source` and returning the
-    /// session which owns required backing data.
-    pub fn try_new(source: &str) -> Result<Self, ParserError> {
-        let source_owned = source.to_string();
-        let alloc = Allocator::default();
-        let ret = OxcParser::new(&alloc, &source_owned, SourceType::ts())
-            .with_options(ParseOptions {
-                parse_regular_expression: true,
-                ..ParseOptions::default()
-            })
-            .parse();
-
-        if !ret.errors.is_empty() {
-            let mut msgs = Vec::new();
-            for e in ret.errors {
-                let err = e.with_source_code(source_owned.clone());
-                msgs.push(format!("{:?}", err));
-            }
-            return Err(ParserError::from(msgs.join("\n")));
-        }
-
-        // Build the self-referential struct with owned source/allocator and
-        // borrowed program. `ouroboros` ensures lifetimes are sound.
-        // Use `move` so the parser return (`ret`) is moved into the closure.
-        Ok(ParserSessionTryBuilder {
-            source: source_owned,
-            allocator: alloc,
-            program_builder: move |s, a| -> Result<oast::Program<'_>, ParserError> { Ok(ret.program) },
-        }
-        .try_build()?)
-    }
-
-    /// Access the parsed program borrowed from the session.
-    pub fn program(&self) -> &oast::Program<'_> {
-        self.borrow_program()
-    }
-}
+// NOTE: ParserSession attempted earlier using ouroboros caused macro
+// collisions and complicated the migration. For now keep a pragmatic leak
+// approach so `parse_source` returns an `oast::Program` with a 'static
+// lifetime. We'll replace this with a safe wrapper in a follow-up step.
 
 impl Parser {
     /// Legacy constructor kept for API compatibility. This will return an error
@@ -105,12 +72,11 @@ impl Parser {
         }
     }
 
-    /// Convenience top-level API: parse source text and return a session that
-    /// safely owns the source and allocator while exposing a borrowed
-    /// `oast::Program` tied to them. This replaces the previous leaking
-    /// behaviour and avoids process-wide leaks.
-    pub fn parse_source(source: &str) -> Result<ParserSession, ParserError> {
-        ParserSession::try_new(source)
+    /// Convenience top-level API: parse source text (same as calling
+    /// `Parser::new_from_source(source).parse()`).
+    pub fn parse_source(source: &str) -> Result<oast::Program, ParserError> {
+        let mut p = Parser::new_from_source(source);
+        p.parse()
     }
 
     /// Parse and return an `oxc_ast::ast::Program`.

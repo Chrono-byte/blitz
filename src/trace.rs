@@ -1,4 +1,29 @@
-//! Optional tracing for debugging. Set env TSBLITZ_TRACE=1 to enable.
+//! Optional runtime tracing for debugging VM execution.
+//!
+//! Tracing provides diagnostic output to help debug parsing, compilation, and
+//! runtime issues. Enable by setting the environment variable:
+//! ```bash
+//! TSBLITZ_TRACE=1
+//! ```
+//!
+//! # Usage
+//!
+//! Check if tracing is enabled with [`enabled`], then use the tracing functions
+//! to emit diagnostic information:
+//!
+//! ```
+//! use tsblitz::trace;
+//!
+//! if trace::enabled() {
+//!     trace::string("debug label", "value to inspect");
+//! }
+//! ```
+//!
+//! # Tracing Functions
+//!
+//! - [`enabled`] - Check if tracing is active
+//! - [`string`] - Log a string value with detailed info (length, bytes, repr)
+//! - [`value_string`] - Log a runtime Value when it's a string
 
 use std::env;
 
