@@ -9,111 +9,111 @@ import { toString } from "./core/runtime.js";
 // `globalThis`. During bootstrap these may be missing so this function
 // defensively falls back to a no-op.
 export function host_print(msg: string): void {
-    try {
-        const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
-        const p = g
-            ? g.__native_print || g.__native_print_raw || g.native_print || (g.host && g.host.host_print)
-            : undefined;
-        if (typeof p === "function") {
-            try {
-                if (msg !== "") p(msg);
-            } catch (_) { }
-        }
-    } catch (_) { }
+  try {
+    const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
+    const p = g
+      ? g.__native_print || g.__native_print_raw || g.native_print || (g.host && g.host.host_print)
+      : undefined;
+    if (typeof p === "function") {
+      try {
+        if (msg !== "") p(msg);
+      } catch (_) {}
+    }
+  } catch (_) {}
 }
 
 // Export runtime helpers as functions that lookup the host builtin on each
 // call. This avoids needing a module-level cached function value which can
 // become `null`/`undefined` due to bundling/initialization ordering.
 export function native_new_object(): any {
-    try {
-        const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
-        const f = g
-            ? g.__native_new_object ||
-            g.__native_new_object_raw ||
-            g.native_new_object ||
-            (g.host && g.host.native_new_object)
-            : undefined;
-        if (typeof f === "function") {
-            try {
-                return f();
-            } catch (_) {
-                return undefined;
-            }
-        }
-    } catch (_) { }
-    return undefined;
+  try {
+    const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
+    const f = g
+      ? g.__native_new_object ||
+        g.__native_new_object_raw ||
+        g.native_new_object ||
+        (g.host && g.host.native_new_object)
+      : undefined;
+    if (typeof f === "function") {
+      try {
+        return f();
+      } catch (_) {
+        return undefined;
+      }
+    }
+  } catch (_) {}
+  return undefined;
 }
 
 export function native_print(...args: any[]): void {
-    try {
-        const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
-        let f: any = g
-            ? g.__native_print ||
-            g.__native_print_raw ||
-            g.native_print ||
-            (g.host && g.host.native_print)
-            : undefined;
-        if (typeof f === "function") {
+  try {
+    const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
+    let f: any = g
+      ? g.__native_print ||
+        g.__native_print_raw ||
+        g.native_print ||
+        (g.host && g.host.native_print)
+      : undefined;
+    if (typeof f === "function") {
+      try {
+        const out = (args || [])
+          .map((a: any) => {
             try {
-                const out = (args || [])
-                    .map((a: any) => {
-                        try {
-                            if (a === null) return "null";
-                            if (typeof a === "undefined") return "undefined";
-                            if (typeof a === "string") return a;
-                            if (typeof a === "number") return toString(a as any);
-                            if (typeof a === "boolean") return a ? "true" : "false";
-                            try {
-                                return JSON.stringify(a);
-                            } catch (_) {
-                                return "[object]";
-                            }
-                        } catch (_) {
-                            return "";
-                        }
-                    })
-                    .join(" ");
-                f(out);
-            } catch (_) { }
-        }
-    } catch (_) { }
+              if (a === null) return "null";
+              if (typeof a === "undefined") return "undefined";
+              if (typeof a === "string") return a;
+              if (typeof a === "number") return toString(a as any);
+              if (typeof a === "boolean") return a ? "true" : "false";
+              try {
+                return JSON.stringify(a);
+              } catch (_) {
+                return "[object]";
+              }
+            } catch (_) {
+              return "";
+            }
+          })
+          .join(" ");
+        f(out);
+      } catch (_) {}
+    }
+  } catch (_) {}
 }
 
 // Small helper to print a debug line describing a value's type and a short
 // stringified representation. Use host_print so it is safe during bootstrap.
 export function debugValue(name: string, v: any): void {
+  try {
+    let typ: string = typeof v;
+    if (v === null) typ = "null";
+    let repr: string;
+    // Avoid calling global constructors like `String` or `Object` here because
+    // during bootstrap those globals may not be initialized or may be host
+    // backed values that don't behave like normal JS objects. Use simple
+    // primitive checks and fall back to a generic marker for complex values.
+    if (v === null) {
+      repr = "null";
+    } else if (typeof v === "undefined") {
+      repr = "undefined";
+    } else if (typeof v === "string") {
+      repr = v;
+    } else if (typeof v === "number" || typeof v === "boolean") {
+      try {
+        repr = (v as any).toString();
+      } catch (_) {
+        repr = "[primitive]";
+      }
+    } else {
+      repr = "[object]";
+    }
+    // Avoid heavy formatting when tracing is disabled. If the host wants
+    // tracing it should set a global flag `__TSBLITZ_TRACE` to a truthy value.
     try {
-        let typ: string = typeof v;
-        if (v === null) typ = "null";
-        let repr: string;
-        // Avoid calling global constructors like `String` or `Object` here because
-        // during bootstrap those globals may not be initialized or may be host
-        // backed values that don't behave like normal JS objects. Use simple
-        // primitive checks and fall back to a generic marker for complex values.
-        if (v === null) {
-            repr = "null";
-        } else if (typeof v === "undefined") {
-            repr = "undefined";
-        } else if (typeof v === "string") {
-            repr = v;
-        } else if (typeof v === "number" || typeof v === "boolean") {
-            try {
-                repr = (v as any).toString();
-            } catch (_) {
-                repr = "[primitive]";
-            }
-        } else {
-            repr = "[object]";
-        }
-        // Avoid heavy formatting when tracing is disabled. If the host wants
-        // tracing it should set a global flag `__TSBLITZ_TRACE` to a truthy value.
-        try {
-            const traceEnabled = typeof globalThis !== "undefined" && (globalThis as any).__TSBLITZ_TRACE;
-            if (!traceEnabled) return;
-        } catch (_) { }
-        host_print(name + " -> typeof=" + typ + " repr=" + repr);
-    } catch (_) { }
+      const traceEnabled = typeof globalThis !== "undefined" && (globalThis as any).__TSBLITZ_TRACE;
+      if (!traceEnabled) return;
+    } catch (_) {}
+    host_print(name + " -> typeof=" + typ + " repr=" + repr);
+  } catch (_) {}
 }
 
 // Note: we intentionally avoid a complex host-get indirection. The runtime
@@ -125,30 +125,30 @@ export function debugValue(name: string, v: any): void {
 // reads any runtime-published accessor (e.g. __host_get_fn or __host_get)
 // from `globalThis` and returns it if callable.
 export function getHostGetter(): any {
-    try {
-        const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
-        if (!g) return undefined;
-        const getter = g.__host_get_fn || g.__host_get;
-        if (typeof getter === "function") return getter;
-    } catch (_) { }
-    return undefined;
+  try {
+    const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
+    if (!g) return undefined;
+    const getter = g.__host_get_fn || g.__host_get;
+    if (typeof getter === "function") return getter;
+  } catch (_) {}
+  return undefined;
 }
 
 // Provide a helper to access cached builtins if available. Some bootstrapped
 // environments publish a `__get_builtin_cached` or similar accessor — fall
 // back to undefined when missing.
 export function getBuiltinCached(name: string): any {
-    try {
-        const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
-        if (!g) return undefined;
-        const fn = g.__get_builtin_cached || (g as any).getBuiltinCached;
-        if (typeof fn === "function") {
-            try {
-                return fn(name);
-            } catch (_) { }
-        }
-    } catch (_) { }
-    return undefined;
+  try {
+    const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
+    if (!g) return undefined;
+    const fn = g.__get_builtin_cached || (g as any).getBuiltinCached;
+    if (typeof fn === "function") {
+      try {
+        return fn(name);
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return undefined;
 }
 
 // Direct global access for host bindings. The host exposes helpers by
@@ -162,12 +162,12 @@ export function getBuiltinCached(name: string): any {
 // Keep this as a non-exported const so it's available as a plain
 // top-level binding in the bundled program.
 const host = {
-    host_print,
-    native_new_object,
-    native_print,
-    debugValue,
-    getHostGetter,
-    getBuiltinCached,
+  host_print,
+  native_new_object,
+  native_print,
+  debugValue,
+  getHostGetter,
+  getBuiltinCached,
 };
 
 // Also export the symbol for module consumers that import named exports.
@@ -180,11 +180,11 @@ export { host };
 // `native_print`, `debugValue`, `getHostGetter`, or `getBuiltinCached`) onto
 // `globalThis`. This avoids leaking low-level host internals into user code.
 try {
-    if (typeof globalThis !== "undefined") {
-        try {
-            const g: any = globalThis as any;
-            // Intentionally do not assign any host internals to `globalThis`.
-            // Consumers should import the helpers from this module when needed.
-        } catch (_) { }
-    }
-} catch (_) { }
+  if (typeof globalThis !== "undefined") {
+    try {
+      const g: any = globalThis as any;
+      // Intentionally do not assign any host internals to `globalThis`.
+      // Consumers should import the helpers from this module when needed.
+    } catch (_) {}
+  }
+} catch (_) {}

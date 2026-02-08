@@ -56,11 +56,15 @@ NumberImpl.POSITIVE_INFINITY = Infinity;
 NumberImpl.NEGATIVE_INFINITY = -Infinity;
 
 NumberImpl.isFinite = function (number: any): boolean {
-  return typeof number === "number" && number === number && number !== Infinity && number !== -Infinity;
+  return (
+    typeof number === "number" && number === number && number !== Infinity && number !== -Infinity
+  );
 };
 
 NumberImpl.isInteger = function (number: any): boolean {
-  return typeof number === "number" && number === number && !Number.isFinite(number) ? false : Math.floor(number) === number;
+  return typeof number === "number" && number === number && !Number.isFinite(number)
+    ? false
+    : Math.floor(number) === number;
 };
 
 NumberImpl.isNaN = function (number: any): boolean {
@@ -130,7 +134,9 @@ if (typeof Number !== "undefined") {
         let result = "";
         while (absN > 0) {
           const digit = Math.floor(absN % radix);
-          result = (digit < 10 ? String.fromCharCode(48 + digit) : String.fromCharCode(87 + digit)) + result;
+          result =
+            (digit < 10 ? String.fromCharCode(48 + digit) : String.fromCharCode(87 + digit)) +
+            result;
           absN = Math.floor(absN / radix);
         }
         return isNegative ? "-" + result : result;

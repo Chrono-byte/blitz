@@ -46,7 +46,7 @@ function createSymbol(description?: string): symbol {
     value: description,
     writable: true,
     enumerable: false,
-    configurable: true
+    configurable: true,
   });
   return sym;
 }
@@ -78,7 +78,8 @@ SymbolImpl.keyFor = function (sym: symbol): string | undefined {
 
 SymbolImpl.asyncIterator = Symbol.asyncIterator || createSymbol("Symbol.asyncIterator");
 SymbolImpl.hasInstance = Symbol.hasInstance || createSymbol("Symbol.hasInstance");
-SymbolImpl.isConcatSpreadable = Symbol.isConcatSpreadable || createSymbol("Symbol.isConcatSpreadable");
+SymbolImpl.isConcatSpreadable =
+  Symbol.isConcatSpreadable || createSymbol("Symbol.isConcatSpreadable");
 SymbolImpl.iterator = Symbol.iterator || createSymbol("Symbol.iterator");
 SymbolImpl.match = Symbol.match || createSymbol("Symbol.match");
 SymbolImpl.matchAll = Symbol.matchAll || createSymbol("Symbol.matchAll");

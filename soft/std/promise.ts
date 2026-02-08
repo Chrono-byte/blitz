@@ -6,24 +6,42 @@
 declare var Promise: PromiseConstructor;
 
 interface PromiseConstructor {
-  new <T>(executor: (resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: any) => void) => void): Promise<T>;
-  <T>(executor: (resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: any) => void) => void): Promise<T>;
+  new <T>(
+    executor: (
+      resolve: (value: T | PromiseLike<T>) => void,
+      reject: (reason?: any) => void,
+    ) => void,
+  ): Promise<T>;
+  <T>(
+    executor: (
+      resolve: (value: T | PromiseLike<T>) => void,
+      reject: (reason?: any) => void,
+    ) => void,
+  ): Promise<T>;
   readonly prototype: Promise<any>;
   resolve<T>(value: T | PromiseLike<T>): Promise<T>;
   reject<T = never>(reason?: any): Promise<T>;
   all<T>(values: readonly (T | PromiseLike<T>)[]): Promise<T[]>;
-  race<T>(values: readonly (PromiseLike<T>)[]): Promise<T>;
+  race<T>(values: readonly PromiseLike<T>[]): Promise<T>;
   allSettled<T>(values: readonly (T | PromiseLike<T>)[]): Promise<PromiseSettledResult<T>[]>;
-  any<T>(values: readonly (PromiseLike<T>)[]): Promise<T>;
+  any<T>(values: readonly PromiseLike<T>[]): Promise<T>;
 }
 
 interface PromiseLike<T> {
-  then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null): PromiseLike<TResult1 | TResult2>;
+  then<TResult1 = T, TResult2 = never>(
+    onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null,
+  ): PromiseLike<TResult1 | TResult2>;
 }
 
 interface Promise<T> {
-  then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null): Promise<TResult1 | TResult2>;
-  catch<TResult = never>(onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | null): Promise<T | TResult>;
+  then<TResult1 = T, TResult2 = never>(
+    onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null,
+  ): Promise<TResult1 | TResult2>;
+  catch<TResult = never>(
+    onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | null,
+  ): Promise<T | TResult>;
   finally(onfinally?: (() => void) | null): Promise<T>;
   readonly [Symbol.toStringTag]: string;
 }
@@ -38,7 +56,9 @@ interface PromiseSettledResult<T> {
 
 const pendingPromise = { status: "pending" as PromiseStatus };
 
-const PromiseImpl: PromiseConstructor = function <T>(executor: (resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: any) => void) => void): Promise<T> {
+const PromiseImpl: PromiseConstructor = function <T>(
+  executor: (resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: any) => void) => void,
+): Promise<T> {
   if (this instanceof PromiseImpl === false) {
     return new PromiseImpl(executor);
   }
@@ -98,7 +118,7 @@ PromiseImpl.all = function <T>(values: readonly (T | PromiseLike<T>)[]): Promise
   });
 };
 
-PromiseImpl.race = function <T>(values: readonly (PromiseLike<T>)[]): Promise<T> {
+PromiseImpl.race = function <T>(values: readonly PromiseLike<T>[]): Promise<T> {
   return new PromiseImpl((resolve, reject) => {
     let i = 0;
     while (i < values.length) {
@@ -115,7 +135,9 @@ PromiseImpl.race = function <T>(values: readonly (PromiseLike<T>)[]): Promise<T>
   });
 };
 
-PromiseImpl.allSettled = function <T>(values: readonly (T | PromiseLike<T>)[]): Promise<PromiseSettledResult<T>[]> {
+PromiseImpl.allSettled = function <T>(
+  values: readonly (T | PromiseLike<T>)[],
+): Promise<PromiseSettledResult<T>[]> {
   return new PromiseImpl((resolve) => {
     const results: PromiseSettledResult<T>[] = [];
     let pending = values.length;
@@ -147,7 +169,7 @@ PromiseImpl.allSettled = function <T>(values: readonly (T | PromiseLike<T>)[]): 
   });
 };
 
-PromiseImpl.any = function <T>(values: readonly (PromiseLike<T>)[]): Promise<T> {
+PromiseImpl.any = function <T>(values: readonly PromiseLike<T>[]): Promise<T> {
   return new PromiseImpl((resolve, reject) => {
     const errors: any[] = [];
     let pending = values.length;

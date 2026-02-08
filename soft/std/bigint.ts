@@ -64,7 +64,7 @@ BigIntImpl.asIntN = function asIntN(bits: number, int: bigint): bigint {
   }
   const mask = (BigInt(1) << BigInt(bits)) - BigInt(1);
   let result = int & mask;
-  if (result >= (BigInt(1) << BigInt(bits - 1))) {
+  if (result >= BigInt(1) << BigInt(bits - 1)) {
     result = result - (BigInt(1) << BigInt(bits));
   }
   return result;
@@ -95,7 +95,9 @@ if (typeof BigInt !== "undefined") {
         let result = "";
         while (absN > BigInt(0)) {
           const digit = Number(absN % BigInt(radix));
-          result = (digit < 10 ? String.fromCharCode(48 + digit) : String.fromCharCode(87 + digit)) + result;
+          result =
+            (digit < 10 ? String.fromCharCode(48 + digit) : String.fromCharCode(87 + digit)) +
+            result;
         }
         return isNegative ? "-" + result : result || "0";
       };

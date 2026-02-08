@@ -5,7 +5,11 @@
 
 interface JSON {
   parse(text: string, reviver?: (key: string, value: any) => any): any;
-  stringify(value: any, replacer?: (key: string, value: any) => any, space?: string | number): string;
+  stringify(
+    value: any,
+    replacer?: (key: string, value: any) => any,
+    space?: string | number,
+  ): string;
 }
 
 const JSONImpl: JSON = {
@@ -19,7 +23,11 @@ const JSONImpl: JSON = {
     }
     return parsed;
   },
-  stringify(value: any, replacer?: (key: string, value: any) => any, space?: string | number): string {
+  stringify(
+    value: any,
+    replacer?: (key: string, value: any) => any,
+    space?: string | number,
+  ): string {
     if (replacer !== undefined && typeof replacer !== "function" && !Array.isArray(replacer)) {
       throw new TypeError("The replacer argument must be a function or an array");
     }

@@ -11,7 +11,15 @@ interface DateConstructor {
   readonly prototype: Date;
   now(): number;
   parse(dateString: string): number;
-  UTC(year: number, month: number, date?: number, hours?: number, minutes?: number, seconds?: number, ms?: number): number;
+  UTC(
+    year: number,
+    month: number,
+    date?: number,
+    hours?: number,
+    minutes?: number,
+    seconds?: number,
+    ms?: number,
+  ): number;
 }
 
 interface Date {
@@ -59,7 +67,20 @@ interface Date {
 
 const DAYS_IN_MONTH = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTH_NAMES = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
 
 function isLeapYear(year: number): boolean {
   return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
@@ -95,7 +116,9 @@ const DateImpl: DateConstructor = function (value?: any): Date {
   }
   const timestamp = dateToTimestamp(value);
   if (Number.isNaN(timestamp)) {
-    this.getTime = function (): number { return NaN; };
+    this.getTime = function (): number {
+      return NaN;
+    };
     return this;
   }
   const epochOffset = 864e13;
@@ -201,23 +224,65 @@ DateImpl.prototype.toString = function (): string {
 };
 
 DateImpl.prototype.toDateString = function (): string {
-  return DAY_NAMES[this._day] + " " + MONTH_NAMES[this._month - 1] + " " + String(this._date).padStart(2, " ") + " " + String(this._year);
+  return (
+    DAY_NAMES[this._day] +
+    " " +
+    MONTH_NAMES[this._month - 1] +
+    " " +
+    String(this._date).padStart(2, " ") +
+    " " +
+    String(this._year)
+  );
 };
 
 DateImpl.prototype.toTimeString = function (): string {
-  return String(this._hours).padStart(2, "0") + ":" + String(this._minutes).padStart(2, "0") + ":" + String(this._seconds).padStart(2, "0") + " GMT" + (this.getTimezoneOffset() <= 0 ? "-" : "+") + String(Math.abs(this.getTimezoneOffset()) / 60).padStart(2, "0") + "00";
+  return (
+    String(this._hours).padStart(2, "0") +
+    ":" +
+    String(this._minutes).padStart(2, "0") +
+    ":" +
+    String(this._seconds).padStart(2, "0") +
+    " GMT" +
+    (this.getTimezoneOffset() <= 0 ? "-" : "+") +
+    String(Math.abs(this.getTimezoneOffset()) / 60).padStart(2, "0") +
+    "00"
+  );
 };
 
 DateImpl.prototype.toLocaleString = function (): string {
-  return String(this._year) + "/" + String(this._month).padStart(2, "0") + "/" + String(this._date).padStart(2, "0") + " " + String(this._hours).padStart(2, "0") + ":" + String(this._minutes).padStart(2, "0") + ":" + String(this._seconds).padStart(2, "0");
+  return (
+    String(this._year) +
+    "/" +
+    String(this._month).padStart(2, "0") +
+    "/" +
+    String(this._date).padStart(2, "0") +
+    " " +
+    String(this._hours).padStart(2, "0") +
+    ":" +
+    String(this._minutes).padStart(2, "0") +
+    ":" +
+    String(this._seconds).padStart(2, "0")
+  );
 };
 
 DateImpl.prototype.toLocaleDateString = function (): string {
-  return String(this._year) + "/" + String(this._month).padStart(2, "0") + "/" + String(this._date).padStart(2, "0");
+  return (
+    String(this._year) +
+    "/" +
+    String(this._month).padStart(2, "0") +
+    "/" +
+    String(this._date).padStart(2, "0")
+  );
 };
 
 DateImpl.prototype.toLocaleTimeString = function (): string {
-  return String(this._hours).padStart(2, "0") + ":" + String(this._minutes).padStart(2, "0") + ":" + String(this._seconds).padStart(2, "0");
+  return (
+    String(this._hours).padStart(2, "0") +
+    ":" +
+    String(this._minutes).padStart(2, "0") +
+    ":" +
+    String(this._seconds).padStart(2, "0")
+  );
 };
 
 DateImpl.prototype.valueOf = function (): number {
@@ -338,7 +403,12 @@ DateImpl.prototype.setUTCMinutes = function (min: number, sec?: number, ms?: num
   return this.getTime();
 };
 
-DateImpl.prototype.setHours = function (hour: number, min?: number, sec?: number, ms?: number): number {
+DateImpl.prototype.setHours = function (
+  hour: number,
+  min?: number,
+  sec?: number,
+  ms?: number,
+): number {
   this._hours = hour;
   if (min !== undefined) this._minutes = min;
   if (sec !== undefined) this._seconds = sec;
@@ -346,7 +416,12 @@ DateImpl.prototype.setHours = function (hour: number, min?: number, sec?: number
   return this.getTime();
 };
 
-DateImpl.prototype.setUTCHours = function (hour: number, min?: number, sec?: number, ms?: number): number {
+DateImpl.prototype.setUTCHours = function (
+  hour: number,
+  min?: number,
+  sec?: number,
+  ms?: number,
+): number {
   this._hours = hour;
   if (min !== undefined) this._minutes = min;
   if (sec !== undefined) this._seconds = sec;

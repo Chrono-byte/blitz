@@ -83,7 +83,10 @@ if (typeof RegExp !== "undefined") {
       };
     }
     if (!prototype[Symbol.replace]) {
-      prototype[Symbol.replace] = function (string: string, replaceValue: string | ((...args: any[]) => string)): string {
+      prototype[Symbol.replace] = function (
+        string: string,
+        replaceValue: string | ((...args: any[]) => string),
+      ): string {
         if (typeof replaceValue === "string") {
           return string.replace(this, replaceValue);
         }

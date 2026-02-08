@@ -25,7 +25,10 @@ interface Map<K, V> {
   [Symbol.iterator](): IterableIterator<[K, V]>;
 }
 
-const MapImpl: MapConstructor = function <K, V>(this: Map<K, V>, entries?: readonly (readonly [K, V])[]): Map<K, V> {
+const MapImpl: MapConstructor = function <K, V>(
+  this: Map<K, V>,
+  entries?: readonly (readonly [K, V])[],
+): Map<K, V> {
   if (this instanceof MapImpl === false) {
     return new MapImpl(entries);
   }
@@ -62,7 +65,11 @@ MapImpl.prototype.clear = function <K, V>(this: Map<K, V>): void {
   this._map.clear();
 };
 
-MapImpl.prototype.forEach = function <K, V>(this: Map<K, V>, callbackfn: (value: V, key: K, map: Map<K, V>) => void, thisArg?: any): void {
+MapImpl.prototype.forEach = function <K, V>(
+  this: Map<K, V>,
+  callbackfn: (value: V, key: K, map: Map<K, V>) => void,
+  thisArg?: any,
+): void {
   this._map.forEach((value: V, key: K) => {
     callbackfn.call(thisArg, value, key, this);
   });

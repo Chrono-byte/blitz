@@ -56,7 +56,11 @@ SetImpl.prototype.clear = function <T>(this: Set<T>): void {
   this._set.clear();
 };
 
-SetImpl.prototype.forEach = function <T>(this: Set<T>, callbackfn: (value: T, value2: T, set: Set<T>) => void, thisArg?: any): void {
+SetImpl.prototype.forEach = function <T>(
+  this: Set<T>,
+  callbackfn: (value: T, value2: T, set: Set<T>) => void,
+  thisArg?: any,
+): void {
   this._set.forEach((value: T) => {
     callbackfn.call(thisArg, value, value, this);
   });
