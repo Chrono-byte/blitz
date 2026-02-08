@@ -36,23 +36,187 @@ fn convert_stmt(v: &Value) -> Result<la::Statement, String> {
         .ok_or_else(|| "Missing node 'type'".to_string())?;
 
     match typ {
+        "ImportDeclaration" => {
+            let source = v
+                .get("source")
+                .and_then(|s| s.get("value"))
+                .and_then(|sv| sv.as_str())
+                .ok_or_else(|| "import missing source".to_string())?
+                .to_string();
+            let mut specs = Vec::new();
+            if let Some(specs_arr) = v.get("specifiers").and_then(|s| s.as_array()) {
+                for s in specs_arr {
+                    let stype = s.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    // local name is present on all specifier kinds
+                    let local = s
+                        .get("local")
+                        .and_then(|l| l.get("name"))
+                        .and_then(|n| n.as_str())
+                        .map(ToString::to_string)
+                        .ok_or_else(|| "import specifier missing local name".to_string())?;
+                    let imported = match stype {
+                        "ImportDefaultSpecifier" => "default".to_string(),
+                        "ImportNamespaceSpecifier" => "*".to_string(),
+                        _ => s
+                            .get("imported")
+                            .and_then(|i| i.get("name"))
+                            .and_then(|n| n.as_str()).map_or_else(|| local.clone(), ToString::to_string),
+                    };
+                    specs.push((local, imported));
+                }
+            }
+            Ok(la::Statement::ImportDecl(la::ImportDecl {
+                specifiers: specs,
+                source,
+            }))
+        }
+        "ExportNamedDeclaration" | "ExportAllDeclaration" => {
+            // handle simple export forms and re-exports
+            let source = v
+                .get("source")
+                .and_then(|s| s.get("value"))
+                .and_then(|sv| sv.as_str())
+                .map(ToString::to_string);
+            let decl = v
+                .get("declaration")
+                .and_then(|d| if d.is_null() { None } else { Some(d) });
+            let declaration = match decl {
+                Some(dv) => Some(Box::new(convert_stmt(dv)?)),
+                None => None,
+            };
+
+            // collect exported specifiers when present: (exported, local)
+            let mut specs: Vec<(String, Option<String>)> = Vec::new();
+            if let Some(specs_arr) = v.get("specifiers").and_then(|s| s.as_array()) {
+                for sp in specs_arr {
+                    if sp.get("type").and_then(|t| t.as_str()) == Some("ExportSpecifier") {
+                        let exported = sp
+                            .get("exported")
+                            .and_then(|e| e.get("name"))
+                            .and_then(|n| n.as_str())
+                            .map(ToString::to_string)
+                            .or_else(|| {
+                                // exported can be a literal (string) in some forms
+                                sp.get("exported")
+                                    .and_then(|e| e.get("value"))
+                                    .and_then(|v| v.as_str())
+                                    .map(ToString::to_string)
+                            });
+                        let local = sp
+                            .get("local")
+                            .and_then(|l| l.get("name"))
+                            .and_then(|n| n.as_str())
+                            .map(ToString::to_string);
+                        if let Some(exp) = exported {
+                            specs.push((exp, local));
+                        }
+                    }
+                }
+            }
+
+            // preserve a single 'name' for compatibility: prefer first exported name
+            let name = specs.first().map(|(e, _)| e.clone());
+
+            Ok(la::Statement::ExportDecl(la::ExportDecl {
+                name,
+                declaration,
+                source,
+                specifiers: specs,
+            }))
+        }
+        "ExportDefaultDeclaration" => {
+            // export default <declaration|expression>
+            if let Some(dv) = v.get("declaration") {
+                // If the declaration is a FunctionDeclaration or ClassDeclaration,
+                // convert and hoist the contained declaration. If anonymous, wrap
+                // into a VarDecl named __default_export.
+                if let Some(kind) = dv.get("type").and_then(|t| t.as_str()) {
+                    match kind {
+                        "FunctionDeclaration" | "ClassDeclaration" => {
+                            // Attempt to convert as a statement; if it's an anonymous
+                            // declaration, create a named var to hold it.
+                            match convert_stmt(dv) {
+                                Ok(stmt) => {
+                                    // If the contained declaration has a local name, record
+                                    // a default specifier mapping (default -> local_name).
+                                    let mut specs = Vec::new();
+                                    match &stmt {
+                                        la::Statement::FunctionDecl(f) => {
+                                            specs.push((
+                                                "default".to_string(),
+                                                Some(f.name.clone()),
+                                            ));
+                                        }
+                                        la::Statement::VarDecl(v) => {
+                                            specs.push((
+                                                "default".to_string(),
+                                                Some(v.name.clone()),
+                                            ));
+                                        }
+                                        la::Statement::ClassDecl(c) => {
+                                            specs.push((
+                                                "default".to_string(),
+                                                Some(c.name.clone()),
+                                            ));
+                                        }
+                                        _ => {}
+                                    }
+                                    return Ok(la::Statement::ExportDecl(la::ExportDecl {
+                                        name: None,
+                                        declaration: Some(Box::new(stmt)),
+                                        source: None,
+                                        specifiers: specs,
+                                    }));
+                                }
+                                Err(_) => {
+                                    // fallthrough to wrap as var
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // Fallback: create a var binding for the default export and
+                // record a default specifier mapping.
+                let default_var = la::Statement::VarDecl(la::VarDecl {
+                    name: "__default_export".to_string(),
+                    type_ann: None,
+                    init: Some(convert_expr(dv)?),
+                });
+                return Ok(la::Statement::ExportDecl(la::ExportDecl {
+                    name: Some("__default_export".to_string()),
+                    declaration: Some(Box::new(default_var)),
+                    source: None,
+                    specifiers: vec![("default".to_string(), Some("__default_export".to_string()))],
+                }));
+            }
+            Err("Unsupported export default form".to_string())
+        }
+        "ClassDeclaration" => {
+            let id = v
+                .get("id")
+                .and_then(|i| i.get("name"))
+                .and_then(|n| n.as_str())
+                .ok_or_else(|| "class missing id".to_string())?;
+            Ok(la::Statement::ClassDecl(la::ClassDecl {
+                name: id.to_string(),
+            }))
+        }
         "VariableDeclaration" => {
             // If this declaration is a `declare` form, treat it as a top-level Declare
-            if v.get("declare").and_then(|d| d.as_bool()) == Some(true) {
+            if v.get("declare").and_then(Value::as_bool) == Some(true) {
                 // Best-effort: pull the declared name where possible
                 if let Some(id) = v
                     .get("declarations")
                     .and_then(|d| d.as_array())
-                    .and_then(|arr| arr.get(0))
+                    .and_then(|arr| arr.first())
                     .and_then(|dec| dec.get("id"))
-                {
-                    if let Some(name) = id.get("name").and_then(|n| n.as_str()) {
+                    && let Some(name) = id.get("name").and_then(|n| n.as_str()) {
                         return Ok(la::Statement::Declare(la::Declare {
                             name: name.to_string(),
                             type_ann: None,
                         }));
                     }
-                }
                 return Err("Unsupported declare form".to_string());
             }
 
@@ -144,7 +308,7 @@ fn convert_stmt(v: &Value) -> Result<la::Statement, String> {
                         .get("param")
                         .and_then(|p| p.get("name"))
                         .and_then(|n| n.as_str())
-                        .map(|s| s.to_string());
+                        .map(ToString::to_string);
                     let body = h
                         .get("body")
                         .ok_or_else(|| "catch missing body".to_string())?;
@@ -206,22 +370,21 @@ fn convert_stmt(v: &Value) -> Result<la::Statement, String> {
         }
         "EmptyStatement" => Err("EmptyStatement not supported".to_string()),
         "TSDeclareFunction" | "DeclareVariable"
-            if v.get("declare").and_then(|d| d.as_bool()) == Some(true) =>
+            if v.get("declare").and_then(Value::as_bool) == Some(true) =>
         {
             // Best-effort: pull the declared name where possible
             if let Some(id) = v.get("id").or_else(|| {
                 v.get("declarations")
                     .and_then(|d| d.as_array())
-                    .and_then(|arr| arr.get(0))
+                    .and_then(|arr| arr.first())
                     .and_then(|dec| dec.get("id"))
-            }) {
-                if let Some(name) = id.get("name").and_then(|n| n.as_str()) {
+            })
+                && let Some(name) = id.get("name").and_then(|n| n.as_str()) {
                     return Ok(la::Statement::Declare(la::Declare {
                         name: name.to_string(),
                         type_ann: None,
                     }));
                 }
-            }
             Err("Unsupported declare form".to_string())
         }
         other => Err(format!("Unsupported statement type: {}", other)),
@@ -400,7 +563,7 @@ fn convert_expr(v: &Value) -> Result<la::Expr, String> {
                 v.get("property")
                     .ok_or_else(|| "member missing property".to_string())?,
             )?;
-            let computed = v.get("computed").and_then(|c| c.as_bool()).unwrap_or(false);
+            let computed = v.get("computed").and_then(Value::as_bool).unwrap_or(false);
             Ok(la::Expr::MemberExpr(la::MemberExpr {
                 object: Box::new(object),
                 property: Box::new(property),

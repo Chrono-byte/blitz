@@ -42,7 +42,6 @@ use oxc_span::{SourceType, Span};
 // only use specific oxc_span helpers (LineIndex) directly here for now.
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::path::Path;
 
 /// Severity levels for type checking issues.
@@ -166,7 +165,7 @@ pub enum Type {
     Array(Box<Type>),
     Function(Vec<Type>, Box<Type>),
     /// Object with named property types.
-    Object(std::collections::HashMap<String, Type>),
+    Object(HashMap<String, Type>),
     /// Reference to a named type (eg. global class/interface)
     TypeReference {
         name: String,
@@ -313,8 +312,10 @@ impl SoftLayerTypechecker {
             .insert("Symbol".to_string(), Type::Builtin(BuiltinType::Symbol));
         self.global_types
             .insert("BigInt".to_string(), Type::Builtin(BuiltinType::BigInt));
-        self.global_types
-            .insert("Function".to_string(), Type::Function(vec![], Box::new(Type::Void)));
+        self.global_types.insert(
+            "Function".to_string(),
+            Type::Function(vec![], Box::new(Type::Void)),
+        );
         self.global_types
             .insert("Promise".to_string(), Type::Builtin(BuiltinType::Promise));
         self.global_types
@@ -400,7 +401,7 @@ impl SoftLayerTypechecker {
                 self.add_issue(
                     IssueSeverity::Error,
                     "ESTREE_CONVERT",
-                    &format!("{}", e.message),
+                    &e.message,
                     None,
                     None,
                     file_path,
@@ -487,8 +488,8 @@ impl SoftLayerTypechecker {
                         }
                     }
                     "VariableDeclaration" => {
-                        if self.config.require_annotations {
-                            if let Some(decls) = item.get("declarations").and_then(|d| d.as_array())
+                        if self.config.require_annotations
+                            && let Some(decls) = item.get("declarations").and_then(|d| d.as_array())
                             {
                                 for decl in decls {
                                     // id may be Identifier or pattern
@@ -518,7 +519,6 @@ impl SoftLayerTypechecker {
                                     }
                                 }
                             }
-                        }
                     }
                     _ => {}
                 }

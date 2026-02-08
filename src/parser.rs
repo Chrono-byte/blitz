@@ -133,11 +133,14 @@ impl Parser {
     // still expect the old `crate::ast::Program`. This converts oxc_ast -> crate::ast
     // using a minimal adapter so we can migrate the callsites incrementally.
     #[allow(dead_code)]
-    pub fn parse_source_into_local_ast(source: &str) -> Result<crate::local_ast::Program, ParserError> {
+    pub fn parse_source_into_local_ast(
+        source: &str,
+    ) -> Result<crate::local_ast::Program, ParserError> {
         let session = Parser::parse_source(source)?;
         let estree = session.program().to_pretty_estree_ts_json(false);
-        let prog = crate::estree_bridge::estree_json_to_local_program(&estree)
-            .map_err(|e| ParserError::from(format!("ESTree -> local AST conversion failed: {}", e)))?;
+        let prog = crate::estree_bridge::estree_json_to_local_program(&estree).map_err(|e| {
+            ParserError::from(format!("ESTree -> local AST conversion failed: {}", e))
+        })?;
         Ok(prog)
     }
 
@@ -196,7 +199,7 @@ impl Parser {
 // `self_referencing` macro generates a `borrow_program` method; expose a
 // convenient `program()` method that returns the borrowed `Program`.
 impl ParserSession {
-    pub fn program(&self) -> &oast::Program {
+    pub fn program(&self) -> &oast::Program<'_> {
         self.borrow_program()
     }
 }

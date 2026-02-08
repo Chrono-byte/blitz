@@ -38,8 +38,8 @@ use std::path::Path;
 use std::rc::Rc;
 
 use tsblitz::bytecode;
-use tsblitz::{bundle_entry, compile, parser::Parser, typecheck, value::Value, vm::Vm};
 use tsblitz::local_ast::Program;
+use tsblitz::{bundle_entry, compile, parser::Parser, typecheck, value::Value, vm::Vm};
 
 /// Minimal native hook: print to stdout. The TS soft layer wraps this as console.log.
 fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
@@ -97,16 +97,16 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 ///
 /// Returns an error string if any stage of compilation fails
 fn run_source(vm: &mut Vm, source: &str) -> Result<Value, tsblitz::errors::Error> {
-    let program = Parser::parse_source_into_local_ast(source)
-        .map_err(tsblitz::errors::ParserError::from)?;
-    typecheck(&program).map_err(tsblitz::errors::TypeCheckerError::from)?;
-    let chunk = compile(&program).map_err(tsblitz::errors::CompilerError::from)?;
+    let program =
+        Parser::parse_source_into_local_ast(source)?;
+    typecheck(&program)?;
+    let chunk = compile(&program)?;
     vm.run(chunk).map_err(tsblitz::errors::Error::from)
 }
 
 fn run_program(vm: &mut Vm, program: Program) -> Result<Value, tsblitz::errors::Error> {
-    typecheck(&program).map_err(tsblitz::errors::TypeCheckerError::from)?;
-    let chunk = compile(&program).map_err(tsblitz::errors::CompilerError::from)?;
+    typecheck(&program)?;
+    let chunk = compile(&program)?;
     vm.run(chunk).map_err(tsblitz::errors::Error::from)
 }
 
@@ -215,10 +215,11 @@ fn main() -> Result<(), tsblitz::errors::Error> {
 
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let prelude_path = manifest_dir.join("soft/prelude.ts");
-    let prelude_program = bundle_entry(&prelude_path).map_err(tsblitz::errors::BundlerError::from)?;
+    let prelude_program =
+        bundle_entry(&prelude_path)?;
 
     // Skip type checking for soft layer prelude (has dynamic patterns that typechecker doesn't handle yet)
-    let chunk = compile(&prelude_program).map_err(tsblitz::errors::CompilerError::from)?;
+    let chunk = compile(&prelude_program)?;
     // The soft prelude is written in TypeScript and contains dynamic patterns
     // and annotated helper types that the static compiler may record as
     // parameter types. The prelude is intended to run untyped at runtime,
@@ -457,7 +458,7 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 {
         let path = Path::new(&args[1]);
-        let program = bundle_entry(path).map_err(tsblitz::errors::BundlerError::from)?;
+        let program = bundle_entry(path)?;
         run_program(&mut repl_vm, program)?;
         return Ok(());
     }
@@ -480,11 +481,11 @@ fn main() -> Result<(), tsblitz::errors::Error> {
                 if line.eq_ignore_ascii_case("exit") || line.eq_ignore_ascii_case("quit") {
                     break;
                 }
-                    match run_source(&mut repl_vm, line) {
-                        Ok(v) if !matches!(v, Value::Null) => println!("{}", v),
-                        Ok(_) => {}
-                        Err(e) => eprintln!("Error: {}", e),
-                    }
+                match run_source(&mut repl_vm, line) {
+                    Ok(v) if !matches!(v, Value::Null) => println!("{}", v),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("Error: {}", e),
+                }
             }
             Err(rustyline::error::ReadlineError::Interrupted)
             | Err(rustyline::error::ReadlineError::Eof) => break,

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Minimal owned AST used as a compatibility bridge.
 //!
 //! This module defines a small, owned AST shape that mirrors the legacy
@@ -24,6 +25,9 @@ pub enum Statement {
     While(WhileStmt),
     Continue,
     FunctionDecl(FunctionDecl),
+    ImportDecl(ImportDecl),
+    ExportDecl(ExportDecl),
+    ClassDecl(ClassDecl),
     Return(ReturnStmt),
     ExpressionStatement(ExpressionStatement),
 }
@@ -200,6 +204,25 @@ pub struct ObjectExpr {
 pub struct Property {
     pub key: String,
     pub value: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportDecl {
+    pub specifiers: Vec<(String, String)>, // (local, imported)
+    pub source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportDecl {
+    pub name: Option<String>,
+    pub declaration: Option<Box<Statement>>,
+    pub source: Option<String>,
+    pub specifiers: Vec<(String, Option<String>)>, // (exported, local?)
+}
+
+#[derive(Debug, Clone)]
+pub struct ClassDecl {
+    pub name: String,
 }
 
 #[derive(Debug, Clone)]

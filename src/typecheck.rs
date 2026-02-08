@@ -306,6 +306,12 @@ impl TypeContext {
                 }
                 self.scopes.pop();
             }
+            Statement::ImportDecl(_) | Statement::ExportDecl(_) | Statement::ClassDecl(_) => {
+                // Import/export/class declarations are ignored by this conservative
+                // typechecker for now. They affect module linking and runtime
+                // behaviour but do not introduce immediate type errors in the
+                // soft-layer checks we perform.
+            }
             Statement::Return(r) => {
                 let ret_type = r
                     .argument

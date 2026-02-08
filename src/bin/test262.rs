@@ -25,10 +25,10 @@ use std::rc::Rc;
 
 use serde::Deserialize;
 
-use tsblitz::local_ast::Program;
 use tsblitz::{bundle_entry, compile, parser::Parser, typecheck, value::Value, vm::Vm};
 
 /// Minimal subset of metadata we care about.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct Negative {
     phase: String,
@@ -36,6 +36,7 @@ struct Negative {
     ty: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct Meta {
     flags: Option<Vec<String>>,
@@ -152,25 +153,20 @@ fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>) {
         Ok(e) => e,
         Err(_) => return,
     };
-    for ent in entries {
-        if let Ok(ent) = ent {
-            let p = ent.path();
-            if let Ok(ft) = ent.file_type() {
-                if ft.is_dir() {
-                    collect_tests(&p, out);
-                } else if ft.is_file() {
-                    if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                        if ext == "js" {
-                            if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                                if name.contains("_FIXTURE") {
-                                    continue;
-                                }
-                                out.push(p.clone());
+    for ent in entries.flatten() {
+        let p = ent.path();
+        if let Ok(ft) = ent.file_type() {
+            if ft.is_dir() {
+                collect_tests(&p, out);
+            } else if ft.is_file()
+                && let Some(ext) = p.extension().and_then(|s| s.to_str())
+                    && ext == "js"
+                        && let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                            if name.contains("_FIXTURE") {
+                                continue;
                             }
+                            out.push(p.clone());
                         }
-                    }
-                }
-            }
         }
     }
 }
@@ -182,9 +178,9 @@ fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>) {
 /// - tests that `includes` harness files (we don't support includes resolution yet)
 /// - tests containing `throw` (throw handling is not yet implemented)
 fn should_skip_test(src: &str, meta: &Option<Meta>) -> bool {
-    if let Some(m) = meta {
-        if let Some(flags) = &m.flags {
-            if flags.iter().any(|f| {
+    if let Some(m) = meta
+        && let Some(flags) = &m.flags
+            && flags.iter().any(|f| {
                 matches!(
                     f.as_str(),
                     "module" | "raw" | "async" | "noStrict" | "onlyStrict" // onlyStrict/noStrict handled below, but we don't run `module/raw/async`
@@ -199,11 +195,9 @@ fn should_skip_test(src: &str, meta: &Option<Meta>) -> bool {
                     return true;
                 }
             }
-        }
         // `includes` are not skipped here. Included harness files will be
         // evaluated at runtime by the runner (see below) so that tests which
         // reference helper files can be supported.
-    }
     // Very simple heuristic: skip tests that use `throw` (our runtime doesn't
     // yet support the ThrowStatement semantics required by many Test262 tests).
     if src.contains("throw") {
@@ -238,8 +232,8 @@ fn run_test_file(
     // - default -> run both non-strict and strict
     let mut run_non_strict = true;
     let mut run_strict = true;
-    if let Some(m) = &meta {
-        if let Some(flags) = &m.flags {
+    if let Some(m) = &meta
+        && let Some(flags) = &m.flags {
             if flags.iter().any(|f| f == "onlyStrict") {
                 run_non_strict = false;
                 run_strict = true;
@@ -248,7 +242,6 @@ fn run_test_file(
                 run_strict = false;
             }
         }
-    }
 
     // The VM and globals are provided by the caller. We'll reset VM state to
     // a clean run while keeping `keep_globals` intact.
@@ -257,8 +250,7 @@ fn run_test_file(
     let raw_flag = meta
         .as_ref()
         .and_then(|m| m.flags.as_ref())
-        .map(|f| f.iter().any(|s| s == "raw"))
-        .unwrap_or(false);
+        .is_some_and(|f| f.iter().any(|s| s == "raw"));
 
     // Required harness files as per Test262 interpreting instructions.
     let harness_files = ["harness/sta.js", "harness/assert.js"];
@@ -267,7 +259,7 @@ fn run_test_file(
     struct ResetStrict;
     impl Drop for ResetStrict {
         fn drop(&mut self) {
-            tsblitz::typecheck::set_strict_override(None);
+            typecheck::set_strict_override(None);
         }
     }
     for (mode_name, do_run) in &[("non-strict", run_non_strict), ("strict", run_strict)] {
@@ -278,9 +270,9 @@ fn run_test_file(
         // Configure strictness for the engine (runtime-configured via TSBLITZ_STRICT).
         if *mode_name == "non-strict" {
             // Use the test-friendly override rather than setting process env vars
-            tsblitz::typecheck::set_strict_override(Some(false));
+            typecheck::set_strict_override(Some(false));
         } else {
-            tsblitz::typecheck::set_strict_override(Some(true));
+            typecheck::set_strict_override(Some(true));
         }
         let _reset_strict = ResetStrict;
 
@@ -353,9 +345,9 @@ fn run_test_file(
         };
 
         // Handle parse-phase negative expectations first
-        if let Some(m) = &meta {
-            if let Some(neg) = &m.negative {
-                if neg.phase == "parse" {
+        if let Some(m) = &meta
+            && let Some(neg) = &m.negative
+                && neg.phase == "parse" {
                     // Expect parse to fail
                     match Parser::parse_source(&run_src) {
                         Ok(_) => {
@@ -371,8 +363,6 @@ fn run_test_file(
                         }
                     }
                 }
-            }
-        }
 
         // Otherwise, parse must succeed
         let session = match Parser::parse_source_into_local_ast(&run_src) {
@@ -415,9 +405,9 @@ fn run_test_file(
         let run_result = vm.run(chunk);
 
         // If the test expects a runtime error, ensure one occurred.
-        if let Some(m) = &meta {
-            if let Some(neg) = &m.negative {
-                if neg.phase == "runtime" {
+        if let Some(m) = &meta
+            && let Some(neg) = &m.negative
+                && neg.phase == "runtime" {
                     if run_result.is_err() {
                         // ok - expected runtime error
                         continue;
@@ -429,8 +419,6 @@ fn run_test_file(
                         ));
                     }
                 }
-            }
-        }
 
         // For non-negative tests, execution must succeed.
         if run_result.is_err() {
@@ -531,11 +519,10 @@ fn main() {
         if ran >= limit {
             break;
         }
-        if let Some(ref flt) = filter {
-            if !f.to_string_lossy().contains(flt) {
+        if let Some(ref flt) = filter
+            && !f.to_string_lossy().contains(flt) {
                 continue;
             }
-        }
 
         eprintln!("Running test: {}", f.display());
         match run_test_file(&f, &test262_dir, &mut vm, &keep_globals) {

@@ -205,6 +205,12 @@ impl Compiler {
                 self.locals.truncate(start);
                 self.local_types.truncate(start_types);
             }
+            Statement::ImportDecl(_) | Statement::ExportDecl(_) | Statement::ClassDecl(_) => {
+                // Imports/exports/classes are currently no-ops for the bytecode
+                // compiler at top-level. They are represented in the AST so
+                // bundlers and higher-level passes can handle linking. Skip
+                // emitting runtime code here.
+            }
             Statement::If(i) => {
                 self.compile_expr(&i.test)?;
                 self.emit(Op::JumpIfFalse, LINE);
