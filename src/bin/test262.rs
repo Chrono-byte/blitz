@@ -441,22 +441,15 @@ fn run_test_file(
 }
 
 fn main() {
-    // Locate the Test262 checkout
-    // Require a local Test262 checkout via TEST262_DIR or local 'test262' folder; otherwise exit.
-    let test262_dir = match env::var("TEST262_DIR") {
-        Ok(s) => PathBuf::from(s),
-        Err(_) => {
-            let p = PathBuf::from("test262");
-            if p.exists() {
-                p
-            } else {
-                eprintln!(
-                    "TEST262_DIR not set and local 'test262' not found; skipping Test262 connector"
-                );
-                exit(0);
-            }
-        }
-    };
+    // Use the local `./test262` checkout only. This runner is intended to be
+    // hermetic and operate against a repository checked out next to the project.
+    // If `./test262` is missing we skip the connector rather than using a
+    // remote or environment-provided path.
+    let test262_dir = PathBuf::from("test262");
+    if !test262_dir.exists() {
+        eprintln!("Local './test262' not found; skipping Test262 connector");
+        exit(0);
+    }
 
     let filter = env::var("TEST262_FILTER").ok();
     let limit: usize = env::var("TEST262_LIMIT")
