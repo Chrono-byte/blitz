@@ -395,7 +395,62 @@ impl Vm {
                     self.pop()?;
                 }
                 Op::Dup => {
-                    let v = self.stack.last().cloned().ok_or("Stack underflow")?;
+                    let v = self.stack.last().cloned().ok_or_else(|| {
+                        if crate::trace::enabled() {
+                            eprintln!("[diag] Stack underflow (Dup)");
+                            let start = self.ip.saturating_sub(8);
+                            let end = usize::min(self.ip + 8, self.chunk.code.len());
+                            eprintln!("[diag] disasm window ({}..{}):", start, end);
+                            let mut j = start;
+                            while j < end {
+                                let b = self.chunk.code[j];
+                                if let Some(op) = Op::from_byte(b) {
+                                    let width = opcode_width(op);
+                                    match op {
+                                        Op::Const => {
+                                            let arg =
+                                                self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                            if let Some(c) = self.chunk.constants.get(arg as usize)
+                                            {
+                                                eprintln!("[diag]   {}: {:?} {:?}", j, op, c);
+                                            } else {
+                                                eprintln!("[diag]   {}: {:?} {}", j, op, arg);
+                                            }
+                                        }
+                                        Op::Jump | Op::JumpIfFalse | Op::PushHandler => {
+                                            let hi =
+                                                self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                            let lo =
+                                                self.chunk.code.get(j + 2).cloned().unwrap_or(0);
+                                            let offset = ((hi as i16) << 8) | (lo as i16);
+                                            eprintln!("[diag]   {}: {:?} {}", j, op, offset);
+                                        }
+                                        Op::SetLocal
+                                        | Op::GetLocal
+                                        | Op::SetGlobal
+                                        | Op::GetGlobal
+                                        | Op::Call
+                                        | Op::GetBuiltin
+                                        | Op::GetProperty
+                                        | Op::SetProperty
+                                        | Op::GetPropertyIC
+                                        | Op::MakeClosure => {
+                                            let arg =
+                                                self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                            eprintln!("[diag]   {}: {:?} {}", j, op, arg);
+                                        }
+                                        _ => eprintln!("[diag]   {}: {:?}", j, op),
+                                    }
+                                    j += width;
+                                } else {
+                                    eprintln!("[diag]   {}: <invalid {}>", j, b);
+                                    j += 1;
+                                }
+                            }
+                            eprintln!("[diag] Stack size: {}", self.stack.len());
+                        }
+                        "Stack underflow"
+                    })?;
                     self.stack.push(v);
                 }
 
@@ -1028,9 +1083,57 @@ impl Vm {
 
     #[inline(always)]
     fn pop(&mut self) -> Result<Value, crate::errors::RuntimeError> {
-        self.stack
-            .pop()
-            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))
+        self.stack.pop().ok_or_else(|| {
+            if crate::trace::enabled() {
+                eprintln!("[diag] Stack underflow");
+                let start = self.ip.saturating_sub(8);
+                let end = usize::min(self.ip + 8, self.chunk.code.len());
+                eprintln!("[diag] disasm window ({}..{}):", start, end);
+                let mut j = start;
+                while j < end {
+                    let b = self.chunk.code[j];
+                    if let Some(op) = Op::from_byte(b) {
+                        let width = opcode_width(op);
+                        match op {
+                            Op::Const => {
+                                let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                if let Some(c) = self.chunk.constants.get(arg as usize) {
+                                    eprintln!("[diag]   {}: {:?} {:?}", j, op, c);
+                                } else {
+                                    eprintln!("[diag]   {}: {:?} {}", j, op, arg);
+                                }
+                            }
+                            Op::Jump | Op::JumpIfFalse | Op::PushHandler => {
+                                let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0);
+                                let offset = ((hi as i16) << 8) | (lo as i16);
+                                eprintln!("[diag]   {}: {:?} {}", j, op, offset);
+                            }
+                            Op::SetLocal
+                            | Op::GetLocal
+                            | Op::SetGlobal
+                            | Op::GetGlobal
+                            | Op::Call
+                            | Op::GetBuiltin
+                            | Op::GetProperty
+                            | Op::SetProperty
+                            | Op::GetPropertyIC
+                            | Op::MakeClosure => {
+                                let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                eprintln!("[diag]   {}: {:?} {}", j, op, arg);
+                            }
+                            _ => eprintln!("[diag]   {}: {:?}", j, op),
+                        }
+                        j += width;
+                    } else {
+                        eprintln!("[diag]   {}: <invalid {}>", j, b);
+                        j += 1;
+                    }
+                }
+                eprintln!("[diag] Stack size: {}", self.stack.len());
+            }
+            crate::errors::RuntimeError::from("Stack underflow")
+        })
     }
 
     // -----------------------------------------------------------------------

@@ -242,7 +242,7 @@ impl TypeContext {
                             }
                         } else {
                             let it = self.type_of_expr_oast(init)?;
-                            assignable(&var_type, &it)
+                            assignable(&var_type, &it) || assignable(&it, &var_type)
                         };
                         if !init_ok {
                             return Err(TypeCheckerError::from(format!(
@@ -343,6 +343,11 @@ impl TypeContext {
             }
             OStmt::ExpressionStatement(e) => {
                 let _ = self.type_of_expr_oast(&e.expression)?;
+            }
+            OStmt::BlockStatement(b) => {
+                for s in &b.body {
+                    self.check_statement_oast(s)?;
+                }
             }
             OStmt::IfStatement(i) => {
                 let _ = self.type_of_expr_oast(&i.test)?;
@@ -558,6 +563,8 @@ fn convert_type_ann(_ty: &oast::TSTypeAnnotation) -> Result<Type, TypeCheckerErr
 
 fn assignable(expected: &Type, actual: &Type) -> bool {
     match (expected, actual) {
+        (Type::Any, _) | (_, Type::Any) => true,
+        (Type::Unknown, _) | (_, Type::Unknown) => true,
         (Type::Number, Type::Number) => true,
         (Type::String, Type::String) => true,
         (Type::Boolean, Type::Boolean) => true,

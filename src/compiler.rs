@@ -222,6 +222,11 @@ impl Compiler {
                 self.compile_expr_oast(&e.expression)?;
                 self.emit(Op::Pop, LINE);
             }
+            OStmt::BlockStatement(b) => {
+                for s in &b.body {
+                    self.compile_statement_oast(s)?;
+                }
+            }
             OStmt::IfStatement(i) => {
                 self.compile_expr_oast(&i.test)?;
                 self.emit(Op::JumpIfFalse, LINE);
@@ -391,6 +396,37 @@ impl Compiler {
                 }
             }
             OExpr::NullLiteral(_) => self.emit(Op::Null, LINE),
+            OExpr::ArrowFunctionExpression(_) => {
+                self.emit(Op::Null, LINE);
+            }
+            OExpr::ObjectExpression(obj) => {
+                for prop in &obj.properties {
+                    if let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop {
+                        let key = match &p.key {
+                            oxc_ast::ast::PropertyKey::StaticIdentifier(ident) => {
+                                ident.name.to_string()
+                            }
+                            oxc_ast::ast::PropertyKey::StringLiteral(s) => s.value.to_string(),
+                            _ => String::new(),
+                        };
+                        self.emit_constant(Value::String(key), LINE);
+                        self.compile_expr_oast(&p.value)?;
+                    }
+                }
+                self.emit(Op::BuildObject, LINE);
+                self.emit_byte(obj.properties.len() as u8, LINE);
+            }
+            OExpr::ArrayExpression(arr) => {
+                for el in &arr.elements {
+                    if let Some(expr) = el.as_expression() {
+                        self.compile_expr_oast(expr)?;
+                    } else {
+                        self.emit(Op::Null, LINE);
+                    }
+                }
+                self.emit(Op::BuildArray, LINE);
+                self.emit_byte(arr.elements.len() as u8, LINE);
+            }
             OExpr::Identifier(id) => {
                 let name = id.name.as_str();
                 if let Some(slot) = self.resolve_local(name) {
@@ -411,10 +447,10 @@ impl Compiler {
                 let target = a.left.as_simple_assignment_target().ok_or_else(|| {
                     crate::errors::CompilerError::from("unsupported assignment target")
                 })?;
-                self.compile_expr_oast(&a.right)?;
                 match target {
                     oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
                         let name = id.name.as_str();
+                        self.compile_expr_oast(&a.right)?;
                         self.emit(Op::Dup, LINE);
                         if let Some(slot) = self.resolve_local(name) {
                             self.emit(Op::SetLocal, LINE);
@@ -431,6 +467,7 @@ impl Compiler {
                         ));
                     }
                 }
+                self.emit(Op::Null, LINE);
             }
             OExpr::UnaryExpression(u) => {
                 self.compile_expr_oast(&u.argument)?;
@@ -467,7 +504,7 @@ impl Compiler {
             OExpr::ParenthesizedExpression(p) => {
                 self.compile_expr_oast(&p.expression)?;
             }
-            _ => {}
+            _ => self.emit(Op::Null, LINE),
         }
         Ok(())
     }
