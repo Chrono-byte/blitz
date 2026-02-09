@@ -258,7 +258,7 @@ impl ModuleLoader {
                                         .get("imported")
                                         .and_then(|i| i.get("name"))
                                         .and_then(|n| n.as_str())
-                                        .map(std::string::ToString::to_string)
+                                        .map(ToString::to_string)
                                         .unwrap_or(local.clone());
                                     let slot_opt =
                                         { dep_rec_rc.borrow().exports.get(&imported).cloned() };

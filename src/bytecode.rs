@@ -33,7 +33,6 @@
 
 use crate::typecheck::Type;
 use crate::value::Value;
-use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::rc::Rc;
 
@@ -313,6 +312,12 @@ pub enum Op {
     SetProperty,
     /// Create closure from function prototype
     MakeClosure,
+    /// Push the current `this` binding for the running frame
+    GetThis,
+    /// Read an upvalue from the closure environment (operand = upvalue index)
+    GetUpvalue,
+    /// Write an upvalue into the closure environment (operand = upvalue index)
+    SetUpvalue,
     /// Get built-in function
     GetBuiltin,
     /// Throw an exception value (pop value and trigger handler)
@@ -419,12 +424,15 @@ impl TryFrom<u8> for Op {
             34 => Ok(Op::GetPropertyIC),
             35 => Ok(Op::SetProperty),
             36 => Ok(Op::MakeClosure),
-            37 => Ok(Op::GetBuiltin),
-            38 => Ok(Op::Throw),
-            39 => Ok(Op::PushHandler),
-            40 => Ok(Op::PopHandler),
-            41 => Ok(Op::GetModuleExport),
-            42 => Ok(Op::SetModuleExport),
+            37 => Ok(Op::GetThis),
+            38 => Ok(Op::GetUpvalue),
+            39 => Ok(Op::SetUpvalue),
+            40 => Ok(Op::GetBuiltin),
+            41 => Ok(Op::Throw),
+            42 => Ok(Op::PushHandler),
+            43 => Ok(Op::PopHandler),
+            44 => Ok(Op::GetModuleExport),
+            45 => Ok(Op::SetModuleExport),
             _ => Err(()),
         }
     }

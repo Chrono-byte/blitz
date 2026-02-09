@@ -33,7 +33,6 @@
 
 use clap::Parser;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;

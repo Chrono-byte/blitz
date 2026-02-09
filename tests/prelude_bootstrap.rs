@@ -27,12 +27,8 @@ fn clear_slot_types_in_chunk(chunk: Chunk) -> Chunk {
         new_chunk.code = rc_chunk.code.clone();
         new_chunk.constants = rc_chunk.constants.clone();
         new_chunk.lines = rc_chunk.lines.clone();
-        // Clear global type annotations so runtime won't enforce them during bootstrap.
-        new_chunk.global_types = rc_chunk
-            .global_types
-            .keys()
-            .map(|k| (k.clone(), None))
-            .collect();
+        // No global_types field in current Chunk layout; copy only the
+        // existing basic fields and rebuild functions below.
 
         // Process functions
         let mut new_funcs = Vec::new();
@@ -93,60 +89,52 @@ fn prelude_bootstrap_runs() {
     }
 
     // Publish host primitives into globals as main.rs does.
+    // Construct builtins with explicit BuiltinFn typing to avoid inference issues
+    let builtin_print: tsblitz::value::BuiltinFn = Rc::new(|vm, args| test_native_print(vm, args));
+    let builtin_new_object: tsblitz::value::BuiltinFn =
+        Rc::new(|vm, args| test_native_new_object(vm, args));
+
     globals.borrow_mut().properties.insert(
         PropertyKey::String("__native_print".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            test_native_print(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("__native_new_object".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            test_native_new_object(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(builtin_new_object.clone())),
     );
     // Also publish convenience host-level wrappers so the inlined prelude can
     // import them during bootstrap ordering variants in tests.
     globals.borrow_mut().properties.insert(
         PropertyKey::String("host_print".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            test_native_print(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("native_print".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            test_native_print(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
+    let builtin_null: tsblitz::value::BuiltinFn = Rc::new(|_vm, _args| Ok(Value::Null));
     globals.borrow_mut().properties.insert(
         PropertyKey::String("debugValue".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| Ok(Value::Null)))),
+        PropertyDescriptor::data(Value::Builtin(builtin_null.clone())),
     );
 
     // Provide a minimal `host` object used by some prelude paths
     let mut host_obj = ObjectData::new();
     host_obj.properties.insert(
         PropertyKey::String("host_print".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            test_native_print(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
     host_obj.properties.insert(
         PropertyKey::String("native_new_object".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            test_native_new_object(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(builtin_new_object.clone())),
     );
     host_obj.properties.insert(
         PropertyKey::String("native_print".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            test_native_print(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
     host_obj.properties.insert(
         PropertyKey::String("debugValue".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| Ok(Value::Null)))),
+        PropertyDescriptor::data(Value::Builtin(builtin_null.clone())),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("host".to_string()),
@@ -157,33 +145,23 @@ fn prelude_bootstrap_runs() {
     let mut console_obj = ObjectData::new();
     console_obj.properties.insert(
         PropertyKey::String("log".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            test_native_print(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
     console_obj.properties.insert(
         PropertyKey::String("info".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            test_native_print(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
     console_obj.properties.insert(
         PropertyKey::String("warn".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            test_native_print(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
     console_obj.properties.insert(
         PropertyKey::String("error".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            test_native_print(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
     console_obj.properties.insert(
         PropertyKey::String("debug".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            test_native_print(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("console".to_string()),

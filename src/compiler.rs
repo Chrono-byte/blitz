@@ -322,9 +322,9 @@ impl Compiler {
                                     }
                                 };
                                 let slot = self.add_local(name.clone(), None);
-                    if self.is_root {
-                        self.emit(Op::Dup, LINE);
-                    }
+                                if self.is_root {
+                                    self.emit(Op::Dup, LINE);
+                                }
                                 self.emit(Op::SetLocal, LINE);
                                 self.emit_byte(slot as u8, LINE);
                                 if self.is_root {
@@ -426,6 +426,10 @@ impl Compiler {
                 }
             }
             OExpr::NullLiteral(_) => self.emit(Op::Null, LINE),
+            OExpr::ThisExpression(_) => {
+                // Emit GetThis to push the current this binding for the running frame.
+                self.emit(Op::GetThis, LINE);
+            }
             OExpr::ArrowFunctionExpression(a) => {
                 let name = "<arrow>";
                 let (proto, _env_len) = self.compile_arrow_function(name, a, None)?;
@@ -507,10 +511,10 @@ impl Compiler {
                 })?;
                 match a.operator {
                     oast::AssignmentOperator::Assign => match target {
-                            oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
-                                let name = id.name.as_str();
-                                self.compile_expr_oast(&a.right)?;
-                                self.emit(Op::Dup, LINE);
+                        oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                            let name = id.name.as_str();
+                            self.compile_expr_oast(&a.right)?;
+                            self.emit(Op::Dup, LINE);
                             if let Some(slot) = self.resolve_local(name) {
                                 self.emit(Op::SetLocal, LINE);
                                 self.emit_byte(slot as u8, LINE);
@@ -518,15 +522,15 @@ impl Compiler {
                                 let is_exported = self
                                     .current_module
                                     .as_ref()
-                                    .map(|c| c.exports.contains(name))
-                                    .unwrap_or(false);
+                                    .is_some_and(|c| c.exports.contains(name));
                                 if is_exported {
                                     let module_index = self
                                         .current_module
                                         .as_ref()
                                         .map(|c| c.module_index)
                                         .expect("module_index expected");
-                                    let cname_idx = self.chunk.add_constant(Value::String(name.to_string()));
+                                    let cname_idx =
+                                        self.chunk.add_constant(Value::String(name.to_string()));
                                     self.emit(Op::SetModuleExport, LINE);
                                     self.emit_byte(module_index as u8, LINE);
                                     self.emit_byte(cname_idx as u8, LINE);
@@ -538,7 +542,8 @@ impl Compiler {
                                     .as_ref()
                                     .and_then(|c| c.imports.get(name).map(|(i, n)| (*i, n.clone())))
                                 {
-                                    let cname_idx = self.chunk.add_constant(Value::String(exported_name));
+                                    let cname_idx =
+                                        self.chunk.add_constant(Value::String(exported_name));
                                     self.emit(Op::SetModuleExport, LINE);
                                     self.emit_byte(src_idx as u8, LINE);
                                     self.emit_byte(cname_idx as u8, LINE);
@@ -877,7 +882,7 @@ impl Default for Compiler {
 mod tests {
     use super::*;
     use crate::bytecode::Op;
-    use crate::parser::Parser;
+    
     use crate::value::Value;
 
     #[test]

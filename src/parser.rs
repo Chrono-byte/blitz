@@ -87,8 +87,40 @@ impl Parser {
     /// `ParserSession` which owns backing data (allocator + source) and
     /// exposes the parsed `Program` that borrows that backing data.
     pub fn parse_source(source: &str) -> Result<ParserSession, ParserError> {
-        let mut p = Parser::new_from_source(source);
-        p.parse()
+        // Default to TypeScript parsing for callers that don't provide
+        // filename/extension information (preserves previous behavior).
+        Self::parse_source_with_type(source, SourceType::ts())
+    }
+
+    /// Parse source text with an explicit Oxc SourceType (js or ts).
+    pub fn parse_source_with_type(
+        source: &str,
+        source_type: SourceType,
+    ) -> Result<ParserSession, ParserError> {
+        let _p = Parser::new_from_source(source);
+        // Use a small wrapper around `parse()` that selects the oxc SourceType
+        // based on the caller's guidance. This keeps the public `parse()` logic
+        // centralized while allowing callers who know the file extension to
+        // request JS parsing.
+        ParserSession::try_new(Allocator::default(), source.to_string(), |alloc, source| {
+            let ret = OxcParser::new(alloc, source, source_type)
+                .with_options(ParseOptions {
+                    parse_regular_expression: true,
+                    ..ParseOptions::default()
+                })
+                .parse();
+
+            if !ret.errors.is_empty() {
+                let mut msgs = Vec::new();
+                for e in ret.errors {
+                    let err = e.with_source_code(source.to_string());
+                    msgs.push(format!("{:?}", err));
+                }
+                return Err(ParserError::from(msgs.join("\n")));
+            }
+
+            Ok(ret.program)
+        })
     }
 
     /// Parse and return a `ParserSession` owning allocator+source and
@@ -137,6 +169,8 @@ impl Parser {
         // We only need the ESTree JSON here so keeping allocator scoped is fine.
         let alloc = Allocator::default();
         let leaked_source = source; // short-lived borrow for parser
+        // Default to TypeScript parsing for import extraction. Callers that
+        // know the file is JavaScript should use `extract_imports_from_source_with_type`.
         let ret = OxcParser::new(&alloc, leaked_source, SourceType::ts())
             .with_options(ParseOptions {
                 parse_regular_expression: true,
@@ -166,6 +200,53 @@ impl Parser {
         for item in body {
             // Treat `import ...` and re-export forms (`export * from`,
             // `export { ... } from`) as module dependencies for the module loader.
+            if let Some(typ) = item.get("type").and_then(|t| t.as_str())
+                && (typ == "ImportDeclaration"
+                    || typ == "ExportAllDeclaration"
+                    || typ == "ExportNamedDeclaration")
+                && let Some(source_node) = item.get("source")
+                && let Some(val) = source_node.get("value").and_then(|v| v.as_str())
+            {
+                imports.push(val.to_string());
+            }
+        }
+        Ok(imports)
+    }
+
+    /// Extract top-level static import specifiers from source text with explicit SourceType.
+    pub fn extract_imports_from_source_with_type(
+        source: &str,
+        source_type: SourceType,
+    ) -> Result<Vec<String>, ParserError> {
+        let alloc = Allocator::default();
+        let leaked_source = source;
+        let ret = OxcParser::new(&alloc, leaked_source, source_type)
+            .with_options(ParseOptions {
+                parse_regular_expression: true,
+                ..ParseOptions::default()
+            })
+            .parse();
+
+        if !ret.errors.is_empty() {
+            let mut msgs = Vec::new();
+            for e in ret.errors {
+                let err = e.with_source_code(source.to_string());
+                msgs.push(format!("{:?}", err));
+            }
+            return Err(ParserError::from(msgs.join("\n")));
+        }
+
+        let estree_json = ret.program.to_pretty_estree_ts_json(false);
+        let root: Value = serde_json::from_str(&estree_json)
+            .map_err(|e| ParserError::from(format!("Failed to parse Oxc ESTree JSON: {}", e)))?;
+
+        let body = root
+            .get("body")
+            .and_then(|b| b.as_array())
+            .ok_or_else(|| ParserError::from("Expected program 'body' array".to_string()))?;
+
+        let mut imports = Vec::new();
+        for item in body {
             if let Some(typ) = item.get("type").and_then(|t| t.as_str())
                 && (typ == "ImportDeclaration"
                     || typ == "ExportAllDeclaration"

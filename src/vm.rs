@@ -35,10 +35,10 @@
 //! use tsblitz::vm::Vm;
 //! use tsblitz::bytecode::Chunk;
 //! use std::cell::RefCell;
-//! use std::collections::HashMap;
 //! use std::rc::Rc;
+//! use tsblitz::value::ObjectData;
 //!
-//! let globals = Rc::new(RefCell::new(HashMap::new()));
+//! let globals = Rc::new(RefCell::new(ObjectData::new()));
 //! let mut vm = Vm::new(globals);
 //! // vm.run(chunk)?;
 //! ```
@@ -241,7 +241,7 @@ impl Vm {
     pub fn install_module_exports(
         &mut self,
         module_index: usize,
-        exports: std::collections::HashMap<String, Rc<RefCell<Value>>>,
+        exports: HashMap<String, Rc<RefCell<Value>>>,
     ) {
         // Ensure table is large enough
         while self.module_table.len() <= module_index {
@@ -493,7 +493,9 @@ impl Vm {
                                         | Op::GetProperty
                                         | Op::SetProperty
                                         | Op::GetPropertyIC
-                                        | Op::MakeClosure => {
+                                        | Op::MakeClosure
+                                        | Op::GetUpvalue
+                                        | Op::SetUpvalue => {
                                             let arg =
                                                 self.chunk.code.get(j + 1).cloned().unwrap_or(0);
                                             eprintln!("[diag]   {}: {:?} {}", j, op, arg);
@@ -699,6 +701,37 @@ impl Vm {
                         .map_or(Value::Undefined, |slot| slot.borrow().clone());
                     self.stack.push(v);
                 }
+                // New op: GetThis — push the current frame's `this` binding.
+                Op::GetThis => {
+                    // For now, `this` semantics are simple: if a frame exists,
+                    // `this` is taken from the current frame's first local if
+                    // arranged by the caller; otherwise Undefined. We'll expose a
+                    // getter on the Vm later when call-site conventions are
+                    // adjusted. Use stack top fallback to Undefined for now.
+                    let this_val = if let Some(frame) = self.frames.last() {
+                        // Heuristic: if the frame has at least one local, treat
+                        // locals[0] as the `this` binding (temporary).
+                        frame.locals.get(0).cloned().unwrap_or(Value::Undefined)
+                    } else {
+                        Value::Undefined
+                    };
+                    self.stack.push(this_val);
+                }
+                Op::GetUpvalue => {
+                    // Operand: upvalue index (u8).
+                    let idx = self.read_byte()? as usize;
+                    // Placeholder behavior: push Undefined for now.
+                    // Real implementation will read from closure.env.
+                    let _ = idx;
+                    self.stack.push(Value::Undefined);
+                }
+                Op::SetUpvalue => {
+                    // Operand: upvalue index (u8).
+                    let idx = self.read_byte()? as usize;
+                    // Placeholder: pop value and discard. Real impl will write into closure.env.
+                    let _ = idx;
+                    let _v = self.pop()?;
+                }
                 Op::SetModuleExport => {
                     let module_idx = self.read_byte()? as usize;
                     let name_idx = self.read_byte()? as usize;
@@ -804,11 +837,11 @@ impl Vm {
                 let result = (f.as_ref())(self, &args)?;
                 self.stack.push(result);
             }
-                Value::Closure { proto, .. } => {
-                    let call_args = self.prepare_call_args(&args, &proto)?;
-                    // Argument validation removed in JS-first mode.
-                    self.push_call_frame(&proto, call_args)?;
-                }
+            Value::Closure { proto, .. } => {
+                let call_args = self.prepare_call_args(&args, &proto)?;
+                // Argument validation removed in JS-first mode.
+                self.push_call_frame(&proto, call_args)?;
+            }
             _ => {
                 self.dump_diag("Call failed: callee not callable", &callee);
                 return Err(crate::errors::RuntimeError::from(format!(
@@ -965,6 +998,23 @@ impl Vm {
                     .borrow_mut()
                     .properties
                     .insert(PropertyKey::String(name), PropertyDescriptor::data(v));
+            }
+            // New op: GetThis
+            Op::GetThis => {
+                let this_val = if let Some(frame) = self.frames.last() {
+                    frame.locals.get(0).cloned().unwrap_or(Value::Undefined)
+                } else {
+                    Value::Undefined
+                };
+                self.stack.push(this_val);
+            }
+            Op::GetUpvalue => {
+                let _idx = self.read_byte()? as usize;
+                self.stack.push(Value::Undefined);
+            }
+            Op::SetUpvalue => {
+                let _idx = self.read_byte()? as usize;
+                let _v = self.pop()?;
             }
             Op::Pop => {
                 self.pop()?;
@@ -2288,6 +2338,8 @@ fn opcode_width(op: Op) -> usize {
         | Op::SetGlobal
         | Op::Call
         | Op::MakeClosure
+        | Op::GetUpvalue
+        | Op::SetUpvalue
         | Op::GetPropertyIC
         | Op::GetBuiltin
         | Op::BuildArray

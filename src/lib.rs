@@ -45,8 +45,8 @@
 //! // available via the `compiler`/`parser` modules; this snippet shows VM usage.
 //! use std::rc::Rc;
 //! use std::cell::RefCell;
-//! use std::collections::HashMap;
-//! let globals = Rc::new(RefCell::new(HashMap::new()));
+//! use tsblitz::value::ObjectData;
+//! let globals = Rc::new(RefCell::new(ObjectData::new()));
 //! let mut vm = Vm::new(globals);
 //! // vm.run(&bytecode)?; // run compiled bytecode when available
 //! # Ok::<(), Box<dyn std::error::Error>>(())
