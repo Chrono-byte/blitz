@@ -126,7 +126,7 @@ fn get_global_bg_runtime() -> Arc<Runtime> {
                 .filter(|&n| n > 0);
 
             let workers = std::thread::available_parallelism()
-                .map(|n| n.get())
+                .map(std::num::NonZero::get)
                 .unwrap_or(4);
 
             // Default: leave one core for the foreground VM thread if possible.

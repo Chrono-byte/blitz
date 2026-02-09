@@ -181,10 +181,8 @@ pub fn check(program: &oast::Program<'_>) -> Result<(), TypeCheckerError> {
         Type::Function(vec![Type::String], Box::new(Type::Number)),
     );
 
-    for item in &program.body {
-        if let oast::ModuleItem::Stmt(stmt) = item {
-            ctx.check_statement_oast(stmt)?;
-        }
+    for stmt in &program.body {
+        ctx.check_statement_oast(stmt)?;
     }
     Ok(())
 }
@@ -212,128 +210,153 @@ impl TypeContext {
         None
     }
 
-    fn check_statement_oast(&mut self, stmt: &oast::Stmt) -> Result<(), TypeCheckerError> {
-        use oast::{Decl as ODecl, Pat as OPat, Stmt as OStmt};
+    fn check_statement_oast(&mut self, stmt: &oast::Statement) -> Result<(), TypeCheckerError> {
+        use oast::{BindingPattern as OPat, Statement as OStmt};
+        if matches!(stmt, oxc_ast::match_module_declaration!(OStmt)) {
+            return Ok(());
+        }
         match stmt {
-            OStmt::Decl(d) => match d {
-                ODecl::Var(v) => {
-                    for dec in &v.decls {
-                        let name = match &dec.id {
-                            OPat::Ident(i) => i.id.name.clone(),
-                            _ => return Err(TypeCheckerError::from("unsupported var pattern")),
-                        };
-                        let var_type = if let Some(typ) = &dec.ty {
-                            convert_type_ann(typ)?
-                        } else if let Some(init) = &dec.init {
-                            self.type_of_expr_oast(init)?
-                        } else {
-                            return Err(TypeCheckerError::from(format!(
-                                "Variable '{}' needs a type annotation or initializer",
-                                name
-                            )));
-                        };
-                        if let Some(init) = &dec.init {
-                            let init_ok = if let oast::Expr::Array(arr) = init {
-                                if arr.elements.is_empty() {
-                                    matches!(var_type, Type::Array(_))
-                                } else {
-                                    let it = self.type_of_expr_oast(init)?;
-                                    assignable(&var_type, &it)
-                                }
+            OStmt::VariableDeclaration(v) => {
+                for dec in &v.declarations {
+                    let name = match &dec.id {
+                        OPat::BindingIdentifier(i) => i.name.to_string(),
+                        _ => return Err(TypeCheckerError::from("unsupported var pattern")),
+                    };
+                    let var_type = if let Some(typ) = &dec.type_annotation {
+                        convert_type_ann(typ)?
+                    } else if let Some(init) = &dec.init {
+                        self.type_of_expr_oast(init)?
+                    } else {
+                        return Err(TypeCheckerError::from(format!(
+                            "Variable '{}' needs a type annotation or initializer",
+                            name
+                        )));
+                    };
+                    if let Some(init) = &dec.init {
+                        let init_ok = if let oast::Expression::ArrayExpression(arr) = init {
+                            if arr.elements.is_empty() {
+                                matches!(var_type, Type::Array(_))
                             } else {
                                 let it = self.type_of_expr_oast(init)?;
                                 assignable(&var_type, &it)
-                            };
-                            if !init_ok {
-                                return Err(TypeCheckerError::from(format!(
-                                    "Type '{}' is not assignable to '{}' for variable '{}'",
-                                    type_to_string(&self.type_of_expr_oast(init)?),
-                                    type_to_string(&var_type),
-                                    name
-                                )));
                             }
-                        }
-                        self.scope_mut().insert(name, var_type);
-                    }
-                }
-                ODecl::Fn(f) => {
-                    if let Some(ident) = &f.ident {
-                        let fname = ident.name.clone();
-                        // parameters and return types live on `oast::Function` as `ty`/`return_type` optionally
-                        let mut param_types = Vec::new();
-                        for p in &f.params {
-                            if strict_mode() && p.ty.is_none() {
-                                return Err(TypeCheckerError::from(format!(
-                                    "Parameter '{}' requires a type annotation in strict mode",
-                                    match &p.pat {
-                                        OPat::Ident(i) => i.id.name.clone(),
-                                        _ => "<pat>".to_string(),
-                                    }
-                                )));
-                            }
-                            param_types.push(
-                                p.ty.as_ref()
-                                    .map(|t| convert_type_ann(t))
-                                    .transpose()?
-                                    .unwrap_or(Type::Void),
-                            );
-                        }
-                        if strict_mode() && f.return_type.is_none() {
+                        } else {
+                            let it = self.type_of_expr_oast(init)?;
+                            assignable(&var_type, &it)
+                        };
+                        if !init_ok {
                             return Err(TypeCheckerError::from(format!(
-                                "Function '{}' return type required in strict mode",
-                                fname
+                                "Type '{}' is not assignable to '{}' for variable '{}'",
+                                type_to_string(&self.type_of_expr_oast(init)?),
+                                type_to_string(&var_type),
+                                name
                             )));
                         }
-                        let return_type = f
-                            .return_type
-                            .as_ref()
-                            .map(|t| convert_type_ann(t))
-                            .transpose()?
-                            .unwrap_or(Type::Void);
-                        self.scope_mut().insert(
-                            fname.clone(),
-                            Type::Function(param_types, Box::new(return_type.clone())),
-                        );
-                        // check body
-                        if let Some(body) = &f.body {
-                            self.scopes.push(Scope::new());
-                            for p in &f.params {
-                                let pname = match &p.pat {
-                                    OPat::Ident(i) => i.id.name.clone(),
-                                    _ => "_".to_string(),
-                                };
-                                let pt =
-                                    p.ty.as_ref()
-                                        .map(|t| convert_type_ann(t))
-                                        .transpose()?
-                                        .unwrap_or(Type::Void);
-                                self.scope_mut().insert(pname, pt);
-                            }
-                            for s in &body.body {
-                                self.check_statement_oast(s)?;
-                            }
-                            self.scopes.pop();
+                    }
+                    self.scope_mut().insert(name, var_type);
+                }
+            }
+            OStmt::FunctionDeclaration(f) => {
+                if let Some(ident) = &f.id {
+                    let fname = ident.name.to_string();
+                    let mut param_types = Vec::new();
+                    for p in &f.params.items {
+                        if strict_mode() && p.type_annotation.is_none() {
+                            return Err(TypeCheckerError::from(format!(
+                                "Parameter '{}' requires a type annotation in strict mode",
+                                match &p.pattern {
+                                    OPat::BindingIdentifier(i) => i.name.to_string(),
+                                    _ => "<pat>".to_string(),
+                                }
+                            )));
                         }
+                        param_types.push(
+                            p.type_annotation
+                                .as_ref()
+                                .map(|t| convert_type_ann(t))
+                                .transpose()?
+                                .unwrap_or(Type::Void),
+                        );
+                    }
+                    if let Some(rest) = &f.params.rest {
+                        if strict_mode() && rest.type_annotation.is_none() {
+                            return Err(TypeCheckerError::from(
+                                "Rest parameter requires a type annotation in strict mode",
+                            ));
+                        }
+                        param_types.push(
+                            rest.type_annotation
+                                .as_ref()
+                                .map(|t| convert_type_ann(t))
+                                .transpose()?
+                                .unwrap_or(Type::Void),
+                        );
+                    }
+                    if strict_mode() && f.return_type.is_none() {
+                        return Err(TypeCheckerError::from(format!(
+                            "Function '{}' return type required in strict mode",
+                            fname
+                        )));
+                    }
+                    let return_type = f
+                        .return_type
+                        .as_ref()
+                        .map(|t| convert_type_ann(t))
+                        .transpose()?
+                        .unwrap_or(Type::Void);
+                    self.scope_mut()
+                        .insert(fname, Type::Function(param_types, Box::new(return_type)));
+                    if let Some(body) = &f.body {
+                        self.scopes.push(Scope::new());
+                        for p in &f.params.items {
+                            let pname = match &p.pattern {
+                                OPat::BindingIdentifier(i) => i.name.to_string(),
+                                _ => "_".to_string(),
+                            };
+                            let pt = p
+                                .type_annotation
+                                .as_ref()
+                                .map(|t| convert_type_ann(t))
+                                .transpose()?
+                                .unwrap_or(Type::Void);
+                            self.scope_mut().insert(pname, pt);
+                        }
+                        if let Some(rest) = &f.params.rest {
+                            let pname = match &rest.rest.argument {
+                                OPat::BindingIdentifier(i) => i.name.to_string(),
+                                _ => "_".to_string(),
+                            };
+                            let pt = rest
+                                .type_annotation
+                                .as_ref()
+                                .map(|t| convert_type_ann(t))
+                                .transpose()?
+                                .unwrap_or(Type::Void);
+                            self.scope_mut().insert(pname, pt);
+                        }
+                        for s in &body.statements {
+                            self.check_statement_oast(s)?;
+                        }
+                        self.scopes.pop();
                     }
                 }
-                _ => {}
-            },
-            OStmt::Expr(e) => {
-                let _ = self.type_of_expr_oast(&e.expr)?;
             }
-            OStmt::If(i) => {
+            OStmt::ExpressionStatement(e) => {
+                let _ = self.type_of_expr_oast(&e.expression)?;
+            }
+            OStmt::IfStatement(i) => {
                 let _ = self.type_of_expr_oast(&i.test)?;
-                self.check_statement_oast(&i.cons)?;
-                if let Some(alt) = &i.alt {
+                self.check_statement_oast(&i.consequent)?;
+                if let Some(alt) = &i.alternate {
                     self.check_statement_oast(alt)?;
                 }
             }
-            OStmt::While(w) => {
+            OStmt::WhileStatement(w) => {
                 let _ = self.type_of_expr_oast(&w.test)?;
                 self.check_statement_oast(&w.body)?;
             }
-            OStmt::Return(r) => {
-                if let Some(arg) = &r.arg {
+            OStmt::ReturnStatement(r) => {
+                if let Some(arg) = &r.argument {
                     let _ = self.type_of_expr_oast(arg)?;
                 }
             }
@@ -342,26 +365,23 @@ impl TypeContext {
         Ok(())
     }
 
-    fn type_of_expr_oast(&self, expr: &oast::Expr) -> Result<Type, TypeCheckerError> {
-        use oast::Expr as OExpr;
+    fn type_of_expr_oast(&self, expr: &oast::Expression) -> Result<Type, TypeCheckerError> {
+        use oast::Expression as OExpr;
         match expr {
-            OExpr::Lit(l) => Ok(match &l.kind {
-                oast::LitKind::Number(_) => Type::Number,
-                oast::LitKind::String(s) => Type::String,
-                oast::LitKind::Bool(b) => Type::Boolean,
-                oast::LitKind::Null => Type::Null,
-                _ => Type::Unknown,
-            }),
-            OExpr::Ident(id) => {
-                let name = &id.name;
+            OExpr::NumericLiteral(_) => Ok(Type::Number),
+            OExpr::StringLiteral(_) => Ok(Type::String),
+            OExpr::BooleanLiteral(_) => Ok(Type::Boolean),
+            OExpr::NullLiteral(_) => Ok(Type::Null),
+            OExpr::Identifier(id) => {
+                let name = id.name.as_str();
                 self.lookup(name)
                     .ok_or_else(|| TypeCheckerError::from(format!("Unknown variable '{}'", name)))
             }
-            OExpr::Unary(u) => {
-                let a = self.type_of_expr_oast(&u.arg)?;
-                match u.op {
-                    oast::UnaryOp::Not => Ok(Type::Boolean),
-                    oast::UnaryOp::Neg => {
+            OExpr::UnaryExpression(u) => {
+                let a = self.type_of_expr_oast(&u.argument)?;
+                match u.operator {
+                    oast::UnaryOperator::LogicalNot => Ok(Type::Boolean),
+                    oast::UnaryOperator::UnaryNegation => {
                         if assignable(&Type::Number, &a) {
                             Ok(Type::Number)
                         } else {
@@ -371,11 +391,11 @@ impl TypeContext {
                     _ => Ok(Type::Unknown),
                 }
             }
-            OExpr::Bin(b) => {
-                let l = self.type_of_expr_oast(&b.lhs)?;
-                let r = self.type_of_expr_oast(&b.rhs)?;
-                match b.op {
-                    oast::BinaryOp::Add => {
+            OExpr::BinaryExpression(b) => {
+                let l = self.type_of_expr_oast(&b.left)?;
+                let r = self.type_of_expr_oast(&b.right)?;
+                match b.operator {
+                    oast::BinaryOperator::Addition => {
                         if l == Type::Number && r == Type::Number {
                             Ok(Type::Number)
                         } else if l == Type::String || r == Type::String {
@@ -388,7 +408,9 @@ impl TypeContext {
                             )))
                         }
                     }
-                    oast::BinaryOp::Sub | oast::BinaryOp::Mul | oast::BinaryOp::Div => {
+                    oast::BinaryOperator::Subtraction
+                    | oast::BinaryOperator::Multiplication
+                    | oast::BinaryOperator::Division => {
                         if assignable(&Type::Number, &l) && assignable(&Type::Number, &r) {
                             Ok(Type::Number)
                         } else {
@@ -402,16 +424,12 @@ impl TypeContext {
                     _ => Ok(Type::Unknown),
                 }
             }
-            OExpr::Call(c) => {
+            OExpr::CallExpression(c) => {
                 let callee_type = self.type_of_expr_oast(&c.callee)?;
-                let is_console_log = if let OExpr::Member(m) = &*c.callee {
-                    if let OExpr::Ident(obj_ident) = &*m.obj {
-                        let obj = &obj_ident.name;
-                        if let oast::PropName::Ident(prop_ident) = &m.prop {
-                            obj == "console" && prop_ident.name == "log"
-                        } else {
-                            false
-                        }
+                let is_console_log = if let OExpr::StaticMemberExpression(m) = &c.callee {
+                    if let OExpr::Identifier(obj_ident) = &m.object {
+                        let obj = obj_ident.name.as_str();
+                        obj == "console" && m.property.name.as_str() == "log"
                     } else {
                         false
                     }
@@ -420,15 +438,18 @@ impl TypeContext {
                 };
                 match &callee_type {
                     Type::Function(params, ret) => {
-                        if !params.is_empty() && params.len() != c.args.len() {
+                        if !params.is_empty() && params.len() != c.arguments.len() {
                             return Err(TypeCheckerError::from(format!(
                                 "Expected {} arguments, got {}",
                                 params.len(),
-                                c.args.len()
+                                c.arguments.len()
                             )));
                         }
-                        for (i, (arg, param)) in c.args.iter().zip(params.iter()).enumerate() {
-                            let arg_type = self.type_of_expr_oast(arg)?;
+                        for (i, (arg, param)) in c.arguments.iter().zip(params.iter()).enumerate() {
+                            let arg_expr = arg.as_expression().ok_or_else(|| {
+                                TypeCheckerError::from("Unsupported call argument")
+                            })?;
+                            let arg_type = self.type_of_expr_oast(arg_expr)?;
                             if !assignable(param, &arg_type) {
                                 if is_console_log
                                     && *param == Type::String
@@ -452,64 +473,62 @@ impl TypeContext {
                     ))),
                 }
             }
-            OExpr::Member(m) => {
-                let obj_type = self.type_of_expr_oast(&m.obj)?;
+            OExpr::StaticMemberExpression(m) => {
+                let obj_type = self.type_of_expr_oast(&m.object)?;
                 match obj_type {
                     Type::Object(ref props) => {
-                        let key_opt = if !m.computed {
-                            match &m.prop {
-                                oast::PropName::Ident(ident) => Some(ident.name.clone()),
-                                oast::PropName::Str(s) => Some(s.value.clone()),
-                                _ => None,
-                            }
+                        let key = m.property.name.to_string();
+                        if let Some(t) = props.get(&key) {
+                            Ok(t.clone())
                         } else {
-                            None
-                        };
-                        if let Some(k) = key_opt {
-                            if let Some(t) = props.get(&k) {
-                                Ok(t.clone())
-                            } else {
-                                Err(TypeCheckerError::from(format!(
-                                    "Property '{}' not found on object",
-                                    k
-                                )))
-                            }
-                        } else {
-                            Err(TypeCheckerError::from(
-                                "Unsupported property access in type context",
-                            ))
+                            Err(TypeCheckerError::from(format!(
+                                "Property '{}' not found on object",
+                                key
+                            )))
                         }
                     }
                     _ => Err(TypeCheckerError::from("GetProperty on non-object type")),
                 }
             }
-            OExpr::Array(arr) => {
+            OExpr::ComputedMemberExpression(_) => Err(TypeCheckerError::from(
+                "Unsupported computed property access in type context",
+            )),
+            OExpr::ArrayExpression(arr) => {
                 if arr.elements.is_empty() {
                     return Err(TypeCheckerError::from(
                         "Empty array literal requires an explicit type annotation",
                     ));
                 }
-                let first = self.type_of_expr_oast(&arr.elements[0])?;
+                let first_expr = arr.elements[0]
+                    .as_expression()
+                    .ok_or_else(|| TypeCheckerError::from("Unsupported array element"))?;
+                let first = self.type_of_expr_oast(first_expr)?;
                 for e in &arr.elements[1..] {
-                    let t = self.type_of_expr_oast(e)?;
+                    let expr = e
+                        .as_expression()
+                        .ok_or_else(|| TypeCheckerError::from("Unsupported array element"))?;
+                    let t = self.type_of_expr_oast(expr)?;
                     if !assignable(&first, &t) && !assignable(&t, &first) {
                         return Err(TypeCheckerError::from("Array elements must have same type"));
                     }
                 }
                 Ok(Type::Array(Box::new(first)))
             }
-            OExpr::This => Ok(Type::Object(HashMap::new())),
-            OExpr::Object(obj) => {
+            OExpr::ThisExpression(_) => Ok(Type::Object(HashMap::new())),
+            OExpr::ObjectExpression(obj) => {
                 let mut props = HashMap::new();
                 for p in &obj.properties {
-                    if let oast::Prop::KeyValue(k, v) = p {
-                        let t = self.type_of_expr_oast(v)?;
-                        match k {
-                            oast::PropName::Ident(ident) => {
-                                props.insert(ident.name.clone(), t);
+                    if let oast::ObjectPropertyKind::ObjectProperty(prop) = p {
+                        if prop.computed {
+                            continue;
+                        }
+                        let t = self.type_of_expr_oast(&prop.value)?;
+                        match &prop.key {
+                            oast::PropertyKey::StaticIdentifier(ident) => {
+                                props.insert(ident.name.to_string(), t);
                             }
-                            oast::PropName::Str(s) => {
-                                props.insert(s.value.clone(), t);
+                            oast::PropertyKey::StringLiteral(s) => {
+                                props.insert(s.value.to_string(), t);
                             }
                             _ => {}
                         }
@@ -517,12 +536,13 @@ impl TypeContext {
                 }
                 Ok(Type::Object(props))
             }
+            OExpr::ParenthesizedExpression(p) => self.type_of_expr_oast(&p.expression),
             _ => Ok(Type::Unknown),
         }
     }
 }
 
-fn convert_type_ann(_ty: &oast::TsType) -> Result<Type, TypeCheckerError> {
+fn convert_type_ann(_ty: &oast::TSTypeAnnotation) -> Result<Type, TypeCheckerError> {
     // For now, be permissive: map many annotations to simple Type variants.
     // A full mapping is out of scope for this migration patch.
     Ok(Type::Any)

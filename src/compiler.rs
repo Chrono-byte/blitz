@@ -35,9 +35,8 @@ const LINE: u32 = 1;
 ///
 /// # Errors
 ///
-/// Returns an error string if compilation fails
-// Public API: compile an oxc AST Program. Internally we convert to the
-// legacy owned AST and delegate to the existing compiler implementation.
+/// Returns an error string if compilation fails.
+// Public API: compile an oxc AST Program directly.
 pub fn compile(program: &oast::Program<'_>) -> Result<Chunk, crate::errors::CompilerError> {
     let mut c = Compiler::new();
     c.compile_oxc(program)
@@ -117,37 +116,22 @@ impl Compiler {
         idx
     }
 
-    /// (legacy-owned AST entrypoints removed) The compiler exposes `compile_oxc`
-    /// which consumes `oast::Program` directly. Previous owned-ast entrypoints
-    /// were intentionally removed as part of the migration.
-
     /// Transitional compiler entry that accepts an `oast::Program` reference.
     ///
-    /// Currently this converts to the legacy `local_ast::Program` and invokes
-    /// the existing `compile(&Program)` implementation. We'll replace the
-    /// body with a direct walker over `oast` in subsequent patches.
+    /// Uses a direct walker over `oast`.
     pub fn compile_oxc(
         &mut self,
         program: &oast::Program<'_>,
     ) -> Result<Chunk, crate::errors::CompilerError> {
-        // Start direct walking of the oxc program body. We iterate over
-        // ModuleItems and compile their statement content where present.
-        // This is a minimal but complete walker for the node kinds we need.
-        // Note: ModuleDecl items (imports/exports) are treated as no-ops.
-        // Use fully-qualified oxc ast alias `oast::ModuleItem` when matching.
+        // Start direct walking of the oxc program body. This is a minimal but
+        // complete walker for the node kinds we need. Module declarations are
+        // treated as no-ops.
 
         // Pre-declare functions for hoisting by scanning module items.
         self.pre_declare_functions_oast(program);
 
-        for item in &program.body {
-            match item {
-                oast::ModuleItem::Stmt(stmt) => {
-                    self.compile_statement_oast(stmt)?;
-                }
-                oast::ModuleItem::ModuleDecl(_) => {
-                    // imports/exports skipped at compile-time
-                }
-            }
+        for stmt in &program.body {
+            self.compile_statement_oast(stmt)?;
         }
 
         // After walking module, finish with Return
@@ -158,15 +142,13 @@ impl Compiler {
     /// Scan an oxc Program and reserve local slots for top-level function
     /// declarations to preserve hoisting semantics during the migration.
     fn pre_declare_functions_oast(&mut self, program: &oast::Program<'_>) {
-        for item in &program.body {
-            if let oast::ModuleItem::Stmt(stmt) = item {
-                if let oast::Stmt::Decl(oast::Decl::Fn(fn_decl)) = stmt {
-                    if let Some(ident) = &fn_decl.ident {
-                        let name = ident.name.clone();
-                        if self.resolve_local(&name).is_none() {
-                            self.add_local(name, None);
-                        }
-                    }
+        for stmt in &program.body {
+            if let oast::Statement::FunctionDeclaration(fn_decl) = stmt
+                && let Some(ident) = &fn_decl.id
+            {
+                let name = ident.name.to_string();
+                if self.resolve_local(&name).is_none() {
+                    self.add_local(name, None);
                 }
             }
         }
@@ -175,79 +157,79 @@ impl Compiler {
     // Direct oxc AST statement/epression walkers
     fn compile_statement_oast(
         &mut self,
-        stmt: &oast::Stmt,
+        stmt: &oast::Statement,
     ) -> Result<(), crate::errors::CompilerError> {
-        use oxc_ast::ast::{Decl as ODecl, Pat as OPat, Stmt as OStmt};
+        use oxc_ast::ast::{BindingPattern as OPat, Statement as OStmt};
+        if matches!(stmt, oxc_ast::match_module_declaration!(OStmt)) {
+            return Ok(());
+        }
         match stmt {
-            OStmt::Decl(d) => match d {
-                ODecl::Var(v) => {
-                    for dec in &v.decls {
-                        if let Some(init) = &dec.init {
-                            self.compile_expr_oast(init)?;
-                        } else {
-                            self.emit(Op::Null, LINE);
-                        }
-                        let name = match &dec.id {
-                            OPat::Ident(i) => i.id.name.clone(),
-                            _ => {
-                                return Err(crate::errors::CompilerError::from(
-                                    "unsupported var pattern",
-                                ));
-                            }
-                        };
-                        let slot = self.add_local(name.clone(), None);
-                        if self.is_root {
-                            self.chunk.global_types.insert(name.clone(), None);
-                            self.emit(Op::Dup, LINE);
-                        }
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(slot as u8, LINE);
-                        if self.is_root {
-                            let idx = self.global_name_index(&name);
-                            self.emit(Op::SetGlobal, LINE);
-                            self.emit_byte(idx as u8, LINE);
-                        }
+            OStmt::VariableDeclaration(v) => {
+                for dec in &v.declarations {
+                    if let Some(init) = &dec.init {
+                        self.compile_expr_oast(init)?;
+                    } else {
+                        self.emit(Op::Null, LINE);
                     }
-                }
-                ODecl::Fn(f) => {
-                    if let Some(ident) = &f.ident {
-                        let fname = ident.name.clone();
-                        let (proto, _env_len) = self.compile_function(&fname, f, None)?;
-                        let idx = self.chunk.add_function(proto);
-                        self.emit(Op::MakeClosure, LINE);
+                    let name = match &dec.id {
+                        OPat::BindingIdentifier(i) => i.name.to_string(),
+                        _ => {
+                            return Err(crate::errors::CompilerError::from(
+                                "unsupported var pattern",
+                            ));
+                        }
+                    };
+                    let slot = self.add_local(name.clone(), None);
+                    if self.is_root {
+                        self.chunk.global_types.insert(name.clone(), None);
+                        self.emit(Op::Dup, LINE);
+                    }
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(slot as u8, LINE);
+                    if self.is_root {
+                        let idx = self.global_name_index(&name);
+                        self.emit(Op::SetGlobal, LINE);
                         self.emit_byte(idx as u8, LINE);
-                        let slot = if let Some(s) = self.resolve_local(&fname) {
-                            s
-                        } else {
-                            self.add_local(fname.clone(), None)
-                        };
-                        if self.is_root {
-                            self.chunk.global_types.insert(fname.clone(), None);
-                            self.emit(Op::Dup, LINE);
-                        }
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(slot as u8, LINE);
-                        if self.is_root {
-                            let gidx = self.global_name_index(&fname);
-                            self.emit(Op::SetGlobal, LINE);
-                            self.emit_byte(gidx as u8, LINE);
-                        }
                     }
                 }
-                _ => {}
-            },
-            OStmt::Expr(e) => {
-                self.compile_expr_oast(&e.expr)?;
+            }
+            OStmt::FunctionDeclaration(f) => {
+                if let Some(ident) = &f.id {
+                    let fname = ident.name.to_string();
+                    let (proto, _env_len) = self.compile_function(&fname, f, None)?;
+                    let idx = self.chunk.add_function(proto);
+                    self.emit(Op::MakeClosure, LINE);
+                    self.emit_byte(idx as u8, LINE);
+                    let slot = if let Some(s) = self.resolve_local(&fname) {
+                        s
+                    } else {
+                        self.add_local(fname.clone(), None)
+                    };
+                    if self.is_root {
+                        self.chunk.global_types.insert(fname.clone(), None);
+                        self.emit(Op::Dup, LINE);
+                    }
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(slot as u8, LINE);
+                    if self.is_root {
+                        let gidx = self.global_name_index(&fname);
+                        self.emit(Op::SetGlobal, LINE);
+                        self.emit_byte(gidx as u8, LINE);
+                    }
+                }
+            }
+            OStmt::ExpressionStatement(e) => {
+                self.compile_expr_oast(&e.expression)?;
                 self.emit(Op::Pop, LINE);
             }
-            OStmt::If(i) => {
+            OStmt::IfStatement(i) => {
                 self.compile_expr_oast(&i.test)?;
                 self.emit(Op::JumpIfFalse, LINE);
                 let jump_over = self.chunk.code.len();
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
-                self.compile_statement_oast(&i.cons)?;
-                if let Some(alt) = &i.alt {
+                self.compile_statement_oast(&i.consequent)?;
+                if let Some(alt) = &i.alternate {
                     self.emit(Op::Jump, LINE);
                     let jump_else = self.chunk.code.len();
                     self.emit_byte(0, LINE);
@@ -259,7 +241,7 @@ impl Compiler {
                     self.patch_jump(jump_over);
                 }
             }
-            OStmt::While(w) => {
+            OStmt::WhileStatement(w) => {
                 self.continue_patches.push(Vec::new());
                 let loop_start = self.chunk.code.len();
                 self.compile_expr_oast(&w.test)?;
@@ -282,8 +264,8 @@ impl Compiler {
                 }
                 self.patch_jump(exit_jump);
             }
-            OStmt::Return(r) => {
-                if let Some(arg) = &r.arg {
+            OStmt::ReturnStatement(r) => {
+                if let Some(arg) = &r.argument {
                     self.compile_expr_oast(arg)?;
                 } else {
                     self.emit(Op::Null, LINE);
@@ -295,24 +277,24 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_expr_oast(&mut self, expr: &oast::Expr) -> Result<(), crate::errors::CompilerError> {
-        use oxc_ast::ast::Expr as OExpr;
+    fn compile_expr_oast(
+        &mut self,
+        expr: &oast::Expression,
+    ) -> Result<(), crate::errors::CompilerError> {
+        use oxc_ast::ast::Expression as OExpr;
         match expr {
-            OExpr::Lit(l) => match &l.kind {
-                oast::LitKind::Number(n) => self.emit_constant(Value::Number(*n), LINE),
-                oast::LitKind::String(s) => self.emit_constant(Value::String(s.clone()), LINE),
-                oast::LitKind::Bool(b) => {
-                    if *b {
-                        self.emit(Op::True, LINE)
-                    } else {
-                        self.emit(Op::False, LINE)
-                    }
+            OExpr::NumericLiteral(n) => self.emit_constant(Value::Number(n.value), LINE),
+            OExpr::StringLiteral(s) => self.emit_constant(Value::String(s.value.to_string()), LINE),
+            OExpr::BooleanLiteral(b) => {
+                if b.value {
+                    self.emit(Op::True, LINE)
+                } else {
+                    self.emit(Op::False, LINE)
                 }
-                oast::LitKind::Null => self.emit(Op::Null, LINE),
-                _ => {}
-            },
-            OExpr::Ident(id) => {
-                let name = &id.name;
+            }
+            OExpr::NullLiteral(_) => self.emit(Op::Null, LINE),
+            OExpr::Identifier(id) => {
+                let name = id.name.as_str();
                 if let Some(slot) = self.resolve_local(name) {
                     self.emit(Op::GetLocal, LINE);
                     self.emit_byte(slot as u8, LINE);
@@ -322,24 +304,27 @@ impl Compiler {
                     self.emit_byte(idx as u8, LINE);
                 }
             }
-            OExpr::Unary(u) => {
-                self.compile_expr_oast(&u.arg)?;
-                match u.op {
-                    oast::UnaryOp::Not => self.emit(Op::Not, LINE),
-                    oast::UnaryOp::Neg => self.emit(Op::Neg, LINE),
+            OExpr::UnaryExpression(u) => {
+                self.compile_expr_oast(&u.argument)?;
+                match u.operator {
+                    oast::UnaryOperator::LogicalNot => self.emit(Op::Not, LINE),
+                    oast::UnaryOperator::UnaryNegation => self.emit(Op::Neg, LINE),
                     _ => {}
                 }
             }
-            OExpr::Bin(b) => {
-                self.compile_expr_oast(&b.lhs)?;
-                self.compile_expr_oast(&b.rhs)?;
-                match b.op {
-                    oast::BinaryOp::Add => self.emit(Op::Add, LINE),
-                    oast::BinaryOp::Sub => self.emit(Op::Sub, LINE),
-                    oast::BinaryOp::Mul => self.emit(Op::Mul, LINE),
-                    oast::BinaryOp::Div => self.emit(Op::Div, LINE),
+            OExpr::BinaryExpression(b) => {
+                self.compile_expr_oast(&b.left)?;
+                self.compile_expr_oast(&b.right)?;
+                match b.operator {
+                    oast::BinaryOperator::Addition => self.emit(Op::Add, LINE),
+                    oast::BinaryOperator::Subtraction => self.emit(Op::Sub, LINE),
+                    oast::BinaryOperator::Multiplication => self.emit(Op::Mul, LINE),
+                    oast::BinaryOperator::Division => self.emit(Op::Div, LINE),
                     _ => self.emit(Op::Add, LINE),
                 }
+            }
+            OExpr::ParenthesizedExpression(p) => {
+                self.compile_expr_oast(&p.expression)?;
             }
             _ => {}
         }
@@ -360,14 +345,14 @@ impl Compiler {
         self.emit_byte((v & 0xff) as u8, line);
     }
 
-    fn pre_declare_functions_oast_stmts(&mut self, stmts: &[oast::Stmt]) {
+    fn pre_declare_functions_oast_stmts(&mut self, stmts: &[oast::Statement]) {
         for stmt in stmts {
-            if let oast::Stmt::Decl(oast::Decl::Fn(f)) = stmt {
-                if let Some(ident) = &f.ident {
-                    let name = ident.name.clone();
-                    if self.resolve_local(&name).is_none() {
-                        self.add_local(name, None);
-                    }
+            if let oast::Statement::FunctionDeclaration(f) = stmt
+                && let Some(ident) = &f.id
+            {
+                let name = ident.name.to_string();
+                if self.resolve_local(&name).is_none() {
+                    self.add_local(name, None);
                 }
             }
         }
@@ -391,9 +376,17 @@ impl Compiler {
 
         // Parameter placeholders (no type information available here).
         let mut param_type_opts: Vec<Option<Type>> = Vec::new();
-        for p in &func.params {
-            let pname = match &p.pat {
-                oast::Pat::Ident(i) => i.id.name.clone(),
+        for p in &func.params.items {
+            let pname = match &p.pattern {
+                oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
+                _ => "_".to_string(),
+            };
+            param_type_opts.push(None);
+            inner.add_local(pname, None);
+        }
+        if let Some(rest) = &func.params.rest {
+            let pname = match &rest.rest.argument {
+                oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
                 _ => "_".to_string(),
             };
             param_type_opts.push(None);
@@ -402,12 +395,12 @@ impl Compiler {
 
         // Pre-declare nested functions inside this function body.
         if let Some(body) = &func.body {
-            self.pre_declare_functions_oast_stmts(&body.body);
+            self.pre_declare_functions_oast_stmts(&body.statements);
         }
 
         // Compile function body statements into inner compiler.
         if let Some(body) = &func.body {
-            for stmt in &body.body {
+            for stmt in &body.statements {
                 inner.compile_statement_oast(stmt)?;
             }
         }
@@ -418,11 +411,11 @@ impl Compiler {
             .into_iter()
             .chain(inner.local_types)
             .collect();
-        let has_rest = func.params.iter().any(|p| p.rest);
+        let has_rest = func.params.rest.is_some();
         Ok((
             FunctionProto {
                 name: name.to_string(),
-                arity: func.params.len(),
+                arity: func.params.items.len() + if has_rest { 1 } else { 0 },
                 chunk: Rc::new(chunk),
                 slot_types,
                 has_rest,
