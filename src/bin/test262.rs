@@ -36,7 +36,7 @@ use serde::Deserialize;
 
 use tsblitz::compiler;
 use tsblitz::value::PropertyKey;
-use tsblitz::{parser::Parser, typecheck, value::Value, vm::Vm, module::ModuleLoader};
+use tsblitz::{module::ModuleLoader, parser::Parser, typecheck, value::Value, vm::Vm};
 
 struct RunnerOptions {
     includes: Vec<String>,
@@ -758,13 +758,17 @@ fn main() {
     if prelude_path.exists() {
         let mut loader = ModuleLoader::new();
         if let Err(e) = (|| -> Result<(), String> {
-            loader.construct(
-                prelude_path.parent().unwrap_or(Path::new(".")),
-                &format!("./{}", prelude_path.file_name().unwrap().to_string_lossy()),
-            )
-            .map_err(|e| format!("construct prelude failed: {}", e))?;
-            loader.instantiate_all().map_err(|e| format!("instantiate prelude failed: {}", e))?;
-            loader.evaluate_entry(&prelude_path, &mut vm)
+            loader
+                .construct(
+                    prelude_path.parent().unwrap_or(Path::new(".")),
+                    &format!("./{}", prelude_path.file_name().unwrap().to_string_lossy()),
+                )
+                .map_err(|e| format!("construct prelude failed: {}", e))?;
+            loader
+                .instantiate_all()
+                .map_err(|e| format!("instantiate prelude failed: {}", e))?;
+            loader
+                .evaluate_entry(&prelude_path, &mut vm)
                 .map_err(|e| format!("evaluate prelude failed: {}", e))?;
             Ok(())
         })() {

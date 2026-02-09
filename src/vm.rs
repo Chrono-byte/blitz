@@ -1231,12 +1231,12 @@ impl Vm {
                     && matches!(value, Value::Bool(true))
                     && let Some(PropertyDescriptor::Data { value, .. }) =
                         d.properties.get(&PropertyKey::String("_id".to_string()))
-                        && let Value::Number(n) = value
-                    {
-                        return Ok(PropertyKey::Symbol(crate::value::SymbolId::well_known(
-                            *n as u64,
-                        )));
-                    }
+                    && let Value::Number(n) = value
+                {
+                    return Ok(PropertyKey::Symbol(crate::value::SymbolId::well_known(
+                        *n as u64,
+                    )));
+                }
                 let prim = self.to_primitive(v, Some("string"))?;
                 match prim {
                     Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym)),
@@ -1426,15 +1426,17 @@ impl Vm {
                 if let PropertyDescriptor::Data {
                     writable, value, ..
                 } = &cur
-                    && !*writable {
-                        if let Some(true) = desc.writable {
-                            return Ok(false);
-                        }
-                        if let Some(new_val) = &desc.value
-                            && !values_equal(new_val, value) {
-                                return Ok(false);
-                            }
+                    && !*writable
+                {
+                    if let Some(true) = desc.writable {
+                        return Ok(false);
                     }
+                    if let Some(new_val) = &desc.value
+                        && !values_equal(new_val, value)
+                    {
+                        return Ok(false);
+                    }
+                }
             }
         }
 
@@ -1444,22 +1446,16 @@ impl Vm {
                 get: desc.get,
                 set: desc.set,
                 enumerable: desc.enumerable.unwrap_or_else(|| {
-                    current
-                        .as_ref()
-                        .is_some_and(|d| match d {
-                            PropertyDescriptor::Data { enumerable, .. } => *enumerable,
-                            PropertyDescriptor::Accessor { enumerable, .. } => *enumerable,
-                        })
+                    current.as_ref().is_some_and(|d| match d {
+                        PropertyDescriptor::Data { enumerable, .. } => *enumerable,
+                        PropertyDescriptor::Accessor { enumerable, .. } => *enumerable,
+                    })
                 }),
                 configurable: desc.configurable.unwrap_or_else(|| {
-                    current
-                        .as_ref()
-                        .is_some_and(|d| match d {
-                            PropertyDescriptor::Data { configurable, .. } => *configurable,
-                            PropertyDescriptor::Accessor { configurable, .. } => {
-                                *configurable
-                            }
-                        })
+                    current.as_ref().is_some_and(|d| match d {
+                        PropertyDescriptor::Data { configurable, .. } => *configurable,
+                        PropertyDescriptor::Accessor { configurable, .. } => *configurable,
+                    })
                 }),
             }
         } else {
@@ -1533,17 +1529,18 @@ impl Vm {
             Value::Array(arr, props) => {
                 if let PropertyKey::String(s) = key
                     && let Ok(i) = s.parse::<usize>()
-                    && let Some(v) = arr.borrow().get(i).cloned() {
-                        return Ok(Some((
-                            PropertyDescriptor::Data {
-                                value: v,
-                                writable: true,
-                                enumerable: true,
-                                configurable: true,
-                            },
-                            obj.clone(),
-                        )));
-                    }
+                    && let Some(v) = arr.borrow().get(i).cloned()
+                {
+                    return Ok(Some((
+                        PropertyDescriptor::Data {
+                            value: v,
+                            writable: true,
+                            enumerable: true,
+                            configurable: true,
+                        },
+                        obj.clone(),
+                    )));
+                }
                 let p = props.borrow();
                 if let Some(desc) = p.properties.get(key) {
                     return Ok(Some((desc.clone(), obj.clone())));
@@ -1855,13 +1852,14 @@ impl Vm {
         value: Value,
     ) -> Result<(), crate::errors::RuntimeError> {
         if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)?
-            && let PropertyDescriptor::Accessor { set, .. } = desc {
-                if let Some(setter) = set {
-                    let _ = self.call_with_this(&setter, obj, &[value])?;
-                    return Ok(());
-                }
+            && let PropertyDescriptor::Accessor { set, .. } = desc
+        {
+            if let Some(setter) = set {
+                let _ = self.call_with_this(&setter, obj, &[value])?;
                 return Ok(());
             }
+            return Ok(());
+        }
         set_property(obj, key, value)?;
 
         // Bump generation for the mutated object.

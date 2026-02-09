@@ -1,6 +1,6 @@
-// Lightweight wrapper around oxc_resolver to replace the custom bundler's
-// resolution logic. Exposes a minimal API for resolving module specifiers
-// relative to a base directory.
+// Lightweight wrapper around oxc_resolver that provides resolution logic
+// used by the ModuleLoader. Exposes a minimal API for resolving module
+// specifiers relative to a base directory.
 
 use oxc_resolver::{ResolveOptions, Resolver};
 use std::path::{Path, PathBuf};

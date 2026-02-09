@@ -5,10 +5,7 @@
  * environment, including all built-in objects and functions.
  */
 
-import type {
-  Value,
-  Console,
-} from "./core/types.js";
+import type { Value, Console } from "./core/types.js";
 import { BlitzObject as ObjectImpl, BlitzFunction as FunctionImpl } from "./core/objects.js";
 import { toString as runtimeToString } from "./core/runtime.js";
 // Host helpers are provided by the inlined `soft/host.ts` module and expose
