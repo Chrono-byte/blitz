@@ -24,6 +24,7 @@ rustyline = "11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+oxc_resolver = "11.17.1"
 # Optional: for better errors later
 thiserror = "2.0"
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync"] }

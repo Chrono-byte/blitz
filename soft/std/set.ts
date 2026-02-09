@@ -3,21 +3,21 @@
  * Written in TypeScript, runs on the Rust VM.
  */
 
-declare var Set: SetConstructor;
+declare var Set: any;
 
 interface SetConstructor {
-  new (): Set;
-  new (values?: readonly any[]): Set;
-  readonly prototype: Set;
+  new <T>(): any;
+  new <T>(values?: readonly T[] | null): any;
+  readonly prototype: any;
 }
 
-interface Set<T> {
-  readonly size: number;
+interface Set<T = any> {
+  size: number;
   add(value: T): this;
   has(value: T): boolean;
   delete(value: T): boolean;
   clear(): void;
-  forEach(callbackfn: (value: T, value2: T, set: this) => void, thisArg?: any): void;
+  forEach(callbackfn: (value: T, value2: T, set: Set<T>) => void, thisArg?: any): void;
   values(): IterableIterator<T>;
   keys(): IterableIterator<T>;
   entries(): IterableIterator<[T, T]>;
@@ -28,11 +28,11 @@ const SetImpl: SetConstructor = function <T>(this: Set<T>, values?: readonly T[]
   if (this instanceof SetImpl === false) {
     return new SetImpl(values);
   }
-  this._set = new Set();
+  (this as any)._set = new Set();
   if (values !== undefined) {
     let i = 0;
     while (i < values.length) {
-      this._set.add(values[i]);
+    (this as any)._set.add(values[i]);
       i = i + 1;
     }
   }
@@ -40,20 +40,20 @@ const SetImpl: SetConstructor = function <T>(this: Set<T>, values?: readonly T[]
 } as any;
 
 SetImpl.prototype.add = function <T>(this: Set<T>, value: T): Set<T> {
-  this._set.add(value);
+  (this as any)._set.add(value);
   return this;
 };
 
 SetImpl.prototype.has = function <T>(this: Set<T>, value: T): boolean {
-  return this._set.has(value);
+  return (this as any)._set.has(value);
 };
 
 SetImpl.prototype.delete = function <T>(this: Set<T>, value: T): boolean {
-  return this._set.delete(value);
+  return (this as any)._set.delete(value);
 };
 
 SetImpl.prototype.clear = function <T>(this: Set<T>): void {
-  this._set.clear();
+  (this as any)._set.clear();
 };
 
 SetImpl.prototype.forEach = function <T>(
@@ -61,25 +61,25 @@ SetImpl.prototype.forEach = function <T>(
   callbackfn: (value: T, value2: T, set: Set<T>) => void,
   thisArg?: any,
 ): void {
-  this._set.forEach((value: T) => {
+  (this as any)._set.forEach((value: T) => {
     callbackfn.call(thisArg, value, value, this);
   });
 };
 
 SetImpl.prototype.values = function <T>(this: Set<T>): IterableIterator<T> {
-  return this._set.values();
+  return (this as any)._set.values();
 };
 
 SetImpl.prototype.keys = function <T>(this: Set<T>): IterableIterator<T> {
-  return this._set.keys();
+  return (this as any)._set.keys();
 };
 
 SetImpl.prototype.entries = function <T>(this: Set<T>): IterableIterator<[T, T]> {
-  return this._set.entries();
+  return (this as any)._set.entries();
 };
 
 SetImpl.prototype[Symbol.iterator] = function <T>(this: Set<T>): IterableIterator<T> {
-  return this._set[Symbol.iterator]();
+  return (this as any)._set[Symbol.iterator]();
 };
 
 SetImpl.prototype.size = Object.getOwnPropertyDescriptor(SetImpl.prototype, "size")

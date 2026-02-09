@@ -10,14 +10,14 @@ declare var Number: NumberConstructor;
 interface NumberConstructor {
   new (value?: any): number;
   (value?: any): number;
-  readonly EPSILON: number;
-  readonly MAX_SAFE_INTEGER: number;
-  readonly MIN_SAFE_INTEGER: number;
-  readonly MAX_VALUE: number;
-  readonly MIN_VALUE: number;
-  readonly NaN: number;
-  readonly POSITIVE_INFINITY: number;
-  readonly NEGATIVE_INFINITY: number;
+  EPSILON: number;
+  MAX_SAFE_INTEGER: number;
+  MIN_SAFE_INTEGER: number;
+  MAX_VALUE: number;
+  MIN_VALUE: number;
+  NaN: number;
+  POSITIVE_INFINITY: number;
+  NEGATIVE_INFINITY: number;
   isFinite(number: any): boolean;
   isInteger(number: any): boolean;
   isNaN(number: any): boolean;
@@ -116,7 +116,7 @@ NumberImpl.parseInt = function (string: string, radix?: number): number {
 if (typeof Number !== "undefined") {
   const prototype = Number.prototype;
   if (prototype) {
-    if (!prototype.toString) {
+  if (!prototype.toString) {
       prototype.toString = function (radix?: number): string {
         if (radix === undefined) {
           return this.valueOf().toString();
@@ -130,7 +130,7 @@ if (typeof Number !== "undefined") {
         if (n === -Infinity) return "-Infinity";
         if (n === 0) return "0";
         const isNegative = n < 0;
-        const absN = Math.abs(n);
+        let absN = Math.abs(n);
         let result = "";
         while (absN > 0) {
           const digit = Math.floor(absN % radix);

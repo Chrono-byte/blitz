@@ -44,187 +44,50 @@ use std::path::{Path, PathBuf};
 /// Returns an error if the entry module or any of its dependencies cannot be
 /// read or parsed.
 pub fn bundle_entry(entry: &Path) -> Result<crate::parser::ParserSession, BundlerError> {
-    // Resolve the entry to a canonical path where possible to avoid duplicates.
+    // New behavior: do not concatenate/inlines dependencies. Instead, parse
+    // the entry file alone and rewrite top-level `import` statements so they
+    // trigger a runtime synchronous import helper (`__tsblitz_import`). This
+    // keeps module execution synchronous and in the same realm as the caller.
+
     let entry_canon = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf());
+    let src = std::fs::read_to_string(&entry_canon).map_err(|e| {
+        BundlerError::from(format!("Failed to read module {}: {}", entry.display(), e))
+    })?;
 
-    // Track visited files and produce an ordering (push on finish -> deps first).
-    let mut visited: HashSet<PathBuf> = HashSet::new();
-    let mut order: Vec<PathBuf> = Vec::new();
-
-    // DFS traversal
-    fn visit(
-        path: PathBuf,
-        visited: &mut HashSet<PathBuf>,
-        order: &mut Vec<PathBuf>,
-    ) -> Result<(), BundlerError> {
-        if visited.contains(&path) {
-            return Ok(());
-        }
-        // Mark as visited early to avoid cycles causing infinite recursion.
-        visited.insert(path.clone());
-
-        // Read source
-        let src = std::fs::read_to_string(&path).map_err(|e| {
-            BundlerError::from(format!("Failed to read module {}: {}", path.display(), e))
-        })?;
-
-        // Extract import specifiers (static top-level imports)
-        let imports = Parser::extract_imports_from_source(&src).map_err(|e| {
-            BundlerError::from(format!(
-                "Failed to parse imports in {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
-
-        // Resolve relative imports and visit them
-        for spec in imports {
-            if spec.starts_with('.') {
-                let base = path.parent().unwrap_or_else(|| Path::new(""));
-                let mut target = base.join(&spec);
-                // Prefer `.ts` local files: map `.js` -> `.ts` and default extension to `.ts`
-                if target.extension().and_then(|s| s.to_str()) == Some("js") {
-                    target.set_extension("ts");
-                } else if target.extension().is_none() {
-                    target.set_extension("ts");
-                }
-
-                // Canonicalize where possible so the visited set is consistent.
-                let target_canon = std::fs::canonicalize(&target).unwrap_or(target);
-
-                // Recurse
-                visit(target_canon, visited, order)?;
-            } else {
-                // Bare / non-relative import - treat as external and ignore.
-                continue;
-            }
-        }
-
-        // Finished exploring dependencies; add to ordering.
-        order.push(path);
-        Ok(())
-    }
-
-    // Build the module ordering
-    visit(entry_canon, &mut visited, &mut order)?;
-
-    // Concatenate module sources in dependency-first order and parse the
-    // combined source to produce a single oxc AST `Program`.
-    let mut combined_src = String::new();
-    // Collect exported names from an inlined host module (if any). We will
-    // synthesize a small runtime shim after concatenation that copies the
-    // exported helpers onto `globalThis` when missing. Use a best-effort
-    // textual extraction (no full parsing) to remain lightweight.
-    let mut host_exports: Vec<String> = Vec::new();
-    for path in &order {
-        let src = std::fs::read_to_string(path).map_err(|e| {
-            BundlerError::from(format!("Failed to read module {}: {}", path.display(), e))
-        })?;
-
-        // Debug: bundling order is intentionally silent in normal test runs.
-
-        // Insert a newline and a simple file marker to keep boundaries clear
-        combined_src.push_str(&format!("// --- {} ---\n", path.display()));
-        combined_src.push_str(&src);
-        combined_src.push('\n');
-        if let Some(path_str) = path.to_str() {
-            // Heuristic: consider this the host module when the path ends with
-            // `soft/host.ts` (cross-platform safe check via substring).
-            if path_str.ends_with("/soft/host.ts") || path_str.ends_with("\\soft\\host.ts") {
-                // Extract exported identifiers from the source text.
-                for line in src.lines() {
-                    let line = line.trim();
-                    if line.starts_with("export function ") {
-                        if let Some(rest) = line.strip_prefix("export function ") {
-                            let name: String = rest
-                                .chars()
-                                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                                .collect();
-                            if !name.is_empty() {
-                                host_exports.push(name);
-                            }
-                        }
-                    } else if line.starts_with("export const ")
-                        || line.starts_with("export let ")
-                        || line.starts_with("export var ")
-                    {
-                        if let Some(_idx) = line.find(' ') {
-                            // after `export` skip one token like `const` then capture
-                            if let Some(rest) = line.splitn(3, ' ').nth(2) {
-                                let name: String = rest
-                                    .chars()
-                                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                                    .collect();
-                                if !name.is_empty() {
-                                    host_exports.push(name);
-                                }
-                            }
-                        }
-                    } else if let Some(_start) = line.find("export {") {
-                        // capture names inside the braces: export { a, b as c }
-                        if let Some(open) = line.find('{')
-                            && let Some(close) = line.find('}')
-                        {
-                            let inner = &line[open + 1..close];
-                            for part in inner.split(',') {
-                                let p = part.trim();
-                                if p.is_empty() {
-                                    continue;
-                                }
-                                // strip `as` aliases
-                                let name = p.split(" as ").next().unwrap().trim();
-                                // strip potential renames like `b as b2`
-                                let name = name
-                                    .chars()
-                                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                                    .collect::<String>();
-                                if !name.is_empty() {
-                                    host_exports.push(name);
-                                }
-                            }
-                        }
-                    }
+    // Simple textual rewrite: replace top-level `import ... from 'x';` and
+    // `import 'x';` with `__tsblitz_import('x');` so imports are resolved and
+    // executed at runtime by the host-provided builtin.
+    let mut rewritten = String::new();
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("import ") {
+            // Try to extract the final string literal specifier
+            if let Some(pos) = line.rfind('"') {
+                if let Some(pos2) = line[..pos].rfind('"') {
+                    let spec = &line[pos2 + 1..pos];
+                    rewritten.push_str(&format!("__tsblitz_import(\"{}\");\n", spec));
+                    continue;
                 }
             }
-        }
-    }
-
-    // If we found exported names from a host module, generate a shim that
-    // copies those exported bindings onto `globalThis` when absent.
-    if !host_exports.is_empty() {
-        combined_src.push_str("// --- bundler: host global shims ---\n");
-        combined_src.push_str("try {\n  if (typeof globalThis !== 'undefined') {\n    try {\n      const g = globalThis;\n");
-        // Ensure the `host` object is copied when exported.
-        if host_exports.iter().any(|n| n == "host") {
-            combined_src.push_str("      if (typeof host !== 'undefined') {\n        try { if (typeof g.host === 'undefined') g.host = host; } catch(_) {}\n      }\n");
-        }
-
-        // For each export, attempt to expose it on globalThis if missing.
-        for name in &host_exports {
-            if name == "host" {
-                continue;
+            if let Some(pos) = line.rfind('\'') {
+                if let Some(pos2) = line[..pos].rfind('\'') {
+                    let spec = &line[pos2 + 1..pos];
+                    rewritten.push_str(&format!("__tsblitz_import('{}');\n", spec));
+                    continue;
+                }
             }
-            // For each exported name NAME, do roughly:
-            // if (typeof g.NAME === 'undefined') {
-            //   try { if (typeof NAME !== 'undefined') g.NAME = NAME; } catch(_) {}
-            //   try { if (typeof g.NAME === 'undefined' && typeof host !== 'undefined' && host && typeof host.NAME !== 'undefined') g.NAME = host.NAME; } catch(_) {}
-            // }
-            combined_src.push_str(&format!(
-                "      try {{ if (typeof g.{0} === 'undefined') {{ try {{ if (typeof {0} !== 'undefined') g.{0} = {0}; }} catch(_) {{}} try {{ if (typeof g.{0} === 'undefined' && typeof host !== 'undefined' && host && typeof host.{0} !== 'undefined') g.{0} = host.{0}; }} catch(_) {{}} }} }} catch(_) {{}}\n",
-                name
-            ));
+            // Fallback: keep the original line if we couldn't parse specifier
+            rewritten.push_str(line);
+            rewritten.push('\n');
+        } else {
+            rewritten.push_str(line);
+            rewritten.push('\n');
         }
-
-        combined_src.push_str("    } catch (_) {}\n  }\n} catch (_) {}\n");
     }
 
-    // Parse the combined source into a ParserSession which owns backing data
-    // and exposes an `oast::Program` that borrows it. Return the session so
-    // the caller can hold the backing data alive while working with the
-    // borrowed AST.
-    let session = Parser::parse_source(&combined_src)
-        .map_err(|e| BundlerError::from(format!("Failed to parse bundled program: {}", e)))?;
-
+    let session = Parser::parse_source(&rewritten).map_err(|e| {
+        BundlerError::from(format!("Failed to parse module {}: {}", entry.display(), e))
+    })?;
     Ok(session)
 }
 

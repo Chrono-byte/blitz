@@ -205,7 +205,11 @@ if (typeof Promise !== "undefined") {
         onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
         onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null,
       ): Promise<TResult1 | TResult2> {
-        return PromiseImpl.resolve(onfulfilled ? onfulfilled(this) : this);
+        // Relax typing: our simple shim returns a permissive Promise via resolve.
+        // Cast to any to avoid complex generic incompatibilities with PromiseLike.
+        return (PromiseImpl.resolve(onfulfilled ? (onfulfilled as any)(this) : (this as any)) as any) as Promise<
+          TResult1 | TResult2
+        >;
       };
     }
     if (!prototype.catch) {

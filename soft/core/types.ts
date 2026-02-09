@@ -9,7 +9,9 @@
 // `core/objects.ts` will implement these methods and merge with this
 // declaration at compile time.
 export interface BlitzObject {
-  getOwnProperty(key: string): PropertyDescriptor | undefined;
+  // The VM represents property descriptors as runtime values (BlitzObject).
+  // Return a `Value` here to match the runtime shape used by the soft layer.
+  getOwnProperty(key: string): Value | undefined;
   get(key: string): Value;
   set(key: string, value: Value): boolean;
   hasProperty(key: string): boolean;
@@ -31,18 +33,19 @@ export type Value =
   | number
   | string
   | symbol
+  | object
   | BlitzObject
   | BlitzFunction;
 
 // Property descriptor following JavaScript specification
-export interface PropertyDescriptor {
-  value?: Value;
-  writable?: boolean;
-  enumerable?: boolean;
-  configurable?: boolean;
-  get?(): Value;
-  set?(value: Value): void;
-}
+// In the tsblitz runtime a property descriptor is represented as a runtime
+// value (BlitzObject). Keep the compile-time shape permissive to match that
+// runtime representation while allowing std/prelude code to access descriptor
+// fields.
+// Keep descriptors permissive so runtime-backed descriptor objects and
+// simple object literals are both valid. Using `any` avoids tight coupling
+// between the soft-layer descriptor shape and TS built-ins.
+export type PropertyDescriptor = any;
 
 // Property descriptor map for object definitions
 export type PropertyDescriptorMap = { [key: string]: PropertyDescriptor };
@@ -65,27 +68,27 @@ export interface BlitzFunction {
 
 // Basic constructors
 export interface ObjectConstructor {
-  new (value?: Value): BlitzObject;
+  new (value?: Value): Value;
   (value?: Value): Value;
-  keys(o: BlitzObject): string[];
-  values(o: BlitzObject): Value[];
-  entries(o: BlitzObject): [string, Value][];
-  assign(target: BlitzObject, ...sources: BlitzObject[]): BlitzObject;
-  create(o: BlitzObject | null, properties?: PropertyDescriptorMap): BlitzObject;
-  defineProperty(o: BlitzObject, p: string, attributes: PropertyDescriptor): BlitzObject;
-  defineProperties(o: BlitzObject, properties: PropertyDescriptorMap): BlitzObject;
-  getOwnPropertyDescriptor(o: BlitzObject, p: string): PropertyDescriptor | undefined;
-  getOwnPropertyDescriptors(o: BlitzObject): PropertyDescriptorMap;
-  getOwnPropertyNames(o: BlitzObject): string[];
-  getPrototypeOf(o: BlitzObject): BlitzObject | null;
-  setPrototypeOf(o: BlitzObject, proto: BlitzObject | null): BlitzObject;
+  keys(o: Value): string[];
+  values(o: Value): Value[];
+  entries(o: Value): [string, Value][];
+  assign(target: Value, ...sources: Value[]): Value;
+  create(o: Value | null, properties?: PropertyDescriptorMap): Value;
+  defineProperty(o: Value, p: string, attributes: PropertyDescriptor): Value;
+  defineProperties(o: Value, properties: PropertyDescriptorMap): Value;
+  getOwnPropertyDescriptor(o: Value, p: string): PropertyDescriptor | undefined;
+  getOwnPropertyDescriptors(o: Value): PropertyDescriptorMap;
+  getOwnPropertyNames(o: Value): string[];
+  getPrototypeOf(o: Value): Value | null;
+  setPrototypeOf(o: Value, proto: Value | null): Value;
   is(x: Value, y: Value): boolean;
-  freeze(o: BlitzObject): BlitzObject;
-  seal(o: BlitzObject): BlitzObject;
-  preventExtensions(o: BlitzObject): BlitzObject;
-  isFrozen(o: BlitzObject): boolean;
-  isSealed(o: BlitzObject): boolean;
-  isExtensible(o: BlitzObject): boolean;
+  freeze(o: Value): Value;
+  seal(o: Value): Value;
+  preventExtensions(o: Value): Value;
+  isFrozen(o: Value): boolean;
+  isSealed(o: Value): boolean;
+  isExtensible(o: Value): boolean;
 }
 
 export interface ArrayConstructor {

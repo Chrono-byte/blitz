@@ -182,6 +182,22 @@ export function getBuiltinCached(name: string): any {
   return undefined;
 }
 
+export function defineProperty(target: any, key: any, desc: any): boolean {
+  try {
+    const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
+    if (!g) return false;
+    const fn = g.__define_property;
+    if (typeof fn === "function") {
+      try {
+        return !!fn(target, key, desc);
+      } catch (_) {
+        return false;
+      }
+    }
+  } catch (_) {}
+  return false;
+}
+
 // Direct global access for host bindings. The host exposes helpers by
 // publishing `__native_print` and `__native_new_object` directly onto
 // `globalThis` (moved from a private host table). Avoid complex getter

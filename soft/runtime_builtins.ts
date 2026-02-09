@@ -4,7 +4,43 @@
  */
 
 (() => {
+  try {
   const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : (this as any);
+
+  // Early diagnostics: print the presence/types of critical symbols before
+  // runtime_builtins applies polyfills. This helps determine ordering issues
+  // when harness files (like atomicsHelper.js) run very early.
+  try {
+    const _p: any = g ? g.__native_print || g.__native_print_raw || g.native_print || (g.host && g.host.native_print) : undefined;
+    try {
+      if (typeof _p === "function") {
+        _p("RB DIAG EARLY: Function.prototype.bind=" + (typeof (Function.prototype && Function.prototype.bind)));
+        _p("RB DIAG EARLY: typeof $262=" + (typeof g.$262));
+        _p("RB DIAG EARLY: typeof $262.agent=" + (g.$262 ? typeof g.$262.agent : "<missing>"));
+        _p("RB DIAG EARLY: typeof getReport=" + (g.$262 && g.$262.agent ? typeof g.$262.agent.getReport : "<missing>"));
+        _p("RB DIAG EARLY: typeof Atomics=" + (typeof g.Atomics));
+        _p("RB DIAG EARLY: typeof Atomics.waitAsync=" + (g.Atomics ? typeof g.Atomics.waitAsync : "<missing>"));
+      }
+    } catch (_) {}
+  } catch (_) {}
+
+  // Minimal polyfills required by harness helpers: Function.prototype.bind is
+  // used by `harness/atomicsHelper.js` (it calls `$262.agent.getReport.bind(...)`).
+  // If bind is missing, provide a small compliant polyfill.
+  try {
+    if (typeof Function !== "undefined" && typeof Function.prototype !== "undefined") {
+      if (typeof Function.prototype.bind !== "function") {
+        Function.prototype.bind = function (thisArg: any) {
+          const fn = this;
+          const boundArgs = Array.prototype.slice.call(arguments, 1);
+          return function () {
+            const args = Array.prototype.slice.call(arguments);
+            return fn.apply(thisArg, boundArgs.concat(args));
+          };
+        } as any;
+      }
+    }
+  } catch (_) {}
 
   const defineGlobal = (name: string, value: any) => {
     try {
@@ -167,6 +203,9 @@
       };
     };
     SymbolImpl.toPrimitive = SymbolImpl("Symbol.toPrimitive");
+    try {
+      (SymbolImpl as any)["toPrimitive"] = SymbolImpl.toPrimitive;
+    } catch (_) {}
     SymbolImpl.iterator = SymbolImpl("Symbol.iterator");
     SymbolImpl.asyncIterator = SymbolImpl("Symbol.asyncIterator");
     SymbolImpl.match = SymbolImpl("Symbol.match");
@@ -278,12 +317,57 @@
   }
 
   if (typeof g.Atomics === "undefined") {
+    const _p: any = g ? g.__native_print || g.__native_print_raw || g.native_print || (g.host && g.host.native_print) : undefined;
+    try { if (typeof _p === "function") _p("runtime_builtins: creating AtomicsImpl"); } catch (_) {}
     const AtomicsImpl: any = {
       add: function (ta: any, index: number, value: any) {
         const i = Number(index) || 0;
         const old = ta.__data[i] || 0;
         const next = old + Number(value);
         ta.__data[i] = next;
+        return old;
+      },
+      // Additional Atomics operations used by the Test262 harness.
+      sub: function (ta: any, index: number, value: any) {
+        const i = Number(index) || 0;
+        const old = ta.__data[i] || 0;
+        const next = old - Number(value);
+        ta.__data[i] = next;
+        return old;
+      },
+      and: function (ta: any, index: number, value: any) {
+        const i = Number(index) || 0;
+        const old = ta.__data[i] || 0;
+        const next = old & Number(value);
+        ta.__data[i] = next;
+        return old;
+      },
+      or: function (ta: any, index: number, value: any) {
+        const i = Number(index) || 0;
+        const old = ta.__data[i] || 0;
+        const next = old | Number(value);
+        ta.__data[i] = next;
+        return old;
+      },
+      xor: function (ta: any, index: number, value: any) {
+        const i = Number(index) || 0;
+        const old = ta.__data[i] || 0;
+        const next = old ^ Number(value);
+        ta.__data[i] = next;
+        return old;
+      },
+      exchange: function (ta: any, index: number, value: any) {
+        const i = Number(index) || 0;
+        const old = ta.__data[i] || 0;
+        ta.__data[i] = value;
+        return old;
+      },
+      compareExchange: function (ta: any, index: number, expected: any, replacement: any) {
+        const i = Number(index) || 0;
+        const old = ta.__data[i] || 0;
+        if (old === expected) {
+          ta.__data[i] = replacement;
+        }
         return old;
       },
       load: function (ta: any, index: number) {
@@ -298,10 +382,21 @@
       wait: function (_ta: any, _index: number, _value: any, _timeout?: any) {
         return "ok";
       },
+      // Minimal waitAsync shim: return an object with a Promise `value` and log invocation
+      waitAsync: function (_ta: any, _index: number, _value: any, _timeout?: any) {
+        try { if (typeof _p === "function") _p("runtime_builtins: Atomics.waitAsync called"); } catch (_) {}
+        try {
+          const P = (g && g.Promise) || Promise;
+          return { value: P.resolve("ok") };
+        } catch (_) {
+          return { value: Promise.resolve("ok") };
+        }
+      },
       wake: function (_ta: any, _index: number, _count?: any) {
         return 0;
       },
     };
+    try { if (typeof _p === "function") _p("runtime_builtins: defining Atomics global"); } catch (_) {}
     defineGlobal("Atomics", AtomicsImpl);
   }
 
@@ -316,6 +411,19 @@
       set: function (obj: any, key: any, value: any) {
         obj[key] = value;
         return true;
+      },
+      defineProperty: function (obj: any, key: any, desc: any) {
+        try {
+          if (typeof g.__define_property === "function") {
+            return !!g.__define_property(obj, key, desc);
+          }
+        } catch (_) {}
+        try {
+          Object.defineProperty(obj, key, desc);
+          return true;
+        } catch (_) {
+          return false;
+        }
       },
     });
   }
@@ -366,6 +474,10 @@
   if (!g.$262) g.$262 = {};
   if (!g.$262.agent) g.$262.agent = {};
   const agent = g.$262.agent;
+  try {
+    const _p: any = g ? g.__native_print || g.__native_print_raw || g.native_print || (g.host && g.host.native_print) : undefined;
+    try { if (typeof _p === "function") _p("runtime_builtins: agent initialized, getReport type=" + typeof agent.getReport); } catch (_) {}
+  } catch (_) {}
   if (!agent._reports) agent._reports = [];
   if (!agent.getReport) {
     agent.getReport = function () {
@@ -386,6 +498,25 @@
       return g.Promise.resolve();
     };
   }
+  // safeBroadcast: ensure the typed array can be used for Atomics.wait
+  if (!agent.safeBroadcast) {
+    agent.safeBroadcast = function (typedArray: any) {
+      try {
+        const Constructor = Object.getPrototypeOf(typedArray).constructor;
+        // create a temp shared buffer to test Atomics.wait support
+        const temp = new Constructor(new SharedArrayBuffer(Constructor.BYTES_PER_ELEMENT));
+        try {
+          Atomics.wait(temp, 0, Constructor === Int32Array ? 1 : (typeof BigInt !== 'undefined' ? BigInt(1) : 1));
+        } catch (error) {
+          throw new Error(`${Constructor.name} cannot be used as a shared typed array. (${error})`);
+        }
+        return agent.broadcast(typedArray.buffer || typedArray);
+      } catch (e) {
+        // If anything fails, rethrow to match harness behavior
+        throw e;
+      }
+    };
+  }
   if (!agent.receiveBroadcast) {
     agent.receiveBroadcast = function (cb: any) {
       agent._broadcastCb = cb;
@@ -393,6 +524,69 @@
   }
   if (!agent.start) {
     agent.start = function (_src: any) {};
+  }
+  if (!agent.monotonicNow) {
+    agent.monotonicNow = function () {
+      try { return Date.now(); } catch (_) { return 0; }
+    };
+  }
+  if (!agent.getReportAsync) {
+    agent.getReportAsync = function () {
+      try {
+        const P = (g && g.Promise) || Promise;
+        return new P(function (resolve) {
+          (function loop() {
+            try {
+              const r = agent.getReport();
+              if (!r) {
+                try { (g && g.setTimeout ? g.setTimeout : setTimeout)(loop, 1000); } catch (_) { P.resolve().then(loop); }
+              } else {
+                resolve(r);
+              }
+            } catch (_) {
+              try { (g && g.setTimeout ? g.setTimeout : setTimeout)(loop, 1000); } catch (_) { P.resolve().then(loop); }
+            }
+          })();
+        });
+      } catch (_) {
+        return Promise.resolve(agent.getReport());
+      }
+    };
+  }
+  if (!agent.safeBroadcastAsync) {
+    // Conform to harness: safeBroadcastAsync(ta, index, expected)
+    agent.safeBroadcastAsync = async function (ta: any, index: any, expected: any) {
+      try {
+        await agent.broadcast(ta.buffer || ta);
+      } catch (_) {}
+      try {
+        await agent.waitUntil(ta, index, expected);
+      } catch (_) {}
+      try {
+        await agent.tryYield();
+      } catch (_) {}
+      try {
+        return Atomics.load(ta, index);
+      } catch (_) {
+        return (ta && ta.__data && typeof ta.__data[index] !== 'undefined') ? ta.__data[index] : 0;
+      }
+    };
+  }
+  // waitUntil: block (busy-wait) until Atomics.load returns expected
+  if (!agent.waitUntil) {
+    agent.waitUntil = function (typedArray: any, index: number, expected: number) {
+      while (true) {
+        try {
+          const v = Atomics.load(typedArray, index);
+          if (v === expected) break;
+        } catch (_) {
+          try {
+            if (typedArray && typedArray.__data && typedArray.__data[index] === expected) break;
+          } catch (_) {}
+        }
+        // spin
+      }
+    };
   }
   if (!agent.leaving) {
     agent.leaving = function () {};
@@ -416,5 +610,18 @@
         buffer._detached = true;
       }
     };
+  }
+  } catch (e) {
+    try {
+      const msg = e && e.stack ? e.stack : String(e);
+      try {
+        const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
+        const p = g ? g.__native_print || g.__native_print_raw || g.native_print || (g.host && g.host.native_print) : undefined;
+        if (typeof p === "function") {
+          try { p("runtime_builtins failed: " + msg); } catch (_) {}
+        }
+      } catch (_) {}
+    } catch (_) {}
+    throw e;
   }
 })();

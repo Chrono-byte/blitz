@@ -16,7 +16,7 @@ interface StringConstructor {
 // Extend String prototype with helper methods
 declare global {
   interface String {
-    length: number;
+    readonly length: number;
     charAt(pos: number): string;
     charCodeAt(index: number): number;
     concat(...strings: string[]): string;

@@ -40,7 +40,7 @@ use std::rc::Rc;
 
 use tsblitz::bytecode;
 use tsblitz::compiler;
-use tsblitz::{bundle_entry, parser::Parser as TsParser, typecheck, value::Value, vm::Vm};
+use tsblitz::{bundle_entry, resolver::resolve_specifier, parser::Parser as TsParser, typecheck, value::Value, vm::Vm};
 
 /// Minimal native hook: print to stdout. The TS soft layer wraps this as console.log.
 fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
@@ -225,6 +225,14 @@ fn main() -> Result<(), tsblitz::errors::Error> {
         })),
     );
 
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__define_property".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
+            vm.define_property_builtin(args)
+                .map_err(tsblitz::errors::RuntimeError::from)
+        })),
+    );
+
     // Provide a minimal builtin console.log for early bootstrap and REPL use.
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("console".to_string()),
@@ -245,7 +253,12 @@ fn main() -> Result<(), tsblitz::errors::Error> {
 
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let prelude_path = manifest_dir.join("soft/prelude.ts");
-    let prelude_session = bundle_entry(&prelude_path)?;
+    // Resolve the prelude path into a concrete file using oxc_resolver wrapper
+    let prelude_resolved = resolve_specifier(
+        prelude_path.parent().unwrap_or(Path::new(".")),
+        &format!("./{}", prelude_path.file_name().unwrap().to_string_lossy()),
+    )?;
+    let prelude_session = tsblitz::bundler::bundle_entry(&prelude_resolved)?;
     let prelude_program = prelude_session.program();
 
     // Skip type checking for soft layer prelude (has dynamic patterns that typechecker doesn't handle yet)

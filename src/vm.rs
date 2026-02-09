@@ -118,6 +118,16 @@ struct HandlerRecord {
     frame_count: usize,
 }
 
+#[derive(Clone, Debug, Default)]
+struct PartialDescriptor {
+    value: Option<Value>,
+    writable: Option<bool>,
+    enumerable: Option<bool>,
+    configurable: Option<bool>,
+    get: Option<Value>,
+    set: Option<Value>,
+}
+
 // ---------------------------------------------------------------------------
 // Global background Tokio runtime (lazy, shared across all Vm instances)
 // ---------------------------------------------------------------------------
@@ -632,7 +642,7 @@ impl Vm {
                     let v = self.get_property_value(&obj, &k)?;
                     self.stack.push(v);
                 }
-            Op::GetPropertyIC => self.get_property_ic()?,
+                Op::GetPropertyIC => self.get_property_ic()?,
                 Op::SetProperty => {
                     let value = self.pop()?;
                     let key = self.pop()?;
@@ -737,10 +747,25 @@ impl Vm {
         Ok(())
     }
 
+    /// Host hook: define an own property with a descriptor.
+    pub fn define_property_builtin(
+        &mut self,
+        args: &[Value],
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        if args.len() < 3 {
+            return Ok(Value::Undefined);
+        }
+        let target = &args[0];
+        let key = self.to_property_key(&args[1])?;
+        let desc = self.read_descriptor_from_value(&args[2])?;
+        let ok = self.define_own_property(target, key, desc)?;
+        Ok(Value::Bool(ok))
+    }
+
     fn call_with_this(
         &mut self,
         callee: &Value,
-        _this_arg: &Value,
+        this_arg: &Value,
         args: &[Value],
     ) -> Result<Value, crate::errors::RuntimeError> {
         match callee {
@@ -748,13 +773,291 @@ impl Vm {
                 let result = f(self, args)?;
                 Ok(result)
             }
-            Value::Closure { .. } => Err(crate::errors::RuntimeError::from(
-                "CallWithThis: closures not yet supported",
-            )),
+            Value::Closure { proto, .. } => {
+                let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
+                call_args.push(this_arg.clone());
+                call_args.extend_from_slice(args);
+                let call_args = self.prepare_call_args(&call_args, proto)?;
+                self.validate_call_args(&call_args, proto)?;
+                let stack_base = self.stack.len();
+                let caller_chunk = Rc::clone(&self.chunk);
+                let caller_ip = self.ip;
+                let caller_locals = self.locals.clone();
+                let caller_slot_types = self.current_slot_types.clone();
+                self.push_call_frame(proto, call_args)?;
+                let result = self.run_until_return(stack_base)?;
+                // Restore caller state (run_until_return already truncated stack)
+                self.chunk = caller_chunk;
+                self.ip = caller_ip;
+                self.locals = caller_locals;
+                self.current_slot_types = caller_slot_types;
+                Ok(result)
+            }
             _ => Err(crate::errors::RuntimeError::from(
                 "CallWithThis: not a function",
             )),
         }
+    }
+
+    fn run_until_return(&mut self, stack_base: usize) -> Result<Value, crate::errors::RuntimeError> {
+        loop {
+            let op_byte = self.read_byte()?;
+            let op = match Op::from_byte(op_byte) {
+                Some(o) => o,
+                None => {
+                    return Err(crate::errors::RuntimeError::from(format!(
+                        "Invalid opcode 0x{:02x} at ip {}",
+                        op_byte,
+                        self.ip.saturating_sub(1)
+                    )));
+                }
+            };
+            match op {
+                Op::Return => {
+                    let result = self.pop().unwrap_or(Value::Undefined);
+                    // Restore caller state through execute_return logic.
+                    if !self.frames.is_empty() {
+                        self.execute_return()?;
+                    }
+                    self.stack.truncate(stack_base);
+                    return Ok(result);
+                }
+                _ => {
+                    // Dispatch through main loop by reusing existing match via run.
+                    // We emulate by temporarily setting ip and reusing inline logic by calling run_step.
+                    self.dispatch_op(op)?;
+                }
+            }
+        }
+    }
+
+    fn dispatch_op(&mut self, op: Op) -> Result<(), crate::errors::RuntimeError> {
+        match op {
+            Op::Const => {
+                let idx = self.read_byte()? as usize;
+                let v = self.constant(idx)?;
+                self.stack.push(v);
+            }
+            Op::Null => self.stack.push(Value::Null),
+            Op::True => self.stack.push(Value::Bool(true)),
+            Op::False => self.stack.push(Value::Bool(false)),
+            Op::GetLocal => {
+                let slot = self.read_byte()? as usize;
+                let v = self.locals.get(slot).cloned().ok_or("Bad local slot")?;
+                self.stack.push(v);
+            }
+            Op::SetLocal => {
+                let slot = self.read_byte()? as usize;
+                let v = self.pop()?;
+                if let Some(Some(expected)) =
+                    self.current_slot_types.as_ref().and_then(|t| t.get(slot))
+                {
+                    check_assign(expected, &v)?;
+                }
+                ensure_slot(&mut self.locals, slot);
+                self.locals[slot] = v;
+            }
+            Op::GetGlobal => {
+                let idx = self.read_byte()? as usize;
+                let name = self.string_constant(idx)?;
+                let v = self
+                    .globals
+                    .borrow()
+                    .properties
+                    .get(&PropertyKey::String(name))
+                    .and_then(|d| match d {
+                        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or(Value::Undefined);
+                self.stack.push(v);
+            }
+            Op::SetGlobal => {
+                let idx = self.read_byte()? as usize;
+                let name = self.string_constant(idx)?;
+                let v = self.pop()?;
+                if let Some(Some(expected)) = self
+                    .root_chunk
+                    .as_ref()
+                    .and_then(|r| r.global_types.get(&name))
+                {
+                    check_assign(expected, &v)?;
+                }
+                self.globals
+                    .borrow_mut()
+                    .properties
+                    .insert(PropertyKey::String(name), PropertyDescriptor::data(v));
+            }
+            Op::Pop => {
+                self.pop()?;
+            }
+            Op::Dup => {
+                let v = self.stack.last().cloned().ok_or("Stack underflow")?;
+                self.stack.push(v);
+            }
+            Op::Add => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let result = match (a, b) {
+                    (Value::BigInt(x), Value::BigInt(y)) => Value::BigInt(x + y),
+                    (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
+                    (Value::String(s), v) => Value::String(format!("{}{}", s, v)),
+                    (v, Value::String(s)) => Value::String(format!("{}{}", v, s)),
+                    _ => return Err("Add: number or string expected".into()),
+                };
+                self.stack.push(result);
+            }
+            Op::AddNumber => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                match (a, b) {
+                    (Value::BigInt(x), Value::BigInt(y)) => self.stack.push(Value::BigInt(x + y)),
+                    (Value::Number(x), Value::Number(y)) => self.stack.push(Value::Number(x + y)),
+                    _ => return Err("AddNumber: number expected".into()),
+                }
+            }
+            Op::Sub => self.binary_num_bigint(|a, b| a - b, |a, b| Ok(a - b))?,
+            Op::Mul => self.binary_num_bigint(|a, b| a * b, |a, b| Ok(a * b))?,
+            Op::Div => self.binary_num_bigint(
+                |a, b| a / b,
+                |_, _| Err(crate::errors::RuntimeError::from("Div: bigint not supported")),
+            )?,
+            Op::Mod => self.binary_num_bigint(|a, b| a % b, |a, b| Ok(a % b))?,
+            Op::Eq => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                self.stack.push(Value::Bool(values_equal(&a, &b)));
+            }
+            Op::Neq => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                self.stack.push(Value::Bool(!values_equal(&a, &b)));
+            }
+            Op::Lt => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                self.stack.push(Value::Bool(a < b));
+            }
+            Op::Le => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                self.stack.push(Value::Bool(a <= b));
+            }
+            Op::Gt => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                self.stack.push(Value::Bool(a > b));
+            }
+            Op::Ge => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                self.stack.push(Value::Bool(a >= b));
+            }
+            Op::And => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                self.stack.push(Value::Bool(a.is_truthy() && b.is_truthy()));
+            }
+            Op::Or => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                self.stack.push(Value::Bool(a.is_truthy() || b.is_truthy()));
+            }
+            Op::Neg => {
+                let v = self.pop()?;
+                match v {
+                    Value::Number(n) => self.stack.push(Value::Number(-n)),
+                    _ => return Err("Neg: number expected".into()),
+                }
+            }
+            Op::Not => {
+                let v = self.pop()?;
+                self.stack.push(Value::Bool(!v.is_truthy()));
+            }
+            Op::Typeof => {
+                let v = self.pop()?;
+                self.stack.push(Value::String(v.type_name().to_string()));
+            }
+            Op::Call => self.execute_call()?,
+            Op::Return => {
+                self.execute_return()?;
+            }
+            Op::Jump => {
+                let offset = self.read_short_signed()?;
+                self.jump(offset)?;
+            }
+            Op::JumpIfFalse => {
+                let offset = self.read_short_signed()?;
+                let v = self.pop()?;
+                if !v.is_truthy() {
+                    self.jump(offset)?;
+                }
+            }
+            Op::BuildArray => self.build_array()?,
+            Op::BuildObject => self.build_object()?,
+            Op::GetProperty => {
+                let key = self.pop()?;
+                let obj = self.pop()?;
+                let k = self.to_property_key(&key)?;
+                let v = self.get_property_value(&obj, &k)?;
+                self.stack.push(v);
+            }
+            Op::GetPropertyIC => self.get_property_ic()?,
+            Op::SetProperty => {
+                let value = self.pop()?;
+                let key = self.pop()?;
+                let obj = self.pop()?;
+                let k = self.to_property_key(&key)?;
+                self.set_property_tracked(&obj, &k, value)?;
+            }
+            Op::MakeClosure => self.make_closure()?,
+            Op::GetBuiltin => {
+                let idx = self.read_byte()? as usize;
+                let name = self.string_constant(idx)?;
+                let g = self.globals.borrow();
+                let v = g
+                    .properties
+                    .get(&PropertyKey::String(name.clone()))
+                    .and_then(|d| match d {
+                        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        crate::errors::RuntimeError::from(format!(
+                            "GetBuiltin: '{}' not found",
+                            name
+                        ))
+                    })?;
+                match v {
+                    Value::Builtin(_) => self.stack.push(v),
+                    _ => {
+                        return Err(crate::errors::RuntimeError::from(format!(
+                            "GetBuiltin: '{}' is not a builtin",
+                            name
+                        )));
+                    }
+                }
+            }
+            Op::PushHandler => {
+                let offset = self.read_short_signed()?;
+                let handler_ip = (self.ip as isize + offset) as usize;
+                self.handlers.push(HandlerRecord {
+                    chunk: Rc::clone(&self.chunk),
+                    handler_ip,
+                    saved_stack_len: self.stack.len(),
+                    saved_locals_len: self.locals.len(),
+                    frame_count: self.frames.len(),
+                });
+            }
+            Op::PopHandler => {
+                self.handlers.pop();
+            }
+            Op::Throw => {
+                let thrown = self.pop()?;
+                self.unwind_to_handler(thrown)?;
+            }
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -795,7 +1098,9 @@ impl Vm {
                                     return Ok(rv);
                                 }
                 }
-                Err(crate::errors::RuntimeError::from("Cannot convert object to primitive"))
+                // TODO: when Object.prototype.toString/valueOf are wired into
+                // the runtime object model, this should throw TypeError instead.
+                Ok(Value::String("[object Object]".to_string()))
             }
             _ => Ok(v.clone()),
         }
@@ -819,6 +1124,7 @@ impl Vm {
         }
     }
 
+    #[allow(dead_code)]
     fn to_number_value(&mut self, v: &Value) -> Result<f64, crate::errors::RuntimeError> {
         match v {
             Value::Number(n) => Ok(*n),
@@ -843,6 +1149,27 @@ impl Vm {
     ) -> Result<PropertyKey, crate::errors::RuntimeError> {
         match v {
             Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym.clone())),
+            Value::Object(data) => {
+                let d = data.borrow();
+                if let Some(PropertyDescriptor::Data { value, .. }) =
+                    d.properties.get(&PropertyKey::String("__isSymbol".to_string()))
+                    && matches!(value, Value::Bool(true))
+                {
+                    if let Some(PropertyDescriptor::Data { value, .. }) =
+                        d.properties.get(&PropertyKey::String("_id".to_string()))
+                        && let Value::Number(n) = value
+                    {
+                        return Ok(PropertyKey::Symbol(crate::value::SymbolId::well_known(
+                            *n as u64,
+                        )));
+                    }
+                }
+                let prim = self.to_primitive(v, Some("string"))?;
+                match prim {
+                    Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym)),
+                    _ => Ok(PropertyKey::String(self.to_string(&prim)?)),
+                }
+            }
             _ => {
                 let prim = self.to_primitive(v, Some("string"))?;
                 match prim {
@@ -853,27 +1180,238 @@ impl Vm {
         }
     }
 
+    fn to_boolean(&self, v: &Value) -> bool {
+        v.is_truthy()
+    }
+
+    fn read_descriptor_from_value(
+        &mut self,
+        v: &Value,
+    ) -> Result<PartialDescriptor, crate::errors::RuntimeError> {
+        let mut desc = PartialDescriptor::default();
+        if let Value::Object(data) = v {
+            let d = data.borrow();
+            if let Some(PropertyDescriptor::Data { value, .. }) =
+                d.properties.get(&PropertyKey::String("value".to_string()))
+            {
+                desc.value = Some(value.clone());
+            }
+            if let Some(PropertyDescriptor::Data { value, .. }) =
+                d.properties.get(&PropertyKey::String("writable".to_string()))
+            {
+                desc.writable = Some(self.to_boolean(value));
+            }
+            if let Some(PropertyDescriptor::Data { value, .. }) =
+                d.properties.get(&PropertyKey::String("enumerable".to_string()))
+            {
+                desc.enumerable = Some(self.to_boolean(value));
+            }
+            if let Some(PropertyDescriptor::Data { value, .. }) =
+                d.properties.get(&PropertyKey::String("configurable".to_string()))
+            {
+                desc.configurable = Some(self.to_boolean(value));
+            }
+            if let Some(PropertyDescriptor::Data { value, .. }) =
+                d.properties.get(&PropertyKey::String("get".to_string()))
+            {
+                desc.get = Some(value.clone());
+            }
+            if let Some(PropertyDescriptor::Data { value, .. }) =
+                d.properties.get(&PropertyKey::String("set".to_string()))
+            {
+                desc.set = Some(value.clone());
+            }
+        }
+        Ok(desc)
+    }
+
+    fn define_own_property(
+        &mut self,
+        obj: &Value,
+        key: PropertyKey,
+        desc: PartialDescriptor,
+    ) -> Result<bool, crate::errors::RuntimeError> {
+        let target = match obj {
+            Value::Object(data) => data,
+            Value::Array(_, props) => props,
+            Value::Closure { props, .. } => props,
+            _ => return Ok(false),
+        };
+        let mut data = target.borrow_mut();
+        let current = data.properties.get(&key).cloned();
+
+        if current.is_none() && !data.extensible {
+            return Ok(false);
+        }
+
+        if let Some(ref cur) = current {
+            // Non-configurable restrictions.
+            let cur_configurable = match &cur {
+                PropertyDescriptor::Data { configurable, .. } => *configurable,
+                PropertyDescriptor::Accessor { configurable, .. } => *configurable,
+            };
+            if !cur_configurable {
+                if let Some(true) = desc.configurable {
+                    return Ok(false);
+                }
+                if let Some(en) = desc.enumerable {
+                    let cur_en = match &cur {
+                        PropertyDescriptor::Data { enumerable, .. } => *enumerable,
+                        PropertyDescriptor::Accessor { enumerable, .. } => *enumerable,
+                    };
+                    if en != cur_en {
+                        return Ok(false);
+                    }
+                }
+                if let PropertyDescriptor::Data { writable, value, .. } = &cur {
+                    if !*writable {
+                        if let Some(true) = desc.writable {
+                            return Ok(false);
+                        }
+                        if let Some(new_val) = &desc.value {
+                            if !values_equal(new_val, value) {
+                                return Ok(false);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let is_accessor = desc.get.is_some() || desc.set.is_some();
+        let new_desc = if is_accessor {
+            PropertyDescriptor::Accessor {
+                get: desc.get,
+                set: desc.set,
+                enumerable: desc.enumerable.unwrap_or_else(|| {
+                    current
+                        .as_ref()
+                        .and_then(|d| match d {
+                            PropertyDescriptor::Data { enumerable, .. } => Some(*enumerable),
+                            PropertyDescriptor::Accessor { enumerable, .. } => Some(*enumerable),
+                        })
+                        .unwrap_or(false)
+                }),
+                configurable: desc.configurable.unwrap_or_else(|| {
+                    current
+                        .as_ref()
+                        .and_then(|d| match d {
+                            PropertyDescriptor::Data { configurable, .. } => Some(*configurable),
+                            PropertyDescriptor::Accessor { configurable, .. } => Some(*configurable),
+                        })
+                        .unwrap_or(false)
+                }),
+            }
+        } else {
+            let (cur_value, cur_writable, cur_enumerable, cur_configurable) = match &current {
+                Some(PropertyDescriptor::Data {
+                    value,
+                    writable,
+                    enumerable,
+                    configurable,
+                }) => (
+                    value.clone(),
+                    *writable,
+                    *enumerable,
+                    *configurable,
+                ),
+                Some(PropertyDescriptor::Accessor { enumerable, configurable, .. }) => (
+                    Value::Undefined,
+                    false,
+                    *enumerable,
+                    *configurable,
+                ),
+                None => (Value::Undefined, false, false, false),
+            };
+            PropertyDescriptor::Data {
+                value: desc.value.unwrap_or(cur_value),
+                writable: desc.writable.unwrap_or(cur_writable),
+                enumerable: desc.enumerable.unwrap_or(cur_enumerable),
+                configurable: desc.configurable.unwrap_or(cur_configurable),
+            }
+        };
+
+        data.properties.insert(key, new_desc);
+        Ok(true)
+    }
+
     fn get_property_value(
         &mut self,
         obj: &Value,
         key: &PropertyKey,
     ) -> Result<Value, crate::errors::RuntimeError> {
-        if let Value::Object(data) = obj {
-            let d = data.borrow();
-            if let Some(desc) = d.properties.get(key) {
-                return match desc {
-                    PropertyDescriptor::Data { value, .. } => Ok(value.clone()),
-                    PropertyDescriptor::Accessor { get, .. } => {
-                        if let Some(getter) = get {
-                            self.call_with_this(getter, obj, &[])
-                        } else {
-                            Ok(Value::Undefined)
-                        }
+        if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
+            return match desc {
+                PropertyDescriptor::Data { value, .. } => Ok(value),
+                PropertyDescriptor::Accessor { get, .. } => {
+                    if let Some(getter) = get {
+                        self.call_with_this(&getter, obj, &[])
+                    } else {
+                        Ok(Value::Undefined)
                     }
-                };
-            }
+                }
+            };
         }
-        get_property(obj, key, 0)
+        Ok(Value::Undefined)
+    }
+
+    fn lookup_property_descriptor(
+        &self,
+        obj: &Value,
+        key: &PropertyKey,
+        depth: usize,
+    ) -> Result<Option<(PropertyDescriptor, Value)>, crate::errors::RuntimeError> {
+        if depth > MAX_PROTOTYPE_DEPTH {
+            return Err(crate::errors::RuntimeError::from(
+                "Prototype chain cycle detected or too deep",
+            ));
+        }
+        match obj {
+            Value::Object(data) => {
+                let d = data.borrow();
+                if let Some(desc) = d.properties.get(key) {
+                    return Ok(Some((desc.clone(), obj.clone())));
+                }
+                if !matches!(d.prototype, Value::Null) {
+                    return self.lookup_property_descriptor(&d.prototype, key, depth + 1);
+                }
+            }
+            Value::Array(arr, props) => {
+                if let PropertyKey::String(s) = key
+                    && let Ok(i) = s.parse::<usize>()
+                {
+                    if let Some(v) = arr.borrow().get(i).cloned() {
+                        return Ok(Some((
+                            PropertyDescriptor::Data {
+                                value: v,
+                                writable: true,
+                                enumerable: true,
+                                configurable: true,
+                            },
+                            obj.clone(),
+                        )));
+                    }
+                }
+                let p = props.borrow();
+                if let Some(desc) = p.properties.get(key) {
+                    return Ok(Some((desc.clone(), obj.clone())));
+                }
+                if !matches!(p.prototype, Value::Null) {
+                    return self.lookup_property_descriptor(&p.prototype, key, depth + 1);
+                }
+            }
+            Value::Closure { props, .. } => {
+                let p = props.borrow();
+                if let Some(desc) = p.properties.get(key) {
+                    return Ok(Some((desc.clone(), obj.clone())));
+                }
+                if !matches!(p.prototype, Value::Null) {
+                    return self.lookup_property_descriptor(&p.prototype, key, depth + 1);
+                }
+            }
+            _ => {}
+        }
+        Ok(None)
     }
 
     /// Pop the return value, restore the caller's frame, and push the result.
@@ -1164,16 +1702,14 @@ impl Vm {
         key: &PropertyKey,
         value: Value,
     ) -> Result<(), crate::errors::RuntimeError> {
-        if let Value::Object(data) = obj {
-            let mut d = data.borrow_mut();
-            if let Some(desc) = d.properties.get_mut(key)
-                && let PropertyDescriptor::Accessor { set, .. } = desc {
-                    if let Some(setter) = set.clone() {
-                        let _ = self.call_with_this(&setter, obj, &[value])?;
-                        return Ok(());
-                    }
+        if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
+            if let PropertyDescriptor::Accessor { set, .. } = desc {
+                if let Some(setter) = set {
+                    let _ = self.call_with_this(&setter, obj, &[value])?;
                     return Ok(());
                 }
+                return Ok(());
+            }
         }
         set_property(obj, key, value)?;
 
@@ -1357,6 +1893,7 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     #[inline(always)]
+    #[allow(dead_code)]
     fn binary_num<F>(&mut self, f: F) -> Result<(), crate::errors::RuntimeError>
     where
         F: FnOnce(f64, f64) -> f64,
@@ -1579,11 +2116,6 @@ fn check_assign(expected: &Type, actual: &Value) -> Result<(), crate::errors::Ru
     }
 }
 
-fn property_key(_v: &Value) -> Result<PropertyKey, crate::errors::RuntimeError> {
-    Err(crate::errors::RuntimeError::from(
-        "property_key should not be called; use Vm::to_property_key",
-    ))
-}
 
 /// Reference-equality semantics for objects/arrays/closures, structural
 /// equality for primitives. Matches JavaScript `===` behaviour.

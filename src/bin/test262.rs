@@ -625,6 +625,32 @@ fn run_harness_only(
         harness_files.extend(extra);
     }
 
+    // Helper: print richer VM diagnostics when a harness file causes a runtime
+    // failure. This includes preserved globals and important builtin shapes so
+    // we can reason about missing functions or prototype properties.
+    fn print_vm_diag(vm: &Vm, keep_globals: &HashSet<String>) {
+        eprintln!("--- VM DIAGNOSTICS ---");
+        eprintln!("Preserved globals: {:?}", keep_globals);
+        let inspect_globals = ["$262", "Atomics", "Function", "Promise", "SharedArrayBuffer", "Int32Array"];
+        for name in &inspect_globals {
+            match vm.get_global(name) {
+                Some(v) => {
+                    eprintln!("Global {}: {}", name, v);
+                    match vm.list_global_own_keys(name) {
+                        Some(keys) => eprintln!("  own keys: {:?}", keys),
+                        None => eprintln!("  own keys: <none or non-object>"),
+                    }
+                    match vm.list_global_prototype_keys(name) {
+                        Some(pkeys) => eprintln!("  prototype keys: {:?}", pkeys),
+                        None => eprintln!("  prototype keys: <none or non-object>"),
+                    }
+                }
+                None => eprintln!("Global {}: <missing>", name),
+            }
+        }
+        eprintln!("--- END DIAGNOSTICS ---");
+    }
+
     for h in &harness_files {
         vm.reset(keep_globals);
         let p = test262_root.join(h);
@@ -639,9 +665,16 @@ fn run_harness_only(
         typecheck::check_oxc(prog).map_err(|e| format!("Harness {} typecheck failed: {}", h, e))?;
         let chunk = compiler::compile_oxc(prog)
             .map_err(|e| format!("Harness {} compile failed: {}", h, e))?;
-        vm.run(chunk)
-            .map_err(|e| format!("Harness {} runtime failed: {}", h, e))?;
-        eprintln!("Harness ok: {}", h);
+        match vm.run(chunk) {
+            Ok(_) => {
+                eprintln!("Harness ok: {}", h);
+            }
+            Err(e) => {
+                eprintln!("Harness {} runtime failed: {}", h, e);
+                print_vm_diag(vm, keep_globals);
+                return Err(format!("Harness {} runtime failed: {}", h, e));
+            }
+        }
     }
     Ok(())
 }

@@ -12,9 +12,9 @@ declare var EvalError: EvalErrorConstructor;
 declare var URIError: URIErrorConstructor;
 
 interface ErrorConstructor {
-  new (message?: string): Error;
-  (message?: string): Error;
-  readonly prototype: Error;
+  new (message?: string): any;
+  (message?: string): any;
+  readonly prototype: any;
 }
 
 interface Error {
@@ -73,20 +73,24 @@ interface URIErrorConstructor extends ErrorConstructor {
 interface URIError extends Error {}
 
 function createErrorClass(name: string, ParentConstructor: any): any {
-  function ErrorCtor(this: any, message?: string): void {
+  function ErrorCtor(this: any, message?: string): any {
     if (this instanceof ErrorCtor === false) {
-      return new ErrorCtor(message);
+      return new (ErrorCtor as any)(message);
     }
-    this.name = name;
-    this.message = message !== undefined ? String(message) : "";
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, ErrorCtor);
-    }
+    (this as any).name = name;
+    (this as any).message = message !== undefined ? String(message) : "";
+    try {
+      if ((Error as any).captureStackTrace) {
+        (Error as any).captureStackTrace(this, ErrorCtor);
+      }
+    } catch (_) {}
     return this;
   }
-  ErrorCtor.prototype = Object.create(ParentConstructor.prototype);
-  ErrorCtor.prototype.name = name;
-  ErrorCtor.prototype.constructor = ErrorCtor;
+  try {
+    ErrorCtor.prototype = Object.create((ParentConstructor && ParentConstructor.prototype) || {});
+    (ErrorCtor.prototype as any).name = name;
+    (ErrorCtor.prototype as any).constructor = ErrorCtor;
+  } catch (_) {}
   return ErrorCtor;
 }
 

@@ -113,8 +113,19 @@ const ObjectImpl: ObjectConstructor = {
   },
 
   defineProperty(o: any, p: string | symbol, attributes: PropertyDescriptor): any {
-    // Basic implementation - full property descriptors would need more work
-    o[p] = attributes.value;
+    try {
+      if (host && typeof (host as any).defineProperty === "function") {
+        (host as any).defineProperty(o, p, attributes as any);
+        return o;
+      }
+    } catch (_) {}
+    try {
+      if (o && typeof (o as any).defineProperty === "function") {
+        (o as any).defineProperty(p as any, attributes as any);
+        return o;
+      }
+    } catch (_) {}
+    o[p] = (attributes as any).value;
     return o;
   },
 
@@ -130,7 +141,11 @@ const ObjectImpl: ObjectConstructor = {
   },
 
   getOwnPropertyDescriptor(o: any, p: string | symbol): PropertyDescriptor | undefined {
-    // Basic implementation
+    try {
+      if (o && typeof (o as any).getOwnPropertyDescriptor === "function") {
+        return (o as any).getOwnPropertyDescriptor(p as any) as any;
+      }
+    } catch (_) {}
     if (Object.prototype.hasOwnProperty.call(o, p)) {
       return {
         value: o[p],
@@ -184,7 +199,11 @@ const ObjectImpl: ObjectConstructor = {
       return value1 !== 0 || 1 / value1 === 1 / value2;
     } else {
       // Handle NaN === NaN
-      return value1 !== value1 && value2 !== value2;
+      try {
+        return Number.isNaN(value1) && Number.isNaN(value2);
+      } catch (_) {
+        return false;
+      }
     }
   },
 
@@ -214,4 +233,8 @@ const ObjectImpl: ObjectConstructor = {
 };
 
 // Assign to global Object
-(Object as any) = ObjectImpl;
+try {
+  if (typeof globalThis !== "undefined") {
+    (globalThis as any).Object = ObjectImpl as any;
+  }
+} catch (_) {}

@@ -11,6 +11,7 @@
  */
 
 /* Basic global reference */
+// Use the host-provided globalThis (we still declare it to satisfy the compiler)
 declare const globalThis: any;
 
 /* Fundamental global types missing when `noLib` is enabled.
@@ -31,13 +32,105 @@ interface IArguments {
 }
 
 /* Primitive wrapper constructors (permissive) */
-declare var Object: any;
-declare var Function: any;
-declare var Array: any;
-declare var String: any;
-declare var Number: any;
-declare var Boolean: any;
-declare var Symbol: any;
+/* Ambient constructor shapes (permissive but typed to allow generics) */
+interface ObjectConstructorAmbient {
+  new (value?: any): any;
+  (value?: any): any;
+  keys(o: any): string[];
+  values(o: any): any[];
+  entries(o: any): [string, any][];
+  assign(target: any, ...sources: any[]): any;
+  create(o: any, properties?: any): any;
+  defineProperty(o: any, p: string, attributes: any): any;
+  defineProperties(o: any, properties: any): any;
+  getOwnPropertyDescriptor(o: any, p: string): any;
+  getOwnPropertyDescriptors(o: any): any;
+  getOwnPropertyNames(o: any): string[];
+  getPrototypeOf(o: any): any;
+  setPrototypeOf(o: any, proto: any): any;
+  is(x: any, y: any): boolean;
+  freeze(o: any): any;
+  seal(o: any): any;
+  preventExtensions(o: any): any;
+  isFrozen(o: any): boolean;
+  isSealed(o: any): boolean;
+  isExtensible(o: any): boolean;
+}
+declare var Object: ObjectConstructorAmbient;
+
+interface FunctionConstructorAmbient {
+  new (...args: string[]): any;
+  (...args: string[]): any;
+  prototype: any;
+}
+declare var Function: FunctionConstructorAmbient;
+
+interface ArrayConstructorAmbient {
+  new <T>(...items: T[]): T[];
+  <T>(...items: T[]): T[];
+  isArray<T>(arg: any): arg is T[];
+  from<T>(arrayLike: ArrayLike<T>): T[];
+  of<T>(...items: T[]): T[];
+  prototype: any;
+}
+declare var Array: ArrayConstructorAmbient;
+
+interface StringConstructorAmbient {
+  new (value?: any): string;
+  (value?: any): string;
+  fromCharCode(...codes: number[]): string;
+  fromCodePoint(...codePoints: number[]): string;
+  raw(template: TemplateStringsArray, ...substitutions: any[]): string;
+  prototype: any;
+}
+declare var String: StringConstructorAmbient;
+
+interface NumberConstructorAmbient {
+  new (value?: any): number;
+  (value?: any): number;
+  EPSILON: number;
+  MAX_SAFE_INTEGER: number;
+  MIN_SAFE_INTEGER: number;
+  NaN: number;
+  Infinity: number;
+  isFinite(number: any): boolean;
+  isInteger(number: any): boolean;
+  isNaN(number: any): boolean;
+  isSafeInteger(number: any): boolean;
+  parseFloat(string: string): number;
+  parseInt(string: string, radix?: number): number;
+  prototype: any;
+}
+declare var Number: NumberConstructorAmbient;
+
+interface BooleanConstructorAmbient {
+  new (value?: any): boolean;
+  (value?: any): boolean;
+  prototype: any;
+}
+declare var Boolean: BooleanConstructorAmbient;
+
+interface SymbolConstructorAmbient {
+  new (description?: string | number): symbol;
+  (description?: string | number): symbol;
+  for(key: string): symbol;
+  keyFor(sym: symbol): string | undefined;
+  iterator: symbol;
+  asyncIterator: symbol;
+  match: symbol;
+  matchAll: symbol;
+  replace: symbol;
+  search: symbol;
+  species: symbol;
+  split: symbol;
+  toPrimitive: symbol;
+  toStringTag: symbol;
+  hasInstance: symbol;
+  isConcatSpreadable: symbol;
+  unscopables: symbol;
+}
+declare var Symbol: SymbolConstructorAmbient;
+
 declare var BigInt: any;
 
 /* Collections and common globals */
@@ -49,10 +142,61 @@ declare var Promise: any;
 declare var Date: any;
 declare var RegExp: any;
 
+/* Global numeric constants */
+declare const NaN: number;
+declare const Infinity: number;
+
+/* Error constructors (permissive) */
+declare var Error: any;
+declare var EvalError: any;
+declare var RangeError: any;
+declare var ReferenceError: any;
+declare var SyntaxError: any;
+declare var TypeError: any;
+declare var AggregateError: any;
+
+/* Utility / helper types often used by code */
+type Awaited<T> = any;
+interface TemplateStringsArray {
+  [n: number]: string;
+  length: number;
+  raw: string[];
+}
+interface ArrayLike<T> {
+  length: number;
+  [n: number]: T;
+}
+interface RegExpMatchArray extends Array<string> {}
+
+/* Minimal property descriptor shapes used in std code */
+type PropertyDescriptor = any;
+type PropertyDescriptorMap = { [key: string]: PropertyDescriptor };
+
+/* Generic helpers */
+type Record<K extends keyof any, T> = { [P in K]: T };
+
+/* Provide a type for Math/JSON so they can be used as types in code. */
+interface Math { [k: string]: any }
+interface JSON { [k: string]: any }
+
+/* Minimal global types that appear as type names in code. */
+interface Object {}
+interface RegExp {
+  test?(s: string): boolean;
+  exec?(s: string): any;
+  toString(): string;
+}
+
 /* Runtime singletons */
 declare var Math: any;
 declare var JSON: any;
 declare var console: any;
+/* Global helper functions provided by the runtime layer */
+declare function toString(v: any): string;
+declare function parseInt(s: any, radix?: number): number;
+declare function parseFloat(s: any): number;
+declare function isNaN(value: any): boolean;
+declare function isFinite(value: any): boolean;
 
 /* Timer APIs */
 declare function setTimeout(handler: any, timeout?: number, ...args: any[]): number;
@@ -81,6 +225,7 @@ interface Array<T> {
   slice(start?: number, end?: number): T[];
   splice(start: number, deleteCount?: number, ...items: T[]): T[];
   [n: number]: T;
+  [Symbol.iterator](): IterableIterator<T>;
 }
 
 interface String {

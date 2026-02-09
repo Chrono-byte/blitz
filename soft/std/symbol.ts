@@ -30,7 +30,7 @@ declare global {
     readonly description: string | undefined;
     toString(): string;
     valueOf(): symbol;
-    [Symbol.toStringTag]: string;
+    readonly [Symbol.toStringTag]: string;
   }
 }
 

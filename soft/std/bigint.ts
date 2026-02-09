@@ -37,7 +37,7 @@ const BigIntImpl: BigIntConstructor = function (value?: any): bigint {
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (trimmed === "") throw new SyntaxError("Cannot convert empty string to BigInt");
-    const sign = trimmed[0] === "-" ? -1 : 1;
+    const sign = trimmed[0] === "-" ? BigInt(-1) : BigInt(1);
     const absStr = trimmed[0] === "-" || trimmed[0] === "+" ? trimmed.slice(1) : trimmed;
     if (!/^\d+$/.test(absStr)) {
       throw new SyntaxError("Cannot convert string to BigInt");
@@ -46,11 +46,11 @@ const BigIntImpl: BigIntConstructor = function (value?: any): bigint {
     const digits = absStr.split("");
     let i = 0;
     while (i < digits.length) {
-      const digit = parseInt(digits[i], 10);
-      result = result * BigInt(10) + BigInt(digit);
+      const digit = BigInt(parseInt(digits[i], 10));
+      result = result * BigInt(10) + digit;
       i = i + 1;
     }
-    return sign * result;
+    return (sign as any) * result;
   }
   if (typeof value === "boolean") {
     return value ? BigInt(1) : BigInt(0);
