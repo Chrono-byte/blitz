@@ -214,7 +214,6 @@ impl Compiler {
                     };
                     let slot = self.add_local(name.clone(), None);
                     if self.is_root {
-                        self.chunk.global_types.insert(name.clone(), None);
                         self.emit(Op::Dup, LINE);
                     }
                     self.emit(Op::SetLocal, LINE);
@@ -239,7 +238,6 @@ impl Compiler {
                         self.add_local(fname.clone(), None)
                     };
                     if self.is_root {
-                        self.chunk.global_types.insert(fname.clone(), None);
                         self.emit(Op::Dup, LINE);
                     }
                     self.emit(Op::SetLocal, LINE);
@@ -324,10 +322,9 @@ impl Compiler {
                                     }
                                 };
                                 let slot = self.add_local(name.clone(), None);
-                                if self.is_root {
-                                    self.chunk.global_types.insert(name.clone(), None);
-                                    self.emit(Op::Dup, LINE);
-                                }
+                    if self.is_root {
+                        self.emit(Op::Dup, LINE);
+                    }
                                 self.emit(Op::SetLocal, LINE);
                                 self.emit_byte(slot as u8, LINE);
                                 if self.is_root {
