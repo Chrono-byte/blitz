@@ -25,14 +25,7 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
         new_chunk.code = rc_chunk.code.clone();
         new_chunk.constants = rc_chunk.constants.clone();
         new_chunk.lines = rc_chunk.lines.clone();
-        // Clear global type annotations for the soft prelude so runtime won't
-        // enforce static global types during bootstrap. Replace any annotated
-        // type with `None` to disable runtime checks for globals.
-        new_chunk.global_types = rc_chunk
-            .global_types
-            .keys()
-            .map(|k| (k.clone(), None))
-            .collect();
+        // Slot/global type annotations removed in JS-first mode; nothing to do.
 
         // Process functions
         let mut new_funcs = Vec::new();

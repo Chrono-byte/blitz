@@ -48,9 +48,6 @@ pub struct Chunk {
     pub functions: Vec<FunctionProto>,
     /// Line number information for debugging
     pub lines: Vec<u32>,
-    /// Type of each global (name -> type). Used at runtime for SetGlobal checks.
-    /// A missing (`None`) entry indicates no static type annotation was provided.
-    pub global_types: HashMap<String, Option<Type>>,
 }
 
 #[derive(Clone, Debug)]
@@ -62,8 +59,8 @@ pub struct FunctionProto {
     pub arity: usize,
     /// Compiled bytecode for this function
     pub chunk: Rc<Chunk>,
-    /// Type of each slot (params then locals). Used at runtime for SetLocal checks.
-    /// Each slot may be `None` when no static annotation was provided.
+    /// NOTE: slot type annotations have been removed in JS-first mode; the
+    /// runtime no longer enforces TypeScript annotations.
     pub slot_types: Vec<Option<Type>>,
     /// Whether the last parameter is a rest parameter (`...args`). If true,
     /// at runtime the last local will be populated with an array of the
@@ -81,7 +78,6 @@ impl Chunk {
             constants: Vec::new(),
             functions: Vec::new(),
             lines: Vec::new(),
-            global_types: HashMap::new(),
         }
     }
 

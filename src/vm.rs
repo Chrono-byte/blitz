@@ -181,7 +181,7 @@ pub struct Vm {
     frames: Vec<Frame>,
     /// Root chunk (kept alive for global type metadata).
     root_chunk: Option<Rc<Chunk>>,
-    /// Slot-type annotations for the current function (None at top level).
+    /// Slot-type annotations for the current function (formerly used by TS checks).
     current_slot_types: Option<Vec<Option<Type>>>,
     /// Per-chunk inline-cache storage, keyed by chunk `Rc` pointer address.
     ic_caches: HashMap<usize, Vec<Option<IcEntry>>>,
@@ -804,11 +804,11 @@ impl Vm {
                 let result = (f.as_ref())(self, &args)?;
                 self.stack.push(result);
             }
-            Value::Closure { proto, .. } => {
-                let call_args = self.prepare_call_args(&args, &proto)?;
-                self.validate_call_args(&call_args, &proto)?;
-                self.push_call_frame(&proto, call_args)?;
-            }
+                Value::Closure { proto, .. } => {
+                    let call_args = self.prepare_call_args(&args, &proto)?;
+                    // Argument validation removed in JS-first mode.
+                    self.push_call_frame(&proto, call_args)?;
+                }
             _ => {
                 self.dump_diag("Call failed: callee not callable", &callee);
                 return Err(crate::errors::RuntimeError::from(format!(
