@@ -204,9 +204,9 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     // the runtime simpler and avoids an extra indirection.
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("__native_print".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(std::rc::Rc::new(|vm, args| {
             native_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        })),
+        }))),
     );
 
     // Minimal native hook for creating VM-backed objects.
@@ -220,17 +220,17 @@ fn main() -> Result<(), tsblitz::errors::Error> {
 
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("__native_new_object".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(std::rc::Rc::new(|vm, args| {
             native_new_object(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        })),
+        }))),
     );
 
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("__define_property".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(std::rc::Rc::new(|vm, args| {
             vm.define_property_builtin(args)
                 .map_err(tsblitz::errors::RuntimeError::from)
-        })),
+        }))),
     );
 
     // Provide a minimal builtin console.log for early bootstrap and REPL use.
@@ -240,12 +240,153 @@ fn main() -> Result<(), tsblitz::errors::Error> {
             let mut data = tsblitz::value::ObjectData::new();
             data.properties.insert(
                 tsblitz::value::PropertyKey::String("log".to_string()),
-                tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
+                tsblitz::value::PropertyDescriptor::data(Value::Builtin(std::rc::Rc::new(|vm, args| {
                     native_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-                })),
+                }))),
             );
             data
         })))),
+    );
+
+    // Publish minimal kernel-owned constructors and their prototype objects so
+    // the soft prelude can assume canonical constructors exist. We expose them
+    // as callable builtin-backed objects so they behave like functions (callable)
+    // and also expose a property bag for `.prototype` where std installers can
+    // attach methods.
+
+    // Helper: create an object-backed constructor value where the object stores
+    // the `prototype` own property and the value is callable through the new
+    // `BuiltinObject` variant.
+    // Object
+    let object_proto_map: Rc<RefCell<tsblitz::value::ObjectData>> =
+        Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+    let object_ctor_map: Rc<RefCell<tsblitz::value::ObjectData>> =
+        Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+    // ctor.prototype -> proto
+    object_ctor_map.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("prototype".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Object(Rc::clone(&object_proto_map))),
+    );
+    // proto.constructor -> ctor (temporary placeholder, will be filled after ctor value exists)
+    // We'll create a callable builtin object below and then set proto.constructor -> ctor
+
+    // Array
+    let array_proto_map: Rc<RefCell<tsblitz::value::ObjectData>> =
+        Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+    let array_ctor_map: Rc<RefCell<tsblitz::value::ObjectData>> =
+        Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+    array_ctor_map.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("prototype".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Object(Rc::clone(&array_proto_map))),
+    );
+
+    // String
+    let string_proto_map: Rc<RefCell<tsblitz::value::ObjectData>> =
+        Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+    let string_ctor_map: Rc<RefCell<tsblitz::value::ObjectData>> =
+        Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+    string_ctor_map.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("prototype".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Object(Rc::clone(&string_proto_map))),
+    );
+
+    // Build callable constructor objects by using the new BuiltinObject variant.
+    // Each builtin captures a reference to its own property bag so it can read
+    // the `.prototype` value when creating instances.
+    use tsblitz::value::BuiltinFn;
+    use tsblitz::value::PropertyKey as PKey;
+
+    // Object constructor: returns a fresh object whose prototype is ctor.prototype
+    let object_ctor_props = Rc::clone(&object_ctor_map);
+    let object_ctor_fn: BuiltinFn = std::rc::Rc::new(move |_vm, _args| {
+        // read .prototype from constructor props
+        let proto = object_ctor_props
+            .borrow()
+            .properties
+            .get(&PKey::String("prototype".to_string()))
+            .and_then(|d| match d {
+                tsblitz::value::PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or(Value::Null);
+        let mut inst = tsblitz::value::ObjectData::new();
+        inst.prototype = proto;
+        Ok(Value::Object(Rc::new(RefCell::new(inst))))
+    });
+
+    let object_ctor_val = Value::BuiltinObject(object_ctor_fn.clone(), Rc::clone(&object_ctor_map));
+    // now set proto.constructor -> ctor
+    object_proto_map.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("constructor".to_string()),
+        tsblitz::value::PropertyDescriptor::data(object_ctor_val.clone()),
+    );
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("Object".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::BuiltinObject(object_ctor_fn.clone(), Rc::clone(&object_ctor_map))),
+    );
+
+    // Array constructor: build a Value::Array from arguments
+    let array_ctor_props = Rc::clone(&array_ctor_map);
+    let array_ctor_fn: BuiltinFn = std::rc::Rc::new(move |_vm, args| {
+        let elems: Vec<Value> = args.to_vec();
+        let arr_rc = Rc::new(RefCell::new(elems));
+        // prepare property bag with length and prototype
+        let props: Rc<RefCell<tsblitz::value::ObjectData>> = Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+        props.borrow_mut().properties.insert(
+            PKey::String("length".to_string()),
+            tsblitz::value::PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+        );
+        // attach prototype from constructor props if present
+        if let Some(pval) = array_ctor_props
+            .borrow()
+            .properties
+            .get(&PKey::String("prototype".to_string()))
+            .and_then(|d| match d {
+                tsblitz::value::PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+        {
+            props.borrow_mut().prototype = pval;
+        }
+        Ok(Value::Array(arr_rc, props))
+    });
+
+    let array_ctor_val = Value::BuiltinObject(array_ctor_fn.clone(), Rc::clone(&array_ctor_map));
+    array_proto_map.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("constructor".to_string()),
+        tsblitz::value::PropertyDescriptor::data(array_ctor_val.clone()),
+    );
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("Array".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::BuiltinObject(array_ctor_fn.clone(), Rc::clone(&array_ctor_map))),
+    );
+
+    // String constructor: coerce argument to string primitive
+    let string_ctor_props = Rc::clone(&string_ctor_map);
+    let string_ctor_fn: BuiltinFn = std::rc::Rc::new(move |_vm, args| {
+        if args.is_empty() {
+            return Ok(Value::String("".to_string()));
+        }
+        // Use basic ToString for primitives; for objects return primitive '[object Object]'
+        match &args[0] {
+            Value::String(s) => Ok(Value::String(s.clone())),
+            Value::Number(n) => Ok(Value::String(n.to_string())),
+            Value::Bool(b) => Ok(Value::String((if *b { "true" } else { "false" }).to_string())),
+            Value::Null => Ok(Value::String("null".to_string())),
+            Value::Undefined => Ok(Value::String("undefined".to_string())),
+            Value::BigInt(n) => Ok(Value::String(n.to_string())),
+            _ => Ok(Value::String("[object Object]".to_string())),
+        }
+    });
+
+    let string_ctor_val = Value::BuiltinObject(string_ctor_fn.clone(), Rc::clone(&string_ctor_map));
+    string_proto_map.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("constructor".to_string()),
+        tsblitz::value::PropertyDescriptor::data(string_ctor_val.clone()),
+    );
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("String".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::BuiltinObject(string_ctor_fn.clone(), Rc::clone(&string_ctor_map))),
     );
 
     // Parse CLI early so clap can handle --help/--version before doing work.

@@ -222,6 +222,15 @@ impl Vm {
         }
     }
 
+    /// Provide mutable access to the per-VM module loader, creating it if missing.
+    pub fn module_loader_mut(&mut self) -> &mut ModuleLoader {
+        if self.module_loader.is_none() {
+            self.module_loader = Some(ModuleLoader::new());
+        }
+        // SAFETY: we just ensured module_loader is Some
+        self.module_loader.as_mut().unwrap()
+    }
+
     /// Debug helper: get a global value by name (cloned).
     pub fn get_global(&self, name: &str) -> Option<Value> {
         self.globals
@@ -503,14 +512,30 @@ impl Vm {
                 Op::Add => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = match (a, b) {
-                        (Value::BigInt(x), Value::BigInt(y)) => Value::BigInt(x + y),
-                        (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
-                        (Value::String(s), v) => Value::String(format!("{}{}", s, v)),
-                        (v, Value::String(s)) => Value::String(format!("{}{}", v, s)),
-                        _ => return Err("Add: number or string expected".into()),
-                    };
-                    self.stack.push(result);
+                    // BigInt arithmetic: both operands must be BigInt
+                    if matches!(a, Value::BigInt(_)) || matches!(b, Value::BigInt(_)) {
+                        if let (Value::BigInt(x), Value::BigInt(y)) = (a, b) {
+                            self.stack.push(Value::BigInt(x + y));
+                        } else {
+                            return Err(crate::errors::RuntimeError::from(
+                                "Add: cannot mix BigInt and other types",
+                            ));
+                        }
+                    } else {
+                        // Ordinary addition: perform ToPrimitive with hint 'default'
+                        let a_prim = self.to_primitive(&a, None)?;
+                        let b_prim = self.to_primitive(&b, None)?;
+                        // If either primitive is a string, perform string concatenation
+                        if matches!(a_prim, Value::String(_)) || matches!(b_prim, Value::String(_)) {
+                            let sa = self.to_string(&a_prim)?;
+                            let sb = self.to_string(&b_prim)?;
+                            self.stack.push(Value::String(format!("{}{}", sa, sb)));
+                        } else {
+                            let na = self.to_number_value(&a_prim)?;
+                            let nb = self.to_number_value(&b_prim)?;
+                            self.stack.push(Value::Number(na + nb));
+                        }
+                    }
                 }
                 Op::AddNumber => {
                     let b = self.pop()?;
@@ -682,7 +707,7 @@ impl Vm {
                             ))
                         })?;
                     match v {
-                        Value::Builtin(_) => self.stack.push(v),
+                        Value::Builtin(_) | Value::BuiltinObject(_, _) => self.stack.push(v),
                         _ => {
                             return Err(crate::errors::RuntimeError::from(format!(
                                 "GetBuiltin: '{}' is not a builtin",
@@ -732,7 +757,11 @@ impl Vm {
 
         match callee {
             Value::Builtin(f) => {
-                let result = f(self, &args)?;
+                let result = (f.as_ref())(self, &args)?;
+                self.stack.push(result);
+            }
+            Value::BuiltinObject(f, _props) => {
+                let result = (f.as_ref())(self, &args)?;
                 self.stack.push(result);
             }
             Value::Closure { proto, .. } => {
@@ -775,7 +804,20 @@ impl Vm {
     ) -> Result<Value, crate::errors::RuntimeError> {
         match callee {
             Value::Builtin(f) => {
-                let result = f(self, args)?;
+                // For builtins invoked with an explicit `this`, pass the receiver
+                // as the first argument so native functions that expect the
+                // receiver can access it (used by accessor getters/setters).
+                let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
+                call_args.push(this_arg.clone());
+                call_args.extend_from_slice(args);
+                let result = (f.as_ref())(self, &call_args)?;
+                Ok(result)
+            }
+            Value::BuiltinObject(f, _props) => {
+                let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
+                call_args.push(this_arg.clone());
+                call_args.extend_from_slice(args);
+                let result = (f.as_ref())(self, &call_args)?;
                 Ok(result)
             }
             Value::Closure { proto, .. } => {
@@ -2001,15 +2043,6 @@ impl Vm {
     }
 }
 
-    /// Provide mutable access to the per-VM module loader, creating it if missing.
-    pub fn module_loader_mut(&mut self) -> &mut ModuleLoader {
-        if self.module_loader.is_none() {
-            self.module_loader = Some(ModuleLoader::new());
-        }
-        // SAFETY: we just ensured module_loader is Some
-        self.module_loader.as_mut().unwrap()
-    }
-
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
@@ -2091,7 +2124,9 @@ fn value_to_type(v: &Value) -> Type {
         Value::Null => Type::Null,
         Value::Object(_) => Type::Object(HashMap::new()),
         Value::Array(_, _) => Type::Array(Box::new(Type::Void)),
-        Value::Closure { .. } | Value::Builtin(_) => Type::Function(vec![], Box::new(Type::Void)),
+        Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _) => {
+            Type::Function(vec![], Box::new(Type::Void))
+        }
         Value::Symbol(_, _) => Type::Builtin(BuiltinType::Symbol),
     }
 }
@@ -2110,9 +2145,10 @@ fn runtime_assignable(expected: &Type, actual: &Value) -> bool {
         Type::Unknown => true,
         Type::Array(_) => matches!(actual, Value::Array(_, _)),
         Type::Object(_) => matches!(actual, Value::Object(_)),
-        Type::Function(_, _) => {
-            matches!(actual, Value::Closure { .. } | Value::Builtin(_))
-        }
+            Type::Function(_, _) => matches!(
+                actual,
+                Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
+            ),
         Type::Union(variants) => variants.iter().any(|t| runtime_assignable(t, actual)),
         Type::Builtin(_) | Type::TypeReference { .. } => true,
     }
@@ -2271,13 +2307,22 @@ fn set_property(
             if let PropertyKey::String(s) = key
                 && let Ok(i) = s.parse::<usize>()
             {
-                let mut a = arr.borrow_mut();
-                if i >= a.len() {
-                    a.resize(i + 1, Value::Undefined);
+                    let mut a = arr.borrow_mut();
+                    if i >= a.len() {
+                        a.resize(i + 1, Value::Undefined);
+                    }
+                    a[i] = value;
+                    // Update the `length` own property on the array's property bag
+                    // so reads of `arr.length` reflect the new size.
+                    let new_len = a.len();
+                    drop(a);
+                    let mut p = props.borrow_mut();
+                    p.properties.insert(
+                        PropertyKey::String("length".to_string()),
+                        PropertyDescriptor::data(Value::Number(new_len as f64)),
+                    );
+                    return Ok(());
                 }
-                a[i] = value;
-                return Ok(());
-            }
             let mut p = props.borrow_mut();
             if let Some(desc) = p.properties.get_mut(key) {
                 match desc {

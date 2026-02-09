@@ -135,7 +135,7 @@ impl ObjectData {
 
 use crate::bytecode::FunctionProto;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 /// Runtime value enum
 pub enum Value {
     /// Number value
@@ -170,6 +170,8 @@ pub enum Value {
     },
     /// Built-in function
     Builtin(BuiltinFn),
+    /// Built-in function object with a property bag (e.g. `.prototype`).
+    BuiltinObject(BuiltinFn, Rc<RefCell<ObjectData>>),
 }
 
 /// Built-in function type.
@@ -179,7 +181,8 @@ pub enum Value {
 /// call closures or manipulate frames). They return `Result<Value, RuntimeError>`
 /// so they can signal runtime errors back to the VM using the structured
 /// error type defined in `crate::errors`.
-pub type BuiltinFn = fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, crate::errors::RuntimeError>;
+pub type BuiltinFn =
+    std::rc::Rc<dyn Fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, crate::errors::RuntimeError>>;
 
 /// Full runtime type descriptor structure so the VM can perform stricter checks.
 #[derive(Clone, Debug)]
@@ -228,7 +231,7 @@ impl Value {
             Value::Object(_) => "object",
             Value::Array(..) => "object",
             Value::Closure { .. } => "function",
-            Value::Builtin(_) => "function",
+            Value::Builtin(_) | Value::BuiltinObject(_, _) => "function",
         }
     }
 }
@@ -256,7 +259,35 @@ impl std::fmt::Display for Value {
                 write!(f, "[{}]", parts.join(", "))
             }
             Value::Closure { proto, .. } => write!(f, "[Function: {}]", proto.name),
-            Value::Builtin(_) => write!(f, "[Native Function]"),
+            Value::Builtin(_) | Value::BuiltinObject(_, _) => write!(f, "[Native Function]"),
+        }
+    }
+}
+
+impl std::fmt::Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Undefined => write!(f, "Undefined"),
+            Value::Number(n) => write!(f, "Number({})", n),
+            Value::String(s) => write!(f, "String({:?})", s),
+            Value::Bool(b) => write!(f, "Bool({})", b),
+            Value::BigInt(n) => write!(f, "BigInt({})", n),
+            Value::Symbol(id, desc) => write!(f, "Symbol({:?},{:?})", id, desc),
+            Value::Null => write!(f, "Null"),
+            Value::Object(map) => write!(f, "Object({:p})", Rc::as_ptr(map)),
+            Value::Array(arr, props) => write!(
+                f,
+                "Array(arr={:p}, props={:p})",
+                Rc::as_ptr(arr),
+                Rc::as_ptr(props)
+            ),
+            Value::Closure { proto, .. } => {
+                write!(f, "Closure(name='{}' arity={})", proto.name, proto.arity)
+            }
+            Value::Builtin(_) => write!(f, "Builtin(<fn>)"),
+            Value::BuiltinObject(_, props) => {
+                write!(f, "BuiltinObject(props={:p})", Rc::as_ptr(props))
+            }
         }
     }
 }

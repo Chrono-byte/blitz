@@ -535,324 +535,41 @@ try {
             host_debugValue("global console assigned", console);
         } catch (_) { }
 
-        // Basic Object implementation
-        const ObjectImplInstance = {
-            new(value?: Value): Value {
-                if (value === null || value === undefined) {
-                    return new ObjectImpl();
-                }
-                if (typeof value === "object") {
-                    return value as Value;
-                }
-                // Would create wrapper objects for primitives
-                throw new Error("Wrapper objects not implemented");
-            },
-
-            // Removed anonymous call-signature function (tech debt). Implement callable-object behavior
-            // properly in the runtime if/when needed.
-
-            keys(o: Value): string[] {
-                return (o as BlitzObject).getOwnPropertyKeys();
-            },
-
-            values(o: Value): Value[] {
-                const bo = o as BlitzObject;
-                const keys = bo.getOwnPropertyKeys();
-                const result: Value[] = [];
-                let i = 0;
-                while (i < keys.length) {
-                    result.push(bo.get(keys[i]));
-                    i = i + 1;
-                }
-                return result;
-            },
-
-            entries(o: Value): [string, Value][] {
-                const bo = o as BlitzObject;
-                const keys = bo.getOwnPropertyKeys();
-                const result: [string, Value][] = [];
-                let i = 0;
-                while (i < keys.length) {
-                    const key = keys[i];
-                    result.push([key, bo.get(key)]);
-                    i = i + 1;
-                }
-                return result;
-            },
-
-            assign(target: Value, ...sources: Value[]): Value {
-                let si = 0;
-                const t = target as BlitzObject;
-                while (si < (sources as any).length) {
-                    const source = (sources as any)[si] as BlitzObject;
-                    const keys = source.getOwnPropertyKeys();
-                    let ki = 0;
-                    while (ki < keys.length) {
-                        const key = keys[ki];
-                        const value = source.get(key);
-                        t.set(key, value);
-                        ki = ki + 1;
-                    }
-                    si = si + 1;
-                }
-                return target;
-            },
-
-            create(o: Value | null): Value {
-                return new ObjectImpl(o as any);
-            },
-
-            defineProperty(o: Value, p: string, attributes: Value): Value {
-                let descriptor: any = {};
-                if (attributes && typeof attributes === "object") {
-                    if ("value" in (attributes as any)) descriptor.value = (attributes as any).value;
-                    if ("writable" in (attributes as any)) descriptor.writable = (attributes as any).writable;
-                    if ("enumerable" in (attributes as any))
-                        descriptor.enumerable = (attributes as any).enumerable;
-                    if ("configurable" in (attributes as any))
-                        descriptor.configurable = (attributes as any).configurable;
-                    if ("get" in (attributes as any)) descriptor.get = (attributes as any).get;
-                    if ("set" in (attributes as any)) descriptor.set = (attributes as any).set;
-                } else {
-                    descriptor = {
-                        value: attributes,
-                        writable: true,
-                        enumerable: true,
-                        configurable: true,
-                    };
-                }
-                try {
-                    if (typeof (o as any).defineProperty === "function") {
-                        (o as any).defineProperty(p, descriptor);
-                        return o;
-                    }
-                } catch (_) { }
-                try {
-                    if (host_ns && typeof (host_ns as any).defineProperty === "function") {
-                        (host_ns as any).defineProperty(o, p, descriptor);
-                        return o;
-                    }
-                } catch (_) { }
-                (o as BlitzObject).defineProperty(p, descriptor);
-                return o;
-            },
-
-            defineProperties(o: Value, properties: Value): Value {
-                if (properties && typeof properties === "object") {
-                    const keys = (properties as any).getOwnPropertyKeys
-                        ? (properties as any).getOwnPropertyKeys()
-                        : ObjectImplGlobal.keys(properties as any);
-                    let i = 0;
-                    while (i < keys.length) {
-                        const key = keys[i];
-                        try {
-                            const desc = (properties as any)[key];
-                            (Object as any).defineProperty(o as any, key, desc);
-                        } catch (_) { }
-                        i = i + 1;
-                    }
-                }
-                return o;
-            },
-
-            getOwnPropertyDescriptor(o: Value, p: string): Value {
-                return (o as BlitzObject).getOwnProperty(p) || undefined;
-            },
-
-            getOwnPropertyDescriptors(o: Value): Value {
-                const bo = o as BlitzObject;
-                const result: Record<string, Value> = {};
-                const keys = bo.getOwnPropertyKeys();
-                let i = 0;
-                while (i < keys.length) {
-                    const key = keys[i];
-                    const desc = bo.getOwnProperty(key);
-                    if (desc) {
-                        result[key] = desc;
-                    }
-                    i = i + 1;
-                }
-                return result;
-            },
-
-            getOwnPropertyNames(o: Value): string[] {
-                return (o as BlitzObject).getOwnPropertyKeys();
-            },
-
-            getPrototypeOf(o: Value): Value | null {
-                return (o as BlitzObject).getPrototypeOf();
-            },
-
-            setPrototypeOf(o: Value, proto: Value | null): Value {
-                (o as BlitzObject).setPrototypeOf(proto);
-                return o;
-            },
-
-            is(x: Value, y: Value): boolean {
-                if (x === y) {
-                    if (x !== 0) return true;
-                    return 1 / (x as number) === 1 / (y as number);
-                }
-                return false;
-            },
-
-            freeze(o: Value): Value {
-                (o as BlitzObject).preventExtensions();
-                return o;
-            },
-
-            seal(o: Value): Value {
-                (o as BlitzObject).preventExtensions();
-                return o;
-            },
-
-            preventExtensions(o: Value): Value {
-                (o as BlitzObject).preventExtensions();
-                return o;
-            },
-
-            isFrozen(o: Value): boolean {
-                return !(o as BlitzObject).isExtensible();
-            },
-
-            isSealed(o: Value): boolean {
-                return !(o as BlitzObject).isExtensible();
-            },
-
-            isExtensible(o: Value): boolean {
-                return (o as BlitzObject).isExtensible();
-            },
-        } as unknown as ObjectConstructor;
-
-        // Construct `Object` constructor object privately and then assign it to
-        // `globalThis` in a single stable write to avoid producing many transient
-        // hidden classes during bootstrap.
+        // Kernel provides canonical constructors; adopt kernel-provided
+        // `Object`/`Array`/`String` when available. The kernel publishes
+        // these globals prior to evaluating the prelude so in normal runs the
+        // soft-layer fallback implementations below are not used.
         try {
-            const builtObjectCtor: any = ObjectImplInstance;
             if (typeof globalThis !== "undefined") {
                 const g: any = globalThis as any;
-                try {
-                    if (!g.Object) {
-                        try {
-                            g.Object = builtObjectCtor;
-                        } catch (_) { }
-                    }
-                } catch (_) { }
-                try {
-                    ObjectImplGlobal = g.Object ? g.Object : builtObjectCtor;
-                } catch (_) {
-                    ObjectImplGlobal = builtObjectCtor;
-                }
-            } else {
-                ObjectImplGlobal = builtObjectCtor;
+                if (g.Object) ObjectImplGlobal = g.Object;
+                if (g.Array) ArrayImplGlobal = g.Array;
+                if (g.String) StringImplGlobal = g.String;
             }
-        } catch (_) {
-            try {
-                ObjectImplGlobal = ObjectImplInstance;
-            } catch (_) { }
-        }
-        try { host_print("PRELUDE: Object published"); } catch (_) {}
+        } catch (_) { }
+        try { host_print("PRELUDE: kernel constructors adopted if present"); } catch (_) {}
 
-        // Basic String constructor
-        const StringImplInstance = {
-            new(value?: Value): string {
-                return runtimeToString(value);
-            },
-
-            fromCharCode(...codes: number[]): string {
-                return String.fromCharCode(...codes);
-            },
-
-            fromCodePoint(...codePoints: number[]): string {
-                return String.fromCodePoint(...codePoints);
-            },
-
-            raw(template: Value, ...substitutions: Value[]): string {
-                // Basic implementation
-                return String.raw(template as TemplateStringsArray, ...substitutions);
-            },
-        } as unknown as StringConstructor;
-
-        // Construct `String` constructor and publish it with a single stable write.
+        // Prefer kernel-provided String constructor when available. The kernel
+        // publishes `String` prior to executing the prelude so in normal runs we
+        // adopt the kernel constructor instead of defining a soft fallback.
         try {
-            const builtStringCtor: any = StringImplInstance;
             if (typeof globalThis !== "undefined") {
                 const g: any = globalThis as any;
-                try {
-                    if (!g.String) {
-                        try {
-                            g.String = builtStringCtor;
-                        } catch (_) { }
-                    }
-                } catch (_) { }
-                try {
-                    StringImplGlobal = g.String ? g.String : builtStringCtor;
-                } catch (_) {
-                    StringImplGlobal = builtStringCtor;
-                }
-            } else {
-                StringImplGlobal = builtStringCtor;
+                if (g.String) StringImplGlobal = g.String;
             }
-        } catch (_) {
-            try {
-                StringImplGlobal = StringImplInstance;
-            } catch (_) { }
-        }
-        try { host_print("PRELUDE: String published"); } catch (_) {}
+        } catch (_) { }
+        try { host_print("PRELUDE: kernel String adopted if present"); } catch (_) {}
 
-        // Basic Array implementation
-        const ArrayImplInstance = {
-            new(...items: Value[]): Value[] {
-                if (items.length === 1 && typeof items[0] === "number") {
-                    const length = items[0];
-                    const result: Value[] = new Array(length);
-                    return result;
-                } else {
-                    return items.slice();
-                }
-            },
-
-            isArray(arg: Value): boolean {
-                // Basic implementation for tsblitz VM
-                return Array.isArray(arg);
-            },
-
-            from<T>(arrayLike: Value): T[] {
-                // Basic implementation
-                return [];
-            },
-
-            of<T>(...items: T[]): T[] {
-                return items.slice();
-            },
-        } as unknown as ArrayConstructor;
-
-        // Construct `Array` constructor and publish it with a single stable write.
+        // Prefer kernel-provided Array constructor when available. The kernel
+        // publishes `Array` and its `.prototype` prior to prelude evaluation so
+        // the soft layer should attach methods rather than re-defining Array.
         try {
-            const builtArrayCtor: any = ArrayImplInstance;
             if (typeof globalThis !== "undefined") {
                 const g: any = globalThis as any;
-                try {
-                    if (!g.Array) {
-                        try {
-                            g.Array = builtArrayCtor;
-                        } catch (_) { }
-                    }
-                } catch (_) { }
-                try {
-                    ArrayImplGlobal = g.Array ? g.Array : builtArrayCtor;
-                } catch (_) {
-                    ArrayImplGlobal = builtArrayCtor;
-                }
-            } else {
-                ArrayImplGlobal = builtArrayCtor;
+                if (g.Array) ArrayImplGlobal = g.Array;
             }
-        } catch (_) {
-            try {
-                ArrayImplGlobal = ArrayImplInstance;
-            } catch (_) { }
-        }
-        try { host_print("PRELUDE: Array published"); } catch (_) {}
+        } catch (_) { }
+        try { host_print("PRELUDE: kernel Array adopted if present"); } catch (_) {}
 
         // Ensure an Array.prototype object exists so std library can install methods
         // (the runtime's BlitzObject exposes `set`/`defineProperty` and prototype

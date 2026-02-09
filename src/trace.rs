@@ -83,6 +83,8 @@ pub fn value_string(label: &str, v: &crate::value::Value) {
             "[trace] {} Closure(name='{}' arity={})",
             label, proto.name, proto.arity
         ),
-        Value::Builtin(_) => eprintln!("[trace] {} Builtin", label),
+        Value::Builtin(_) | Value::BuiltinObject(_, _) => {
+            eprintln!("[trace] {} Builtin", label)
+        }
     }
 }

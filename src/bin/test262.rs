@@ -204,9 +204,9 @@ fn builtin_eval_script(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
         Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
     new_globals.borrow_mut().properties.insert(
         PropertyKey::String("print".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        })),
+        }))),
     );
 
     // Parse / typecheck / compile / run. Ignore errors and return Null on failure.
@@ -722,22 +722,22 @@ fn main() {
         Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
     globals.borrow_mut().properties.insert(
         PropertyKey::String("__native_print".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        })),
+        }))),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("print".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        })),
+        }))),
     );
     let mut data = tsblitz::value::ObjectData::new();
     data.properties.insert(
         PropertyKey::String("evalScript".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             builtin_eval_script(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        })),
+        }))),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("$262".to_string()),
