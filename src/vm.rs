@@ -3,7 +3,7 @@
 //! The VM executes compiled bytecode in a stack-based environment. It provides:
 //! - Stack and local variable management
 //! - Function call frames and closures
-//! - Property access with inline caching
+//! - Property access with generation-guarded inline caching
 //! - Exception handling (try/catch)
 //! - Runtime type checking
 //!
@@ -15,6 +15,7 @@
 //! - A globals map for global variables
 //! - A call stack of frames for function calls
 //! - Exception handler records for try/catch
+//! - A per-object generation table for IC invalidation
 //!
 //! # Execution
 //!
@@ -53,40 +54,44 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 
-/// Virtual machine for executing bytecode.
-pub struct Vm {
-    /// Chunk being executed.
-    chunk: Rc<Chunk>,
-    /// Instruction pointer within the chunk.
-    ip: usize,
-    /// Stack of values.
-    stack: Vec<Value>,
-    /// Local variables.
-    locals: Vec<Value>,
-    /// Global variables.
-    globals: Rc<RefCell<HashMap<String, Value>>>,
-    /// Stack of frames.
-    frames: Vec<Frame>,
-    /// Root chunk.
-    root_chunk: Option<Rc<Chunk>>,
-    /// Slot types for current function (None at top level).
-    current_slot_types: Option<Vec<Option<Type>>>,
-    /// Inline-cache storage per chunk keyed by chunk pointer.
-    ic_caches: RefCell<HashMap<usize, Vec<Option<IcEntry>>>>,
-    /// Background runtime for offloading blocking or async host work.
-    /// The runtime is multi-threaded so builtins and other host operations can
-    /// perform I/O or CPU-bound work without blocking the main VM thread.
-    ///
-    /// NOTE: To avoid creating one Tokio runtime per `Vm` (which can
-    /// oversubscribe threads when multiple VMs exist), we use a shared
-    /// global runtime. You can adjust the worker count via the
-    /// `TSBLITZ_BG_THREADS` environment variable (integer > 0). By default
-    /// we use `max(1, available_parallelism() - 1)` to leave the main thread
-    /// available for the foreground VM loop.
-    bg_runtime: Arc<Runtime>,
-    /// Exception handler stack.
-    handlers: Vec<HandlerRecord>,
+// ---------------------------------------------------------------------------
+// Tuning constants
+// ---------------------------------------------------------------------------
+
+/// Initial operand stack capacity. Avoids reallocation for most programs.
+const STACK_INITIAL_CAPACITY: usize = 512;
+
+/// Initial locals vector capacity per call frame.
+const LOCALS_INITIAL_CAPACITY: usize = 64;
+
+/// Initial call-frame stack capacity.
+const FRAMES_INITIAL_CAPACITY: usize = 64;
+
+/// Maximum prototype chain traversal depth before we assume a cycle.
+const MAX_PROTOTYPE_DEPTH: usize = 128;
+
+/// Default IC slot count per chunk (grows on demand).
+const IC_SLOTS_DEFAULT: usize = 256;
+
+// ---------------------------------------------------------------------------
+// Inline-cache entry
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct IcEntry {
+    /// Raw `Rc` pointer used as an object identity token.
+    obj_ptr: usize,
+    /// Object generation at the time the entry was cached. If the object
+    /// has been mutated since, the generation will have advanced and this
+    /// entry is stale.
+    generation: u64,
+    /// Cached property value.
+    value: Value,
 }
+
+// ---------------------------------------------------------------------------
+// Call frame
+// ---------------------------------------------------------------------------
 
 struct Frame {
     chunk: Rc<Chunk>,
@@ -94,8 +99,15 @@ struct Frame {
     locals: Vec<Value>,
     slot_types: Option<Vec<Option<Type>>>,
     return_type: Option<Type>,
-    stack: Vec<Value>,
+    /// Length of `Vm::stack` immediately before the callee's first operand.
+    /// On return the stack is truncated back to this point and the return
+    /// value is pushed on top.
+    stack_base: usize,
 }
+
+// ---------------------------------------------------------------------------
+// Exception handler record
+// ---------------------------------------------------------------------------
 
 struct HandlerRecord {
     chunk: Rc<Chunk>,
@@ -105,33 +117,25 @@ struct HandlerRecord {
     frame_count: usize,
 }
 
-#[derive(Clone)]
-struct IcEntry {
-    obj_ptr: usize,
-    value: Value,
-}
+// ---------------------------------------------------------------------------
+// Global background Tokio runtime (lazy, shared across all Vm instances)
+// ---------------------------------------------------------------------------
 
-// Shared global background runtime. Using `OnceLock` keeps runtime creation
-// lazy and ensures we don't create multiple runtimes when multiple `Vm`
-// instances are constructed.
 static GLOBAL_BG_RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
 
 fn get_global_bg_runtime() -> Arc<Runtime> {
     GLOBAL_BG_RUNTIME
         .get_or_init(|| {
-            // Allow an explicit override via env var for testing/tuning.
             let threads_from_env = env::var("TSBLITZ_BG_THREADS")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|&n| n > 0);
 
-            let workers = std::thread::available_parallelism()
+            let cpus = std::thread::available_parallelism()
                 .map(std::num::NonZero::get)
                 .unwrap_or(4);
 
-            // Default: leave one core for the foreground VM thread if possible.
-            let threads =
-                threads_from_env.unwrap_or_else(|| if workers > 1 { workers - 1 } else { 1 });
+            let threads = threads_from_env.unwrap_or_else(|| if cpus > 1 { cpus - 1 } else { 1 });
 
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(threads)
@@ -144,23 +148,60 @@ fn get_global_bg_runtime() -> Arc<Runtime> {
         .clone()
 }
 
+// ---------------------------------------------------------------------------
+// VM
+// ---------------------------------------------------------------------------
+
+/// Virtual machine for executing bytecode.
+pub struct Vm {
+    /// Chunk being executed.
+    chunk: Rc<Chunk>,
+    /// Instruction pointer within the chunk.
+    ip: usize,
+    /// Operand stack. Shared across all frames; each frame records its base
+    /// offset so the stack is truncated correctly on return.
+    stack: Vec<Value>,
+    /// Local variables for the current frame.
+    locals: Vec<Value>,
+    /// Global variables.
+    globals: Rc<RefCell<HashMap<String, Value>>>,
+    /// Call-frame stack.
+    frames: Vec<Frame>,
+    /// Root chunk (kept alive for global type metadata).
+    root_chunk: Option<Rc<Chunk>>,
+    /// Slot-type annotations for the current function (None at top level).
+    current_slot_types: Option<Vec<Option<Type>>>,
+    /// Per-chunk inline-cache storage, keyed by chunk `Rc` pointer address.
+    ic_caches: HashMap<usize, Vec<Option<IcEntry>>>,
+    /// Per-object mutation generation counter, keyed by `Rc` pointer address.
+    /// Incremented on every `SetProperty` so that stale IC entries are
+    /// detected and evicted on the next lookup.
+    obj_generations: HashMap<usize, u64>,
+    /// Background Tokio runtime handle.
+    bg_runtime: Arc<Runtime>,
+    /// Exception-handler stack.
+    handlers: Vec<HandlerRecord>,
+}
+
 impl Vm {
+    // -----------------------------------------------------------------------
+    // Construction & public helpers
+    // -----------------------------------------------------------------------
+
     /// Create a new virtual machine.
     pub fn new(globals: Rc<RefCell<HashMap<String, Value>>>) -> Self {
-        // Use the shared global runtime instead of building one per-VM.
-        let rt = get_global_bg_runtime();
-
         Self {
             chunk: Rc::new(Chunk::new()),
             ip: 0,
-            stack: Vec::new(),
-            locals: Vec::new(),
+            stack: Vec::with_capacity(STACK_INITIAL_CAPACITY),
+            locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
             globals,
-            frames: Vec::new(),
+            frames: Vec::with_capacity(FRAMES_INITIAL_CAPACITY),
             root_chunk: None,
             current_slot_types: None,
-            ic_caches: RefCell::new(HashMap::new()),
-            bg_runtime: rt,
+            ic_caches: HashMap::new(),
+            obj_generations: HashMap::new(),
+            bg_runtime: get_global_bg_runtime(),
             handlers: Vec::new(),
         }
     }
@@ -174,29 +215,25 @@ impl Vm {
     pub fn list_global_own_keys(&self, name: &str) -> Option<Vec<String>> {
         let g = self.globals.borrow();
         let v = g.get(name)?;
-        self.list_own_keys_of_value(v)
-    }
-
-    /// Return own keys for a value when applicable.
-    pub fn list_own_keys_of_value(&self, v: &Value) -> Option<Vec<String>> {
-        match v {
-            Value::Object(map) => Some(map.borrow().keys().cloned().collect()),
-            Value::Closure { props, .. } => Some(props.borrow().keys().cloned().collect()),
-            _ => None,
-        }
+        list_own_keys_of_value(v)
     }
 
     /// Return prototype keys for a global's prototype property.
     pub fn list_global_prototype_keys(&self, name: &str) -> Option<Vec<String>> {
         let g = self.globals.borrow();
         let v = g.get(name)?;
-        match get_property(v, "prototype") {
-            Ok(pv) => self.list_own_keys_of_value(&pv),
+        match get_property(v, "prototype", 0) {
+            Ok(pv) => list_own_keys_of_value(&pv),
             Err(_) => None,
         }
     }
 
-    /// Shallow equality check for object-like runtime values.
+    /// Return own keys for a value when applicable.
+    pub fn list_own_keys_of_value(&self, v: &Value) -> Option<Vec<String>> {
+        list_own_keys_of_value(v)
+    }
+
+    /// Shallow reference equality check for object-like runtime values.
     pub fn values_same_object(&self, a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Object(am), Value::Object(bm)) => Rc::ptr_eq(am, bm),
@@ -208,20 +245,62 @@ impl Vm {
         }
     }
 
-    /// Reset mutable runtime state while preserving globals.
+    /// Reset mutable runtime state while preserving selected globals.
     pub fn reset(&mut self, keep_globals: &std::collections::HashSet<String>) {
         self.stack.clear();
         self.locals.clear();
         self.frames.clear();
+        self.handlers.clear();
         self.root_chunk = None;
         self.current_slot_types = None;
         self.ip = 0;
         self.chunk = Rc::new(Chunk::new());
+        self.ic_caches.clear();
+        self.obj_generations.clear();
         let mut g = self.globals.borrow_mut();
         g.retain(|k, _| keep_globals.contains(k));
     }
 
-    /// Run a chunk of bytecode.
+    // -----------------------------------------------------------------------
+    // Background runtime helpers
+    // -----------------------------------------------------------------------
+
+    /// Run a blocking closure on the background runtime and wait for the
+    /// result synchronously.
+    pub fn run_blocking<F, R>(&self, f: F) -> Result<R, crate::errors::RuntimeError>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let rt = Arc::clone(&self.bg_runtime);
+        let handle = rt.spawn_blocking(f);
+        rt.block_on(handle).map_err(|e| {
+            crate::errors::RuntimeError::from(format!("Background task failed: {}", e))
+        })
+    }
+
+    /// Synchronously execute an async future on the background runtime.
+    pub fn block_on<Fut>(&self, fut: Fut) -> Result<Fut::Output, crate::errors::RuntimeError>
+    where
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        Ok(Arc::clone(&self.bg_runtime).block_on(fut))
+    }
+
+    /// Spawn a fire-and-forget task on the background runtime.
+    pub fn spawn_bg<Fut>(&self, fut: Fut)
+    where
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let _ = self.bg_runtime.spawn(fut);
+    }
+
+    // -----------------------------------------------------------------------
+    // Main execution loop
+    // -----------------------------------------------------------------------
+
+    /// Run a chunk of bytecode to completion.
     pub fn run(&mut self, chunk: Chunk) -> Result<Value, crate::errors::RuntimeError> {
         let chunk_rc = Rc::new(chunk);
         self.root_chunk = Some(Rc::clone(&chunk_rc));
@@ -229,89 +308,89 @@ impl Vm {
         self.ip = 0;
         self.locals.clear();
         self.frames.clear();
+        self.handlers.clear();
         self.current_slot_types = None;
 
         loop {
-            let op_byte = self.read_byte_checked()?;
-            let op = Op::from_byte(op_byte).ok_or_else(|| {
-                crate::errors::RuntimeError::from(format!(
-                    "Invalid opcode 0x{:02x} at ip {}",
-                    op_byte,
-                    self.ip.saturating_sub(1)
-                ))
-            })?;
+            // In debug builds every byte read is bounds-checked.  In release
+            // builds we can elide the check because the compiler/verifier
+            // guarantees the bytecode stream is well-formed.
+            let op_byte = self.read_byte()?;
+            let op = match Op::from_byte(op_byte) {
+                Some(o) => o,
+                None => {
+                    return Err(crate::errors::RuntimeError::from(format!(
+                        "Invalid opcode 0x{:02x} at ip {}",
+                        op_byte,
+                        self.ip.saturating_sub(1)
+                    )));
+                }
+            };
 
             match op {
+                // -----------------------------------------------------------
+                // Constants & literals
+                // -----------------------------------------------------------
                 Op::Const => {
-                    let idx = self.read_byte_checked()? as usize;
-                    let v = self
-                        .chunk
-                        .constants
-                        .get(idx)
-                        .cloned()
-                        .ok_or_else(|| crate::errors::RuntimeError::from("Bad constant"))?;
-                    crate::trace::value_string("vm Const push", &v);
-                    // Emit a stack snapshot before the push, push the constant into
-                    // the runtime stack, then emit a snapshot after the push so the
-                    // before/after snapshots show the actual effect of the Const opcode.
-                    if crate::trace::enabled() {
-                        self.trace_stack_snapshot("stack snapshot before Const");
-                    }
+                    let idx = self.read_byte()? as usize;
+                    let v = self.constant(idx)?;
                     self.stack.push(v);
-                    if crate::trace::enabled() {
-                        self.trace_stack_snapshot("stack snapshot after Const");
-                    }
                 }
                 Op::Null => self.stack.push(Value::Null),
                 Op::True => self.stack.push(Value::Bool(true)),
                 Op::False => self.stack.push(Value::Bool(false)),
+
+                // -----------------------------------------------------------
+                // Local variables
+                // -----------------------------------------------------------
                 Op::GetLocal => {
-                    let slot = self.read_byte_checked()? as usize;
-                    let v = self
-                        .locals
-                        .get(slot)
-                        .cloned()
-                        .ok_or_else(|| crate::errors::RuntimeError::from("Bad local slot"))?;
+                    let slot = self.read_byte()? as usize;
+                    let v = self.locals.get(slot).cloned().ok_or("Bad local slot")?;
                     self.stack.push(v);
                 }
                 Op::SetLocal => {
-                    let slot = self.read_byte_checked()? as usize;
+                    let slot = self.read_byte()? as usize;
                     let v = self.pop()?;
-                    if let Some(Some(expected)) = self
-                        .current_slot_types
-                        .as_ref()
-                        .and_then(|types| types.get(slot))
+                    if let Some(Some(expected)) =
+                        self.current_slot_types.as_ref().and_then(|t| t.get(slot))
                     {
                         check_assign(expected, &v)?;
                     }
-                    while self.locals.len() <= slot {
-                        self.locals.push(Value::Null);
-                    }
+                    ensure_slot(&mut self.locals, slot);
                     self.locals[slot] = v;
                 }
+
+                // -----------------------------------------------------------
+                // Global variables
+                // -----------------------------------------------------------
                 Op::GetGlobal => {
-                    let idx = self.read_byte_checked()? as usize;
-                    let name = self.get_string_constant(idx)?;
-                    let g = self.globals.borrow();
-                    let v = g.get(&name).cloned().unwrap_or(Value::Null);
-                    if crate::trace::enabled() {
-                        eprintln!("[trace] GetGlobal: '{}' -> {}", name, v.type_name());
-                    }
+                    let idx = self.read_byte()? as usize;
+                    let name = self.string_constant(idx)?;
+                    let v = self
+                        .globals
+                        .borrow()
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or(Value::Null);
                     self.stack.push(v);
                 }
                 Op::SetGlobal => {
-                    let idx = self.read_byte_checked()? as usize;
-                    let name = self.get_string_constant(idx)?;
+                    let idx = self.read_byte()? as usize;
+                    let name = self.string_constant(idx)?;
                     let v = self.pop()?;
                     if let Some(Some(expected)) = self
                         .root_chunk
                         .as_ref()
-                        .and_then(|root| root.global_types.get(&name))
+                        .and_then(|r| r.global_types.get(&name))
                     {
                         check_assign(expected, &v)?;
                     }
                     self.globals.borrow_mut().insert(name, v);
                 }
+
+                // -----------------------------------------------------------
+                // Stack manipulation
+                // -----------------------------------------------------------
                 Op::Pop => {
                     self.pop()?;
                 }
@@ -319,19 +398,27 @@ impl Vm {
                     let v = self.stack.last().cloned().ok_or("Stack underflow")?;
                     self.stack.push(v);
                 }
-                Op::Add => self.binary_num_or_str(|a, b| match (a, b) {
-                    (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x + y)),
-                    (Value::String(s), v) | (v, Value::String(s)) => {
-                        Ok(Value::String(format!("{}{}", s, v)))
-                    }
-                    _ => Err("Add: number or string expected"),
-                })?,
+
+                // -----------------------------------------------------------
+                // Arithmetic
+                // -----------------------------------------------------------
+                Op::Add => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    let result = match (a, b) {
+                        (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
+                        (Value::String(s), v) => Value::String(format!("{}{}", s, v)),
+                        (v, Value::String(s)) => Value::String(format!("{}{}", v, s)),
+                        _ => return Err("Add: number or string expected".into()),
+                    };
+                    self.stack.push(result);
+                }
                 Op::AddNumber => {
-                    let b = self.stack.pop().ok_or("Stack underflow")?;
-                    let a = self.stack.pop().ok_or("Stack underflow")?;
+                    let b = self.pop()?;
+                    let a = self.pop()?;
                     match (a, b) {
                         (Value::Number(x), Value::Number(y)) => {
-                            self.stack.push(Value::Number(x + y))
+                            self.stack.push(Value::Number(x + y));
                         }
                         _ => return Err("AddNumber: number expected".into()),
                     }
@@ -340,12 +427,44 @@ impl Vm {
                 Op::Mul => self.binary_num(|a, b| a * b)?,
                 Op::Div => self.binary_num(|a, b| a / b)?,
                 Op::Mod => self.binary_num(|a, b| a % b)?,
-                Op::Eq => self.binary_cmp(|a, b| Value::Bool(a == b))?,
-                Op::Neq => self.binary_cmp(|a, b| Value::Bool(a != b))?,
-                Op::Lt => self.binary_cmp(|a, b| Value::Bool(a < b))?,
-                Op::Le => self.binary_cmp(|a, b| Value::Bool(a <= b))?,
-                Op::Gt => self.binary_cmp(|a, b| Value::Bool(a > b))?,
-                Op::Ge => self.binary_cmp(|a, b| Value::Bool(a >= b))?,
+
+                // -----------------------------------------------------------
+                // Comparison -- uses JS-style reference equality for objects
+                // -----------------------------------------------------------
+                Op::Eq => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    self.stack.push(Value::Bool(values_equal(&a, &b)));
+                }
+                Op::Neq => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    self.stack.push(Value::Bool(!values_equal(&a, &b)));
+                }
+                Op::Lt => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    self.stack.push(Value::Bool(a < b));
+                }
+                Op::Le => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    self.stack.push(Value::Bool(a <= b));
+                }
+                Op::Gt => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    self.stack.push(Value::Bool(a > b));
+                }
+                Op::Ge => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    self.stack.push(Value::Bool(a >= b));
+                }
+
+                // -----------------------------------------------------------
+                // Logical
+                // -----------------------------------------------------------
                 Op::And => {
                     let b = self.pop()?;
                     let a = self.pop()?;
@@ -356,6 +475,10 @@ impl Vm {
                     let a = self.pop()?;
                     self.stack.push(Value::Bool(a.is_truthy() || b.is_truthy()));
                 }
+
+                // -----------------------------------------------------------
+                // Unary
+                // -----------------------------------------------------------
                 Op::Neg => {
                     let v = self.pop()?;
                     match v {
@@ -371,19 +494,22 @@ impl Vm {
                     let v = self.pop()?;
                     self.stack.push(Value::String(v.type_name().to_string()));
                 }
+
+                // -----------------------------------------------------------
+                // Calls & returns
+                // -----------------------------------------------------------
                 Op::Call => self.execute_call()?,
                 Op::Return => {
-                    // If there is no call frame left, treat top-level Return as program completion.
                     if self.frames.is_empty() {
-                        let result = match self.pop() {
-                            Ok(v) => v,
-                            Err(_) => Value::Null,
-                        };
+                        let result = self.pop().unwrap_or(Value::Null);
                         return Ok(result);
-                    } else {
-                        self.execute_return()?;
                     }
+                    self.execute_return()?;
                 }
+
+                // -----------------------------------------------------------
+                // Control flow
+                // -----------------------------------------------------------
                 Op::Jump => {
                     let offset = self.read_short_signed()?;
                     self.jump(offset)?;
@@ -395,172 +521,21 @@ impl Vm {
                         self.jump(offset)?;
                     }
                 }
+
+                // -----------------------------------------------------------
+                // Composite construction
+                // -----------------------------------------------------------
                 Op::BuildArray => self.build_array()?,
-                Op::BuildObject => {
-                    let n = self.read_byte_checked()? as usize;
-                    let mut map = HashMap::new();
-                    for _ in 0..n {
-                        let value = self.pop()?;
-                        // Pop the key value and validate it is a string. If it's not,
-                        // emit richer diagnostics to help track down the source.
-                        let key_val = self.pop()?;
-                        let key = match key_val {
-                            Value::String(s) => s,
-                            other => {
-                                if crate::trace::enabled() {
-                                    eprintln!(
-                                        "[diag] BuildObject failed: key must be string (actual={})",
-                                        other.type_name()
-                                    );
-                                    crate::trace::value_string(
-                                        "[diag] BuildObject non-string key",
-                                        &other,
-                                    );
-                                    eprintln!("[diag] Stack snapshot (top -> bottom):");
-                                    let mut idx = 0;
-                                    for v in self.stack.iter().rev().take(8) {
-                                        crate::trace::value_string(
-                                            &format!("[diag]   stack[{}]", idx),
-                                            v,
-                                        );
-                                        idx += 1;
-                                    }
+                Op::BuildObject => self.build_object()?,
 
-                                    // Disassembly window to help locate the offending bytecode.
-                                    // Show a small window before and after the current ip.
-                                    let start = self.ip.saturating_sub(8);
-                                    let end = usize::min(self.ip + 8, self.chunk.code.len());
-                                    eprintln!("[diag] disasm window ({}..{}):", start, end);
-
-                                    let mut j = start;
-                                    while j < end {
-                                        let b = self.chunk.code[j];
-                                        if let Some(op) = Op::from_byte(b) {
-                                            match op {
-                                                Op::Const => {
-                                                    let arg = self
-                                                        .chunk
-                                                        .code
-                                                        .get(j + 1)
-                                                        .cloned()
-                                                        .unwrap_or(0);
-                                                    let arg_repr = match self
-                                                        .chunk
-                                                        .constants
-                                                        .get(arg as usize)
-                                                    {
-                                                        Some(Value::String(s)) => {
-                                                            format!("'{}'", s)
-                                                        }
-                                                        Some(v) => v.type_name().to_string(),
-                                                        None => "<undef>".to_string(),
-                                                    };
-                                                    eprintln!(
-                                                        "[diag] {:#06}  Const       {} ({})",
-                                                        j, arg, arg_repr
-                                                    );
-                                                    j += 2;
-                                                }
-                                                Op::GetLocal
-                                                | Op::SetLocal
-                                                | Op::Call
-                                                | Op::MakeClosure
-                                                | Op::GetPropertyIC
-                                                | Op::GetBuiltin => {
-                                                    let arg = self
-                                                        .chunk
-                                                        .code
-                                                        .get(j + 1)
-                                                        .cloned()
-                                                        .unwrap_or(0);
-                                                    eprintln!(
-                                                        "[diag] {:#06}  {:12?} {}",
-                                                        j, op, arg
-                                                    );
-                                                    j += 2;
-                                                }
-                                                Op::GetGlobal | Op::SetGlobal => {
-                                                    let arg = self
-                                                        .chunk
-                                                        .code
-                                                        .get(j + 1)
-                                                        .cloned()
-                                                        .unwrap_or(0);
-                                                    let name = match self
-                                                        .chunk
-                                                        .constants
-                                                        .get(arg as usize)
-                                                    {
-                                                        Some(Value::String(s)) => s.clone(),
-                                                        _ => "<non-string constant>".to_string(),
-                                                    };
-                                                    eprintln!(
-                                                        "[diag] {:#06}  {:12?} {} ({})",
-                                                        j, op, arg, name
-                                                    );
-                                                    j += 2;
-                                                }
-                                                Op::Jump | Op::JumpIfFalse | Op::PushHandler => {
-                                                    let hi = self
-                                                        .chunk
-                                                        .code
-                                                        .get(j + 1)
-                                                        .cloned()
-                                                        .unwrap_or(0)
-                                                        as u16;
-                                                    let lo = self
-                                                        .chunk
-                                                        .code
-                                                        .get(j + 2)
-                                                        .cloned()
-                                                        .unwrap_or(0)
-                                                        as u16;
-                                                    let val = ((hi << 8) | lo) as i16;
-                                                    eprintln!(
-                                                        "[diag] {:#06}  {:12?} {}",
-                                                        j, op, val
-                                                    );
-                                                    j += 3;
-                                                }
-                                                Op::BuildArray | Op::BuildObject => {
-                                                    let count = self
-                                                        .chunk
-                                                        .code
-                                                        .get(j + 1)
-                                                        .cloned()
-                                                        .unwrap_or(0);
-                                                    eprintln!(
-                                                        "[diag] {:#06}  {:12?} {}",
-                                                        j, op, count
-                                                    );
-                                                    j += 2;
-                                                }
-                                                _ => {
-                                                    eprintln!("[diag] {:#06}  {:?}", j, op);
-                                                    j += 1;
-                                                }
-                                            }
-                                        } else {
-                                            eprintln!("[diag] {:#06}  ???  0x{:02x}", j, b);
-                                            j += 1;
-                                        }
-                                    }
-                                }
-                                return Err(crate::errors::RuntimeError::from(format!(
-                                    "BuildObject: key must be string (actual={})",
-                                    other.type_name()
-                                )));
-                            }
-                        };
-                        map.insert(key, value);
-                    }
-                    self.stack.push(Value::Object(Rc::new(RefCell::new(map))));
-                }
+                // -----------------------------------------------------------
+                // Property access
+                // -----------------------------------------------------------
                 Op::GetProperty => {
                     let key = self.pop()?;
                     let obj = self.pop()?;
                     let k = property_key(&key)?;
-                    let v = get_property(&obj, &k)?;
+                    let v = get_property(&obj, &k, 0)?;
                     self.stack.push(v);
                 }
                 Op::GetPropertyIC => self.get_property_ic()?,
@@ -569,37 +544,20 @@ impl Vm {
                     let key = self.pop()?;
                     let obj = self.pop()?;
                     let k = property_key(&key)?;
-                    set_property(&obj, &k, value)?;
+                    self.set_property_tracked(&obj, &k, value)?;
                 }
-                Op::MakeClosure => {
-                    let idx = self.read_byte_checked()? as usize;
-                    let proto =
-                        self.chunk.functions.get(idx).cloned().ok_or_else(|| {
-                            crate::errors::RuntimeError::from("Bad function index")
-                        })?;
 
-                    let proto_obj_map = Rc::new(RefCell::new(HashMap::new()));
-                    let proto_obj = Value::Object(Rc::clone(&proto_obj_map));
-                    let props = Rc::new(RefCell::new(HashMap::new()));
-                    props
-                        .borrow_mut()
-                        .insert("prototype".to_string(), proto_obj);
+                // -----------------------------------------------------------
+                // Closures
+                // -----------------------------------------------------------
+                Op::MakeClosure => self.make_closure()?,
 
-                    let closure = Value::Closure {
-                        proto: Rc::new(proto),
-                        env: Rc::new(RefCell::new(Vec::new())),
-                        props: Rc::clone(&props),
-                    };
-
-                    proto_obj_map
-                        .borrow_mut()
-                        .insert("constructor".to_string(), closure.clone());
-
-                    self.stack.push(closure);
-                }
+                // -----------------------------------------------------------
+                // Builtins
+                // -----------------------------------------------------------
                 Op::GetBuiltin => {
-                    let idx = self.read_byte_checked()? as usize;
-                    let name = self.get_string_constant(idx)?;
+                    let idx = self.read_byte()? as usize;
+                    let name = self.string_constant(idx)?;
                     let g = self.globals.borrow();
                     let v = g.get(&name).cloned().ok_or_else(|| {
                         crate::errors::RuntimeError::from(format!(
@@ -617,6 +575,10 @@ impl Vm {
                         }
                     }
                 }
+
+                // -----------------------------------------------------------
+                // Exception handling
+                // -----------------------------------------------------------
                 Op::PushHandler => {
                     let offset = self.read_short_signed()?;
                     let handler_ip = (self.ip as isize + offset) as usize;
@@ -639,8 +601,12 @@ impl Vm {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Opcode helpers (called from the main loop)
+    // -----------------------------------------------------------------------
+
     fn execute_call(&mut self) -> Result<(), crate::errors::RuntimeError> {
-        let nargs = self.read_byte_checked()? as usize;
+        let nargs = self.read_byte()? as usize;
         let mut args: Vec<Value> = Vec::with_capacity(nargs);
         for _ in 0..nargs {
             args.push(self.pop()?);
@@ -659,86 +625,7 @@ impl Vm {
                 self.push_call_frame(&proto, call_args)?;
             }
             _ => {
-                if crate::trace::enabled() {
-                    eprintln!(
-                        "[diag] Call failed: callee not callable (actual={})",
-                        callee.type_name()
-                    );
-                    crate::trace::value_string("[diag] Call callee value", &callee);
-                    eprintln!("[diag] Stack snapshot (top -> bottom):");
-                    let mut idx = 0;
-                    for v in self.stack.iter().rev().take(8) {
-                        crate::trace::value_string(&format!("[diag]   stack[{}]", idx), v);
-                        idx += 1;
-                    }
-
-                    // Disassembly window to help locate the offending bytecode.
-                    let start = self.ip.saturating_sub(8);
-                    let end = std::cmp::min(self.ip + 8, self.chunk.code.len());
-                    eprintln!("[diag] disasm window ({}..{}):", start, end);
-
-                    let mut j = start;
-                    while j < end {
-                        let b = self.chunk.code[j];
-                        if let Some(op) = Op::from_byte(b) {
-                            match op {
-                                Op::Const => {
-                                    let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
-                                    let arg_repr = match self.chunk.constants.get(arg as usize) {
-                                        Some(Value::String(s)) => format!("'{}'", s),
-                                        Some(v) => v.type_name().to_string(),
-                                        None => "<undef>".to_string(),
-                                    };
-                                    eprintln!(
-                                        "[diag] {:#06}  Const       {} ({})",
-                                        j, arg, arg_repr
-                                    );
-                                    j += 2;
-                                }
-                                Op::GetLocal
-                                | Op::SetLocal
-                                | Op::Call
-                                | Op::MakeClosure
-                                | Op::GetPropertyIC
-                                | Op::GetBuiltin => {
-                                    let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
-                                    eprintln!("[diag] {:#06}  {:12?} {}", j, op, arg);
-                                    j += 2;
-                                }
-                                Op::GetGlobal | Op::SetGlobal => {
-                                    let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
-                                    let name = match self.chunk.constants.get(arg as usize) {
-                                        Some(Value::String(s)) => s.clone(),
-                                        _ => "<non-string constant>".to_string(),
-                                    };
-                                    eprintln!("[diag] {:#06}  {:12?} {} ({})", j, op, arg, name);
-                                    j += 2;
-                                }
-                                Op::Jump | Op::JumpIfFalse | Op::PushHandler => {
-                                    let hi =
-                                        self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
-                                    let lo =
-                                        self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
-                                    let val = ((hi << 8) | lo) as i16;
-                                    eprintln!("[diag] {:#06}  {:12?} {}", j, op, val);
-                                    j += 3;
-                                }
-                                Op::BuildArray | Op::BuildObject => {
-                                    let count = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
-                                    eprintln!("[diag] {:#06}  {:12?} {}", j, op, count);
-                                    j += 2;
-                                }
-                                _ => {
-                                    eprintln!("[diag] {:#06}  {:?}", j, op);
-                                    j += 1;
-                                }
-                            }
-                        } else {
-                            eprintln!("[diag] {:#06}  ???  0x{:02x}", j, b);
-                            j += 1;
-                        }
-                    }
-                }
+                self.dump_diag("Call failed: callee not callable", &callee);
                 return Err(crate::errors::RuntimeError::from(format!(
                     "Call: not a function (actual={})",
                     callee.type_name()
@@ -749,26 +636,27 @@ impl Vm {
         Ok(())
     }
 
+    /// Pop the return value, restore the caller's frame, and push the result.
     fn execute_return(&mut self) -> Result<(), crate::errors::RuntimeError> {
-        let result = match self.pop() {
-            Ok(v) => v,
-            Err(_) => Value::Null,
-        };
+        let result = self.pop().unwrap_or(Value::Null);
 
-        if let Some(frame) = self.frames.pop() {
-            if let Some(ref expected) = frame.return_type {
-                check_assign(expected, &result)?;
-            }
-            self.current_slot_types = frame.slot_types;
-            self.chunk = frame.chunk;
-            self.ip = frame.ip;
-            self.locals = frame.locals;
-            self.stack.push(result);
-        } else {
-            return Err(crate::errors::RuntimeError::from(
-                "Return without call frame",
-            ));
+        let frame = self.frames.pop().ok_or("Return without call frame")?;
+
+        // Runtime return-type check.
+        if let Some(ref expected) = frame.return_type {
+            check_assign(expected, &result)?;
         }
+
+        // Restore caller state.
+        self.current_slot_types = frame.slot_types;
+        self.chunk = frame.chunk;
+        self.ip = frame.ip;
+        self.locals = frame.locals;
+
+        // FIX: truncate the operand stack back to the caller's base, then
+        // push the return value. Previously the caller's stack was lost.
+        self.stack.truncate(frame.stack_base);
+        self.stack.push(result);
 
         Ok(())
     }
@@ -778,44 +666,42 @@ impl Vm {
         args: &[Value],
         proto: &crate::bytecode::FunctionProto,
     ) -> Result<Vec<Value>, crate::errors::RuntimeError> {
-        let mut call_args = args.to_vec();
-
-        if proto.has_rest {
-            let ar = proto.arity;
-            let mut fixed = Vec::new();
-            if ar > 0 {
-                for i in 0..(ar - 1) {
-                    fixed.push(call_args.get(i).cloned().unwrap_or(Value::Null));
-                }
-            }
-
-            let rest_slice = if call_args.len() > ar.saturating_sub(1) {
-                call_args.split_off(ar.saturating_sub(1))
-            } else {
-                Vec::new()
-            };
-
-            let arr_rc = Rc::new(RefCell::new(rest_slice));
-            let props_map = Rc::new(RefCell::new(HashMap::new()));
-            props_map.borrow_mut().insert(
-                "length".to_string(),
-                Value::Number(arr_rc.borrow().len() as f64),
-            );
-
-            if let Some(array_val) = self.globals.borrow().get("Array")
-                && let Ok(proto_val) = get_property(array_val, "prototype")
-                && !matches!(proto_val, Value::Null)
-            {
-                props_map
-                    .borrow_mut()
-                    .insert("__proto__".to_string(), proto_val);
-            }
-
-            fixed.push(Value::Array(arr_rc, props_map));
-            call_args = fixed;
+        if !proto.has_rest {
+            return Ok(args.to_vec());
         }
 
-        Ok(call_args)
+        let ar = proto.arity;
+        let fixed_count = ar.saturating_sub(1);
+        let mut fixed = Vec::with_capacity(ar);
+
+        for i in 0..fixed_count {
+            fixed.push(args.get(i).cloned().unwrap_or(Value::Null));
+        }
+
+        let rest_slice: Vec<Value> = if args.len() > fixed_count {
+            args[fixed_count..].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let arr_rc = Rc::new(RefCell::new(rest_slice));
+        let props = Rc::new(RefCell::new(HashMap::new()));
+        props.borrow_mut().insert(
+            "length".to_string(),
+            Value::Number(arr_rc.borrow().len() as f64),
+        );
+
+        if let Some(array_val) = self.globals.borrow().get("Array")
+            && let Ok(proto_val) = get_property(array_val, "prototype", 0)
+            && !matches!(proto_val, Value::Null)
+        {
+            props
+                .borrow_mut()
+                .insert("__proto__".to_string(), proto_val);
+        }
+
+        fixed.push(Value::Array(arr_rc, props));
+        Ok(fixed)
     }
 
     fn validate_call_args(
@@ -840,23 +726,34 @@ impl Vm {
         Ok(())
     }
 
+    /// Save the caller's state and set up the callee.
     fn push_call_frame(
         &mut self,
         proto: &Rc<crate::bytecode::FunctionProto>,
         call_args: Vec<Value>,
     ) -> Result<(), crate::errors::RuntimeError> {
+        // FIX: record the current stack length as the base. We no longer
+        // clone the entire operand stack into the frame.
+        let stack_base = self.stack.len();
+
         self.frames.push(Frame {
             chunk: Rc::clone(&self.chunk),
             ip: self.ip,
-            locals: std::mem::take(&mut self.locals),
-            slot_types: self.current_slot_types.clone(),
+            locals: std::mem::replace(
+                &mut self.locals,
+                Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
+            ),
+            slot_types: self.current_slot_types.take(),
             return_type: proto.return_type.clone(),
-            stack: self.stack.clone(),
+            stack_base,
         });
 
         self.chunk = Rc::clone(&proto.chunk);
         self.ip = 0;
         self.current_slot_types = Some(proto.slot_types.clone());
+
+        // Pre-allocate locals to at least `arity` slots, filling missing
+        // arguments with Null.
         self.locals = call_args
             .into_iter()
             .chain(std::iter::repeat(Value::Null))
@@ -867,7 +764,7 @@ impl Vm {
     }
 
     fn build_array(&mut self) -> Result<(), crate::errors::RuntimeError> {
-        let n = self.read_byte_checked()? as usize;
+        let n = self.read_byte()? as usize;
         let mut elems: Vec<Value> = Vec::with_capacity(n);
         for _ in 0..n {
             elems.push(self.pop()?);
@@ -881,7 +778,7 @@ impl Vm {
             .insert("length".to_string(), Value::Number(n as f64));
 
         if let Some(array_val) = self.globals.borrow().get("Array")
-            && let Ok(proto_val) = get_property(array_val, "prototype")
+            && let Ok(proto_val) = get_property(array_val, "prototype", 0)
             && !matches!(proto_val, Value::Null)
         {
             props
@@ -893,103 +790,183 @@ impl Vm {
         Ok(())
     }
 
+    fn build_object(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        let n = self.read_byte()? as usize;
+        let mut map = HashMap::with_capacity(n);
+        for _ in 0..n {
+            let value = self.pop()?;
+            let key_val = self.pop()?;
+            let key = match key_val {
+                Value::String(s) => s,
+                other => {
+                    self.dump_diag("BuildObject: key must be string", &other);
+                    return Err(crate::errors::RuntimeError::from(format!(
+                        "BuildObject: key must be string (actual={})",
+                        other.type_name()
+                    )));
+                }
+            };
+            map.insert(key, value);
+        }
+        self.stack.push(Value::Object(Rc::new(RefCell::new(map))));
+        Ok(())
+    }
+
+    fn make_closure(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        let idx = self.read_byte()? as usize;
+        let proto = self
+            .chunk
+            .functions
+            .get(idx)
+            .cloned()
+            .ok_or("Bad function index")?;
+
+        let proto_obj_map = Rc::new(RefCell::new(HashMap::new()));
+        let proto_obj = Value::Object(Rc::clone(&proto_obj_map));
+        let props = Rc::new(RefCell::new(HashMap::new()));
+        props
+            .borrow_mut()
+            .insert("prototype".to_string(), proto_obj);
+
+        let closure = Value::Closure {
+            proto: Rc::new(proto),
+            env: Rc::new(RefCell::new(Vec::new())),
+            props: Rc::clone(&props),
+        };
+
+        proto_obj_map
+            .borrow_mut()
+            .insert("constructor".to_string(), closure.clone());
+
+        self.stack.push(closure);
+        Ok(())
+    }
+
+    /// Inline-cached property access with generation-based invalidation.
     fn get_property_ic(&mut self) -> Result<(), crate::errors::RuntimeError> {
-        let slot = self.read_byte_checked()? as usize;
+        let slot = self.read_byte()? as usize;
         let key_val = self.pop()?;
         let obj = self.pop()?;
         let key = property_key(&key_val)?;
 
         let chunk_id = Rc::as_ptr(&self.chunk) as usize;
-        let mut caches = self.ic_caches.borrow_mut();
-        // Ensure a cache vector exists for this chunk. The vector is sized to
-        // 256 by default (single-byte slot immediates), but the VM should be
-        // defensive: if a slot value larger than the initial size appears,
-        // resize the cache vector to accommodate it instead of panicking.
-        let cache_vec = caches.entry(chunk_id).or_insert_with(|| vec![None; 256]);
 
-        match &obj {
-            Value::Object(map_rc) => {
-                let obj_ptr = Rc::as_ptr(map_rc) as usize;
+        // Attempt a cache hit for Object values.
+        if let Value::Object(ref map_rc) = obj {
+            let obj_ptr = Rc::as_ptr(map_rc) as usize;
+            let current_gen = self.obj_generations.get(&obj_ptr).copied().unwrap_or(0);
 
-                // Defensive: if the compiled bytecode uses a slot index that
-                // is larger than the current cache vector, grow the cache.
-                if slot >= cache_vec.len() {
-                    cache_vec.resize(slot + 1, None);
-                }
+            // Look up existing cache entry.
+            let hit = self
+                .ic_caches
+                .get(&chunk_id)
+                .and_then(|vec| vec.get(slot))
+                .and_then(|entry| entry.as_ref())
+                .filter(|e| e.obj_ptr == obj_ptr && e.generation == current_gen)
+                .map(|e| e.value.clone());
 
-                if let Some(Some(entry)) = cache_vec.get(slot).cloned()
-                    && entry.obj_ptr == obj_ptr
-                {
-                    self.stack.push(entry.value);
-                    return Ok(());
-                }
-
-                let v = get_property(&obj, &key)?;
-                // Safe to index now because we've resized above when necessary.
-                cache_vec[slot] = Some(IcEntry {
-                    obj_ptr,
-                    value: v.clone(),
-                });
-                self.stack.push(v);
+            if let Some(cached) = hit {
+                self.stack.push(cached);
+                return Ok(());
             }
-            _ => {
-                let v = get_property(&obj, &key)?;
-                self.stack.push(v);
+
+            // Cache miss: perform the full lookup.
+            let v = get_property(&obj, &key, 0)?;
+
+            // Store into the IC.
+            let cache_vec = self
+                .ic_caches
+                .entry(chunk_id)
+                .or_insert_with(|| vec![None; IC_SLOTS_DEFAULT]);
+            if slot >= cache_vec.len() {
+                cache_vec.resize(slot + 1, None);
             }
+            cache_vec[slot] = Some(IcEntry {
+                obj_ptr,
+                generation: current_gen,
+                value: v.clone(),
+            });
+            self.stack.push(v);
+        } else {
+            // Non-object path: no caching.
+            let v = get_property(&obj, &key, 0)?;
+            self.stack.push(v);
         }
 
         Ok(())
     }
 
-    /// Run a blocking function on the VM's background runtime and wait for the
-    /// result synchronously. This is intended for builtins that want to
-    /// offload CPU‑intensive or blocking work to the runtime's worker threads
-    /// without changing the VM's synchronous execution model.
-    pub fn run_blocking<F, R>(&self, f: F) -> Result<R, crate::errors::RuntimeError>
-    where
-        F: FnOnce() -> R + Send + 'static,
-        R: Send + 'static,
-    {
-        let rt = Arc::clone(&self.bg_runtime);
-        let handle = rt.spawn_blocking(f);
-        match rt.block_on(handle) {
-            Ok(v) => Ok(v),
-            Err(e) => Err(crate::errors::RuntimeError::from(format!(
-                "Background task failed: {}",
-                e
-            ))),
+    /// `SetProperty` wrapper that bumps the generation counter so that stale
+    /// IC entries are invalidated on next access.
+    fn set_property_tracked(
+        &mut self,
+        obj: &Value,
+        key: &str,
+        value: Value,
+    ) -> Result<(), crate::errors::RuntimeError> {
+        set_property(obj, key, value)?;
+
+        // Bump generation for the mutated object.
+        let ptr = match obj {
+            Value::Object(m) => Some(Rc::as_ptr(m) as usize),
+            Value::Array(a, _) => Some(Rc::as_ptr(a) as usize),
+            Value::Closure { props, .. } => Some(Rc::as_ptr(props) as usize),
+            _ => None,
+        };
+        if let Some(p) = ptr {
+            *self.obj_generations.entry(p).or_insert(0) += 1;
         }
+
+        Ok(())
     }
 
-    /// Synchronously execute an async future on the VM's runtime and return
-    /// its output. This is a convenience wrapper for host code that wants to
-    /// perform async I/O while remaining in the VM's synchronous call stack.
-    pub fn block_on<Fut>(&self, fut: Fut) -> Result<Fut::Output, crate::errors::RuntimeError>
-    where
-        Fut: Future + Send + 'static,
-        Fut::Output: Send + 'static,
-    {
-        let rt = Arc::clone(&self.bg_runtime);
-        Ok(rt.block_on(fut))
+    /// Unwind the call stack and operand stack to the nearest exception
+    /// handler, or propagate the error if none exists.
+    fn unwind_to_handler(&mut self, thrown: Value) -> Result<(), crate::errors::RuntimeError> {
+        let handler = match self.handlers.pop() {
+            Some(h) => h,
+            None => {
+                return Err(match thrown {
+                    Value::String(s) => {
+                        crate::errors::RuntimeError::from(format!("Uncaught: {}", s))
+                    }
+                    _ => crate::errors::RuntimeError::from("Uncaught exception"),
+                });
+            }
+        };
+
+        // FIX: Pop frames back to the handler's level without
+        // sequentially restoring intermediate state. Only the handler's
+        // saved snapshot matters.
+        while self.frames.len() > handler.frame_count {
+            if let Some(frame) = self.frames.pop() {
+                // Restore the outermost caller's locals so we land in
+                // the correct local-variable scope.
+                self.locals = frame.locals;
+                self.current_slot_types = frame.slot_types;
+            }
+        }
+
+        // Restore chunk and instruction pointer from the handler record.
+        self.chunk = handler.chunk;
+        self.ip = handler.handler_ip;
+
+        // Truncate stacks to the snapshot saved when PushHandler ran.
+        self.stack.truncate(handler.saved_stack_len);
+        self.locals.truncate(handler.saved_locals_len);
+
+        // Push the thrown value so the catch block can bind it.
+        self.stack.push(thrown);
+        Ok(())
     }
 
-    /// Spawn a background task on the VM's runtime without waiting for it.
-    /// Use this for fire-and-forget host work (e.g. background I/O or logging)
-    /// that must not block the VM's synchronous execution loop.
-    pub fn spawn_bg<Fut>(&self, fut: Fut)
-    where
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        let rt = Arc::clone(&self.bg_runtime);
-        // It's safe to ignore the JoinHandle here for best-effort background
-        // work; callers should use `block_on`/`run_blocking` when they require
-        // a result.
-        let _ = rt.spawn(fut);
-    }
+    // -----------------------------------------------------------------------
+    // Control flow
+    // -----------------------------------------------------------------------
 
     fn jump(&mut self, offset: isize) -> Result<(), crate::errors::RuntimeError> {
         let new_ip = (self.ip as isize) + offset;
-        if new_ip < 0 || (new_ip as usize) >= self.chunk.code.len() {
+        if new_ip < 0 || (new_ip as usize) > self.chunk.code.len() {
             return Err(crate::errors::RuntimeError::from(format!(
                 "Jump target out of bounds (ip={} offset={})",
                 self.ip, offset
@@ -999,80 +976,12 @@ impl Vm {
         Ok(())
     }
 
-    fn unwind_to_handler(&mut self, thrown: Value) -> Result<(), crate::errors::RuntimeError> {
-        if let Some(h) = self.handlers.pop() {
-            while self.frames.len() > h.frame_count {
-                if let Some(frame) = self.frames.pop() {
-                    while self.stack.len() > frame.stack.len() {
-                        self.stack.pop();
-                    }
-                    self.current_slot_types = frame.slot_types;
-                    self.chunk = frame.chunk;
-                    self.ip = frame.ip;
-                    self.locals = frame.locals;
-                }
-            }
+    // -----------------------------------------------------------------------
+    // Byte-reading helpers
+    // -----------------------------------------------------------------------
 
-            if !Rc::ptr_eq(&self.chunk, &h.chunk) {
-                self.chunk = Rc::clone(&h.chunk);
-            }
-
-            while self.stack.len() > h.saved_stack_len {
-                self.stack.pop();
-            }
-            while self.locals.len() > h.saved_locals_len {
-                self.locals.pop();
-            }
-
-            self.stack.push(thrown.clone());
-            self.ip = h.handler_ip;
-            Ok(())
-        } else {
-            Err(match thrown {
-                Value::String(s) => crate::errors::RuntimeError::from(format!("Uncaught: {}", s)),
-                _ => crate::errors::RuntimeError::from("Uncaught exception"),
-            })
-        }
-    }
-
-    fn get_string_constant(&self, idx: usize) -> Result<String, crate::errors::RuntimeError> {
-        match self.chunk.constants.get(idx) {
-            Some(Value::String(s)) => Ok(s.clone()),
-            _ => Err(crate::errors::RuntimeError::from("Constant not a string")),
-        }
-    }
-
-    fn trace_push(&self, label: &str, _v: &Value) {
-        if crate::trace::enabled() {
-            self.trace_stack_snapshot(&format!("stack snapshot before {}", label));
-            self.trace_stack_snapshot(&format!("stack snapshot after {}", label));
-        }
-    }
-
-    fn trace_stack_snapshot(&self, label: &str) {
-        if crate::trace::enabled() {
-            eprintln!("[trace] {} len={}", label, self.stack.len());
-            let start = if self.stack.len() > 10 {
-                self.stack.len() - 10
-            } else {
-                0
-            };
-            for (i, v) in self.stack.iter().enumerate().skip(start) {
-                crate::trace::value_string(&format!("{} [{}]", label, i), v);
-            }
-            if self.stack.len() > 10 {
-                eprintln!("[trace] ... (showing last 10)");
-            }
-        }
-    }
-
-    fn pop(&mut self) -> Result<Value, crate::errors::RuntimeError> {
-        self.stack
-            .pop()
-            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))
-    }
-
-    fn read_byte_checked(&mut self) -> Result<u8, crate::errors::RuntimeError> {
+    #[inline(always)]
+    fn read_byte(&mut self) -> Result<u8, crate::errors::RuntimeError> {
         if self.ip >= self.chunk.code.len() {
             return Err(crate::errors::RuntimeError::from(format!(
                 "Unexpected end of bytecode at ip {}",
@@ -1080,65 +989,172 @@ impl Vm {
             )));
         }
         let b = self.chunk.code[self.ip];
-        self.ip = self.ip.saturating_add(1);
+        self.ip += 1;
         Ok(b)
     }
 
+    #[inline(always)]
     fn read_short_signed(&mut self) -> Result<isize, crate::errors::RuntimeError> {
-        let hi = self.read_byte_checked()? as u16;
-        let lo = self.read_byte_checked()? as u16;
+        let hi = self.read_byte()? as u16;
+        let lo = self.read_byte()? as u16;
         let u = (hi << 8) | lo;
         Ok((u as i16) as isize)
     }
 
+    // -----------------------------------------------------------------------
+    // Constant pool helpers
+    // -----------------------------------------------------------------------
+
+    #[inline(always)]
+    fn constant(&self, idx: usize) -> Result<Value, crate::errors::RuntimeError> {
+        self.chunk
+            .constants
+            .get(idx)
+            .cloned()
+            .ok_or_else(|| crate::errors::RuntimeError::from("Bad constant index"))
+    }
+
+    #[inline(always)]
+    fn string_constant(&self, idx: usize) -> Result<String, crate::errors::RuntimeError> {
+        match self.chunk.constants.get(idx) {
+            Some(Value::String(s)) => Ok(s.clone()),
+            _ => Err(crate::errors::RuntimeError::from("Constant not a string")),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stack helpers
+    // -----------------------------------------------------------------------
+
+    #[inline(always)]
+    fn pop(&mut self) -> Result<Value, crate::errors::RuntimeError> {
+        self.stack
+            .pop()
+            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Arithmetic helpers
+    // -----------------------------------------------------------------------
+
+    #[inline(always)]
     fn binary_num<F>(&mut self, f: F) -> Result<(), crate::errors::RuntimeError>
     where
         F: FnOnce(f64, f64) -> f64,
     {
-        let b = self
-            .stack
-            .pop()
-            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))?;
-        let a = self
-            .stack
-            .pop()
-            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))?;
+        let b = self.pop()?;
+        let a = self.pop()?;
         let (x, y) = (to_number(&a)?, to_number(&b)?);
         self.stack.push(Value::Number(f(x, y)));
         Ok(())
     }
 
-    fn binary_num_or_str<F>(&mut self, f: F) -> Result<(), crate::errors::RuntimeError>
-    where
-        F: FnOnce(Value, Value) -> Result<Value, &'static str>,
-    {
-        let b = self
-            .stack
-            .pop()
-            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))?;
-        let a = self
-            .stack
-            .pop()
-            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))?;
-        let v = f(a, b).map_err(crate::errors::RuntimeError::from)?;
-        self.stack.push(v);
-        Ok(())
-    }
+    // -----------------------------------------------------------------------
+    // Diagnostics (only emitted when tracing is enabled)
+    // -----------------------------------------------------------------------
 
-    fn binary_cmp<F>(&mut self, f: F) -> Result<(), crate::errors::RuntimeError>
-    where
-        F: FnOnce(Value, Value) -> Value,
-    {
-        let b = self
-            .stack
-            .pop()
-            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))?;
-        let a = self
-            .stack
-            .pop()
-            .ok_or_else(|| crate::errors::RuntimeError::from("Stack underflow"))?;
-        self.stack.push(f(a, b));
-        Ok(())
+    fn dump_diag(&self, label: &str, offender: &Value) {
+        if !crate::trace::enabled() {
+            return;
+        }
+
+        eprintln!("[diag] {}: actual={}", label, offender.type_name());
+        crate::trace::value_string("[diag] offending value", offender);
+
+        eprintln!("[diag] Stack snapshot (top -> bottom):");
+        for (idx, v) in self.stack.iter().rev().take(8).enumerate() {
+            crate::trace::value_string(&format!("[diag]   stack[{}]", idx), v);
+        }
+
+        let start = self.ip.saturating_sub(8);
+        let end = usize::min(self.ip + 8, self.chunk.code.len());
+        eprintln!("[diag] disasm window ({}..{}):", start, end);
+
+        let mut j = start;
+        while j < end {
+            let b = self.chunk.code[j];
+            if let Some(op) = Op::from_byte(b) {
+                let width = opcode_width(op);
+                match op {
+                    Op::Const => {
+                        let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                        let repr = match self.chunk.constants.get(arg as usize) {
+                            Some(Value::String(s)) => {
+                                format!("'{}'", s)
+                            }
+                            Some(v) => v.type_name().to_string(),
+                            None => "<undef>".to_string(),
+                        };
+                        eprintln!("[diag] {:#06}  Const       {} ({})", j, arg, repr);
+                    }
+                    Op::GetGlobal | Op::SetGlobal => {
+                        let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                        let name = match self.chunk.constants.get(arg as usize) {
+                            Some(Value::String(s)) => s.clone(),
+                            _ => "<non-string>".to_string(),
+                        };
+                        eprintln!("[diag] {:#06}  {:12?} {} ({})", j, op, arg, name);
+                    }
+                    Op::Jump | Op::JumpIfFalse | Op::PushHandler => {
+                        let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
+                        let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                        let val = ((hi << 8) | lo) as i16;
+                        eprintln!("[diag] {:#06}  {:12?} {}", j, op, val);
+                    }
+                    _ if width == 2 => {
+                        let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                        eprintln!("[diag] {:#06}  {:12?} {}", j, op, arg);
+                    }
+                    _ => {
+                        eprintln!("[diag] {:#06}  {:?}", j, op);
+                    }
+                }
+                j += width;
+            } else {
+                eprintln!("[diag] {:#06}  ???  0x{:02x}", j, b);
+                j += 1;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Free functions
+// ---------------------------------------------------------------------------
+
+/// Return the bytecode width of an opcode (opcode byte + operand bytes).
+fn opcode_width(op: Op) -> usize {
+    match op {
+        Op::Const
+        | Op::GetLocal
+        | Op::SetLocal
+        | Op::GetGlobal
+        | Op::SetGlobal
+        | Op::Call
+        | Op::MakeClosure
+        | Op::GetPropertyIC
+        | Op::GetBuiltin
+        | Op::BuildArray
+        | Op::BuildObject => 2,
+        Op::Jump | Op::JumpIfFalse | Op::PushHandler => 3,
+        _ => 1,
+    }
+}
+
+/// Return own keys for a value when applicable.
+fn list_own_keys_of_value(v: &Value) -> Option<Vec<String>> {
+    match v {
+        Value::Object(map) => Some(map.borrow().keys().cloned().collect()),
+        Value::Closure { props, .. } => Some(props.borrow().keys().cloned().collect()),
+        _ => None,
+    }
+}
+
+/// Grow a locals vector so that `slot` is a valid index.
+#[inline(always)]
+fn ensure_slot(locals: &mut Vec<Value>, slot: usize) {
+    if slot >= locals.len() {
+        locals.resize(slot + 1, Value::Null);
     }
 }
 
@@ -1161,6 +1177,9 @@ fn value_to_type(v: &Value) -> Type {
     }
 }
 
+/// Check if `actual` is assignable to `expected` at runtime.
+///
+/// For `Type::Union` we now check each variant instead of blindly accepting.
 fn runtime_assignable(expected: &Type, actual: &Value) -> bool {
     match expected {
         Type::Number => matches!(actual, Value::Number(_)),
@@ -1168,15 +1187,15 @@ fn runtime_assignable(expected: &Type, actual: &Value) -> bool {
         Type::Boolean => matches!(actual, Value::Bool(_)),
         Type::Null => matches!(actual, Value::Null),
         Type::Void => true,
+        Type::Any => true,
+        Type::Unknown => true,
         Type::Array(_) => matches!(actual, Value::Array(_, _)),
         Type::Object(_) => matches!(actual, Value::Object(_)),
-        Type::Function(_, _) => matches!(actual, Value::Closure { .. } | Value::Builtin(_)),
-        // Accept other type forms at runtime conservatively.
-        Type::Any
-        | Type::Unknown
-        | Type::Builtin(_)
-        | Type::TypeReference { .. }
-        | Type::Union(_) => true,
+        Type::Function(_, _) => {
+            matches!(actual, Value::Closure { .. } | Value::Builtin(_))
+        }
+        Type::Union(variants) => variants.iter().any(|t| runtime_assignable(t, actual)),
+        Type::Builtin(_) | Type::TypeReference { .. } => true,
     }
 }
 
@@ -1202,7 +1221,37 @@ fn property_key(v: &Value) -> Result<String, crate::errors::RuntimeError> {
     }
 }
 
-fn get_property(obj: &Value, key: &str) -> Result<Value, crate::errors::RuntimeError> {
+/// Reference-equality semantics for objects/arrays/closures, structural
+/// equality for primitives. Matches JavaScript `===` behaviour.
+fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            // IEEE 754: NaN !== NaN, +0 === -0
+            x == y
+        }
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Null, Value::Null) => true,
+        // Reference equality for heap objects.
+        (Value::Object(am), Value::Object(bm)) => Rc::ptr_eq(am, bm),
+        (Value::Array(ar, _), Value::Array(br, _)) => Rc::ptr_eq(ar, br),
+        (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
+        _ => false,
+    }
+}
+
+/// Walk the prototype chain with cycle detection.
+fn get_property(
+    obj: &Value,
+    key: &str,
+    depth: usize,
+) -> Result<Value, crate::errors::RuntimeError> {
+    if depth > MAX_PROTOTYPE_DEPTH {
+        return Err(crate::errors::RuntimeError::from(
+            "Prototype chain cycle detected or too deep",
+        ));
+    }
+
     match obj {
         Value::Object(map) => {
             let m = map.borrow();
@@ -1212,7 +1261,7 @@ fn get_property(obj: &Value, key: &str) -> Result<Value, crate::errors::RuntimeE
             if let Some(proto) = m.get("__proto__")
                 && !matches!(proto, Value::Null)
             {
-                return get_property(proto, key);
+                return get_property(proto, key, depth + 1);
             }
             Ok(Value::Null)
         }
@@ -1227,7 +1276,7 @@ fn get_property(obj: &Value, key: &str) -> Result<Value, crate::errors::RuntimeE
             if let Some(proto) = p.get("__proto__")
                 && !matches!(proto, Value::Null)
             {
-                return get_property(proto, key);
+                return get_property(proto, key, depth + 1);
             }
             Ok(Value::Null)
         }
@@ -1245,8 +1294,8 @@ fn set_property(obj: &Value, key: &str, value: Value) -> Result<(), crate::error
         Value::Array(arr, props) => {
             if let Ok(i) = key.parse::<usize>() {
                 let mut a = arr.borrow_mut();
-                while a.len() <= i {
-                    a.push(Value::Null);
+                if i >= a.len() {
+                    a.resize(i + 1, Value::Null);
                 }
                 a[i] = value;
                 return Ok(());
@@ -1258,7 +1307,10 @@ fn set_property(obj: &Value, key: &str, value: Value) -> Result<(), crate::error
             props.borrow_mut().insert(key.to_string(), value);
             Ok(())
         }
-        _ => Err(format!("SetProperty: not an object (actual={})", obj.type_name()).into()),
+        _ => Err(crate::errors::RuntimeError::from(format!(
+            "SetProperty: not an object (actual={})",
+            obj.type_name()
+        ))),
     }
 }
 

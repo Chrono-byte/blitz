@@ -264,6 +264,85 @@ impl Compiler {
                 }
                 self.patch_jump(exit_jump);
             }
+            OStmt::ForStatement(f) => {
+                use oxc_ast::ast::ForStatementInit as OForInit;
+                self.continue_patches.push(Vec::new());
+
+                if let Some(init) = &f.init {
+                    match init {
+                        OForInit::VariableDeclaration(v) => {
+                            for dec in &v.declarations {
+                                if let Some(init) = &dec.init {
+                                    self.compile_expr_oast(init)?;
+                                } else {
+                                    self.emit(Op::Null, LINE);
+                                }
+                                let name = match &dec.id {
+                                    OPat::BindingIdentifier(i) => i.name.to_string(),
+                                    _ => {
+                                        return Err(crate::errors::CompilerError::from(
+                                            "unsupported var pattern",
+                                        ));
+                                    }
+                                };
+                                let slot = self.add_local(name.clone(), None);
+                                if self.is_root {
+                                    self.chunk.global_types.insert(name.clone(), None);
+                                    self.emit(Op::Dup, LINE);
+                                }
+                                self.emit(Op::SetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
+                                if self.is_root {
+                                    let idx = self.global_name_index(&name);
+                                    self.emit(Op::SetGlobal, LINE);
+                                    self.emit_byte(idx as u8, LINE);
+                                }
+                            }
+                        }
+                        OForInit::Expression(e) => {
+                            self.compile_expr_oast(e)?;
+                            self.emit(Op::Pop, LINE);
+                        }
+                    }
+                }
+
+                let loop_start = self.chunk.code.len();
+                let exit_jump = if let Some(test) = &f.test {
+                    self.compile_expr_oast(test)?;
+                    self.emit(Op::JumpIfFalse, LINE);
+                    let exit_jump = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    Some(exit_jump)
+                } else {
+                    None
+                };
+
+                self.compile_statement_oast(&f.body)?;
+
+                let update_start = self.chunk.code.len();
+                if let Some(patches) = self.continue_patches.pop() {
+                    for patch_pos in patches {
+                        let target = update_start as isize - (patch_pos as isize) - 2;
+                        let v = target as i16;
+                        self.chunk.code[patch_pos] = (v >> 8) as u8;
+                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                    }
+                }
+
+                if let Some(update) = &f.update {
+                    self.compile_expr_oast(update)?;
+                    self.emit(Op::Pop, LINE);
+                }
+
+                self.emit(Op::Jump, LINE);
+                let back_offset = loop_start as isize - (self.chunk.code.len() + 3) as isize;
+                self.emit_short_signed(back_offset, LINE);
+
+                if let Some(exit_jump) = exit_jump {
+                    self.patch_jump(exit_jump);
+                }
+            }
             OStmt::ReturnStatement(r) => {
                 if let Some(arg) = &r.argument {
                     self.compile_expr_oast(arg)?;
@@ -271,6 +350,19 @@ impl Compiler {
                     self.emit(Op::Null, LINE);
                 }
                 self.emit(Op::Return, LINE);
+            }
+            OStmt::ContinueStatement(_) => {
+                if let Some(patches) = self.continue_patches.last_mut() {
+                    self.emit(Op::Jump, LINE);
+                    let patch_pos = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    patches.push(patch_pos);
+                } else {
+                    return Err(crate::errors::CompilerError::from(
+                        "'continue' used outside of a loop",
+                    ));
+                }
             }
             _ => {}
         }
@@ -321,6 +413,14 @@ impl Compiler {
                     oast::BinaryOperator::Multiplication => self.emit(Op::Mul, LINE),
                     oast::BinaryOperator::Division => self.emit(Op::Div, LINE),
                     _ => self.emit(Op::Add, LINE),
+                }
+            }
+            OExpr::LogicalExpression(l) => {
+                self.compile_expr_oast(&l.left)?;
+                self.compile_expr_oast(&l.right)?;
+                match l.operator {
+                    oast::LogicalOperator::And => self.emit(Op::And, LINE),
+                    oast::LogicalOperator::Or => self.emit(Op::Or, LINE),
                 }
             }
             OExpr::ParenthesizedExpression(p) => {

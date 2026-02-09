@@ -184,13 +184,8 @@ impl Parser {
 // `self_referencing` macro generates a `borrow_program` method; expose a
 // convenient `program()` method that returns the borrowed `Program`.
 impl ParserSession {
+    /// Simple get borrow program
     pub fn program(&self) -> &oast::Program<'_> {
         self.borrow_program()
     }
 }
-
-// Note:
-// The detailed ESTree -> local AST conversion helpers that used to live in this
-// module were removed as part of the migration to use `oxc_ast` directly. If a
-// compatibility layer is required (to produce the old owned AST), implement it
-// in a separate module so consumers can migrate incrementally.
