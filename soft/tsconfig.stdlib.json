@@ -1,0 +1,65 @@
+{
+  // Dedicated tsconfig for building the TypeScript stdlib.
+  // - Emits runtime JS + declarations into `dist/std`
+  // - Keeps default soft/tsconfig.json compiler options via `extends`
+  // - Restricts which files are compiled so ambient declarations can be placed
+  //   in `core/*.d.ts` and so that std modules don't accidentally collide with
+  //   unrelated type roots.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Output
+    "outDir": "./dist/std",
+    "rootDir": ".",
+
+    // Emit declarations for consumers of the stdlib
+    "declaration": true,
+    "declarationMap": true,
+    "emitDeclarationOnly": false,
+
+    // Module / target
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "esnext",
+    "lib": [],
+
+    // Type resolution
+    // Keep types empty so Node/DOM ambient packages don't get pulled in automatically.
+    // Add explicit `.d.ts` files into `core/` for host-provided globals.
+    "types": [],
+
+    // Relaxed strictness (consistent with soft/tsconfig.json)
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "strictFunctionTypes": false,
+    "strictPropertyInitialization": false,
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false,
+    "noImplicitThis": false,
+
+    // Other important flags
+    "allowJs": true,
+    "checkJs": false,
+    "isolatedModules": false,         // allow full TS program-level checks (not just per-file)
+    "skipLibCheck": true,             // avoid spurious errors from external lib .d.ts
+    "noUncheckedSideEffectImports": true,
+    "moduleDetection": "force",
+    "verbatimModuleSyntax": false,
+    "esModuleInterop": true,
+    "sourceMap": true,
+    "noEmitOnError": false
+  },
+
+  // Only build the std-related sources (and the small core pieces the std relies on).
+  // Note: keep ambient declaration files (e.g. `core/*.d.ts`) here so they are picked up.
+  "include": [
+    "std/**/*",
+    "core/**/*",
+    "prelude.ts",
+    "runtime_builtins.ts",
+    "host.ts"
+  ],
+
+  // Exclude tests and node_modules
+  "exclude": ["node_modules", "**/*.test.ts"]
+}

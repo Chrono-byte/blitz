@@ -44,8 +44,9 @@
 //! ```
 
 use crate::bytecode::{Chunk, Op};
+use crate::typecheck::BuiltinType;
 use crate::typecheck::Type;
-use crate::value::Value;
+use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
@@ -164,7 +165,7 @@ pub struct Vm {
     /// Local variables for the current frame.
     locals: Vec<Value>,
     /// Global variables.
-    globals: Rc<RefCell<HashMap<String, Value>>>,
+    globals: Rc<RefCell<ObjectData>>,
     /// Call-frame stack.
     frames: Vec<Frame>,
     /// Root chunk (kept alive for global type metadata).
@@ -189,7 +190,7 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     /// Create a new virtual machine.
-    pub fn new(globals: Rc<RefCell<HashMap<String, Value>>>) -> Self {
+    pub fn new(globals: Rc<RefCell<ObjectData>>) -> Self {
         Self {
             chunk: Rc::new(Chunk::new()),
             ip: 0,
@@ -208,21 +209,40 @@ impl Vm {
 
     /// Debug helper: get a global value by name (cloned).
     pub fn get_global(&self, name: &str) -> Option<Value> {
-        self.globals.borrow().get(name).cloned()
+        self.globals
+            .borrow()
+            .properties
+            .get(&PropertyKey::String(name.to_string()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })
     }
 
     /// Return own keys for a global value if it is an object or closure.
     pub fn list_global_own_keys(&self, name: &str) -> Option<Vec<String>> {
         let g = self.globals.borrow();
-        let v = g.get(name)?;
-        list_own_keys_of_value(v)
+        let v = g
+            .properties
+            .get(&PropertyKey::String(name.to_string()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })?;
+        list_own_keys_of_value(&v)
     }
 
     /// Return prototype keys for a global's prototype property.
     pub fn list_global_prototype_keys(&self, name: &str) -> Option<Vec<String>> {
         let g = self.globals.borrow();
-        let v = g.get(name)?;
-        match get_property(v, "prototype", 0) {
+        let v = g
+            .properties
+            .get(&PropertyKey::String(name.to_string()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })?;
+        match get_property(&v, &PropertyKey::String("prototype".to_string()), 0) {
             Ok(pv) => list_own_keys_of_value(&pv),
             Err(_) => None,
         }
@@ -258,7 +278,8 @@ impl Vm {
         self.ic_caches.clear();
         self.obj_generations.clear();
         let mut g = self.globals.borrow_mut();
-        g.retain(|k, _| keep_globals.contains(k));
+        g.properties
+            .retain(|k, _| matches!(k, PropertyKey::String(s) if keep_globals.contains(s)));
     }
 
     // -----------------------------------------------------------------------
@@ -369,9 +390,13 @@ impl Vm {
                     let v = self
                         .globals
                         .borrow()
-                        .get(&name)
-                        .cloned()
-                        .unwrap_or(Value::Null);
+                        .properties
+                        .get(&PropertyKey::String(name))
+                        .and_then(|d| match d {
+                            PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or(Value::Undefined);
                     self.stack.push(v);
                 }
                 Op::SetGlobal => {
@@ -385,7 +410,10 @@ impl Vm {
                     {
                         check_assign(expected, &v)?;
                     }
-                    self.globals.borrow_mut().insert(name, v);
+                    self.globals
+                        .borrow_mut()
+                        .properties
+                        .insert(PropertyKey::String(name), PropertyDescriptor::data(v));
                 }
 
                 // -----------------------------------------------------------
@@ -461,6 +489,7 @@ impl Vm {
                     let b = self.pop()?;
                     let a = self.pop()?;
                     let result = match (a, b) {
+                        (Value::BigInt(x), Value::BigInt(y)) => Value::BigInt(x + y),
                         (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
                         (Value::String(s), v) => Value::String(format!("{}{}", s, v)),
                         (v, Value::String(s)) => Value::String(format!("{}{}", v, s)),
@@ -472,16 +501,26 @@ impl Vm {
                     let b = self.pop()?;
                     let a = self.pop()?;
                     match (a, b) {
+                        (Value::BigInt(x), Value::BigInt(y)) => {
+                            self.stack.push(Value::BigInt(x + y));
+                        }
                         (Value::Number(x), Value::Number(y)) => {
                             self.stack.push(Value::Number(x + y));
                         }
                         _ => return Err("AddNumber: number expected".into()),
                     }
                 }
-                Op::Sub => self.binary_num(|a, b| a - b)?,
-                Op::Mul => self.binary_num(|a, b| a * b)?,
-                Op::Div => self.binary_num(|a, b| a / b)?,
-                Op::Mod => self.binary_num(|a, b| a % b)?,
+                Op::Sub => self.binary_num_bigint(|a, b| a - b, |a, b| Ok(a - b))?,
+                Op::Mul => self.binary_num_bigint(|a, b| a * b, |a, b| Ok(a * b))?,
+                Op::Div => self.binary_num_bigint(
+                    |a, b| a / b,
+                    |_, _| {
+                        Err(crate::errors::RuntimeError::from(
+                            "Div: bigint not supported",
+                        ))
+                    },
+                )?,
+                Op::Mod => self.binary_num_bigint(|a, b| a % b, |a, b| Ok(a % b))?,
 
                 // -----------------------------------------------------------
                 // Comparison -- uses JS-style reference equality for objects
@@ -589,16 +628,16 @@ impl Vm {
                 Op::GetProperty => {
                     let key = self.pop()?;
                     let obj = self.pop()?;
-                    let k = property_key(&key)?;
-                    let v = get_property(&obj, &k, 0)?;
+                    let k = self.to_property_key(&key)?;
+                    let v = self.get_property_value(&obj, &k)?;
                     self.stack.push(v);
                 }
-                Op::GetPropertyIC => self.get_property_ic()?,
+            Op::GetPropertyIC => self.get_property_ic()?,
                 Op::SetProperty => {
                     let value = self.pop()?;
                     let key = self.pop()?;
                     let obj = self.pop()?;
-                    let k = property_key(&key)?;
+                    let k = self.to_property_key(&key)?;
                     self.set_property_tracked(&obj, &k, value)?;
                 }
 
@@ -614,12 +653,19 @@ impl Vm {
                     let idx = self.read_byte()? as usize;
                     let name = self.string_constant(idx)?;
                     let g = self.globals.borrow();
-                    let v = g.get(&name).cloned().ok_or_else(|| {
-                        crate::errors::RuntimeError::from(format!(
-                            "GetBuiltin: '{}' not found",
-                            name
-                        ))
-                    })?;
+                    let v = g
+                        .properties
+                        .get(&PropertyKey::String(name.clone()))
+                        .and_then(|d| match d {
+                            PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            crate::errors::RuntimeError::from(format!(
+                                "GetBuiltin: '{}' not found",
+                                name
+                            ))
+                        })?;
                     match v {
                         Value::Builtin(_) => self.stack.push(v),
                         _ => {
@@ -691,6 +737,145 @@ impl Vm {
         Ok(())
     }
 
+    fn call_with_this(
+        &mut self,
+        callee: &Value,
+        _this_arg: &Value,
+        args: &[Value],
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        match callee {
+            Value::Builtin(f) => {
+                let result = f(self, args)?;
+                Ok(result)
+            }
+            Value::Closure { .. } => Err(crate::errors::RuntimeError::from(
+                "CallWithThis: closures not yet supported",
+            )),
+            _ => Err(crate::errors::RuntimeError::from(
+                "CallWithThis: not a function",
+            )),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ECMAScript coercions
+    // -----------------------------------------------------------------------
+
+    fn to_primitive(
+        &mut self,
+        v: &Value,
+        hint: Option<&str>,
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        match v {
+            Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::Builtin(_) => {
+                // Try @@toPrimitive if present.
+                let to_prim_key = PropertyKey::Symbol(crate::value::SymbolId::well_known(1));
+                if let Ok(method) = get_property(v, &to_prim_key, 0)
+                    && matches!(method, Value::Closure { .. } | Value::Builtin(_))
+                            && let Ok(rv) = self.call_with_this(
+                                &method,
+                                v,
+                                &[Value::String(hint.unwrap_or("default").to_string())],
+                            )
+                            && !matches!(rv, Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::Builtin(_)) {
+                                return Ok(rv);
+                            }
+
+                let order = match hint {
+                    Some("string") => ["toString", "valueOf"],
+                    Some("number") => ["valueOf", "toString"],
+                    _ => ["valueOf", "toString"],
+                };
+                for name in order {
+                    let key = PropertyKey::String(name.to_string());
+                    if let Ok(method) = get_property(v, &key, 0)
+                        && matches!(method, Value::Closure { .. } | Value::Builtin(_))
+                            && let Ok(rv) = self.call_with_this(&method, v, &[])
+                                && !matches!(rv, Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::Builtin(_)) {
+                                    return Ok(rv);
+                                }
+                }
+                Err(crate::errors::RuntimeError::from("Cannot convert object to primitive"))
+            }
+            _ => Ok(v.clone()),
+        }
+    }
+
+    fn to_string(&mut self, v: &Value) -> Result<String, crate::errors::RuntimeError> {
+        match v {
+            Value::String(s) => Ok(s.clone()),
+            Value::Number(n) => Ok(n.to_string()),
+            Value::Bool(b) => Ok(if *b { "true".to_string() } else { "false".to_string() }),
+            Value::Undefined => Ok("undefined".to_string()),
+            Value::Null => Ok("null".to_string()),
+            Value::BigInt(n) => Ok(n.to_string()),
+            Value::Symbol(_, _) => Err(crate::errors::RuntimeError::from(
+                "Cannot convert Symbol to string",
+            )),
+            _ => {
+                let prim = self.to_primitive(v, Some("string"))?;
+                self.to_string(&prim)
+            }
+        }
+    }
+
+    fn to_number_value(&mut self, v: &Value) -> Result<f64, crate::errors::RuntimeError> {
+        match v {
+            Value::Number(n) => Ok(*n),
+            Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
+            Value::String(s) => Ok(s.parse::<f64>().unwrap_or(f64::NAN)),
+            Value::Undefined => Ok(f64::NAN),
+            Value::Null => Ok(0.0),
+            Value::BigInt(n) => Ok(*n as f64),
+            Value::Symbol(_, _) => Err(crate::errors::RuntimeError::from(
+                "Cannot convert Symbol to number",
+            )),
+            _ => {
+                let prim = self.to_primitive(v, Some("number"))?;
+                self.to_number_value(&prim)
+            }
+        }
+    }
+
+    fn to_property_key(
+        &mut self,
+        v: &Value,
+    ) -> Result<PropertyKey, crate::errors::RuntimeError> {
+        match v {
+            Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym.clone())),
+            _ => {
+                let prim = self.to_primitive(v, Some("string"))?;
+                match prim {
+                    Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym)),
+                    _ => Ok(PropertyKey::String(self.to_string(&prim)?)),
+                }
+            }
+        }
+    }
+
+    fn get_property_value(
+        &mut self,
+        obj: &Value,
+        key: &PropertyKey,
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        if let Value::Object(data) = obj {
+            let d = data.borrow();
+            if let Some(desc) = d.properties.get(key) {
+                return match desc {
+                    PropertyDescriptor::Data { value, .. } => Ok(value.clone()),
+                    PropertyDescriptor::Accessor { get, .. } => {
+                        if let Some(getter) = get {
+                            self.call_with_this(getter, obj, &[])
+                        } else {
+                            Ok(Value::Undefined)
+                        }
+                    }
+                };
+            }
+        }
+        get_property(obj, key, 0)
+    }
+
     /// Pop the return value, restore the caller's frame, and push the result.
     fn execute_return(&mut self) -> Result<(), crate::errors::RuntimeError> {
         let result = self.pop().unwrap_or(Value::Null);
@@ -740,19 +925,26 @@ impl Vm {
         };
 
         let arr_rc = Rc::new(RefCell::new(rest_slice));
-        let props = Rc::new(RefCell::new(HashMap::new()));
-        props.borrow_mut().insert(
-            "length".to_string(),
-            Value::Number(arr_rc.borrow().len() as f64),
+        let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+        props.borrow_mut().properties.insert(
+            PropertyKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
         );
 
-        if let Some(array_val) = self.globals.borrow().get("Array")
-            && let Ok(proto_val) = get_property(array_val, "prototype", 0)
+        if let Some(array_val) = self
+            .globals
+            .borrow()
+            .properties
+            .get(&PropertyKey::String("Array".to_string()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            && let Ok(proto_val) =
+                get_property(&array_val, &PropertyKey::String("prototype".to_string()), 0)
             && !matches!(proto_val, Value::Null)
         {
-            props
-                .borrow_mut()
-                .insert("__proto__".to_string(), proto_val);
+            props.borrow_mut().prototype = proto_val;
         }
 
         fixed.push(Value::Array(arr_rc, props));
@@ -827,18 +1019,26 @@ impl Vm {
         elems.reverse();
 
         let arr_rc = Rc::new(RefCell::new(elems));
-        let props = Rc::new(RefCell::new(HashMap::new()));
-        props
-            .borrow_mut()
-            .insert("length".to_string(), Value::Number(n as f64));
+        let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+        props.borrow_mut().properties.insert(
+            PropertyKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(n as f64)),
+        );
 
-        if let Some(array_val) = self.globals.borrow().get("Array")
-            && let Ok(proto_val) = get_property(array_val, "prototype", 0)
+        if let Some(array_val) = self
+            .globals
+            .borrow()
+            .properties
+            .get(&PropertyKey::String("Array".to_string()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            && let Ok(proto_val) =
+                get_property(&array_val, &PropertyKey::String("prototype".to_string()), 0)
             && !matches!(proto_val, Value::Null)
         {
-            props
-                .borrow_mut()
-                .insert("__proto__".to_string(), proto_val);
+            props.borrow_mut().prototype = proto_val;
         }
 
         self.stack.push(Value::Array(arr_rc, props));
@@ -847,12 +1047,13 @@ impl Vm {
 
     fn build_object(&mut self) -> Result<(), crate::errors::RuntimeError> {
         let n = self.read_byte()? as usize;
-        let mut map = HashMap::with_capacity(n);
+        let mut map: HashMap<PropertyKey, PropertyDescriptor> = HashMap::with_capacity(n);
         for _ in 0..n {
             let value = self.pop()?;
             let key_val = self.pop()?;
             let key = match key_val {
-                Value::String(s) => s,
+                Value::String(s) => PropertyKey::String(s),
+                Value::Symbol(sym, _) => PropertyKey::Symbol(sym),
                 other => {
                     self.dump_diag("BuildObject: key must be string", &other);
                     return Err(crate::errors::RuntimeError::from(format!(
@@ -861,9 +1062,11 @@ impl Vm {
                     )));
                 }
             };
-            map.insert(key, value);
+            map.insert(key, PropertyDescriptor::data(value));
         }
-        self.stack.push(Value::Object(Rc::new(RefCell::new(map))));
+        let mut data = ObjectData::new();
+        data.properties = map;
+        self.stack.push(Value::Object(Rc::new(RefCell::new(data))));
         Ok(())
     }
 
@@ -876,12 +1079,13 @@ impl Vm {
             .cloned()
             .ok_or("Bad function index")?;
 
-        let proto_obj_map = Rc::new(RefCell::new(HashMap::new()));
+        let proto_obj_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
         let proto_obj = Value::Object(Rc::clone(&proto_obj_map));
-        let props = Rc::new(RefCell::new(HashMap::new()));
-        props
-            .borrow_mut()
-            .insert("prototype".to_string(), proto_obj);
+        let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+        props.borrow_mut().properties.insert(
+            PropertyKey::String("prototype".to_string()),
+            PropertyDescriptor::data(proto_obj),
+        );
 
         let closure = Value::Closure {
             proto: Rc::new(proto),
@@ -889,9 +1093,10 @@ impl Vm {
             props: Rc::clone(&props),
         };
 
-        proto_obj_map
-            .borrow_mut()
-            .insert("constructor".to_string(), closure.clone());
+        proto_obj_map.borrow_mut().properties.insert(
+            PropertyKey::String("constructor".to_string()),
+            PropertyDescriptor::data(closure.clone()),
+        );
 
         self.stack.push(closure);
         Ok(())
@@ -902,7 +1107,7 @@ impl Vm {
         let slot = self.read_byte()? as usize;
         let key_val = self.pop()?;
         let obj = self.pop()?;
-        let key = property_key(&key_val)?;
+        let key = self.to_property_key(&key_val)?;
 
         let chunk_id = Rc::as_ptr(&self.chunk) as usize;
 
@@ -926,7 +1131,7 @@ impl Vm {
             }
 
             // Cache miss: perform the full lookup.
-            let v = get_property(&obj, &key, 0)?;
+            let v = self.get_property_value(&obj, &key)?;
 
             // Store into the IC.
             let cache_vec = self
@@ -944,7 +1149,7 @@ impl Vm {
             self.stack.push(v);
         } else {
             // Non-object path: no caching.
-            let v = get_property(&obj, &key, 0)?;
+            let v = self.get_property_value(&obj, &key)?;
             self.stack.push(v);
         }
 
@@ -956,9 +1161,20 @@ impl Vm {
     fn set_property_tracked(
         &mut self,
         obj: &Value,
-        key: &str,
+        key: &PropertyKey,
         value: Value,
     ) -> Result<(), crate::errors::RuntimeError> {
+        if let Value::Object(data) = obj {
+            let mut d = data.borrow_mut();
+            if let Some(desc) = d.properties.get_mut(key)
+                && let PropertyDescriptor::Accessor { set, .. } = desc {
+                    if let Some(setter) = set.clone() {
+                        let _ = self.call_with_this(&setter, obj, &[value])?;
+                        return Ok(());
+                    }
+                    return Ok(());
+                }
+        }
         set_property(obj, key, value)?;
 
         // Bump generation for the mutated object.
@@ -1152,6 +1368,28 @@ impl Vm {
         Ok(())
     }
 
+    #[inline(always)]
+    fn binary_num_bigint<F, G>(&mut self, f: F, g: G) -> Result<(), crate::errors::RuntimeError>
+    where
+        F: FnOnce(f64, f64) -> f64,
+        G: FnOnce(i128, i128) -> Result<i128, crate::errors::RuntimeError>,
+    {
+        let b = self.pop()?;
+        let a = self.pop()?;
+        match (a, b) {
+            (Value::BigInt(x), Value::BigInt(y)) => {
+                let v = g(x, y)?;
+                self.stack.push(Value::BigInt(v));
+                Ok(())
+            }
+            (a, b) => {
+                let (x, y) = (to_number(&a)?, to_number(&b)?);
+                self.stack.push(Value::Number(f(x, y)));
+                Ok(())
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Diagnostics (only emitted when tracing is enabled)
     // -----------------------------------------------------------------------
@@ -1247,8 +1485,27 @@ fn opcode_width(op: Op) -> usize {
 /// Return own keys for a value when applicable.
 fn list_own_keys_of_value(v: &Value) -> Option<Vec<String>> {
     match v {
-        Value::Object(map) => Some(map.borrow().keys().cloned().collect()),
-        Value::Closure { props, .. } => Some(props.borrow().keys().cloned().collect()),
+        Value::Object(data) => Some(
+            data.borrow()
+                .properties
+                .keys()
+                .filter_map(|k| match k {
+                    PropertyKey::String(s) => Some(s.clone()),
+                    PropertyKey::Symbol(_) => None,
+                })
+                .collect(),
+        ),
+        Value::Closure { props, .. } => Some(
+            props
+                .borrow()
+                .properties
+                .keys()
+                .filter_map(|k| match k {
+                    PropertyKey::String(s) => Some(s.clone()),
+                    PropertyKey::Symbol(_) => None,
+                })
+                .collect(),
+        ),
         _ => None,
     }
 }
@@ -1264,19 +1521,27 @@ fn ensure_slot(locals: &mut Vec<Value>, slot: usize) {
 fn to_number(v: &Value) -> Result<f64, crate::errors::RuntimeError> {
     match v {
         Value::Number(n) => Ok(*n),
+        Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
+        Value::String(s) => Ok(s.parse::<f64>().unwrap_or(f64::NAN)),
+        Value::Undefined => Ok(f64::NAN),
+        Value::Null => Ok(0.0),
+        Value::BigInt(n) => Ok(*n as f64),
         _ => Err(crate::errors::RuntimeError::from("Expected number")),
     }
 }
 
 fn value_to_type(v: &Value) -> Type {
     match v {
+        Value::Undefined => Type::Builtin(BuiltinType::Undefined),
         Value::Number(_) => Type::Number,
         Value::String(_) => Type::String,
         Value::Bool(_) => Type::Boolean,
+        Value::BigInt(_) => Type::Builtin(BuiltinType::BigInt),
         Value::Null => Type::Null,
         Value::Object(_) => Type::Object(HashMap::new()),
         Value::Array(_, _) => Type::Array(Box::new(Type::Void)),
         Value::Closure { .. } | Value::Builtin(_) => Type::Function(vec![], Box::new(Type::Void)),
+        Value::Symbol(_, _) => Type::Builtin(BuiltinType::Symbol),
     }
 }
 
@@ -1314,34 +1579,25 @@ fn check_assign(expected: &Type, actual: &Value) -> Result<(), crate::errors::Ru
     }
 }
 
-fn property_key(v: &Value) -> Result<String, crate::errors::RuntimeError> {
-    match v {
-        Value::String(s) => Ok(s.clone()),
-        Value::Number(n) => Ok(n.to_string()),
-        Value::Bool(b) => Ok(if *b {
-            "true".to_string()
-        } else {
-            "false".to_string()
-        }),
-        Value::Null => Ok("null".to_string()),
-        Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::Builtin(_) => {
-            // Minimal ToPropertyKey: fall back to stringification.
-            // Full Symbol and ToPrimitive semantics are not yet implemented.
-            Ok(format!("{}", v))
-        }
-    }
+fn property_key(_v: &Value) -> Result<PropertyKey, crate::errors::RuntimeError> {
+    Err(crate::errors::RuntimeError::from(
+        "property_key should not be called; use Vm::to_property_key",
+    ))
 }
 
 /// Reference-equality semantics for objects/arrays/closures, structural
 /// equality for primitives. Matches JavaScript `===` behaviour.
 fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
+        (Value::Undefined, Value::Undefined) => true,
         (Value::Number(x), Value::Number(y)) => {
             // IEEE 754: NaN !== NaN, +0 === -0
             x == y
         }
         (Value::String(x), Value::String(y)) => x == y,
         (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::BigInt(x), Value::BigInt(y)) => x == y,
+        (Value::Symbol(x, _), Value::Symbol(y, _)) => x == y,
         (Value::Null, Value::Null) => true,
         // Reference equality for heap objects.
         (Value::Object(am), Value::Object(bm)) => Rc::ptr_eq(am, bm),
@@ -1354,7 +1610,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
 /// Walk the prototype chain with cycle detection.
 fn get_property(
     obj: &Value,
-    key: &str,
+    key: &PropertyKey,
     depth: usize,
 ) -> Result<Value, crate::errors::RuntimeError> {
     if depth > MAX_PROTOTYPE_DEPTH {
@@ -1364,62 +1620,177 @@ fn get_property(
     }
 
     match obj {
-        Value::Object(map) => {
-            let m = map.borrow();
-            if let Some(v) = m.get(key) {
-                return Ok(v.clone());
+        Value::Object(data) => {
+            let d = data.borrow();
+            if let Some(desc) = d.properties.get(key) {
+                return match desc {
+                    PropertyDescriptor::Data { value, .. } => Ok(value.clone()),
+                    PropertyDescriptor::Accessor { get, .. } => {
+                        if get.is_some() {
+                            // Accessor invocation is handled in Vm::get_property_value.
+                            Ok(Value::Undefined)
+                        } else {
+                            Ok(Value::Undefined)
+                        }
+                    }
+                };
             }
-            if let Some(proto) = m.get("__proto__")
-                && !matches!(proto, Value::Null)
-            {
-                return get_property(proto, key, depth + 1);
+            if !matches!(d.prototype, Value::Null) {
+                return get_property(&d.prototype, key, depth + 1);
             }
-            Ok(Value::Null)
+            Ok(Value::Undefined)
         }
         Value::Array(arr, props) => {
-            if let Ok(i) = key.parse::<usize>() {
-                return Ok(arr.borrow().get(i).cloned().unwrap_or(Value::Null));
+            if let PropertyKey::String(s) = key
+                && let Ok(i) = s.parse::<usize>()
+            {
+                return Ok(arr.borrow().get(i).cloned().unwrap_or(Value::Undefined));
             }
             let p = props.borrow();
-            if let Some(v) = p.get(key) {
-                return Ok(v.clone());
+            if let Some(desc) = p.properties.get(key) {
+                return match desc {
+                    PropertyDescriptor::Data { value, .. } => Ok(value.clone()),
+                    PropertyDescriptor::Accessor { get, .. } => {
+                        if let Some(Value::Closure { .. } | Value::Builtin(_)) = get {
+                            Ok(Value::Undefined)
+                        } else {
+                            Ok(Value::Undefined)
+                        }
+                    }
+                };
             }
-            if let Some(proto) = p.get("__proto__")
-                && !matches!(proto, Value::Null)
-            {
-                return get_property(proto, key, depth + 1);
+            if !matches!(p.prototype, Value::Null) {
+                return get_property(&p.prototype, key, depth + 1);
             }
-            Ok(Value::Null)
+            Ok(Value::Undefined)
         }
-        Value::Closure { props, .. } => Ok(props.borrow().get(key).cloned().unwrap_or(Value::Null)),
-        _ => Ok(Value::Null),
+        Value::Closure { props, .. } => {
+            let p = props.borrow();
+            if let Some(desc) = p.properties.get(key) {
+                return match desc {
+                    PropertyDescriptor::Data { value, .. } => Ok(value.clone()),
+                    PropertyDescriptor::Accessor { get, .. } => {
+                        if let Some(Value::Closure { .. } | Value::Builtin(_)) = get {
+                            Ok(Value::Undefined)
+                        } else {
+                            Ok(Value::Undefined)
+                        }
+                    }
+                };
+            }
+            if !matches!(p.prototype, Value::Null) {
+                return get_property(&p.prototype, key, depth + 1);
+            }
+            Ok(Value::Undefined)
+        }
+        _ => Ok(Value::Undefined),
     }
 }
 
-fn set_property(obj: &Value, key: &str, value: Value) -> Result<(), crate::errors::RuntimeError> {
+fn set_property(
+    obj: &Value,
+    key: &PropertyKey,
+    value: Value,
+) -> Result<(), crate::errors::RuntimeError> {
     match obj {
         Value::Object(map) => {
-            map.borrow_mut().insert(key.to_string(), value);
+            let mut m = map.borrow_mut();
+            if let Some(desc) = m.properties.get_mut(key) {
+                match desc {
+                    PropertyDescriptor::Data {
+                        value: v, writable, ..
+                    } => {
+                        if !*writable {
+                            return Ok(());
+                        }
+                        *v = value;
+                        return Ok(());
+                    }
+                    PropertyDescriptor::Accessor { set, .. } => {
+                        if set.is_some() {
+                            return Ok(());
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            if !m.extensible {
+                return Ok(());
+            }
+            m.properties
+                .insert(key.clone(), PropertyDescriptor::data(value));
             Ok(())
         }
         Value::Array(arr, props) => {
-            if let Ok(i) = key.parse::<usize>() {
+            if let PropertyKey::String(s) = key
+                && let Ok(i) = s.parse::<usize>()
+            {
                 let mut a = arr.borrow_mut();
                 if i >= a.len() {
-                    a.resize(i + 1, Value::Null);
+                    a.resize(i + 1, Value::Undefined);
                 }
                 a[i] = value;
                 return Ok(());
             }
-            props.borrow_mut().insert(key.to_string(), value);
+            let mut p = props.borrow_mut();
+            if let Some(desc) = p.properties.get_mut(key) {
+                match desc {
+                    PropertyDescriptor::Data {
+                        value: v, writable, ..
+                    } => {
+                        if !*writable {
+                            return Ok(());
+                        }
+                        *v = value;
+                        return Ok(());
+                    }
+                    PropertyDescriptor::Accessor { set, .. } => {
+                        if set.is_some() {
+                            return Ok(());
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            if !p.extensible {
+                return Ok(());
+            }
+            p.properties
+                .insert(key.clone(), PropertyDescriptor::data(value));
             Ok(())
         }
         Value::Closure { props, .. } => {
-            props.borrow_mut().insert(key.to_string(), value);
+            let mut p = props.borrow_mut();
+            if let Some(desc) = p.properties.get_mut(key) {
+                match desc {
+                    PropertyDescriptor::Data {
+                        value: v, writable, ..
+                    } => {
+                        if !*writable {
+                            return Ok(());
+                        }
+                        *v = value;
+                        return Ok(());
+                    }
+                    PropertyDescriptor::Accessor { set, .. } => {
+                        if set.is_some() {
+                            return Ok(());
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            if !p.extensible {
+                return Ok(());
+            }
+            p.properties
+                .insert(key.clone(), PropertyDescriptor::data(value));
             Ok(())
         }
         _ => {
             // Non-object property assignments are no-ops in sloppy mode.
+            //
+            // this should probably check the strict mode behavior as well
             Ok(())
         }
     }

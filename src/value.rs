@@ -38,6 +38,101 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// Symbol primitive identity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SymbolId(u64);
+
+impl SymbolId {
+    /// Generate a new unique symbol id.
+    pub fn new() -> Self {
+        Self(fastrand::u64(..))
+    }
+
+    /// Create a well-known symbol id.
+    pub fn well_known(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+/// Property key variant (string or symbol).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PropertyKey {
+    /// String key
+    String(String),
+    /// Symbol key
+    Symbol(SymbolId),
+}
+
+/// Property descriptor (data or accessor).
+#[derive(Clone, Debug)]
+pub enum PropertyDescriptor {
+    /// Data descriptor
+    Data {
+        /// Stored value
+        value: Value,
+        /// Writable flag
+        writable: bool,
+        /// Enumerable flag
+        enumerable: bool,
+        /// Configurable flag
+        configurable: bool,
+    },
+    /// Accessor descriptor
+    Accessor {
+        /// Getter function
+        get: Option<Value>,
+        /// Setter function
+        set: Option<Value>,
+        /// Enumerable flag
+        enumerable: bool,
+        /// Configurable flag
+        configurable: bool,
+    },
+}
+
+impl PropertyDescriptor {
+    /// Create a default data descriptor with full attributes.
+    pub fn data(value: Value) -> Self {
+        Self::Data {
+            value,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+        }
+    }
+}
+
+/// Object storage with properties and prototype.
+#[derive(Clone, Debug)]
+pub struct ObjectData {
+    /// Property table
+    pub properties: HashMap<PropertyKey, PropertyDescriptor>,
+    /// Prototype pointer
+    pub prototype: Value,
+    /// Extensible flag
+    pub extensible: bool,
+}
+
+impl ObjectData {
+    /// Create an empty object data container with a null prototype.
+    pub fn new() -> Self {
+        Self {
+            properties: HashMap::new(),
+            prototype: Value::Null,
+            extensible: true,
+        }
+    }
+
+    /// Create an empty object with a specific prototype.
+    pub fn with_prototype(prototype: Value) -> Self {
+        Self {
+            properties: HashMap::new(),
+            prototype,
+            extensible: true,
+        }
+    }
+}
+
 use crate::bytecode::FunctionProto;
 
 #[derive(Clone, Debug)]
@@ -49,15 +144,21 @@ pub enum Value {
     String(String),
     /// Boolean value
     Bool(bool),
+    /// Undefined value
+    Undefined,
+    /// BigInt value
+    BigInt(i128),
+    /// Symbol value
+    Symbol(SymbolId, Option<String>),
     /// Null value
     Null,
-    /// Object value with string key-value pairs
-    Object(Rc<RefCell<HashMap<String, Value>>>),
+    /// Object value with property descriptors and prototype
+    Object(Rc<RefCell<ObjectData>>),
     /// Array value with indexed elements plus a property bag for non-index
     /// properties and prototype linkage. The first field stores dense indexed
     /// elements; the second is a property map used for `__proto__` and arbitrary
     /// named properties (so arrays can behave like objects for non-index keys).
-    Array(Rc<RefCell<Vec<Value>>>, Rc<RefCell<HashMap<String, Value>>>),
+    Array(Rc<RefCell<Vec<Value>>>, Rc<RefCell<ObjectData>>),
     /// Function closure with prototype and captured environment
     Closure {
         /// Function prototype
@@ -65,7 +166,7 @@ pub enum Value {
         /// Captured / closed-over values
         env: Rc<RefCell<Vec<Value>>>,
         /// Mutable property bag for function object properties (e.g., `prototype`).
-        props: Rc<RefCell<HashMap<String, Value>>>,
+        props: Rc<RefCell<ObjectData>>,
     },
     /// Built-in function
     Builtin(BuiltinFn),
@@ -105,9 +206,11 @@ impl Value {
     /// Returns true if the value is truthy (not falsy)
     pub fn is_truthy(&self) -> bool {
         match self {
+            Value::Undefined => false,
             Value::Null => false,
             Value::Bool(b) => *b,
             Value::Number(n) => *n != 0.0 && !n.is_nan(),
+            Value::BigInt(n) => *n != 0,
             _ => true,
         }
     }
@@ -115,9 +218,12 @@ impl Value {
     /// Returns the type name of the value as a static string
     pub fn type_name(&self) -> &'static str {
         match self {
+            Value::Undefined => "undefined",
             Value::Number(_) => "number",
             Value::String(_) => "string",
             Value::Bool(_) => "boolean",
+            Value::BigInt(_) => "bigint",
+            Value::Symbol(_, _) => "symbol",
             Value::Null => "null",
             Value::Object(_) => "object",
             Value::Array(..) => "object",
@@ -130,9 +236,18 @@ impl Value {
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Value::Undefined => write!(f, "undefined"),
             Value::Number(n) => write!(f, "{}", n),
             Value::String(s) => write!(f, "{}", s),
             Value::Bool(b) => write!(f, "{}", b),
+            Value::BigInt(n) => write!(f, "{}", n),
+            Value::Symbol(_, desc) => {
+                if let Some(d) = desc {
+                    write!(f, "Symbol({})", d)
+                } else {
+                    write!(f, "Symbol()")
+                }
+            }
             Value::Null => write!(f, "null"),
             Value::Object(_map) => write!(f, "[object Object]"),
             Value::Array(arr, _props) => {
@@ -149,9 +264,12 @@ impl std::fmt::Display for Value {
 impl PartialEq for Value {
     fn eq(&self, other: &Value) -> bool {
         match (self, other) {
+            (Value::Undefined, Value::Undefined) => true,
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::BigInt(a), Value::BigInt(b)) => a == b,
+            (Value::Symbol(a, _), Value::Symbol(b, _)) => a == b,
             (Value::Null, Value::Null) => true,
             _ => false,
         }

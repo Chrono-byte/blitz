@@ -27,6 +27,7 @@ import {
   debugValue as host_debugValue,
   host as host_ns,
 } from "./host.js";
+import "./runtime_builtins.js";
 
 // Note: std modules are imported after we establish canonical runtime
 // constructors (Object, Array, String, console). The std code mutates

@@ -10,19 +10,19 @@ interface SymbolConstructor {
   (description?: string): symbol;
   for(key: string): symbol;
   keyFor(sym: symbol): string | undefined;
-  readonly asyncIterator: symbol;
-  readonly hasInstance: symbol;
-  readonly isConcatSpreadable: symbol;
-  readonly iterator: symbol;
-  readonly match: symbol;
-  readonly matchAll: symbol;
-  readonly replace: symbol;
-  readonly search: symbol;
-  readonly species: symbol;
-  readonly split: symbol;
-  readonly toPrimitive: symbol;
-  readonly toStringTag: symbol;
-  readonly unscopables: symbol;
+  asyncIterator: symbol;
+  hasInstance: symbol;
+  isConcatSpreadable: symbol;
+  iterator: symbol;
+  match: symbol;
+  matchAll: symbol;
+  replace: symbol;
+  search: symbol;
+  species: symbol;
+  split: symbol;
+  toPrimitive: symbol;
+  toStringTag: symbol;
+  unscopables: symbol;
 }
 
 declare global {

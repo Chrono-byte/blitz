@@ -25,7 +25,7 @@ APIs.
 */
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,6 +35,7 @@ use std::rc::Rc;
 use serde::Deserialize;
 
 use tsblitz::compiler;
+use tsblitz::value::PropertyKey;
 use tsblitz::{bundle_entry, parser::Parser, typecheck, value::Value, vm::Vm};
 
 struct RunnerOptions {
@@ -199,12 +200,13 @@ fn builtin_eval_script(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     };
 
     // Build a minimal new realm
-    let new_globals = Rc::new(RefCell::new(HashMap::new()));
-    new_globals.borrow_mut().insert(
-        "print".to_string(),
-        Value::Builtin(|vm, args| {
+    let new_globals: Rc<RefCell<tsblitz::value::ObjectData>> =
+        Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+    new_globals.borrow_mut().properties.insert(
+        PropertyKey::String("print".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
             builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        }),
+        })),
     );
 
     // Parse / typecheck / compile / run. Ignore errors and return Null on failure.
@@ -244,7 +246,7 @@ fn builtin_eval_script(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 
 /// Run a source text in the provided globals and return a Result.
 fn run_source_in_realm(
-    globals: Rc<RefCell<HashMap<String, Value>>>,
+    globals: Rc<RefCell<tsblitz::value::ObjectData>>,
     source: &str,
 ) -> Result<Value, String> {
     let session = Parser::parse_source(source).map_err(|e| format!("parse: {}", e))?;
@@ -378,12 +380,12 @@ fn run_test_file(
         "harness/sta.js".to_string(),
         "harness/assert.js".to_string(),
     ];
-    if let Some(m) = &meta {
-        if let Some(includes) = &m.includes {
-            for inc in includes {
-                if !harness_files.iter().any(|h| h == inc) {
-                    harness_files.push(inc.clone());
-                }
+    if let Some(m) = &meta
+        && let Some(includes) = &m.includes
+    {
+        for inc in includes {
+            if !harness_files.iter().any(|h| h == inc) {
+                harness_files.push(inc.clone());
             }
         }
     }
@@ -683,29 +685,30 @@ fn main() {
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
 
     // Create a persistent VM and globals, install host builtins and the soft-prelude
-    let globals = Rc::new(RefCell::new(HashMap::new()));
-    globals.borrow_mut().insert(
-        "__native_print".to_string(),
-        Value::Builtin(|vm, args| {
+    let globals: Rc<RefCell<tsblitz::value::ObjectData>> =
+        Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_print".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
             builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        }),
+        })),
     );
-    globals.borrow_mut().insert(
-        "print".to_string(),
-        Value::Builtin(|vm, args| {
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("print".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
             builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        }),
+        })),
     );
-    let mut obj: HashMap<String, Value> = HashMap::new();
-    obj.insert(
-        "evalScript".to_string(),
-        Value::Builtin(|vm, args| {
+    let mut data = tsblitz::value::ObjectData::new();
+    data.properties.insert(
+        PropertyKey::String("evalScript".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
             builtin_eval_script(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        }),
+        })),
     );
-    globals.borrow_mut().insert(
-        "$262".to_string(),
-        Value::Object(Rc::new(RefCell::new(obj))),
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("$262".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(data)))),
     );
 
     let mut vm = Vm::new(globals.clone());
@@ -730,7 +733,15 @@ fn main() {
     }
 
     // Capture the set of globals installed by host + prelude; preserve these across tests.
-    let keep_globals: HashSet<String> = globals.borrow().keys().cloned().collect();
+    let keep_globals: HashSet<String> = globals
+        .borrow()
+        .properties
+        .keys()
+        .filter_map(|k| match k {
+            PropertyKey::String(s) => Some(s.clone()),
+            PropertyKey::Symbol(_) => None,
+        })
+        .collect();
 
     if opts.harness_only {
         match run_harness_only(&test262_dir, &mut vm, &keep_globals) {

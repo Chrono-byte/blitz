@@ -62,10 +62,23 @@ pub fn value_string(label: &str, v: &crate::value::Value) {
         Value::Number(n) => eprintln!("[trace] {} Number({})", label, n),
         Value::Bool(b) => eprintln!("[trace] {} Bool({})", label, b),
         Value::Null => eprintln!("[trace] {} Null", label),
+        Value::Undefined => eprintln!("[trace] {} Undefined", label),
+        Value::BigInt(n) => eprintln!("[trace] {} BigInt {}", label, n),
+        Value::Symbol(_, desc) => {
+            if let Some(d) = desc {
+                eprintln!("[trace] {} Symbol({})", label, d);
+            } else {
+                eprintln!("[trace] {} Symbol()", label);
+            }
+        }
         Value::Array(arr, _props) => {
             eprintln!("[trace] {} Array(len={})", label, arr.borrow().len())
         }
-        Value::Object(map) => eprintln!("[trace] {} Object(keys={})", label, map.borrow().len()),
+        Value::Object(map) => eprintln!(
+            "[trace] {} Object(keys={})",
+            label,
+            map.borrow().properties.len()
+        ),
         Value::Closure { proto, .. } => eprintln!(
             "[trace] {} Closure(name='{}' arity={})",
             label, proto.name, proto.arity

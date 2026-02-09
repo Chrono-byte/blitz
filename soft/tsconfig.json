@@ -1,36 +1,16 @@
 {
-  // Visit https://aka.ms/tsconfig to read more about this file
   "compilerOptions": {
-    // File Layout
-    // "rootDir": "./src",
-    // "outDir": "./dist",
-    // Environment Settings
-    // See also https://aka.ms/tsconfig/module
     "module": "nodenext",
+    "moduleResolution": "nodenext",
     "target": "esnext",
+    "lib": [],
+    "typeRoots": [],
     "types": [],
-    // For nodejs:
-    // "lib": ["esnext"],
-    // "types": ["node"],
-    // and npm install -D @types/node
-    // Other Outputs
     "sourceMap": true,
     "declaration": true,
     "declarationMap": true,
-    // Stricter Typechecking Options
     "noUncheckedIndexedAccess": false,
     "exactOptionalPropertyTypes": false,
-    // Style Options
-    // "noImplicitReturns": true,
-    // "noImplicitOverride": true,
-    // "noUnusedLocals": true,
-    // "noUnusedParameters": true,
-    // "noFallthroughCasesInSwitch": true,
-    // "noPropertyAccessFromIndexSignature": true,
-    // Relaxed compiler options to accommodate the soft layer's unusual
-    // patterns (host-backed globals, runtime-defined constructors,
-    // and deliberate prototype overwrites). These settings reduce
-    // strictness so the existing codebase typechecks with fewer edits.
     "strict": false,
     "noImplicitAny": false,
     "strictNullChecks": false,
@@ -43,7 +23,13 @@
     "isolatedModules": true,
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "rootDir": ".",
+    "outDir": "./dist",
+    "composite": false,
+    "esModuleInterop": true,
+    "resolveJsonModule": false
   },
-  "exclude": ["node_modules"]
+  "include": ["prelude.ts", "host.ts", "runtime_builtins.ts", "core/**/*.ts", "std/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
 }

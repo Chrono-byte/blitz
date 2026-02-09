@@ -111,7 +111,6 @@ fn run_program(
 /// slot types in every FunctionProto across the compiled chunk graph so the
 /// VM won't enforce runtime type checks for those functions.
 fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     // Recursive helper that rebuilds chunks and their nested function chunks.
@@ -184,7 +183,8 @@ struct Cli {
 
 fn main() -> Result<(), tsblitz::errors::Error> {
     // Public globals visible to user code (populated by the prelude)
-    let globals = Rc::new(RefCell::new(HashMap::new()));
+    let globals: Rc<RefCell<tsblitz::value::ObjectData>> =
+        Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
 
     // Provide a `globalThis` object that reflects the VM globals map so soft
     // layer code that writes `globalThis.x = ...` updates the VM globals.
@@ -193,43 +193,51 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     let global_this = Value::Object(Rc::clone(&globals));
     {
         let mut g = globals.borrow_mut();
-        g.insert("globalThis".to_string(), global_this);
+        g.properties.insert(
+            tsblitz::value::PropertyKey::String("globalThis".to_string()),
+            tsblitz::value::PropertyDescriptor::data(global_this),
+        );
     }
 
     // Publish native host bindings directly into globals so soft code can read
     // them as ordinary globals (e.g. `globalThis.__native_print`). This keeps
     // the runtime simpler and avoids an extra indirection.
-    globals.borrow_mut().insert(
-        "__native_print".to_string(),
-        Value::Builtin(|vm, args| {
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_print".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
             native_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        }),
+        })),
     );
 
     // Minimal native hook for creating VM-backed objects.
     fn native_new_object(_vm: &mut Vm, _args: &[Value]) -> Result<Value, String> {
         use std::cell::RefCell;
-        use std::collections::HashMap;
         use std::rc::Rc;
-        Ok(Value::Object(Rc::new(RefCell::new(HashMap::new()))))
+        Ok(Value::Object(Rc::new(RefCell::new(
+            tsblitz::value::ObjectData::new(),
+        ))))
     }
 
-    globals.borrow_mut().insert(
-        "__native_new_object".to_string(),
-        Value::Builtin(|vm, args| {
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_new_object".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
             native_new_object(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        }),
+        })),
     );
 
     // Provide a minimal builtin console.log for early bootstrap and REPL use.
-    globals.borrow_mut().insert(
-        "console".to_string(),
-        Value::Object(Rc::new(RefCell::new(HashMap::from([(
-            "log".to_string(),
-            Value::Builtin(|vm, args| {
-                native_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-            }),
-        )])))),
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("console".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new({
+            let mut data = tsblitz::value::ObjectData::new();
+            data.properties.insert(
+                tsblitz::value::PropertyKey::String("log".to_string()),
+                tsblitz::value::PropertyDescriptor::data(Value::Builtin(|vm, args| {
+                    native_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+                })),
+            );
+            data
+        })))),
     );
 
     // Parse CLI early so clap can handle --help/--version before doing work.
@@ -418,7 +426,14 @@ fn main() -> Result<(), tsblitz::errors::Error> {
             "Object",
             "Array",
         ] {
-            match globals.borrow().get(*name) {
+            match globals
+                .borrow()
+                .properties
+                .get(&tsblitz::value::PropertyKey::String((*name).to_string()))
+                .and_then(|d| match d {
+                    tsblitz::value::PropertyDescriptor::Data { value, .. } => Some(value),
+                    _ => None,
+                }) {
                 Some(v) => eprintln!(
                     "[diag pre-prelude] global '{}' type={}",
                     name,
