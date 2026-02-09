@@ -325,6 +325,10 @@ pub enum Op {
     PushHandler,
     /// Pop the top exception handler record
     PopHandler,
+    /// Read an export slot from a module table. Operands: module_index (u8), export_name_constant_index (u8)
+    GetModuleExport,
+    /// Write an export slot in a module table. Operands: module_index (u8), export_name_constant_index (u8)
+    SetModuleExport,
 }
 
 impl Op {
@@ -423,6 +427,8 @@ impl TryFrom<u8> for Op {
             38 => Ok(Op::Throw),
             39 => Ok(Op::PushHandler),
             40 => Ok(Op::PopHandler),
+            41 => Ok(Op::GetModuleExport),
+            42 => Ok(Op::SetModuleExport),
             _ => Err(()),
         }
     }

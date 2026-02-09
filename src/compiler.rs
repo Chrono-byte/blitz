@@ -29,6 +29,17 @@ use oxc_ast::ast as oast;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// Module compilation context describing imports/exports for the module being compiled.
+#[derive(Clone, Debug)]
+pub struct ModuleContext {
+    /// Numeric module index assigned during instantiation
+    pub module_index: usize,
+    /// Imports: local name -> (module_index, exported_name)
+    pub imports: HashMap<String, (usize, String)>,
+    /// Exported local names (set)
+    pub exports: std::collections::HashSet<String>,
+}
+
 const LINE: u32 = 1;
 
 /// Compile a parsed program to bytecode.
@@ -39,13 +50,22 @@ const LINE: u32 = 1;
 // Public API: compile an oxc AST Program directly.
 pub fn compile(program: &oast::Program<'_>) -> Result<Chunk, crate::errors::CompilerError> {
     let mut c = Compiler::new();
-    c.compile_oxc(program)
+    c.compile_oxc(program, None)
 }
 
 /// Compile an oxc AST Program.
 pub fn compile_oxc(program: &oast::Program<'_>) -> Result<Chunk, crate::errors::CompilerError> {
     let mut c = Compiler::new();
-    c.compile_oxc(program)
+    c.compile_oxc(program, None)
+}
+
+/// Compile an oxc AST Program with an optional ModuleContext.
+pub fn compile_oxc_with_ctx(
+    program: &oast::Program<'_>,
+    ctx: Option<&ModuleContext>,
+) -> Result<Chunk, crate::errors::CompilerError> {
+    let mut c = Compiler::new();
+    c.compile_oxc(program, ctx)
 }
 
 // Internal helpers for legacy owned AST were removed. The compiler now
@@ -67,6 +87,8 @@ pub struct Compiler {
     /// of code offsets (index of the first placeholder byte) that must be
     /// patched to jump to the loop's continue target when the loop is closed.
     continue_patches: Vec<Vec<usize>>,
+    /// Optional module context when compiling a module
+    current_module: Option<ModuleContext>,
 }
 
 impl Compiler {
@@ -79,6 +101,7 @@ impl Compiler {
             globals: HashMap::new(),
             is_root: true,
             continue_patches: Vec::new(),
+            current_module: None,
         }
     }
 
@@ -122,6 +145,7 @@ impl Compiler {
     pub fn compile_oxc(
         &mut self,
         program: &oast::Program<'_>,
+        ctx: Option<&ModuleContext>,
     ) -> Result<Chunk, crate::errors::CompilerError> {
         // Start direct walking of the oxc program body. This is a minimal but
         // complete walker for the node kinds we need. Module declarations are
@@ -129,6 +153,15 @@ impl Compiler {
 
         // Pre-declare functions for hoisting by scanning module items.
         self.pre_declare_functions_oast(program);
+
+        // Attach ModuleContext for compilation to consult when resolving
+        // imports/exports. We store a clone so the compiler can borrow it
+        // throughout the compile pass.
+        if let Some(cctx) = ctx {
+            self.current_module = Some(cctx.clone());
+        } else {
+            self.current_module = None;
+        }
 
         for stmt in &program.body {
             self.compile_statement_oast(stmt)?;
@@ -447,9 +480,28 @@ impl Compiler {
                     self.emit(Op::GetLocal, LINE);
                     self.emit_byte(slot as u8, LINE);
                 } else {
-                    let idx = self.global_name_index(name);
-                    self.emit(Op::GetGlobal, LINE);
-                    self.emit_byte(idx as u8, LINE);
+                    // If compiling a module and this identifier is an imported
+                    // local, emit a GetModuleExport opcode to read the live
+                    // binding from the source module's export slot.
+                    // If compiling a module and this identifier is an imported
+                    // local, emit a GetModuleExport opcode to read the live
+                    // binding from the source module's export slot. Extract
+                    // the source index and exported name first to avoid holding
+                    // a borrow on self while emitting bytecode.
+                    if let Some((src_idx, exported_name)) = self
+                        .current_module
+                        .as_ref()
+                        .and_then(|c| c.imports.get(name).map(|(i, n)| (*i, n.clone())))
+                    {
+                        let cname_idx = self.chunk.add_constant(Value::String(exported_name));
+                        self.emit(Op::GetModuleExport, LINE);
+                        self.emit_byte(src_idx as u8, LINE);
+                        self.emit_byte(cname_idx as u8, LINE);
+                    } else {
+                        let idx = self.global_name_index(name);
+                        self.emit(Op::GetGlobal, LINE);
+                        self.emit_byte(idx as u8, LINE);
+                    }
                 }
             }
             OExpr::AssignmentExpression(a) => {
@@ -458,17 +510,46 @@ impl Compiler {
                 })?;
                 match a.operator {
                     oast::AssignmentOperator::Assign => match target {
-                        oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
-                            let name = id.name.as_str();
-                            self.compile_expr_oast(&a.right)?;
-                            self.emit(Op::Dup, LINE);
+                            oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                                let name = id.name.as_str();
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit(Op::Dup, LINE);
                             if let Some(slot) = self.resolve_local(name) {
                                 self.emit(Op::SetLocal, LINE);
                                 self.emit_byte(slot as u8, LINE);
+                                // Check export membership without holding a borrow
+                                let is_exported = self
+                                    .current_module
+                                    .as_ref()
+                                    .map(|c| c.exports.contains(name))
+                                    .unwrap_or(false);
+                                if is_exported {
+                                    let module_index = self
+                                        .current_module
+                                        .as_ref()
+                                        .map(|c| c.module_index)
+                                        .expect("module_index expected");
+                                    let cname_idx = self.chunk.add_constant(Value::String(name.to_string()));
+                                    self.emit(Op::SetModuleExport, LINE);
+                                    self.emit_byte(module_index as u8, LINE);
+                                    self.emit_byte(cname_idx as u8, LINE);
+                                }
                             } else {
-                                let idx = self.global_name_index(name);
-                                self.emit(Op::SetGlobal, LINE);
-                                self.emit_byte(idx as u8, LINE);
+                                // Assignment to a non-local — could be an import binding
+                                if let Some((src_idx, exported_name)) = self
+                                    .current_module
+                                    .as_ref()
+                                    .and_then(|c| c.imports.get(name).map(|(i, n)| (*i, n.clone())))
+                                {
+                                    let cname_idx = self.chunk.add_constant(Value::String(exported_name));
+                                    self.emit(Op::SetModuleExport, LINE);
+                                    self.emit_byte(src_idx as u8, LINE);
+                                    self.emit_byte(cname_idx as u8, LINE);
+                                } else {
+                                    let idx = self.global_name_index(name);
+                                    self.emit(Op::SetGlobal, LINE);
+                                    self.emit_byte(idx as u8, LINE);
+                                }
                             }
                         }
                         oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
@@ -670,6 +751,7 @@ impl Compiler {
             globals: HashMap::new(),
             is_root: false,
             continue_patches: Vec::new(),
+            current_module: None,
         };
 
         // Parameter placeholders (no type information available here).
@@ -737,6 +819,7 @@ impl Compiler {
             globals: HashMap::new(),
             is_root: false,
             continue_patches: Vec::new(),
+            current_module: None,
         };
 
         let mut param_type_opts: Vec<Option<Type>> = Vec::new();

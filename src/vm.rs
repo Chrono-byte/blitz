@@ -195,6 +195,8 @@ pub struct Vm {
     handlers: Vec<HandlerRecord>,
     /// Per-VM module loader responsible for module construction/instantiation/eval
     module_loader: Option<ModuleLoader>,
+    /// Per-VM module table: vector indexed by module index, each mapping export name -> shared slot
+    module_table: Vec<HashMap<String, Rc<RefCell<Value>>>>,
 }
 
 impl Vm {
@@ -219,6 +221,7 @@ impl Vm {
             handlers: Vec::new(),
             // Each VM gets its own module loader
             module_loader: Some(ModuleLoader::new()),
+            module_table: Vec::new(),
         }
     }
 
@@ -229,6 +232,22 @@ impl Vm {
         }
         // SAFETY: we just ensured module_loader is Some
         self.module_loader.as_mut().unwrap()
+    }
+
+    /// Install a module's export slot map into the VM module table at the
+    /// specified numeric module index. The provided `exports` map contains
+    /// shared `Rc<RefCell<Value>>` slots allocated by the ModuleLoader so both
+    /// VM and ModuleLoader share the same live binding slots.
+    pub fn install_module_exports(
+        &mut self,
+        module_index: usize,
+        exports: std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    ) {
+        // Ensure table is large enough
+        while self.module_table.len() <= module_index {
+            self.module_table.push(HashMap::new());
+        }
+        self.module_table[module_index] = exports;
     }
 
     /// Debug helper: get a global value by name (cloned).
@@ -396,11 +415,6 @@ impl Vm {
                 Op::SetLocal => {
                     let slot = self.read_byte()? as usize;
                     let v = self.pop()?;
-                    if let Some(Some(expected)) =
-                        self.current_slot_types.as_ref().and_then(|t| t.get(slot))
-                    {
-                        check_assign(expected, &v)?;
-                    }
                     ensure_slot(&mut self.locals, slot);
                     self.locals[slot] = v;
                 }
@@ -427,13 +441,6 @@ impl Vm {
                     let idx = self.read_byte()? as usize;
                     let name = self.string_constant(idx)?;
                     let v = self.pop()?;
-                    if let Some(Some(expected)) = self
-                        .root_chunk
-                        .as_ref()
-                        .and_then(|r| r.global_types.get(&name))
-                    {
-                        check_assign(expected, &v)?;
-                    }
                     self.globals
                         .borrow_mut()
                         .properties
@@ -681,6 +688,38 @@ impl Vm {
                     let k = self.to_property_key(&key)?;
                     self.set_property_tracked(&obj, &k, value)?;
                 }
+                Op::GetModuleExport => {
+                    let module_idx = self.read_byte()? as usize;
+                    let name_idx = self.read_byte()? as usize;
+                    let name = self.string_constant(name_idx)?;
+                    let v = self
+                        .module_table
+                        .get(module_idx)
+                        .and_then(|m| m.get(&name).cloned())
+                        .map_or(Value::Undefined, |slot| slot.borrow().clone());
+                    self.stack.push(v);
+                }
+                Op::SetModuleExport => {
+                    let module_idx = self.read_byte()? as usize;
+                    let name_idx = self.read_byte()? as usize;
+                    let name = self.string_constant(name_idx)?;
+                    let v = self.pop()?;
+                    if let Some(m) = self.module_table.get_mut(module_idx) {
+                        if let Some(slot) = m.get(&name) {
+                            *slot.borrow_mut() = v;
+                        } else {
+                            let new_slot = Rc::new(RefCell::new(v.clone()));
+                            m.insert(name, new_slot);
+                        }
+                    } else {
+                        // Expand module table if needed
+                        while self.module_table.len() <= module_idx {
+                            self.module_table.push(HashMap::new());
+                        }
+                        let new_slot = Rc::new(RefCell::new(v.clone()));
+                        self.module_table[module_idx].insert(name, new_slot);
+                    }
+                }
 
                 // -----------------------------------------------------------
                 // Closures
@@ -900,11 +939,6 @@ impl Vm {
             Op::SetLocal => {
                 let slot = self.read_byte()? as usize;
                 let v = self.pop()?;
-                if let Some(Some(expected)) =
-                    self.current_slot_types.as_ref().and_then(|t| t.get(slot))
-                {
-                    check_assign(expected, &v)?;
-                }
                 ensure_slot(&mut self.locals, slot);
                 self.locals[slot] = v;
             }
@@ -927,13 +961,6 @@ impl Vm {
                 let idx = self.read_byte()? as usize;
                 let name = self.string_constant(idx)?;
                 let v = self.pop()?;
-                if let Some(Some(expected)) = self
-                    .root_chunk
-                    .as_ref()
-                    .and_then(|r| r.global_types.get(&name))
-                {
-                    check_assign(expected, &v)?;
-                }
                 self.globals
                     .borrow_mut()
                     .properties
@@ -949,14 +976,30 @@ impl Vm {
             Op::Add => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = match (a, b) {
-                    (Value::BigInt(x), Value::BigInt(y)) => Value::BigInt(x + y),
-                    (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
-                    (Value::String(s), v) => Value::String(format!("{}{}", s, v)),
-                    (v, Value::String(s)) => Value::String(format!("{}{}", v, s)),
-                    _ => return Err("Add: number or string expected".into()),
-                };
-                self.stack.push(result);
+                // BigInt arithmetic: both operands must be BigInt
+                if matches!(a, Value::BigInt(_)) || matches!(b, Value::BigInt(_)) {
+                    if let (Value::BigInt(x), Value::BigInt(y)) = (a, b) {
+                        self.stack.push(Value::BigInt(x + y));
+                    } else {
+                        return Err(crate::errors::RuntimeError::from(
+                            "Add: cannot mix BigInt and other types",
+                        ));
+                    }
+                } else {
+                    // Ordinary addition: perform ToPrimitive with hint 'default'
+                    let a_prim = self.to_primitive(&a, None)?;
+                    let b_prim = self.to_primitive(&b, None)?;
+                    // If either primitive is a string, perform string concatenation
+                    if matches!(a_prim, Value::String(_)) || matches!(b_prim, Value::String(_)) {
+                        let sa = self.to_string(&a_prim)?;
+                        let sb = self.to_string(&b_prim)?;
+                        self.stack.push(Value::String(format!("{}{}", sa, sb)));
+                    } else {
+                        let na = self.to_number_value(&a_prim)?;
+                        let nb = self.to_number_value(&b_prim)?;
+                        self.stack.push(Value::Number(na + nb));
+                    }
+                }
             }
             Op::AddNumber => {
                 let b = self.pop()?;
@@ -1064,6 +1107,37 @@ impl Vm {
                 let obj = self.pop()?;
                 let k = self.to_property_key(&key)?;
                 self.set_property_tracked(&obj, &k, value)?;
+            }
+            Op::GetModuleExport => {
+                let module_idx = self.read_byte()? as usize;
+                let name_idx = self.read_byte()? as usize;
+                let name = self.string_constant(name_idx)?;
+                let v = self
+                    .module_table
+                    .get(module_idx)
+                    .and_then(|m| m.get(&name).cloned())
+                    .map_or(Value::Undefined, |slot| slot.borrow().clone());
+                self.stack.push(v);
+            }
+            Op::SetModuleExport => {
+                let module_idx = self.read_byte()? as usize;
+                let name_idx = self.read_byte()? as usize;
+                let name = self.string_constant(name_idx)?;
+                let v = self.pop()?;
+                if let Some(m) = self.module_table.get_mut(module_idx) {
+                    if let Some(slot) = m.get(&name) {
+                        *slot.borrow_mut() = v;
+                    } else {
+                        let new_slot = Rc::new(RefCell::new(v));
+                        m.insert(name, new_slot);
+                    }
+                } else {
+                    while self.module_table.len() <= module_idx {
+                        self.module_table.push(HashMap::new());
+                    }
+                    let new_slot = Rc::new(RefCell::new(v));
+                    self.module_table[module_idx].insert(name, new_slot);
+                }
             }
             Op::MakeClosure => self.make_closure()?,
             Op::GetBuiltin => {
@@ -1198,7 +1272,6 @@ impl Vm {
         }
     }
 
-    #[allow(dead_code)]
     pub fn to_number_value(&mut self, v: &Value) -> Result<f64, crate::errors::RuntimeError> {
         match v {
             Value::Number(n) => Ok(*n),
@@ -1569,10 +1642,8 @@ impl Vm {
 
         let frame = self.frames.pop().ok_or("Return without call frame")?;
 
-        // Runtime return-type check.
-        if let Some(ref expected) = frame.return_type {
-            check_assign(expected, &result)?;
-        }
+        // Runtime return-type check intentionally disabled in JS-first mode.
+        // TypeScript return annotations are erased at runtime.
 
         // Restore caller state.
         self.current_slot_types = frame.slot_types;
@@ -1640,23 +1711,13 @@ impl Vm {
 
     fn validate_call_args(
         &self,
-        call_args: &[Value],
-        proto: &crate::bytecode::FunctionProto,
+        _call_args: &[Value],
+        _proto: &crate::bytecode::FunctionProto,
     ) -> Result<(), crate::errors::RuntimeError> {
-        for (i, (arg, expected_opt)) in call_args
-            .iter()
-            .zip(proto.slot_types.iter().take(proto.arity))
-            .enumerate()
-        {
-            if let Some(expected) = expected_opt {
-                if *expected == Type::Void {
-                    continue;
-                }
-                check_assign(expected, arg).map_err(|e| {
-                    crate::errors::RuntimeError::from(format!("Argument {}: {}", i + 1, e))
-                })?;
-            }
-        }
+        // Argument type validation is intentionally disabled in JS-first mode.
+        // TypeScript annotations are treated as comments and should not affect
+        // runtime behaviour. Keep this function for tooling and future opt-in
+        // checked modes.
         Ok(())
     }
 
@@ -2042,7 +2103,6 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     #[inline(always)]
-    #[allow(dead_code)]
     fn binary_num<F>(&mut self, f: F) -> Result<(), crate::errors::RuntimeError>
     where
         F: FnOnce(f64, f64) -> f64,

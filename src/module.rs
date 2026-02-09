@@ -1,3 +1,4 @@
+use crate::compiler::ModuleContext;
 use crate::errors::BundlerError;
 use crate::parser::ParserSession;
 use crate::resolver::resolve_specifier;
@@ -25,10 +26,14 @@ pub struct ModuleRecord {
     pub path: PathBuf,
     pub session: ParserSession,
     pub state: ModuleState,
+    /// Assigned numeric module index used by the VM module table. Set during instantiation.
+    pub module_index: Option<usize>,
     /// Export slots: mapping export name -> shared slot (Rc<RefCell<Value>>)
     pub exports: HashMap<String, Rc<RefCell<Value>>>,
     /// Import bindings: local name -> exporter slot
     pub imports: HashMap<String, Rc<RefCell<Value>>>,
+    /// Import metadata: local name -> (module_index, exported_name)
+    pub import_sources: HashMap<String, (usize, String)>,
     // pub chunk: Option<crate::bytecode::Chunk>,
 }
 
@@ -38,8 +43,10 @@ impl ModuleRecord {
             path,
             session,
             state: ModuleState::Parsed,
+            module_index: None,
             exports: HashMap::new(),
             imports: HashMap::new(),
+            import_sources: HashMap::new(),
         }
     }
 }
@@ -180,17 +187,31 @@ impl ModuleLoader {
         }
 
         // Second pass: wire imports to exporter slots so importers hold live
-        // bindings to the same Rc<RefCell<Value>> as exporters.
+        // bindings to the same Rc<RefCell<Value>> as exporters. We iterate over
+        // a snapshot of module paths so mutation of self.map during construct
+        // doesn't interfere with iteration.
         let module_paths: Vec<PathBuf> = self.map.keys().cloned().collect();
+        // Assign a numeric module index to each module and prepare an export map
+        // vector that the VM will consume. We don't have access to the Vm here,
+        // so we'll store the index in the ModuleRecord and the caller should
+        // populate Vm.module_table from ModuleLoader.map after instantiation.
+        let mut next_index: usize = 0;
+        for path in &module_paths {
+            if let Some(rec_rc) = self.map.get(path) {
+                let mut rec = rec_rc.borrow_mut();
+                if rec.module_index.is_none() {
+                    rec.module_index = Some(next_index);
+                    next_index += 1;
+                }
+            }
+        }
         for path in module_paths {
-            // Re-borrow per-module record (we clone the Rc so we don't hold a
-            // borrow across calls that may mutably modify the loader map).
             let rec_rc = match self.map.get(&path) {
                 Some(r) => Rc::clone(r),
                 None => continue,
             };
             let mut rec = rec_rc.borrow_mut();
-            // Parse the ESTree to find import declarations
+            // Walk ESTree JSON import declarations to wire live-binding slots
             let estree = rec.session.program().to_pretty_estree_ts_json(false);
             let root: JsonValue = serde_json::from_str(&estree)
                 .map_err(|e| BundlerError::from(format!("Failed to parse ESTree JSON: {}", e)))?;
@@ -199,121 +220,124 @@ impl ModuleLoader {
                 .and_then(|b| b.as_array())
                 .ok_or_else(|| BundlerError::from("Expected program body"))?;
             for item in body {
-                if let Some(typ) = item.get("type").and_then(|t| t.as_str())
-                    && typ == "ImportDeclaration"
-                    && let Some(source_node) = item.get("source")
-                    && let Some(spec) = source_node.get("value").and_then(|v| v.as_str())
-                {
-                    // Resolve the specifier relative to this module
-                    let base_dir = rec.path.parent().unwrap_or(Path::new("."));
-                    // Ensure dependency is constructed; this may insert into self.map
-                    let dep_rec_rc = match self.construct(base_dir, spec) {
-                        Ok(r) => r,
-                        Err(_) => continue,
-                    };
+                if let Some(typ) = item.get("type").and_then(|t| t.as_str()) {
+                    if typ != "ImportDeclaration" {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
 
-                    if let Some(specs) = item.get("specifiers").and_then(|s| s.as_array()) {
-                        for sp in specs {
-                            if let Some(kind) = sp.get("type").and_then(|k| k.as_str()) {
-                                match kind {
-                                    "ImportSpecifier" => {
-                                        // imported.name and local.name
-                                        if let Some(imported) = sp
-                                            .get("imported")
-                                            .and_then(|i| i.get("name"))
-                                            .and_then(|n| n.as_str())
-                                            && let Some(local) = sp
-                                                .get("local")
-                                                .and_then(|l| l.get("name"))
-                                                .and_then(|n| n.as_str())
-                                        {
-                                            // Try to get exporter slot without holding a borrow while mutating
-                                            let slot_opt = {
-                                                let dep = dep_rec_rc.borrow();
-                                                dep.exports.get(imported).cloned()
-                                            };
-                                            if let Some(slot) = slot_opt {
-                                                rec.imports
-                                                    .insert(local.to_string(), Rc::clone(&slot));
-                                            } else {
-                                                // Create a new slot on exporter and link to it
-                                                let new_slot =
-                                                    Rc::new(RefCell::new(Value::Undefined));
-                                                {
-                                                    let mut dep_mut = dep_rec_rc.borrow_mut();
-                                                    dep_mut.exports.insert(
-                                                        imported.to_string(),
-                                                        Rc::clone(&new_slot),
-                                                    );
-                                                }
-                                                rec.imports.insert(
-                                                    local.to_string(),
-                                                    Rc::clone(&new_slot),
-                                                );
-                                            }
+                let spec = item
+                    .get("source")
+                    .and_then(|s| s.get("value"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if spec.is_empty() {
+                    continue;
+                }
+                let base_dir = rec.path.parent().unwrap_or(Path::new("."));
+                let dep_rec_rc = match self.construct(base_dir, &spec) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+
+                if let Some(specs) = item.get("specifiers").and_then(|s| s.as_array()) {
+                    for sp in specs {
+                        if let Some(sptype) = sp.get("type").and_then(|t| t.as_str()) {
+                            match sptype {
+                                "ImportSpecifier" => {
+                                    let local = sp
+                                        .get("local")
+                                        .and_then(|l| l.get("name"))
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let imported = sp
+                                        .get("imported")
+                                        .and_then(|i| i.get("name"))
+                                        .and_then(|n| n.as_str())
+                                        .map(std::string::ToString::to_string)
+                                        .unwrap_or(local.clone());
+                                    let slot_opt =
+                                        { dep_rec_rc.borrow().exports.get(&imported).cloned() };
+                                    if let Some(slot) = slot_opt {
+                                        rec.imports.insert(local.clone(), Rc::clone(&slot));
+                                        if let Some(src_idx) = dep_rec_rc.borrow().module_index {
+                                            rec.import_sources.insert(local, (src_idx, imported));
+                                        }
+                                    } else {
+                                        let new_slot = Rc::new(RefCell::new(Value::Undefined));
+                                        dep_rec_rc
+                                            .borrow_mut()
+                                            .exports
+                                            .insert(imported.clone(), Rc::clone(&new_slot));
+                                        rec.imports.insert(local.clone(), Rc::clone(&new_slot));
+                                        if let Some(src_idx) = dep_rec_rc.borrow().module_index {
+                                            rec.import_sources.insert(local, (src_idx, imported));
                                         }
                                     }
-                                    "ImportDefaultSpecifier" => {
-                                        if let Some(local) = sp
-                                            .get("local")
-                                            .and_then(|l| l.get("name"))
-                                            .and_then(|n| n.as_str())
-                                        {
-                                            let slot_opt = {
-                                                let dep = dep_rec_rc.borrow();
-                                                dep.exports.get("default").cloned()
-                                            };
-                                            if let Some(slot) = slot_opt {
-                                                rec.imports
-                                                    .insert(local.to_string(), Rc::clone(&slot));
-                                            } else {
-                                                let new_slot =
-                                                    Rc::new(RefCell::new(Value::Undefined));
-                                                {
-                                                    let mut dep_mut = dep_rec_rc.borrow_mut();
-                                                    dep_mut.exports.insert(
-                                                        "default".to_string(),
-                                                        Rc::clone(&new_slot),
-                                                    );
-                                                }
-                                                rec.imports.insert(
-                                                    local.to_string(),
-                                                    Rc::clone(&new_slot),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    "ImportNamespaceSpecifier" => {
-                                        if let Some(local) = sp
-                                            .get("local")
-                                            .and_then(|l| l.get("name"))
-                                            .and_then(|n| n.as_str())
-                                        {
-                                            // Create namespace object (snapshot of current exports)
-                                            let ns_obj = Value::Object(Rc::new(RefCell::new(
-                                                crate::value::ObjectData::new(),
-                                            )));
-                                            let exports_snapshot = {
-                                                let dep = dep_rec_rc.borrow();
-                                                dep.exports.clone()
-                                            };
-                                            for (k, slot) in &exports_snapshot {
-                                                let v = slot.borrow().clone();
-                                                if let Value::Object(o) = &ns_obj {
-                                                    o.borrow_mut().properties.insert(
-                                                        crate::value::PropertyKey::String(
-                                                            k.clone(),
-                                                        ),
-                                                        crate::value::PropertyDescriptor::data(v),
-                                                    );
-                                                }
-                                            }
-                                            let boxed = Rc::new(RefCell::new(ns_obj));
-                                            rec.imports.insert(local.to_string(), boxed);
-                                        }
-                                    }
-                                    _ => {}
                                 }
+                                "ImportDefaultSpecifier" => {
+                                    let local = sp
+                                        .get("local")
+                                        .and_then(|l| l.get("name"))
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let slot_opt =
+                                        { dep_rec_rc.borrow().exports.get("default").cloned() };
+                                    if let Some(slot) = slot_opt {
+                                        rec.imports.insert(local.clone(), Rc::clone(&slot));
+                                        if let Some(src_idx) = dep_rec_rc.borrow().module_index {
+                                            rec.import_sources
+                                                .insert(local, (src_idx, "default".to_string()));
+                                        }
+                                    } else {
+                                        let new_slot = Rc::new(RefCell::new(Value::Undefined));
+                                        dep_rec_rc
+                                            .borrow_mut()
+                                            .exports
+                                            .insert("default".to_string(), Rc::clone(&new_slot));
+                                        rec.imports.insert(local.clone(), Rc::clone(&new_slot));
+                                        if let Some(src_idx) = dep_rec_rc.borrow().module_index {
+                                            rec.import_sources
+                                                .insert(local, (src_idx, "default".to_string()));
+                                        }
+                                    }
+                                }
+                                "ImportNamespaceSpecifier" => {
+                                    let local = sp
+                                        .get("local")
+                                        .and_then(|l| l.get("name"))
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    // Create a namespace object backed by a property map
+                                    let ns_obj = Value::Object(Rc::new(RefCell::new(
+                                        crate::value::ObjectData::new(),
+                                    )));
+                                    let exports_snapshot = { dep_rec_rc.borrow().exports.clone() };
+                                    for (k, slot) in &exports_snapshot {
+                                        let v = slot.borrow().clone();
+                                        if let Value::Object(o) = &ns_obj {
+                                            o.borrow_mut().properties.insert(
+                                                crate::value::PropertyKey::String(k.clone()),
+                                                crate::value::PropertyDescriptor::data(v),
+                                            );
+                                        }
+                                    }
+                                    let boxed = Rc::new(RefCell::new(ns_obj));
+                                    rec.imports.insert(local.clone(), boxed);
+                                    // Namespace imports are represented as plain objects for now.
+                                    // Record a synthetic import source with module index and special "*" name
+                                    if let Some(src_idx) = dep_rec_rc.borrow().module_index {
+                                        rec.import_sources
+                                            .insert(local, (src_idx, "*".to_string()));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -391,6 +415,18 @@ impl ModuleLoader {
         entry: &Path,
         vm: &mut Vm,
     ) -> Result<(), crate::errors::RuntimeError> {
+        // Populate vm.module_table with the export slot maps for each
+        // instantiated module. ModuleRecord.module_index must have been set
+        // during instantiate_all(). We clone the HashMap of Rc slots so the
+        // VM receives ownership of the map structure but still shares the
+        // underlying Rc<RefCell<Value>> live binding slots.
+        for rec_rc in self.map.values() {
+            let rec = rec_rc.borrow();
+            if let Some(idx) = rec.module_index {
+                let exports_clone = rec.exports.clone();
+                vm.install_module_exports(idx, exports_clone);
+            }
+        }
         let order = self.evaluation_order_from(entry).map_err(|e| {
             crate::errors::RuntimeError::from(format!("Module resolution failed: {}", e))
         })?;
@@ -404,9 +440,18 @@ impl ModuleLoader {
                     crate::typecheck::check_oxc(program).map_err(|e| {
                         crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
                     })?;
-                    let chunk = crate::compiler::compile_oxc(program).map_err(|e| {
-                        crate::errors::RuntimeError::from(format!("Compile failed: {}", e))
-                    })?;
+                    // Build ModuleContext from the instantiated record so the compiler
+                    // can emit module ops for imports/exports.
+                    let module_idx = rec.module_index.expect("module_index should be set");
+                    let ctx = ModuleContext {
+                        module_index: module_idx,
+                        imports: rec.import_sources.clone(),
+                        exports: rec.exports.keys().cloned().collect(),
+                    };
+                    let chunk = crate::compiler::compile_oxc_with_ctx(program, Some(&ctx))
+                        .map_err(|e| {
+                            crate::errors::RuntimeError::from(format!("Compile failed: {}", e))
+                        })?;
                     let chunk = crate::runtime_utils::clear_slot_types_in_chunk(chunk);
                     vm.run(chunk)?;
                     rec.state = ModuleState::Evaluated;
@@ -429,7 +474,7 @@ impl ModuleLoader {
                 crate::typecheck::check_oxc(program).map_err(|e| {
                     crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
                 })?;
-                let chunk = crate::compiler::compile_oxc(program).map_err(|e| {
+                let chunk = crate::compiler::compile_oxc_with_ctx(program, None).map_err(|e| {
                     crate::errors::RuntimeError::from(format!("Compile failed: {}", e))
                 })?;
                 // Clear slot types to allow dynamic prelude patterns
