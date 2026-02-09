@@ -41,8 +41,8 @@ use std::rc::Rc;
 use tsblitz::bytecode;
 use tsblitz::compiler;
 use tsblitz::{
-    bundle_entry, parser::Parser as TsParser, resolver::resolve_specifier, typecheck, value::Value,
-    vm::Vm,
+    module::ModuleLoader, parser::Parser as TsParser, resolver::resolve_specifier, typecheck,
+    value::Value, vm::Vm,
 };
 
 /// Minimal native hook: print to stdout. The TS soft layer wraps this as console.log.
@@ -166,10 +166,10 @@ fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
 }
 
 // Textual import inlining was removed. The project now uses a proper
-// bundler/module-graph loader that parses modules and inlines them at the
-// AST level. Use `bundle_entry()` (from the `bundler` module) to build a
-// combined `Program` for an entry file that resolves relative imports and
-// inlines module bodies in dependency order.
+// module-graph loader that parses modules and wires imports at runtime.
+// Use `ModuleLoader` (see `module::ModuleLoader`) to construct/instantiate
+// and evaluate entry modules; it handles parsing dependencies, compilation,
+// and execution into a VM.
 
 /// Command line arguments for the tsblitz executable.
 #[derive(Parser, Debug)]
@@ -231,7 +231,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("__define_property".to_string()),
         tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            vm.define_property_builtin(args)}))),
+            vm.define_property_builtin(args)
+        }))),
     );
 
     // Kernel-native coercion helpers: soft layer delegates ToString/ToNumber/ToBoolean
@@ -242,15 +243,15 @@ fn main() -> Result<(), tsblitz::errors::Error> {
         tsblitz::value::PropertyKey::String("__native_toString".to_string()),
         tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let v = args.first().cloned().unwrap_or(Value::Undefined);
-            vm.to_string(&v)
-                .map(Value::String)}))),
+            vm.to_string(&v).map(Value::String)
+        }))),
     );
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("__native_toNumber".to_string()),
         tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let v = args.first().cloned().unwrap_or(Value::Undefined);
-            vm.to_number_value(&v)
-                .map(Value::Number)}))),
+            vm.to_number_value(&v).map(Value::Number)
+        }))),
     );
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("__native_toBoolean".to_string()),
@@ -692,57 +693,143 @@ fn main() -> Result<(), tsblitz::errors::Error> {
         prelude_path.parent().unwrap_or(Path::new(".")),
         &format!("./{}", prelude_path.file_name().unwrap().to_string_lossy()),
     )?;
-    let prelude_session = bundle_entry(&prelude_resolved)?;
-    let prelude_program = prelude_session.program();
-
-    // Skip type checking for soft layer prelude (has dynamic patterns that typechecker doesn't handle yet)
-    let chunk = compiler::compile_oxc(prelude_program).map_err(tsblitz::errors::Error::from)?;
-    // The soft prelude is written in TypeScript and contains dynamic patterns
-    // and annotated helper types that the static compiler may record as
-    // parameter types. The prelude is intended to run untyped at runtime,
-    // so clear function slot type annotations here to avoid enforcing runtime
-    // type checks during prelude initialization.
-    // Clear slot types recursively across the chunk graph so the dynamic
-    // soft prelude isn't blocked by runtime type checks that expect stricter
-    // static types.
-    let chunk = clear_slot_types_in_chunk(chunk);
-    // One-time diagnostic: print compiled chunk constants and function prototypes
-    // so we can map bytecode ip locations back to source-level functions during debugging.
+    // Use ModuleLoader to construct/instantiate/evaluate the soft prelude which
+    // handles parsing dependencies, compiling, clearing slot types, and running.
+    let mut loader = ModuleLoader::new();
+    loader.construct(
+        prelude_resolved.parent().unwrap_or(Path::new(".")),
+        &format!(
+            "./{}",
+            prelude_resolved.file_name().unwrap().to_string_lossy()
+        ),
+    )?;
+    loader
+        .instantiate_all()
+        .map_err(tsblitz::errors::Error::from)?;
+    // One-time diagnostic: compile the prelude module and print chunk info so
+    // we can map bytecode ip locations back to source-level functions during
+    // debugging. Compilation here is best-effort and only performed when
+    // tracing is enabled to avoid extra work in normal runs.
     if tsblitz::trace::enabled() {
-        eprintln!(
-            "[trace] Prelude chunk: code_len={} constants={}",
-            chunk.code.len(),
-            chunk.constants.len()
-        );
-        eprintln!("[trace] Prelude functions (index -> name, arity, bytecode_len):");
-        for (i, f) in chunk.functions.iter().enumerate() {
+        // Prepare a one-off chunk compilation and disassembly for the prelude.
+        match (|| -> Result<(), tsblitz::errors::Error> {
+            // The loader.map keys are canonicalized; ensure we look up the same
+            // canonical path when fetching the prelude record.
+            let prelude_key =
+                std::fs::canonicalize(&prelude_resolved).unwrap_or(prelude_resolved.clone());
+            let rec_rc = loader
+                .map
+                .get(&prelude_key)
+                .ok_or_else(|| tsblitz::errors::BundlerError::from("Prelude module not found"))?
+                .clone();
+
+            // Hold the borrow across compilation so parser session data remains
+            // valid for the duration of compile_oxc.
+            let chunk = {
+                let rec_b = rec_rc.borrow();
+                let program = rec_b.session.program();
+                let chunk = compiler::compile_oxc(program).map_err(tsblitz::errors::Error::from)?;
+                // Use the local helper to clear slot types for the prelude chunk.
+                clear_slot_types_in_chunk(chunk)
+            };
+
             eprintln!(
-                "[trace]  fn[{}] name='{}' arity={} bytecode_len={}",
-                i,
-                f.name,
-                f.arity,
-                f.chunk.code.len()
+                "[trace] Prelude chunk: code_len={} constants={}",
+                chunk.code.len(),
+                chunk.constants.len()
             );
-        }
-        // Print annotated bytecode for each function: opcode, operand preview, and source line
-        for (i, f) in chunk.functions.iter().enumerate() {
-            eprintln!(
-                "[trace] --- fn[{}] '{}' bytecode (len={}) ---",
-                i,
-                f.name,
-                f.chunk.code.len()
-            );
+            eprintln!("[trace] Prelude functions (index -> name, arity, bytecode_len):");
+            for (i, f) in chunk.functions.iter().enumerate() {
+                eprintln!(
+                    "[trace]  fn[{}] name='{}' arity={} bytecode_len={}",
+                    i,
+                    f.name,
+                    f.arity,
+                    f.chunk.code.len()
+                );
+            }
+            // Print annotated bytecode for each function: opcode, operand preview, and source line
+            for (i, f) in chunk.functions.iter().enumerate() {
+                eprintln!(
+                    "[trace] --- fn[{}] '{}' bytecode (len={}) ---",
+                    i,
+                    f.name,
+                    f.chunk.code.len()
+                );
+                let mut ip = 0usize;
+                while ip < f.chunk.code.len() {
+                    let b = f.chunk.code[ip];
+                    let op = bytecode::Op::from_byte(b)
+                        .map_or_else(|| format!("0x{:02x}", b), |o| format!("{:?}", o));
+                    // line number for this opcode if available
+                    let line = if ip < f.chunk.lines.len() {
+                        f.chunk.lines[ip]
+                    } else {
+                        0
+                    };
+                    let mut extra = String::new();
+                    match bytecode::Op::from_byte(b) {
+                        Some(bytecode::Op::Const)
+                        | Some(bytecode::Op::GetGlobal)
+                        | Some(bytecode::Op::SetGlobal)
+                        | Some(bytecode::Op::GetBuiltin)
+                        | Some(bytecode::Op::MakeClosure)
+                        | Some(bytecode::Op::GetPropertyIC)
+                        | Some(bytecode::Op::Call) => {
+                            if ip + 1 < f.chunk.code.len() {
+                                let v = f.chunk.code[ip + 1] as usize;
+                                extra = format!(" {}", v);
+                            }
+                        }
+                        Some(bytecode::Op::Jump)
+                        | Some(bytecode::Op::JumpIfFalse)
+                        | Some(bytecode::Op::PushHandler) => {
+                            if ip + 2 < f.chunk.code.len() {
+                                let hi = f.chunk.code[ip + 1] as usize;
+                                let lo = f.chunk.code[ip + 2] as usize;
+                                let short = ((hi << 8) | lo) as i16;
+                                extra = format!(" {}", short);
+                            }
+                        }
+                        _ => {}
+                    }
+                    eprintln!(
+                        "[trace] fn[{}] {:04} (line {})  {}{}",
+                        i, ip, line, op, extra
+                    );
+                    ip += 1;
+                    match bytecode::Op::from_byte(b) {
+                        Some(bytecode::Op::Const)
+                        | Some(bytecode::Op::GetGlobal)
+                        | Some(bytecode::Op::SetGlobal)
+                        | Some(bytecode::Op::GetBuiltin)
+                        | Some(bytecode::Op::MakeClosure)
+                        | Some(bytecode::Op::GetPropertyIC)
+                        | Some(bytecode::Op::Call) => ip += 1,
+                        Some(bytecode::Op::Jump)
+                        | Some(bytecode::Op::JumpIfFalse)
+                        | Some(bytecode::Op::PushHandler) => ip += 2,
+                        _ => {}
+                    }
+                }
+            }
+            for (i, c) in chunk.constants.iter().enumerate() {
+                match c {
+                    Value::String(s) => eprintln!("[trace] const[{}] (string) = {:?}", i, s),
+                    Value::Number(n) => eprintln!("[trace] const[{}] (number) = {}", i, n),
+                    Value::Bool(b) => eprintln!("[trace] const[{}] (bool) = {}", i, b),
+                    Value::Null => eprintln!("[trace] const[{}] = null", i),
+                    other => eprintln!("[trace] const[{}] (other) = {}", i, other.type_name()),
+                }
+            }
+            // Very small disassembly to map ip -> opcode and operand (first 2000 bytes)
+            eprintln!("[trace] Prelude chunk disassembly (first 2000 bytes):");
             let mut ip = 0usize;
-            while ip < f.chunk.code.len() {
-                let b = f.chunk.code[ip];
+            while ip < chunk.code.len() {
+                let b = chunk.code[ip];
                 let op = bytecode::Op::from_byte(b)
                     .map_or_else(|| format!("0x{:02x}", b), |o| format!("{:?}", o));
-                // line number for this opcode if available
-                let line = if ip < f.chunk.lines.len() {
-                    f.chunk.lines[ip]
-                } else {
-                    0
-                };
+                // Prepare a short operand preview depending on opcode
                 let mut extra = String::new();
                 match bytecode::Op::from_byte(b) {
                     Some(bytecode::Op::Const)
@@ -752,27 +839,25 @@ fn main() -> Result<(), tsblitz::errors::Error> {
                     | Some(bytecode::Op::MakeClosure)
                     | Some(bytecode::Op::GetPropertyIC)
                     | Some(bytecode::Op::Call) => {
-                        if ip + 1 < f.chunk.code.len() {
-                            let v = f.chunk.code[ip + 1] as usize;
+                        if ip + 1 < chunk.code.len() {
+                            let v = chunk.code[ip + 1] as usize;
                             extra = format!(" {}", v);
                         }
                     }
                     Some(bytecode::Op::Jump)
                     | Some(bytecode::Op::JumpIfFalse)
                     | Some(bytecode::Op::PushHandler) => {
-                        if ip + 2 < f.chunk.code.len() {
-                            let hi = f.chunk.code[ip + 1] as usize;
-                            let lo = f.chunk.code[ip + 2] as usize;
+                        if ip + 2 < chunk.code.len() {
+                            let hi = chunk.code[ip + 1] as usize;
+                            let lo = chunk.code[ip + 2] as usize;
                             let short = ((hi << 8) | lo) as i16;
                             extra = format!(" {}", short);
                         }
                     }
                     _ => {}
                 }
-                eprintln!(
-                    "[trace] fn[{}] {:04} (line {})  {}{}",
-                    i, ip, line, op, extra
-                );
+                eprintln!("[trace] {:04}  {}{}", ip, op, extra);
+                // Advance ip by opcode + operand length heuristically
                 ip += 1;
                 match bytecode::Op::from_byte(b) {
                     Some(bytecode::Op::Const)
@@ -787,70 +872,15 @@ fn main() -> Result<(), tsblitz::errors::Error> {
                     | Some(bytecode::Op::PushHandler) => ip += 2,
                     _ => {}
                 }
-            }
-        }
-        for (i, c) in chunk.constants.iter().enumerate() {
-            match c {
-                Value::String(s) => eprintln!("[trace] const[{}] (string) = {:?}", i, s),
-                Value::Number(n) => eprintln!("[trace] const[{}] (number) = {}", i, n),
-                Value::Bool(b) => eprintln!("[trace] const[{}] (bool) = {}", i, b),
-                Value::Null => eprintln!("[trace] const[{}] = null", i),
-                other => eprintln!("[trace] const[{}] (other) = {}", i, other.type_name()),
-            }
-        }
-        // Very small disassembly to map ip -> opcode and operand (one-time)
-        eprintln!("[trace] Prelude chunk disassembly (first 2000 bytes):");
-        let mut ip = 0usize;
-        while ip < chunk.code.len() {
-            let b = chunk.code[ip];
-            let op = bytecode::Op::from_byte(b)
-                .map_or_else(|| format!("0x{:02x}", b), |o| format!("{:?}", o));
-            // Prepare a short operand preview depending on opcode
-            let mut extra = String::new();
-            match bytecode::Op::from_byte(b) {
-                Some(bytecode::Op::Const)
-                | Some(bytecode::Op::GetGlobal)
-                | Some(bytecode::Op::SetGlobal)
-                | Some(bytecode::Op::GetBuiltin)
-                | Some(bytecode::Op::MakeClosure)
-                | Some(bytecode::Op::GetPropertyIC)
-                | Some(bytecode::Op::Call) => {
-                    if ip + 1 < chunk.code.len() {
-                        let v = chunk.code[ip + 1] as usize;
-                        extra = format!(" {}", v);
-                    }
+                if ip > 2000 {
+                    break;
                 }
-                Some(bytecode::Op::Jump)
-                | Some(bytecode::Op::JumpIfFalse)
-                | Some(bytecode::Op::PushHandler) => {
-                    if ip + 2 < chunk.code.len() {
-                        let hi = chunk.code[ip + 1] as usize;
-                        let lo = chunk.code[ip + 2] as usize;
-                        let short = ((hi << 8) | lo) as i16;
-                        extra = format!(" {}", short);
-                    }
-                }
-                _ => {}
             }
-            eprintln!("[trace] {:04}  {}{}", ip, op, extra);
-            // Advance ip by opcode + operand length heuristically
-            ip += 1;
-            match bytecode::Op::from_byte(b) {
-                Some(bytecode::Op::Const)
-                | Some(bytecode::Op::GetGlobal)
-                | Some(bytecode::Op::SetGlobal)
-                | Some(bytecode::Op::GetBuiltin)
-                | Some(bytecode::Op::MakeClosure)
-                | Some(bytecode::Op::GetPropertyIC)
-                | Some(bytecode::Op::Call) => ip += 1,
-                Some(bytecode::Op::Jump)
-                | Some(bytecode::Op::JumpIfFalse)
-                | Some(bytecode::Op::PushHandler) => ip += 2,
-                _ => {}
-            }
-            if ip > 2000 {
-                break;
-            }
+
+            Ok(())
+        })() {
+            Err(e) => eprintln!("[trace] Prelude trace preparation failed: {}", e),
+            Ok(()) => {}
         }
     }
     // Create a persistent VM for the REPL and reuse it for every input so
@@ -860,90 +890,36 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     // Create VM and run prelude. blitzlib can call `__host_get(name)` during
     // bootstrap to capture host-provided values; raw host entries are never
     // placed into the globals table.
-    let mut repl_vm = Vm::new(globals.clone());
+    let mut repl_vm = Vm::new(globals);
 
     // Run prelude. The soft layer provides all base objects (Object, Array, console, etc.).
-    if tsblitz::trace::enabled() {
-        eprintln!("[diag pre-prelude] Snapshot of globals before running prelude:");
-        for name in &[
-            "console",
-            "__native_print",
-            "__native_new_object",
-            "globalThis",
-            "Object",
-            "Array",
-        ] {
-            match globals
-                .borrow()
-                .properties
-                .get(&tsblitz::value::PropertyKey::String((*name).to_string()))
-                .and_then(|d| match d {
-                    tsblitz::value::PropertyDescriptor::Data { value, .. } => Some(value),
-                    _ => None,
-                }) {
-                Some(v) => eprintln!(
-                    "[diag pre-prelude] global '{}' type={}",
-                    name,
-                    v.type_name()
-                ),
-                None => eprintln!("[diag pre-prelude] global '{}' NOT present", name),
-            }
-        }
-    }
-    match repl_vm.run(chunk) {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Runtime error in soft layer: {}", e);
-            if tsblitz::trace::enabled() {
-                eprintln!("[diag] Dumping selected globals for diagnosis:");
-            }
-            // Inspect common suspects
-            for name in &[
-                "console",
-                "__native_print",
-                "__native_new_object",
-                "globalThis",
-                "Object",
-                "Array",
-            ] {
-                match repl_vm.get_global(name) {
-                    Some(v) => {
-                        eprintln!("[diag] global '{}' type={}", name, v.type_name());
-                        if tsblitz::trace::enabled() {
-                            if let Some(keys) = repl_vm.list_global_own_keys(name) {
-                                eprintln!("[diag]   own keys = {:?}", keys);
-                            }
-                            if *name == "console"
-                                && let Some(val) = repl_vm.get_global("console")
-                            {
-                                // Try to print the console object's own keys and whether
-                                // it has a 'log' key; avoid calling private helpers.
-                                if let Some(keys) = repl_vm.list_own_keys_of_value(&val) {
-                                    eprintln!("[diag]   console own keys = {:?}", keys);
-                                    eprintln!(
-                                        "[diag]   console.has_log = {}",
-                                        keys.iter().any(|k| k == "log")
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    None => eprintln!("[diag] global '{}' NOT present", name),
-                }
-            }
-            return Err(tsblitz::errors::RuntimeError::from(format!(
-                "Runtime error in soft layer: {}",
-                e
-            ))
-            .into());
-        }
+    // Evaluate prelude via ModuleLoader into the repl_vm
+    if let Err(e) = loader
+        .evaluate_entry(&prelude_resolved, &mut repl_vm)
+        .map_err(tsblitz::errors::Error::from)
+    {
+        eprintln!("Runtime error in soft layer: {}", e);
+        return Err(tsblitz::errors::RuntimeError::from(format!(
+            "Runtime error in soft layer: {}",
+            e
+        ))
+        .into());
     }
 
     // If a file was provided, run it and exit. Otherwise start REPL.
     if let Some(path) = cli.file {
-        let session = bundle_entry(&path)?;
-        let program = session.program();
-        run_program(&mut repl_vm, program)?;
+        // Use ModuleLoader to load and run the entry file (and its deps)
+        let mut loader = ModuleLoader::new();
+        loader.construct(
+            path.parent().unwrap_or(Path::new(".")),
+            &format!("./{}", path.file_name().unwrap().to_string_lossy()),
+        )?;
+        loader
+            .instantiate_all()
+            .map_err(tsblitz::errors::Error::from)?;
+        loader
+            .evaluate_entry(&path, &mut repl_vm)
+            .map_err(tsblitz::errors::Error::from)?;
         return Ok(());
     }
 

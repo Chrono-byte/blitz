@@ -11,7 +11,7 @@
 //! | [`TypeCheckerError`] | Type checker | Static type checking failures |
 //! | [`CompilerError`] | Compiler | Bytecode generation errors |
 //! | [`RuntimeError`] | VM | Runtime execution errors |
-//! | [`BundlerError`] | Bundler | Module resolution failures |
+//! | [`BundlerError`] | Module loader | Module resolution failures (module loader)
 //!
 //! # Usage
 //!
@@ -51,7 +51,7 @@ pub enum Error {
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
 
-    /// Error originating from the bundler.
+    /// Error originating from the module loader.
     #[error(transparent)]
     Bundler(#[from] BundlerError),
 }
@@ -100,7 +100,7 @@ pub struct RuntimeError {
 
 #[derive(Debug, Error)]
 #[error("Bundler error: {message}")]
-/// Errors emitted by the bundler when resolving/packaging modules.
+/// Errors emitted by the module loader when resolving/packaging modules.
 pub struct BundlerError {
     /// Human-readable bundler error message.
     pub message: String,

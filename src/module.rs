@@ -148,8 +148,7 @@ impl ModuleLoader {
                                 } else if let Some(decl) = item.get("declaration")
                                     && let Some(decl_type) =
                                         decl.get("type").and_then(|d| d.as_str())
-                                    {
-                                        if (decl_type == "FunctionDeclaration"
+                                        && (decl_type == "FunctionDeclaration"
                                             || decl_type == "ClassDeclaration")
                                             && let Some(id) = decl
                                                 .get("id")
@@ -161,7 +160,6 @@ impl ModuleLoader {
                                                     Rc::new(RefCell::new(Value::Undefined)),
                                                 );
                                             }
-                                    }
                             }
                             "ExportDefaultDeclaration" => {
                                 rec.exports.insert(

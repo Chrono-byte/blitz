@@ -1446,22 +1446,20 @@ impl Vm {
                 enumerable: desc.enumerable.unwrap_or_else(|| {
                     current
                         .as_ref()
-                        .map(|d| match d {
+                        .is_some_and(|d| match d {
                             PropertyDescriptor::Data { enumerable, .. } => *enumerable,
                             PropertyDescriptor::Accessor { enumerable, .. } => *enumerable,
                         })
-                        .unwrap_or(false)
                 }),
                 configurable: desc.configurable.unwrap_or_else(|| {
                     current
                         .as_ref()
-                        .map(|d| match d {
+                        .is_some_and(|d| match d {
                             PropertyDescriptor::Data { configurable, .. } => *configurable,
                             PropertyDescriptor::Accessor { configurable, .. } => {
                                 *configurable
                             }
                         })
-                        .unwrap_or(false)
                 }),
             }
         } else {

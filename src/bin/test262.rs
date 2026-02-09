@@ -36,7 +36,7 @@ use serde::Deserialize;
 
 use tsblitz::compiler;
 use tsblitz::value::PropertyKey;
-use tsblitz::{bundle_entry, parser::Parser, typecheck, value::Value, vm::Vm};
+use tsblitz::{parser::Parser, typecheck, value::Value, vm::Vm, module::ModuleLoader};
 
 struct RunnerOptions {
     includes: Vec<String>,
@@ -756,19 +756,19 @@ fn main() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let prelude_path = manifest_dir.join("soft/prelude.ts");
     if prelude_path.exists() {
-        match bundle_entry(&prelude_path) {
-            Ok(session) => {
-                let prog = session.program();
-                match compiler::compile_oxc(prog) {
-                    Ok(chunk) => {
-                        if let Err(e) = vm.run(chunk) {
-                            eprintln!("Failed to execute soft prelude: {}", e);
-                        }
-                    }
-                    Err(e) => eprintln!("Failed to compile soft prelude: {}", e),
-                }
-            }
-            Err(e) => eprintln!("Failed to bundle soft prelude: {}", e),
+        let mut loader = ModuleLoader::new();
+        if let Err(e) = (|| -> Result<(), String> {
+            loader.construct(
+                prelude_path.parent().unwrap_or(Path::new(".")),
+                &format!("./{}", prelude_path.file_name().unwrap().to_string_lossy()),
+            )
+            .map_err(|e| format!("construct prelude failed: {}", e))?;
+            loader.instantiate_all().map_err(|e| format!("instantiate prelude failed: {}", e))?;
+            loader.evaluate_entry(&prelude_path, &mut vm)
+                .map_err(|e| format!("evaluate prelude failed: {}", e))?;
+            Ok(())
+        })() {
+            eprintln!("Failed to execute soft prelude: {}", e);
         }
     }
 

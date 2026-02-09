@@ -8,11 +8,6 @@
 import type {
   Value,
   Console,
-  ObjectConstructor,
-  ArrayConstructor,
-  StringConstructor,
-  BlitzObject,
-  BlitzFunction,
 } from "./core/types.js";
 import { BlitzObject as ObjectImpl, BlitzFunction as FunctionImpl } from "./core/objects.js";
 import { toString as runtimeToString } from "./core/runtime.js";
@@ -27,30 +22,6 @@ import {
   debugValue as host_debugValue,
   host as host_ns,
 } from "./host.js";
-// import "./runtime_builtins.js";
-// try {
-  // host_print("PRELUDE: runtime_builtins imported");
-// } catch (_) {}
-// Diagnostic: report whether runtime_builtins exported $262.agent.getReport
-try {
-  if (typeof globalThis !== "undefined") {
-    const g: any = globalThis as any;
-    try {
-      host_print("PRELUDE DIAG: typeof $262 = " + typeof g.$262);
-    } catch (_) {}
-    try {
-      host_print(
-        "PRELUDE DIAG: typeof $262.agent = " + (g.$262 ? typeof g.$262.agent : "<missing>"),
-      );
-    } catch (_) {}
-    try {
-      host_print(
-        "PRELUDE DIAG: typeof $262.agent.getReport = " +
-          (g.$262 && g.$262.agent ? typeof g.$262.agent.getReport : "<missing>"),
-      );
-    } catch (_) {}
-  }
-} catch (_) {}
 
 // Enable tracing for host.debugValue during bootstrap to help capture
 // type/shape information that may be lost otherwise.
@@ -60,11 +31,6 @@ try {
     host_print("PRELUDE: trace enabled");
   } catch (_) {}
 } catch (_) {}
-
-// NOTE: Do not shim or polyfill harness APIs from the prelude. The harness
-// must load itself and the runtime should provide compliant builtins. Any
-// missing harness helpers should be implemented in `runtime_builtins.ts` or
-// the host environment, not here.
 
 // Marker and top-level try/catch to surface a full stack trace when the
 // prelude fails during VM bootstrap. Tests (harness) can then report the
@@ -112,7 +78,8 @@ try {
 
   // Declare global variables
   // Capture runtime globals (console, Object, Array, String) when available so
-  // the bundler-generated TypeScript files can reference them without
+  // generated TypeScript files (previously produced by a bundler) can
+  // reference them without
   // relying on unsupported `declare` statements.
   let console: any =
     typeof globalThis !== "undefined" && (globalThis as any).console
