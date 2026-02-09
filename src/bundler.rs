@@ -231,7 +231,6 @@ pub fn bundle_entry(entry: &Path) -> Result<crate::parser::ParserSession, Bundle
 #[cfg(test)]
 mod tests {
     use super::bundle_entry;
-    use crate::local_ast as la;
     use std::env;
     use std::fs;
     use std::path::PathBuf;

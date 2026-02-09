@@ -349,19 +349,6 @@ impl Op {
         matches!(self, Op::Jump | Op::JumpIfFalse)
     }
 
-    /// Hotwire a jump instruction (deprecated—use `Chunk` helpers instead).
-    /// Kept for compatibility: returns an op transformed to an "equivalent"
-    /// hotwired opcode when possible.
-    /// NOTE: This function does not mutate `Chunk` bytes; it only returns a
-    /// suggested opcode to use when writing out the opcode byte.
-    pub fn hotwire_jump(op: Op) -> Op {
-        match op {
-            Op::Jump => Op::Jump,
-            Op::JumpIfFalse => Op::Jump,
-            _ => panic!("Cannot hotwire non-jump instruction"),
-        }
-    }
-
     /// Returns whether this opcode performs an arithmetic operation that
     /// expects two operands.
     pub fn is_arithmetic(&self) -> bool {

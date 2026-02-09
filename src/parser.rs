@@ -129,20 +129,6 @@ impl Parser {
         })
     }
 
-    // Backwards-compatible helper: parse_source_into_local_ast for consumers that
-    // still expect the old `crate::ast::Program`. This converts oxc_ast -> crate::ast
-    // using a minimal adapter so we can migrate the callsites incrementally.
-    pub fn parse_source_into_local_ast(
-        source: &str,
-    ) -> Result<crate::local_ast::Program, ParserError> {
-        let session = Parser::parse_source(source)?;
-        let estree = session.program().to_pretty_estree_ts_json(false);
-        let prog = crate::estree_bridge::estree_json_to_local_program(&estree).map_err(|e| {
-            ParserError::from(format!("ESTree -> local AST conversion failed: {}", e))
-        })?;
-        Ok(prog)
-    }
-
     /// Extract top-level static import specifiers (e.g. "./mod") from a source
     /// text without converting the entire ESTree into the internal AST. This
     /// helper is used by the bundler/loader to build the module graph.
