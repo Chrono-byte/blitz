@@ -30,8 +30,7 @@
 
 use crate::errors::BundlerError;
 use crate::parser::Parser;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Bundle an entry module (filesystem `Path`) and its relative imports into a
 /// single `Program` suitable for typechecking/compilation.
@@ -44,48 +43,15 @@ use std::path::{Path, PathBuf};
 /// Returns an error if the entry module or any of its dependencies cannot be
 /// read or parsed.
 pub fn bundle_entry(entry: &Path) -> Result<crate::parser::ParserSession, BundlerError> {
-    // New behavior: do not concatenate/inlines dependencies. Instead, parse
-    // the entry file alone and rewrite top-level `import` statements so they
-    // trigger a runtime synchronous import helper (`__tsblitz_import`). This
-    // keeps module execution synchronous and in the same realm as the caller.
-
+    // Bypass bundling: read the module source and return its ParserSession
+    // unchanged. Module loading/linking/evaluation is handled by the VM
+    // module loader (spec-compliant) instead of textual concatenation.
     let entry_canon = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf());
     let src = std::fs::read_to_string(&entry_canon).map_err(|e| {
         BundlerError::from(format!("Failed to read module {}: {}", entry.display(), e))
     })?;
 
-    // Simple textual rewrite: replace top-level `import ... from 'x';` and
-    // `import 'x';` with `__tsblitz_import('x');` so imports are resolved and
-    // executed at runtime by the host-provided builtin.
-    let mut rewritten = String::new();
-    for line in src.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("import ") {
-            // Try to extract the final string literal specifier
-            if let Some(pos) = line.rfind('"') {
-                if let Some(pos2) = line[..pos].rfind('"') {
-                    let spec = &line[pos2 + 1..pos];
-                    rewritten.push_str(&format!("__tsblitz_import(\"{}\");\n", spec));
-                    continue;
-                }
-            }
-            if let Some(pos) = line.rfind('\'') {
-                if let Some(pos2) = line[..pos].rfind('\'') {
-                    let spec = &line[pos2 + 1..pos];
-                    rewritten.push_str(&format!("__tsblitz_import('{}');\n", spec));
-                    continue;
-                }
-            }
-            // Fallback: keep the original line if we couldn't parse specifier
-            rewritten.push_str(line);
-            rewritten.push('\n');
-        } else {
-            rewritten.push_str(line);
-            rewritten.push('\n');
-        }
-    }
-
-    let session = Parser::parse_source(&rewritten).map_err(|e| {
+    let session = Parser::parse_source(&src).map_err(|e| {
         BundlerError::from(format!("Failed to parse module {}: {}", entry.display(), e))
     })?;
     Ok(session)
