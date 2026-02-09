@@ -69,7 +69,6 @@ pub mod value;
 pub mod vm;
 
 // Re-export oxc_ast::ast under the `ast` namespace for compatibility.
-pub use bundler::*;
 pub use bytecode::*;
 pub use compiler::*;
 pub use errors::*;

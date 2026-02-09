@@ -27,10 +27,10 @@ import {
   debugValue as host_debugValue,
   host as host_ns,
 } from "./host.js";
-import "./runtime_builtins.js";
-try {
-  host_print("PRELUDE: runtime_builtins imported");
-} catch (_) {}
+// import "./runtime_builtins.js";
+// try {
+  // host_print("PRELUDE: runtime_builtins imported");
+// } catch (_) {}
 // Diagnostic: report whether runtime_builtins exported $262.agent.getReport
 try {
   if (typeof globalThis !== "undefined") {
