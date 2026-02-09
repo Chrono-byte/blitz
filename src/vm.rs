@@ -47,6 +47,7 @@ use crate::bytecode::{Chunk, Op};
 use crate::typecheck::BuiltinType;
 use crate::typecheck::Type;
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::module::ModuleLoader;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
@@ -192,6 +193,8 @@ pub struct Vm {
     bg_runtime: Arc<Runtime>,
     /// Exception-handler stack.
     handlers: Vec<HandlerRecord>,
+    /// Per-VM module loader responsible for module construction/instantiation/eval
+    module_loader: Option<ModuleLoader>,
 }
 
 impl Vm {
@@ -214,6 +217,8 @@ impl Vm {
             obj_generations: HashMap::new(),
             bg_runtime: get_global_bg_runtime(),
             handlers: Vec::new(),
+            // Each VM gets its own module loader
+            module_loader: Some(ModuleLoader::new()),
         }
     }
 
@@ -1995,6 +2000,15 @@ impl Vm {
         }
     }
 }
+
+    /// Provide mutable access to the per-VM module loader, creating it if missing.
+    pub fn module_loader_mut(&mut self) -> &mut ModuleLoader {
+        if self.module_loader.is_none() {
+            self.module_loader = Some(ModuleLoader::new());
+        }
+        // SAFETY: we just ensured module_loader is Some
+        self.module_loader.as_mut().unwrap()
+    }
 
 // ---------------------------------------------------------------------------
 // Free functions
