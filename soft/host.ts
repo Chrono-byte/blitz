@@ -35,7 +35,7 @@ export function host_print(msg: string): void {
 
 // Export runtime helpers as functions that lookup the host builtin on each
 // call. This avoids needing a module-level cached function value which can
-// become `null`/`undefined` due to bundling/initialization ordering.
+// become `null`/`undefined` due to initialization ordering.
 export function native_new_object(): any {
   try {
     const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
@@ -205,9 +205,9 @@ export function defineProperty(target: any, key: any, desc: any): boolean {
 
 // Provide a global `host` object so modules that were written as
 // `import * as host from "./host"` continue to work when modules are
-// inlined by the bundler. This mirrors the exported helpers above.
+// inlined by an earlier tooling flow. This mirrors the exported helpers above.
 // Keep this as a non-exported const so it's available as a plain
-// top-level binding in the bundled program.
+// top-level binding at runtime.
 const host = {
   host_print,
   native_new_object,

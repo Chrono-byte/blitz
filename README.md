@@ -12,7 +12,7 @@ Repo layout (high level)
 
 Quick start
 - Build and run the REPL: `cargo run` (starts the REPL; type `exit` to quit).
-- Run a TypeScript file: `cargo run -- path/to/file.ts` (the bundler inlines the soft prelude and executes your entry file in the same VM instance).
+- Run a TypeScript file: `cargo run -- path/to/file.ts` (the runtime loads the soft prelude and executes your entry file in the same VM instance).
 
 How blitzlib and the kernel interact
 - The Rust kernel provides a minimal, well-documented native ABI (examples: `__native_print`, `__native_new_object`, and scheduling/file primitives). The kernel enforces low-level invariants (object identity, descriptor semantics, numeric behavior, GC).
@@ -25,7 +25,7 @@ Goals and constraints
 Where to look first
 - `soft/prelude.ts` — bootstraps globals and installs builtins at startup.
 - `soft/core/` — runtime scaffolding and types used by the prelude.
-- `src/main.rs` — shows how the prelude is bundled and executed and which natives are injected into the VM.
+- `src/main.rs` — shows how the prelude is loaded and executed and which natives are injected into the VM.
 - `ARCHITECTURE.md` — design goals and the VM ↔ blitzlib contract.
 
 Next steps for contributors

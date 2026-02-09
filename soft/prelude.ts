@@ -60,7 +60,7 @@ try {
       initialized = true;
       // Prefer the imported `native_print` wrapper which handles host lookup
       // safely. Avoid calling global helper functions here because some
-      // bundling/initialization variants reference internal helpers as globals
+      // initialization variants reference internal helpers as globals
       // which can be unavailable during certain bootstrap orders.
       try {
         if (typeof native_print === "function") {
@@ -75,7 +75,7 @@ try {
 
   // Declare global variables
   // Capture runtime globals (console, Object, Array, String) when available so
-  // generated TypeScript files (previously produced by a bundler) can
+  // generated TypeScript files (previously produced by earlier build tooling) can
   // reference them without
   // relying on unsupported `declare` statements.
   let console: any =

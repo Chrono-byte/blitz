@@ -26,9 +26,32 @@ pub fn resolve_specifier(
     };
     match resolver.resolve(&base_dir, specifier) {
         Ok(resolution) => Ok(resolution.full_path()),
-        Err(e) => Err(crate::errors::BundlerError::from(format!(
-            "resolve error: {}",
-            e
-        ))),
+        Err(e) => {
+            // Try a small compatibility fallback: imports authored as `./foo.js`
+            // may actually exist as `./foo.ts` in the source tree. Attempt to
+            // resolve a `.ts` variant before failing.
+            if specifier.ends_with(".js") {
+                let mut alt = specifier.to_string();
+                alt.truncate(alt.len() - 3);
+                alt.push_str(".ts");
+                if let Ok(resolution) = resolver.resolve(&base_dir, &alt) {
+                    return Ok(resolution.full_path());
+                }
+            }
+
+            // Also try appending `.ts` when no explicit extension was provided.
+            if !specifier.contains('.') {
+                let mut alt = specifier.to_string();
+                alt.push_str(".ts");
+                if let Ok(resolution) = resolver.resolve(&base_dir, &alt) {
+                    return Ok(resolution.full_path());
+                }
+            }
+
+            Err(crate::errors::BundlerError::from(format!(
+                "resolve error: {}",
+                e
+            )))
+        }
     }
 }

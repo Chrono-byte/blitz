@@ -25,7 +25,7 @@
 //! | Module | Purpose |
 //! |--------|---------|
 //! | [`ast`] | Re-export of oxc_ast types for AST representation |
-//! | (removed) | Entry point bundling was removed; use [`module::ModuleLoader`] |
+//! | (removed) | Entry-point bundling has been removed; use [`module::ModuleLoader`] |
 //! | [`bytecode`] | VM instruction set and bytecode encoding/decoding |
 //! | [`compiler`] | AST-to-bytecode compilation |
 //! | [`errors`] | Error types for parsing, compilation, and runtime |
@@ -54,7 +54,8 @@
 //!
 //! See individual module documentation for detailed API usage.
 
-// bundler removed; ModuleLoader in `module` replaces previous bundler flows
+// Entry-point bundling removed; `ModuleLoader` in `module` replaces previous
+// bundling flows.
 pub mod bytecode;
 pub mod compiler;
 pub mod errors;

@@ -95,7 +95,7 @@ try {
 } catch (_) {}
 
 // Diagnostic trace to help VM-side debugging: print types of Array and its prototype.
-// Avoid caching `host.native_print` at module-init time because bundling/initialization
+// Avoid caching `host.native_print` at module-init time because initialization
 // order may make the cached value undefined. Resolve it at call time instead.
 // Diagnostic removed: avoid calling host helpers during early bootstrap
 // to prevent invocation of uninitialized host bindings.

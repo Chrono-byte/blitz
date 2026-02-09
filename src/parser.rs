@@ -3,7 +3,7 @@
 //! This module provides a thin wrapper around the OXC parser, delegating parsing
 //! to OXC and returning the produced AST (`oxc_ast::ast::Program`). It handles:
 //! - Source text parsing into AST
-//! - Import extraction for module bundling
+//! - Import extraction for module graph building
 //! - Error conversion to tsblitz error types
 //!
 //! # Migration Note
@@ -131,7 +131,7 @@ impl Parser {
 
     /// Extract top-level static import specifiers (e.g. "./mod") from a source
     /// text without converting the entire ESTree into the internal AST. This
-    /// helper is used by the bundler/loader to build the module graph.
+    /// helper is used by the module loader to build the module graph.
     pub fn extract_imports_from_source(source: &str) -> Result<Vec<String>, ParserError> {
         // Run Oxc parser using a temporary allocator and borrowed source string.
         // We only need the ESTree JSON here so keeping allocator scoped is fine.
@@ -165,7 +165,7 @@ impl Parser {
         let mut imports = Vec::new();
         for item in body {
             // Treat `import ...` and re-export forms (`export * from`,
-            // `export { ... } from`) as module dependencies for bundling.
+            // `export { ... } from`) as module dependencies for the module loader.
             if let Some(typ) = item.get("type").and_then(|t| t.as_str())
                 && (typ == "ImportDeclaration"
                     || typ == "ExportAllDeclaration"

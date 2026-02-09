@@ -33,7 +33,7 @@ use thiserror::Error;
 /// - `TypeChecker` for static type checking failures
 /// - `Compiler` for bytecode/compiler errors
 /// - `Runtime` for errors occurring during VM execution
-/// - `Bundler` for errors produced by the bundler
+/// - `Bundler` for errors produced by the module loader (ModuleLoader)
 pub enum Error {
     /// Error originating from the parser.
     #[error(transparent)]
@@ -99,10 +99,10 @@ pub struct RuntimeError {
 }
 
 #[derive(Debug, Error)]
-#[error("Bundler error: {message}")]
-/// Errors emitted by the module loader when resolving/packaging modules.
+#[error("Module loader error: {message}")]
+/// Errors emitted by the module loader when resolving modules.
 pub struct BundlerError {
-    /// Human-readable bundler error message.
+    /// Human-readable module loader error message.
     pub message: String,
 }
 

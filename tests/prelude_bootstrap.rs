@@ -105,7 +105,7 @@ fn prelude_bootstrap_runs() {
             test_native_new_object(vm, args)
         }))),
     );
-    // Also publish convenience host-level wrappers so the bundled prelude can
+    // Also publish convenience host-level wrappers so the inlined prelude can
     // import them during bootstrap ordering variants in tests.
     globals.borrow_mut().properties.insert(
         PropertyKey::String("host_print".to_string()),
@@ -212,7 +212,7 @@ fn prelude_bootstrap_runs() {
             base,
             &format!("./{}", prelude_path.file_name().unwrap().to_string_lossy()),
         )
-        .expect("bundle prelude ok");
+        .expect("prelude construct ok");
     // Hold the borrow while calling compile so the Program reference remains valid.
     let rec_b = rec.borrow();
     let program = rec_b.session.program();
