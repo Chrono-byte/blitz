@@ -207,9 +207,9 @@ if (typeof Promise !== "undefined") {
       ): Promise<TResult1 | TResult2> {
         // Relax typing: our simple shim returns a permissive Promise via resolve.
         // Cast to any to avoid complex generic incompatibilities with PromiseLike.
-        return (PromiseImpl.resolve(onfulfilled ? (onfulfilled as any)(this) : (this as any)) as any) as Promise<
-          TResult1 | TResult2
-        >;
+        return PromiseImpl.resolve(
+          onfulfilled ? (onfulfilled as any)(this) : (this as any),
+        ) as any as Promise<TResult1 | TResult2>;
       };
     }
     if (!prototype.catch) {

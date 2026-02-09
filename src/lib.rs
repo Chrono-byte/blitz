@@ -55,29 +55,29 @@
 //! See individual module documentation for detailed API usage.
 
 pub mod bundler;
-pub mod resolver;
-pub mod module;
 pub mod bytecode;
 pub mod compiler;
 pub mod errors;
 pub mod lexer;
+pub mod module;
 pub mod parser;
+pub mod resolver;
+pub mod runtime_utils;
 pub mod trace;
 pub mod typecheck;
 pub mod value;
 pub mod vm;
-pub mod runtime_utils;
 
 // Re-export oxc_ast::ast under the `ast` namespace for compatibility.
 pub use bundler::*;
-pub use resolver::*;
-pub use module::*;
 pub use bytecode::*;
 pub use compiler::*;
 pub use errors::*;
 pub use lexer::*;
+pub use module::*;
 pub use oast as ast;
 pub use oxc_ast::ast as oast;
+pub use resolver::*;
 // `oxc_typecheck` removed — use `typecheck` module which now provides oxc integrations.
 pub use parser::*;
 pub use trace::*;

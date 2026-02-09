@@ -39,71 +39,33 @@ export function isFunction(value: Value): value is BlitzFunction {
 
 // Type conversion utilities
 export function toBoolean(value: Value): boolean {
-  if (value === false || value === 0 || value === "" || value === null || value === undefined) {
-    return false;
+  const hostFn = (globalThis as any).__native_toBoolean;
+  if (typeof hostFn !== "function") {
+    throw new Error("Kernel native '__native_toBoolean' not available");
   }
-  if (isNumber(value)) {
-    // Avoid relying on the global `isNaN` helper (it may be absent during
-    // early bootstrap). Detect NaN by using the fact that NaN !== NaN.
-    return value === value;
+  const res = hostFn(value);
+  // Expect kernel to return a `Value::Bool`-like JS boolean or boxed bool.
+  if (typeof res === "boolean") return res;
+  if (res && typeof res === "object" && typeof (res as any).valueOf === "function") {
+    return !!(res as any).valueOf();
   }
-  return true;
+  return !!res;
 }
 
 export function toNumber(value: Value): number {
-  if (isNumber(value)) return value;
-  if (isBoolean(value)) return value ? 1 : 0;
-  if (isNull(value)) return 0;
-  if (isUndefined(value)) return NaN;
-  if (isString(value)) {
-    const trimmed = value.trim();
-    if (trimmed === "") return 0;
-    const parsed = Number(trimmed);
-    // Avoid global `isNaN`: use `parsed !== parsed` to detect NaN.
-    return parsed !== parsed ? NaN : parsed;
+  const hostFn = (globalThis as any).__native_toNumber;
+  if (typeof hostFn !== "function") {
+    throw new Error("Kernel native '__native_toNumber' not available");
   }
-  if (isObject(value)) {
-    // Would implement object-to-primitive conversion
-    return NaN;
-  }
-  if (isSymbol(value)) {
-    throw new TypeError("Cannot convert a Symbol value to a number");
-  }
-  return NaN;
+  return hostFn(value) as number;
 }
 
 export function toString(value: Value): string {
-  if (isString(value)) return value;
-  if (isNull(value)) return "null";
-  if (isUndefined(value)) return "undefined";
-  if (isBoolean(value)) return value ? "true" : "false";
-  if (isNumber(value)) {
-    // Detect NaN without calling global helpers (which may be missing).
-    if (value !== value) return "NaN";
-    if (value === Infinity) return "Infinity";
-    if (value === -Infinity) return "-Infinity";
-    // Avoid calling the global `String` constructor; use the numeric's own toString.
-    // Wrap in try/catch to be robust in unusual bootstrap orders.
-    try {
-      return (value as number).toString();
-    } catch (_) {
-      // Fallback: string-concatenate which will coerce without referencing global String.
-      return "" + value;
-    }
+  const hostFn = (globalThis as any).__native_toString;
+  if (typeof hostFn !== "function") {
+    throw new Error("Kernel native '__native_toString' not available");
   }
-  if (isSymbol(value)) {
-    throw new TypeError("Cannot convert a Symbol value to a number");
-  }
-  if (isObject(value)) {
-    // Would implement object-to-primitive conversion
-    return "[object Object]";
-  }
-  // Final fallback: try calling the value's own toString() instead of global String().
-  try {
-    return (value as any).toString();
-  } catch (_) {
-    return "[object]";
-  }
+  return hostFn(value) as string;
 }
 
 export function toObject(value: Value): BlitzObject {
@@ -118,35 +80,11 @@ export function toObject(value: Value): BlitzObject {
 
 // JavaScript operations
 export function abstractEqualityComparison(x: Value, y: Value): boolean {
-  // SameValue algorithm for strict equality
-  if (typeof x === typeof y) {
-    if (x === y) return true;
-    // Use local NaN detection (x !== x) instead of calling global `isNaN`.
-    if (isNumber(x) && x !== x && isNumber(y) && y !== y) return true;
-    return false;
+  const hostFn = (globalThis as any).__native_abstractEquality;
+  if (typeof hostFn !== "function") {
+    throw new Error("Kernel native '__native_abstractEquality' not available");
   }
-
-  // Type coercion
-  if (x === null && y === undefined) return true;
-  if (x === undefined && y === null) return true;
-
-  if (isNumber(x) && isString(y)) return abstractEqualityComparison(x, toNumber(y));
-  if (isString(x) && isNumber(y)) return abstractEqualityComparison(toNumber(x), y);
-
-  if (isBoolean(x)) return abstractEqualityComparison(toNumber(x), y);
-  if (isBoolean(y)) return abstractEqualityComparison(x, toNumber(y));
-
-  if ((isString(x) || isNumber(x)) && isObject(y)) {
-    // Would implement ToPrimitive
-    return abstractEqualityComparison(x, y);
-  }
-
-  if (isObject(x) && (isString(y) || isNumber(y))) {
-    // Would implement ToPrimitive
-    return abstractEqualityComparison(x, y);
-  }
-
-  return false;
+  return !!hostFn(x, y);
 }
 
 export function strictEqualityComparison(x: Value, y: Value): boolean {
@@ -237,31 +175,27 @@ export function logicalOr(x: Value, y: Value): Value {
 
 // Instanceof operator
 export function instanceOf(value: Value, constructor: BlitzFunction): boolean {
-  if (!isObject(value)) return false;
-
-  let prototype = (constructor as unknown as BlitzObject).get("prototype");
-  if (!isObject(prototype)) return false;
-
-  let current = (value as BlitzObject).getPrototypeOf();
-  while (current !== null) {
-    if (current === prototype) return true;
-    current = (current as BlitzObject).getPrototypeOf();
+  const hostFn = (globalThis as any).__native_instanceof;
+  if (typeof hostFn !== "function") {
+    throw new Error("Kernel native '__native_instanceof' not available");
   }
-
-  return false;
+  return !!hostFn(value, constructor as any);
 }
 
 // In operator
 export function inProperty(property: Value, object: Value): boolean {
-  if (!isObject(object)) throw new TypeError("in operator expects an object");
-
-  const propertyKey = toString(property);
-  return (object as BlitzObject).hasProperty(propertyKey);
+  const hostFn = (globalThis as any).__native_inProperty;
+  if (typeof hostFn !== "function") {
+    throw new Error("Kernel native '__native_inProperty' not available");
+  }
+  return !!hostFn(property, object);
 }
 
 // Typeof operator
 export function typeofValue(value: Value): string {
-  if (isNull(value)) return "object";
-  if (isFunction(value)) return "function";
-  return typeof value;
+  const hostFn = (globalThis as any).__native_typeof;
+  if (typeof hostFn !== "function") {
+    throw new Error("Kernel native '__native_typeof' not available");
+  }
+  return hostFn(value) as string;
 }

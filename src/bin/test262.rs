@@ -631,7 +631,14 @@ fn run_harness_only(
     fn print_vm_diag(vm: &Vm, keep_globals: &HashSet<String>) {
         eprintln!("--- VM DIAGNOSTICS ---");
         eprintln!("Preserved globals: {:?}", keep_globals);
-        let inspect_globals = ["$262", "Atomics", "Function", "Promise", "SharedArrayBuffer", "Int32Array"];
+        let inspect_globals = [
+            "$262",
+            "Atomics",
+            "Function",
+            "Promise",
+            "SharedArrayBuffer",
+            "Int32Array",
+        ];
         for name in &inspect_globals {
             match vm.get_global(name) {
                 Some(v) => {

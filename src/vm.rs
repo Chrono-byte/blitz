@@ -44,10 +44,10 @@
 //! ```
 
 use crate::bytecode::{Chunk, Op};
+use crate::module::ModuleLoader;
 use crate::typecheck::BuiltinType;
 use crate::typecheck::Type;
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
-use crate::module::ModuleLoader;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
@@ -526,7 +526,8 @@ impl Vm {
                         let a_prim = self.to_primitive(&a, None)?;
                         let b_prim = self.to_primitive(&b, None)?;
                         // If either primitive is a string, perform string concatenation
-                        if matches!(a_prim, Value::String(_)) || matches!(b_prim, Value::String(_)) {
+                        if matches!(a_prim, Value::String(_)) || matches!(b_prim, Value::String(_))
+                        {
                             let sa = self.to_string(&a_prim)?;
                             let sb = self.to_string(&b_prim)?;
                             self.stack.push(Value::String(format!("{}{}", sa, sb)));
@@ -846,7 +847,10 @@ impl Vm {
         }
     }
 
-    fn run_until_return(&mut self, stack_base: usize) -> Result<Value, crate::errors::RuntimeError> {
+    fn run_until_return(
+        &mut self,
+        stack_base: usize,
+    ) -> Result<Value, crate::errors::RuntimeError> {
         loop {
             let op_byte = self.read_byte()?;
             let op = match Op::from_byte(op_byte) {
@@ -967,7 +971,11 @@ impl Vm {
             Op::Mul => self.binary_num_bigint(|a, b| a * b, |a, b| Ok(a * b))?,
             Op::Div => self.binary_num_bigint(
                 |a, b| a / b,
-                |_, _| Err(crate::errors::RuntimeError::from("Div: bigint not supported")),
+                |_, _| {
+                    Err(crate::errors::RuntimeError::from(
+                        "Div: bigint not supported",
+                    ))
+                },
             )?,
             Op::Mod => self.binary_num_bigint(|a, b| a % b, |a, b| Ok(a % b))?,
             Op::Eq => {
@@ -1111,7 +1119,7 @@ impl Vm {
     // ECMAScript coercions
     // -----------------------------------------------------------------------
 
-    fn to_primitive(
+    pub fn to_primitive(
         &mut self,
         v: &Value,
         hint: Option<&str>,
@@ -1119,17 +1127,25 @@ impl Vm {
         match v {
             Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::Builtin(_) => {
                 // Try @@toPrimitive if present.
-                let to_prim_key = PropertyKey::Symbol(crate::value::SymbolId::well_known(1));
+                let to_prim_key =
+                    PropertyKey::Symbol(crate::value::SymbolId::well_known_to_primitive());
                 if let Ok(method) = get_property(v, &to_prim_key, 0)
                     && matches!(method, Value::Closure { .. } | Value::Builtin(_))
-                            && let Ok(rv) = self.call_with_this(
-                                &method,
-                                v,
-                                &[Value::String(hint.unwrap_or("default").to_string())],
-                            )
-                            && !matches!(rv, Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::Builtin(_)) {
-                                return Ok(rv);
-                            }
+                    && let Ok(rv) = self.call_with_this(
+                        &method,
+                        v,
+                        &[Value::String(hint.unwrap_or("default").to_string())],
+                    )
+                    && !matches!(
+                        rv,
+                        Value::Object(_)
+                            | Value::Array(..)
+                            | Value::Closure { .. }
+                            | Value::Builtin(_)
+                    )
+                {
+                    return Ok(rv);
+                }
 
                 let order = match hint {
                     Some("string") => ["toString", "valueOf"],
@@ -1140,10 +1156,17 @@ impl Vm {
                     let key = PropertyKey::String(name.to_string());
                     if let Ok(method) = get_property(v, &key, 0)
                         && matches!(method, Value::Closure { .. } | Value::Builtin(_))
-                            && let Ok(rv) = self.call_with_this(&method, v, &[])
-                                && !matches!(rv, Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::Builtin(_)) {
-                                    return Ok(rv);
-                                }
+                        && let Ok(rv) = self.call_with_this(&method, v, &[])
+                        && !matches!(
+                            rv,
+                            Value::Object(_)
+                                | Value::Array(..)
+                                | Value::Closure { .. }
+                                | Value::Builtin(_)
+                        )
+                    {
+                        return Ok(rv);
+                    }
                 }
                 // TODO: when Object.prototype.toString/valueOf are wired into
                 // the runtime object model, this should throw TypeError instead.
@@ -1153,11 +1176,15 @@ impl Vm {
         }
     }
 
-    fn to_string(&mut self, v: &Value) -> Result<String, crate::errors::RuntimeError> {
+    pub fn to_string(&mut self, v: &Value) -> Result<String, crate::errors::RuntimeError> {
         match v {
             Value::String(s) => Ok(s.clone()),
             Value::Number(n) => Ok(n.to_string()),
-            Value::Bool(b) => Ok(if *b { "true".to_string() } else { "false".to_string() }),
+            Value::Bool(b) => Ok(if *b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }),
             Value::Undefined => Ok("undefined".to_string()),
             Value::Null => Ok("null".to_string()),
             Value::BigInt(n) => Ok(n.to_string()),
@@ -1172,7 +1199,7 @@ impl Vm {
     }
 
     #[allow(dead_code)]
-    fn to_number_value(&mut self, v: &Value) -> Result<f64, crate::errors::RuntimeError> {
+    pub fn to_number_value(&mut self, v: &Value) -> Result<f64, crate::errors::RuntimeError> {
         match v {
             Value::Number(n) => Ok(*n),
             Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
@@ -1190,7 +1217,7 @@ impl Vm {
         }
     }
 
-    fn to_property_key(
+    pub fn to_property_key(
         &mut self,
         v: &Value,
     ) -> Result<PropertyKey, crate::errors::RuntimeError> {
@@ -1198,11 +1225,11 @@ impl Vm {
             Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym.clone())),
             Value::Object(data) => {
                 let d = data.borrow();
-                if let Some(PropertyDescriptor::Data { value, .. }) =
-                    d.properties.get(&PropertyKey::String("__isSymbol".to_string()))
+                if let Some(PropertyDescriptor::Data { value, .. }) = d
+                    .properties
+                    .get(&PropertyKey::String("__isSymbol".to_string()))
                     && matches!(value, Value::Bool(true))
-                {
-                    if let Some(PropertyDescriptor::Data { value, .. }) =
+                    && let Some(PropertyDescriptor::Data { value, .. }) =
                         d.properties.get(&PropertyKey::String("_id".to_string()))
                         && let Value::Number(n) = value
                     {
@@ -1210,7 +1237,6 @@ impl Vm {
                             *n as u64,
                         )));
                     }
-                }
                 let prim = self.to_primitive(v, Some("string"))?;
                 match prim {
                     Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym)),
@@ -1227,8 +1253,92 @@ impl Vm {
         }
     }
 
-    fn to_boolean(&self, v: &Value) -> bool {
+    pub fn to_boolean(&self, v: &Value) -> bool {
         v.is_truthy()
+    }
+
+    /// Kernel helper: abstract equality comparison (==). Exposed so the
+    /// soft layer can delegate equality semantics to the kernel during
+    /// migration.
+    pub fn abstract_equality(
+        &mut self,
+        x: &Value,
+        y: &Value,
+    ) -> Result<bool, crate::errors::RuntimeError> {
+        // Same-value for identical discriminants
+        if std::mem::discriminant(x) == std::mem::discriminant(y) {
+            return Ok(values_equal(x, y));
+        }
+
+        // null == undefined
+        if matches!(x, Value::Null) && matches!(y, Value::Undefined) {
+            return Ok(true);
+        }
+        if matches!(x, Value::Undefined) && matches!(y, Value::Null) {
+            return Ok(true);
+        }
+
+        // Number == String
+        if matches!(x, Value::Number(_)) && matches!(y, Value::String(_)) {
+            let yn = self.to_number_value(y)?;
+            if let Value::Number(xn) = x {
+                return Ok(*xn == yn);
+            }
+        }
+        if matches!(x, Value::String(_)) && matches!(y, Value::Number(_)) {
+            let xn = self.to_number_value(x)?;
+            if let Value::Number(yn) = y {
+                return Ok(xn == *yn);
+            }
+        }
+
+        // Boolean -> Number coercion
+        if matches!(x, Value::Bool(_)) {
+            let xn = if let Value::Bool(b) = x {
+                if *b { 1.0 } else { 0.0 }
+            } else {
+                0.0
+            };
+            return self.abstract_equality(&Value::Number(xn), y);
+        }
+        if matches!(y, Value::Bool(_)) {
+            let yn = if let Value::Bool(b) = y {
+                if *b { 1.0 } else { 0.0 }
+            } else {
+                0.0
+            };
+            return self.abstract_equality(x, &Value::Number(yn));
+        }
+
+        // Object compared with String/Number: ToPrimitive on object
+        if (matches!(x, Value::String(_)) || matches!(x, Value::Number(_)))
+            && matches!(
+                y,
+                Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::Builtin(_)
+                    | Value::BuiltinObject(_, _)
+            )
+        {
+            let yprim = self.to_primitive(y, None)?;
+            return self.abstract_equality(x, &yprim);
+        }
+        if (matches!(y, Value::String(_)) || matches!(y, Value::Number(_)))
+            && matches!(
+                x,
+                Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::Builtin(_)
+                    | Value::BuiltinObject(_, _)
+            )
+        {
+            let xprim = self.to_primitive(x, None)?;
+            return self.abstract_equality(&xprim, y);
+        }
+
+        Ok(false)
     }
 
     fn read_descriptor_from_value(
@@ -1243,18 +1353,21 @@ impl Vm {
             {
                 desc.value = Some(value.clone());
             }
-            if let Some(PropertyDescriptor::Data { value, .. }) =
-                d.properties.get(&PropertyKey::String("writable".to_string()))
+            if let Some(PropertyDescriptor::Data { value, .. }) = d
+                .properties
+                .get(&PropertyKey::String("writable".to_string()))
             {
                 desc.writable = Some(self.to_boolean(value));
             }
-            if let Some(PropertyDescriptor::Data { value, .. }) =
-                d.properties.get(&PropertyKey::String("enumerable".to_string()))
+            if let Some(PropertyDescriptor::Data { value, .. }) = d
+                .properties
+                .get(&PropertyKey::String("enumerable".to_string()))
             {
                 desc.enumerable = Some(self.to_boolean(value));
             }
-            if let Some(PropertyDescriptor::Data { value, .. }) =
-                d.properties.get(&PropertyKey::String("configurable".to_string()))
+            if let Some(PropertyDescriptor::Data { value, .. }) = d
+                .properties
+                .get(&PropertyKey::String("configurable".to_string()))
             {
                 desc.configurable = Some(self.to_boolean(value));
             }
@@ -1310,18 +1423,18 @@ impl Vm {
                         return Ok(false);
                     }
                 }
-                if let PropertyDescriptor::Data { writable, value, .. } = &cur {
-                    if !*writable {
+                if let PropertyDescriptor::Data {
+                    writable, value, ..
+                } = &cur
+                    && !*writable {
                         if let Some(true) = desc.writable {
                             return Ok(false);
                         }
-                        if let Some(new_val) = &desc.value {
-                            if !values_equal(new_val, value) {
+                        if let Some(new_val) = &desc.value
+                            && !values_equal(new_val, value) {
                                 return Ok(false);
                             }
-                        }
                     }
-                }
             }
         }
 
@@ -1333,18 +1446,20 @@ impl Vm {
                 enumerable: desc.enumerable.unwrap_or_else(|| {
                     current
                         .as_ref()
-                        .and_then(|d| match d {
-                            PropertyDescriptor::Data { enumerable, .. } => Some(*enumerable),
-                            PropertyDescriptor::Accessor { enumerable, .. } => Some(*enumerable),
+                        .map(|d| match d {
+                            PropertyDescriptor::Data { enumerable, .. } => *enumerable,
+                            PropertyDescriptor::Accessor { enumerable, .. } => *enumerable,
                         })
                         .unwrap_or(false)
                 }),
                 configurable: desc.configurable.unwrap_or_else(|| {
                     current
                         .as_ref()
-                        .and_then(|d| match d {
-                            PropertyDescriptor::Data { configurable, .. } => Some(*configurable),
-                            PropertyDescriptor::Accessor { configurable, .. } => Some(*configurable),
+                        .map(|d| match d {
+                            PropertyDescriptor::Data { configurable, .. } => *configurable,
+                            PropertyDescriptor::Accessor { configurable, .. } => {
+                                *configurable
+                            }
                         })
                         .unwrap_or(false)
                 }),
@@ -1356,18 +1471,12 @@ impl Vm {
                     writable,
                     enumerable,
                     configurable,
-                }) => (
-                    value.clone(),
-                    *writable,
-                    *enumerable,
-                    *configurable,
-                ),
-                Some(PropertyDescriptor::Accessor { enumerable, configurable, .. }) => (
-                    Value::Undefined,
-                    false,
-                    *enumerable,
-                    *configurable,
-                ),
+                }) => (value.clone(), *writable, *enumerable, *configurable),
+                Some(PropertyDescriptor::Accessor {
+                    enumerable,
+                    configurable,
+                    ..
+                }) => (Value::Undefined, false, *enumerable, *configurable),
                 None => (Value::Undefined, false, false, false),
             };
             PropertyDescriptor::Data {
@@ -1426,8 +1535,7 @@ impl Vm {
             Value::Array(arr, props) => {
                 if let PropertyKey::String(s) = key
                     && let Ok(i) = s.parse::<usize>()
-                {
-                    if let Some(v) = arr.borrow().get(i).cloned() {
+                    && let Some(v) = arr.borrow().get(i).cloned() {
                         return Ok(Some((
                             PropertyDescriptor::Data {
                                 value: v,
@@ -1438,7 +1546,6 @@ impl Vm {
                             obj.clone(),
                         )));
                     }
-                }
                 let p = props.borrow();
                 if let Some(desc) = p.properties.get(key) {
                     return Ok(Some((desc.clone(), obj.clone())));
@@ -1749,15 +1856,14 @@ impl Vm {
         key: &PropertyKey,
         value: Value,
     ) -> Result<(), crate::errors::RuntimeError> {
-        if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
-            if let PropertyDescriptor::Accessor { set, .. } = desc {
+        if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)?
+            && let PropertyDescriptor::Accessor { set, .. } = desc {
                 if let Some(setter) = set {
                     let _ = self.call_with_this(&setter, obj, &[value])?;
                     return Ok(());
                 }
                 return Ok(());
             }
-        }
         set_property(obj, key, value)?;
 
         // Bump generation for the mutated object.
@@ -2041,6 +2147,75 @@ impl Vm {
             }
         }
     }
+
+    /// Instanceof helper: checks whether `value` has `constructor.prototype` in its prototype chain.
+    pub fn instance_of(
+        &self,
+        value: &Value,
+        constructor: &Value,
+    ) -> Result<bool, crate::errors::RuntimeError> {
+        // Only objects have prototype chains.
+        match value {
+            Value::Object(_)
+            | Value::Array(..)
+            | Value::Closure { .. }
+            | Value::BuiltinObject(_, _) => {}
+            _ => return Ok(false),
+        }
+
+        // Get constructor.prototype
+        let proto_key = PropertyKey::String("prototype".to_string());
+        let ctor_proto = get_property(constructor, &proto_key, 0)?;
+        // prototype must be an object
+        match ctor_proto {
+            Value::Object(_)
+            | Value::Array(..)
+            | Value::Closure { .. }
+            | Value::BuiltinObject(_, _) => {}
+            _ => return Ok(false),
+        }
+
+        // Walk value's prototype chain
+        let mut current = match value {
+            Value::Object(d) => d.borrow().prototype.clone(),
+            Value::Array(_, props) => props.borrow().prototype.clone(),
+            Value::Closure { props, .. } => props.borrow().prototype.clone(),
+            Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
+            _ => Value::Null,
+        };
+
+        while !matches!(current, Value::Null) {
+            if values_equal(&current, &ctor_proto) {
+                return Ok(true);
+            }
+            // advance
+            current = match &current {
+                Value::Object(d) => d.borrow().prototype.clone(),
+                Value::Array(_, props) => props.borrow().prototype.clone(),
+                Value::Closure { props, .. } => props.borrow().prototype.clone(),
+                Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
+                _ => Value::Null,
+            };
+        }
+
+        Ok(false)
+    }
+
+    /// 'in' operator helper. Returns true if property (after ToPropertyKey) is in object.
+    pub fn in_property(
+        &mut self,
+        property: &Value,
+        object: &Value,
+    ) -> Result<bool, crate::errors::RuntimeError> {
+        let key = self.to_property_key(property)?;
+        Ok(self.lookup_property_descriptor(object, &key, 0)?.is_some())
+    }
+
+    /// typeof helper returning the type string for a value.
+    pub fn typeof_value(&self, value: &Value) -> String {
+        // `typeof null` is 'object'
+        value.type_name().to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2145,10 +2320,10 @@ fn runtime_assignable(expected: &Type, actual: &Value) -> bool {
         Type::Unknown => true,
         Type::Array(_) => matches!(actual, Value::Array(_, _)),
         Type::Object(_) => matches!(actual, Value::Object(_)),
-            Type::Function(_, _) => matches!(
-                actual,
-                Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
-            ),
+        Type::Function(_, _) => matches!(
+            actual,
+            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
+        ),
         Type::Union(variants) => variants.iter().any(|t| runtime_assignable(t, actual)),
         Type::Builtin(_) | Type::TypeReference { .. } => true,
     }
@@ -2165,7 +2340,6 @@ fn check_assign(expected: &Type, actual: &Value) -> Result<(), crate::errors::Ru
         )))
     }
 }
-
 
 /// Reference-equality semantics for objects/arrays/closures, structural
 /// equality for primitives. Matches JavaScript `===` behaviour.
@@ -2307,22 +2481,22 @@ fn set_property(
             if let PropertyKey::String(s) = key
                 && let Ok(i) = s.parse::<usize>()
             {
-                    let mut a = arr.borrow_mut();
-                    if i >= a.len() {
-                        a.resize(i + 1, Value::Undefined);
-                    }
-                    a[i] = value;
-                    // Update the `length` own property on the array's property bag
-                    // so reads of `arr.length` reflect the new size.
-                    let new_len = a.len();
-                    drop(a);
-                    let mut p = props.borrow_mut();
-                    p.properties.insert(
-                        PropertyKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(new_len as f64)),
-                    );
-                    return Ok(());
+                let mut a = arr.borrow_mut();
+                if i >= a.len() {
+                    a.resize(i + 1, Value::Undefined);
                 }
+                a[i] = value;
+                // Update the `length` own property on the array's property bag
+                // so reads of `arr.length` reflect the new size.
+                let new_len = a.len();
+                drop(a);
+                let mut p = props.borrow_mut();
+                p.properties.insert(
+                    PropertyKey::String("length".to_string()),
+                    PropertyDescriptor::data(Value::Number(new_len as f64)),
+                );
+                return Ok(());
+            }
             let mut p = props.borrow_mut();
             if let Some(desc) = p.properties.get_mut(key) {
                 match desc {

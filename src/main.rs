@@ -40,7 +40,10 @@ use std::rc::Rc;
 
 use tsblitz::bytecode;
 use tsblitz::compiler;
-use tsblitz::{bundle_entry, resolver::resolve_specifier, parser::Parser as TsParser, typecheck, value::Value, vm::Vm};
+use tsblitz::{
+    bundle_entry, parser::Parser as TsParser, resolver::resolve_specifier, typecheck, value::Value,
+    vm::Vm,
+};
 
 /// Minimal native hook: print to stdout. The TS soft layer wraps this as console.log.
 fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
@@ -204,7 +207,7 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     // the runtime simpler and avoids an extra indirection.
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("__native_print".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(std::rc::Rc::new(|vm, args| {
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             native_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
         }))),
     );
@@ -220,16 +223,276 @@ fn main() -> Result<(), tsblitz::errors::Error> {
 
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("__native_new_object".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(std::rc::Rc::new(|vm, args| {
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             native_new_object(vm, args).map_err(tsblitz::errors::RuntimeError::from)
         }))),
     );
 
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("__define_property".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(std::rc::Rc::new(|vm, args| {
-            vm.define_property_builtin(args)
-                .map_err(tsblitz::errors::RuntimeError::from)
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            vm.define_property_builtin(args)}))),
+    );
+
+    // Kernel-native coercion helpers: soft layer delegates ToString/ToNumber/ToBoolean
+    // to the kernel during migration. These simple wrappers call into the VM
+    // helpers implemented in `Vm` so soft runtime can use authoritative semantics
+    // without reimplementing them in TypeScript.
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_toString".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let v = args.first().cloned().unwrap_or(Value::Undefined);
+            vm.to_string(&v)
+                .map(Value::String)}))),
+    );
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_toNumber".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let v = args.first().cloned().unwrap_or(Value::Undefined);
+            vm.to_number_value(&v)
+                .map(Value::Number)}))),
+    );
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_toBoolean".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let v = args.first().cloned().unwrap_or(Value::Undefined);
+            Ok(Value::Bool(vm.to_boolean(&v)))
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_abstractEquality".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Undefined);
+            let b = args.get(1).cloned().unwrap_or(Value::Undefined);
+            match vm.abstract_equality(&a, &b) {
+                Ok(v) => Ok(Value::Bool(v)),
+                Err(e) => Err(e),
+            }
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_instanceof".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let value = args.first().cloned().unwrap_or(Value::Undefined);
+            let ctor = args.get(1).cloned().unwrap_or(Value::Undefined);
+            match vm.instance_of(&value, &ctor) {
+                Ok(v) => Ok(Value::Bool(v)),
+                Err(e) => Err(e),
+            }
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_inProperty".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let prop = args.first().cloned().unwrap_or(Value::Undefined);
+            let obj = args.get(1).cloned().unwrap_or(Value::Undefined);
+            match vm.in_property(&prop, &obj) {
+                Ok(v) => Ok(Value::Bool(v)),
+                Err(e) => Err(e),
+            }
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_typeof".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let v = args.first().cloned().unwrap_or(Value::Undefined);
+            Ok(Value::String(vm.typeof_value(&v)))
+        }))),
+    );
+
+    // Arithmetic and relational native helpers
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_add".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            // BigInt handling
+            if matches!(a, Value::BigInt(_)) || matches!(b, Value::BigInt(_)) {
+                // Match on references to avoid moving `a`/`b` so they can be
+                // borrowed again later in the closure.
+                if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
+                    return Ok(Value::BigInt(*x + *y));
+                } else {
+                    return Err(tsblitz::errors::RuntimeError::from(
+                        "Add: cannot mix BigInt and other types",
+                    ));
+                }
+            }
+            // Ordinary addition: ToPrimitive default
+            let a_prim = vm.to_primitive(&a, None)?;
+            let b_prim = vm.to_primitive(&b, None)?;
+            if matches!(a_prim, Value::String(_)) || matches!(b_prim, Value::String(_)) {
+                let sa = vm.to_string(&a_prim)?;
+                let sb = vm.to_string(&b_prim)?;
+                return Ok(Value::String(format!("{}{}", sa, sb)));
+            }
+            let na = vm.to_number_value(&a_prim)?;
+            let nb = vm.to_number_value(&b_prim)?;
+            Ok(Value::Number(na + nb))
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_subtract".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
+                return Ok(Value::BigInt(*x - *y));
+            }
+            let na = vm.to_number_value(&a)?;
+            let nb = vm.to_number_value(&b)?;
+            Ok(Value::Number(na - nb))
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_multiply".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
+                return Ok(Value::BigInt(*x * *y));
+            }
+            let na = vm.to_number_value(&a)?;
+            let nb = vm.to_number_value(&b)?;
+            Ok(Value::Number(na * nb))
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_divide".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            // BigInt division is not supported
+            if matches!(a, Value::BigInt(_)) || matches!(b, Value::BigInt(_)) {
+                return Err(tsblitz::errors::RuntimeError::from(
+                    "Div: bigint not supported",
+                ));
+            }
+            let na = vm.to_number_value(&a)?;
+            let nb = vm.to_number_value(&b)?;
+            Ok(Value::Number(na / nb))
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_remainder".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
+                return Ok(Value::BigInt(*x % *y));
+            }
+            let na = vm.to_number_value(&a)?;
+            let nb = vm.to_number_value(&b)?;
+            Ok(Value::Number(na % nb))
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_exponentiate".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
+                // BigInt exponentiation: use integer pow if y >= 0 and fits
+                if *y < 0 {
+                    return Err(tsblitz::errors::RuntimeError::from(
+                        "Exponentiation with negative BigInt not supported",
+                    ));
+                }
+                let mut res: i128 = 1;
+                let mut base = *x;
+                let mut exp = *y as u128;
+                while exp > 0 {
+                    if (exp & 1) == 1 {
+                        res = res.checked_mul(base).ok_or_else(|| {
+                            tsblitz::errors::RuntimeError::from("BigInt overflow in exponentiation")
+                        })?;
+                    }
+                    exp >>= 1;
+                    if exp > 0 {
+                        base = base.checked_mul(base).ok_or_else(|| {
+                            tsblitz::errors::RuntimeError::from("BigInt overflow in exponentiation")
+                        })?;
+                    }
+                }
+                return Ok(Value::BigInt(res));
+            }
+            let na = vm.to_number_value(&a)?;
+            let nb = vm.to_number_value(&b)?;
+            Ok(Value::Number(na.powf(nb)))
+        }))),
+    );
+
+    // Relational
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_lessThan".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            let ap = vm.to_primitive(&a, None)?;
+            let bp = vm.to_primitive(&b, None)?;
+            if let (Value::String(sa), Value::String(sb)) = (ap.clone(), bp.clone()) {
+                return Ok(Value::Bool(sa < sb));
+            }
+            let na = vm.to_number_value(&ap)?;
+            let nb = vm.to_number_value(&bp)?;
+            Ok(Value::Bool(na < nb))
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_lessThanOrEqual".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            let ap = vm.to_primitive(&a, None)?;
+            let bp = vm.to_primitive(&b, None)?;
+            if let (Value::String(sa), Value::String(sb)) = (ap.clone(), bp.clone()) {
+                return Ok(Value::Bool(sa <= sb));
+            }
+            let na = vm.to_number_value(&ap)?;
+            let nb = vm.to_number_value(&bp)?;
+            Ok(Value::Bool(na <= nb))
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_greaterThan".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            let ap = vm.to_primitive(&a, None)?;
+            let bp = vm.to_primitive(&b, None)?;
+            if let (Value::String(sa), Value::String(sb)) = (ap.clone(), bp.clone()) {
+                return Ok(Value::Bool(sa > sb));
+            }
+            let na = vm.to_number_value(&ap)?;
+            let nb = vm.to_number_value(&bp)?;
+            Ok(Value::Bool(na > nb))
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("__native_greaterThanOrEqual".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            let ap = vm.to_primitive(&a, None)?;
+            let bp = vm.to_primitive(&b, None)?;
+            if let (Value::String(sa), Value::String(sb)) = (ap.clone(), bp.clone()) {
+                return Ok(Value::Bool(sa >= sb));
+            }
+            let na = vm.to_number_value(&ap)?;
+            let nb = vm.to_number_value(&bp)?;
+            Ok(Value::Bool(na >= nb))
         }))),
     );
 
@@ -240,7 +503,7 @@ fn main() -> Result<(), tsblitz::errors::Error> {
             let mut data = tsblitz::value::ObjectData::new();
             data.properties.insert(
                 tsblitz::value::PropertyKey::String("log".to_string()),
-                tsblitz::value::PropertyDescriptor::data(Value::Builtin(std::rc::Rc::new(|vm, args| {
+                tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
                     native_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
                 }))),
             );
@@ -298,7 +561,7 @@ fn main() -> Result<(), tsblitz::errors::Error> {
 
     // Object constructor: returns a fresh object whose prototype is ctor.prototype
     let object_ctor_props = Rc::clone(&object_ctor_map);
-    let object_ctor_fn: BuiltinFn = std::rc::Rc::new(move |_vm, _args| {
+    let object_ctor_fn: BuiltinFn = Rc::new(move |_vm, _args| {
         // read .prototype from constructor props
         let proto = object_ctor_props
             .borrow()
@@ -318,20 +581,42 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     // now set proto.constructor -> ctor
     object_proto_map.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("constructor".to_string()),
-        tsblitz::value::PropertyDescriptor::data(object_ctor_val.clone()),
+        tsblitz::value::PropertyDescriptor::data(object_ctor_val),
+    );
+    // Install Object.prototype.toString and valueOf as builtin functions so
+    // runtime coercions have sane defaults.
+    object_proto_map.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("toString".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+            // `this` is passed as first arg for builtins
+            let this = args.first().cloned().unwrap_or(Value::Null);
+            let tag = this.object_tag();
+            Ok(Value::String(format!("[object {}]", tag)))
+        }))),
+    );
+    object_proto_map.borrow_mut().properties.insert(
+        tsblitz::value::PropertyKey::String("valueOf".to_string()),
+        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Null);
+            Ok(this)
+        }))),
     );
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("Object".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::BuiltinObject(object_ctor_fn.clone(), Rc::clone(&object_ctor_map))),
+        tsblitz::value::PropertyDescriptor::data(Value::BuiltinObject(
+            object_ctor_fn.clone(),
+            Rc::clone(&object_ctor_map),
+        )),
     );
 
     // Array constructor: build a Value::Array from arguments
     let array_ctor_props = Rc::clone(&array_ctor_map);
-    let array_ctor_fn: BuiltinFn = std::rc::Rc::new(move |_vm, args| {
+    let array_ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
         let elems: Vec<Value> = args.to_vec();
         let arr_rc = Rc::new(RefCell::new(elems));
         // prepare property bag with length and prototype
-        let props: Rc<RefCell<tsblitz::value::ObjectData>> = Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+        let props: Rc<RefCell<tsblitz::value::ObjectData>> =
+            Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
         props.borrow_mut().properties.insert(
             PKey::String("length".to_string()),
             tsblitz::value::PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
@@ -354,16 +639,19 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     let array_ctor_val = Value::BuiltinObject(array_ctor_fn.clone(), Rc::clone(&array_ctor_map));
     array_proto_map.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("constructor".to_string()),
-        tsblitz::value::PropertyDescriptor::data(array_ctor_val.clone()),
+        tsblitz::value::PropertyDescriptor::data(array_ctor_val),
     );
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("Array".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::BuiltinObject(array_ctor_fn.clone(), Rc::clone(&array_ctor_map))),
+        tsblitz::value::PropertyDescriptor::data(Value::BuiltinObject(
+            array_ctor_fn.clone(),
+            Rc::clone(&array_ctor_map),
+        )),
     );
 
     // String constructor: coerce argument to string primitive
-    let string_ctor_props = Rc::clone(&string_ctor_map);
-    let string_ctor_fn: BuiltinFn = std::rc::Rc::new(move |_vm, args| {
+    let _string_ctor_props = Rc::clone(&string_ctor_map);
+    let string_ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
         if args.is_empty() {
             return Ok(Value::String("".to_string()));
         }
@@ -371,7 +659,9 @@ fn main() -> Result<(), tsblitz::errors::Error> {
         match &args[0] {
             Value::String(s) => Ok(Value::String(s.clone())),
             Value::Number(n) => Ok(Value::String(n.to_string())),
-            Value::Bool(b) => Ok(Value::String((if *b { "true" } else { "false" }).to_string())),
+            Value::Bool(b) => Ok(Value::String(
+                (if *b { "true" } else { "false" }).to_string(),
+            )),
             Value::Null => Ok(Value::String("null".to_string())),
             Value::Undefined => Ok(Value::String("undefined".to_string())),
             Value::BigInt(n) => Ok(Value::String(n.to_string())),
@@ -382,11 +672,14 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     let string_ctor_val = Value::BuiltinObject(string_ctor_fn.clone(), Rc::clone(&string_ctor_map));
     string_proto_map.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("constructor".to_string()),
-        tsblitz::value::PropertyDescriptor::data(string_ctor_val.clone()),
+        tsblitz::value::PropertyDescriptor::data(string_ctor_val),
     );
     globals.borrow_mut().properties.insert(
         tsblitz::value::PropertyKey::String("String".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::BuiltinObject(string_ctor_fn.clone(), Rc::clone(&string_ctor_map))),
+        tsblitz::value::PropertyDescriptor::data(Value::BuiltinObject(
+            string_ctor_fn.clone(),
+            Rc::clone(&string_ctor_map),
+        )),
     );
 
     // Parse CLI early so clap can handle --help/--version before doing work.
@@ -399,7 +692,7 @@ fn main() -> Result<(), tsblitz::errors::Error> {
         prelude_path.parent().unwrap_or(Path::new(".")),
         &format!("./{}", prelude_path.file_name().unwrap().to_string_lossy()),
     )?;
-    let prelude_session = tsblitz::bundler::bundle_entry(&prelude_resolved)?;
+    let prelude_session = bundle_entry(&prelude_resolved)?;
     let prelude_program = prelude_session.program();
 
     // Skip type checking for soft layer prelude (has dynamic patterns that typechecker doesn't handle yet)

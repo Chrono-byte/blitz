@@ -52,6 +52,11 @@ impl SymbolId {
     pub fn well_known(id: u64) -> Self {
         Self(id)
     }
+
+    /// Well-known symbol for @@toPrimitive
+    pub fn well_known_to_primitive() -> Self {
+        Self::well_known(1)
+    }
 }
 
 /// Property key variant (string or symbol).
@@ -182,7 +187,7 @@ pub enum Value {
 /// so they can signal runtime errors back to the VM using the structured
 /// error type defined in `crate::errors`.
 pub type BuiltinFn =
-    std::rc::Rc<dyn Fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, crate::errors::RuntimeError>>;
+    Rc<dyn Fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, crate::errors::RuntimeError>>;
 
 /// Full runtime type descriptor structure so the VM can perform stricter checks.
 #[derive(Clone, Debug)]
@@ -232,6 +237,22 @@ impl Value {
             Value::Array(..) => "object",
             Value::Closure { .. } => "function",
             Value::Builtin(_) | Value::BuiltinObject(_, _) => "function",
+        }
+    }
+
+    /// Return the internal [[Class]] / object tag used by Object.prototype.toString.
+    pub fn object_tag(&self) -> &'static str {
+        match self {
+            Value::Undefined => "Undefined",
+            Value::Null => "Null",
+            Value::Bool(_) => "Boolean",
+            Value::Number(_) => "Number",
+            Value::BigInt(_) => "BigInt",
+            Value::String(_) => "String",
+            Value::Symbol(_, _) => "Symbol",
+            Value::Array(..) => "Array",
+            Value::Object(_) => "Object",
+            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _) => "Function",
         }
     }
 }

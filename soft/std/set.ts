@@ -32,7 +32,7 @@ const SetImpl: SetConstructor = function <T>(this: Set<T>, values?: readonly T[]
   if (values !== undefined) {
     let i = 0;
     while (i < values.length) {
-    (this as any)._set.add(values[i]);
+      (this as any)._set.add(values[i]);
       i = i + 1;
     }
   }

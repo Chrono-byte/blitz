@@ -50,6 +50,12 @@ pub struct ModuleLoader {
     pub map: HashMap<PathBuf, Rc<RefCell<ModuleRecord>>>,
 }
 
+impl Default for ModuleLoader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModuleLoader {
     pub fn new() -> Self {
         Self {
@@ -64,7 +70,7 @@ impl ModuleLoader {
         spec: &str,
     ) -> Result<Rc<RefCell<ModuleRecord>>, BundlerError> {
         let resolved = resolve_specifier(base, spec)?;
-        let resolved_canon = std::fs::canonicalize(&resolved).unwrap_or(resolved.clone());
+        let resolved_canon = std::fs::canonicalize(&resolved).unwrap_or(resolved);
         if let Some(existing) = self.map.get(&resolved_canon) {
             return Ok(Rc::clone(existing));
         }
@@ -108,7 +114,7 @@ impl ModuleLoader {
     /// exported names so importers can hold live bindings to the same slot.
     pub fn instantiate_all(&mut self) -> Result<(), BundlerError> {
         // For each module, examine its AST for exported names and allocate slots.
-        for (_path, rec_rc) in &self.map {
+        for rec_rc in self.map.values() {
             let mut rec = rec_rc.borrow_mut();
             if matches!(rec.state, ModuleState::Parsed) {
                 // Use ESTree JSON representation to find export declarations
@@ -139,14 +145,13 @@ impl ModuleLoader {
                                             );
                                         }
                                     }
-                                } else if let Some(decl) = item.get("declaration") {
-                                    if let Some(decl_type) =
+                                } else if let Some(decl) = item.get("declaration")
+                                    && let Some(decl_type) =
                                         decl.get("type").and_then(|d| d.as_str())
                                     {
-                                        if decl_type == "FunctionDeclaration"
-                                            || decl_type == "ClassDeclaration"
-                                        {
-                                            if let Some(id) = decl
+                                        if (decl_type == "FunctionDeclaration"
+                                            || decl_type == "ClassDeclaration")
+                                            && let Some(id) = decl
                                                 .get("id")
                                                 .and_then(|i| i.get("name"))
                                                 .and_then(|n| n.as_str())
@@ -156,9 +161,7 @@ impl ModuleLoader {
                                                     Rc::new(RefCell::new(Value::Undefined)),
                                                 );
                                             }
-                                        }
                                     }
-                                }
                             }
                             "ExportDefaultDeclaration" => {
                                 rec.exports.insert(
@@ -191,18 +194,17 @@ impl ModuleLoader {
             let mut rec = rec_rc.borrow_mut();
             // Parse the ESTree to find import declarations
             let estree = rec.session.program().to_pretty_estree_ts_json(false);
-            let root: JsonValue = serde_json::from_str(&estree).map_err(|e| {
-                BundlerError::from(format!("Failed to parse ESTree JSON: {}", e))
-            })?;
+            let root: JsonValue = serde_json::from_str(&estree)
+                .map_err(|e| BundlerError::from(format!("Failed to parse ESTree JSON: {}", e)))?;
             let body = root
                 .get("body")
                 .and_then(|b| b.as_array())
                 .ok_or_else(|| BundlerError::from("Expected program body"))?;
             for item in body {
-                if let Some(typ) = item.get("type").and_then(|t| t.as_str()) {
-                    if typ == "ImportDeclaration" {
-                        if let Some(source_node) = item.get("source") {
-                            if let Some(spec) = source_node.get("value").and_then(|v| v.as_str()) {
+                if let Some(typ) = item.get("type").and_then(|t| t.as_str())
+                    && typ == "ImportDeclaration"
+                        && let Some(source_node) = item.get("source")
+                            && let Some(spec) = source_node.get("value").and_then(|v| v.as_str()) {
                                 // Resolve the specifier relative to this module
                                 let base_dir = rec.path.parent().unwrap_or(Path::new("."));
                                 // Ensure dependency is constructed; this may insert into self.map
@@ -211,14 +213,23 @@ impl ModuleLoader {
                                     Err(_) => continue,
                                 };
 
-                                if let Some(specs) = item.get("specifiers").and_then(|s| s.as_array()) {
+                                if let Some(specs) =
+                                    item.get("specifiers").and_then(|s| s.as_array())
+                                {
                                     for sp in specs {
-                                        if let Some(kind) = sp.get("type").and_then(|k| k.as_str()) {
+                                        if let Some(kind) = sp.get("type").and_then(|k| k.as_str())
+                                        {
                                             match kind {
                                                 "ImportSpecifier" => {
                                                     // imported.name and local.name
-                                                    if let Some(imported) = sp.get("imported").and_then(|i| i.get("name")).and_then(|n| n.as_str())
-                                                        && let Some(local) = sp.get("local").and_then(|l| l.get("name")).and_then(|n| n.as_str())
+                                                    if let Some(imported) = sp
+                                                        .get("imported")
+                                                        .and_then(|i| i.get("name"))
+                                                        .and_then(|n| n.as_str())
+                                                        && let Some(local) = sp
+                                                            .get("local")
+                                                            .and_then(|l| l.get("name"))
+                                                            .and_then(|n| n.as_str())
                                                     {
                                                         // Try to get exporter slot without holding a borrow while mutating
                                                         let slot_opt = {
@@ -226,45 +237,80 @@ impl ModuleLoader {
                                                             dep.exports.get(imported).cloned()
                                                         };
                                                         if let Some(slot) = slot_opt {
-                                                            rec.imports.insert(local.to_string(), Rc::clone(&slot));
+                                                            rec.imports.insert(
+                                                                local.to_string(),
+                                                                Rc::clone(&slot),
+                                                            );
                                                         } else {
                                                             // Create a new slot on exporter and link to it
-                                                            let new_slot = Rc::new(RefCell::new(Value::Undefined));
+                                                            let new_slot = Rc::new(RefCell::new(
+                                                                Value::Undefined,
+                                                            ));
                                                             {
-                                                                let mut dep_mut = dep_rec_rc.borrow_mut();
-                                                                dep_mut.exports.insert(imported.to_string(), Rc::clone(&new_slot));
+                                                                let mut dep_mut =
+                                                                    dep_rec_rc.borrow_mut();
+                                                                dep_mut.exports.insert(
+                                                                    imported.to_string(),
+                                                                    Rc::clone(&new_slot),
+                                                                );
                                                             }
-                                                            rec.imports.insert(local.to_string(), Rc::clone(&new_slot));
+                                                            rec.imports.insert(
+                                                                local.to_string(),
+                                                                Rc::clone(&new_slot),
+                                                            );
                                                         }
                                                     }
                                                 }
                                                 "ImportDefaultSpecifier" => {
-                                                    if let Some(local) = sp.get("local").and_then(|l| l.get("name")).and_then(|n| n.as_str()) {
+                                                    if let Some(local) = sp
+                                                        .get("local")
+                                                        .and_then(|l| l.get("name"))
+                                                        .and_then(|n| n.as_str())
+                                                    {
                                                         let slot_opt = {
                                                             let dep = dep_rec_rc.borrow();
                                                             dep.exports.get("default").cloned()
                                                         };
                                                         if let Some(slot) = slot_opt {
-                                                            rec.imports.insert(local.to_string(), Rc::clone(&slot));
+                                                            rec.imports.insert(
+                                                                local.to_string(),
+                                                                Rc::clone(&slot),
+                                                            );
                                                         } else {
-                                                            let new_slot = Rc::new(RefCell::new(Value::Undefined));
+                                                            let new_slot = Rc::new(RefCell::new(
+                                                                Value::Undefined,
+                                                            ));
                                                             {
-                                                                let mut dep_mut = dep_rec_rc.borrow_mut();
-                                                                dep_mut.exports.insert("default".to_string(), Rc::clone(&new_slot));
+                                                                let mut dep_mut =
+                                                                    dep_rec_rc.borrow_mut();
+                                                                dep_mut.exports.insert(
+                                                                    "default".to_string(),
+                                                                    Rc::clone(&new_slot),
+                                                                );
                                                             }
-                                                            rec.imports.insert(local.to_string(), Rc::clone(&new_slot));
+                                                            rec.imports.insert(
+                                                                local.to_string(),
+                                                                Rc::clone(&new_slot),
+                                                            );
                                                         }
                                                     }
                                                 }
                                                 "ImportNamespaceSpecifier" => {
-                                                    if let Some(local) = sp.get("local").and_then(|l| l.get("name")).and_then(|n| n.as_str()) {
+                                                    if let Some(local) = sp
+                                                        .get("local")
+                                                        .and_then(|l| l.get("name"))
+                                                        .and_then(|n| n.as_str())
+                                                    {
                                                         // Create namespace object (snapshot of current exports)
-                                                        let ns_obj = Value::Object(Rc::new(RefCell::new(crate::value::ObjectData::new())));
+                                                        let ns_obj =
+                                                            Value::Object(Rc::new(RefCell::new(
+                                                                crate::value::ObjectData::new(),
+                                                            )));
                                                         let exports_snapshot = {
                                                             let dep = dep_rec_rc.borrow();
                                                             dep.exports.clone()
                                                         };
-                                                        for (k, slot) in exports_snapshot.iter() {
+                                                        for (k, slot) in &exports_snapshot {
                                                             let v = slot.borrow().clone();
                                                             if let Value::Object(o) = &ns_obj {
                                                                 o.borrow_mut().properties.insert(
@@ -274,7 +320,8 @@ impl ModuleLoader {
                                                             }
                                                         }
                                                         let boxed = Rc::new(RefCell::new(ns_obj));
-                                                        rec.imports.insert(local.to_string(), boxed);
+                                                        rec.imports
+                                                            .insert(local.to_string(), boxed);
                                                     }
                                                 }
                                                 _ => {}
@@ -283,9 +330,6 @@ impl ModuleLoader {
                                     }
                                 }
                             }
-                        }
-                    }
-                }
             }
         }
         Ok(())
@@ -293,8 +337,11 @@ impl ModuleLoader {
 
     /// Compute depth-first, post-order evaluation order starting from `entry`.
     pub fn evaluation_order_from(&mut self, entry: &Path) -> Result<Vec<PathBuf>, BundlerError> {
-        let resolved = resolve_specifier(entry.parent().unwrap_or(Path::new(".")), &format!("./{}", entry.file_name().unwrap().to_string_lossy()))?;
-        let resolved_canon = std::fs::canonicalize(&resolved).unwrap_or(resolved.clone());
+        let resolved = resolve_specifier(
+            entry.parent().unwrap_or(Path::new(".")),
+            &format!("./{}", entry.file_name().unwrap().to_string_lossy()),
+        )?;
+        let resolved_canon = std::fs::canonicalize(&resolved).unwrap_or(resolved);
         let mut temp: HashMap<PathBuf, bool> = HashMap::new();
         let mut perm: HashMap<PathBuf, bool> = HashMap::new();
         let mut order: Vec<PathBuf> = Vec::new();
@@ -319,9 +366,10 @@ impl ModuleLoader {
             let src = std::fs::read_to_string(path).map_err(|e| {
                 BundlerError::from(format!("Failed to read module {}: {}", path.display(), e))
             })?;
-            let imports = crate::parser::Parser::extract_imports_from_source(&src).map_err(|e| {
-                BundlerError::from(format!("Parse error {}: {}", path.display(), e))
-            })?;
+            let imports =
+                crate::parser::Parser::extract_imports_from_source(&src).map_err(|e| {
+                    BundlerError::from(format!("Parse error {}: {}", path.display(), e))
+                })?;
             for spec in imports {
                 let base_dir = path.parent().unwrap_or(Path::new("."));
                 // attempt to ensure dependency constructed
@@ -339,7 +387,10 @@ impl ModuleLoader {
         if !self.map.contains_key(&resolved_canon) {
             // ensure constructed
             let base_dir = entry.parent().unwrap_or(Path::new("."));
-            self.construct(base_dir, &format!("./{}", entry.file_name().unwrap().to_string_lossy()))?;
+            self.construct(
+                base_dir,
+                &format!("./{}", entry.file_name().unwrap().to_string_lossy()),
+            )?;
         }
 
         visit(self, &resolved_canon, &mut temp, &mut perm, &mut order)?;
@@ -347,10 +398,14 @@ impl ModuleLoader {
     }
 
     /// Evaluate a module graph starting from entry in DFS post-order.
-    pub fn evaluate_entry(&mut self, entry: &Path, vm: &mut Vm) -> Result<(), crate::errors::RuntimeError> {
-        let order = self
-            .evaluation_order_from(entry)
-            .map_err(|e| crate::errors::RuntimeError::from(format!("Module resolution failed: {}", e)))?;
+    pub fn evaluate_entry(
+        &mut self,
+        entry: &Path,
+        vm: &mut Vm,
+    ) -> Result<(), crate::errors::RuntimeError> {
+        let order = self.evaluation_order_from(entry).map_err(|e| {
+            crate::errors::RuntimeError::from(format!("Module resolution failed: {}", e))
+        })?;
 
         for path in order {
             if let Some(rec_rc) = self.map.get(&path) {
@@ -377,7 +432,7 @@ impl ModuleLoader {
     /// Evaluate module graph in depth-first, post-order. For now synchronous.
     pub fn evaluate_all(&mut self, vm: &mut Vm) -> Result<(), crate::errors::RuntimeError> {
         // For simplicity evaluate modules in insertion order after instantiation.
-        for (_p, rec_rc) in &self.map {
+        for rec_rc in self.map.values() {
             let mut rec = rec_rc.borrow_mut();
             if matches!(rec.state, ModuleState::Instantiated) {
                 rec.state = ModuleState::Evaluating;

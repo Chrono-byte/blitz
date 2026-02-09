@@ -4,9 +4,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use tsblitz::bytecode::Chunk;
+use tsblitz::compile;
+use tsblitz::module::ModuleLoader;
 use tsblitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use tsblitz::vm::Vm;
-use tsblitz::{bundle_entry, compile};
 
 /// Clear slot types recursively for a Chunk graph.
 ///
@@ -94,44 +95,44 @@ fn prelude_bootstrap_runs() {
     // Publish host primitives into globals as main.rs does.
     globals.borrow_mut().properties.insert(
         PropertyKey::String("__native_print".to_string()),
-        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(test_native_print))),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("__native_new_object".to_string()),
-        PropertyDescriptor::data(Value::Builtin(test_native_new_object)),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(test_native_new_object))),
     );
     // Also publish convenience host-level wrappers so the bundled prelude can
     // import them during bootstrap ordering variants in tests.
     globals.borrow_mut().properties.insert(
         PropertyKey::String("host_print".to_string()),
-        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(test_native_print))),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("native_print".to_string()),
-        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(test_native_print))),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("debugValue".to_string()),
-        PropertyDescriptor::data(Value::Builtin(|_vm, _args| Ok(Value::Null))),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| Ok(Value::Null)))),
     );
 
     // Provide a minimal `host` object used by some prelude paths
     let mut host_obj = ObjectData::new();
     host_obj.properties.insert(
         PropertyKey::String("host_print".to_string()),
-        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(test_native_print))),
     );
     host_obj.properties.insert(
         PropertyKey::String("native_new_object".to_string()),
-        PropertyDescriptor::data(Value::Builtin(test_native_new_object)),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(test_native_new_object))),
     );
     host_obj.properties.insert(
         PropertyKey::String("native_print".to_string()),
-        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(test_native_print))),
     );
     host_obj.properties.insert(
         PropertyKey::String("debugValue".to_string()),
-        PropertyDescriptor::data(Value::Builtin(|_vm, _args| Ok(Value::Null))),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| Ok(Value::Null)))),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("host".to_string()),
@@ -142,23 +143,23 @@ fn prelude_bootstrap_runs() {
     let mut console_obj = ObjectData::new();
     console_obj.properties.insert(
         PropertyKey::String("log".to_string()),
-        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(test_native_print))),
     );
     console_obj.properties.insert(
         PropertyKey::String("info".to_string()),
-        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(test_native_print))),
     );
     console_obj.properties.insert(
         PropertyKey::String("warn".to_string()),
-        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(test_native_print))),
     );
     console_obj.properties.insert(
         PropertyKey::String("error".to_string()),
-        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(test_native_print))),
     );
     console_obj.properties.insert(
         PropertyKey::String("debug".to_string()),
-        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(test_native_print))),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("console".to_string()),
@@ -177,8 +178,18 @@ fn prelude_bootstrap_runs() {
     // Bundle and compile the soft prelude
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let prelude_path = manifest_dir.join("soft/prelude.ts");
-    let session = bundle_entry(&prelude_path).expect("bundle prelude ok");
-    let program = session.program();
+    // Use the VM module loader to construct (parse) the prelude module so the
+    // module resolution logic is exercised in the same way as the running
+    // process. We only need the ParserSession.program() for compilation here.
+    let mut loader = ModuleLoader::new();
+    let base = prelude_path.parent().unwrap_or(std::path::Path::new("."));
+    let rec = loader
+        .construct(
+            base,
+            &format!("./{}", prelude_path.file_name().unwrap().to_string_lossy()),
+        )
+        .expect("bundle prelude ok");
+    let program = rec.borrow().session.program();
     let chunk = compile(program).expect("compile prelude ok");
 
     // Clear slot types (the prelude is intentionally dynamic)

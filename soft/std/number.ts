@@ -116,7 +116,7 @@ NumberImpl.parseInt = function (string: string, radix?: number): number {
 if (typeof Number !== "undefined") {
   const prototype = Number.prototype;
   if (prototype) {
-  if (!prototype.toString) {
+    if (!prototype.toString) {
       prototype.toString = function (radix?: number): string {
         if (radix === undefined) {
           return this.valueOf().toString();

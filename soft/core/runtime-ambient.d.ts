@@ -176,8 +176,12 @@ type PropertyDescriptorMap = { [key: string]: PropertyDescriptor };
 type Record<K extends keyof any, T> = { [P in K]: T };
 
 /* Provide a type for Math/JSON so they can be used as types in code. */
-interface Math { [k: string]: any }
-interface JSON { [k: string]: any }
+interface Math {
+  [k: string]: any;
+}
+interface JSON {
+  [k: string]: any;
+}
 
 /* Minimal global types that appear as type names in code. */
 interface Object {}
@@ -273,7 +277,12 @@ interface Set<T = any> {
 
 /* Minimal Promise shape */
 interface PromiseConstructor {
-  new <T>(executor: (resolve: (value?: T | PromiseLike<T>) => void, reject: (reason?: any) => void) => void): Promise<any>;
+  new <T>(
+    executor: (
+      resolve: (value?: T | PromiseLike<T>) => void,
+      reject: (reason?: any) => void,
+    ) => void,
+  ): Promise<any>;
   resolve<T>(value: T | PromiseLike<T>): Promise<T>;
   reject<T = never>(reason?: any): Promise<T>;
   all<T>(values: readonly (T | PromiseLike<T>)[]): Promise<T[]>;
@@ -284,9 +293,11 @@ interface PromiseConstructor {
 interface Promise<T> {
   then<TResult1 = T, TResult2 = never>(
     onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
-    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null
+    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null,
   ): Promise<TResult1 | TResult2>;
-  catch<TResult = never>(onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | null): Promise<T | TResult>;
+  catch<TResult = never>(
+    onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | null,
+  ): Promise<T | TResult>;
   finally(onfinally?: (() => void) | null): Promise<T>;
 }
 

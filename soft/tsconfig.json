@@ -39,8 +39,8 @@
     // Other important flags
     "allowJs": true,
     "checkJs": false,
-    "isolatedModules": false,         // allow full TS program-level checks (not just per-file)
-    "skipLibCheck": true,             // avoid spurious errors from external lib .d.ts
+    "isolatedModules": false, // allow full TS program-level checks (not just per-file)
+    "skipLibCheck": true, // avoid spurious errors from external lib .d.ts
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
     "verbatimModuleSyntax": false,

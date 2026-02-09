@@ -25,7 +25,7 @@ pub fn resolve_specifier(
         std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf())
     };
     match resolver.resolve(&base_dir, specifier) {
-        Ok(resolution) => Ok(resolution.full_path().to_path_buf()),
+        Ok(resolution) => Ok(resolution.full_path()),
         Err(e) => Err(crate::errors::BundlerError::from(format!(
             "resolve error: {}",
             e
