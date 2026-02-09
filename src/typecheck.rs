@@ -424,6 +424,14 @@ impl TypeContext {
                     _ => Ok(Type::Unknown),
                 }
             }
+            OExpr::LogicalExpression(l) => {
+                let _ = self.type_of_expr_oast(&l.left)?;
+                let _ = self.type_of_expr_oast(&l.right)?;
+                match l.operator {
+                    oast::LogicalOperator::Coalesce => Ok(Type::Unknown),
+                    oast::LogicalOperator::And | oast::LogicalOperator::Or => Ok(Type::Unknown),
+                }
+            }
             OExpr::CallExpression(c) => {
                 let callee_type = self.type_of_expr_oast(&c.callee)?;
                 let is_console_log = if let OExpr::StaticMemberExpression(m) = &c.callee {

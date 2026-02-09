@@ -299,8 +299,13 @@ impl Compiler {
                                 }
                             }
                         }
-                        OForInit::Expression(e) => {
-                            self.compile_expr_oast(e)?;
+                        other => {
+                            let expr = other.as_expression().ok_or_else(|| {
+                                crate::errors::CompilerError::from(
+                                    "unsupported for-loop initializer",
+                                )
+                            })?;
+                            self.compile_expr_oast(expr)?;
                             self.emit(Op::Pop, LINE);
                         }
                     }
@@ -352,16 +357,17 @@ impl Compiler {
                 self.emit(Op::Return, LINE);
             }
             OStmt::ContinueStatement(_) => {
-                if let Some(patches) = self.continue_patches.last_mut() {
-                    self.emit(Op::Jump, LINE);
-                    let patch_pos = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
-                    patches.push(patch_pos);
-                } else {
+                if self.continue_patches.is_empty() {
                     return Err(crate::errors::CompilerError::from(
                         "'continue' used outside of a loop",
                     ));
+                }
+                self.emit(Op::Jump, LINE);
+                let patch_pos = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                if let Some(patches) = self.continue_patches.last_mut() {
+                    patches.push(patch_pos);
                 }
             }
             _ => {}
@@ -396,6 +402,36 @@ impl Compiler {
                     self.emit_byte(idx as u8, LINE);
                 }
             }
+            OExpr::AssignmentExpression(a) => {
+                if a.operator != oast::AssignmentOperator::Assign {
+                    return Err(crate::errors::CompilerError::from(
+                        "unsupported assignment operator",
+                    ));
+                }
+                let target = a.left.as_simple_assignment_target().ok_or_else(|| {
+                    crate::errors::CompilerError::from("unsupported assignment target")
+                })?;
+                self.compile_expr_oast(&a.right)?;
+                match target {
+                    oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                        let name = id.name.as_str();
+                        self.emit(Op::Dup, LINE);
+                        if let Some(slot) = self.resolve_local(name) {
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(slot as u8, LINE);
+                        } else {
+                            let idx = self.global_name_index(name);
+                            self.emit(Op::SetGlobal, LINE);
+                            self.emit_byte(idx as u8, LINE);
+                        }
+                    }
+                    _ => {
+                        return Err(crate::errors::CompilerError::from(
+                            "unsupported assignment target",
+                        ));
+                    }
+                }
+            }
             OExpr::UnaryExpression(u) => {
                 self.compile_expr_oast(&u.argument)?;
                 match u.operator {
@@ -421,6 +457,11 @@ impl Compiler {
                 match l.operator {
                     oast::LogicalOperator::And => self.emit(Op::And, LINE),
                     oast::LogicalOperator::Or => self.emit(Op::Or, LINE),
+                    oast::LogicalOperator::Coalesce => {
+                        return Err(crate::errors::CompilerError::from(
+                            "?? logical coalesce not supported",
+                        ));
+                    }
                 }
             }
             OExpr::ParenthesizedExpression(p) => {
