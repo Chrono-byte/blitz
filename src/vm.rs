@@ -1318,9 +1318,17 @@ fn property_key(v: &Value) -> Result<String, crate::errors::RuntimeError> {
     match v {
         Value::String(s) => Ok(s.clone()),
         Value::Number(n) => Ok(n.to_string()),
-        _ => Err(crate::errors::RuntimeError::from(
-            "Property key must be string or number",
-        )),
+        Value::Bool(b) => Ok(if *b {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }),
+        Value::Null => Ok("null".to_string()),
+        Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::Builtin(_) => {
+            // Minimal ToPropertyKey: fall back to stringification.
+            // Full Symbol and ToPrimitive semantics are not yet implemented.
+            Ok(format!("{}", v))
+        }
     }
 }
 
@@ -1410,10 +1418,10 @@ fn set_property(obj: &Value, key: &str, value: Value) -> Result<(), crate::error
             props.borrow_mut().insert(key.to_string(), value);
             Ok(())
         }
-        _ => Err(crate::errors::RuntimeError::from(format!(
-            "SetProperty: not an object (actual={})",
-            obj.type_name()
-        ))),
+        _ => {
+            // Non-object property assignments are no-ops in sloppy mode.
+            Ok(())
+        }
     }
 }
 

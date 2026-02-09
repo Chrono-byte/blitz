@@ -396,25 +396,39 @@ impl Compiler {
                 }
             }
             OExpr::NullLiteral(_) => self.emit(Op::Null, LINE),
-            OExpr::ArrowFunctionExpression(_) => {
-                self.emit(Op::Null, LINE);
+            OExpr::ArrowFunctionExpression(a) => {
+                let name = "<arrow>";
+                let (proto, _env_len) = self.compile_arrow_function(name, a, None)?;
+                let idx = self.chunk.add_function(proto);
+                self.emit(Op::MakeClosure, LINE);
+                self.emit_byte(idx as u8, LINE);
+            }
+            OExpr::FunctionExpression(f) => {
+                let name = "<anonymous>";
+                let (proto, _env_len) = self.compile_function(name, f, None)?;
+                let idx = self.chunk.add_function(proto);
+                self.emit(Op::MakeClosure, LINE);
+                self.emit_byte(idx as u8, LINE);
             }
             OExpr::ObjectExpression(obj) => {
+                let mut count = 0usize;
                 for prop in &obj.properties {
-                    if let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop {
+                    if let oast::ObjectPropertyKind::ObjectProperty(p) = prop {
+                        if p.computed {
+                            continue;
+                        }
                         let key = match &p.key {
-                            oxc_ast::ast::PropertyKey::StaticIdentifier(ident) => {
-                                ident.name.to_string()
-                            }
-                            oxc_ast::ast::PropertyKey::StringLiteral(s) => s.value.to_string(),
-                            _ => String::new(),
+                            oast::PropertyKey::StaticIdentifier(ident) => ident.name.to_string(),
+                            oast::PropertyKey::StringLiteral(s) => s.value.to_string(),
+                            _ => continue,
                         };
                         self.emit_constant(Value::String(key), LINE);
                         self.compile_expr_oast(&p.value)?;
+                        count += 1;
                     }
                 }
                 self.emit(Op::BuildObject, LINE);
-                self.emit_byte(obj.properties.len() as u8, LINE);
+                self.emit_byte(count as u8, LINE);
             }
             OExpr::ArrayExpression(arr) => {
                 for el in &arr.elements {
@@ -439,35 +453,92 @@ impl Compiler {
                 }
             }
             OExpr::AssignmentExpression(a) => {
-                if a.operator != oast::AssignmentOperator::Assign {
-                    return Err(crate::errors::CompilerError::from(
-                        "unsupported assignment operator",
-                    ));
-                }
                 let target = a.left.as_simple_assignment_target().ok_or_else(|| {
                     crate::errors::CompilerError::from("unsupported assignment target")
                 })?;
-                match target {
-                    oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
-                        let name = id.name.as_str();
-                        self.compile_expr_oast(&a.right)?;
-                        self.emit(Op::Dup, LINE);
-                        if let Some(slot) = self.resolve_local(name) {
-                            self.emit(Op::SetLocal, LINE);
-                            self.emit_byte(slot as u8, LINE);
-                        } else {
-                            let idx = self.global_name_index(name);
-                            self.emit(Op::SetGlobal, LINE);
-                            self.emit_byte(idx as u8, LINE);
+                match a.operator {
+                    oast::AssignmentOperator::Assign => match target {
+                        oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                            let name = id.name.as_str();
+                            self.compile_expr_oast(&a.right)?;
+                            self.emit(Op::Dup, LINE);
+                            if let Some(slot) = self.resolve_local(name) {
+                                self.emit(Op::SetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
+                            } else {
+                                let idx = self.global_name_index(name);
+                                self.emit(Op::SetGlobal, LINE);
+                                self.emit_byte(idx as u8, LINE);
+                            }
                         }
-                    }
+                        oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
+                            self.compile_expr_oast(&m.object)?;
+                            self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                            self.compile_expr_oast(&a.right)?;
+                            self.emit(Op::Dup, LINE);
+                            self.emit(Op::SetProperty, LINE);
+                        }
+                        oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
+                            self.compile_expr_oast(&m.object)?;
+                            self.compile_expr_oast(&m.expression)?;
+                            self.compile_expr_oast(&a.right)?;
+                            self.emit(Op::Dup, LINE);
+                            self.emit(Op::SetProperty, LINE);
+                        }
+                        _ => {
+                            return Err(crate::errors::CompilerError::from(
+                                "unsupported assignment target",
+                            ));
+                        }
+                    },
+                    oast::AssignmentOperator::Addition
+                    | oast::AssignmentOperator::Subtraction
+                    | oast::AssignmentOperator::Multiplication
+                    | oast::AssignmentOperator::Division
+                    | oast::AssignmentOperator::Remainder => match target {
+                        oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                            let name = id.name.as_str();
+                            if let Some(slot) = self.resolve_local(name) {
+                                self.emit(Op::GetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
+                            } else {
+                                let idx = self.global_name_index(name);
+                                self.emit(Op::GetGlobal, LINE);
+                                self.emit_byte(idx as u8, LINE);
+                            }
+                            self.compile_expr_oast(&a.right)?;
+                            match a.operator {
+                                oast::AssignmentOperator::Addition => self.emit(Op::Add, LINE),
+                                oast::AssignmentOperator::Subtraction => self.emit(Op::Sub, LINE),
+                                oast::AssignmentOperator::Multiplication => {
+                                    self.emit(Op::Mul, LINE)
+                                }
+                                oast::AssignmentOperator::Division => self.emit(Op::Div, LINE),
+                                oast::AssignmentOperator::Remainder => self.emit(Op::Mod, LINE),
+                                _ => {}
+                            }
+                            self.emit(Op::Dup, LINE);
+                            if let Some(slot) = self.resolve_local(name) {
+                                self.emit(Op::SetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
+                            } else {
+                                let idx = self.global_name_index(name);
+                                self.emit(Op::SetGlobal, LINE);
+                                self.emit_byte(idx as u8, LINE);
+                            }
+                        }
+                        _ => {
+                            return Err(crate::errors::CompilerError::from(
+                                "unsupported assignment target",
+                            ));
+                        }
+                    },
                     _ => {
                         return Err(crate::errors::CompilerError::from(
-                            "unsupported assignment target",
+                            "unsupported assignment operator",
                         ));
                     }
                 }
-                self.emit(Op::Null, LINE);
             }
             OExpr::UnaryExpression(u) => {
                 self.compile_expr_oast(&u.argument)?;
@@ -500,6 +571,55 @@ impl Compiler {
                         ));
                     }
                 }
+            }
+            OExpr::StaticMemberExpression(m) => {
+                self.compile_expr_oast(&m.object)?;
+                self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                self.emit(Op::GetPropertyIC, LINE);
+                self.emit_byte(0, LINE);
+            }
+            OExpr::ComputedMemberExpression(m) => {
+                self.compile_expr_oast(&m.object)?;
+                self.compile_expr_oast(&m.expression)?;
+                self.emit(Op::GetProperty, LINE);
+            }
+            OExpr::CallExpression(c) => {
+                if let OExpr::StaticMemberExpression(m) = &c.callee
+                    && let OExpr::Identifier(obj_ident) = &m.object
+                    && obj_ident.name.as_str() == "console"
+                    && m.property.name.as_str() == "log"
+                {
+                    let idx = self.global_name_index("__native_print");
+                    self.emit(Op::GetGlobal, LINE);
+                    self.emit_byte(idx as u8, LINE);
+                    let mut arg_count = 0usize;
+                    for arg in &c.arguments {
+                        if let Some(expr) = arg.as_expression() {
+                            self.compile_expr_oast(expr)?;
+                            arg_count += 1;
+                        } else {
+                            self.emit(Op::Null, LINE);
+                            arg_count += 1;
+                        }
+                    }
+                    self.emit(Op::Call, LINE);
+                    self.emit_byte(arg_count as u8, LINE);
+                    return Ok(());
+                }
+
+                self.compile_expr_oast(&c.callee)?;
+                let mut arg_count = 0usize;
+                for arg in &c.arguments {
+                    if let Some(expr) = arg.as_expression() {
+                        self.compile_expr_oast(expr)?;
+                        arg_count += 1;
+                    } else {
+                        self.emit(Op::Null, LINE);
+                        arg_count += 1;
+                    }
+                }
+                self.emit(Op::Call, LINE);
+                self.emit_byte(arg_count as u8, LINE);
             }
             OExpr::ParenthesizedExpression(p) => {
                 self.compile_expr_oast(&p.expression)?;
@@ -581,6 +701,67 @@ impl Compiler {
             for stmt in &body.statements {
                 inner.compile_statement_oast(stmt)?;
             }
+        }
+
+        inner.emit(Op::Return, LINE);
+        let chunk = std::mem::take(&mut inner.chunk);
+        let slot_types: Vec<Option<Type>> = param_type_opts
+            .into_iter()
+            .chain(inner.local_types)
+            .collect();
+        let has_rest = func.params.rest.is_some();
+        Ok((
+            FunctionProto {
+                name: name.to_string(),
+                arity: func.params.items.len() + if has_rest { 1 } else { 0 },
+                chunk: Rc::new(chunk),
+                slot_types,
+                has_rest,
+                return_type,
+            },
+            _env_len,
+        ))
+    }
+
+    fn compile_arrow_function(
+        &mut self,
+        name: &str,
+        func: &oast::ArrowFunctionExpression,
+        return_type: Option<Type>,
+    ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
+        let _env_len = self.locals.len();
+        let mut inner = Compiler {
+            chunk: Chunk::new(),
+            locals: Vec::new(),
+            local_types: Vec::new(),
+            globals: HashMap::new(),
+            is_root: false,
+            continue_patches: Vec::new(),
+        };
+
+        let mut param_type_opts: Vec<Option<Type>> = Vec::new();
+        for p in &func.params.items {
+            let pname = match &p.pattern {
+                oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
+                _ => "_".to_string(),
+            };
+            param_type_opts.push(None);
+            inner.add_local(pname, None);
+        }
+        if let Some(rest) = &func.params.rest {
+            let pname = match &rest.rest.argument {
+                oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
+                _ => "_".to_string(),
+            };
+            param_type_opts.push(None);
+            inner.add_local(pname, None);
+        }
+
+        // Pre-declare nested functions inside this function body.
+        inner.pre_declare_functions_oast_stmts(&func.body.statements);
+
+        for stmt in &func.body.statements {
+            inner.compile_statement_oast(stmt)?;
         }
 
         inner.emit(Op::Return, LINE);

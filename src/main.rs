@@ -64,34 +64,16 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Build the final joined string to print and offload actual IO to the
-    // background runtime so the VM main thread is not blocked on slow
-    // host I/O (terminals, pipes, etc.). Only move the owned `String` into
-    // the background task; do not move VM-internal values (which are not
-    // Send/Sync).
-    let s_owned = s;
-
-    // Keep a small synchronous trace for diagnostics, then schedule the
-    // heavy lifting to the background runtime.
+    // Print synchronously so output is visible before the VM exits.
     if tsblitz::trace::enabled() {
         eprintln!(
-            "[diag] host.native_print scheduled async write len={} repr={:?}",
-            s_owned.len(),
-            s_owned
+            "[diag] host.native_print write len={} repr={:?}",
+            s.len(),
+            s
         );
     }
 
-    // Schedule fire-and-forget async printing. We intentionally ignore the
-    // JoinHandle — printing is best-effort and we don't want to block the VM
-    // waiting for it. Background tasks must not access VM state.
-    _vm.spawn_bg(async move {
-        // Perform synchronous writes on the background thread. This keeps the
-        // main VM thread responsive while the OS performs potentially slow
-        // I/O.
-        use std::io::Write;
-        print!("{}", s_owned);
-        let _ = std::io::stdout().flush();
-    });
+    eprintln!("{}", s);
 
     Ok(Value::Null)
 }
@@ -209,9 +191,10 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     // We reuse the same Rc<RefCell<HashMap>> so property ops on the object and
     // Get/SetGlobal access the same backing map.
     let global_this = Value::Object(Rc::clone(&globals));
-    globals
-        .borrow_mut()
-        .insert("globalThis".to_string(), global_this);
+    {
+        let mut g = globals.borrow_mut();
+        g.insert("globalThis".to_string(), global_this);
+    }
 
     // Publish native host bindings directly into globals so soft code can read
     // them as ordinary globals (e.g. `globalThis.__native_print`). This keeps
@@ -236,6 +219,17 @@ fn main() -> Result<(), tsblitz::errors::Error> {
         Value::Builtin(|vm, args| {
             native_new_object(vm, args).map_err(tsblitz::errors::RuntimeError::from)
         }),
+    );
+
+    // Provide a minimal builtin console.log for early bootstrap and REPL use.
+    globals.borrow_mut().insert(
+        "console".to_string(),
+        Value::Object(Rc::new(RefCell::new(HashMap::from([(
+            "log".to_string(),
+            Value::Builtin(|vm, args| {
+                native_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+            }),
+        )])))),
     );
 
     // Parse CLI early so clap can handle --help/--version before doing work.

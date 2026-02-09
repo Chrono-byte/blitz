@@ -127,7 +127,7 @@ fn strict_mode() -> bool {
     }
     std::env::var("TSBLITZ_STRICT")
         .map(|v| v != "0")
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 pub fn set_strict_override(v: Option<bool>) {
@@ -226,11 +226,13 @@ impl TypeContext {
                         convert_type_ann(typ)?
                     } else if let Some(init) = &dec.init {
                         self.type_of_expr_oast(init)?
-                    } else {
+                    } else if strict_mode() {
                         return Err(TypeCheckerError::from(format!(
                             "Variable '{}' needs a type annotation or initializer",
                             name
                         )));
+                    } else {
+                        Type::Unknown
                     };
                     if let Some(init) = &dec.init {
                         let init_ok = if let oast::Expression::ArrayExpression(arr) = init {
@@ -379,8 +381,7 @@ impl TypeContext {
             OExpr::NullLiteral(_) => Ok(Type::Null),
             OExpr::Identifier(id) => {
                 let name = id.name.as_str();
-                self.lookup(name)
-                    .ok_or_else(|| TypeCheckerError::from(format!("Unknown variable '{}'", name)))
+                Ok(self.lookup(name).unwrap_or(Type::Unknown))
             }
             OExpr::UnaryExpression(u) => {
                 let a = self.type_of_expr_oast(&u.argument)?;
@@ -480,6 +481,7 @@ impl TypeContext {
                         }
                         Ok((**ret).clone())
                     }
+                    Type::Any | Type::Unknown => Ok(Type::Unknown),
                     _ => Err(TypeCheckerError::from(format!(
                         "Cannot call non-function type {}",
                         type_to_string(&callee_type)
@@ -494,18 +496,14 @@ impl TypeContext {
                         if let Some(t) = props.get(&key) {
                             Ok(t.clone())
                         } else {
-                            Err(TypeCheckerError::from(format!(
-                                "Property '{}' not found on object",
-                                key
-                            )))
+                            Ok(Type::Unknown)
                         }
                     }
-                    _ => Err(TypeCheckerError::from("GetProperty on non-object type")),
+                    Type::Any | Type::Unknown => Ok(Type::Unknown),
+                    _ => Ok(Type::Unknown),
                 }
             }
-            OExpr::ComputedMemberExpression(_) => Err(TypeCheckerError::from(
-                "Unsupported computed property access in type context",
-            )),
+            OExpr::ComputedMemberExpression(_) => Ok(Type::Unknown),
             OExpr::ArrayExpression(arr) => {
                 if arr.elements.is_empty() {
                     return Err(TypeCheckerError::from(

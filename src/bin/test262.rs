@@ -2,10 +2,19 @@
 Test262 connector script for tsblitz.
 
 Usage:
-- Set the `TEST262_DIR` environment variable to point at a checkout of
-  <https://github.com/tc39/test262>
 - Optionally set `TEST262_FILTER` to a substring to limit which tests are run
 - Optionally set `TEST262_LIMIT` to limit how many tests are executed (default 50)
+- Optionally set `TEST262_SEGMENTS` to a comma-separated list of segments
+- Optionally set `TEST262_EXCLUDE` to a comma-separated list of segments to skip
+
+CLI (preferred over env):
+- --segment <seg>[,<seg>...] (repeatable)
+- --exclude <seg>[,<seg>...] (repeatable)
+- --filter <substring>
+- --limit <n>
+
+Segments may be labels like: annexB, language, built-ins, intl402, staging
+or paths relative to test262/test (e.g. built-ins/Array).
 
 This connector is intentionally conservative: it runs a small subset of
 tests that don't require modules, async harnesses, includes, or other
@@ -16,7 +25,7 @@ APIs.
 */
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,6 +36,106 @@ use serde::Deserialize;
 
 use tsblitz::compiler;
 use tsblitz::{bundle_entry, parser::Parser, typecheck, value::Value, vm::Vm};
+
+struct RunnerOptions {
+    includes: Vec<String>,
+    excludes: Vec<String>,
+    filter: Option<String>,
+    limit: usize,
+    harness_only: bool,
+}
+
+fn print_usage() {
+    eprintln!("test262 runner options:");
+    eprintln!("  --segment <seg>[,<seg>...]   Include segment(s)");
+    eprintln!("  --exclude <seg>[,<seg>...]   Exclude segment(s)");
+    eprintln!("  --filter <substring>         Substring filter");
+    eprintln!("  --limit <n>                  Max tests (default 50)");
+    eprintln!("  --harness-only               Run only harness files");
+    eprintln!("segments: annexB, language, built-ins, intl402, staging, or path relative to test/");
+}
+
+fn parse_args() -> RunnerOptions {
+    let mut includes: Vec<String> = Vec::new();
+    let mut excludes: Vec<String> = Vec::new();
+    let mut filter = env::var("TEST262_FILTER").ok();
+    let mut limit: usize = env::var("TEST262_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+    let mut harness_only = false;
+
+    if let Ok(seg) = env::var("TEST262_SEGMENTS") {
+        includes.extend(
+            seg.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+        );
+    }
+    if let Ok(seg) = env::var("TEST262_EXCLUDE") {
+        excludes.extend(
+            seg.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+        );
+    }
+
+    let mut it = env::args().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print_usage();
+                exit(0);
+            }
+            "--segment" | "--include" => {
+                if let Some(val) = it.next() {
+                    includes.extend(
+                        val.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from),
+                    );
+                }
+            }
+            "--exclude" => {
+                if let Some(val) = it.next() {
+                    excludes.extend(
+                        val.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from),
+                    );
+                }
+            }
+            "--filter" => {
+                if let Some(val) = it.next() {
+                    filter = Some(val);
+                }
+            }
+            "--limit" => {
+                if let Some(val) = it.next()
+                    && let Ok(n) = val.parse::<usize>()
+                {
+                    limit = n;
+                }
+            }
+            "--harness-only" | "--harness" => {
+                harness_only = true;
+            }
+            _ => {}
+        }
+    }
+
+    RunnerOptions {
+        includes,
+        excludes,
+        filter,
+        limit,
+        harness_only,
+    }
+}
 
 /// Minimal subset of metadata we care about.
 #[derive(Debug, Deserialize)]
@@ -148,9 +257,14 @@ fn run_source_in_realm(
 
 /// Recursively gather `.js` test files under the given directory while skipping
 /// files with `_FIXTURE` in their name.
-fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>, excludes: &[PathBuf]) {
     if !dir.exists() {
         return;
+    }
+    for ex in excludes {
+        if dir.starts_with(ex) {
+            return;
+        }
     }
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -158,9 +272,12 @@ fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for ent in entries.flatten() {
         let p = ent.path();
+        if excludes.iter().any(|ex| p.starts_with(ex)) {
+            continue;
+        }
         if let Ok(ft) = ent.file_type() {
             if ft.is_dir() {
-                collect_tests(&p, out);
+                collect_tests(&p, out, excludes);
             } else if ft.is_file()
                 && let Some(ext) = p.extension().and_then(|s| s.to_str())
                 && ext == "js"
@@ -215,8 +332,6 @@ fn should_skip_test(src: &str, meta: &Option<Meta>) -> bool {
 /// - Ok(Some(()))  -> test ran and passed
 /// - Ok(None)      -> test was skipped (not an error)
 /// - Err(String)   -> test ran and failed (message)
-use std::collections::HashSet;
-
 fn run_test_file(
     path: &Path,
     test262_root: &Path,
@@ -259,7 +374,19 @@ fn run_test_file(
         .is_some_and(|f| f.iter().any(|s| s == "raw"));
 
     // Required harness files as per Test262 interpreting instructions.
-    let harness_files = ["harness/sta.js", "harness/assert.js"];
+    let mut harness_files: Vec<String> = vec![
+        "harness/sta.js".to_string(),
+        "harness/assert.js".to_string(),
+    ];
+    if let Some(m) = &meta {
+        if let Some(includes) = &m.includes {
+            for inc in includes {
+                if !harness_files.iter().any(|h| h == inc) {
+                    harness_files.push(inc.clone());
+                }
+            }
+        }
+    }
 
     // For both modes, run and validate according to `negative` metadata.
     struct ResetStrict;
@@ -274,12 +401,9 @@ fn run_test_file(
         }
 
         // Configure strictness for the engine (runtime-configured via TSBLITZ_STRICT).
-        if *mode_name == "non-strict" {
-            // Use the test-friendly override rather than setting process env vars
-            typecheck::set_strict_override(Some(false));
-        } else {
-            typecheck::set_strict_override(Some(true));
-        }
+        let is_strict = *mode_name == "strict";
+        // Use the test-friendly override rather than setting process env vars.
+        typecheck::set_strict_override(Some(false));
         let _reset_strict = ResetStrict;
 
         // Reset VM state but preserve globals installed by the soft-prelude and host.
@@ -342,6 +466,9 @@ fn run_test_file(
                 }
             }
         }
+
+        // Apply strict override for the test source after harness setup.
+        typecheck::set_strict_override(Some(is_strict));
 
         // Prepare source for this run (strict-mode transformation if needed)
         let run_src = if *mode_name == "strict" && !raw_flag {
@@ -444,6 +571,79 @@ fn run_test_file(
     Ok(Some(()))
 }
 
+fn resolve_segment(test_root: &Path, segment: &str) -> PathBuf {
+    let mut seg = segment.trim().trim_start_matches("./").to_string();
+    if let Some(rest) = seg.strip_prefix("test/") {
+        seg = rest.to_string();
+    }
+    match seg.as_str() {
+        "" | "all" | "test" => test_root.to_path_buf(),
+        "annexB" => test_root.join("annexB"),
+        "language" => test_root.join("language"),
+        "built-ins" => test_root.join("built-ins"),
+        "intl402" => test_root.join("intl402"),
+        "staging" => test_root.join("staging"),
+        _ => test_root.join(seg),
+    }
+}
+
+fn run_harness_only(
+    test262_root: &Path,
+    vm: &mut Vm,
+    keep_globals: &HashSet<String>,
+) -> Result<(), String> {
+    let harness_dir = test262_root.join("harness");
+    let mut harness_files: Vec<String> = vec![
+        "harness/sta.js".to_string(),
+        "harness/assert.js".to_string(),
+    ];
+    if harness_dir.exists() {
+        let mut extra: Vec<String> = Vec::new();
+        for ent in fs::read_dir(&harness_dir)
+            .map_err(|e| format!("Failed to read harness dir: {}", e))?
+            .flatten()
+        {
+            let p = ent.path();
+            if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                if ext != "js" {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+            if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                let rel = format!("harness/{}", name);
+                if rel == "harness/sta.js" || rel == "harness/assert.js" {
+                    continue;
+                }
+                extra.push(rel);
+            }
+        }
+        extra.sort();
+        harness_files.extend(extra);
+    }
+
+    for h in &harness_files {
+        vm.reset(keep_globals);
+        let p = test262_root.join(h);
+        if !p.exists() {
+            return Err(format!("Harness file missing: {}", p.display()));
+        }
+        let hsrc = fs::read_to_string(&p)
+            .map_err(|e| format!("Failed to read harness {}: {}", p.display(), e))?;
+        let session = Parser::parse_source(&hsrc)
+            .map_err(|e| format!("Harness {} parse failed: {}", h, e))?;
+        let prog = session.program();
+        typecheck::check_oxc(prog).map_err(|e| format!("Harness {} typecheck failed: {}", h, e))?;
+        let chunk = compiler::compile_oxc(prog)
+            .map_err(|e| format!("Harness {} compile failed: {}", h, e))?;
+        vm.run(chunk)
+            .map_err(|e| format!("Harness {} runtime failed: {}", h, e))?;
+        eprintln!("Harness ok: {}", h);
+    }
+    Ok(())
+}
+
 fn main() {
     // Use the local `./test262` checkout only. This runner is intended to be
     // hermetic and operate against a repository checked out next to the project.
@@ -455,15 +655,27 @@ fn main() {
         exit(0);
     }
 
-    let filter = env::var("TEST262_FILTER").ok();
-    let limit: usize = env::var("TEST262_LIMIT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(50);
+    let opts = parse_args();
 
     let test_root = test262_dir.join("test");
     let mut files = Vec::new();
-    collect_tests(&test_root, &mut files);
+    let include_roots = if opts.includes.is_empty() {
+        vec![test_root.clone()]
+    } else {
+        opts.includes
+            .iter()
+            .map(|s| resolve_segment(&test_root, s))
+            .collect()
+    };
+    let exclude_roots: Vec<PathBuf> = opts
+        .excludes
+        .iter()
+        .map(|s| resolve_segment(&test_root, s))
+        .collect();
+
+    for root in &include_roots {
+        collect_tests(root, &mut files, &exclude_roots);
+    }
 
     files.sort();
 
@@ -520,11 +732,24 @@ fn main() {
     // Capture the set of globals installed by host + prelude; preserve these across tests.
     let keep_globals: HashSet<String> = globals.borrow().keys().cloned().collect();
 
+    if opts.harness_only {
+        match run_harness_only(&test262_dir, &mut vm, &keep_globals) {
+            Ok(()) => {
+                eprintln!("Harness-only run: ok");
+                exit(0);
+            }
+            Err(e) => {
+                eprintln!("Harness-only run: fail: {}", e);
+                exit(1);
+            }
+        }
+    }
+
     for f in files {
-        if ran >= limit {
+        if ran >= opts.limit {
             break;
         }
-        if let Some(ref flt) = filter
+        if let Some(ref flt) = opts.filter
             && !f.to_string_lossy().contains(flt)
         {
             continue;

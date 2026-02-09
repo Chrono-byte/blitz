@@ -1,22 +1,22 @@
 {
-    "name": "blitzlib",
-    "version": "0.1.0",
-    "description": "",
-    "keywords": [],
-    "license": "ISC",
-    "author": "",
-    "type": "module",
-    "scripts": {
-        "format": "oxfmt",
-        "lint": "oxlint",
-        "lint-tsgolint": "oxlint-tsgolint",
-        "check-types": "tsgo --noEmit -p tsconfig.check.json"
-    },
-    "dependencies": {
-        "@typescript/native-preview": "7.0.0-dev.20260201.1",
-        "oxfmt": "^0.27.0",
-        "oxlint": "^1.42.0",
-        "oxlint-tsgolint": "^0.11.4"
-    },
-    "packageManager": "pnpm@10.26.2"
+  "name": "blitzlib",
+  "version": "0.1.0",
+  "description": "",
+  "keywords": [],
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "scripts": {
+    "format": "oxfmt",
+    "lint": "oxlint",
+    "lint-tsgolint": "oxlint-tsgolint",
+    "check-types": "tsgo --noEmit -p tsconfig.check.json"
+  },
+  "dependencies": {
+    "@typescript/native-preview": "7.0.0-dev.20260201.1",
+    "oxfmt": "^0.27.0",
+    "oxlint": "^1.42.0",
+    "oxlint-tsgolint": "^0.11.4"
+  },
+  "packageManager": "pnpm@10.26.2"
 }

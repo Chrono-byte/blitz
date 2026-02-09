@@ -1,4 +1,4 @@
-import { toString } from "./core/runtime.js";
+import { toString as runtimeToString } from "./core/runtime.js";
 
 // Host accessor helpers for prelude and std modules.
 // Resolve the VM-provided `__host_get` builtin via a safe typeof check
@@ -11,9 +11,20 @@ import { toString } from "./core/runtime.js";
 export function host_print(msg: string): void {
   try {
     const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
-    const p = g
-      ? g.__native_print || g.__native_print_raw || g.native_print || (g.host && g.host.host_print)
-      : undefined;
+    let p: any = undefined;
+    if (g) {
+      if (typeof g.__native_print === "function") {
+        p = g.__native_print;
+      } else if (typeof g.__native_print_raw === "function") {
+        p = g.__native_print_raw;
+      } else if (typeof g.native_print === "function") {
+        p = g.native_print;
+      } else if (g.host) {
+        if (typeof g.host.host_print === "function") {
+          p = g.host.host_print;
+        }
+      }
+    }
     if (typeof p === "function") {
       try {
         if (msg !== "") p(msg);
@@ -28,12 +39,20 @@ export function host_print(msg: string): void {
 export function native_new_object(): any {
   try {
     const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
-    const f = g
-      ? g.__native_new_object ||
-        g.__native_new_object_raw ||
-        g.native_new_object ||
-        (g.host && g.host.native_new_object)
-      : undefined;
+    let f: any = undefined;
+    if (g) {
+      if (typeof g.__native_new_object === "function") {
+        f = g.__native_new_object;
+      } else if (typeof g.__native_new_object_raw === "function") {
+        f = g.__native_new_object_raw;
+      } else if (typeof g.native_new_object === "function") {
+        f = g.native_new_object;
+      } else if (g.host) {
+        if (typeof g.host.native_new_object === "function") {
+          f = g.host.native_new_object;
+        }
+      }
+    }
     if (typeof f === "function") {
       try {
         return f();
@@ -48,12 +67,20 @@ export function native_new_object(): any {
 export function native_print(...args: any[]): void {
   try {
     const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
-    let f: any = g
-      ? g.__native_print ||
-        g.__native_print_raw ||
-        g.native_print ||
-        (g.host && g.host.native_print)
-      : undefined;
+    let f: any = undefined;
+    if (g) {
+      if (typeof g.__native_print === "function") {
+        f = g.__native_print;
+      } else if (typeof g.__native_print_raw === "function") {
+        f = g.__native_print_raw;
+      } else if (typeof g.native_print === "function") {
+        f = g.native_print;
+      } else if (g.host) {
+        if (typeof g.host.native_print === "function") {
+          f = g.host.native_print;
+        }
+      }
+    }
     if (typeof f === "function") {
       try {
         const out = (args || [])
@@ -62,7 +89,7 @@ export function native_print(...args: any[]): void {
               if (a === null) return "null";
               if (typeof a === "undefined") return "undefined";
               if (typeof a === "string") return a;
-              if (typeof a === "number") return toString(a as any);
+              if (typeof a === "number") return runtimeToString(a as any);
               if (typeof a === "boolean") return a ? "true" : "false";
               try {
                 return JSON.stringify(a);
@@ -128,8 +155,8 @@ export function getHostGetter(): any {
   try {
     const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
     if (!g) return undefined;
-    const getter = g.__host_get_fn || g.__host_get;
-    if (typeof getter === "function") return getter;
+    if (typeof g.__host_get_fn === "function") return g.__host_get_fn;
+    if (typeof g.__host_get === "function") return g.__host_get;
   } catch (_) {}
   return undefined;
 }
@@ -141,10 +168,14 @@ export function getBuiltinCached(name: string): any {
   try {
     const g: any = typeof globalThis !== "undefined" ? (globalThis as any) : undefined;
     if (!g) return undefined;
-    const fn = g.__get_builtin_cached || (g as any).getBuiltinCached;
-    if (typeof fn === "function") {
+    if (typeof g.__get_builtin_cached === "function") {
       try {
-        return fn(name);
+        return g.__get_builtin_cached(name);
+      } catch (_) {}
+    }
+    if (typeof (g as any).getBuiltinCached === "function") {
+      try {
+        return (g as any).getBuiltinCached(name);
       } catch (_) {}
     }
   } catch (_) {}
