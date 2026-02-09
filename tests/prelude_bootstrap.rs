@@ -1,12 +1,10 @@
 //! Test the preload bootstrap that helps elevate us up to the level needed to run user code.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::path::Path;
 use std::rc::Rc;
 
 use tsblitz::bytecode::Chunk;
-use tsblitz::value::Value;
+use tsblitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use tsblitz::vm::Vm;
 use tsblitz::{bundle_entry, compile};
 
@@ -64,13 +62,14 @@ fn clear_slot_types_in_chunk(chunk: Chunk) -> Chunk {
 #[test]
 fn prelude_bootstrap_runs() {
     // Create a minimal VM globals map similar to main.rs bootstrap.
-    let globals: Rc<RefCell<HashMap<String, Value>>> = Rc::new(RefCell::new(HashMap::new()));
+    let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
 
     // Provide a global `globalThis` object
-    let global_this = Value::Object(Rc::new(RefCell::new(HashMap::new())));
-    globals
-        .borrow_mut()
-        .insert("globalThis".to_string(), global_this);
+    let global_this = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("globalThis".to_string()),
+        PropertyDescriptor::data(global_this),
+    );
 
     // Minimal builtin printer used by soft code during bootstrap.
     fn test_native_print(
@@ -87,76 +86,96 @@ fn prelude_bootstrap_runs() {
         _args: &[Value],
     ) -> Result<Value, tsblitz::errors::RuntimeError> {
         use std::cell::RefCell;
-        use std::collections::HashMap;
         use std::rc::Rc;
-        let v = Value::Object(Rc::new(RefCell::new(HashMap::new())));
+        let v = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
         Ok(v)
     }
 
     // Publish host primitives into globals as main.rs does.
-    globals.borrow_mut().insert(
-        "__native_print".to_string(),
-        Value::Builtin(test_native_print),
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_print".to_string()),
+        PropertyDescriptor::data(Value::Builtin(test_native_print)),
     );
-    globals.borrow_mut().insert(
-        "__native_new_object".to_string(),
-        Value::Builtin(test_native_new_object),
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_new_object".to_string()),
+        PropertyDescriptor::data(Value::Builtin(test_native_new_object)),
     );
     // Also publish convenience host-level wrappers so the bundled prelude can
     // import them during bootstrap ordering variants in tests.
-    globals
-        .borrow_mut()
-        .insert("host_print".to_string(), Value::Builtin(test_native_print));
-    globals.borrow_mut().insert(
-        "native_print".to_string(),
-        Value::Builtin(test_native_print),
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("host_print".to_string()),
+        PropertyDescriptor::data(Value::Builtin(test_native_print)),
     );
-    globals.borrow_mut().insert(
-        "debugValue".to_string(),
-        Value::Builtin(|_vm, _args| Ok(Value::Null)),
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("native_print".to_string()),
+        PropertyDescriptor::data(Value::Builtin(test_native_print)),
     );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("debugValue".to_string()),
+        PropertyDescriptor::data(Value::Builtin(|_vm, _args| Ok(Value::Null))),
+    );
+
     // Provide a minimal `host` object used by some prelude paths
-    let mut host_map: HashMap<String, Value> = HashMap::new();
-    host_map.insert("host_print".to_string(), Value::Builtin(test_native_print));
-    host_map.insert(
-        "native_new_object".to_string(),
-        Value::Builtin(test_native_new_object),
+    let mut host_obj = ObjectData::new();
+    host_obj.properties.insert(
+        PropertyKey::String("host_print".to_string()),
+        PropertyDescriptor::data(Value::Builtin(test_native_print)),
     );
-    host_map.insert(
-        "native_print".to_string(),
-        Value::Builtin(test_native_print),
+    host_obj.properties.insert(
+        PropertyKey::String("native_new_object".to_string()),
+        PropertyDescriptor::data(Value::Builtin(test_native_new_object)),
     );
-    host_map.insert(
-        "debugValue".to_string(),
-        Value::Builtin(|_vm, _args| Ok(Value::Null)),
+    host_obj.properties.insert(
+        PropertyKey::String("native_print".to_string()),
+        PropertyDescriptor::data(Value::Builtin(test_native_print)),
     );
-    globals.borrow_mut().insert(
-        "host".to_string(),
-        Value::Object(Rc::new(RefCell::new(host_map))),
+    host_obj.properties.insert(
+        PropertyKey::String("debugValue".to_string()),
+        PropertyDescriptor::data(Value::Builtin(|_vm, _args| Ok(Value::Null))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("host".to_string()),
+        PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(host_obj)))),
     );
 
     // Provide a simple console object backed by the builtin printer.
-    let mut console_map: HashMap<String, Value> = HashMap::new();
-    console_map.insert("log".to_string(), Value::Builtin(test_native_print));
-    console_map.insert("info".to_string(), Value::Builtin(test_native_print));
-    console_map.insert("warn".to_string(), Value::Builtin(test_native_print));
-    console_map.insert("error".to_string(), Value::Builtin(test_native_print));
-    console_map.insert("debug".to_string(), Value::Builtin(test_native_print));
-    globals.borrow_mut().insert(
-        "console".to_string(),
-        Value::Object(Rc::new(RefCell::new(console_map))),
+    let mut console_obj = ObjectData::new();
+    console_obj.properties.insert(
+        PropertyKey::String("log".to_string()),
+        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+    );
+    console_obj.properties.insert(
+        PropertyKey::String("info".to_string()),
+        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+    );
+    console_obj.properties.insert(
+        PropertyKey::String("warn".to_string()),
+        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+    );
+    console_obj.properties.insert(
+        PropertyKey::String("error".to_string()),
+        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+    );
+    console_obj.properties.insert(
+        PropertyKey::String("debug".to_string()),
+        PropertyDescriptor::data(Value::Builtin(test_native_print)),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("console".to_string()),
+        PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(console_obj)))),
     );
 
     // Disable soft-layer tracing for the test to keep output quiet.
-    globals
-        .borrow_mut()
-        .insert("__TSBLITZ_TRACE".to_string(), Value::Bool(false));
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__TSBLITZ_TRACE".to_string()),
+        PropertyDescriptor::data(Value::Bool(false)),
+    );
 
     // Create VM
     let mut vm = Vm::new(Rc::clone(&globals));
 
     // Bundle and compile the soft prelude
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let prelude_path = manifest_dir.join("soft/prelude.ts");
     let session = bundle_entry(&prelude_path).expect("bundle prelude ok");
     let program = session.program();
@@ -165,7 +184,7 @@ fn prelude_bootstrap_runs() {
     // Clear slot types (the prelude is intentionally dynamic)
     let chunk = clear_slot_types_in_chunk(chunk);
 
-    // Run the prelude. This should not error with \"Call: not a function\" or other
+    // Run the prelude. This should not error with "Call: not a function" or other
     // bootstrap-time failures.
     let res = vm.run(chunk);
     assert!(
