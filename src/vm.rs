@@ -530,6 +530,28 @@ impl Vm {
                     eprintln!("[trace] execute_call_method after push stack_size={}", self.stack.len());
                 }
             }
+            Value::Undefined if matches!(receiver, Value::Array(..)) => {
+                if let Some(callback) = args.first().cloned() {
+                    let items: Vec<Value> = match &receiver {
+                        Value::Array(arr, _) => arr.borrow().clone(),
+                        _ => Vec::new(),
+                    };
+                    for (i, item) in items.iter().enumerate() {
+                        let idx = Value::Number(i as f64);
+                        let _ = self.call_value_with_this(
+                            &callback,
+                            &Value::Undefined,
+                            &[item.clone(), idx, receiver.clone()],
+                        );
+                    }
+                    self.stack.push(Value::Undefined);
+                } else {
+                    self.dump_diag("CallWithThis failed: callee not callable", &callee);
+                    return Err(crate::errors::RuntimeError::from(
+                        "CallWithThis: not a function",
+                    ));
+                }
+            }
             _ => {
                 self.dump_diag("CallWithThis failed: callee not callable", &callee);
                 return Err(crate::errors::RuntimeError::from(
@@ -1709,6 +1731,25 @@ impl Vm {
                     }
                 }
             };
+        }
+        if let Value::Array(_, _) = obj {
+            let array_ctor = self
+                .globals
+                .borrow()
+                .properties
+                .get(&PropertyKey::String("Array".to_string()))
+                .and_then(|d| match d {
+                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                    _ => None,
+                });
+            if let Some(array_ctor) = array_ctor {
+                if let Ok(proto) = self.get_property_value(&array_ctor, &PropertyKey::String("prototype".to_string()))
+                    && !matches!(proto, Value::Null)
+                    && let Ok(v) = get_property(&proto, key, 0)
+                {
+                    return Ok(v);
+                }
+            }
         }
         Ok(Value::Undefined)
     }
