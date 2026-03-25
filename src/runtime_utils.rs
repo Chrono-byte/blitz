@@ -6,6 +6,7 @@ use std::rc::Rc;
 use crate::bytecode;
 use crate::compiler;
 use crate::parser::Parser;
+use crate::value::SymbolId;
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 /// Clear slot type annotations recursively for a Chunk graph.
@@ -284,6 +285,114 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     let array_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
         ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
     ));
+    let for_each_fn = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let this_for_call = this.clone();
+            let items: Vec<Value> = match &this {
+                Value::Array(arr, _) => arr.borrow().clone(),
+                _ => Vec::new(),
+            };
+            for (i, item) in items.iter().enumerate() {
+                let idx = Value::Number(i as f64);
+                let _ = vm.call_value_with_this(&callback, &this_for_call, &[item.clone(), idx, this_for_call.clone()]);
+            }
+            Ok(Value::Undefined)
+        }),
+        &function_proto_map,
+    );
+    array_proto_map.borrow_mut().properties.insert(
+        PKey::String("forEach".to_string()),
+        PropertyDescriptor::data(for_each_fn.clone()),
+    );
+    array_proto_map.borrow_mut().properties.insert(
+        PKey::String("join".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let sep = match args.get(1) {
+                    Some(Value::Undefined) | None => ",".to_string(),
+                    Some(v) => vm.to_string(v)?,
+                };
+                let items: Vec<Value> = match this {
+                    Value::Array(arr, _) => arr.borrow().clone(),
+                    _ => Vec::new(),
+                };
+                let mut out = String::new();
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(&sep);
+                    }
+                    match item {
+                        Value::Undefined | Value::Null => {}
+                        v => out.push_str(&vm.to_string(v)?),
+                    }
+                }
+                Ok(Value::String(out))
+            }),
+            &function_proto_map,
+        )),
+    );
+    array_proto_map.borrow_mut().properties.insert(
+        PKey::String("push".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|_vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let mut items = match this {
+                    Value::Array(arr, _) => arr,
+                    _ => return Ok(Value::Number(0.0)),
+                };
+                let mut vec = items.borrow_mut();
+                for v in args.iter().skip(1).cloned() {
+                    vec.push(v);
+                }
+                Ok(Value::Number(vec.len() as f64))
+            }),
+            &function_proto_map,
+        )),
+    );
+    let array_iterator_proto: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+        ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
+    ));
+    array_iterator_proto.borrow_mut().properties.insert(
+        PKey::String("next".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|_vm, _args| {
+                let result = Rc::new(RefCell::new(ObjectData::new()));
+                result.borrow_mut().properties.insert(
+                    PKey::String("done".to_string()),
+                    PropertyDescriptor::data(Value::Bool(true)),
+                );
+                result.borrow_mut().properties.insert(
+                    PKey::String("value".to_string()),
+                    PropertyDescriptor::data(Value::Undefined),
+                );
+                Ok(Value::Object(result))
+            }),
+            &function_proto_map,
+        )),
+    );
+    array_proto_map.borrow_mut().properties.insert(
+        PKey::Symbol(SymbolId::well_known_iterator()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new({
+                let array_iterator_proto = Rc::clone(&array_iterator_proto);
+                move |_vm, args| {
+                    let this = args.first().cloned().unwrap_or(Value::Undefined);
+                    let iter = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+                        Rc::clone(&array_iterator_proto),
+                    ))));
+                    iter.borrow_mut().properties.insert(
+                        PKey::String("[[IteratedObject]]".to_string()),
+                        PropertyDescriptor::data(this),
+                    );
+                    Ok(Value::Object(iter))
+                }
+            }),
+            &function_proto_map,
+        )),
+    );
     let array_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
         ObjectData::with_prototype(Value::Object(Rc::clone(&function_proto_map))),
     ));
@@ -330,21 +439,22 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         Rc::new(move |_vm, _args| Ok(make_host_function_instance(&function_ctor_proto)));
     let function_ctor_val =
         Value::BuiltinObject(function_ctor_fn.clone(), Rc::clone(&function_ctor_map));
+    let function_call_val = builtin_object(
+        Rc::new(|vm, args| {
+            let callee = args.first().cloned().unwrap_or(Value::Undefined);
+            let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let rest = args.get(2..).unwrap_or(&[]);
+            vm.call_value_with_this(&callee, &this_arg, rest)
+        }),
+        &function_proto_map,
+    );
     function_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(function_ctor_val.clone()),
     );
     function_proto_map.borrow_mut().properties.insert(
         PKey::String("call".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|vm, args| {
-                let callee = args.first().cloned().unwrap_or(Value::Undefined);
-                let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let rest = args.get(2..).unwrap_or(&[]);
-                vm.call_value_with_this(&callee, &this_arg, rest)
-            }),
-            &function_proto_map,
-        )),
+        PropertyDescriptor::data(function_call_val.clone()),
     );
     function_proto_map.borrow_mut().properties.insert(
         PKey::String("apply".to_string()),
@@ -367,19 +477,26 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(builtin_object(
             Rc::new({
                 let function_proto_map = Rc::clone(&function_proto_map);
+                let function_call_val = function_call_val.clone();
                 move |_vm, args| {
                     let target = args.first().cloned().unwrap_or(Value::Undefined);
                     let bound_this = args.get(1).cloned().unwrap_or(Value::Undefined);
                     let bound_args: Vec<Value> = args.iter().skip(2).cloned().collect();
+                    if crate::trace::enabled() {
+                        eprintln!("[trace] bind create target={:?} bound_this={:?} bound_args={:?}", target, bound_this, bound_args);
+                    }
                     let bound_target = target;
                     let bound_this_arg = bound_this;
                     let prefix_args = bound_args;
                     Ok(builtin_object(
                         Rc::new(move |vm, call_args| {
-                            let mut combined = prefix_args.clone();
-                            combined.extend(call_args.iter().skip(1).cloned());
-                            vm.call_value_with_this(&bound_target, &bound_this_arg, &combined)
-                        }),
+                    if crate::trace::enabled() {
+                        eprintln!("[trace] bound fn call target={:?} this={:?} args={:?}", bound_target, bound_this_arg, call_args);
+                    }
+                    let mut combined = prefix_args.clone();
+                    combined.extend(call_args.iter().cloned());
+                    vm.call_value_with_this(&bound_target, &bound_this_arg, &combined)
+                }),
                         &function_proto_map,
                     ))
                 }
@@ -404,6 +521,82 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         Ok(Value::Object(Rc::new(RefCell::new(inst))))
     });
     let object_ctor_val = Value::BuiltinObject(object_ctor_fn.clone(), Rc::clone(&object_ctor_map));
+
+    let symbol_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+        ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
+    ));
+    let symbol_ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
+        let desc = match args.get(1) {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Undefined) | None => None,
+            Some(v) => Some(v.type_name().to_string()),
+        };
+        Ok(Value::Symbol(SymbolId::new(), desc))
+    });
+    let symbol_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+        ObjectData::with_prototype(Value::Object(Rc::clone(&function_proto_map))),
+    ));
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("prototype".to_string()),
+        PropertyDescriptor::data(Value::Object(Rc::clone(&symbol_proto_map))),
+    );
+    let symbol_ctor_val = Value::BuiltinObject(symbol_ctor_fn.clone(), Rc::clone(&symbol_ctor_map));
+    symbol_proto_map.borrow_mut().properties.insert(
+        PKey::String("constructor".to_string()),
+        PropertyDescriptor::data(symbol_ctor_val.clone()),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("iterator".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_iterator(), Some("Symbol.iterator".to_string()))),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("asyncIterator".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_async_iterator(), Some("Symbol.asyncIterator".to_string()))),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("toPrimitive".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_to_primitive(), Some("Symbol.toPrimitive".to_string()))),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("toStringTag".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_to_string_tag(), Some("Symbol.toStringTag".to_string()))),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("species".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_species(), Some("Symbol.species".to_string()))),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("hasInstance".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_has_instance(), Some("Symbol.hasInstance".to_string()))),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("isConcatSpreadable".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_is_concat_spreadable(), Some("Symbol.isConcatSpreadable".to_string()))),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("match".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_match(), Some("Symbol.match".to_string()))),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("matchAll".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_match_all(), Some("Symbol.matchAll".to_string()))),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("replace".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_replace(), Some("Symbol.replace".to_string()))),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("search".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_search(), Some("Symbol.search".to_string()))),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("split".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_split(), Some("Symbol.split".to_string()))),
+    );
+    symbol_ctor_map.borrow_mut().properties.insert(
+        PKey::String("unscopables".to_string()),
+        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_unscopables(), Some("Symbol.unscopables".to_string()))),
+    );
     object_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(object_ctor_val.clone()),
@@ -432,6 +625,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let this = args.first().cloned().unwrap_or(Value::Undefined);
                 let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let key = vm.to_property_key(&key_value)?;
+                if crate::trace::enabled() {
+                    eprintln!("[trace] hasOwnProperty this={:?} key={:?}", this, key_value);
+                }
                 let has_own = match this {
                     Value::Object(obj) => obj.borrow().properties.contains_key(&key),
                     Value::Array(_, props)
@@ -600,6 +796,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     return Ok(Value::Undefined);
                 }
                 let target = args[1].clone();
+                if crate::trace::enabled() {
+                    eprintln!("[trace] Object.defineProperty target={:?} key={:?} desc={:?}", target, args.get(2), args.get(3));
+                }
                 let ok = vm.define_property_value(&target, &args[2], &args[3])?;
                 if ok {
                     Ok(target)
@@ -805,6 +1004,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             Value::Null => Ok(Value::String("null".to_string())),
             Value::Undefined => Ok(Value::String("undefined".to_string())),
             Value::BigInt(n) => Ok(Value::String(n.to_string())),
+            Value::Symbol(_, desc) => Ok(Value::String(match desc {
+                Some(d) => format!("Symbol({})", d),
+                None => "Symbol()".to_string(),
+            })),
             _ => Ok(Value::String("[object Object]".to_string())),
         }
     });
@@ -1041,9 +1244,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     // Add kernel helpers if missing, prefer host-provided values when present.
     let mut insert_if_missing = |name: &str, val: Value| {
         let k = PKey::String(name.to_string());
-        if !g.properties.contains_key(&k) {
-            g.properties.insert(k, PropertyDescriptor::data(val));
-        }
+        g.properties
+            .entry(k)
+            .or_insert_with(|| PropertyDescriptor::data(val));
     };
 
     insert_if_missing(
@@ -1102,6 +1305,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(string_ctor_val),
     );
     g.properties.insert(
+        PKey::String("Symbol".to_string()),
+        PropertyDescriptor::data(symbol_ctor_val),
+    );
+    g.properties.insert(
         PKey::String("Error".to_string()),
         PropertyDescriptor::data(error_ctor_val),
     );
@@ -1124,17 +1331,17 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
 
     // Ensure a few additional helpers the soft prelude expects. Do not
     // override host-provided values.
-    let insert_if_missing_global = |name: &str, v: Value| {
+    let mut insert_if_missing_global = |name: &str, v: Value| {
         let k = PKey::String(name.to_string());
-        if !g.properties.contains_key(&k) {
-            g.properties.insert(k, PropertyDescriptor::data(v));
-        }
+        g.properties
+            .entry(k)
+            .or_insert_with(|| PropertyDescriptor::data(v));
     };
 
     insert_if_missing_global(
         "__native_toString",
         Value::Builtin(Rc::new(|vm, args| {
-            let v = args.get(0).cloned().unwrap_or(Value::Undefined);
+            let v = args.first().cloned().unwrap_or(Value::Undefined);
             let s = vm.to_string(&v)?;
             Ok(Value::String(s))
         })),
@@ -1142,7 +1349,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     insert_if_missing_global(
         "__native_toNumber",
         Value::Builtin(Rc::new(|vm, args| {
-            let v = args.get(0).cloned().unwrap_or(Value::Undefined);
+            let v = args.first().cloned().unwrap_or(Value::Undefined);
             let n = vm.to_number_value(&v)?;
             Ok(Value::Number(n))
         })),
@@ -1150,14 +1357,14 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     insert_if_missing_global(
         "__native_toBoolean",
         Value::Builtin(Rc::new(|vm, args| {
-            let v = args.get(0).cloned().unwrap_or(Value::Undefined);
+            let v = args.first().cloned().unwrap_or(Value::Undefined);
             Ok(Value::Bool(vm.to_boolean(&v)))
         })),
     );
     insert_if_missing_global(
         "__native_abstractEquality",
         Value::Builtin(Rc::new(|vm, args| {
-            let a = args.get(0).cloned().unwrap_or(Value::Undefined);
+            let a = args.first().cloned().unwrap_or(Value::Undefined);
             let b = args.get(1).cloned().unwrap_or(Value::Undefined);
             Ok(Value::Bool(vm.abstract_equality(&a, &b)?))
         })),
@@ -1165,7 +1372,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     insert_if_missing_global(
         "__native_instanceof",
         Value::Builtin(Rc::new(|vm, args| {
-            let value = args.get(0).cloned().unwrap_or(Value::Undefined);
+            let value = args.first().cloned().unwrap_or(Value::Undefined);
             let ctor = args.get(1).cloned().unwrap_or(Value::Undefined);
             Ok(Value::Bool(vm.instance_of(&value, &ctor)?))
         })),
@@ -1173,36 +1380,51 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     insert_if_missing_global(
         "__native_inProperty",
         Value::Builtin(Rc::new(|vm, args| {
-            let prop = args.get(0).cloned().unwrap_or(Value::Undefined);
+            let prop = args.first().cloned().unwrap_or(Value::Undefined);
             let obj = args.get(1).cloned().unwrap_or(Value::Undefined);
             Ok(Value::Bool(vm.in_property(&prop, &obj)?))
         })),
     );
 
-    // Mirror a selection of helpers onto globalThis if not present there.
-    if let Some(PropertyDescriptor::Data { value: gv, .. }) = g.properties.get(&global_this_key).cloned() {
-        if let Value::Object(obj_rc) = gv {
-            let mut obj = obj_rc.borrow_mut();
-            let mirror = |name: &str| {
-                let k = PropertyKey::String(name.to_string());
-                if !obj.properties.contains_key(&k) {
-                    if let Some(PropertyDescriptor::Data { value, .. }) = g.properties.get(&PKey::String(name.to_string())).cloned() {
-                        obj.properties.insert(k, PropertyDescriptor::data(value));
-                    }
-                }
-            };
-            for n in [
-                "__native_typeof",
-                "__native_toString",
-                "__native_toNumber",
-                "__native_toBoolean",
-                "__native_abstractEquality",
-                "__native_instanceof",
-                "__native_in",
-                "__native_construct",
-            ] {
-                mirror(n);
+    insert_if_missing_global(
+        "__native_deleteProperty",
+        Value::Builtin(Rc::new(|vm, args| {
+            let target = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let key = args.get(2).cloned().unwrap_or(Value::Undefined);
+            if crate::trace::enabled() {
+                eprintln!("[trace] __native_deleteProperty target={:?} key={:?}", target, key);
             }
+            let key = vm.to_property_key(&key)?;
+            Ok(Value::Bool(vm.delete_property_host(&target, &key)?))
+        })),
+    );
+
+    // Mirror a selection of helpers onto globalThis if not present there.
+    if let Some(PropertyDescriptor::Data { value: gv, .. }) =
+        g.properties.get(&global_this_key).cloned()
+        && let Value::Object(obj_rc) = gv
+    {
+        let mut obj = obj_rc.borrow_mut();
+        let mut mirror = |name: &str| {
+            let k = PropertyKey::String(name.to_string());
+            if !obj.properties.contains_key(&k)
+                && let Some(PropertyDescriptor::Data { value, .. }) =
+                    g.properties.get(&PKey::String(name.to_string())).cloned()
+            {
+                obj.properties.insert(k, PropertyDescriptor::data(value));
+            }
+        };
+        for n in [
+            "__native_typeof",
+            "__native_toString",
+            "__native_toNumber",
+            "__native_toBoolean",
+            "__native_abstractEquality",
+            "__native_instanceof",
+            "__native_in",
+            "__native_construct",
+        ] {
+            mirror(n);
         }
     }
 }

@@ -57,6 +57,43 @@ impl SymbolId {
     pub fn well_known_to_primitive() -> Self {
         Self::well_known(1)
     }
+
+    pub fn well_known_iterator() -> Self {
+        Self::well_known(2)
+    }
+    pub fn well_known_async_iterator() -> Self {
+        Self::well_known(3)
+    }
+    pub fn well_known_to_string_tag() -> Self {
+        Self::well_known(4)
+    }
+    pub fn well_known_species() -> Self {
+        Self::well_known(5)
+    }
+    pub fn well_known_has_instance() -> Self {
+        Self::well_known(6)
+    }
+    pub fn well_known_is_concat_spreadable() -> Self {
+        Self::well_known(7)
+    }
+    pub fn well_known_match() -> Self {
+        Self::well_known(8)
+    }
+    pub fn well_known_match_all() -> Self {
+        Self::well_known(9)
+    }
+    pub fn well_known_replace() -> Self {
+        Self::well_known(10)
+    }
+    pub fn well_known_search() -> Self {
+        Self::well_known(11)
+    }
+    pub fn well_known_split() -> Self {
+        Self::well_known(12)
+    }
+    pub fn well_known_unscopables() -> Self {
+        Self::well_known(13)
+    }
 }
 
 /// Property key variant (string or symbol).
@@ -170,6 +207,8 @@ pub enum Value {
         proto: Rc<FunctionProto>,
         /// Captured / closed-over binding cells
         env: Rc<RefCell<Vec<Rc<RefCell<Value>>>>>,
+        /// Lexically captured `this` value for arrow functions.
+        lexical_this: Option<Box<Value>>,
         /// Mutable property bag for function object properties (e.g., `prototype`).
         props: Rc<RefCell<ObjectData>>,
     },

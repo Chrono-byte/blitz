@@ -245,7 +245,7 @@ impl Vm {
     /// ensures every VM has the expected helpers (including a `globalThis`
     /// object) available for the soft prelude without requiring callers to
     /// remember to invoke runtime setup.
-    pub fn with_runtime(mut self) -> Self {
+    pub fn with_runtime(self) -> Self {
         // Install minimal kernel constructors/helpers onto the globals map.
         // This is defensive: the installer will only populate missing keys
         // and will not override host-provided helpers.
@@ -351,7 +351,16 @@ impl Vm {
         self.handlers.clear();
         self.root_chunk = None;
         self.current_slot_types = None;
-        self.this_value = Value::Undefined;
+        self.this_value = self
+            .globals
+            .borrow()
+            .properties
+            .get(&PropertyKey::String("globalThis".to_string()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or(Value::Undefined);
         self.current_closure_env = None;
         self.ip = 0;
         self.chunk = Rc::new(Chunk::new());
@@ -413,6 +422,16 @@ impl Vm {
         self.handlers.clear();
         self.current_slot_types = None;
         self.current_closure_env = None;
+        self.this_value = self
+            .globals
+            .borrow()
+            .properties
+            .get(&PropertyKey::String("globalThis".to_string()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or(Value::Undefined);
 
         loop {
             match self.step(false)? {
@@ -463,6 +482,17 @@ impl Vm {
 
     fn execute_call_method(&mut self) -> Result<(), crate::errors::RuntimeError> {
         let nargs = self.read_byte()? as usize;
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] execute_call_method nargs={} stack_size={} ip={}",
+                nargs,
+                self.stack.len(),
+                self.ip.saturating_sub(1)
+            );
+            for (i, v) in self.stack.iter().rev().take(6).enumerate() {
+                crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
+            }
+        }
         let mut args: Vec<Value> = Vec::with_capacity(nargs);
         for _ in 0..nargs {
             args.push(self.pop()?);
@@ -470,8 +500,43 @@ impl Vm {
         args.reverse();
         let callee = self.pop()?;
         let receiver = self.pop()?;
-        let result = self.call_with_this(&callee, &receiver, &args)?;
-        self.stack.push(result);
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] execute_call_method after pops stack_size={} receiver={:?} callee={:?}",
+                self.stack.len(), receiver, callee
+            );
+        }
+        match callee {
+            Value::Builtin(f) => {
+                // Builtins invoked as methods receive the receiver as the
+                // first argument.
+                let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
+                call_args.push(receiver);
+                call_args.extend_from_slice(&args);
+                let result = (f.as_ref())(self, &call_args)?;
+                self.stack.push(result);
+            }
+            Value::BuiltinObject(f, _props) => {
+                let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
+                call_args.push(receiver);
+                call_args.extend_from_slice(&args);
+                let result = (f.as_ref())(self, &call_args)?;
+                self.stack.push(result);
+            }
+            Value::Closure { .. } => {
+                let result = self.call_with_this(&callee, &receiver, &args)?;
+                self.stack.push(result);
+                if crate::trace::enabled() {
+                    eprintln!("[trace] execute_call_method after push stack_size={}", self.stack.len());
+                }
+            }
+            _ => {
+                self.dump_diag("CallWithThis failed: callee not callable", &callee);
+                return Err(crate::errors::RuntimeError::from(
+                    "CallWithThis: not a function",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -568,6 +633,60 @@ impl Vm {
         Ok(self.lookup_property_descriptor(obj, key, 0)?.is_some())
     }
 
+    /// Host hook: delete an own property.
+    pub fn delete_property_host(
+        &mut self,
+        obj: &Value,
+        key: &PropertyKey,
+    ) -> Result<bool, crate::errors::RuntimeError> {
+        match obj {
+            Value::Object(data) => {
+                let mut d = data.borrow_mut();
+                match d.properties.get(key) {
+                    Some(PropertyDescriptor::Data { configurable, .. })
+                    | Some(PropertyDescriptor::Accessor { configurable, .. })
+                        if !*configurable =>
+                    {
+                        Ok(false)
+                    }
+                    _ => Ok(d.properties.remove(key).is_some() || true),
+                }
+            }
+            Value::Array(arr, props) => {
+                if let PropertyKey::String(s) = key
+                    && let Ok(i) = s.parse::<usize>()
+                    && i < arr.borrow().len()
+                {
+                    arr.borrow_mut()[i] = Value::Undefined;
+                    return Ok(true);
+                }
+                let mut p = props.borrow_mut();
+                match p.properties.get(key) {
+                    Some(PropertyDescriptor::Data { configurable, .. })
+                    | Some(PropertyDescriptor::Accessor { configurable, .. })
+                        if !*configurable =>
+                    {
+                        Ok(false)
+                    }
+                    _ => Ok(p.properties.remove(key).is_some() || true),
+                }
+            }
+            Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+                let mut p = props.borrow_mut();
+                match p.properties.get(key) {
+                    Some(PropertyDescriptor::Data { configurable, .. })
+                    | Some(PropertyDescriptor::Accessor { configurable, .. })
+                        if !*configurable =>
+                    {
+                        Ok(false)
+                    }
+                    _ => Ok(p.properties.remove(key).is_some() || true),
+                }
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn call_with_this(
         &mut self,
         callee: &Value,
@@ -598,6 +717,15 @@ impl Vm {
                 let call_args = self.prepare_call_args(&call_args, proto)?;
                 self.validate_call_args(&call_args, proto)?;
                 let stack_base = self.stack.len();
+                let saved_stack = self.stack[..stack_base].to_vec();
+                if crate::trace::enabled() {
+                    eprintln!(
+                        "[trace] call_with_this closure stack_base={} stack_len={} proto='{}'",
+                        stack_base,
+                        self.stack.len(),
+                        proto.name
+                    );
+                }
                 let caller_chunk = Rc::clone(&self.chunk);
                 let caller_ip = self.ip;
                 let caller_locals = self.locals.clone();
@@ -617,6 +745,7 @@ impl Vm {
                 self.this_value = caller_this;
                 self.current_closure_env = caller_env;
                 self.current_slot_types = caller_slot_types;
+                self.stack = saved_stack;
                 Ok(result)
             }
             _ => {
@@ -636,9 +765,7 @@ impl Vm {
             match self.step(true)? {
                 StepOutcome::Continue => {}
                 StepOutcome::Return(result) => {
-                    if !self.frames.is_empty() {
-                        self.stack.truncate(stack_base);
-                    }
+                    self.stack.truncate(stack_base);
                     return Ok(result);
                 }
             }
@@ -647,6 +774,14 @@ impl Vm {
 
     fn step(&mut self, stop_on_return: bool) -> Result<StepOutcome, crate::errors::RuntimeError> {
         let op_byte = self.read_byte()?;
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] step ip={} stack_size={} op_byte=0x{:02x}",
+                self.ip.saturating_sub(1),
+                self.stack.len(),
+                op_byte
+            );
+        }
         let op = match Op::from_byte(op_byte) {
             Some(o) => o,
             None => {
@@ -744,7 +879,14 @@ impl Vm {
             }
             Op::Dup => {
                 let v = self.stack.last().cloned().ok_or("Stack underflow")?;
+                if crate::trace::enabled() {
+                    crate::trace::value_string("[trace] Dup top value", &v);
+                    eprintln!("[trace] Dup before push stack_size={} ", self.stack.len());
+                }
                 self.stack.push(v);
+                if crate::trace::enabled() {
+                    eprintln!("[trace] Dup after push stack_size={} ", self.stack.len());
+                }
             }
             Op::Add => {
                 let b = self.pop()?;
@@ -794,6 +936,124 @@ impl Vm {
                 },
             )?,
             Op::Mod => self.binary_num_bigint(|a, b| a % b, |a, b| Ok(a % b))?,
+            Op::Pow => {
+                // Exponentiation: handle BigInt**BigInt and Number**Number semantics.
+                // Pop right then left.
+                let b = self.pop()?;
+                let a = self.pop()?;
+                // Helper: ToNumeric approximation returning either Number(f64) or BigInt(i128)
+                enum Numeric {
+                    Number(f64),
+                    BigInt(i128),
+                }
+
+                let to_numeric = |vm: &mut Vm,
+                                  v: Value|
+                 -> Result<Numeric, crate::errors::RuntimeError> {
+                    match v {
+                        Value::BigInt(n) => Ok(Numeric::BigInt(n)),
+                        Value::Number(n) => Ok(Numeric::Number(n)),
+                        other => {
+                            // ToPrimitive with number hint then interpret
+                            let prim = vm.to_primitive(&other, Some("number"))?;
+                            match prim {
+                                Value::BigInt(n) => Ok(Numeric::BigInt(n)),
+                                Value::Number(n) => Ok(Numeric::Number(n)),
+                                Value::String(s) => {
+                                    let parsed = s.parse::<f64>().unwrap_or(f64::NAN);
+                                    Ok(Numeric::Number(parsed))
+                                }
+                                Value::Bool(b) => Ok(Numeric::Number(if b { 1.0 } else { 0.0 })),
+                                Value::Null => Ok(Numeric::Number(0.0)),
+                                Value::Undefined => Ok(Numeric::Number(f64::NAN)),
+                                _ => {
+                                    // Default: try ToNumber
+                                    let n = vm.to_number_value(&prim)?;
+                                    Ok(Numeric::Number(n))
+                                }
+                            }
+                        }
+                    }
+                };
+
+                let a_num = match to_numeric(self, a) {
+                    Ok(n) => n,
+                    Err(_e) => {
+                        // Convert runtime error into a JS TypeError where appropriate
+                        let ctor = self.get_global("TypeError").unwrap_or(Value::Undefined);
+                        let thrown = self
+                            .construct_value(&ctor, &[])
+                            .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                        match self.unwind_to_handler(thrown) {
+                            Ok(()) => return Ok(StepOutcome::Continue),
+                            Err(err) => return Err(err),
+                        }
+                    }
+                };
+                let b_num = match to_numeric(self, b) {
+                    Ok(n) => n,
+                    Err(_e) => {
+                        let ctor = self.get_global("TypeError").unwrap_or(Value::Undefined);
+                        let thrown = self
+                            .construct_value(&ctor, &[])
+                            .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                        match self.unwind_to_handler(thrown) {
+                            Ok(()) => return Ok(StepOutcome::Continue),
+                            Err(err) => return Err(err),
+                        }
+                    }
+                };
+
+                match (a_num, b_num) {
+                    (Numeric::BigInt(x), Numeric::BigInt(y)) => {
+                        // BigInt exponent must be non-negative
+                        let exp = y;
+                        if exp < 0 {
+                            let ctor = self.get_global("RangeError").unwrap_or(Value::Undefined);
+                            let thrown = self
+                                .construct_value(&ctor, &[])
+                                .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                            match self.unwind_to_handler(thrown) {
+                                Ok(()) => return Ok(StepOutcome::Continue),
+                                Err(err) => return Err(err),
+                            }
+                        }
+                        // Exponentiation by repeated squaring for i128 (may overflow)
+                        let mut base = x;
+                        let mut exp_mut = exp;
+                        let mut result: i128 = 1;
+                        while exp_mut > 0 {
+                            if (exp_mut & 1) != 0 {
+                                result = result.checked_mul(base).ok_or_else(|| {
+                                    crate::errors::RuntimeError::from("Pow: bigint overflow")
+                                })?;
+                            }
+                            exp_mut >>= 1;
+                            if exp_mut > 0 {
+                                base = base.checked_mul(base).ok_or_else(|| {
+                                    crate::errors::RuntimeError::from("Pow: bigint overflow")
+                                })?;
+                            }
+                        }
+                        self.stack.push(Value::BigInt(result));
+                    }
+                    (Numeric::Number(x), Numeric::Number(y)) => {
+                        let r = x.powf(y);
+                        self.stack.push(Value::Number(r));
+                    }
+                    // Mixing BigInt and Number -> throw TypeError as JS semantics
+                    _ => {
+                        let ctor = self.get_global("TypeError").unwrap_or(Value::Undefined);
+                        let thrown = self
+                            .construct_value(&ctor, &[])
+                            .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                        match self.unwind_to_handler(thrown) {
+                            Ok(()) => return Ok(StepOutcome::Continue),
+                            Err(err) => return Err(err),
+                        }
+                    }
+                }
+            }
             Op::Eq => {
                 let b = self.pop()?;
                 let a = self.pop()?;
@@ -836,14 +1096,63 @@ impl Vm {
             }
             Op::Neg => {
                 let v = self.pop()?;
-                match v {
-                    Value::Number(n) => self.stack.push(Value::Number(-n)),
-                    _ => return Err("Neg: number expected".into()),
-                }
+                // Perform ToNumber semantics for unary negation
+                let n = self.to_number_value(&v)?;
+                self.stack.push(Value::Number(-n));
             }
             Op::Not => {
                 let v = self.pop()?;
                 self.stack.push(Value::Bool(!v.is_truthy()));
+            }
+            Op::BitAnd => {
+                // Perform ToInt32 on operands and bitwise-and like JS
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let ai = self.to_int32_value(&a)?;
+                let bi = self.to_int32_value(&b)?;
+                let r = ai & bi;
+                self.stack.push(Value::Number(r as f64));
+            }
+            Op::BitOr => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let ai = self.to_int32_value(&a)?;
+                let bi = self.to_int32_value(&b)?;
+                let r = ai | bi;
+                self.stack.push(Value::Number(r as f64));
+            }
+            Op::BitXor => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let ai = self.to_int32_value(&a)?;
+                let bi = self.to_int32_value(&b)?;
+                let r = ai ^ bi;
+                self.stack.push(Value::Number(r as f64));
+            }
+            Op::Shl => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let ai = self.to_int32_value(&a)?;
+                let shift = self.to_uint32_value(&b)? & 0x1f;
+                let r = ai.wrapping_shl(shift);
+                self.stack.push(Value::Number(r as f64));
+            }
+            Op::Shr => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let ai = self.to_int32_value(&a)?;
+                let shift = self.to_uint32_value(&b)? & 0x1f;
+                let r = ai.wrapping_shr(shift);
+                self.stack.push(Value::Number(r as f64));
+            }
+            Op::Ushr => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let au = self.to_uint32_value(&a)?;
+                let shift = self.to_uint32_value(&b)? & 0x1f;
+                let r = au.wrapping_shr(shift);
+                // JavaScript >>> yields an unsigned 32-bit number, represent as Number
+                self.stack.push(Value::Number(r as f64));
             }
             Op::Typeof => {
                 let v = self.pop()?;
@@ -853,7 +1162,7 @@ impl Vm {
             Op::CallMethod => self.execute_call_method()?,
             Op::Return => {
                 if self.frames.is_empty() {
-                    let result = self.pop().unwrap_or(Value::Undefined);
+                    let result = self.stack.pop().unwrap_or(Value::Undefined);
                     return Ok(StepOutcome::Return(result));
                 }
                 self.execute_return()?;
@@ -884,6 +1193,16 @@ impl Vm {
             }
             Op::GetPropertyIC => self.get_property_ic()?,
             Op::SetProperty => {
+                if crate::trace::enabled() {
+                    eprintln!(
+                        "[trace] SetProperty stack_size={} ip={}",
+                        self.stack.len(),
+                        self.ip.saturating_sub(1)
+                    );
+                    for (i, v) in self.stack.iter().rev().take(6).enumerate() {
+                        crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
+                    }
+                }
                 let value = self.pop()?;
                 let key = self.pop()?;
                 let obj = self.pop()?;
@@ -961,12 +1280,31 @@ impl Vm {
                     saved_locals_len: self.locals.len(),
                     frame_count: self.frames.len(),
                 });
+                if crate::trace::enabled() {
+                    eprintln!(
+                        "[trace] PushHandler handler_ip={} saved_stack_len={} handlers={}",
+                        handler_ip,
+                        self.stack.len(),
+                        self.handlers.len()
+                    );
+                }
             }
             Op::PopHandler => {
                 self.handlers.pop();
+                if crate::trace::enabled() {
+                    eprintln!("[trace] PopHandler handlers={}", self.handlers.len());
+                }
             }
             Op::Throw => {
                 let thrown = self.pop()?;
+                if crate::trace::enabled() {
+                    crate::trace::value_string("[trace] Throw thrown", &thrown);
+                    eprintln!(
+                        "[trace] Throw stack_size={} handlers={}",
+                        self.stack.len(),
+                        self.handlers.len()
+                    );
+                }
                 self.unwind_to_handler(thrown)?;
             }
         }
@@ -1443,9 +1781,21 @@ impl Vm {
 
     /// Pop the return value, restore the caller's frame, and push the result.
     fn execute_return(&mut self) -> Result<(), crate::errors::RuntimeError> {
-        let result = self.pop().unwrap_or(Value::Null);
+        let result = self.stack.pop().unwrap_or(Value::Undefined);
 
         let frame = self.frames.pop().ok_or("Return without call frame")?;
+
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] execute_return stack_before_truncate={} frame.stack_base={} result={:?}",
+                self.stack.len(),
+                frame.stack_base,
+                result
+            );
+            for (i, v) in self.stack.iter().rev().take(6).enumerate() {
+                crate::trace::value_string(&format!("[trace]   ret_stack[{}]", i), v);
+            }
+        }
 
         // Runtime return-type check intentionally disabled in JS-first mode.
         // TypeScript return annotations are erased at runtime.
@@ -1462,6 +1812,13 @@ impl Vm {
         // push the return value. Previously the caller's stack was lost.
         self.stack.truncate(frame.stack_base);
         self.stack.push(result);
+
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] execute_return stack_after_push={}",
+                self.stack.len()
+            );
+        }
 
         Ok(())
     }
@@ -1510,6 +1867,14 @@ impl Vm {
             && !matches!(proto_val, Value::Null)
         {
             props.borrow_mut().prototype = proto_val;
+            if let Ok(for_each_val) = get_property(&props.borrow().prototype, &PropertyKey::String("forEach".to_string()), 0)
+                && !matches!(for_each_val, Value::Undefined)
+            {
+                props.borrow_mut().properties.insert(
+                    PropertyKey::String("forEach".to_string()),
+                    PropertyDescriptor::data(for_each_val),
+                );
+            }
         }
 
         fixed.push(Value::Array(arr_rc, props));
@@ -1540,6 +1905,16 @@ impl Vm {
         // clone the entire operand stack into the frame.
         let stack_base = self.stack.len();
 
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] push_call_frame stack_base={} proto='{}' arity={} stack_len={}",
+                stack_base,
+                proto.name,
+                proto.arity,
+                self.stack.len()
+            );
+        }
+
         self.frames.push(Frame {
             chunk: Rc::clone(&self.chunk),
             ip: self.ip,
@@ -1560,12 +1935,24 @@ impl Vm {
 
         // Pre-allocate locals to at least `arity` slots, filling missing
         // arguments with Null.
-        self.locals = call_args
-            .into_iter()
-            .chain(std::iter::repeat(Value::Null))
-            .take(proto.arity)
-            .map(|value| Rc::new(RefCell::new(value)))
+        let args_for_arguments = call_args.clone();
+        self.locals = std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Null)))
+            .take(proto.slot_types.len().max(proto.arity))
             .collect();
+        for (i, value) in call_args.into_iter().enumerate().take(proto.arity) {
+            *self.locals[i].borrow_mut() = value;
+        }
+        if let Some(slot) = proto.arguments_slot
+            && slot < self.locals.len()
+        {
+            let arr_rc = Rc::new(RefCell::new(args_for_arguments));
+            let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+            props.borrow_mut().properties.insert(
+                PropertyKey::String("length".to_string()),
+                PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+            );
+            self.locals[slot] = Rc::new(RefCell::new(Value::Array(arr_rc, props)));
+        }
 
         Ok(())
     }
@@ -1704,6 +2091,7 @@ impl Vm {
         let closure = Value::Closure {
             proto: Rc::clone(&closure_proto),
             env: Rc::new(RefCell::new(env_cells)),
+            lexical_this: None,
             props: Rc::clone(&props),
         };
 
@@ -1926,8 +2314,45 @@ impl Vm {
         self.stack.pop().ok_or_else(|| {
             if crate::trace::enabled() {
                 eprintln!("[diag] Stack underflow");
-                let start = self.ip.saturating_sub(8);
-                let end = usize::min(self.ip + 8, self.chunk.code.len());
+                // Extra diagnostics: print some VM state to help map the
+                // underflow to the currently-executing frame and chunk.
+                eprintln!(
+                    "[diag] chunk_ptr={:p} chunk_len={} frames={} handlers={}",
+                    Rc::as_ptr(&self.chunk),
+                    self.chunk.code.len(),
+                    self.frames.len(),
+                    self.handlers.len()
+                );
+                if let Some(f) = self.frames.last() {
+                    eprintln!("[diag] top_frame.stack_base={} top_frame.ip={} ", f.stack_base, f.ip);
+                    // Print the owning chunk for the top frame and a summary of
+                    // any function prototypes referenced by the current chunk.
+                    eprintln!(
+                        "[diag] top_frame.chunk_ptr={:p} chunk_code_len={} functions={}",
+                        Rc::as_ptr(&f.chunk),
+                        f.chunk.code.len(),
+                        f.chunk.functions.len()
+                    );
+                    // List function proto summaries (limited to first 20)
+                    for (i, proto) in f.chunk.functions.iter().enumerate().take(20) {
+                        eprintln!(
+                            "[diag]   fn[{}] name='{}' arity={} captures_this={} proto_chunk_ptr={:p} chunk_len={}",
+                            i,
+                            proto.name,
+                            proto.arity,
+                            proto.captures_this,
+                            Rc::as_ptr(&proto.chunk),
+                            proto.chunk.code.len()
+                        );
+                    }
+                }
+                // Print a short constant pool dump for the current chunk (limited).
+                eprintln!("[diag] chunk constants (len={}):", self.chunk.constants.len());
+                for (i, c) in self.chunk.constants.iter().enumerate().take(32) {
+                    eprintln!("[diag]   const[{}] = {:?}", i, c);
+                }
+                let start = self.ip.saturating_sub(24);
+                let end = usize::min(self.ip + 24, self.chunk.code.len());
                 eprintln!("[diag] disasm window ({}..{}):", start, end);
                 let mut j = start;
                 while j < end {
@@ -2241,6 +2666,52 @@ fn to_number(v: &Value) -> Result<f64, crate::errors::RuntimeError> {
         Value::Null => Ok(0.0),
         Value::BigInt(n) => Ok(*n as f64),
         _ => Err(crate::errors::RuntimeError::from("Expected number")),
+    }
+}
+
+fn to_int32(v: &Value) -> Result<i32, crate::errors::RuntimeError> {
+    // Per ECMAScript ToInt32: compute ToUint32(n) then reinterpret as signed 32-bit
+    let u = to_uint32(v)?;
+    if u & 0x8000_0000 != 0 {
+        // negative in signed 32-bit space
+        Ok(((u as i64) - 0x1_0000_0000) as i32)
+    } else {
+        Ok(u as i32)
+    }
+}
+
+fn to_uint32(v: &Value) -> Result<u32, crate::errors::RuntimeError> {
+    // ToUint32 per ECMAScript: ToNumber(v), then take the integer part modulo 2^32
+    let n = match v {
+        Value::Number(x) => *x,
+        Value::BigInt(x) => *x as f64,
+        _ => {
+            return Err(crate::errors::RuntimeError::from(
+                "Expected number for bitwise operation",
+            ));
+        }
+    };
+
+    if n.is_nan() || n == 0.0 || n.is_infinite() {
+        return Ok(0);
+    }
+
+    const TWO32: f64 = 4294967296.0; // 2^32
+    // Use truncation toward zero for the integer part, then Euclidean remainder
+    let int_part = n.trunc();
+    let vmod = int_part.rem_euclid(TWO32);
+    Ok(vmod as u32)
+}
+
+// Helper methods on Vm for coercion that delegate to free functions but
+// provide clearer naming when used in opcode handlers.
+impl Vm {
+    fn to_int32_value(&self, v: &Value) -> Result<i32, crate::errors::RuntimeError> {
+        to_int32(v)
+    }
+
+    fn to_uint32_value(&self, v: &Value) -> Result<u32, crate::errors::RuntimeError> {
+        to_uint32(v)
     }
 }
 
@@ -2666,6 +3137,8 @@ mod tests {
     use crate::compiler;
     use crate::parser::Parser;
     use crate::runtime_utils;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     fn test_globals() -> Rc<RefCell<ObjectData>> {
         Rc::new(RefCell::new(ObjectData::new()))
@@ -2889,5 +3362,59 @@ mod tests {
 
         assert!(matches!(result, Value::Undefined));
         assert!(matches!(vm.get_global("x"), Some(Value::Undefined)));
+    }
+
+    #[test]
+    fn logical_and_short_circuits_and_preserves_left_operand() {
+        let session = Parser::parse_source("var x = 0 && bump();").expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program).expect("compile ok");
+
+        let calls = Rc::new(RefCell::new(0usize));
+        let globals = test_globals();
+        globals.borrow_mut().properties.insert(
+            PropertyKey::String("bump".to_string()),
+            PropertyDescriptor::data(Value::Builtin(Rc::new({
+                let calls = Rc::clone(&calls);
+                move |_vm, _args| {
+                    *calls.borrow_mut() += 1;
+                    Ok(Value::Number(99.0))
+                }
+            }))),
+        );
+
+        let mut vm = Vm::new(Rc::clone(&globals));
+        let result = vm.run(chunk).expect("run ok");
+
+        assert_eq!(*calls.borrow(), 0);
+        assert!(matches!(result, Value::Undefined));
+        assert!(matches!(vm.get_global("x"), Some(Value::Number(n)) if n == 0.0));
+    }
+
+    #[test]
+    fn logical_or_short_circuits_and_preserves_left_operand() {
+        let session = Parser::parse_source("var x = 1 || bump();").expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program).expect("compile ok");
+
+        let calls = Rc::new(RefCell::new(0usize));
+        let globals = test_globals();
+        globals.borrow_mut().properties.insert(
+            PropertyKey::String("bump".to_string()),
+            PropertyDescriptor::data(Value::Builtin(Rc::new({
+                let calls = Rc::clone(&calls);
+                move |_vm, _args| {
+                    *calls.borrow_mut() += 1;
+                    Ok(Value::Number(99.0))
+                }
+            }))),
+        );
+
+        let mut vm = Vm::new(Rc::clone(&globals));
+        let result = vm.run(chunk).expect("run ok");
+
+        assert_eq!(*calls.borrow(), 0);
+        assert!(matches!(result, Value::Undefined));
+        assert!(matches!(vm.get_global("x"), Some(Value::Number(n)) if n == 1.0));
     }
 }

@@ -80,6 +80,10 @@ pub struct FunctionProto {
     /// Whether creating this function should install an own `.prototype`
     /// object, i.e. whether it behaves like a constructor function.
     pub has_prototype_property: bool,
+    /// Whether the function should capture lexical `this` at closure creation.
+    pub captures_this: bool,
+    /// Slot index for the implicit `arguments` binding, if reserved.
+    pub arguments_slot: Option<usize>,
     /// Return type annotation
     pub return_type: Option<Type>,
 }
@@ -283,6 +287,8 @@ pub enum Op {
     Sub,
     /// Multiplication
     Mul,
+    /// Exponentiation (**)
+    Pow,
     /// Division
     Div,
     /// Modulo
@@ -349,6 +355,18 @@ pub enum Op {
     GetModuleExport,
     /// Write an export slot in a module table. Operands: module_index (u8), export_name_constant_index (u8)
     SetModuleExport,
+    /// Bitwise AND
+    BitAnd,
+    /// Bitwise OR
+    BitOr,
+    /// Bitwise XOR
+    BitXor,
+    /// Signed left shift
+    Shl,
+    /// Signed right shift (arithmetic)
+    Shr,
+    /// Unsigned right shift (logical)
+    Ushr,
 }
 
 impl Op {
@@ -378,7 +396,7 @@ impl Op {
     pub fn is_arithmetic(&self) -> bool {
         matches!(
             self,
-            Op::Add | Op::AddNumber | Op::Sub | Op::Mul | Op::Div | Op::Mod
+            Op::Add | Op::AddNumber | Op::Sub | Op::Mul | Op::Pow | Op::Div | Op::Mod
         )
     }
 
@@ -421,39 +439,46 @@ impl TryFrom<u8> for Op {
             12 => Ok(Op::AddNumber),
             13 => Ok(Op::Sub),
             14 => Ok(Op::Mul),
-            15 => Ok(Op::Div),
-            16 => Ok(Op::Mod),
-            17 => Ok(Op::Eq),
-            18 => Ok(Op::Neq),
-            19 => Ok(Op::Lt),
-            20 => Ok(Op::Le),
-            21 => Ok(Op::Gt),
-            22 => Ok(Op::Ge),
-            23 => Ok(Op::And),
-            24 => Ok(Op::Or),
-            25 => Ok(Op::Neg),
-            26 => Ok(Op::Not),
-            27 => Ok(Op::Typeof),
-            28 => Ok(Op::Call),
-            29 => Ok(Op::CallMethod),
-            30 => Ok(Op::Return),
-            31 => Ok(Op::Jump),
-            32 => Ok(Op::JumpIfFalse),
-            33 => Ok(Op::BuildArray),
-            34 => Ok(Op::BuildObject),
-            35 => Ok(Op::GetProperty),
-            36 => Ok(Op::GetPropertyIC),
-            37 => Ok(Op::SetProperty),
-            38 => Ok(Op::MakeClosure),
-            39 => Ok(Op::GetThis),
-            40 => Ok(Op::GetUpvalue),
-            41 => Ok(Op::SetUpvalue),
-            42 => Ok(Op::GetBuiltin),
-            43 => Ok(Op::Throw),
-            44 => Ok(Op::PushHandler),
-            45 => Ok(Op::PopHandler),
-            46 => Ok(Op::GetModuleExport),
-            47 => Ok(Op::SetModuleExport),
+            15 => Ok(Op::Pow),
+            16 => Ok(Op::Div),
+            17 => Ok(Op::Mod),
+            18 => Ok(Op::Eq),
+            19 => Ok(Op::Neq),
+            20 => Ok(Op::Lt),
+            21 => Ok(Op::Le),
+            22 => Ok(Op::Gt),
+            23 => Ok(Op::Ge),
+            24 => Ok(Op::And),
+            25 => Ok(Op::Or),
+            26 => Ok(Op::Neg),
+            27 => Ok(Op::Not),
+            28 => Ok(Op::Typeof),
+            29 => Ok(Op::Call),
+            30 => Ok(Op::CallMethod),
+            31 => Ok(Op::Return),
+            32 => Ok(Op::Jump),
+            33 => Ok(Op::JumpIfFalse),
+            34 => Ok(Op::BuildArray),
+            35 => Ok(Op::BuildObject),
+            36 => Ok(Op::GetProperty),
+            37 => Ok(Op::GetPropertyIC),
+            38 => Ok(Op::SetProperty),
+            39 => Ok(Op::MakeClosure),
+            40 => Ok(Op::GetThis),
+            41 => Ok(Op::GetUpvalue),
+            42 => Ok(Op::SetUpvalue),
+            43 => Ok(Op::GetBuiltin),
+            44 => Ok(Op::Throw),
+            45 => Ok(Op::PushHandler),
+            46 => Ok(Op::PopHandler),
+            47 => Ok(Op::GetModuleExport),
+            48 => Ok(Op::SetModuleExport),
+            49 => Ok(Op::BitAnd),
+            50 => Ok(Op::BitOr),
+            51 => Ok(Op::BitXor),
+            52 => Ok(Op::Shl),
+            53 => Ok(Op::Shr),
+            54 => Ok(Op::Ushr),
             _ => Err(()),
         }
     }
@@ -471,7 +496,7 @@ mod tests {
 
     #[test]
     fn op_round_trip() {
-        for i in 0u8..=Op::PopHandler as u8 {
+        for i in 0u8..=Op::Ushr as u8 {
             let op = Op::try_from(i).expect("valid op");
             let b = u8::from(op);
             assert_eq!(b, i);

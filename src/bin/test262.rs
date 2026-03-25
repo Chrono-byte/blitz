@@ -233,9 +233,12 @@ fn clone_value(value: &Value, ctx: &mut CloneCtx) -> Value {
             clone_array_elements(arr, ctx),
             clone_object_data(props, ctx),
         ),
-        Value::Closure { proto, env, props } => Value::Closure {
+        Value::Closure {
+            proto, env, props, ..
+        } => Value::Closure {
             proto: Rc::clone(proto),
             env: clone_env(env, ctx),
+            lexical_this: None,
             props: clone_object_data(props, ctx),
         },
         Value::Builtin(f) => Value::Builtin(Rc::clone(f)),
@@ -781,11 +784,22 @@ fn run_test_file(
         && let Some(includes) = &m.includes
     {
         for inc in includes {
-            if inc != "harness/sta.js"
-                && inc != "harness/assert.js"
-                && !harness_files.iter().any(|h| h == inc)
+            // Normalize harness include paths: tests sometimes list includes
+            // as "harness/assert.js" but we store and later load harness
+            // files from test262/harness/<name>. Ensure we only keep the
+            // basename when encountering a harness/ prefix to avoid
+            // constructing paths like test262/harness/harness/assert.js.
+            let normalized = if let Some(rest) = inc.strip_prefix("harness/") {
+                rest.to_string()
+            } else {
+                inc.clone()
+            };
+
+            if normalized != "sta.js"
+                && normalized != "assert.js"
+                && !harness_files.iter().any(|h| h == &normalized)
             {
-                harness_files.push(inc.clone());
+                harness_files.push(normalized);
             }
         }
     }
@@ -1543,8 +1557,20 @@ fn main() {
         );
         print_bucket_summary("Top-level breakdown:", &top_level, 12, false);
         print_bucket_summary("Worst subtrees:", &subtrees, 15, true);
-        for (p, m) in failed.iter().take(20) {
-            eprintln!("  {}: {}", p.display(), m);
+
+        // Instead of listing every failing file, group failures by subtree
+        // and print the failing folders only (top 20). This avoids long lists
+        // of individual files and surfaces which folders are problematic.
+        let mut failed_by_subtree: HashMap<String, usize> = HashMap::new();
+        for (p, _m) in &failed {
+            let (_top, subtree) = bucket_keys(&test_root, p);
+            *failed_by_subtree.entry(subtree).or_default() += 1;
+        }
+        let mut rows: Vec<_> = failed_by_subtree.into_iter().collect();
+        rows.sort_by(|(an, ac), (bn, bc)| bc.cmp(ac).then_with(|| an.cmp(bn)));
+        eprintln!("Failed folders:");
+        for (name, cnt) in rows.into_iter() {
+            eprintln!("  {:<40} fail {}", name, cnt);
         }
         exit(1);
     } else {

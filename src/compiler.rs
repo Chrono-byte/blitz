@@ -81,6 +81,8 @@ pub struct Compiler {
     local_types: Vec<Option<Type>>,
     /// Whether writes to this local should mirror to the global object.
     local_mirror_globals: Vec<bool>,
+    /// Lexical scope stack for name visibility.
+    scopes: Vec<Scope>,
     /// Global variable name to constant index mapping
     globals: HashMap<String, usize>,
     /// True only for the top-level compiler (so we can record global_types).
@@ -110,6 +112,18 @@ enum CaptureSource {
     Upvalue(u8),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScopeKind {
+    Function,
+    Block,
+}
+
+#[derive(Debug)]
+struct Scope {
+    kind: ScopeKind,
+    bindings: HashMap<String, usize>,
+}
+
 impl Compiler {
     /// Creates a new compiler instance
     pub fn new() -> Self {
@@ -118,6 +132,10 @@ impl Compiler {
             locals: Vec::new(),
             local_types: Vec::new(),
             local_mirror_globals: Vec::new(),
+            scopes: vec![Scope {
+                kind: ScopeKind::Function,
+                bindings: HashMap::new(),
+            }],
             globals: HashMap::new(),
             is_root: true,
             continue_patches: Vec::new(),
@@ -154,11 +172,35 @@ impl Compiler {
     }
 
     fn resolve_local(&self, name: &str) -> Option<usize> {
-        self.locals.iter().position(|n| n == name)
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.bindings.get(name).copied())
     }
 
-    fn add_local(&mut self, name: String, type_ann: Option<Type>) -> usize {
-        self.add_local_with_mirror(name, type_ann, false)
+    fn current_function_scope_index(&self) -> usize {
+        self.scopes
+            .iter()
+            .rposition(|scope| scope.kind == ScopeKind::Function)
+            .expect("compiler must always have a function scope")
+    }
+
+    fn add_local_in_scope(
+        &mut self,
+        scope_index: usize,
+        name: String,
+        type_ann: Option<Type>,
+        mirror_global: bool,
+    ) -> usize {
+        if let Some(slot) = self.scopes[scope_index].bindings.get(&name).copied() {
+            return slot;
+        }
+        let slot = self.locals.len();
+        self.locals.push(name.clone());
+        self.local_types.push(type_ann);
+        self.local_mirror_globals.push(mirror_global);
+        self.scopes[scope_index].bindings.insert(name, slot);
+        slot
     }
 
     fn add_local_with_mirror(
@@ -167,11 +209,51 @@ impl Compiler {
         type_ann: Option<Type>,
         mirror_global: bool,
     ) -> usize {
-        let slot = self.locals.len();
-        self.locals.push(name);
-        self.local_types.push(type_ann);
-        self.local_mirror_globals.push(mirror_global);
-        slot
+        let scope_index = self.scopes.len().saturating_sub(1);
+        self.add_local_in_scope(scope_index, name, type_ann, mirror_global)
+    }
+
+    fn add_var_local(
+        &mut self,
+        name: String,
+        type_ann: Option<Type>,
+        mirror_global: bool,
+    ) -> usize {
+        let scope_index = self.current_function_scope_index();
+        self.add_local_in_scope(scope_index, name, type_ann, mirror_global)
+    }
+
+    fn enter_block_scope(&mut self) {
+        self.scopes.push(Scope {
+            kind: ScopeKind::Block,
+            bindings: HashMap::new(),
+        });
+    }
+
+    fn exit_scope(&mut self) {
+        let scope = self
+            .scopes
+            .pop()
+            .expect("compiler must always have an active scope");
+        debug_assert!(
+            !matches!(scope.kind, ScopeKind::Function) || !self.scopes.is_empty(),
+            "cannot pop the last function scope"
+        );
+    }
+
+    fn visible_bindings_snapshot(&self) -> HashMap<String, CaptureSource> {
+        let mut bindings = HashMap::new();
+        for scope in &self.scopes {
+            for (name, slot) in &scope.bindings {
+                bindings.insert(name.clone(), CaptureSource::Local(*slot as u8));
+            }
+        }
+        for (name, idx) in &self.upvalue_indices {
+            bindings
+                .entry(name.clone())
+                .or_insert(CaptureSource::Upvalue(*idx));
+        }
+        bindings
     }
 
     fn local_mirrors_global(&self, slot: usize) -> bool {
@@ -307,7 +389,7 @@ impl Compiler {
             {
                 let name = ident.name.to_string();
                 if self.resolve_local(&name).is_none() {
-                    self.add_local(name, None);
+                    self.add_local_in_scope(self.current_function_scope_index(), name, None, false);
                 }
             }
         }
@@ -336,9 +418,8 @@ impl Compiler {
             let mirror_global =
                 self.is_root && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
             let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
-                self.resolve_local(&name).unwrap_or_else(|| {
-                    self.add_local_with_mirror(name.clone(), None, mirror_global)
-                })
+                self.resolve_local(&name)
+                    .unwrap_or_else(|| self.add_var_local(name.clone(), None, mirror_global))
             } else {
                 self.add_local_with_mirror(name.clone(), None, mirror_global)
             };
@@ -472,9 +553,11 @@ impl Compiler {
                 self.emit(Op::Pop, LINE);
             }
             OStmt::BlockStatement(b) => {
+                self.enter_block_scope();
                 for s in &b.body {
                     self.compile_statement_oast(s)?;
                 }
+                self.exit_scope();
             }
             OStmt::IfStatement(i) => {
                 self.compile_expr_oast(&i.test)?;
@@ -504,7 +587,9 @@ impl Compiler {
                 let exit_jump = self.chunk.code.len();
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
+                self.enter_block_scope();
                 self.compile_statement_oast(&w.body)?;
+                self.exit_scope();
                 self.emit(Op::Jump, LINE);
                 let back_jump_pos = self.chunk.code.len();
                 let back_offset = loop_start as isize - (self.chunk.code.len() + 2) as isize;
@@ -555,11 +640,7 @@ impl Compiler {
                                     if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var)
                                     {
                                         self.resolve_local(&name).unwrap_or_else(|| {
-                                            self.add_local_with_mirror(
-                                                name.clone(),
-                                                None,
-                                                mirror_global,
-                                            )
+                                            self.add_var_local(name.clone(), None, mirror_global)
                                         })
                                     } else {
                                         self.add_local_with_mirror(
@@ -616,7 +697,9 @@ impl Compiler {
                     None
                 };
 
+                self.enter_block_scope();
                 self.compile_statement_oast(&f.body)?;
+                self.exit_scope();
 
                 let update_start = self.chunk.code.len();
                 if let Some(patches) = self.continue_patches.pop() {
@@ -729,15 +812,21 @@ impl Compiler {
                             ));
                         }
                     };
+                    self.enter_block_scope();
                     let slot = self.add_local_with_mirror(name, None, false);
                     self.emit(Op::SetLocal, LINE);
                     self.emit_byte(slot as u8, LINE);
+                    for stmt in &handler.body.body {
+                        self.compile_statement_oast(stmt)?;
+                    }
+                    self.exit_scope();
                 } else {
                     self.emit(Op::Pop, LINE);
-                }
-
-                for stmt in &handler.body.body {
-                    self.compile_statement_oast(stmt)?;
+                    self.enter_block_scope();
+                    for stmt in &handler.body.body {
+                        self.compile_statement_oast(stmt)?;
+                    }
+                    self.exit_scope();
                 }
 
                 self.patch_jump(end_jump);
@@ -825,6 +914,15 @@ impl Compiler {
                     oast::AssignmentOperator::Assign => match target {
                         oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
                             let name = id.name.as_str();
+                            if self
+                                .current_module
+                                .as_ref()
+                                .is_some_and(|c| c.imports.contains_key(name))
+                            {
+                                return Err(crate::errors::CompilerError::from(
+                                    "cannot assign to imported binding",
+                                ));
+                            }
                             self.compile_expr_oast(&a.right)?;
                             self.emit(Op::Dup, LINE);
                             if let Some(slot) = self.resolve_local(name) {
@@ -898,7 +996,8 @@ impl Compiler {
                     | oast::AssignmentOperator::Subtraction
                     | oast::AssignmentOperator::Multiplication
                     | oast::AssignmentOperator::Division
-                    | oast::AssignmentOperator::Remainder => match target {
+                    | oast::AssignmentOperator::Remainder
+                    | oast::AssignmentOperator::Exponential => match target {
                         oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
                             let name = id.name.as_str();
                             if let Some(slot) = self.resolve_local(name) {
@@ -907,6 +1006,14 @@ impl Compiler {
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
                                 self.emit(Op::GetUpvalue, LINE);
                                 self.emit_byte(upvalue, LINE);
+                            } else if self
+                                .current_module
+                                .as_ref()
+                                .is_some_and(|c| c.imports.contains_key(name))
+                            {
+                                return Err(crate::errors::CompilerError::from(
+                                    "cannot assign to imported binding",
+                                ));
                             } else {
                                 let idx = self.global_name_index(name);
                                 self.emit(Op::GetGlobal, LINE);
@@ -921,6 +1028,7 @@ impl Compiler {
                                 }
                                 oast::AssignmentOperator::Division => self.emit(Op::Div, LINE),
                                 oast::AssignmentOperator::Remainder => self.emit(Op::Mod, LINE),
+                                oast::AssignmentOperator::Exponential => self.emit(Op::Pow, LINE),
                                 _ => {}
                             }
                             self.emit(Op::Dup, LINE);
@@ -964,6 +1072,27 @@ impl Compiler {
                     self.compile_expr_oast(&u.argument)?;
                     self.emit(Op::Call, LINE);
                     self.emit_byte(1, LINE);
+                }
+                oast::UnaryOperator::Delete => {
+                    if let OExpr::StaticMemberExpression(m) = &u.argument {
+                        let idx = self.global_name_index("__native_deleteProperty");
+                        self.emit(Op::GetGlobal, LINE);
+                        self.emit_byte(idx as u8, LINE);
+                        self.compile_expr_oast(&m.object)?;
+                        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                        self.emit(Op::Call, LINE);
+                        self.emit_byte(2, LINE);
+                    } else if let OExpr::ComputedMemberExpression(m) = &u.argument {
+                        let idx = self.global_name_index("__native_deleteProperty");
+                        self.emit(Op::GetGlobal, LINE);
+                        self.emit_byte(idx as u8, LINE);
+                        self.compile_expr_oast(&m.object)?;
+                        self.compile_expr_oast(&m.expression)?;
+                        self.emit(Op::Call, LINE);
+                        self.emit_byte(2, LINE);
+                    } else {
+                        self.emit_constant(Value::Bool(true), LINE);
+                    }
                 }
                 _ => {
                     self.compile_expr_oast(&u.argument)?;
@@ -1086,22 +1215,57 @@ impl Compiler {
                     oast::BinaryOperator::Multiplication => self.emit(Op::Mul, LINE),
                     oast::BinaryOperator::Division => self.emit(Op::Div, LINE),
                     oast::BinaryOperator::Remainder => self.emit(Op::Mod, LINE),
-                    _ => self.emit(Op::Add, LINE),
-                }
-            }
-            OExpr::LogicalExpression(l) => {
-                self.compile_expr_oast(&l.left)?;
-                self.compile_expr_oast(&l.right)?;
-                match l.operator {
-                    oast::LogicalOperator::And => self.emit(Op::And, LINE),
-                    oast::LogicalOperator::Or => self.emit(Op::Or, LINE),
-                    oast::LogicalOperator::Coalesce => {
+                    oast::BinaryOperator::Exponential => {
+                        // Lower exponentiation to a dedicated opcode
+                        self.emit(Op::Pow, LINE)
+                    }
+                    oast::BinaryOperator::BitwiseAnd => self.emit(Op::BitAnd, LINE),
+                    oast::BinaryOperator::BitwiseOR => self.emit(Op::BitOr, LINE),
+                    oast::BinaryOperator::BitwiseXOR => self.emit(Op::BitXor, LINE),
+                    oast::BinaryOperator::ShiftLeft => self.emit(Op::Shl, LINE),
+                    oast::BinaryOperator::ShiftRight => self.emit(Op::Shr, LINE),
+                    oast::BinaryOperator::ShiftRightZeroFill => self.emit(Op::Ushr, LINE),
+                    _ => {
                         return Err(crate::errors::CompilerError::from(
-                            "?? logical coalesce not supported",
+                            "unsupported binary operator",
                         ));
                     }
                 }
             }
+            OExpr::LogicalExpression(l) => match l.operator {
+                oast::LogicalOperator::And => {
+                    self.compile_expr_oast(&l.left)?;
+                    self.emit(Op::Dup, LINE);
+                    self.emit(Op::JumpIfFalse, LINE);
+                    let jump_end = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.emit(Op::Pop, LINE);
+                    self.compile_expr_oast(&l.right)?;
+                    self.patch_jump(jump_end);
+                }
+                oast::LogicalOperator::Or => {
+                    self.compile_expr_oast(&l.left)?;
+                    self.emit(Op::Dup, LINE);
+                    self.emit(Op::JumpIfFalse, LINE);
+                    let jump_right = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.emit(Op::Jump, LINE);
+                    let jump_end = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.patch_jump(jump_right);
+                    self.emit(Op::Pop, LINE);
+                    self.compile_expr_oast(&l.right)?;
+                    self.patch_jump(jump_end);
+                }
+                oast::LogicalOperator::Coalesce => {
+                    return Err(crate::errors::CompilerError::from(
+                        "?? logical coalesce not supported",
+                    ));
+                }
+            },
             OExpr::SequenceExpression(seq) => {
                 let len = seq.expressions.len();
                 for (idx, expr) in seq.expressions.iter().enumerate() {
@@ -1304,23 +1468,17 @@ impl Compiler {
             locals: Vec::new(),
             local_types: Vec::new(),
             local_mirror_globals: Vec::new(),
+            scopes: vec![Scope {
+                kind: ScopeKind::Function,
+                bindings: HashMap::new(),
+            }],
             globals: HashMap::new(),
             is_root: false,
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
             current_module: None,
             next_ic_slot: 0,
-            outer_bindings: self
-                .locals
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), CaptureSource::Local(i as u8)))
-                .chain(
-                    self.upvalue_indices
-                        .iter()
-                        .map(|(name, idx)| (name.clone(), CaptureSource::Upvalue(*idx))),
-                )
-                .collect(),
+            outer_bindings: self.visible_bindings_snapshot(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
         };
@@ -1343,6 +1501,7 @@ impl Compiler {
             param_type_opts.push(None);
             inner.add_local_with_mirror(pname, None, false);
         }
+        let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
 
         // Pre-declare nested functions inside this function body.
         if let Some(body) = &func.body {
@@ -1377,6 +1536,8 @@ impl Compiler {
                 upvalues: inner.captured_upvalues,
                 has_rest,
                 has_prototype_property,
+                captures_this: false,
+                arguments_slot: Some(arguments_slot),
                 return_type,
             },
             _env_len,
@@ -1395,23 +1556,17 @@ impl Compiler {
             locals: Vec::new(),
             local_types: Vec::new(),
             local_mirror_globals: Vec::new(),
+            scopes: vec![Scope {
+                kind: ScopeKind::Function,
+                bindings: HashMap::new(),
+            }],
             globals: HashMap::new(),
             is_root: false,
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
             current_module: None,
             next_ic_slot: 0,
-            outer_bindings: self
-                .locals
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), CaptureSource::Local(i as u8)))
-                .chain(
-                    self.upvalue_indices
-                        .iter()
-                        .map(|(name, idx)| (name.clone(), CaptureSource::Upvalue(*idx))),
-                )
-                .collect(),
+            outer_bindings: self.visible_bindings_snapshot(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
         };
@@ -1433,6 +1588,7 @@ impl Compiler {
             param_type_opts.push(None);
             inner.add_local_with_mirror(pname, None, false);
         }
+        let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
 
         // Pre-declare nested functions inside this function body.
         inner.pre_declare_functions_oast_stmts(&func.body.statements);
@@ -1462,6 +1618,8 @@ impl Compiler {
                 upvalues: inner.captured_upvalues,
                 has_rest,
                 has_prototype_property: false,
+                captures_this: true,
+                arguments_slot: Some(arguments_slot),
                 return_type,
             },
             _env_len,
@@ -1481,8 +1639,14 @@ impl Default for Compiler {
 mod tests {
     use super::*;
     use crate::bytecode::Op;
+    use crate::compiler::ModuleContext;
+    use crate::value::ObjectData;
+    use crate::vm::Vm;
 
     use crate::value::Value;
+    use std::cell::RefCell;
+    use std::collections::{HashMap, HashSet};
+    use std::rc::Rc;
 
     #[test]
     fn hoist_top_level_function_names_into_locals() {
@@ -1704,7 +1868,7 @@ mod tests {
                     Op::Jump => {
                         let hi = chunk.code.get(i + 1).copied().unwrap_or(0) as i16;
                         let lo = chunk.code.get(i + 2).copied().unwrap_or(0) as i16;
-                        let offset = ((hi << 8) | lo) as i16 as isize;
+                        let offset = i16::from_be_bytes([hi as u8, lo as u8]) as isize;
                         back_target = Some((i + 3) as isize + offset);
                         i += 3;
                     }
@@ -1803,6 +1967,54 @@ mod tests {
         assert!(
             saw_pop,
             "expected sequence expression to emit Pop for intermediate values"
+        );
+    }
+
+    #[test]
+    fn imported_binding_assignment_is_rejected() {
+        let src = "a = 1;";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let ctx = ModuleContext {
+            module_index: 0,
+            imports: HashMap::from([(String::from("a"), (1usize, String::from("value")))]),
+            exports: HashSet::new(),
+        };
+
+        let err = compile_oxc_with_ctx(program, Some(&ctx)).expect_err("compile should fail");
+        assert!(
+            err.to_string().contains("imported binding"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_binary_operator_is_not_silently_treated_as_addition() {
+        let src = "1 ?? 2;";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+
+        let err = compile(program).expect_err("compile should fail");
+        assert!(
+            err.to_string().contains("coalesce") || err.to_string().contains("unsupported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn block_scoped_let_does_not_escape_block() {
+        let src = "{ let x = 1; } x = 2;";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program).expect("compile ok");
+
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+
+        assert!(
+            matches!(vm.get_global("x"), Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON),
+            "block-local binding should not leak past its block"
         );
     }
 }
