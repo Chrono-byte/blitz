@@ -65,7 +65,7 @@ fn prelude_bootstrap_runs() {
     let global_this = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
     globals.borrow_mut().properties.insert(
         PropertyKey::String("globalThis".to_string()),
-        PropertyDescriptor::data(global_this),
+        PropertyDescriptor::data(global_this.clone()),
     );
 
     // Minimal builtin printer used by soft code during bootstrap.
@@ -73,7 +73,13 @@ fn prelude_bootstrap_runs() {
         _vm: &mut Vm,
         _args: &[Value],
     ) -> Result<Value, tsblitz::errors::RuntimeError> {
-        // Intentionally no-op for tests.
+        // Print a concise diagnostic to stdout to help debug bootstrap ordering.
+        // Show the first arg if present otherwise print a marker.
+        if !_args.is_empty() {
+            println!("[host_print] {}", _args[0]);
+        } else {
+            println!("[host_print] <empty>");
+        }
         Ok(Value::Null)
     }
 
@@ -85,6 +91,9 @@ fn prelude_bootstrap_runs() {
         use std::cell::RefCell;
         use std::rc::Rc;
         let v = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
+        // No-op here; the test harness mirrors native helpers onto `globalThis`
+        // outside of the native implementation so nested functions don't need
+        // to capture outer variables.
         Ok(v)
     }
 
@@ -118,55 +127,163 @@ fn prelude_bootstrap_runs() {
         PropertyDescriptor::data(Value::Builtin(builtin_null.clone())),
     );
 
+    // Provide minimal kernel-native helpers the soft runtime expects.
+    let builtin_typeof: tsblitz::value::BuiltinFn = Rc::new(|vm, args| {
+        let v = args.get(0).cloned().unwrap_or(Value::Undefined);
+        Ok(Value::String(vm.typeof_value(&v)))
+    });
+    let builtin_to_string: tsblitz::value::BuiltinFn = Rc::new(|vm, args| {
+        let v = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let s = vm.to_string(&v)?;
+        Ok(Value::String(s))
+    });
+    let builtin_to_number: tsblitz::value::BuiltinFn = Rc::new(|vm, args| {
+        let v = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let n = vm.to_number_value(&v)?;
+        Ok(Value::Number(n))
+    });
+    let builtin_to_boolean: tsblitz::value::BuiltinFn = Rc::new(|vm, args| {
+        let v = args.get(0).cloned().unwrap_or(Value::Undefined);
+        Ok(Value::Bool(vm.to_boolean(&v)))
+    });
+    let builtin_abstract_equality: tsblitz::value::BuiltinFn = Rc::new(|vm, args| {
+        let a = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let b = args.get(1).cloned().unwrap_or(Value::Undefined);
+        Ok(Value::Bool(vm.abstract_equality(&a, &b)?))
+    });
+    let builtin_instanceof: tsblitz::value::BuiltinFn = Rc::new(|vm, args| {
+        let value = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let ctor = args.get(1).cloned().unwrap_or(Value::Undefined);
+        Ok(Value::Bool(vm.instance_of(&value, &ctor)?))
+    });
+    let builtin_in_property: tsblitz::value::BuiltinFn = Rc::new(|vm, args| {
+        let prop = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let obj = args.get(1).cloned().unwrap_or(Value::Undefined);
+        Ok(Value::Bool(vm.in_property(&prop, &obj)?))
+    });
+
+    // Register these helpers as globals the soft prelude will look up.
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_typeof".to_string()),
+        PropertyDescriptor::data(Value::Builtin(builtin_typeof.clone())),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_toString".to_string()),
+        PropertyDescriptor::data(Value::Builtin(builtin_to_string.clone())),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_toNumber".to_string()),
+        PropertyDescriptor::data(Value::Builtin(builtin_to_number.clone())),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_toBoolean".to_string()),
+        PropertyDescriptor::data(Value::Builtin(builtin_to_boolean.clone())),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_abstractEquality".to_string()),
+        PropertyDescriptor::data(Value::Builtin(builtin_abstract_equality.clone())),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_instanceof".to_string()),
+        PropertyDescriptor::data(Value::Builtin(builtin_instanceof.clone())),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_inProperty".to_string()),
+        PropertyDescriptor::data(Value::Builtin(builtin_in_property.clone())),
+    );
+
+    // Also mirror into the `globalThis` object by writing a fresh object
+    // value rather than capturing `global_this` in closures (captures are
+    // disallowed in nested fn items). This mirrors how a real host would
+    // publish runtime helpers onto the global object.
+    if let Value::Object(obj_rc) = global_this.clone() {
+        let mut obj = obj_rc.borrow_mut();
+        obj.properties.insert(
+            PropertyKey::String("__native_print".to_string()),
+            PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
+        );
+        obj.properties.insert(
+            PropertyKey::String("__native_new_object".to_string()),
+            PropertyDescriptor::data(Value::Builtin(builtin_new_object.clone())),
+        );
+        obj.properties.insert(
+            PropertyKey::String("host_print".to_string()),
+            PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
+        );
+        obj.properties.insert(
+            PropertyKey::String("native_print".to_string()),
+            PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
+        );
+        obj.properties.insert(
+            PropertyKey::String("debugValue".to_string()),
+            PropertyDescriptor::data(Value::Builtin(builtin_null.clone())),
+        );
+    }
+
     // Provide a minimal `host` object used by some prelude paths
-    let mut host_obj = ObjectData::new();
-    host_obj.properties.insert(
+    // Create a host object and publish it both as a top-level global and as
+    // a property on `globalThis` so soft code can find it through either
+    // access pattern.
+    let host_obj_rc = Rc::new(RefCell::new(ObjectData::new()));
+    host_obj_rc.borrow_mut().properties.insert(
         PropertyKey::String("host_print".to_string()),
         PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
-    host_obj.properties.insert(
+    host_obj_rc.borrow_mut().properties.insert(
         PropertyKey::String("native_new_object".to_string()),
         PropertyDescriptor::data(Value::Builtin(builtin_new_object.clone())),
     );
-    host_obj.properties.insert(
+    host_obj_rc.borrow_mut().properties.insert(
         PropertyKey::String("native_print".to_string()),
         PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
-    host_obj.properties.insert(
+    host_obj_rc.borrow_mut().properties.insert(
         PropertyKey::String("debugValue".to_string()),
         PropertyDescriptor::data(Value::Builtin(builtin_null.clone())),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("host".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(host_obj)))),
+        PropertyDescriptor::data(Value::Object(Rc::clone(&host_obj_rc))),
     );
+    if let Value::Object(obj_rc) = &global_this {
+        obj_rc.borrow_mut().properties.insert(
+            PropertyKey::String("host".to_string()),
+            PropertyDescriptor::data(Value::Object(Rc::clone(&host_obj_rc))),
+        );
+    }
 
     // Provide a simple console object backed by the builtin printer.
-    let mut console_obj = ObjectData::new();
-    console_obj.properties.insert(
+    let console_obj_rc = Rc::new(RefCell::new(ObjectData::new()));
+    console_obj_rc.borrow_mut().properties.insert(
         PropertyKey::String("log".to_string()),
         PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
-    console_obj.properties.insert(
+    console_obj_rc.borrow_mut().properties.insert(
         PropertyKey::String("info".to_string()),
         PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
-    console_obj.properties.insert(
+    console_obj_rc.borrow_mut().properties.insert(
         PropertyKey::String("warn".to_string()),
         PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
-    console_obj.properties.insert(
+    console_obj_rc.borrow_mut().properties.insert(
         PropertyKey::String("error".to_string()),
         PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
-    console_obj.properties.insert(
+    console_obj_rc.borrow_mut().properties.insert(
         PropertyKey::String("debug".to_string()),
         PropertyDescriptor::data(Value::Builtin(builtin_print.clone())),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("console".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(console_obj)))),
+        PropertyDescriptor::data(Value::Object(Rc::clone(&console_obj_rc))),
     );
+    if let Value::Object(obj_rc) = &global_this {
+        obj_rc.borrow_mut().properties.insert(
+            PropertyKey::String("console".to_string()),
+            PropertyDescriptor::data(Value::Object(Rc::clone(&console_obj_rc))),
+        );
+    }
 
     // Disable soft-layer tracing for the test to keep output quiet.
     globals.borrow_mut().properties.insert(

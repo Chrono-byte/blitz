@@ -615,7 +615,6 @@ pub fn type_to_string(t: &Type) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn logical_ops_accept_non_boolean_operands() {

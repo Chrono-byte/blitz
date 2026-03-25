@@ -47,9 +47,9 @@ use crate::bytecode::{Chunk, Op};
 use crate::module::ModuleLoader;
 use crate::typecheck::BuiltinType;
 use crate::typecheck::Type;
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
 use std::rc::Rc;
@@ -75,6 +75,10 @@ const MAX_PROTOTYPE_DEPTH: usize = 128;
 /// Default IC slot count per chunk (grows on demand).
 const IC_SLOTS_DEFAULT: usize = 256;
 
+/// Maximum gap we materialize into the dense backing store before treating an
+/// array write as sparse and storing it on the property bag instead.
+const MAX_DENSE_ARRAY_GROWTH: usize = 1024;
+
 // ---------------------------------------------------------------------------
 // Inline-cache entry
 // ---------------------------------------------------------------------------
@@ -83,6 +87,8 @@ const IC_SLOTS_DEFAULT: usize = 256;
 struct IcEntry {
     /// Raw `Rc` pointer used as an object identity token.
     obj_ptr: usize,
+    /// Property key cached at this site.
+    key: PropertyKey,
     /// Object generation at the time the entry was cached. If the object
     /// has been mutated since, the generation will have advanced and this
     /// entry is stale.
@@ -91,16 +97,14 @@ struct IcEntry {
     value: Value,
 }
 
-// ---------------------------------------------------------------------------
 // Call frame
-// ---------------------------------------------------------------------------
-
 struct Frame {
     chunk: Rc<Chunk>,
     ip: usize,
-    locals: Vec<Value>,
+    locals: Vec<Rc<RefCell<Value>>>,
+    this_value: Value,
+    closure_env: Option<Rc<RefCell<Vec<Rc<RefCell<Value>>>>>>,
     slot_types: Option<Vec<Option<Type>>>,
-    return_type: Option<Type>,
     /// Length of `Vm::stack` immediately before the callee's first operand.
     /// On return the stack is truncated back to this point and the return
     /// value is pushed on top.
@@ -117,6 +121,11 @@ struct HandlerRecord {
     saved_stack_len: usize,
     saved_locals_len: usize,
     frame_count: usize,
+}
+
+enum StepOutcome {
+    Continue,
+    Return(Value),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -174,7 +183,11 @@ pub struct Vm {
     /// offset so the stack is truncated correctly on return.
     stack: Vec<Value>,
     /// Local variables for the current frame.
-    locals: Vec<Value>,
+    locals: Vec<Rc<RefCell<Value>>>,
+    /// Current `this` binding.
+    this_value: Value,
+    /// Upvalue environment for the currently executing closure, if any.
+    current_closure_env: Option<Rc<RefCell<Vec<Rc<RefCell<Value>>>>>>,
     /// Global variables.
     globals: Rc<RefCell<ObjectData>>,
     /// Call-frame stack.
@@ -211,6 +224,8 @@ impl Vm {
             ip: 0,
             stack: Vec::with_capacity(STACK_INITIAL_CAPACITY),
             locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
+            this_value: Value::Undefined,
+            current_closure_env: None,
             globals,
             frames: Vec::with_capacity(FRAMES_INITIAL_CAPACITY),
             root_chunk: None,
@@ -223,6 +238,19 @@ impl Vm {
             module_loader: Some(ModuleLoader::new()),
             module_table: Vec::new(),
         }
+    }
+
+    /// Create a new VM and ensure the minimal kernel constructors and
+    /// runtime helpers are installed on the provided globals. Doing this here
+    /// ensures every VM has the expected helpers (including a `globalThis`
+    /// object) available for the soft prelude without requiring callers to
+    /// remember to invoke runtime setup.
+    pub fn with_runtime(mut self) -> Self {
+        // Install minimal kernel constructors/helpers onto the globals map.
+        // This is defensive: the installer will only populate missing keys
+        // and will not override host-provided helpers.
+        crate::runtime_utils::install_minimal_kernel_constructors(&self.globals);
+        self
     }
 
     /// Provide mutable access to the per-VM module loader, creating it if missing.
@@ -241,8 +269,10 @@ impl Vm {
     pub fn install_module_exports(
         &mut self,
         module_index: usize,
-        exports: HashMap<String, Rc<RefCell<Value>>>,
+        mut exports: HashMap<String, Rc<RefCell<Value>>>,
     ) {
+        let namespace = build_module_namespace_object(&exports);
+        exports.insert("*".to_string(), Rc::new(RefCell::new(namespace)));
         // Ensure table is large enough
         while self.module_table.len() <= module_index {
             self.module_table.push(HashMap::new());
@@ -260,6 +290,11 @@ impl Vm {
                 PropertyDescriptor::Data { value, .. } => Some(value.clone()),
                 _ => None,
             })
+    }
+
+    /// Returns the current globals object for the active realm.
+    pub fn globals_rc(&self) -> Rc<RefCell<ObjectData>> {
+        Rc::clone(&self.globals)
     }
 
     /// Return own keys for a global value if it is an object or closure.
@@ -309,13 +344,15 @@ impl Vm {
     }
 
     /// Reset mutable runtime state while preserving selected globals.
-    pub fn reset(&mut self, keep_globals: &std::collections::HashSet<String>) {
+    pub fn reset(&mut self, keep_globals: &HashSet<String>) {
         self.stack.clear();
         self.locals.clear();
         self.frames.clear();
         self.handlers.clear();
         self.root_chunk = None;
         self.current_slot_types = None;
+        self.this_value = Value::Undefined;
+        self.current_closure_env = None;
         self.ip = 0;
         self.chunk = Rc::new(Chunk::new());
         self.ic_caches.clear();
@@ -370,447 +407,17 @@ impl Vm {
         self.root_chunk = Some(Rc::clone(&chunk_rc));
         self.chunk = chunk_rc;
         self.ip = 0;
+        self.stack.clear();
         self.locals.clear();
         self.frames.clear();
         self.handlers.clear();
         self.current_slot_types = None;
+        self.current_closure_env = None;
 
         loop {
-            // In debug builds every byte read is bounds-checked.  In release
-            // builds we can elide the check because the compiler/verifier
-            // guarantees the bytecode stream is well-formed.
-            let op_byte = self.read_byte()?;
-            let op = match Op::from_byte(op_byte) {
-                Some(o) => o,
-                None => {
-                    return Err(crate::errors::RuntimeError::from(format!(
-                        "Invalid opcode 0x{:02x} at ip {}",
-                        op_byte,
-                        self.ip.saturating_sub(1)
-                    )));
-                }
-            };
-
-            match op {
-                // -----------------------------------------------------------
-                // Constants & literals
-                // -----------------------------------------------------------
-                Op::Const => {
-                    let idx = self.read_byte()? as usize;
-                    let v = self.constant(idx)?;
-                    self.stack.push(v);
-                }
-                Op::Null => self.stack.push(Value::Null),
-                Op::True => self.stack.push(Value::Bool(true)),
-                Op::False => self.stack.push(Value::Bool(false)),
-
-                // -----------------------------------------------------------
-                // Local variables
-                // -----------------------------------------------------------
-                Op::GetLocal => {
-                    let slot = self.read_byte()? as usize;
-                    let v = self.locals.get(slot).cloned().ok_or("Bad local slot")?;
-                    self.stack.push(v);
-                }
-                Op::SetLocal => {
-                    let slot = self.read_byte()? as usize;
-                    let v = self.pop()?;
-                    ensure_slot(&mut self.locals, slot);
-                    self.locals[slot] = v;
-                }
-
-                // -----------------------------------------------------------
-                // Global variables
-                // -----------------------------------------------------------
-                Op::GetGlobal => {
-                    let idx = self.read_byte()? as usize;
-                    let name = self.string_constant(idx)?;
-                    let v = self
-                        .globals
-                        .borrow()
-                        .properties
-                        .get(&PropertyKey::String(name))
-                        .and_then(|d| match d {
-                            PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or(Value::Undefined);
-                    self.stack.push(v);
-                }
-                Op::SetGlobal => {
-                    let idx = self.read_byte()? as usize;
-                    let name = self.string_constant(idx)?;
-                    let v = self.pop()?;
-                    self.globals
-                        .borrow_mut()
-                        .properties
-                        .insert(PropertyKey::String(name), PropertyDescriptor::data(v));
-                }
-
-                // -----------------------------------------------------------
-                // Stack manipulation
-                // -----------------------------------------------------------
-                Op::Pop => {
-                    self.pop()?;
-                }
-                Op::Dup => {
-                    let v = self.stack.last().cloned().ok_or_else(|| {
-                        if crate::trace::enabled() {
-                            eprintln!("[diag] Stack underflow (Dup)");
-                            let start = self.ip.saturating_sub(8);
-                            let end = usize::min(self.ip + 8, self.chunk.code.len());
-                            eprintln!("[diag] disasm window ({}..{}):", start, end);
-                            let mut j = start;
-                            while j < end {
-                                let b = self.chunk.code[j];
-                                if let Some(op) = Op::from_byte(b) {
-                                    let width = opcode_width(op);
-                                    match op {
-                                        Op::Const => {
-                                            let arg =
-                                                self.chunk.code.get(j + 1).cloned().unwrap_or(0);
-                                            if let Some(c) = self.chunk.constants.get(arg as usize)
-                                            {
-                                                eprintln!("[diag]   {}: {:?} {:?}", j, op, c);
-                                            } else {
-                                                eprintln!("[diag]   {}: {:?} {}", j, op, arg);
-                                            }
-                                        }
-                                        Op::Jump | Op::JumpIfFalse | Op::PushHandler => {
-                                            let hi =
-                                                self.chunk.code.get(j + 1).cloned().unwrap_or(0);
-                                            let lo =
-                                                self.chunk.code.get(j + 2).cloned().unwrap_or(0);
-                                            let offset = ((hi as i16) << 8) | (lo as i16);
-                                            eprintln!("[diag]   {}: {:?} {}", j, op, offset);
-                                        }
-                                        Op::SetLocal
-                                        | Op::GetLocal
-                                        | Op::SetGlobal
-                                        | Op::GetGlobal
-                                        | Op::Call
-                                        | Op::GetBuiltin
-                                        | Op::GetProperty
-                                        | Op::SetProperty
-                                        | Op::GetPropertyIC
-                                        | Op::MakeClosure
-                                        | Op::GetUpvalue
-                                        | Op::SetUpvalue => {
-                                            let arg =
-                                                self.chunk.code.get(j + 1).cloned().unwrap_or(0);
-                                            eprintln!("[diag]   {}: {:?} {}", j, op, arg);
-                                        }
-                                        _ => eprintln!("[diag]   {}: {:?}", j, op),
-                                    }
-                                    j += width;
-                                } else {
-                                    eprintln!("[diag]   {}: <invalid {}>", j, b);
-                                    j += 1;
-                                }
-                            }
-                            eprintln!("[diag] Stack size: {}", self.stack.len());
-                        }
-                        "Stack underflow"
-                    })?;
-                    self.stack.push(v);
-                }
-
-                // -----------------------------------------------------------
-                // Arithmetic
-                // -----------------------------------------------------------
-                Op::Add => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    // BigInt arithmetic: both operands must be BigInt
-                    if matches!(a, Value::BigInt(_)) || matches!(b, Value::BigInt(_)) {
-                        if let (Value::BigInt(x), Value::BigInt(y)) = (a, b) {
-                            self.stack.push(Value::BigInt(x + y));
-                        } else {
-                            return Err(crate::errors::RuntimeError::from(
-                                "Add: cannot mix BigInt and other types",
-                            ));
-                        }
-                    } else {
-                        // Ordinary addition: perform ToPrimitive with hint 'default'
-                        let a_prim = self.to_primitive(&a, None)?;
-                        let b_prim = self.to_primitive(&b, None)?;
-                        // If either primitive is a string, perform string concatenation
-                        if matches!(a_prim, Value::String(_)) || matches!(b_prim, Value::String(_))
-                        {
-                            let sa = self.to_string(&a_prim)?;
-                            let sb = self.to_string(&b_prim)?;
-                            self.stack.push(Value::String(format!("{}{}", sa, sb)));
-                        } else {
-                            let na = self.to_number_value(&a_prim)?;
-                            let nb = self.to_number_value(&b_prim)?;
-                            self.stack.push(Value::Number(na + nb));
-                        }
-                    }
-                }
-                Op::AddNumber => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    match (a, b) {
-                        (Value::BigInt(x), Value::BigInt(y)) => {
-                            self.stack.push(Value::BigInt(x + y));
-                        }
-                        (Value::Number(x), Value::Number(y)) => {
-                            self.stack.push(Value::Number(x + y));
-                        }
-                        _ => return Err("AddNumber: number expected".into()),
-                    }
-                }
-                Op::Sub => self.binary_num_bigint(|a, b| a - b, |a, b| Ok(a - b))?,
-                Op::Mul => self.binary_num_bigint(|a, b| a * b, |a, b| Ok(a * b))?,
-                Op::Div => self.binary_num_bigint(
-                    |a, b| a / b,
-                    |_, _| {
-                        Err(crate::errors::RuntimeError::from(
-                            "Div: bigint not supported",
-                        ))
-                    },
-                )?,
-                Op::Mod => self.binary_num_bigint(|a, b| a % b, |a, b| Ok(a % b))?,
-
-                // -----------------------------------------------------------
-                // Comparison -- uses JS-style reference equality for objects
-                // -----------------------------------------------------------
-                Op::Eq => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(Value::Bool(values_equal(&a, &b)));
-                }
-                Op::Neq => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(Value::Bool(!values_equal(&a, &b)));
-                }
-                Op::Lt => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(Value::Bool(a < b));
-                }
-                Op::Le => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(Value::Bool(a <= b));
-                }
-                Op::Gt => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(Value::Bool(a > b));
-                }
-                Op::Ge => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(Value::Bool(a >= b));
-                }
-
-                // -----------------------------------------------------------
-                // Logical
-                // -----------------------------------------------------------
-                Op::And => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(Value::Bool(a.is_truthy() && b.is_truthy()));
-                }
-                Op::Or => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.stack.push(Value::Bool(a.is_truthy() || b.is_truthy()));
-                }
-
-                // -----------------------------------------------------------
-                // Unary
-                // -----------------------------------------------------------
-                Op::Neg => {
-                    let v = self.pop()?;
-                    match v {
-                        Value::Number(n) => self.stack.push(Value::Number(-n)),
-                        _ => return Err("Neg: number expected".into()),
-                    }
-                }
-                Op::Not => {
-                    let v = self.pop()?;
-                    self.stack.push(Value::Bool(!v.is_truthy()));
-                }
-                Op::Typeof => {
-                    let v = self.pop()?;
-                    self.stack.push(Value::String(v.type_name().to_string()));
-                }
-
-                // -----------------------------------------------------------
-                // Calls & returns
-                // -----------------------------------------------------------
-                Op::Call => self.execute_call()?,
-                Op::Return => {
-                    if self.frames.is_empty() {
-                        let result = self.pop().unwrap_or(Value::Null);
-                        return Ok(result);
-                    }
-                    self.execute_return()?;
-                }
-
-                // -----------------------------------------------------------
-                // Control flow
-                // -----------------------------------------------------------
-                Op::Jump => {
-                    let offset = self.read_short_signed()?;
-                    self.jump(offset)?;
-                }
-                Op::JumpIfFalse => {
-                    let offset = self.read_short_signed()?;
-                    let v = self.pop()?;
-                    if !v.is_truthy() {
-                        self.jump(offset)?;
-                    }
-                }
-
-                // -----------------------------------------------------------
-                // Composite construction
-                // -----------------------------------------------------------
-                Op::BuildArray => self.build_array()?,
-                Op::BuildObject => self.build_object()?,
-
-                // -----------------------------------------------------------
-                // Property access
-                // -----------------------------------------------------------
-                Op::GetProperty => {
-                    let key = self.pop()?;
-                    let obj = self.pop()?;
-                    let k = self.to_property_key(&key)?;
-                    let v = self.get_property_value(&obj, &k)?;
-                    self.stack.push(v);
-                }
-                Op::GetPropertyIC => self.get_property_ic()?,
-                Op::SetProperty => {
-                    let value = self.pop()?;
-                    let key = self.pop()?;
-                    let obj = self.pop()?;
-                    let k = self.to_property_key(&key)?;
-                    self.set_property_tracked(&obj, &k, value)?;
-                }
-                Op::GetModuleExport => {
-                    let module_idx = self.read_byte()? as usize;
-                    let name_idx = self.read_byte()? as usize;
-                    let name = self.string_constant(name_idx)?;
-                    let v = self
-                        .module_table
-                        .get(module_idx)
-                        .and_then(|m| m.get(&name).cloned())
-                        .map_or(Value::Undefined, |slot| slot.borrow().clone());
-                    self.stack.push(v);
-                }
-                // New op: GetThis — push the current frame's `this` binding.
-                Op::GetThis => {
-                    // For now, `this` semantics are simple: if a frame exists,
-                    // `this` is taken from the current frame's first local if
-                    // arranged by the caller; otherwise Undefined. We'll expose a
-                    // getter on the Vm later when call-site conventions are
-                    // adjusted. Use stack top fallback to Undefined for now.
-                    let this_val = if let Some(frame) = self.frames.last() {
-                        // Heuristic: if the frame has at least one local, treat
-                        // locals[0] as the `this` binding (temporary).
-                        frame.locals.get(0).cloned().unwrap_or(Value::Undefined)
-                    } else {
-                        Value::Undefined
-                    };
-                    self.stack.push(this_val);
-                }
-                Op::GetUpvalue => {
-                    // Operand: upvalue index (u8).
-                    let idx = self.read_byte()? as usize;
-                    // Placeholder behavior: push Undefined for now.
-                    // Real implementation will read from closure.env.
-                    let _ = idx;
-                    self.stack.push(Value::Undefined);
-                }
-                Op::SetUpvalue => {
-                    // Operand: upvalue index (u8).
-                    let idx = self.read_byte()? as usize;
-                    // Placeholder: pop value and discard. Real impl will write into closure.env.
-                    let _ = idx;
-                    let _v = self.pop()?;
-                }
-                Op::SetModuleExport => {
-                    let module_idx = self.read_byte()? as usize;
-                    let name_idx = self.read_byte()? as usize;
-                    let name = self.string_constant(name_idx)?;
-                    let v = self.pop()?;
-                    if let Some(m) = self.module_table.get_mut(module_idx) {
-                        if let Some(slot) = m.get(&name) {
-                            *slot.borrow_mut() = v;
-                        } else {
-                            let new_slot = Rc::new(RefCell::new(v.clone()));
-                            m.insert(name, new_slot);
-                        }
-                    } else {
-                        // Expand module table if needed
-                        while self.module_table.len() <= module_idx {
-                            self.module_table.push(HashMap::new());
-                        }
-                        let new_slot = Rc::new(RefCell::new(v.clone()));
-                        self.module_table[module_idx].insert(name, new_slot);
-                    }
-                }
-
-                // -----------------------------------------------------------
-                // Closures
-                // -----------------------------------------------------------
-                Op::MakeClosure => self.make_closure()?,
-
-                // -----------------------------------------------------------
-                // Builtins
-                // -----------------------------------------------------------
-                Op::GetBuiltin => {
-                    let idx = self.read_byte()? as usize;
-                    let name = self.string_constant(idx)?;
-                    let g = self.globals.borrow();
-                    let v = g
-                        .properties
-                        .get(&PropertyKey::String(name.clone()))
-                        .and_then(|d| match d {
-                            PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            crate::errors::RuntimeError::from(format!(
-                                "GetBuiltin: '{}' not found",
-                                name
-                            ))
-                        })?;
-                    match v {
-                        Value::Builtin(_) | Value::BuiltinObject(_, _) => self.stack.push(v),
-                        _ => {
-                            return Err(crate::errors::RuntimeError::from(format!(
-                                "GetBuiltin: '{}' is not a builtin",
-                                name
-                            )));
-                        }
-                    }
-                }
-
-                // -----------------------------------------------------------
-                // Exception handling
-                // -----------------------------------------------------------
-                Op::PushHandler => {
-                    let offset = self.read_short_signed()?;
-                    let handler_ip = (self.ip as isize + offset) as usize;
-                    self.handlers.push(HandlerRecord {
-                        chunk: Rc::clone(&self.chunk),
-                        handler_ip,
-                        saved_stack_len: self.stack.len(),
-                        saved_locals_len: self.locals.len(),
-                        frame_count: self.frames.len(),
-                    });
-                }
-                Op::PopHandler => {
-                    self.handlers.pop();
-                }
-                Op::Throw => {
-                    let thrown = self.pop()?;
-                    self.unwind_to_handler(thrown)?;
-                }
+            match self.step(false)? {
+                StepOutcome::Continue => {}
+                StepOutcome::Return(result) => return Ok(result),
             }
         }
     }
@@ -837,10 +444,10 @@ impl Vm {
                 let result = (f.as_ref())(self, &args)?;
                 self.stack.push(result);
             }
-            Value::Closure { proto, .. } => {
-                let call_args = self.prepare_call_args(&args, &proto)?;
+            Value::Closure { ref proto, env, .. } => {
+                let call_args = self.prepare_call_args(&args, proto)?;
                 // Argument validation removed in JS-first mode.
-                self.push_call_frame(&proto, call_args)?;
+                self.push_call_frame(proto, &env, call_args, Value::Undefined)?;
             }
             _ => {
                 self.dump_diag("Call failed: callee not callable", &callee);
@@ -851,6 +458,20 @@ impl Vm {
             }
         }
 
+        Ok(())
+    }
+
+    fn execute_call_method(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        let nargs = self.read_byte()? as usize;
+        let mut args: Vec<Value> = Vec::with_capacity(nargs);
+        for _ in 0..nargs {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+        let callee = self.pop()?;
+        let receiver = self.pop()?;
+        let result = self.call_with_this(&callee, &receiver, &args)?;
+        self.stack.push(result);
         Ok(())
     }
 
@@ -867,6 +488,84 @@ impl Vm {
         let desc = self.read_descriptor_from_value(&args[2])?;
         let ok = self.define_own_property(target, key, desc)?;
         Ok(Value::Bool(ok))
+    }
+
+    /// Host hook: define an own property from explicit arguments.
+    pub fn define_property_value(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        descriptor: &Value,
+    ) -> Result<bool, crate::errors::RuntimeError> {
+        let key = self.to_property_key(key)?;
+        let desc = self.read_descriptor_from_value(descriptor)?;
+        self.define_own_property(target, key, desc)
+    }
+
+    /// Host hook: invoke a callable with an explicit receiver.
+    pub fn call_value_with_this(
+        &mut self,
+        callee: &Value,
+        this_arg: &Value,
+        args: &[Value],
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        self.call_with_this(callee, this_arg, args)
+    }
+
+    /// Host hook: construct a callable with `new` semantics.
+    pub fn construct_value(
+        &mut self,
+        callee: &Value,
+        args: &[Value],
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        match callee {
+            Value::Closure { .. } | Value::BuiltinObject(_, _) => {
+                let proto = self
+                    .get_property_value(callee, &PropertyKey::String("prototype".to_string()))
+                    .unwrap_or(Value::Null);
+                let instance_proto = match proto {
+                    Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::BuiltinObject(_, _) => proto,
+                    _ => Value::Null,
+                };
+                let instance = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
+                    instance_proto,
+                ))));
+                let result = self.call_with_this(callee, &instance, args)?;
+                Ok(match result {
+                    Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::BuiltinObject(_, _) => result,
+                    _ => instance,
+                })
+            }
+            Value::Builtin(f) => (f.as_ref())(self, args),
+            _ => Err(crate::errors::RuntimeError::from(format!(
+                "Construct: not a constructor (actual={})",
+                callee.type_name()
+            ))),
+        }
+    }
+
+    /// Host hook: read a property value.
+    pub fn get_property_host(
+        &mut self,
+        obj: &Value,
+        key: &PropertyKey,
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        self.get_property_value(obj, key)
+    }
+
+    /// Host hook: test whether a property exists on the receiver or its prototype chain.
+    pub fn has_property_host(
+        &self,
+        obj: &Value,
+        key: &PropertyKey,
+    ) -> Result<bool, crate::errors::RuntimeError> {
+        Ok(self.lookup_property_descriptor(obj, key, 0)?.is_some())
     }
 
     fn call_with_this(
@@ -894,8 +593,7 @@ impl Vm {
                 Ok(result)
             }
             Value::Closure { proto, .. } => {
-                let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-                call_args.push(this_arg.clone());
+                let mut call_args: Vec<Value> = Vec::with_capacity(args.len());
                 call_args.extend_from_slice(args);
                 let call_args = self.prepare_call_args(&call_args, proto)?;
                 self.validate_call_args(&call_args, proto)?;
@@ -903,19 +601,30 @@ impl Vm {
                 let caller_chunk = Rc::clone(&self.chunk);
                 let caller_ip = self.ip;
                 let caller_locals = self.locals.clone();
+                let caller_this = self.this_value.clone();
+                let caller_env = self.current_closure_env.clone();
                 let caller_slot_types = self.current_slot_types.clone();
-                self.push_call_frame(proto, call_args)?;
+                let closure_env = match callee {
+                    Value::Closure { env, .. } => Rc::clone(env),
+                    _ => unreachable!(),
+                };
+                self.push_call_frame(proto, &closure_env, call_args, this_arg.clone())?;
                 let result = self.run_until_return(stack_base)?;
                 // Restore caller state (run_until_return already truncated stack)
                 self.chunk = caller_chunk;
                 self.ip = caller_ip;
                 self.locals = caller_locals;
+                self.this_value = caller_this;
+                self.current_closure_env = caller_env;
                 self.current_slot_types = caller_slot_types;
                 Ok(result)
             }
-            _ => Err(crate::errors::RuntimeError::from(
-                "CallWithThis: not a function",
-            )),
+            _ => {
+                self.dump_diag("CallWithThis failed: callee not callable", callee);
+                Err(crate::errors::RuntimeError::from(
+                    "CallWithThis: not a function",
+                ))
+            }
         }
     }
 
@@ -924,37 +633,31 @@ impl Vm {
         stack_base: usize,
     ) -> Result<Value, crate::errors::RuntimeError> {
         loop {
-            let op_byte = self.read_byte()?;
-            let op = match Op::from_byte(op_byte) {
-                Some(o) => o,
-                None => {
-                    return Err(crate::errors::RuntimeError::from(format!(
-                        "Invalid opcode 0x{:02x} at ip {}",
-                        op_byte,
-                        self.ip.saturating_sub(1)
-                    )));
-                }
-            };
-            match op {
-                Op::Return => {
-                    let result = self.pop().unwrap_or(Value::Undefined);
-                    // Restore caller state through execute_return logic.
+            match self.step(true)? {
+                StepOutcome::Continue => {}
+                StepOutcome::Return(result) => {
                     if !self.frames.is_empty() {
-                        self.execute_return()?;
+                        self.stack.truncate(stack_base);
                     }
-                    self.stack.truncate(stack_base);
                     return Ok(result);
-                }
-                _ => {
-                    // Dispatch through main loop by reusing existing match via run.
-                    // We emulate by temporarily setting ip and reusing inline logic by calling run_step.
-                    self.dispatch_op(op)?;
                 }
             }
         }
     }
 
-    fn dispatch_op(&mut self, op: Op) -> Result<(), crate::errors::RuntimeError> {
+    fn step(&mut self, stop_on_return: bool) -> Result<StepOutcome, crate::errors::RuntimeError> {
+        let op_byte = self.read_byte()?;
+        let op = match Op::from_byte(op_byte) {
+            Some(o) => o,
+            None => {
+                return Err(crate::errors::RuntimeError::from(format!(
+                    "Invalid opcode 0x{:02x} at ip {}",
+                    op_byte,
+                    self.ip.saturating_sub(1)
+                )));
+            }
+        };
+
         match op {
             Op::Const => {
                 let idx = self.read_byte()? as usize;
@@ -966,14 +669,24 @@ impl Vm {
             Op::False => self.stack.push(Value::Bool(false)),
             Op::GetLocal => {
                 let slot = self.read_byte()? as usize;
-                let v = self.locals.get(slot).cloned().ok_or("Bad local slot")?;
+                let v = self
+                    .locals
+                    .get(slot)
+                    .map(|cell| cell.borrow().clone())
+                    .ok_or("Bad local slot")?;
                 self.stack.push(v);
             }
             Op::SetLocal => {
                 let slot = self.read_byte()? as usize;
                 let v = self.pop()?;
                 ensure_slot(&mut self.locals, slot);
-                self.locals[slot] = v;
+                *self.locals[slot].borrow_mut() = v;
+            }
+            Op::CloneLocalCell => {
+                let slot = self.read_byte()? as usize;
+                ensure_slot(&mut self.locals, slot);
+                let value = self.locals[slot].borrow().clone();
+                self.locals[slot] = Rc::new(RefCell::new(value));
             }
             Op::GetGlobal => {
                 let idx = self.read_byte()? as usize;
@@ -1001,20 +714,30 @@ impl Vm {
             }
             // New op: GetThis
             Op::GetThis => {
-                let this_val = if let Some(frame) = self.frames.last() {
-                    frame.locals.get(0).cloned().unwrap_or(Value::Undefined)
-                } else {
-                    Value::Undefined
-                };
-                self.stack.push(this_val);
+                self.stack.push(self.this_value.clone());
             }
             Op::GetUpvalue => {
-                let _idx = self.read_byte()? as usize;
-                self.stack.push(Value::Undefined);
+                let idx = self.read_byte()? as usize;
+                let env = self
+                    .current_closure_env
+                    .as_ref()
+                    .ok_or("GetUpvalue without closure env")?;
+                let value = env
+                    .borrow()
+                    .get(idx)
+                    .map(|cell| cell.borrow().clone())
+                    .ok_or("Bad upvalue index")?;
+                self.stack.push(value);
             }
             Op::SetUpvalue => {
-                let _idx = self.read_byte()? as usize;
-                let _v = self.pop()?;
+                let idx = self.read_byte()? as usize;
+                let value = self.pop()?;
+                let env = self
+                    .current_closure_env
+                    .as_ref()
+                    .ok_or("SetUpvalue without closure env")?;
+                let cell = env.borrow().get(idx).cloned().ok_or("Bad upvalue index")?;
+                *cell.borrow_mut() = value;
             }
             Op::Pop => {
                 self.pop()?;
@@ -1127,8 +850,17 @@ impl Vm {
                 self.stack.push(Value::String(v.type_name().to_string()));
             }
             Op::Call => self.execute_call()?,
+            Op::CallMethod => self.execute_call_method()?,
             Op::Return => {
+                if self.frames.is_empty() {
+                    let result = self.pop().unwrap_or(Value::Undefined);
+                    return Ok(StepOutcome::Return(result));
+                }
                 self.execute_return()?;
+                if stop_on_return {
+                    let result = self.pop().unwrap_or(Value::Undefined);
+                    return Ok(StepOutcome::Return(result));
+                }
             }
             Op::Jump => {
                 let offset = self.read_short_signed()?;
@@ -1156,7 +888,9 @@ impl Vm {
                 let key = self.pop()?;
                 let obj = self.pop()?;
                 let k = self.to_property_key(&key)?;
+                let result = value.clone();
                 self.set_property_tracked(&obj, &k, value)?;
+                self.stack.push(result);
             }
             Op::GetModuleExport => {
                 let module_idx = self.read_byte()? as usize;
@@ -1208,7 +942,7 @@ impl Vm {
                         ))
                     })?;
                 match v {
-                    Value::Builtin(_) => self.stack.push(v),
+                    Value::Builtin(_) | Value::BuiltinObject(_, _) => self.stack.push(v),
                     _ => {
                         return Err(crate::errors::RuntimeError::from(format!(
                             "GetBuiltin: '{}' is not a builtin",
@@ -1236,7 +970,7 @@ impl Vm {
                 self.unwind_to_handler(thrown)?;
             }
         }
-        Ok(())
+        Ok(StepOutcome::Continue)
     }
 
     // -----------------------------------------------------------------------
@@ -1249,12 +983,19 @@ impl Vm {
         hint: Option<&str>,
     ) -> Result<Value, crate::errors::RuntimeError> {
         match v {
-            Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::Builtin(_) => {
+            Value::Object(_)
+            | Value::Array(..)
+            | Value::Closure { .. }
+            | Value::Builtin(_)
+            | Value::BuiltinObject(_, _) => {
                 // Try @@toPrimitive if present.
                 let to_prim_key =
                     PropertyKey::Symbol(crate::value::SymbolId::well_known_to_primitive());
                 if let Ok(method) = get_property(v, &to_prim_key, 0)
-                    && matches!(method, Value::Closure { .. } | Value::Builtin(_))
+                    && matches!(
+                        method,
+                        Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
+                    )
                     && let Ok(rv) = self.call_with_this(
                         &method,
                         v,
@@ -1266,6 +1007,7 @@ impl Vm {
                             | Value::Array(..)
                             | Value::Closure { .. }
                             | Value::Builtin(_)
+                            | Value::BuiltinObject(_, _)
                     )
                 {
                     return Ok(rv);
@@ -1279,7 +1021,10 @@ impl Vm {
                 for name in order {
                     let key = PropertyKey::String(name.to_string());
                     if let Ok(method) = get_property(v, &key, 0)
-                        && matches!(method, Value::Closure { .. } | Value::Builtin(_))
+                        && matches!(
+                            method,
+                            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
+                        )
                         && let Ok(rv) = self.call_with_this(&method, v, &[])
                         && !matches!(
                             rv,
@@ -1287,6 +1032,7 @@ impl Vm {
                                 | Value::Array(..)
                                 | Value::Closure { .. }
                                 | Value::Builtin(_)
+                                | Value::BuiltinObject(_, _)
                         )
                     {
                         return Ok(rv);
@@ -1518,6 +1264,7 @@ impl Vm {
             Value::Object(data) => data,
             Value::Array(_, props) => props,
             Value::Closure { props, .. } => props,
+            Value::BuiltinObject(_, props) => props,
             _ => return Ok(false),
         };
         let mut data = target.borrow_mut();
@@ -1650,8 +1397,7 @@ impl Vm {
                 }
             }
             Value::Array(arr, props) => {
-                if let PropertyKey::String(s) = key
-                    && let Ok(i) = s.parse::<usize>()
+                if let Some(i) = array_index_from_key(key)
                     && let Some(v) = arr.borrow().get(i).cloned()
                 {
                     return Ok(Some((
@@ -1681,6 +1427,15 @@ impl Vm {
                     return self.lookup_property_descriptor(&p.prototype, key, depth + 1);
                 }
             }
+            Value::BuiltinObject(_, props) => {
+                let p = props.borrow();
+                if let Some(desc) = p.properties.get(key) {
+                    return Ok(Some((desc.clone(), obj.clone())));
+                }
+                if !matches!(p.prototype, Value::Null) {
+                    return self.lookup_property_descriptor(&p.prototype, key, depth + 1);
+                }
+            }
             _ => {}
         }
         Ok(None)
@@ -1700,6 +1455,8 @@ impl Vm {
         self.chunk = frame.chunk;
         self.ip = frame.ip;
         self.locals = frame.locals;
+        self.this_value = frame.this_value;
+        self.current_closure_env = frame.closure_env;
 
         // FIX: truncate the operand stack back to the caller's base, then
         // push the return value. Previously the caller's stack was lost.
@@ -1775,7 +1532,9 @@ impl Vm {
     fn push_call_frame(
         &mut self,
         proto: &Rc<crate::bytecode::FunctionProto>,
+        closure_env: &Rc<RefCell<Vec<Rc<RefCell<Value>>>>>,
         call_args: Vec<Value>,
+        this_value: Value,
     ) -> Result<(), crate::errors::RuntimeError> {
         // FIX: record the current stack length as the base. We no longer
         // clone the entire operand stack into the frame.
@@ -1788,13 +1547,15 @@ impl Vm {
                 &mut self.locals,
                 Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
             ),
+            this_value: std::mem::replace(&mut self.this_value, this_value),
+            closure_env: self.current_closure_env.take(),
             slot_types: self.current_slot_types.take(),
-            return_type: proto.return_type.clone(),
             stack_base,
         });
 
         self.chunk = Rc::clone(&proto.chunk);
         self.ip = 0;
+        self.current_closure_env = Some(Rc::clone(closure_env));
         self.current_slot_types = Some(proto.slot_types.clone());
 
         // Pre-allocate locals to at least `arity` slots, filling missing
@@ -1803,6 +1564,7 @@ impl Vm {
             .into_iter()
             .chain(std::iter::repeat(Value::Null))
             .take(proto.arity)
+            .map(|value| Rc::new(RefCell::new(value)))
             .collect();
 
         Ok(())
@@ -1864,6 +1626,24 @@ impl Vm {
         }
         let mut data = ObjectData::new();
         data.properties = map;
+        if let Some(object_val) = self
+            .globals
+            .borrow()
+            .properties
+            .get(&PropertyKey::String("Object".to_string()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            && let Ok(proto_val) = get_property(
+                &object_val,
+                &PropertyKey::String("prototype".to_string()),
+                0,
+            )
+            && !matches!(proto_val, Value::Null)
+        {
+            data.prototype = proto_val;
+        }
         self.stack.push(Value::Object(Rc::new(RefCell::new(data))));
         Ok(())
     }
@@ -1876,25 +1656,69 @@ impl Vm {
             .get(idx)
             .cloned()
             .ok_or("Bad function index")?;
+        let has_prototype_property = proto.has_prototype_property;
 
-        let proto_obj_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
-        let proto_obj = Value::Object(Rc::clone(&proto_obj_map));
         let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
-        props.borrow_mut().properties.insert(
-            PropertyKey::String("prototype".to_string()),
-            PropertyDescriptor::data(proto_obj),
-        );
+        if let Some(function_val) = self
+            .globals
+            .borrow()
+            .properties
+            .get(&PropertyKey::String("Function".to_string()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            && let Ok(function_proto) = get_property(
+                &function_val,
+                &PropertyKey::String("prototype".to_string()),
+                0,
+            )
+            && !matches!(function_proto, Value::Null)
+        {
+            props.borrow_mut().prototype = function_proto;
+        }
+
+        let closure_proto = Rc::new(proto);
+        let mut env_cells = Vec::with_capacity(closure_proto.upvalues.len());
+        for upvalue in &closure_proto.upvalues {
+            let cell = if upvalue.is_local {
+                let slot = upvalue.index as usize;
+                ensure_slot(&mut self.locals, slot);
+                self.locals
+                    .get(slot)
+                    .cloned()
+                    .ok_or("Bad upvalue local slot")?
+            } else {
+                let env = self
+                    .current_closure_env
+                    .as_ref()
+                    .ok_or("Bad enclosing closure env")?;
+                env.borrow()
+                    .get(upvalue.index as usize)
+                    .cloned()
+                    .ok_or("Bad enclosing upvalue index")?
+            };
+            env_cells.push(cell);
+        }
 
         let closure = Value::Closure {
-            proto: Rc::new(proto),
-            env: Rc::new(RefCell::new(Vec::new())),
+            proto: Rc::clone(&closure_proto),
+            env: Rc::new(RefCell::new(env_cells)),
             props: Rc::clone(&props),
         };
 
-        proto_obj_map.borrow_mut().properties.insert(
-            PropertyKey::String("constructor".to_string()),
-            PropertyDescriptor::data(closure.clone()),
-        );
+        if has_prototype_property {
+            let proto_obj_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+            let proto_obj = Value::Object(Rc::clone(&proto_obj_map));
+            props.borrow_mut().properties.insert(
+                PropertyKey::String("prototype".to_string()),
+                PropertyDescriptor::data(proto_obj),
+            );
+            proto_obj_map.borrow_mut().properties.insert(
+                PropertyKey::String("constructor".to_string()),
+                PropertyDescriptor::data(closure.clone()),
+            );
+        }
 
         self.stack.push(closure);
         Ok(())
@@ -1909,18 +1733,15 @@ impl Vm {
 
         let chunk_id = Rc::as_ptr(&self.chunk) as usize;
 
-        // Attempt a cache hit for Object values.
-        if let Value::Object(ref map_rc) = obj {
-            let obj_ptr = Rc::as_ptr(map_rc) as usize;
+        if let Some(obj_ptr) = object_identity(&obj) {
             let current_gen = self.obj_generations.get(&obj_ptr).copied().unwrap_or(0);
 
-            // Look up existing cache entry.
             let hit = self
                 .ic_caches
                 .get(&chunk_id)
                 .and_then(|vec| vec.get(slot))
                 .and_then(|entry| entry.as_ref())
-                .filter(|e| e.obj_ptr == obj_ptr && e.generation == current_gen)
+                .filter(|e| e.obj_ptr == obj_ptr && e.generation == current_gen && e.key == key)
                 .map(|e| e.value.clone());
 
             if let Some(cached) = hit {
@@ -1928,10 +1749,7 @@ impl Vm {
                 return Ok(());
             }
 
-            // Cache miss: perform the full lookup.
             let v = self.get_property_value(&obj, &key)?;
-
-            // Store into the IC.
             let cache_vec = self
                 .ic_caches
                 .entry(chunk_id)
@@ -1941,12 +1759,12 @@ impl Vm {
             }
             cache_vec[slot] = Some(IcEntry {
                 obj_ptr,
+                key: key.clone(),
                 generation: current_gen,
                 value: v.clone(),
             });
             self.stack.push(v);
         } else {
-            // Non-object path: no caching.
             let v = self.get_property_value(&obj, &key)?;
             self.stack.push(v);
         }
@@ -1978,6 +1796,7 @@ impl Vm {
             Value::Object(m) => Some(Rc::as_ptr(m) as usize),
             Value::Array(a, _) => Some(Rc::as_ptr(a) as usize),
             Value::Closure { props, .. } => Some(Rc::as_ptr(props) as usize),
+            Value::BuiltinObject(_, props) => Some(Rc::as_ptr(props) as usize),
             _ => None,
         };
         if let Some(p) = ptr {
@@ -1993,6 +1812,15 @@ impl Vm {
         let handler = match self.handlers.pop() {
             Some(h) => h,
             None => {
+                // No handler: print the thrown value for diagnostics then
+                // propagate an error. Tests typically throw Test262Error
+                // instances (objects), so surface their contents to help
+                // debugging.
+                eprintln!("[unwind] uncaught thrown value: {:?}", thrown);
+                // Also print value string via trace helper when available.
+                if crate::trace::enabled() {
+                    crate::trace::value_string("[unwind] uncaught thrown (string) ", &thrown);
+                }
                 return Err(match thrown {
                     Value::String(s) => {
                         crate::errors::RuntimeError::from(format!("Uncaught: {}", s))
@@ -2289,10 +2117,17 @@ impl Vm {
             Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
             _ => Value::Null,
         };
+        let mut seen: HashSet<usize> = HashSet::new();
 
         while !matches!(current, Value::Null) {
             if values_equal(&current, &ctor_proto) {
                 return Ok(true);
+            }
+            let Some(identity) = object_identity(&current) else {
+                break;
+            };
+            if !seen.insert(identity) {
+                return Ok(false);
             }
             // advance
             current = match &current {
@@ -2334,9 +2169,11 @@ fn opcode_width(op: Op) -> usize {
         Op::Const
         | Op::GetLocal
         | Op::SetLocal
+        | Op::CloneLocalCell
         | Op::GetGlobal
         | Op::SetGlobal
         | Op::Call
+        | Op::CallMethod
         | Op::MakeClosure
         | Op::GetUpvalue
         | Op::SetUpvalue
@@ -2379,9 +2216,19 @@ fn list_own_keys_of_value(v: &Value) -> Option<Vec<String>> {
 
 /// Grow a locals vector so that `slot` is a valid index.
 #[inline(always)]
-fn ensure_slot(locals: &mut Vec<Value>, slot: usize) {
+fn ensure_slot(locals: &mut Vec<Rc<RefCell<Value>>>, slot: usize) {
     if slot >= locals.len() {
-        locals.resize(slot + 1, Value::Null);
+        locals.resize_with(slot + 1, || Rc::new(RefCell::new(Value::Undefined)));
+    }
+}
+
+fn object_identity(obj: &Value) -> Option<usize> {
+    match obj {
+        Value::Object(map) => Some(Rc::as_ptr(map) as usize),
+        Value::Array(arr, _) => Some(Rc::as_ptr(arr) as usize),
+        Value::Closure { props, .. } => Some(Rc::as_ptr(props) as usize),
+        Value::BuiltinObject(_, props) => Some(Rc::as_ptr(props) as usize),
+        _ => None,
     }
 }
 
@@ -2471,6 +2318,66 @@ fn values_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// ECMAScript SameValue semantics used by `Object.is`.
+pub fn same_value(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Undefined, Value::Undefined) => true,
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::BigInt(x), Value::BigInt(y)) => x == y,
+        (Value::Symbol(x, _), Value::Symbol(y, _)) => x == y,
+        (Value::Number(x), Value::Number(y)) => {
+            if x.is_nan() && y.is_nan() {
+                true
+            } else if *x == 0.0 && *y == 0.0 {
+                x.is_sign_positive() == y.is_sign_positive()
+            } else {
+                x == y
+            }
+        }
+        (Value::Object(am), Value::Object(bm)) => Rc::ptr_eq(am, bm),
+        (Value::Array(ar, _), Value::Array(br, _)) => Rc::ptr_eq(ar, br),
+        (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
+        (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
+        _ => false,
+    }
+}
+
+fn array_index_from_key(key: &PropertyKey) -> Option<usize> {
+    let PropertyKey::String(s) = key else {
+        return None;
+    };
+    if s.is_empty() {
+        return None;
+    }
+    if s != "0" && s.starts_with('0') {
+        return None;
+    }
+    let idx = s.parse::<u32>().ok()?;
+    if idx == u32::MAX {
+        return None;
+    }
+    if idx.to_string() != *s {
+        return None;
+    }
+    Some(idx as usize)
+}
+
+fn array_length(props: &ObjectData) -> usize {
+    props
+        .properties
+        .get(&PropertyKey::String("length".to_string()))
+        .and_then(|desc| match desc {
+            PropertyDescriptor::Data {
+                value: Value::Number(n),
+                ..
+            } if n.is_finite() && *n >= 0.0 => Some(*n as usize),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
 /// Walk the prototype chain with cycle detection.
 fn get_property(
     obj: &Value,
@@ -2505,10 +2412,10 @@ fn get_property(
             Ok(Value::Undefined)
         }
         Value::Array(arr, props) => {
-            if let PropertyKey::String(s) = key
-                && let Ok(i) = s.parse::<usize>()
+            if let Some(i) = array_index_from_key(key)
+                && let Some(value) = arr.borrow().get(i).cloned()
             {
-                return Ok(arr.borrow().get(i).cloned().unwrap_or(Value::Undefined));
+                return Ok(value);
             }
             let p = props.borrow();
             if let Some(desc) = p.properties.get(key) {
@@ -2529,6 +2436,25 @@ fn get_property(
             Ok(Value::Undefined)
         }
         Value::Closure { props, .. } => {
+            let p = props.borrow();
+            if let Some(desc) = p.properties.get(key) {
+                return match desc {
+                    PropertyDescriptor::Data { value, .. } => Ok(value.clone()),
+                    PropertyDescriptor::Accessor { get, .. } => {
+                        if let Some(Value::Closure { .. } | Value::Builtin(_)) = get {
+                            Ok(Value::Undefined)
+                        } else {
+                            Ok(Value::Undefined)
+                        }
+                    }
+                };
+            }
+            if !matches!(p.prototype, Value::Null) {
+                return get_property(&p.prototype, key, depth + 1);
+            }
+            Ok(Value::Undefined)
+        }
+        Value::BuiltinObject(_, props) => {
             let p = props.borrow();
             if let Some(desc) = p.properties.get(key) {
                 return match desc {
@@ -2586,23 +2512,29 @@ fn set_property(
             Ok(())
         }
         Value::Array(arr, props) => {
-            if let PropertyKey::String(s) = key
-                && let Ok(i) = s.parse::<usize>()
-            {
-                let mut a = arr.borrow_mut();
-                if i >= a.len() {
-                    a.resize(i + 1, Value::Undefined);
-                }
-                a[i] = value;
-                // Update the `length` own property on the array's property bag
-                // so reads of `arr.length` reflect the new size.
-                let new_len = a.len();
-                drop(a);
+            if let Some(i) = array_index_from_key(key) {
                 let mut p = props.borrow_mut();
-                p.properties.insert(
-                    PropertyKey::String("length".to_string()),
-                    PropertyDescriptor::data(Value::Number(new_len as f64)),
-                );
+                let current_len = array_length(&p);
+                let next_len = current_len.max(i.saturating_add(1));
+                let dense_limit = arr.borrow().len().saturating_add(MAX_DENSE_ARRAY_GROWTH);
+                if i <= dense_limit {
+                    let mut a = arr.borrow_mut();
+                    if i >= a.len() {
+                        a.resize(i + 1, Value::Undefined);
+                    }
+                    a[i] = value;
+                    p.properties.insert(
+                        PropertyKey::String("length".to_string()),
+                        PropertyDescriptor::data(Value::Number(a.len() as f64)),
+                    );
+                } else {
+                    p.properties
+                        .insert(key.clone(), PropertyDescriptor::data(value));
+                    p.properties.insert(
+                        PropertyKey::String("length".to_string()),
+                        PropertyDescriptor::data(Value::Number(next_len as f64)),
+                    );
+                }
                 return Ok(());
             }
             let mut p = props.borrow_mut();
@@ -2660,6 +2592,34 @@ fn set_property(
                 .insert(key.clone(), PropertyDescriptor::data(value));
             Ok(())
         }
+        Value::BuiltinObject(_, props) => {
+            let mut p = props.borrow_mut();
+            if let Some(desc) = p.properties.get_mut(key) {
+                match desc {
+                    PropertyDescriptor::Data {
+                        value: v, writable, ..
+                    } => {
+                        if !*writable {
+                            return Ok(());
+                        }
+                        *v = value;
+                        return Ok(());
+                    }
+                    PropertyDescriptor::Accessor { set, .. } => {
+                        if set.is_some() {
+                            return Ok(());
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            if !p.extensible {
+                return Ok(());
+            }
+            p.properties
+                .insert(key.clone(), PropertyDescriptor::data(value));
+            Ok(())
+        }
         _ => {
             // Non-object property assignments are no-ops in sloppy mode.
             //
@@ -2669,6 +2629,27 @@ fn set_property(
     }
 }
 
+fn build_module_namespace_object(exports: &HashMap<String, Rc<RefCell<Value>>>) -> Value {
+    let namespace = Rc::new(RefCell::new(ObjectData::new()));
+    for (name, slot) in exports {
+        if name == "*" {
+            continue;
+        }
+        let slot = Rc::clone(slot);
+        let getter: BuiltinFn = Rc::new(move |_vm, _args| Ok(slot.borrow().clone()));
+        namespace.borrow_mut().properties.insert(
+            PropertyKey::String(name.clone()),
+            PropertyDescriptor::Accessor {
+                get: Some(Value::Builtin(getter)),
+                set: None,
+                enumerable: true,
+                configurable: false,
+            },
+        );
+    }
+    Value::Object(namespace)
+}
+
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Value) -> Option<std::cmp::Ordering> {
         match (self, other) {
@@ -2676,5 +2657,237 @@ impl PartialOrd for Value {
             (Value::String(a), Value::String(b)) => a.partial_cmp(b),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler;
+    use crate::parser::Parser;
+    use crate::runtime_utils;
+
+    fn test_globals() -> Rc<RefCell<ObjectData>> {
+        Rc::new(RefCell::new(ObjectData::new()))
+    }
+
+    #[test]
+    fn builtin_object_property_lookup_uses_props_and_prototype() {
+        let proto = Rc::new(RefCell::new(ObjectData::new()));
+        proto.borrow_mut().properties.insert(
+            PropertyKey::String("inherited".to_string()),
+            PropertyDescriptor::data(Value::Number(7.0)),
+        );
+
+        let props = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+            Rc::clone(&proto),
+        ))));
+        props.borrow_mut().properties.insert(
+            PropertyKey::String("own".to_string()),
+            PropertyDescriptor::data(Value::Number(3.0)),
+        );
+
+        let builtin = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), props);
+
+        assert!(matches!(
+            get_property(&builtin, &PropertyKey::String("own".to_string()), 0).unwrap(),
+            Value::Number(3.0)
+        ));
+        assert!(matches!(
+            get_property(&builtin, &PropertyKey::String("inherited".to_string()), 0).unwrap(),
+            Value::Number(7.0)
+        ));
+    }
+
+    #[test]
+    fn set_property_tracked_mutates_builtin_object_props() {
+        let globals = test_globals();
+        let mut vm = Vm::new(globals);
+        let props = Rc::new(RefCell::new(ObjectData::new()));
+        let builtin = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), Rc::clone(&props));
+
+        vm.set_property_tracked(
+            &builtin,
+            &PropertyKey::String("prototype".to_string()),
+            Value::Number(11.0),
+        )
+        .unwrap();
+
+        let stored = props
+            .borrow()
+            .properties
+            .get(&PropertyKey::String("prototype".to_string()))
+            .cloned();
+        assert!(matches!(
+            stored,
+            Some(PropertyDescriptor::Data {
+                value: Value::Number(11.0),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn get_property_ic_distinguishes_keys_at_same_slot() {
+        let globals = test_globals();
+        let mut vm = Vm::new(globals);
+
+        let obj_data = Rc::new(RefCell::new(ObjectData::new()));
+        obj_data.borrow_mut().properties.insert(
+            PropertyKey::String("x".to_string()),
+            PropertyDescriptor::data(Value::Number(1.0)),
+        );
+        obj_data.borrow_mut().properties.insert(
+            PropertyKey::String("y".to_string()),
+            PropertyDescriptor::data(Value::Number(2.0)),
+        );
+        let obj = Value::Object(Rc::clone(&obj_data));
+
+        vm.chunk = Rc::new(Chunk {
+            code: vec![0],
+            constants: vec![],
+            functions: vec![],
+            lines: vec![1],
+        });
+        vm.ip = 0;
+        vm.stack.push(obj.clone());
+        vm.stack.push(Value::String("x".to_string()));
+        vm.get_property_ic().unwrap();
+        assert!(matches!(vm.pop().unwrap(), Value::Number(1.0)));
+
+        vm.ip = 0;
+        vm.stack.push(obj);
+        vm.stack.push(Value::String("y".to_string()));
+        vm.get_property_ic().unwrap();
+        assert!(matches!(vm.pop().unwrap(), Value::Number(2.0)));
+    }
+
+    #[test]
+    fn same_value_treats_nan_as_equal() {
+        assert!(same_value(
+            &Value::Number(f64::NAN),
+            &Value::Number(f64::NAN)
+        ));
+    }
+
+    #[test]
+    fn same_value_distinguishes_signed_zero() {
+        assert!(!same_value(&Value::Number(0.0), &Value::Number(-0.0)));
+        assert!(same_value(&Value::Number(-0.0), &Value::Number(-0.0)));
+    }
+
+    #[test]
+    fn same_value_uses_reference_identity_for_objects() {
+        let obj = Rc::new(RefCell::new(ObjectData::new()));
+        let a = Value::Object(Rc::clone(&obj));
+        let b = Value::Object(Rc::clone(&obj));
+        let c = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
+
+        assert!(same_value(&a, &b));
+        assert!(!same_value(&a, &c));
+    }
+
+    #[test]
+    fn array_max_u32_key_is_not_dense_index() {
+        let arr_data = Rc::new(RefCell::new(vec![Value::Number(0.0)]));
+        let props = Rc::new(RefCell::new(ObjectData::new()));
+        props.borrow_mut().properties.insert(
+            PropertyKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(1.0)),
+        );
+        let arr = Value::Array(Rc::clone(&arr_data), Rc::clone(&props));
+        let key = PropertyKey::String("4294967295".to_string());
+
+        set_property(&arr, &key, Value::String("x".to_string())).unwrap();
+
+        assert_eq!(arr_data.borrow().len(), 1);
+        assert!(matches!(
+            get_property(&arr, &key, 0).unwrap(),
+            Value::String(ref s) if s == "x"
+        ));
+        assert!(matches!(
+            get_property(&arr, &PropertyKey::String("length".to_string()), 0).unwrap(),
+            Value::Number(n) if (n - 1.0).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn sparse_array_index_updates_length_without_dense_resize() {
+        let arr_data = Rc::new(RefCell::new(vec![Value::Number(0.0)]));
+        let props = Rc::new(RefCell::new(ObjectData::new()));
+        props.borrow_mut().properties.insert(
+            PropertyKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(1.0)),
+        );
+        let arr = Value::Array(Rc::clone(&arr_data), Rc::clone(&props));
+        let key = PropertyKey::String("4294967294".to_string());
+
+        set_property(&arr, &key, Value::Number(1.0)).unwrap();
+
+        assert_eq!(arr_data.borrow().len(), 1);
+        assert!(matches!(
+            get_property(&arr, &key, 0).unwrap(),
+            Value::Number(n) if (n - 1.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            get_property(&arr, &PropertyKey::String("length".to_string()), 0).unwrap(),
+            Value::Number(n) if (n - 4294967295.0).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn top_level_assignment_updates_global_binding() {
+        let session = Parser::parse_source("var x; x = 5;").expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        let result = vm.run(chunk).expect("run ok");
+
+        assert!(matches!(result, Value::Undefined));
+        assert!(
+            matches!(vm.get_global("x"), Some(Value::Number(n)) if (n - 5.0).abs() < f64::EPSILON)
+        );
+    }
+
+    #[test]
+    fn eval_for_loop_completion_is_undefined() {
+        let src = r#"
+            var supreme, count;
+            supreme = 5;
+            var evaluated = eval("for(count=0;;) {if (count===supreme)break;else count++; }");
+        "#;
+        let session = Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program).expect("compile ok");
+
+        let globals = test_globals();
+        runtime_utils::install_minimal_kernel_constructors(&globals);
+        let mut vm = Vm::new(Rc::clone(&globals));
+        let result = vm.run(chunk).expect("run ok");
+
+        assert!(matches!(result, Value::Undefined));
+        assert!(
+            matches!(vm.get_global("supreme"), Some(Value::Number(n)) if (n - 5.0).abs() < f64::EPSILON)
+        );
+        assert!(
+            matches!(vm.get_global("count"), Some(Value::Number(n)) if (n - 5.0).abs() < f64::EPSILON)
+        );
+        assert!(matches!(vm.get_global("evaluated"), Some(Value::Undefined)));
+    }
+
+    #[test]
+    fn void_operator_evaluates_to_undefined() {
+        let session = Parser::parse_source("var x = void 0;").expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        let result = vm.run(chunk).expect("run ok");
+
+        assert!(matches!(result, Value::Undefined));
+        assert!(matches!(vm.get_global("x"), Some(Value::Undefined)));
     }
 }

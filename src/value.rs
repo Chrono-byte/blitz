@@ -168,8 +168,8 @@ pub enum Value {
     Closure {
         /// Function prototype
         proto: Rc<FunctionProto>,
-        /// Captured / closed-over values
-        env: Rc<RefCell<Vec<Value>>>,
+        /// Captured / closed-over binding cells
+        env: Rc<RefCell<Vec<Rc<RefCell<Value>>>>>,
         /// Mutable property bag for function object properties (e.g., `prototype`).
         props: Rc<RefCell<ObjectData>>,
     },
@@ -218,6 +218,7 @@ impl Value {
             Value::Null => false,
             Value::Bool(b) => *b,
             Value::Number(n) => *n != 0.0 && !n.is_nan(),
+            Value::String(s) => !s.is_empty(),
             Value::BigInt(n) => *n != 0,
             _ => true,
         }

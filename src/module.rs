@@ -155,17 +155,35 @@ impl ModuleLoader {
                                 } else if let Some(decl) = item.get("declaration")
                                     && let Some(decl_type) =
                                         decl.get("type").and_then(|d| d.as_str())
-                                    && (decl_type == "FunctionDeclaration"
-                                        || decl_type == "ClassDeclaration")
-                                    && let Some(id) = decl
-                                        .get("id")
-                                        .and_then(|i| i.get("name"))
-                                        .and_then(|n| n.as_str())
                                 {
-                                    rec.exports.insert(
-                                        id.to_string(),
-                                        Rc::new(RefCell::new(Value::Undefined)),
-                                    );
+                                    if (decl_type == "FunctionDeclaration"
+                                        || decl_type == "ClassDeclaration")
+                                        && let Some(id) = decl
+                                            .get("id")
+                                            .and_then(|i| i.get("name"))
+                                            .and_then(|n| n.as_str())
+                                    {
+                                        rec.exports.insert(
+                                            id.to_string(),
+                                            Rc::new(RefCell::new(Value::Undefined)),
+                                        );
+                                    } else if decl_type == "VariableDeclaration"
+                                        && let Some(decls) =
+                                            decl.get("declarations").and_then(|d| d.as_array())
+                                    {
+                                        for var_decl in decls {
+                                            if let Some(name) = var_decl
+                                                .get("id")
+                                                .and_then(|id| id.get("name"))
+                                                .and_then(|n| n.as_str())
+                                            {
+                                                rec.exports.insert(
+                                                    name.to_string(),
+                                                    Rc::new(RefCell::new(Value::Undefined)),
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             "ExportDefaultDeclaration" => {

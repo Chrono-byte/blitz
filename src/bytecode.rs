@@ -37,6 +37,16 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
+/// Description of a captured binding for a closure.
+pub struct UpvalueSpec {
+    /// True when capturing from the immediately enclosing function's locals;
+    /// false when capturing from the enclosing function's own upvalue list.
+    pub is_local: bool,
+    /// Slot or upvalue index in the enclosing function.
+    pub index: u8,
+}
+
+#[derive(Clone, Debug)]
 /// A chunk of bytecode containing opcodes, constants, and metadata
 pub struct Chunk {
     /// Bytecode instructions
@@ -61,10 +71,15 @@ pub struct FunctionProto {
     /// NOTE: slot type annotations have been removed in JS-first mode; the
     /// runtime no longer enforces TypeScript annotations.
     pub slot_types: Vec<Option<Type>>,
+    /// Captured binding descriptors for nested closures.
+    pub upvalues: Vec<UpvalueSpec>,
     /// Whether the last parameter is a rest parameter (`...args`). If true,
     /// at runtime the last local will be populated with an array of the
     /// remaining arguments.
     pub has_rest: bool,
+    /// Whether creating this function should install an own `.prototype`
+    /// object, i.e. whether it behaves like a constructor function.
+    pub has_prototype_property: bool,
     /// Return type annotation
     pub return_type: Option<Type>,
 }
@@ -250,6 +265,8 @@ pub enum Op {
     GetLocal,
     /// Set local variable in slot
     SetLocal,
+    /// Rebind a local slot to a fresh cell containing its current value
+    CloneLocalCell,
     /// Get global variable
     GetGlobal,
     /// Set global variable
@@ -294,6 +311,8 @@ pub enum Op {
     Typeof,
     /// Function call
     Call,
+    /// Function call preserving an explicit receiver (`this`)
+    CallMethod,
     /// Return from function
     Return,
     /// Unconditional jump
@@ -393,46 +412,48 @@ impl TryFrom<u8> for Op {
             3 => Ok(Op::False),
             4 => Ok(Op::GetLocal),
             5 => Ok(Op::SetLocal),
-            6 => Ok(Op::GetGlobal),
-            7 => Ok(Op::SetGlobal),
-            8 => Ok(Op::Pop),
-            9 => Ok(Op::Dup),
-            10 => Ok(Op::Add),
-            11 => Ok(Op::AddNumber),
-            12 => Ok(Op::Sub),
-            13 => Ok(Op::Mul),
-            14 => Ok(Op::Div),
-            15 => Ok(Op::Mod),
-            16 => Ok(Op::Eq),
-            17 => Ok(Op::Neq),
-            18 => Ok(Op::Lt),
-            19 => Ok(Op::Le),
-            20 => Ok(Op::Gt),
-            21 => Ok(Op::Ge),
-            22 => Ok(Op::And),
-            23 => Ok(Op::Or),
-            24 => Ok(Op::Neg),
-            25 => Ok(Op::Not),
-            26 => Ok(Op::Typeof),
-            27 => Ok(Op::Call),
-            28 => Ok(Op::Return),
-            29 => Ok(Op::Jump),
-            30 => Ok(Op::JumpIfFalse),
-            31 => Ok(Op::BuildArray),
-            32 => Ok(Op::BuildObject),
-            33 => Ok(Op::GetProperty),
-            34 => Ok(Op::GetPropertyIC),
-            35 => Ok(Op::SetProperty),
-            36 => Ok(Op::MakeClosure),
-            37 => Ok(Op::GetThis),
-            38 => Ok(Op::GetUpvalue),
-            39 => Ok(Op::SetUpvalue),
-            40 => Ok(Op::GetBuiltin),
-            41 => Ok(Op::Throw),
-            42 => Ok(Op::PushHandler),
-            43 => Ok(Op::PopHandler),
-            44 => Ok(Op::GetModuleExport),
-            45 => Ok(Op::SetModuleExport),
+            6 => Ok(Op::CloneLocalCell),
+            7 => Ok(Op::GetGlobal),
+            8 => Ok(Op::SetGlobal),
+            9 => Ok(Op::Pop),
+            10 => Ok(Op::Dup),
+            11 => Ok(Op::Add),
+            12 => Ok(Op::AddNumber),
+            13 => Ok(Op::Sub),
+            14 => Ok(Op::Mul),
+            15 => Ok(Op::Div),
+            16 => Ok(Op::Mod),
+            17 => Ok(Op::Eq),
+            18 => Ok(Op::Neq),
+            19 => Ok(Op::Lt),
+            20 => Ok(Op::Le),
+            21 => Ok(Op::Gt),
+            22 => Ok(Op::Ge),
+            23 => Ok(Op::And),
+            24 => Ok(Op::Or),
+            25 => Ok(Op::Neg),
+            26 => Ok(Op::Not),
+            27 => Ok(Op::Typeof),
+            28 => Ok(Op::Call),
+            29 => Ok(Op::CallMethod),
+            30 => Ok(Op::Return),
+            31 => Ok(Op::Jump),
+            32 => Ok(Op::JumpIfFalse),
+            33 => Ok(Op::BuildArray),
+            34 => Ok(Op::BuildObject),
+            35 => Ok(Op::GetProperty),
+            36 => Ok(Op::GetPropertyIC),
+            37 => Ok(Op::SetProperty),
+            38 => Ok(Op::MakeClosure),
+            39 => Ok(Op::GetThis),
+            40 => Ok(Op::GetUpvalue),
+            41 => Ok(Op::SetUpvalue),
+            42 => Ok(Op::GetBuiltin),
+            43 => Ok(Op::Throw),
+            44 => Ok(Op::PushHandler),
+            45 => Ok(Op::PopHandler),
+            46 => Ok(Op::GetModuleExport),
+            47 => Ok(Op::SetModuleExport),
             _ => Err(()),
         }
     }

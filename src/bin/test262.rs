@@ -3,7 +3,7 @@ Test262 connector script for tsblitz.
 
 Usage:
 - Optionally set `TEST262_FILTER` to a substring to limit which tests are run
-- Optionally set `TEST262_LIMIT` to limit how many tests are executed (default 50)
+- Optionally set `TEST262_LIMIT` to limit how many tests are executed (default: all)
 - Optionally set `TEST262_SEGMENTS` to a comma-separated list of segments
 - Optionally set `TEST262_EXCLUDE` to a comma-separated list of segments to skip
 
@@ -25,7 +25,7 @@ APIs.
 */
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,35 +35,258 @@ use std::rc::Rc;
 use serde::Deserialize;
 
 use tsblitz::compiler;
-use tsblitz::value::PropertyKey;
+use tsblitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
 use tsblitz::{module::ModuleLoader, parser::Parser, typecheck, value::Value, vm::Vm};
 
-struct RunnerOptions {
-    includes: Vec<String>,
-    excludes: Vec<String>,
-    filter: Option<String>,
+#[derive(Clone, Copy, Default)]
+struct BucketStats {
+    pass: usize,
+    fail: usize,
+    skip: usize,
+}
+
+impl BucketStats {
+    fn total(self) -> usize {
+        self.pass + self.fail + self.skip
+    }
+
+    fn attempted(self) -> usize {
+        self.pass + self.fail
+    }
+
+    fn pass_pct(self) -> f64 {
+        let attempted = self.attempted();
+        if attempted == 0 {
+            0.0
+        } else {
+            (self.pass as f64 / attempted as f64) * 100.0
+        }
+    }
+}
+
+fn bucket_keys(test_root: &Path, file: &Path) -> (String, String) {
+    let rel = file.strip_prefix(test_root).unwrap_or(file);
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+
+    let top = parts
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "<root>".to_string());
+    let subtree = if parts.len() >= 2 {
+        format!("{}/{}", parts[0], parts[1])
+    } else {
+        top.clone()
+    };
+    (top, subtree)
+}
+
+fn print_bucket_summary(
+    label: &str,
+    buckets: &HashMap<String, BucketStats>,
     limit: usize,
+    sort_by_failures: bool,
+) {
+    let mut rows: Vec<_> = buckets.iter().collect();
+    if sort_by_failures {
+        rows.sort_by(|(an, av), (bn, bv)| {
+            bv.fail
+                .cmp(&av.fail)
+                .then_with(|| bv.total().cmp(&av.total()))
+                .then_with(|| an.cmp(bn))
+        });
+    } else {
+        rows.sort_by(|(an, av), (bn, bv)| {
+            bv.total()
+                .cmp(&av.total())
+                .then_with(|| bv.fail.cmp(&av.fail))
+                .then_with(|| an.cmp(bn))
+        });
+    }
+
+    eprintln!("{}", label);
+    for (name, stats) in rows.into_iter().take(limit) {
+        eprintln!(
+            "  {:<28} pass {:>6} fail {:>6} skip {:>6}  pass rate {:>6.2}%",
+            name,
+            stats.pass,
+            stats.fail,
+            stats.skip,
+            stats.pass_pct()
+        );
+    }
+}
+
+#[derive(Default)]
+struct CloneCtx {
+    objects: HashMap<usize, Rc<RefCell<ObjectData>>>,
+    arrays: HashMap<usize, Rc<RefCell<Vec<Value>>>>,
+    envs: HashMap<usize, Rc<RefCell<Vec<Rc<RefCell<Value>>>>>>,
+}
+
+fn clone_descriptor(desc: &PropertyDescriptor, ctx: &mut CloneCtx) -> PropertyDescriptor {
+    match desc {
+        PropertyDescriptor::Data {
+            value,
+            writable,
+            enumerable,
+            configurable,
+        } => PropertyDescriptor::Data {
+            value: clone_value(value, ctx),
+            writable: *writable,
+            enumerable: *enumerable,
+            configurable: *configurable,
+        },
+        PropertyDescriptor::Accessor {
+            get,
+            set,
+            enumerable,
+            configurable,
+        } => PropertyDescriptor::Accessor {
+            get: get.as_ref().map(|v| clone_value(v, ctx)),
+            set: set.as_ref().map(|v| clone_value(v, ctx)),
+            enumerable: *enumerable,
+            configurable: *configurable,
+        },
+    }
+}
+
+fn clone_object_data(obj: &Rc<RefCell<ObjectData>>, ctx: &mut CloneCtx) -> Rc<RefCell<ObjectData>> {
+    let key = Rc::as_ptr(obj) as usize;
+    if let Some(existing) = ctx.objects.get(&key) {
+        return Rc::clone(existing);
+    }
+
+    let cloned = Rc::new(RefCell::new(ObjectData::new()));
+    ctx.objects.insert(key, Rc::clone(&cloned));
+
+    let src = obj.borrow();
+    let prototype = clone_value(&src.prototype, ctx);
+    let extensible = src.extensible;
+    let properties = src
+        .properties
+        .iter()
+        .map(|(k, v)| (k.clone(), clone_descriptor(v, ctx)))
+        .collect();
+    drop(src);
+
+    let mut dst = cloned.borrow_mut();
+    dst.prototype = prototype;
+    dst.extensible = extensible;
+    dst.properties = properties;
+    drop(dst);
+
+    cloned
+}
+
+fn clone_array_elements(
+    arr: &Rc<RefCell<Vec<Value>>>,
+    ctx: &mut CloneCtx,
+) -> Rc<RefCell<Vec<Value>>> {
+    let key = Rc::as_ptr(arr) as usize;
+    if let Some(existing) = ctx.arrays.get(&key) {
+        return Rc::clone(existing);
+    }
+
+    let cloned = Rc::new(RefCell::new(Vec::new()));
+    ctx.arrays.insert(key, Rc::clone(&cloned));
+
+    let values = arr.borrow().iter().map(|v| clone_value(v, ctx)).collect();
+    *cloned.borrow_mut() = values;
+    cloned
+}
+
+fn clone_env(
+    env: &Rc<RefCell<Vec<Rc<RefCell<Value>>>>>,
+    ctx: &mut CloneCtx,
+) -> Rc<RefCell<Vec<Rc<RefCell<Value>>>>> {
+    let key = Rc::as_ptr(env) as usize;
+    if let Some(existing) = ctx.envs.get(&key) {
+        return Rc::clone(existing);
+    }
+
+    let cloned = Rc::new(RefCell::new(Vec::new()));
+    ctx.envs.insert(key, Rc::clone(&cloned));
+
+    let values = env
+        .borrow()
+        .iter()
+        .map(|cell| Rc::new(RefCell::new(clone_value(&cell.borrow(), ctx))))
+        .collect();
+    *cloned.borrow_mut() = values;
+    cloned
+}
+
+fn clone_value(value: &Value, ctx: &mut CloneCtx) -> Value {
+    match value {
+        Value::Number(n) => Value::Number(*n),
+        Value::String(s) => Value::String(s.clone()),
+        Value::Bool(b) => Value::Bool(*b),
+        Value::Undefined => Value::Undefined,
+        Value::BigInt(n) => Value::BigInt(*n),
+        Value::Symbol(id, desc) => Value::Symbol(id.clone(), desc.clone()),
+        Value::Null => Value::Null,
+        Value::Object(obj) => Value::Object(clone_object_data(obj, ctx)),
+        Value::Array(arr, props) => Value::Array(
+            clone_array_elements(arr, ctx),
+            clone_object_data(props, ctx),
+        ),
+        Value::Closure { proto, env, props } => Value::Closure {
+            proto: Rc::clone(proto),
+            env: clone_env(env, ctx),
+            props: clone_object_data(props, ctx),
+        },
+        Value::Builtin(f) => Value::Builtin(Rc::clone(f)),
+        Value::BuiltinObject(f, props) => {
+            Value::BuiltinObject(Rc::clone(f), clone_object_data(props, ctx))
+        }
+    }
+}
+
+fn clone_globals(globals: &Rc<RefCell<ObjectData>>) -> Rc<RefCell<ObjectData>> {
+    let mut ctx = CloneCtx::default();
+    clone_object_data(globals, &mut ctx)
+}
+
+fn make_vm_from_snapshot(snapshot: &Rc<RefCell<ObjectData>>) -> Vm {
+    Vm::new(clone_globals(snapshot))
+}
+
+/// Runner options for the test262 test runner.
+struct RunnerOptions {
+    /// List of test segments to include.
+    includes: Vec<String>,
+    /// List of test segments to exclude.
+    excludes: Vec<String>,
+    /// Substring filter for test names.
+    filter: Option<String>,
+    /// Optional maximum number of tests to run.
+    limit: Option<usize>,
+    /// Run only harness files.
     harness_only: bool,
 }
 
+/// Prints the usage information for the test262 runner.
 fn print_usage() {
     eprintln!("test262 runner options:");
     eprintln!("  --segment <seg>[,<seg>...]   Include segment(s)");
     eprintln!("  --exclude <seg>[,<seg>...]   Exclude segment(s)");
     eprintln!("  --filter <substring>         Substring filter");
-    eprintln!("  --limit <n>                  Max tests (default 50)");
+    eprintln!("  --limit <n>                  Max tests (default: all)");
     eprintln!("  --harness-only               Run only harness files");
     eprintln!("segments: annexB, language, built-ins, intl402, staging, or path relative to test/");
 }
 
+/// Parses the command line arguments
+///
+/// Returns a `RunnerOptions` struct with the parsed values.
 fn parse_args() -> RunnerOptions {
     let mut includes: Vec<String> = Vec::new();
     let mut excludes: Vec<String> = Vec::new();
     let mut filter = env::var("TEST262_FILTER").ok();
-    let mut limit: usize = env::var("TEST262_LIMIT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(50);
+    let mut limit: Option<usize> = env::var("TEST262_LIMIT").ok().and_then(|s| s.parse().ok());
     let mut harness_only = false;
 
     if let Ok(seg) = env::var("TEST262_SEGMENTS") {
@@ -119,7 +342,7 @@ fn parse_args() -> RunnerOptions {
                 if let Some(val) = it.next()
                     && let Ok(n) = val.parse::<usize>()
                 {
-                    limit = n;
+                    limit = Some(n);
                 }
             }
             "--harness-only" | "--harness" => {
@@ -200,23 +423,18 @@ fn builtin_eval_script(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     };
 
     // Build a minimal new realm
-    let new_globals: Rc<RefCell<tsblitz::value::ObjectData>> =
-        Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+    let new_globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
     new_globals.borrow_mut().properties.insert(
         PropertyKey::String("print".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
         }))),
     );
 
-    // Parse / typecheck / compile / run. Ignore errors and return Null on failure.
+    // Parse / compile / run. Ignore errors and return Null on failure.
     match Parser::parse_source(&src) {
         Ok(session) => {
             let prog = session.program();
-            if let Err(e) = typecheck::check_oxc(prog) {
-                eprintln!("[evalScript] typecheck failed: {}", e);
-                return Ok(Value::Null);
-            }
             // compile expects the owned local_ast for now; convert via ESTree JSON
             let _estree = prog.to_pretty_estree_ts_json(false);
             // Use the temporary compile_oxc shim so we can avoid an owned local_ast here.
@@ -244,17 +462,210 @@ fn builtin_eval_script(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     }
 }
 
+fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
+    use tsblitz::value::PropertyKey as PKey;
+    tsblitz::runtime_utils::install_minimal_kernel_constructors(globals);
+
+    let function_proto = globals
+        .borrow()
+        .properties
+        .get(&PKey::String("Function".to_string()))
+        .and_then(|d| match d {
+            PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+        .and_then(|function_ctor| match function_ctor {
+            Value::BuiltinObject(_, props) => props
+                .borrow()
+                .properties
+                .get(&PKey::String("prototype".to_string()))
+                .and_then(|d| match d {
+                    PropertyDescriptor::Data {
+                        value: Value::Object(obj),
+                        ..
+                    } => Some(Rc::clone(obj)),
+                    _ => None,
+                }),
+            _ => None,
+        })
+        .expect("Function.prototype must be installed by kernel constructor setup");
+
+    let builtin_object = |f| {
+        let props = Rc::new(RefCell::new(ObjectData::new()));
+        props.borrow_mut().prototype = Value::Object(Rc::clone(&function_proto));
+        Value::BuiltinObject(f, props)
+    };
+
+    let test262_error_ctor = builtin_object(Rc::new(|_vm, args| {
+        let message = args.get(1).cloned().unwrap_or(Value::Undefined);
+        let mut data = ObjectData::new();
+        data.properties.insert(
+            PKey::String("message".to_string()),
+            PropertyDescriptor::data(message),
+        );
+        Ok(Value::Object(Rc::new(RefCell::new(data))))
+    }));
+
+    let assert_props = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+        Rc::clone(&function_proto),
+    ))));
+    let assert_value = Value::BuiltinObject(
+        Rc::new(|vm, args| {
+            let condition = args.first().cloned().unwrap_or(Value::Undefined);
+            if vm.to_boolean(&condition) {
+                Ok(Value::Undefined)
+            } else {
+                let msg = args
+                    .get(1)
+                    .map_or_else(|| "assert failed".to_string(), |v| format!("{}", v));
+                Err(tsblitz::errors::RuntimeError::from(msg))
+            }
+        }),
+        Rc::clone(&assert_props),
+    );
+    assert_props.borrow_mut().properties.insert(
+        PKey::String("_isSameValue".to_string()),
+        PropertyDescriptor::data(builtin_object(Rc::new(|_vm, args| {
+            let left = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let right = args.get(2).cloned().unwrap_or(Value::Undefined);
+            Ok(Value::Bool(tsblitz::vm::same_value(&left, &right)))
+        }))),
+    );
+    assert_props.borrow_mut().properties.insert(
+        PKey::String("sameValue".to_string()),
+        PropertyDescriptor::data(builtin_object(Rc::new(|_vm, args| {
+            let actual = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let expected = args.get(2).cloned().unwrap_or(Value::Undefined);
+            if tsblitz::vm::same_value(&actual, &expected) {
+                Ok(Value::Undefined)
+            } else {
+                let msg = args.get(3).map_or_else(
+                    || "assert.sameValue failed".to_string(),
+                    |v| format!("{}", v),
+                );
+                Err(tsblitz::errors::RuntimeError::from(msg))
+            }
+        }))),
+    );
+    assert_props.borrow_mut().properties.insert(
+        PKey::String("notSameValue".to_string()),
+        PropertyDescriptor::data(builtin_object(Rc::new(|_vm, args| {
+            let actual = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let unexpected = args.get(2).cloned().unwrap_or(Value::Undefined);
+            if !tsblitz::vm::same_value(&actual, &unexpected) {
+                Ok(Value::Undefined)
+            } else {
+                let msg = args.get(3).map_or_else(
+                    || "assert.notSameValue failed".to_string(),
+                    |v| format!("{}", v),
+                );
+                Err(tsblitz::errors::RuntimeError::from(msg))
+            }
+        }))),
+    );
+    assert_props.borrow_mut().properties.insert(
+        PKey::String("throws".to_string()),
+        PropertyDescriptor::data(builtin_object(Rc::new(|vm, args| {
+            let func = args.get(2).cloned().unwrap_or(Value::Undefined);
+            match vm.call_value_with_this(&func, &Value::Undefined, &[]) {
+                Ok(_) => Err(tsblitz::errors::RuntimeError::from(
+                    "assert.throws expected an exception",
+                )),
+                Err(_) => Ok(Value::Undefined),
+            }
+        }))),
+    );
+    assert_props.borrow_mut().properties.insert(
+        PKey::String("compareArray".to_string()),
+        PropertyDescriptor::data(builtin_object(Rc::new(|vm, args| {
+            let actual = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let expected = args.get(2).cloned().unwrap_or(Value::Undefined);
+            let actual_length =
+                vm.get_property_host(&actual, &PKey::String("length".to_string()))?;
+            let actual_len = vm.to_number_value(&actual_length)? as i64;
+            let expected_length =
+                vm.get_property_host(&expected, &PKey::String("length".to_string()))?;
+            let expected_len = vm.to_number_value(&expected_length)? as i64;
+            if actual_len != expected_len {
+                return Err(tsblitz::errors::RuntimeError::from(
+                    "assert.compareArray length mismatch",
+                ));
+            }
+            for i in 0..actual_len {
+                let key = PKey::String(i.to_string());
+                let av = vm.get_property_host(&actual, &key)?;
+                let ev = vm.get_property_host(&expected, &key)?;
+                if !tsblitz::vm::same_value(&av, &ev) {
+                    return Err(tsblitz::errors::RuntimeError::from(
+                        "assert.compareArray mismatch",
+                    ));
+                }
+            }
+            Ok(Value::Undefined)
+        }))),
+    );
+
+    let mut g = globals.borrow_mut();
+    g.properties.insert(
+        PKey::String("Test262Error".to_string()),
+        PropertyDescriptor::data(test262_error_ctor),
+    );
+    g.properties.insert(
+        PKey::String("assert".to_string()),
+        PropertyDescriptor::data(assert_value),
+    );
+}
+
 /// Run a source text in the provided globals and return a Result.
-fn run_source_in_realm(
-    globals: Rc<RefCell<tsblitz::value::ObjectData>>,
-    source: &str,
-) -> Result<Value, String> {
+fn run_source_in_realm(globals: Rc<RefCell<ObjectData>>, source: &str) -> Result<Value, String> {
     let session = Parser::parse_source(source).map_err(|e| format!("parse: {}", e))?;
     let prog = session.program();
-    typecheck::check_oxc(prog).map_err(|e| format!("typecheck: {}", e))?;
     let chunk = compiler::compile_oxc(prog).map_err(|e| format!("compile: {}", e))?;
     let mut vm = Vm::new(globals);
     vm.run(chunk).map_err(|e| format!("runtime: {}", e))
+}
+
+fn install_test262_realm_helpers(
+    globals: &Rc<RefCell<ObjectData>>,
+    realm_seed: &Rc<RefCell<ObjectData>>,
+) {
+    let seed = Rc::clone(realm_seed);
+    let create_realm = Value::Builtin(Rc::new(move |_vm, _args| {
+        let realm_globals = clone_globals(&seed);
+        let eval_globals = Rc::clone(&realm_globals);
+        realm_globals.borrow_mut().properties.insert(
+            PropertyKey::String("eval".to_string()),
+            PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+                let src = match args.get(1).or_else(|| args.first()) {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => return Ok(Value::Undefined),
+                };
+                run_source_in_realm(Rc::clone(&eval_globals), &src)
+                    .map_err(tsblitz::errors::RuntimeError::from)
+            }))),
+        );
+
+        let realm = Rc::new(RefCell::new(ObjectData::new()));
+        realm.borrow_mut().properties.insert(
+            PropertyKey::String("global".to_string()),
+            PropertyDescriptor::data(Value::Object(realm_globals)),
+        );
+        Ok(Value::Object(realm))
+    }));
+
+    if let Some(PropertyDescriptor::Data {
+        value: Value::Object(test262_obj),
+        ..
+    }) = globals
+        .borrow_mut()
+        .properties
+        .get_mut(&PropertyKey::String("$262".to_string()))
+    {
+        test262_obj.borrow_mut().properties.insert(
+            PropertyKey::String("createRealm".to_string()),
+            PropertyDescriptor::data(create_realm),
+        );
+    }
 }
 
 /// Recursively gather `.js` test files under the given directory while skipping
@@ -294,13 +705,8 @@ fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>, excludes: &[PathBuf]) {
     }
 }
 
-/// Decide whether a test should be skipped based on metadata or simple heuristics.
-///
-/// Currently we skip:
-/// - tests flagged with `module`, `raw`, or `async`
-/// - tests that `includes` harness files (we don't support includes resolution yet)
-/// - tests containing `throw` (throw handling is not yet implemented)
-fn should_skip_test(src: &str, meta: &Option<Meta>) -> bool {
+/// Decide whether a test is unsupported before execution begins.
+fn unsupported_reason(_src: &str, meta: &Option<Meta>) -> Option<String> {
     if let Some(m) = meta
         && let Some(flags) = &m.flags
         && flags.iter().any(|f| {
@@ -316,36 +722,33 @@ fn should_skip_test(src: &str, meta: &Option<Meta>) -> bool {
             .iter()
             .any(|f| f == "module" || f == "raw" || f == "async")
         {
-            return true;
+            let unsupported: Vec<&str> = flags
+                .iter()
+                .filter_map(|f| match f.as_str() {
+                    "module" | "raw" | "async" => Some(f.as_str()),
+                    _ => None,
+                })
+                .collect();
+            return Some(format!("UNSUPPORTED: flags {}", unsupported.join(",")));
         }
     }
-    // `includes` are not skipped here. Included harness files will be
-    // evaluated at runtime by the runner (see below) so that tests which
-    // reference helper files can be supported.
-    // Very simple heuristic: skip tests that use `throw` (our runtime doesn't
-    // yet support the ThrowStatement semantics required by many Test262 tests).
-    if src.contains("throw") {
-        return true;
-    }
-    false
+    None
 }
 
 /// Execute a single test file. Returns:
-/// - Ok(Some(()))  -> test ran and passed
-/// - Ok(None)      -> test was skipped (not an error)
-/// - Err(String)   -> test ran and failed (message)
+/// - Ok(())        -> test ran and passed
+/// - Err(String)   -> test failed or is unsupported
 fn run_test_file(
     path: &Path,
     test262_root: &Path,
-    vm: &mut Vm,
-    keep_globals: &HashSet<String>,
-) -> Result<Option<()>, String> {
+    baseline_globals: &Rc<RefCell<ObjectData>>,
+) -> Result<(), String> {
     let src = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
     let meta = parse_meta(&src);
 
-    if should_skip_test(&src, &meta) {
-        return Ok(None);
+    if let Some(reason) = unsupported_reason(&src, &meta) {
+        return Err(format!("{} ({})", path.display(), reason));
     }
 
     // Determine the run modes (non-strict / strict) according to flags:
@@ -366,9 +769,6 @@ fn run_test_file(
         }
     }
 
-    // The VM and globals are provided by the caller. We'll reset VM state to
-    // a clean run while keeping `keep_globals` intact.
-
     // Unless the test is `raw`, harness files should be evaluated first in the test realm.
     let raw_flag = meta
         .as_ref()
@@ -376,15 +776,15 @@ fn run_test_file(
         .is_some_and(|f| f.iter().any(|s| s == "raw"));
 
     // Required harness files as per Test262 interpreting instructions.
-    let mut harness_files: Vec<String> = vec![
-        "harness/sta.js".to_string(),
-        "harness/assert.js".to_string(),
-    ];
+    let mut harness_files: Vec<String> = vec!["sta.js".to_string(), "assert.js".to_string()];
     if let Some(m) = &meta
         && let Some(includes) = &m.includes
     {
         for inc in includes {
-            if !harness_files.iter().any(|h| h == inc) {
+            if inc != "harness/sta.js"
+                && inc != "harness/assert.js"
+                && !harness_files.iter().any(|h| h == inc)
+            {
                 harness_files.push(inc.clone());
             }
         }
@@ -408,13 +808,13 @@ fn run_test_file(
         typecheck::set_strict_override(Some(false));
         let _reset_strict = ResetStrict;
 
-        // Reset VM state but preserve globals installed by the soft-prelude and host.
-        vm.reset(keep_globals);
+        // Restore a fresh realm cloned from the bootstrapped baseline.
+        let mut vm = make_vm_from_snapshot(baseline_globals);
 
         // Evaluate harness files unless `raw`: compile & run them into the provided VM.
         if !raw_flag {
             for h in &harness_files {
-                let p = test262_root.join(h);
+                let p = test262_root.join("harness").join(h);
                 if p.exists() {
                     let hsrc = fs::read_to_string(&p)
                         .map_err(|e| format!("Failed to read harness {}: {}", p.display(), e))?;
@@ -423,48 +823,86 @@ fn run_test_file(
                         Ok(s) => s,
                         Err(e) => {
                             eprintln!(
-                                "Skipping {} because harness {} parse failed: {}",
+                                "Unsupported {} because harness {} parse failed: {}",
                                 path.display(),
                                 h,
                                 e
                             );
-                            return Ok(None);
+                            return Err(format!(
+                                "{} (UNSUPPORTED: harness {} parse failed: {})",
+                                path.display(),
+                                h,
+                                e
+                            ));
                         }
                     };
                     let prog = session.program();
-                    if let Err(e) = typecheck::check_oxc(prog) {
-                        eprintln!(
-                            "Skipping {} because harness {} typecheck failed: {}",
-                            path.display(),
-                            h,
-                            e
-                        );
-                        return Ok(None);
-                    }
                     let chunk = match compiler::compile_oxc(prog) {
                         Ok(c) => c,
                         Err(e) => {
                             eprintln!(
-                                "Skipping {} because harness {} compile failed: {}",
+                                "Unsupported {} because harness {} compile failed: {}",
                                 path.display(),
                                 h,
                                 e
                             );
-                            return Ok(None);
+                            return Err(format!(
+                                "{} (UNSUPPORTED: harness {} compile failed: {})",
+                                path.display(),
+                                h,
+                                e
+                            ));
                         }
                     };
                     if let Err(e) = vm.run(chunk) {
                         eprintln!(
-                            "Skipping {} because harness {} failed at runtime: {}",
+                            "Unsupported {} because harness {} failed at runtime: {}",
                             path.display(),
                             h,
                             e
                         );
-                        return Ok(None);
+                        return Err(format!(
+                            "{} (UNSUPPORTED: harness {} runtime failed: {})",
+                            path.display(),
+                            h,
+                            e
+                        ));
                     }
                 } else {
-                    eprintln!("Skipping {} because harness {} missing", path.display(), h);
-                    return Ok(None);
+                    eprintln!(
+                        "Unsupported {} because harness {} missing",
+                        path.display(),
+                        h
+                    );
+                    return Err(format!(
+                        "{} (UNSUPPORTED: harness {} missing)",
+                        path.display(),
+                        h
+                    ));
+                }
+            }
+            if env::var("TSBLITZ_TRACE").ok().as_deref() == Some("1") {
+                eprintln!("[trace] assert global: {:?}", vm.get_global("assert"));
+                eprintln!(
+                    "[trace] assert own keys: {:?}",
+                    vm.list_global_own_keys("assert")
+                );
+                eprintln!(
+                    "[trace] assert prototype keys: {:?}",
+                    vm.list_global_prototype_keys("assert")
+                );
+                if let Some(assert_val) = vm.get_global("assert") {
+                    let key = PropertyKey::String("_isSameValue".to_string());
+                    if let Ok(helper) = vm.get_property_host(&assert_val, &key) {
+                        eprintln!("[trace] assert._isSameValue: {}", helper);
+                        if let Ok(result) = vm.call_value_with_this(
+                            &helper,
+                            &assert_val,
+                            &[Value::Number(1.0), Value::Number(1.0)],
+                        ) {
+                            eprintln!("[trace] assert._isSameValue(1,1): {}", result);
+                        }
+                    }
                 }
             }
         }
@@ -515,17 +953,7 @@ fn run_test_file(
         };
         let prog = session.program();
 
-        // Typecheck - if this errors unexpectedly, test fails for this mode
-        if let Err(e) = typecheck::check_oxc(prog) {
-            return Err(format!(
-                "{} ({}): typecheck error: {}",
-                path.display(),
-                mode_name,
-                e
-            ));
-        }
-
-        // Compile (convert to local_ast for now)
+        // Compile the JS source directly; Test262 should not be gated on TS-only checks.
         let chunk = match compiler::compile_oxc(prog) {
             Ok(c) => c,
             Err(e) => {
@@ -570,7 +998,7 @@ fn run_test_file(
     }
 
     // If we reached here for all required modes, the test passed.
-    Ok(Some(()))
+    Ok(())
 }
 
 fn resolve_segment(test_root: &Path, segment: &str) -> PathBuf {
@@ -591,14 +1019,10 @@ fn resolve_segment(test_root: &Path, segment: &str) -> PathBuf {
 
 fn run_harness_only(
     test262_root: &Path,
-    vm: &mut Vm,
-    keep_globals: &HashSet<String>,
+    baseline_globals: &Rc<RefCell<ObjectData>>,
 ) -> Result<(), String> {
     let harness_dir = test262_root.join("harness");
-    let mut harness_files: Vec<String> = vec![
-        "harness/sta.js".to_string(),
-        "harness/assert.js".to_string(),
-    ];
+    let mut harness_files: Vec<String> = Vec::new();
     if harness_dir.exists() {
         let mut extra: Vec<String> = Vec::new();
         for ent in fs::read_dir(&harness_dir)
@@ -658,9 +1082,19 @@ fn run_harness_only(
         eprintln!("--- END DIAGNOSTICS ---");
     }
 
+    let keep_globals: HashSet<String> = baseline_globals
+        .borrow()
+        .properties
+        .keys()
+        .filter_map(|k| match k {
+            PropertyKey::String(s) => Some(s.clone()),
+            PropertyKey::Symbol(_) => None,
+        })
+        .collect();
+
     for h in &harness_files {
-        vm.reset(keep_globals);
-        let p = test262_root.join(h);
+        let mut vm = make_vm_from_snapshot(baseline_globals);
+        let p = test262_root.join("harness").join(h);
         if !p.exists() {
             return Err(format!("Harness file missing: {}", p.display()));
         }
@@ -669,7 +1103,6 @@ fn run_harness_only(
         let session = Parser::parse_source(&hsrc)
             .map_err(|e| format!("Harness {} parse failed: {}", h, e))?;
         let prog = session.program();
-        typecheck::check_oxc(prog).map_err(|e| format!("Harness {} typecheck failed: {}", h, e))?;
         let chunk = compiler::compile_oxc(prog)
             .map_err(|e| format!("Harness {} compile failed: {}", h, e))?;
         match vm.run(chunk) {
@@ -678,7 +1111,7 @@ fn run_harness_only(
             }
             Err(e) => {
                 eprintln!("Harness {} runtime failed: {}", h, e);
-                print_vm_diag(vm, keep_globals);
+                print_vm_diag(&vm, &keep_globals);
                 return Err(format!("Harness {} runtime failed: {}", h, e));
             }
         }
@@ -723,32 +1156,299 @@ fn main() {
 
     let mut ran = 0usize;
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
+    let mut top_level: HashMap<String, BucketStats> = HashMap::new();
+    let mut subtrees: HashMap<String, BucketStats> = HashMap::new();
 
     // Create a persistent VM and globals, install host builtins and the soft-prelude
-    let globals: Rc<RefCell<tsblitz::value::ObjectData>> =
-        Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+    let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
         PropertyKey::String("__native_print".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
         }))),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("print".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
         }))),
     );
-    let mut data = tsblitz::value::ObjectData::new();
-    data.properties.insert(
-        PropertyKey::String("evalScript".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            builtin_eval_script(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_instanceof".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let value = args.first().cloned().unwrap_or(Value::Undefined);
+            let ctor = args.get(1).cloned().unwrap_or(Value::Undefined);
+            vm.instance_of(&value, &ctor).map(Value::Bool)
         }))),
     );
     globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_inProperty".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let prop = args.first().cloned().unwrap_or(Value::Undefined);
+            let obj = args.get(1).cloned().unwrap_or(Value::Undefined);
+            vm.in_property(&prop, &obj).map(Value::Bool)
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_typeof".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+            let value = args.first().cloned().unwrap_or(Value::Undefined);
+            let ty = match value {
+                Value::Undefined => "undefined",
+                Value::Null => "object",
+                Value::Bool(_) => "boolean",
+                Value::Number(_) => "number",
+                Value::String(_) => "string",
+                Value::BigInt(_) => "bigint",
+                Value::Symbol(_, _) => "symbol",
+                Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. } => {
+                    "function"
+                }
+                Value::Object(_) | Value::Array(..) => "object",
+            };
+            Ok(Value::String(ty.to_string()))
+        }))),
+    );
+    let mut data = ObjectData::new();
+    data.properties.insert(
+        PropertyKey::String("evalScript".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            builtin_eval_script(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+        }))),
+    );
+    data.properties.insert(
+        PropertyKey::String("IsHTMLDDA".to_string()),
+        PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
+    );
+    globals.borrow_mut().properties.insert(
         PropertyKey::String("$262".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(data)))),
+        PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(data)))),
+    );
+
+    // Provide a few more kernel-native helpers the soft prelude expects.
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_new_object".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| {
+            use std::cell::RefCell;
+            use std::rc::Rc;
+            Ok(Value::Object(Rc::new(RefCell::new(ObjectData::new()))))
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__define_property".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            vm.define_property_builtin(args)
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_toString".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let v = args.first().cloned().unwrap_or(Value::Undefined);
+            vm.to_string(&v).map(Value::String)
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_toNumber".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let v = args.first().cloned().unwrap_or(Value::Undefined);
+            vm.to_number_value(&v).map(Value::Number)
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_toBoolean".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let v = args.first().cloned().unwrap_or(Value::Undefined);
+            Ok(Value::Bool(vm.to_boolean(&v)))
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_abstractEquality".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Undefined);
+            let b = args.get(1).cloned().unwrap_or(Value::Undefined);
+            match vm.abstract_equality(&a, &b) {
+                Ok(v) => Ok(Value::Bool(v)),
+                Err(e) => Err(e),
+            }
+        }))),
+    );
+
+    // Arithmetic helpers (support BigInt-aware ops similar to main.rs)
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_add".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            if matches!(a, Value::BigInt(_)) || matches!(b, Value::BigInt(_)) {
+                if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
+                    return Ok(Value::BigInt(*x + *y));
+                } else {
+                    return Err(tsblitz::errors::RuntimeError::from(
+                        "Add: cannot mix BigInt and other types",
+                    ));
+                }
+            }
+            let a_prim = vm.to_primitive(&a, None)?;
+            let b_prim = vm.to_primitive(&b, None)?;
+            if matches!(a_prim, Value::String(_)) || matches!(b_prim, Value::String(_)) {
+                let sa = vm.to_string(&a_prim)?;
+                let sb = vm.to_string(&b_prim)?;
+                return Ok(Value::String(format!("{}{}", sa, sb)));
+            }
+            let na = vm.to_number_value(&a_prim)?;
+            let nb = vm.to_number_value(&b_prim)?;
+            Ok(Value::Number(na + nb))
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_subtract".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
+                return Ok(Value::BigInt(*x - *y));
+            }
+            let na = vm.to_number_value(&a)?;
+            let nb = vm.to_number_value(&b)?;
+            Ok(Value::Number(na - nb))
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_multiply".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
+                return Ok(Value::BigInt(*x * *y));
+            }
+            let na = vm.to_number_value(&a)?;
+            let nb = vm.to_number_value(&b)?;
+            Ok(Value::Number(na * nb))
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_divide".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            if matches!(a, Value::BigInt(_)) || matches!(b, Value::BigInt(_)) {
+                return Err(tsblitz::errors::RuntimeError::from(
+                    "Div: bigint not supported",
+                ));
+            }
+            let na = vm.to_number_value(&a)?;
+            let nb = vm.to_number_value(&b)?;
+            Ok(Value::Number(na / nb))
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_remainder".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
+                return Ok(Value::BigInt(*x % *y));
+            }
+            let na = vm.to_number_value(&a)?;
+            let nb = vm.to_number_value(&b)?;
+            Ok(Value::Number(na % nb))
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_exponentiate".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
+                if *y < 0 {
+                    return Err(tsblitz::errors::RuntimeError::from(
+                        "Exponentiation with negative BigInt not supported",
+                    ));
+                }
+                let mut res: i128 = 1;
+                let mut base = *x;
+                let mut exp = *y as u128;
+                while exp > 0 {
+                    if (exp & 1) == 1 {
+                        res = res.checked_mul(base).ok_or_else(|| {
+                            tsblitz::errors::RuntimeError::from("BigInt overflow in exponentiation")
+                        })?;
+                    }
+                    exp >>= 1;
+                    if exp > 0 {
+                        base = base.checked_mul(base).ok_or_else(|| {
+                            tsblitz::errors::RuntimeError::from("BigInt overflow in exponentiation")
+                        })?;
+                    }
+                }
+                return Ok(Value::BigInt(res));
+            }
+            let na = vm.to_number_value(&a)?;
+            let nb = vm.to_number_value(&b)?;
+            Ok(Value::Number(na.powf(nb)))
+        }))),
+    );
+
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_lessThan".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            let ap = vm.to_primitive(&a, None)?;
+            let bp = vm.to_primitive(&b, None)?;
+            if let (Value::String(sa), Value::String(sb)) = (ap.clone(), bp.clone()) {
+                return Ok(Value::Bool(sa < sb));
+            }
+            let na = vm.to_number_value(&ap)?;
+            let nb = vm.to_number_value(&bp)?;
+            Ok(Value::Bool(na < nb))
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_lessThanOrEqual".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            let ap = vm.to_primitive(&a, None)?;
+            let bp = vm.to_primitive(&b, None)?;
+            if let (Value::String(sa), Value::String(sb)) = (ap.clone(), bp.clone()) {
+                return Ok(Value::Bool(sa <= sb));
+            }
+            let na = vm.to_number_value(&ap)?;
+            let nb = vm.to_number_value(&bp)?;
+            Ok(Value::Bool(na <= nb))
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_greaterThan".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            let ap = vm.to_primitive(&a, None)?;
+            let bp = vm.to_primitive(&b, None)?;
+            if let (Value::String(sa), Value::String(sb)) = (ap.clone(), bp.clone()) {
+                return Ok(Value::Bool(sa > sb));
+            }
+            let na = vm.to_number_value(&ap)?;
+            let nb = vm.to_number_value(&bp)?;
+            Ok(Value::Bool(na > nb))
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_greaterThanOrEqual".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let a = args.first().cloned().unwrap_or(Value::Null);
+            let b = args.get(1).cloned().unwrap_or(Value::Null);
+            let ap = vm.to_primitive(&a, None)?;
+            let bp = vm.to_primitive(&b, None)?;
+            if let (Value::String(sa), Value::String(sb)) = (ap.clone(), bp.clone()) {
+                return Ok(Value::Bool(sa >= sb));
+            }
+            let na = vm.to_number_value(&ap)?;
+            let nb = vm.to_number_value(&bp)?;
+            Ok(Value::Bool(na >= nb))
+        }))),
     );
 
     let mut vm = Vm::new(globals.clone());
@@ -775,20 +1475,15 @@ fn main() {
             eprintln!("Failed to execute soft prelude: {}", e);
         }
     }
+    install_minimal_kernel_constructors(&globals);
+    let realm_seed = clone_globals(&globals);
+    install_test262_realm_helpers(&globals, &realm_seed);
 
-    // Capture the set of globals installed by host + prelude; preserve these across tests.
-    let keep_globals: HashSet<String> = globals
-        .borrow()
-        .properties
-        .keys()
-        .filter_map(|k| match k {
-            PropertyKey::String(s) => Some(s.clone()),
-            PropertyKey::Symbol(_) => None,
-        })
-        .collect();
+    // Snapshot the fully bootstrapped realm once, then restore from it for each test.
+    let baseline_globals = clone_globals(&globals);
 
     if opts.harness_only {
-        match run_harness_only(&test262_dir, &mut vm, &keep_globals) {
+        match run_harness_only(&test262_dir, &baseline_globals) {
             Ok(()) => {
                 eprintln!("Harness-only run: ok");
                 exit(0);
@@ -801,7 +1496,9 @@ fn main() {
     }
 
     for f in files {
-        if ran >= opts.limit {
+        if let Some(limit) = opts.limit
+            && ran >= limit
+        {
             break;
         }
         if let Some(ref flt) = opts.filter
@@ -811,30 +1508,52 @@ fn main() {
         }
 
         eprintln!("Running test: {}", f.display());
-        match run_test_file(&f, &test262_dir, &mut vm, &keep_globals) {
-            Ok(Some(())) => {
+        let (top_key, subtree_key) = bucket_keys(&test_root, &f);
+        match run_test_file(&f, &test262_dir, &baseline_globals) {
+            Ok(()) => {
                 ran += 1;
+                top_level.entry(top_key).or_default().pass += 1;
+                subtrees.entry(subtree_key).or_default().pass += 1;
                 eprintln!("  PASS");
-            }
-            Ok(None) => {
-                eprintln!("  SKIP");
             }
             Err(e) => {
                 ran += 1;
+                top_level.entry(top_key).or_default().fail += 1;
+                subtrees.entry(subtree_key).or_default().fail += 1;
                 eprintln!("  FAIL: {}", e);
                 failed.push((f.clone(), e));
             }
         }
     }
 
+    let passed = ran.saturating_sub(failed.len());
+    let pass_pct = if ran == 0 {
+        0.0
+    } else {
+        (passed as f64 / ran as f64) * 100.0
+    };
+
     if !failed.is_empty() {
-        eprintln!("Summary: ran {}, failed {}", ran, failed.len());
+        eprintln!(
+            "Summary: ran {}, passed {}, failed {}, pass rate {:.2}%",
+            ran,
+            passed,
+            failed.len(),
+            pass_pct
+        );
+        print_bucket_summary("Top-level breakdown:", &top_level, 12, false);
+        print_bucket_summary("Worst subtrees:", &subtrees, 15, true);
         for (p, m) in failed.iter().take(20) {
             eprintln!("  {}: {}", p.display(), m);
         }
         exit(1);
     } else {
-        eprintln!("Test262 connector: ran {} tests (no failures)", ran);
+        eprintln!(
+            "Test262 connector: ran {} tests, passed {} ({:.2}%)",
+            ran, passed, pass_pct
+        );
+        print_bucket_summary("Top-level breakdown:", &top_level, 12, false);
+        print_bucket_summary("Worst subtrees:", &subtrees, 15, true);
         exit(0);
     }
 }
