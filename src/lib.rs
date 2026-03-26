@@ -62,6 +62,7 @@ pub mod errors;
 pub mod lexer;
 pub mod module;
 pub mod parser;
+pub mod realm;
 pub mod resolver;
 pub mod runtime_utils;
 pub mod trace;
@@ -80,6 +81,7 @@ pub use oxc_ast::ast as oast;
 pub use resolver::*;
 // `oxc_typecheck` removed — use `typecheck` module which now provides oxc integrations.
 pub use parser::*;
+pub use realm::*;
 pub use trace::*;
 pub use typecheck::{check as typecheck, type_to_string as type_to_string_display};
 pub use value::*;

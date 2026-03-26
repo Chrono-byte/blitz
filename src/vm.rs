@@ -45,6 +45,7 @@
 
 use crate::bytecode::{Chunk, Op};
 use crate::module::ModuleLoader;
+use crate::realm::Realm;
 use crate::typecheck::BuiltinType;
 use crate::typecheck::Type;
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
@@ -95,6 +96,10 @@ struct IcEntry {
     generation: u64,
     /// Cached property value.
     value: Value,
+    /// Whether the property was an accessor when cached. Accessor results
+    /// are never served from cache because the getter may return different
+    /// values on each invocation.
+    is_accessor: bool,
 }
 
 // Call frame
@@ -175,6 +180,8 @@ fn get_global_bg_runtime() -> Arc<Runtime> {
 
 /// Virtual machine for executing bytecode.
 pub struct Vm {
+    /// The ECMAScript Realm this VM operates in.
+    realm: Realm,
     /// Chunk being executed.
     chunk: Rc<Chunk>,
     /// Instruction pointer within the chunk.
@@ -188,7 +195,7 @@ pub struct Vm {
     this_value: Value,
     /// Upvalue environment for the currently executing closure, if any.
     current_closure_env: Option<Rc<RefCell<Vec<Rc<RefCell<Value>>>>>>,
-    /// Global variables.
+    /// Global variables (derived from realm.global_object for convenience).
     globals: Rc<RefCell<ObjectData>>,
     /// Call-frame stack.
     frames: Vec<Frame>,
@@ -219,7 +226,9 @@ impl Vm {
 
     /// Create a new virtual machine.
     pub fn new(globals: Rc<RefCell<ObjectData>>) -> Self {
+        let realm = Realm::with_globals(Rc::clone(&globals));
         Self {
+            realm,
             chunk: Rc::new(Chunk::new()),
             ip: 0,
             stack: Vec::with_capacity(STACK_INITIAL_CAPACITY),
@@ -245,12 +254,81 @@ impl Vm {
     /// ensures every VM has the expected helpers (including a `globalThis`
     /// object) available for the soft prelude without requiring callers to
     /// remember to invoke runtime setup.
-    pub fn with_runtime(self) -> Self {
+    pub fn with_runtime(mut self) -> Self {
         // Install minimal kernel constructors/helpers onto the globals map.
         // This is defensive: the installer will only populate missing keys
         // and will not override host-provided helpers.
         crate::runtime_utils::install_minimal_kernel_constructors(&self.globals);
+        // Populate realm intrinsics from the globals that were just installed.
+        self.populate_realm_intrinsics();
         self
+    }
+
+    /// Populate the Realm's intrinsics table from the globals.
+    ///
+    /// This extracts canonical constructor/prototype references from the
+    /// globals map and stores them in the Realm's intrinsics table. Called
+    /// after `install_minimal_kernel_constructors` to wire up the Realm.
+    fn populate_realm_intrinsics(&mut self) {
+        // Helper: look up a constructor from globals
+        let get_ctor = |globals: &Rc<RefCell<ObjectData>>, name: &str| -> Option<Value> {
+            globals
+                .borrow()
+                .properties
+                .get(&PropertyKey::String(name.to_string()))
+                .and_then(|d| match d {
+                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                    _ => None,
+                })
+        };
+
+        // Helper: extract prototype from a constructor via free-function get_property
+        let get_proto = |ctor: &Value| -> Option<Value> {
+            get_property(ctor, &PropertyKey::String("prototype".to_string()), 0)
+                .ok()
+                .filter(|v| !matches!(v, Value::Null | Value::Undefined))
+        };
+
+        let g = &self.globals;
+
+        let obj_ctor = get_ctor(g, "Object");
+        let arr_ctor = get_ctor(g, "Array");
+        let fn_ctor = get_ctor(g, "Function");
+        let str_ctor = get_ctor(g, "String");
+        let sym_ctor = get_ctor(g, "Symbol");
+        let err_ctor = get_ctor(g, "Error");
+        let te_ctor = get_ctor(g, "TypeError");
+        let re_ctor = get_ctor(g, "RangeError");
+        let refe_ctor = get_ctor(g, "ReferenceError");
+        let se_ctor = get_ctor(g, "SyntaxError");
+        let prom_ctor = get_ctor(g, "Promise");
+        let date_ctor = get_ctor(g, "Date");
+        let map_ctor = get_ctor(g, "Map");
+        let num_ctor = get_ctor(g, "Number");
+
+        self.realm.intrinsics.object_constructor = obj_ctor.clone();
+        self.realm.intrinsics.object_prototype = obj_ctor.as_ref().and_then(get_proto);
+        self.realm.intrinsics.array_constructor = arr_ctor.clone();
+        self.realm.intrinsics.array_prototype = arr_ctor.as_ref().and_then(get_proto);
+        self.realm.intrinsics.function_constructor = fn_ctor.clone();
+        self.realm.intrinsics.function_prototype = fn_ctor.as_ref().and_then(get_proto);
+        self.realm.intrinsics.string_constructor = str_ctor.clone();
+        self.realm.intrinsics.string_prototype = str_ctor.as_ref().and_then(get_proto);
+        self.realm.intrinsics.symbol_constructor = sym_ctor.clone();
+        self.realm.intrinsics.symbol_prototype = sym_ctor.as_ref().and_then(get_proto);
+        self.realm.intrinsics.error_constructor = err_ctor.clone();
+        self.realm.intrinsics.error_prototype = err_ctor.as_ref().and_then(get_proto);
+        self.realm.intrinsics.type_error_constructor = te_ctor;
+        self.realm.intrinsics.range_error_constructor = re_ctor;
+        self.realm.intrinsics.reference_error_constructor = refe_ctor;
+        self.realm.intrinsics.syntax_error_constructor = se_ctor;
+        self.realm.intrinsics.promise_constructor = prom_ctor.clone();
+        self.realm.intrinsics.promise_prototype = prom_ctor.as_ref().and_then(get_proto);
+        self.realm.intrinsics.date_constructor = date_ctor.clone();
+        self.realm.intrinsics.date_prototype = date_ctor.as_ref().and_then(get_proto);
+        self.realm.intrinsics.map_constructor = map_ctor.clone();
+        self.realm.intrinsics.map_prototype = map_ctor.as_ref().and_then(get_proto);
+        self.realm.intrinsics.number_constructor = num_ctor;
     }
 
     /// Provide mutable access to the per-VM module loader, creating it if missing.
@@ -295,6 +373,16 @@ impl Vm {
     /// Returns the current globals object for the active realm.
     pub fn globals_rc(&self) -> Rc<RefCell<ObjectData>> {
         Rc::clone(&self.globals)
+    }
+
+    /// Returns a reference to the Realm this VM operates in.
+    pub fn realm(&self) -> &Realm {
+        &self.realm
+    }
+
+    /// Returns a mutable reference to the Realm this VM operates in.
+    pub fn realm_mut(&mut self) -> &mut Realm {
+        &mut self.realm
     }
 
     /// Return own keys for a global value if it is an object or closure.
@@ -1515,9 +1603,10 @@ impl Vm {
                         return Ok(rv);
                     }
                 }
-                // TODO: when Object.prototype.toString/valueOf are wired into
-                // the runtime object model, this should throw TypeError instead.
-                Ok(Value::String("[object Object]".to_string()))
+                // Per spec: throw TypeError if no primitive conversion possible.
+                Err(crate::errors::RuntimeError::from(
+                    "Cannot convert object to primitive value",
+                ))
             }
             _ => Ok(v.clone()),
         }
@@ -2354,6 +2443,7 @@ impl Vm {
                 .and_then(|vec| vec.get(slot))
                 .and_then(|entry| entry.as_ref())
                 .filter(|e| e.obj_ptr == obj_ptr && e.generation == current_gen && e.key == key)
+                .filter(|e| !e.is_accessor) // Never serve accessor results from cache
                 .map(|e| e.value.clone());
 
             if let Some(cached) = hit {
@@ -2362,6 +2452,14 @@ impl Vm {
             }
 
             let v = self.get_property_value(&obj, &key)?;
+
+            // Determine if this property is an accessor on the found holder.
+            // Accessor results must never be cached because the getter may
+            // return a different value each invocation.
+            let is_accessor = self
+                .lookup_property_descriptor(&obj, &key, 0)?
+                .is_some_and(|(desc, _)| matches!(desc, PropertyDescriptor::Accessor { .. }));
+
             let cache_vec = self
                 .ic_caches
                 .entry(chunk_id)
@@ -2374,6 +2472,7 @@ impl Vm {
                 key: key.clone(),
                 generation: current_gen,
                 value: v.clone(),
+                is_accessor,
             });
             self.stack.push(v);
         } else {
@@ -2759,10 +2858,23 @@ impl Vm {
 
     /// Instanceof helper: checks whether `value` has `constructor.prototype` in its prototype chain.
     pub fn instance_of(
-        &self,
+        &mut self,
         value: &Value,
         constructor: &Value,
     ) -> Result<bool, crate::errors::RuntimeError> {
+        // Per spec: if constructor has @@hasInstance, call it.
+        let has_instance_key =
+            PropertyKey::Symbol(crate::value::SymbolId::well_known_has_instance());
+        if let Ok(method) = get_property(constructor, &has_instance_key, 0)
+            && matches!(
+                method,
+                Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
+            )
+        {
+            let result = self.call_with_this(&method, constructor, &[value.clone()])?;
+            return Ok(result.is_truthy());
+        }
+
         // Only objects have prototype chains.
         match value {
             Value::Object(_)
@@ -3311,6 +3423,25 @@ fn set_property(
                 }
                 return Ok(());
             }
+            // Special handling: setting array.length truncates the dense store.
+            if matches!(key, PropertyKey::String(s) if s == "length")
+                && let Value::Number(new_len_f) = value {
+                    let new_len = if new_len_f.is_nan() || new_len_f < 0.0 {
+                        0usize
+                    } else {
+                        new_len_f as usize
+                    };
+                    let mut a = arr.borrow_mut();
+                    if new_len < a.len() {
+                        a.truncate(new_len);
+                    }
+                    let mut p = props.borrow_mut();
+                    p.properties.insert(
+                        PropertyKey::String("length".to_string()),
+                        PropertyDescriptor::data(Value::Number(a.len() as f64)),
+                    );
+                    return Ok(());
+                }
             let mut p = props.borrow_mut();
             if let Some(desc) = p.properties.get_mut(key) {
                 match desc {

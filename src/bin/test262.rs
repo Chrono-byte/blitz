@@ -258,10 +258,6 @@ fn clone_globals(globals: &Rc<RefCell<ObjectData>>) -> Rc<RefCell<ObjectData>> {
     clone_object_data(globals, &mut ctx)
 }
 
-fn make_vm_from_snapshot(snapshot: &Rc<RefCell<ObjectData>>) -> Vm {
-    Vm::new(clone_globals(snapshot))
-}
-
 /// Runner options for the test262 test runner.
 struct RunnerOptions {
     /// List of test segments to include.
@@ -288,8 +284,6 @@ fn print_usage() {
 }
 
 /// Parses the command line arguments
-///
-/// Returns a `RunnerOptions` struct with the parsed values.
 fn parse_args() -> RunnerOptions {
     let mut includes: Vec<String> = Vec::new();
     let mut excludes: Vec<String> = Vec::new();
@@ -389,7 +383,6 @@ struct Meta {
 fn extract_front_matter(src: &str) -> Option<String> {
     let start = src.find("/*---")?;
     let end = src.find("---*/")?;
-    // extract content between the full token length and end (skip the starting token)
     let fm = &src[start + "/*---".len()..end];
     Some(fm.trim().to_string())
 }
@@ -397,7 +390,6 @@ fn extract_front_matter(src: &str) -> Option<String> {
 /// Parse Test262 metadata YAML into `Meta`
 fn parse_meta(src: &str) -> Option<Meta> {
     let fm = extract_front_matter(src)?;
-    // serde_yaml is available via Cargo dependencies for this binary
     match serde_yaml::from_str::<Meta>(&fm) {
         Ok(m) => Some(m),
         Err(e) => {
@@ -421,6 +413,9 @@ fn builtin_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 /// A simple `$262.evalScript` implementation that evaluates the provided
 /// source in the current realm (not a fresh realm). Per Test262 spec:
 /// ParseScript → ScriptEvaluation in current realm.
+///
+/// The key fix: uses `Rc::clone` (shared handle) instead of deep cloning
+/// globals, so mutations in evalScript are visible to the caller.
 fn builtin_eval_script(globals: &Rc<RefCell<ObjectData>>, args: &[Value]) -> Result<Value, String> {
     if args.is_empty() {
         return Ok(Value::Null);
@@ -430,196 +425,107 @@ fn builtin_eval_script(globals: &Rc<RefCell<ObjectData>>, args: &[Value]) -> Res
         _ => return Ok(Value::Null),
     };
 
-    // Parse / compile / run in the current realm's globals
+    // Parse / compile / run in the current realm's globals.
+    // Rc::clone gives us a shared handle — the new VM sees mutations from
+    // the calling VM and vice versa. This matches spec: evalScript runs
+    // in the SAME realm.
     let session = Parser::parse_source(&src).map_err(|e| format!("evalScript parse: {}", e))?;
     let prog = session.program();
     let chunk = compiler::compile_oxc(prog).map_err(|e| format!("evalScript compile: {}", e))?;
-    let mut vm = Vm::new(Rc::clone(globals));
-    vm.run(chunk)
+    let mut eval_vm = Vm::new(Rc::clone(globals));
+    eval_vm
+        .run(chunk)
         .map_err(|e| format!("evalScript runtime: {}", e))
 }
 
-fn install_test262_realm_helpers(
-    globals: &Rc<RefCell<ObjectData>>,
-    realm_seed: &Rc<RefCell<ObjectData>>,
-) {
-    let seed = Rc::clone(realm_seed);
-    let create_realm = Value::Builtin(Rc::new(move |_vm, _args| {
-        // Clone all globals (intrinsics, constructors, harness state, etc.)
-        let realm_globals = clone_globals(&seed);
+/// Create a `$262` object for a realm, with proper createRealm that builds
+/// fresh intrinsics (not a heap clone) and evalScript that shares globals.
+fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
+    let mut data = ObjectData::new();
 
-        // Build a $262 object for the new realm
-        let mut new_262_data = ObjectData::new();
+    // evalScript: shares globals via Rc::clone (not deep clone)
+    let eval_globals = Rc::clone(globals);
+    data.properties.insert(
+        PropertyKey::String("evalScript".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+            builtin_eval_script(&eval_globals, args).map_err(tsblitz::errors::RuntimeError::from)
+        }))),
+    );
 
-        // evalScript: evaluate in the new realm's globals
-        let eval_globals = Rc::clone(&realm_globals);
-        new_262_data.properties.insert(
-            PropertyKey::String("evalScript".to_string()),
-            PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                builtin_eval_script(&eval_globals, args)
-                    .map_err(tsblitz::errors::RuntimeError::from)
-            }))),
-        );
+    // IsHTMLDDA: plain object placeholder (full implementation requires exotic object semantics)
+    data.properties.insert(
+        PropertyKey::String("IsHTMLDDA".to_string()),
+        PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
+    );
 
-        // IsHTMLDDA: callable object for document.all simulation
-        new_262_data.properties.insert(
-            PropertyKey::String("IsHTMLDDA".to_string()),
-            PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
-        );
-
-        // detachArrayBuffer - detaches an ArrayBuffer per spec
-        new_262_data.properties.insert(
-            PropertyKey::String("detachArrayBuffer".to_string()),
-            PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
-                if let Some(Value::Object(obj)) = args.first() {
-                    let mut obj_data = obj.borrow_mut();
-                    obj_data.properties.insert(
-                        PropertyKey::String("[[ArrayBufferData]]".to_string()),
-                        PropertyDescriptor::data(Value::Array(
-                            Rc::new(RefCell::new(Vec::new())),
-                            Rc::new(RefCell::new(ObjectData::new())),
-                        )),
-                    );
-                    obj_data.properties.insert(
-                        PropertyKey::String("byteLength".to_string()),
-                        PropertyDescriptor::data(Value::Number(0.0)),
-                    );
-                }
-                Ok(Value::Undefined)
-            }))),
-        );
-
-        // createRealm: recursive - clone from the same seed
-        let sub_seed = Rc::clone(&seed);
-        new_262_data.properties.insert(
-            PropertyKey::String("createRealm".to_string()),
-            PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, _args| {
-                // Recursively create a new realm by re-cloning from seed
-                let sub_globals = clone_globals(&sub_seed);
-                let sub_eval = Rc::clone(&sub_globals);
-
-                let mut sub_262 = ObjectData::new();
-                sub_262.properties.insert(
-                    PropertyKey::String("evalScript".to_string()),
-                    PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                        builtin_eval_script(&sub_eval, args)
-                            .map_err(tsblitz::errors::RuntimeError::from)
-                    }))),
+    // detachArrayBuffer: null out [[ArrayBufferData]] and set byteLength to 0
+    data.properties.insert(
+        PropertyKey::String("detachArrayBuffer".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+            if let Some(Value::Object(obj)) = args.first() {
+                let mut obj_data = obj.borrow_mut();
+                // Per spec: [[ArrayBufferData]] = null
+                obj_data.properties.insert(
+                    PropertyKey::String("[[ArrayBufferData]]".to_string()),
+                    PropertyDescriptor::data(Value::Null),
                 );
-                sub_262.properties.insert(
-                    PropertyKey::String("IsHTMLDDA".to_string()),
-                    PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(
-                        ObjectData::new(),
-                    )))),
+                obj_data.properties.insert(
+                    PropertyKey::String("byteLength".to_string()),
+                    PropertyDescriptor::data(Value::Number(0.0)),
                 );
-                sub_262.properties.insert(
-                    PropertyKey::String("detachArrayBuffer".to_string()),
-                    PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
-                        if let Some(Value::Object(obj)) = args.first() {
-                            let mut obj_data = obj.borrow_mut();
-                            obj_data.properties.insert(
-                                PropertyKey::String("[[ArrayBufferData]]".to_string()),
-                                PropertyDescriptor::data(Value::Array(
-                                    Rc::new(RefCell::new(Vec::new())),
-                                    Rc::new(RefCell::new(ObjectData::new())),
-                                )),
-                            );
-                            obj_data.properties.insert(
-                                PropertyKey::String("byteLength".to_string()),
-                                PropertyDescriptor::data(Value::Number(0.0)),
-                            );
-                        }
-                        Ok(Value::Undefined)
-                    }))),
-                );
-                sub_262.properties.insert(
-                    PropertyKey::String("global".to_string()),
-                    PropertyDescriptor::data(Value::Object(Rc::clone(&sub_globals))),
-                );
-
-                let sub_realm = Rc::new(RefCell::new(ObjectData::new()));
-                sub_realm.borrow_mut().properties.insert(
-                    PropertyKey::String("global".to_string()),
-                    PropertyDescriptor::data(Value::Object(sub_globals)),
-                );
-                sub_realm.borrow_mut().properties.insert(
-                    PropertyKey::String("$262".to_string()),
-                    PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(sub_262)))),
-                );
-                Ok(Value::Object(sub_realm))
-            }))),
-        );
-
-        // global: the realm's global object
-        new_262_data.properties.insert(
-            PropertyKey::String("global".to_string()),
-            PropertyDescriptor::data(Value::Object(Rc::clone(&realm_globals))),
-        );
-
-        // The realm object exposes both `global` and `$262`
-        let realm = Rc::new(RefCell::new(ObjectData::new()));
-        realm.borrow_mut().properties.insert(
-            PropertyKey::String("global".to_string()),
-            PropertyDescriptor::data(Value::Object(Rc::clone(&realm_globals))),
-        );
-        realm.borrow_mut().properties.insert(
-            PropertyKey::String("$262".to_string()),
-            PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(new_262_data)))),
-        );
-
-        Ok(Value::Object(realm))
-    }));
-
-    if let Some(PropertyDescriptor::Data {
-        value: Value::Object(test262_obj),
-        ..
-    }) = globals
-        .borrow_mut()
-        .properties
-        .get_mut(&PropertyKey::String("$262".to_string()))
-    {
-        test262_obj.borrow_mut().properties.insert(
-            PropertyKey::String("createRealm".to_string()),
-            PropertyDescriptor::data(create_realm),
-        );
-    }
-}
-
-fn relink_error_constructor_properties(globals: &Rc<RefCell<ObjectData>>) {
-    let mut vm = Vm::new(Rc::clone(globals));
-    for name in [
-        "Error",
-        "EvalError",
-        "RangeError",
-        "ReferenceError",
-        "SyntaxError",
-        "TypeError",
-        "URIError",
-    ] {
-        if let Some(ctor) = vm.get_global(name)
-            && let Ok(proto) =
-                vm.get_property_host(&ctor, &PropertyKey::String("prototype".to_string()))
-        {
-            let ctor_desc = PropertyDescriptor::data(ctor.clone());
-            match proto {
-                Value::Object(proto_obj) => {
-                    proto_obj
-                        .borrow_mut()
-                        .properties
-                        .insert(PropertyKey::String("constructor".to_string()), ctor_desc);
-                }
-                Value::Array(_, props)
-                | Value::Closure { props, .. }
-                | Value::BuiltinObject(_, props) => {
-                    props
-                        .borrow_mut()
-                        .properties
-                        .insert(PropertyKey::String("constructor".to_string()), ctor_desc);
-                }
-                _ => {}
             }
-        }
-    }
+            Ok(Value::Undefined)
+        }))),
+    );
+
+    // createRealm: builds a FRESH realm with fresh intrinsics, NOT a heap clone.
+    // Per spec: each realm gets distinct intrinsic identities.
+    data.properties.insert(
+        PropertyKey::String("createRealm".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, _args| {
+            // Create a fresh global object for the new realm.
+            let realm_global = Rc::new(RefCell::new(ObjectData::new()));
+
+            // Install builtins from scratch — gives each realm distinct
+            // constructor/prototype identities. This is correct per spec:
+            // Realm = fresh intrinsics, not a clone of the parent.
+            tsblitz::runtime_utils::install_minimal_kernel_constructors(&realm_global);
+
+            // Copy the calling realm's $262 object structure into the new realm.
+            let new_262 = make_test262_object(&realm_global);
+
+            // Wire the new realm's global to also have a $262 property.
+            realm_global.borrow_mut().properties.insert(
+                PropertyKey::String("$262".to_string()),
+                PropertyDescriptor::data(new_262.clone()),
+            );
+
+            // The $262 object also exposes `global` pointing to the realm's global.
+            let mut realm_wrapper = ObjectData::new();
+            realm_wrapper.properties.insert(
+                PropertyKey::String("global".to_string()),
+                PropertyDescriptor::data(Value::Object(Rc::clone(&realm_global))),
+            );
+            // Copy all properties from the $262 object
+            if let Value::Object(ref obj) = new_262 {
+                for (k, v) in obj.borrow().properties.iter() {
+                    realm_wrapper
+                        .properties
+                        .insert(k.clone(), v.clone());
+                }
+            }
+
+            Ok(Value::Object(Rc::new(RefCell::new(realm_wrapper))))
+        }))),
+    );
+
+    // global: the realm's global object
+    data.properties.insert(
+        PropertyKey::String("global".to_string()),
+        PropertyDescriptor::data(Value::Object(Rc::clone(globals))),
+    );
+
+    Value::Object(Rc::new(RefCell::new(data)))
 }
 
 /// Recursively gather `.js` test files under the given directory while skipping
@@ -689,13 +595,44 @@ fn unsupported_reason(_src: &str, meta: &Option<Meta>) -> Option<String> {
     None
 }
 
+/// Snapshot the set of global property keys (for test isolation).
+fn snapshot_global_keys(globals: &Rc<RefCell<ObjectData>>) -> HashSet<PropertyKey> {
+    globals.borrow().properties.keys().cloned().collect()
+}
+
+/// Restore globals to the state captured by a snapshot.
+///
+/// This removes properties that were ADDED during the test, and restores
+/// properties that were MODIFIED. This is lighter than a full deep clone:
+/// we only track keys, and we rely on the fact that builtins/closures share
+/// state via `Rc`.
+fn restore_globals(globals: &Rc<RefCell<ObjectData>>, baseline: &HashMap<PropertyKey, PropertyDescriptor>) {
+    let mut g = globals.borrow_mut();
+    // Remove keys that were added during the test
+    g.properties.retain(|k, _| baseline.contains_key(k));
+    // Restore keys that were modified
+    for (k, baseline_desc) in baseline {
+        g.properties.insert(k.clone(), baseline_desc.clone());
+    }
+}
+
+/// Snapshot global property descriptors (deeper than just keys).
+fn snapshot_globals(globals: &Rc<RefCell<ObjectData>>) -> HashMap<PropertyKey, PropertyDescriptor> {
+    globals.borrow().properties.clone()
+}
+
 /// Execute a single test file. Returns:
 /// - Ok(())        -> test ran and passed
 /// - Err(String)   -> test failed or is unsupported
+///
+/// Uses snapshot/restore for test isolation instead of deep heap cloning.
+/// The `globals` Rc is shared across tests; we restore from `baseline_snapshot`
+/// before each test mode to undo mutations from the previous test.
 fn run_test_file(
     path: &Path,
     test262_root: &Path,
-    baseline_globals: &Rc<RefCell<ObjectData>>,
+    globals: &Rc<RefCell<ObjectData>>,
+    baseline_snapshot: &HashMap<PropertyKey, PropertyDescriptor>,
 ) -> Result<(), String> {
     let src = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
@@ -773,8 +710,10 @@ fn run_test_file(
         typecheck::set_strict_override(Some(false));
         let _reset_strict = ResetStrict;
 
-        // Restore a fresh realm cloned from the bootstrapped baseline.
-        let mut vm = make_vm_from_snapshot(baseline_globals);
+        // Restore globals from the baseline snapshot (test isolation).
+        // This undoes any mutations from the previous test without deep cloning.
+        restore_globals(globals, baseline_snapshot);
+        let mut vm = Vm::new(Rc::clone(globals));
 
         // Evaluate harness files unless `raw`: compile & run them into the provided VM.
         if !raw_flag {
@@ -960,7 +899,8 @@ fn resolve_segment(test_root: &Path, segment: &str) -> PathBuf {
 
 fn run_harness_only(
     test262_root: &Path,
-    baseline_globals: &Rc<RefCell<ObjectData>>,
+    globals: &Rc<RefCell<ObjectData>>,
+    baseline_snapshot: &HashMap<PropertyKey, PropertyDescriptor>,
 ) -> Result<(), String> {
     let harness_dir = test262_root.join("harness");
     let mut harness_files: Vec<String> = Vec::new();
@@ -1023,7 +963,7 @@ fn run_harness_only(
         eprintln!("--- END DIAGNOSTICS ---");
     }
 
-    let keep_globals: HashSet<String> = baseline_globals
+    let keep_globals: HashSet<String> = globals
         .borrow()
         .properties
         .keys()
@@ -1034,7 +974,8 @@ fn run_harness_only(
         .collect();
 
     for h in &harness_files {
-        let mut vm = make_vm_from_snapshot(baseline_globals);
+        restore_globals(globals, baseline_snapshot);
+        let mut vm = Vm::new(Rc::clone(globals));
         let p = test262_root.join("harness").join(h);
         if !p.exists() {
             return Err(format!("Harness file missing: {}", p.display()));
@@ -1115,126 +1056,6 @@ fn main() {
         }))),
     );
 
-    let mut data = ObjectData::new();
-    let eval_globals = Rc::clone(&globals);
-    data.properties.insert(
-        PropertyKey::String("evalScript".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-            builtin_eval_script(&eval_globals, args).map_err(tsblitz::errors::RuntimeError::from)
-        }))),
-    );
-    data.properties.insert(
-        PropertyKey::String("IsHTMLDDA".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
-    );
-    // Add detachArrayBuffer - detaches an ArrayBuffer per spec
-    data.properties.insert(
-        PropertyKey::String("detachArrayBuffer".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
-            if let Some(Value::Object(obj)) = args.first() {
-                let mut obj_data = obj.borrow_mut();
-                // Clear [[ArrayBufferData]] to empty
-                obj_data.properties.insert(
-                    PropertyKey::String("[[ArrayBufferData]]".to_string()),
-                    PropertyDescriptor::data(Value::Array(
-                        Rc::new(RefCell::new(Vec::new())),
-                        Rc::new(RefCell::new(ObjectData::new())),
-                    )),
-                );
-                // Set byteLength to 0
-                obj_data.properties.insert(
-                    PropertyKey::String("byteLength".to_string()),
-                    PropertyDescriptor::data(Value::Number(0.0)),
-                );
-            }
-            Ok(Value::Undefined)
-        }))),
-    );
-    // Add createRealm - creates a new realm with full global object and $262
-    data.properties.insert(
-        PropertyKey::String("createRealm".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| {
-            // Create a new global object for the realm
-            let realm_global = Rc::new(RefCell::new(ObjectData::new()));
-
-            // Install all the standard built-in constructors using install_minimal_kernel_constructors
-            tsblitz::runtime_utils::install_minimal_kernel_constructors(&realm_global);
-
-            // Create a new $262 object for this realm with the same structure as the main realm
-            let mut new_262_data = ObjectData::new();
-
-            // Add evalScript
-            let eval_globals = Rc::clone(&realm_global);
-            new_262_data.properties.insert(
-                PropertyKey::String("evalScript".to_string()),
-                PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                    builtin_eval_script(&eval_globals, args)
-                        .map_err(tsblitz::errors::RuntimeError::from)
-                }))),
-            );
-
-            // Add IsHTMLDDA
-            new_262_data.properties.insert(
-                PropertyKey::String("IsHTMLDDA".to_string()),
-                PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
-            );
-
-            // Add detachArrayBuffer - detaches an ArrayBuffer per spec
-            new_262_data.properties.insert(
-                PropertyKey::String("detachArrayBuffer".to_string()),
-                PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
-                    if let Some(Value::Object(obj)) = args.first() {
-                        let mut obj_data = obj.borrow_mut();
-                        obj_data.properties.insert(
-                            PropertyKey::String("[[ArrayBufferData]]".to_string()),
-                            PropertyDescriptor::data(Value::Array(
-                                Rc::new(RefCell::new(Vec::new())),
-                                Rc::new(RefCell::new(ObjectData::new())),
-                            )),
-                        );
-                        obj_data.properties.insert(
-                            PropertyKey::String("byteLength".to_string()),
-                            PropertyDescriptor::data(Value::Number(0.0)),
-                        );
-                    }
-                    Ok(Value::Undefined)
-                }))),
-            );
-
-            // Add createRealm recursively so realms can create sub-realms
-            new_262_data.properties.insert(
-                PropertyKey::String("createRealm".to_string()),
-                PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
-                    // Call the main createRealm via the main $262
-                    if let Some(Value::Object(main_262_obj)) = vm.get_global("$262")
-                        && let Some(PropertyDescriptor::Data {
-                            value: Value::Builtin(f),
-                            ..
-                        }) = main_262_obj
-                            .borrow()
-                            .properties
-                            .get(&PropertyKey::String("createRealm".to_string()))
-                    {
-                        return f.as_ref()(vm, args);
-                    }
-                    Err(tsblitz::errors::RuntimeError::from("createRealm not found"))
-                }))),
-            );
-
-            // Add global property pointing to the realm's global object
-            new_262_data.properties.insert(
-                PropertyKey::String("global".to_string()),
-                PropertyDescriptor::data(Value::Object(Rc::clone(&realm_global))),
-            );
-
-            Ok(Value::Object(Rc::new(RefCell::new(new_262_data))))
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("$262".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(data)))),
-    );
-
     // ECMAScript global constants
     globals.borrow_mut().properties.insert(
         PropertyKey::String("NaN".to_string()),
@@ -1244,7 +1065,6 @@ fn main() {
         PropertyKey::String("Infinity".to_string()),
         PropertyDescriptor::data(Value::Number(f64::INFINITY)),
     );
-    // Note: undefined is the default value, not a property
 
     // Provide a few more kernel-native helpers the soft prelude expects.
     globals.borrow_mut().properties.insert(
@@ -1266,6 +1086,14 @@ fn main() {
     // The prelude may extend/replace these; we avoid re-installing kernel
     // constructors afterward to preserve prelude-level constructor identity.
     tsblitz::runtime_utils::install_minimal_kernel_constructors(&globals);
+
+    // Wire $262 test harness object with proper createRealm (fresh intrinsics,
+    // not heap clone) and evalScript (shares globals via Rc::clone).
+    let test262_obj = make_test262_object(&globals);
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("$262".to_string()),
+        PropertyDescriptor::data(test262_obj),
+    );
 
     let mut vm = Vm::new(globals.clone());
     // Run soft prelude once (if present) to install runtime helpers
@@ -1291,15 +1119,13 @@ fn main() {
             eprintln!("Failed to execute soft prelude: {}", e);
         }
     }
-    relink_error_constructor_properties(&globals);
-    let realm_seed = clone_globals(&globals);
-    install_test262_realm_helpers(&globals, &realm_seed);
 
-    // Snapshot the fully bootstrapped realm once, then restore from it for each test.
-    let baseline_globals = clone_globals(&globals);
+    // Snapshot the fully bootstrapped globals for test isolation.
+    // Each test restores from this snapshot instead of deep-cloning.
+    let baseline_snapshot = snapshot_globals(&globals);
 
     if opts.harness_only {
-        match run_harness_only(&test262_dir, &baseline_globals) {
+        match run_harness_only(&test262_dir, &globals, &baseline_snapshot) {
             Ok(()) => {
                 eprintln!("Harness-only run: ok");
                 exit(0);
@@ -1325,7 +1151,7 @@ fn main() {
 
         eprintln!("Running test: {}", f.display());
         let (top_key, subtree_key) = bucket_keys(&test_root, &f);
-        match run_test_file(&f, &test262_dir, &baseline_globals) {
+        match run_test_file(&f, &test262_dir, &globals, &baseline_snapshot) {
             Ok(()) => {
                 ran += 1;
                 top_level.entry(top_key).or_default().pass += 1;
