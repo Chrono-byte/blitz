@@ -419,9 +419,9 @@ fn builtin_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 }
 
 /// A simple `$262.evalScript` implementation that evaluates the provided
-/// source in a fresh realm (new globals). This is a fairly small stub but
-/// helps tests that call `$262.evalScript(...)`.
-fn builtin_eval_script(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
+/// source in the current realm (not a fresh realm). Per Test262 spec:
+/// ParseScript → ScriptEvaluation in current realm.
+fn builtin_eval_script(globals: &Rc<RefCell<ObjectData>>, args: &[Value]) -> Result<Value, String> {
     if args.is_empty() {
         return Ok(Value::Null);
     }
@@ -430,53 +430,13 @@ fn builtin_eval_script(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
         _ => return Ok(Value::Null),
     };
 
-    // Build a minimal new realm
-    let new_globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
-    new_globals.borrow_mut().properties.insert(
-        PropertyKey::String("print".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
-        }))),
-    );
-
-    // Parse / compile / run. Ignore errors and return Null on failure.
-    match Parser::parse_source(&src) {
-        Ok(session) => {
-            let prog = session.program();
-            // compile expects the owned local_ast for now; convert via ESTree JSON
-            let _estree = prog.to_pretty_estree_ts_json(false);
-            // Use the temporary compile_oxc shim so we can avoid an owned local_ast here.
-            match compiler::compile_oxc(prog) {
-                Ok(chunk) => {
-                    let mut vm = Vm::new(new_globals);
-                    match vm.run(chunk) {
-                        Ok(v) => Ok(v),
-                        Err(e) => {
-                            eprintln!("[evalScript] runtime error: {}", e);
-                            Ok(Value::Null)
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[evalScript] compile error: {}", e);
-                    Ok(Value::Null)
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("[evalScript] parse error: {}", e);
-            Ok(Value::Null)
-        }
-    }
-}
-
-/// Run a source text in the provided globals and return a Result.
-fn run_source_in_realm(globals: Rc<RefCell<ObjectData>>, source: &str) -> Result<Value, String> {
-    let session = Parser::parse_source(source).map_err(|e| format!("parse: {}", e))?;
+    // Parse / compile / run in the current realm's globals
+    let session = Parser::parse_source(&src).map_err(|e| format!("evalScript parse: {}", e))?;
     let prog = session.program();
-    let chunk = compiler::compile_oxc(prog).map_err(|e| format!("compile: {}", e))?;
-    let mut vm = Vm::new(globals);
-    vm.run(chunk).map_err(|e| format!("runtime: {}", e))
+    let chunk = compiler::compile_oxc(prog).map_err(|e| format!("evalScript compile: {}", e))?;
+    let mut vm = Vm::new(Rc::clone(globals));
+    vm.run(chunk)
+        .map_err(|e| format!("evalScript runtime: {}", e))
 }
 
 fn install_test262_realm_helpers(
@@ -485,25 +445,128 @@ fn install_test262_realm_helpers(
 ) {
     let seed = Rc::clone(realm_seed);
     let create_realm = Value::Builtin(Rc::new(move |_vm, _args| {
+        // Clone all globals (intrinsics, constructors, harness state, etc.)
         let realm_globals = clone_globals(&seed);
+
+        // Build a $262 object for the new realm
+        let mut new_262_data = ObjectData::new();
+
+        // evalScript: evaluate in the new realm's globals
         let eval_globals = Rc::clone(&realm_globals);
-        realm_globals.borrow_mut().properties.insert(
-            PropertyKey::String("eval".to_string()),
+        new_262_data.properties.insert(
+            PropertyKey::String("evalScript".to_string()),
             PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                let src = match args.get(1).or_else(|| args.first()) {
-                    Some(Value::String(s)) => s.clone(),
-                    _ => return Ok(Value::Undefined),
-                };
-                run_source_in_realm(Rc::clone(&eval_globals), &src)
+                builtin_eval_script(&eval_globals, args)
                     .map_err(tsblitz::errors::RuntimeError::from)
             }))),
         );
 
+        // IsHTMLDDA: callable object for document.all simulation
+        new_262_data.properties.insert(
+            PropertyKey::String("IsHTMLDDA".to_string()),
+            PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
+        );
+
+        // detachArrayBuffer - detaches an ArrayBuffer per spec
+        new_262_data.properties.insert(
+            PropertyKey::String("detachArrayBuffer".to_string()),
+            PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+                if let Some(Value::Object(obj)) = args.first() {
+                    let mut obj_data = obj.borrow_mut();
+                    obj_data.properties.insert(
+                        PropertyKey::String("[[ArrayBufferData]]".to_string()),
+                        PropertyDescriptor::data(Value::Array(
+                            Rc::new(RefCell::new(Vec::new())),
+                            Rc::new(RefCell::new(ObjectData::new())),
+                        )),
+                    );
+                    obj_data.properties.insert(
+                        PropertyKey::String("byteLength".to_string()),
+                        PropertyDescriptor::data(Value::Number(0.0)),
+                    );
+                }
+                Ok(Value::Undefined)
+            }))),
+        );
+
+        // createRealm: recursive - clone from the same seed
+        let sub_seed = Rc::clone(&seed);
+        new_262_data.properties.insert(
+            PropertyKey::String("createRealm".to_string()),
+            PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, _args| {
+                // Recursively create a new realm by re-cloning from seed
+                let sub_globals = clone_globals(&sub_seed);
+                let sub_eval = Rc::clone(&sub_globals);
+
+                let mut sub_262 = ObjectData::new();
+                sub_262.properties.insert(
+                    PropertyKey::String("evalScript".to_string()),
+                    PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+                        builtin_eval_script(&sub_eval, args)
+                            .map_err(tsblitz::errors::RuntimeError::from)
+                    }))),
+                );
+                sub_262.properties.insert(
+                    PropertyKey::String("IsHTMLDDA".to_string()),
+                    PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(
+                        ObjectData::new(),
+                    )))),
+                );
+                sub_262.properties.insert(
+                    PropertyKey::String("detachArrayBuffer".to_string()),
+                    PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+                        if let Some(Value::Object(obj)) = args.first() {
+                            let mut obj_data = obj.borrow_mut();
+                            obj_data.properties.insert(
+                                PropertyKey::String("[[ArrayBufferData]]".to_string()),
+                                PropertyDescriptor::data(Value::Array(
+                                    Rc::new(RefCell::new(Vec::new())),
+                                    Rc::new(RefCell::new(ObjectData::new())),
+                                )),
+                            );
+                            obj_data.properties.insert(
+                                PropertyKey::String("byteLength".to_string()),
+                                PropertyDescriptor::data(Value::Number(0.0)),
+                            );
+                        }
+                        Ok(Value::Undefined)
+                    }))),
+                );
+                sub_262.properties.insert(
+                    PropertyKey::String("global".to_string()),
+                    PropertyDescriptor::data(Value::Object(Rc::clone(&sub_globals))),
+                );
+
+                let sub_realm = Rc::new(RefCell::new(ObjectData::new()));
+                sub_realm.borrow_mut().properties.insert(
+                    PropertyKey::String("global".to_string()),
+                    PropertyDescriptor::data(Value::Object(sub_globals)),
+                );
+                sub_realm.borrow_mut().properties.insert(
+                    PropertyKey::String("$262".to_string()),
+                    PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(sub_262)))),
+                );
+                Ok(Value::Object(sub_realm))
+            }))),
+        );
+
+        // global: the realm's global object
+        new_262_data.properties.insert(
+            PropertyKey::String("global".to_string()),
+            PropertyDescriptor::data(Value::Object(Rc::clone(&realm_globals))),
+        );
+
+        // The realm object exposes both `global` and `$262`
         let realm = Rc::new(RefCell::new(ObjectData::new()));
         realm.borrow_mut().properties.insert(
             PropertyKey::String("global".to_string()),
-            PropertyDescriptor::data(Value::Object(realm_globals)),
+            PropertyDescriptor::data(Value::Object(Rc::clone(&realm_globals))),
         );
+        realm.borrow_mut().properties.insert(
+            PropertyKey::String("$262".to_string()),
+            PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(new_262_data)))),
+        );
+
         Ok(Value::Object(realm))
     }));
 
@@ -1053,21 +1116,37 @@ fn main() {
     );
 
     let mut data = ObjectData::new();
+    let eval_globals = Rc::clone(&globals);
     data.properties.insert(
         PropertyKey::String("evalScript".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            builtin_eval_script(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+        PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+            builtin_eval_script(&eval_globals, args).map_err(tsblitz::errors::RuntimeError::from)
         }))),
     );
     data.properties.insert(
         PropertyKey::String("IsHTMLDDA".to_string()),
         PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
     );
-    // Add detachArrayBuffer as a no-op (we don't actually need to detach)
+    // Add detachArrayBuffer - detaches an ArrayBuffer per spec
     data.properties.insert(
         PropertyKey::String("detachArrayBuffer".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| {
-            // No-op: we don't actually detach ArrayBuffers in this implementation
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+            if let Some(Value::Object(obj)) = args.first() {
+                let mut obj_data = obj.borrow_mut();
+                // Clear [[ArrayBufferData]] to empty
+                obj_data.properties.insert(
+                    PropertyKey::String("[[ArrayBufferData]]".to_string()),
+                    PropertyDescriptor::data(Value::Array(
+                        Rc::new(RefCell::new(Vec::new())),
+                        Rc::new(RefCell::new(ObjectData::new())),
+                    )),
+                );
+                // Set byteLength to 0
+                obj_data.properties.insert(
+                    PropertyKey::String("byteLength".to_string()),
+                    PropertyDescriptor::data(Value::Number(0.0)),
+                );
+            }
             Ok(Value::Undefined)
         }))),
     );
@@ -1085,10 +1164,12 @@ fn main() {
             let mut new_262_data = ObjectData::new();
 
             // Add evalScript
+            let eval_globals = Rc::clone(&realm_global);
             new_262_data.properties.insert(
                 PropertyKey::String("evalScript".to_string()),
-                PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-                    builtin_eval_script(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+                PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+                    builtin_eval_script(&eval_globals, args)
+                        .map_err(tsblitz::errors::RuntimeError::from)
                 }))),
             );
 
@@ -1098,10 +1179,24 @@ fn main() {
                 PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
             );
 
-            // Add detachArrayBuffer (no-op)
+            // Add detachArrayBuffer - detaches an ArrayBuffer per spec
             new_262_data.properties.insert(
                 PropertyKey::String("detachArrayBuffer".to_string()),
-                PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| {
+                PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+                    if let Some(Value::Object(obj)) = args.first() {
+                        let mut obj_data = obj.borrow_mut();
+                        obj_data.properties.insert(
+                            PropertyKey::String("[[ArrayBufferData]]".to_string()),
+                            PropertyDescriptor::data(Value::Array(
+                                Rc::new(RefCell::new(Vec::new())),
+                                Rc::new(RefCell::new(ObjectData::new())),
+                            )),
+                        );
+                        obj_data.properties.insert(
+                            PropertyKey::String("byteLength".to_string()),
+                            PropertyDescriptor::data(Value::Number(0.0)),
+                        );
+                    }
                     Ok(Value::Undefined)
                 }))),
             );
@@ -1164,183 +1259,6 @@ fn main() {
         PropertyKey::String("__define_property".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             vm.define_property_builtin(args)
-        }))),
-    );
-
-    // Arithmetic helpers (support BigInt-aware ops similar to main.rs)
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_add".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let a = args.first().cloned().unwrap_or(Value::Null);
-            let b = args.get(1).cloned().unwrap_or(Value::Null);
-            if matches!(a, Value::BigInt(_)) || matches!(b, Value::BigInt(_)) {
-                if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
-                    return Ok(Value::BigInt(*x + *y));
-                } else {
-                    return Err(tsblitz::errors::RuntimeError::from(
-                        "Add: cannot mix BigInt and other types",
-                    ));
-                }
-            }
-            let a_prim = vm.to_primitive(&a, None)?;
-            let b_prim = vm.to_primitive(&b, None)?;
-            if matches!(a_prim, Value::String(_)) || matches!(b_prim, Value::String(_)) {
-                let sa = vm.to_string(&a_prim)?;
-                let sb = vm.to_string(&b_prim)?;
-                return Ok(Value::String(format!("{}{}", sa, sb)));
-            }
-            let na = vm.to_number_value(&a_prim)?;
-            let nb = vm.to_number_value(&b_prim)?;
-            Ok(Value::Number(na + nb))
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_subtract".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let a = args.first().cloned().unwrap_or(Value::Null);
-            let b = args.get(1).cloned().unwrap_or(Value::Null);
-            if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
-                return Ok(Value::BigInt(*x - *y));
-            }
-            let na = vm.to_number_value(&a)?;
-            let nb = vm.to_number_value(&b)?;
-            Ok(Value::Number(na - nb))
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_multiply".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let a = args.first().cloned().unwrap_or(Value::Null);
-            let b = args.get(1).cloned().unwrap_or(Value::Null);
-            if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
-                return Ok(Value::BigInt(*x * *y));
-            }
-            let na = vm.to_number_value(&a)?;
-            let nb = vm.to_number_value(&b)?;
-            Ok(Value::Number(na * nb))
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_divide".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let a = args.first().cloned().unwrap_or(Value::Null);
-            let b = args.get(1).cloned().unwrap_or(Value::Null);
-            if matches!(a, Value::BigInt(_)) || matches!(b, Value::BigInt(_)) {
-                return Err(tsblitz::errors::RuntimeError::from(
-                    "Div: bigint not supported",
-                ));
-            }
-            let na = vm.to_number_value(&a)?;
-            let nb = vm.to_number_value(&b)?;
-            Ok(Value::Number(na / nb))
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_remainder".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let a = args.first().cloned().unwrap_or(Value::Null);
-            let b = args.get(1).cloned().unwrap_or(Value::Null);
-            if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
-                return Ok(Value::BigInt(*x % *y));
-            }
-            let na = vm.to_number_value(&a)?;
-            let nb = vm.to_number_value(&b)?;
-            Ok(Value::Number(na % nb))
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_exponentiate".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let a = args.first().cloned().unwrap_or(Value::Null);
-            let b = args.get(1).cloned().unwrap_or(Value::Null);
-            if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
-                if *y < 0 {
-                    return Err(tsblitz::errors::RuntimeError::from(
-                        "Exponentiation with negative BigInt not supported",
-                    ));
-                }
-                let mut res: i128 = 1;
-                let mut base = *x;
-                let mut exp = *y as u128;
-                while exp > 0 {
-                    if (exp & 1) == 1 {
-                        res = res.checked_mul(base).ok_or_else(|| {
-                            tsblitz::errors::RuntimeError::from("BigInt overflow in exponentiation")
-                        })?;
-                    }
-                    exp >>= 1;
-                    if exp > 0 {
-                        base = base.checked_mul(base).ok_or_else(|| {
-                            tsblitz::errors::RuntimeError::from("BigInt overflow in exponentiation")
-                        })?;
-                    }
-                }
-                return Ok(Value::BigInt(res));
-            }
-            let na = vm.to_number_value(&a)?;
-            let nb = vm.to_number_value(&b)?;
-            Ok(Value::Number(na.powf(nb)))
-        }))),
-    );
-
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_lessThan".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let a = args.first().cloned().unwrap_or(Value::Null);
-            let b = args.get(1).cloned().unwrap_or(Value::Null);
-            let ap = vm.to_primitive(&a, None)?;
-            let bp = vm.to_primitive(&b, None)?;
-            if let (Value::String(sa), Value::String(sb)) = (ap.clone(), bp.clone()) {
-                return Ok(Value::Bool(sa < sb));
-            }
-            let na = vm.to_number_value(&ap)?;
-            let nb = vm.to_number_value(&bp)?;
-            Ok(Value::Bool(na < nb))
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_lessThanOrEqual".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let a = args.first().cloned().unwrap_or(Value::Null);
-            let b = args.get(1).cloned().unwrap_or(Value::Null);
-            let ap = vm.to_primitive(&a, None)?;
-            let bp = vm.to_primitive(&b, None)?;
-            if let (Value::String(sa), Value::String(sb)) = (ap.clone(), bp.clone()) {
-                return Ok(Value::Bool(sa <= sb));
-            }
-            let na = vm.to_number_value(&ap)?;
-            let nb = vm.to_number_value(&bp)?;
-            Ok(Value::Bool(na <= nb))
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_greaterThan".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let a = args.first().cloned().unwrap_or(Value::Null);
-            let b = args.get(1).cloned().unwrap_or(Value::Null);
-            let ap = vm.to_primitive(&a, None)?;
-            let bp = vm.to_primitive(&b, None)?;
-            if let (Value::String(sa), Value::String(sb)) = (ap.clone(), bp.clone()) {
-                return Ok(Value::Bool(sa > sb));
-            }
-            let na = vm.to_number_value(&ap)?;
-            let nb = vm.to_number_value(&bp)?;
-            Ok(Value::Bool(na > nb))
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_greaterThanOrEqual".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let a = args.first().cloned().unwrap_or(Value::Null);
-            let b = args.get(1).cloned().unwrap_or(Value::Null);
-            let ap = vm.to_primitive(&a, None)?;
-            let bp = vm.to_primitive(&b, None)?;
-            if let (Value::String(sa), Value::String(sb)) = (ap.clone(), bp.clone()) {
-                return Ok(Value::Bool(sa >= sb));
-            }
-            let na = vm.to_number_value(&ap)?;
-            let nb = vm.to_number_value(&bp)?;
-            Ok(Value::Bool(na >= nb))
         }))),
     );
 
