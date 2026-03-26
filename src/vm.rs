@@ -531,6 +531,7 @@ impl Vm {
                 self.push_call_frame(proto, &env, call_args, receiver)?;
             }
             Value::Undefined if matches!(receiver, Value::Array(..)) => {
+                // Special case: array methods with undefined callee
                 if let Some(callback) = args.first().cloned() {
                     let items: Vec<Value> = match &receiver {
                         Value::Array(arr, _) => arr.borrow().clone(),
@@ -552,7 +553,20 @@ impl Vm {
                     ));
                 }
             }
+            Value::Undefined => {
+                // Calling undefined as a method - just return undefined
+                // This happens when accessing a non-existent property
+                self.stack.push(Value::Undefined);
+            }
+            Value::Null => {
+                // Calling null as a method should throw TypeError
+                return Err(crate::errors::RuntimeError::from(
+                    "Cannot call null as a function",
+                ));
+            }
             _ => {
+                // Debug: print what value type we got
+                eprintln!("CallWithThis ERROR: callee={:?}, receiver={:?}", callee, receiver);
                 self.dump_diag("CallWithThis failed: callee not callable", &callee);
                 return Err(crate::errors::RuntimeError::from(
                     "CallWithThis: not a function",
