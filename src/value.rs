@@ -37,6 +37,57 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::rc::Weak;
+
+/// A weak reference to an ObjectData that can be upgraded when needed.
+/// This helps prevent reference cycles in prototype chains.
+#[derive(Clone)]
+pub struct WeakObject {
+    weak: Weak<RefCell<ObjectData>>,
+}
+
+impl WeakObject {
+    /// Create a new weak reference from a strong reference.
+    pub fn new(obj: &Rc<RefCell<ObjectData>>) -> Self {
+        Self {
+            weak: Rc::downgrade(obj),
+        }
+    }
+
+    /// Create a null weak reference (no target).
+    pub fn null() -> Self {
+        Self { weak: Weak::new() }
+    }
+
+    /// Check if the reference is still valid (hasn't been dropped).
+    pub fn is_valid(&self) -> bool {
+        self.weak.strong_count() > 0
+    }
+
+    /// Try to upgrade to a strong reference.
+    /// Returns None if the object has been dropped.
+    pub fn upgrade(&self) -> Option<Rc<RefCell<ObjectData>>> {
+        self.weak.upgrade()
+    }
+
+    /// Get the Value for this weak reference, or Null if expired.
+    pub fn to_value(&self) -> Value {
+        match self.upgrade() {
+            Some(obj) => Value::Object(obj),
+            None => Value::Null,
+        }
+    }
+}
+
+impl std::fmt::Debug for WeakObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_valid() {
+            write!(f, "WeakObject(valid)")
+        } else {
+            write!(f, "WeakObject(expired)")
+        }
+    }
+}
 
 /// Symbol primitive identity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -149,7 +200,10 @@ impl PropertyDescriptor {
 pub struct ObjectData {
     /// Property table
     pub properties: HashMap<PropertyKey, PropertyDescriptor>,
-    /// Prototype pointer
+    /// Prototype pointer (weak to prevent reference cycles)
+    pub weak_prototype: Option<WeakObject>,
+    /// Prototype pointer (strong reference - kept for compatibility during transition)
+    /// TODO: Remove this once all code is migrated to use weak_prototype
     pub prototype: Value,
     /// Extensible flag
     pub extensible: bool,
@@ -160,6 +214,7 @@ impl ObjectData {
     pub fn new() -> Self {
         Self {
             properties: HashMap::new(),
+            weak_prototype: None,
             prototype: Value::Null,
             extensible: true,
         }
@@ -169,9 +224,37 @@ impl ObjectData {
     pub fn with_prototype(prototype: Value) -> Self {
         Self {
             properties: HashMap::new(),
+            weak_prototype: None,
             prototype,
             extensible: true,
         }
+    }
+
+    /// Create an object with a weak prototype reference (prevents cycles).
+    pub fn with_weak_prototype(prototype: &Rc<RefCell<ObjectData>>) -> Self {
+        Self {
+            properties: HashMap::new(),
+            weak_prototype: Some(WeakObject::new(prototype)),
+            prototype: Value::Object(Rc::clone(prototype)),
+            extensible: true,
+        }
+    }
+
+    /// Get the prototype, preferring weak reference if available.
+    /// Returns Value::Null if the weak reference has expired.
+    pub fn get_prototype(&self) -> Value {
+        if let Some(weak) = &self.weak_prototype {
+            weak.to_value()
+        } else {
+            self.prototype.clone()
+        }
+    }
+
+    /// Set the prototype using a weak reference (prevents cycles).
+    pub fn set_weak_prototype(&mut self, prototype: &Rc<RefCell<ObjectData>>) {
+        self.weak_prototype = Some(WeakObject::new(prototype));
+        // Keep strong ref for backward compatibility during transition
+        self.prototype = Value::Object(Rc::clone(prototype));
     }
 }
 
@@ -216,7 +299,8 @@ pub enum Value {
     /// properties and prototype linkage. The first field stores dense indexed
     /// elements; the second is a property map used for `__proto__` and arbitrary
     /// named properties (so arrays can behave like objects for non-index keys).
-    Array(Rc<RefCell<Vec<Value>>>, Rc<RefCell<ObjectData>>),
+    /// Holes are represented as `None` values.
+    Array(Rc<RefCell<Vec<Option<Value>>>>, Rc<RefCell<ObjectData>>),
     /// Function closure with prototype and captured environment
     Closure {
         /// Function prototype
@@ -290,7 +374,7 @@ impl Value {
             Value::Bool(_) => "boolean",
             Value::BigInt(_) => "bigint",
             Value::Symbol(_, _) => "symbol",
-            Value::Null => "null",
+            Value::Null => "object",
             Value::Object(_) => "object",
             Value::Array(..) => "object",
             Value::Closure { .. } => "function",
@@ -336,7 +420,10 @@ impl std::fmt::Display for Value {
             Value::Object(_map) => write!(f, "[object Object]"),
             Value::Array(arr, _props) => {
                 let arr = arr.borrow();
-                let parts: Vec<String> = arr.iter().map(|v| format!("{}", v)).collect();
+                let parts: Vec<String> = arr
+                    .iter()
+                    .map(|v| format!("{}", v.as_ref().unwrap_or(&Value::Undefined)))
+                    .collect();
                 write!(f, "[{}]", parts.join(", "))
             }
             Value::Closure { proto, .. } => write!(f, "[Function: {}]", proto.name),

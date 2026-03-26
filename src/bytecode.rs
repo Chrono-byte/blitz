@@ -367,6 +367,12 @@ pub enum Op {
     Shr,
     /// Unsigned right shift (logical)
     Ushr,
+    /// Await a promise (suspend execution if pending)
+    AwaitPromise,
+    /// Strict equality comparison (===)
+    StrictEq,
+    /// Strict inequality comparison (!==)
+    StrictNeq,
 }
 
 impl Op {
@@ -479,6 +485,9 @@ impl TryFrom<u8> for Op {
             52 => Ok(Op::Shl),
             53 => Ok(Op::Shr),
             54 => Ok(Op::Ushr),
+            55 => Ok(Op::AwaitPromise),
+            56 => Ok(Op::StrictEq),
+            57 => Ok(Op::StrictNeq),
             _ => Err(()),
         }
     }
@@ -496,7 +505,7 @@ mod tests {
 
     #[test]
     fn op_round_trip() {
-        for i in 0u8..=Op::Ushr as u8 {
+        for i in 0u8..=Op::AwaitPromise as u8 {
             let op = Op::try_from(i).expect("valid op");
             let b = u8::from(op);
             assert_eq!(b, i);

@@ -1034,7 +1034,7 @@ impl Compiler {
                     .quasis
                     .first()
                     .and_then(|q| q.value.cooked.as_ref())
-                    .map(|s| s.to_string())
+                    .map(ToString::to_string)
                     .unwrap_or_default();
                 self.emit_constant(Value::String(first), LINE);
                 for (i, expr) in t.expressions.iter().enumerate() {
@@ -1044,7 +1044,7 @@ impl Compiler {
                         .quasis
                         .get(i + 1)
                         .and_then(|q| q.value.cooked.as_ref())
-                        .map(|s| s.to_string())
+                        .map(ToString::to_string)
                         .unwrap_or_default();
                     self.emit_constant(Value::String(tail), LINE);
                     self.emit(Op::Add, LINE);
@@ -1475,12 +1475,10 @@ impl Compiler {
                 self.compile_expr_oast(&b.left)?;
                 self.compile_expr_oast(&b.right)?;
                 match b.operator {
-                    oast::BinaryOperator::Equality | oast::BinaryOperator::StrictEquality => {
-                        self.emit(Op::Eq, LINE)
-                    }
-                    oast::BinaryOperator::Inequality | oast::BinaryOperator::StrictInequality => {
-                        self.emit(Op::Neq, LINE)
-                    }
+                    oast::BinaryOperator::Equality => self.emit(Op::Eq, LINE),
+                    oast::BinaryOperator::StrictEquality => self.emit(Op::StrictEq, LINE),
+                    oast::BinaryOperator::Inequality => self.emit(Op::Neq, LINE),
+                    oast::BinaryOperator::StrictInequality => self.emit(Op::StrictNeq, LINE),
                     oast::BinaryOperator::LessThan => self.emit(Op::Lt, LINE),
                     oast::BinaryOperator::LessEqualThan => self.emit(Op::Le, LINE),
                     oast::BinaryOperator::GreaterThan => self.emit(Op::Gt, LINE),

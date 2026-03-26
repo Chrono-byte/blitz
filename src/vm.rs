@@ -534,7 +534,9 @@ impl Vm {
                 // Special case: array methods with undefined callee
                 if let Some(callback) = args.first().cloned() {
                     let items: Vec<Value> = match &receiver {
-                        Value::Array(arr, _) => arr.borrow().clone(),
+                        Value::Array(arr, _) => {
+                            arr.borrow().iter().filter_map(Clone::clone).collect()
+                        }
                         _ => Vec::new(),
                     };
                     for (i, item) in items.iter().enumerate() {
@@ -748,7 +750,7 @@ impl Vm {
                     && let Ok(i) = s.parse::<usize>()
                     && i < arr.borrow().len()
                 {
-                    arr.borrow_mut()[i] = Value::Undefined;
+                    arr.borrow_mut()[i] = None;
                     return Ok(true);
                 }
                 let mut p = props.borrow_mut();
@@ -1177,12 +1179,12 @@ impl Vm {
             Op::Eq => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                self.stack.push(Value::Bool(values_equal(&a, &b)));
+                self.stack.push(Value::Bool(abstract_equal(&a, &b)));
             }
             Op::Neq => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                self.stack.push(Value::Bool(!values_equal(&a, &b)));
+                self.stack.push(Value::Bool(!abstract_equal(&a, &b)));
             }
             Op::Lt => {
                 let b = self.pop()?;
@@ -1426,6 +1428,23 @@ impl Vm {
                     );
                 }
                 self.unwind_to_handler(thrown)?;
+            }
+            Op::StrictEq => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                self.stack.push(Value::Bool(values_equal(&a, &b)));
+            }
+            Op::StrictNeq => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                self.stack.push(Value::Bool(!values_equal(&a, &b)));
+            }
+            Op::AwaitPromise => {
+                // Placeholder implementation - just return the value
+                // Full async/await support would require generator state management
+                let _promise = self.pop()?;
+                // For now, just push undefined
+                self.stack.push(Value::Undefined);
             }
         }
         Ok(StepOutcome::Continue)
@@ -1927,7 +1946,8 @@ impl Vm {
             }
             Value::Array(arr, props) => {
                 if let Some(i) = array_index_from_key(key)
-                    && let Some(v) = arr.borrow().get(i).cloned()
+                    && let Some(opt_v) = arr.borrow().get(i).cloned()
+                    && let Some(v) = opt_v
                 {
                     return Ok(Some((
                         PropertyDescriptor::Data {
@@ -2037,8 +2057,11 @@ impl Vm {
             fixed.push(args.get(i).cloned().unwrap_or(Value::Undefined));
         }
 
-        let rest_slice: Vec<Value> = if args.len() > fixed_count {
-            args[fixed_count..].to_vec()
+        let rest_slice: Vec<Option<Value>> = if args.len() > fixed_count {
+            args[fixed_count..]
+                .iter()
+                .map(|v| Some(v.clone()))
+                .collect()
         } else {
             Vec::new()
         };
@@ -2135,7 +2158,8 @@ impl Vm {
 
         // Pre-allocate locals to at least `arity` slots, filling missing
         // arguments with `undefined` per JavaScript semantics.
-        let args_for_arguments = call_args.clone();
+        let args_for_arguments: Vec<Option<Value>> =
+            call_args.iter().map(|v| Some(v.clone())).collect();
         self.locals = std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
             .take(proto.slot_types.len().max(proto.arity))
             .collect();
@@ -2159,9 +2183,9 @@ impl Vm {
 
     fn build_array(&mut self) -> Result<(), crate::errors::RuntimeError> {
         let n = self.read_byte()? as usize;
-        let mut elems: Vec<Value> = Vec::with_capacity(n);
+        let mut elems: Vec<Option<Value>> = Vec::with_capacity(n);
         for _ in 0..n {
-            elems.push(self.pop()?);
+            elems.push(Some(self.pop()?));
         }
         elems.reverse();
 
@@ -3017,6 +3041,56 @@ fn values_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// ECMAScript abstract equality (==) semantics
+/// https://tc39.es/ecma262/#sec-abstract-equality-comparison
+fn abstract_equal(a: &Value, b: &Value) -> bool {
+    // Step 1: If types are the same, use strict equality
+    if std::mem::discriminant(a) == std::mem::discriminant(b) {
+        return values_equal(a, b);
+    }
+
+    // Step 2: If one is null and other is undefined
+    if (matches!(a, Value::Null) && matches!(b, Value::Undefined))
+        || (matches!(a, Value::Undefined) && matches!(b, Value::Null))
+    {
+        return true;
+    }
+
+    // Step 3: If one is number and other is string, convert string to number
+    if let (Value::Number(n), Value::String(s)) = (a, b) {
+        if let Ok(s_num) = s.parse::<f64>() {
+            return n == &s_num;
+        }
+        return false;
+    }
+    if let (Value::String(s), Value::Number(n)) = (a, b) {
+        if let Ok(s_num) = s.parse::<f64>() {
+            return &s_num == n;
+        }
+        return false;
+    }
+
+    // Step 4: If one is boolean, convert to number
+    if let Value::Bool(b_val) = a {
+        let a_num = if *b_val {
+            Value::Number(1.0)
+        } else {
+            Value::Number(0.0)
+        };
+        return abstract_equal(&a_num, b);
+    }
+    if let Value::Bool(b_val) = b {
+        let b_num = if *b_val {
+            Value::Number(1.0)
+        } else {
+            Value::Number(0.0)
+        };
+        return abstract_equal(a, &b_num);
+    }
+
+    false
+}
+
 /// ECMAScript SameValue semantics used by `Object.is`.
 pub fn same_value(a: &Value, b: &Value) -> bool {
     match (a, b) {
@@ -3112,7 +3186,8 @@ fn get_property(
         }
         Value::Array(arr, props) => {
             if let Some(i) = array_index_from_key(key)
-                && let Some(value) = arr.borrow().get(i).cloned()
+                && let Some(opt_value) = arr.borrow().get(i).cloned()
+                && let Some(value) = opt_value
             {
                 return Ok(value);
             }
@@ -3219,9 +3294,9 @@ fn set_property(
                 if i <= dense_limit {
                     let mut a = arr.borrow_mut();
                     if i >= a.len() {
-                        a.resize(i + 1, Value::Undefined);
+                        a.resize(i + 1, Some(Value::Undefined));
                     }
-                    a[i] = value;
+                    a[i] = Some(value);
                     p.properties.insert(
                         PropertyKey::String("length".to_string()),
                         PropertyDescriptor::data(Value::Number(a.len() as f64)),
@@ -3352,8 +3427,37 @@ fn build_module_namespace_object(exports: &HashMap<String, Rc<RefCell<Value>>>) 
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Value) -> Option<std::cmp::Ordering> {
         match (self, other) {
+            // Both numbers: numeric comparison
             (Value::Number(a), Value::Number(b)) => a.partial_cmp(b),
+            // Both strings: string comparison
             (Value::String(a), Value::String(b)) => a.partial_cmp(b),
+            // Number and String: convert string to number
+            (Value::Number(a), Value::String(b)) => {
+                if let Ok(b_num) = b.parse::<f64>() {
+                    a.partial_cmp(&b_num)
+                } else {
+                    // String doesn't parse as number, becomes NaN
+                    // NaN comparisons return None (undefined in JS)
+                    None
+                }
+            }
+            // String and Number: convert string to number
+            (Value::String(a), Value::Number(b)) => {
+                if let Ok(a_num) = a.parse::<f64>() {
+                    a_num.partial_cmp(b)
+                } else {
+                    None
+                }
+            }
+            // Boolean: convert to number (1.0 or 0.0)
+            (Value::Bool(a), other) => {
+                let a_num = if *a { 1.0 } else { 0.0 };
+                Value::Number(a_num).partial_cmp(other)
+            }
+            (other, Value::Bool(b)) => {
+                let b_num = if *b { 1.0 } else { 0.0 };
+                other.partial_cmp(&Value::Number(b_num))
+            }
             _ => None,
         }
     }
@@ -3489,8 +3593,8 @@ mod tests {
     }
 
     #[test]
-    fn array_max_u32_key_is_not_dense_index() {
-        let arr_data = Rc::new(RefCell::new(vec![Value::Number(0.0)]));
+    fn dense_array_index_beyond_max_doesnt_dense_resize() {
+        let arr_data = Rc::new(RefCell::new(vec![Some(Value::Number(0.0))]));
         let props = Rc::new(RefCell::new(ObjectData::new()));
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
@@ -3514,7 +3618,7 @@ mod tests {
 
     #[test]
     fn sparse_array_index_updates_length_without_dense_resize() {
-        let arr_data = Rc::new(RefCell::new(vec![Value::Number(0.0)]));
+        let arr_data = Rc::new(RefCell::new(vec![Some(Value::Number(0.0))]));
         let props = Rc::new(RefCell::new(ObjectData::new()));
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),

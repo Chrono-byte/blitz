@@ -12,16 +12,16 @@ fn main() {
     for stmt in &result.program.body {
         if let oast::Statement::VariableDeclaration(vd) = stmt {
             for decl in &vd.declarations {
-                if let Some(init) = &decl.init {
-                    if let oast::Expression::ArrowFunctionExpression(arrow) = init {
-                        println!("Arrow function expression flag: {}", arrow.expression);
-                        println!("Statement count: {}", arrow.body.statements.len());
-                        if let Some(stmt) = arrow.body.statements.first() {
-                            println!(
-                                "First statement type: {:?}",
-                                std::any::type_name_of_val(stmt)
-                            );
-                        }
+                if let Some(init) = &decl.init
+                    && let oast::Expression::ArrowFunctionExpression(arrow) = init
+                {
+                    println!("Arrow function expression flag: {}", arrow.expression);
+                    println!("Statement count: {}", arrow.body.statements.len());
+                    if let Some(stmt) = arrow.body.statements.first() {
+                        println!(
+                            "First statement type: {:?}",
+                            std::any::type_name_of_val(stmt)
+                        );
                     }
                 }
             }

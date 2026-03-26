@@ -122,7 +122,7 @@ fn print_bucket_summary(
 #[derive(Default)]
 struct CloneCtx {
     objects: HashMap<usize, Rc<RefCell<ObjectData>>>,
-    arrays: HashMap<usize, Rc<RefCell<Vec<Value>>>>,
+    arrays: HashMap<usize, Rc<RefCell<Vec<Option<Value>>>>>,
     envs: HashMap<usize, Rc<RefCell<Vec<Rc<RefCell<Value>>>>>>,
 }
 
@@ -182,9 +182,9 @@ fn clone_object_data(obj: &Rc<RefCell<ObjectData>>, ctx: &mut CloneCtx) -> Rc<Re
 }
 
 fn clone_array_elements(
-    arr: &Rc<RefCell<Vec<Value>>>,
+    arr: &Rc<RefCell<Vec<Option<Value>>>>,
     ctx: &mut CloneCtx,
-) -> Rc<RefCell<Vec<Value>>> {
+) -> Rc<RefCell<Vec<Option<Value>>>> {
     let key = Rc::as_ptr(arr) as usize;
     if let Some(existing) = ctx.arrays.get(&key) {
         return Rc::clone(existing);
@@ -193,7 +193,11 @@ fn clone_array_elements(
     let cloned = Rc::new(RefCell::new(Vec::new()));
     ctx.arrays.insert(key, Rc::clone(&cloned));
 
-    let values = arr.borrow().iter().map(|v| clone_value(v, ctx)).collect();
+    let values = arr
+        .borrow()
+        .iter()
+        .map(|opt_v| opt_v.as_ref().map(|v| clone_value(v, ctx)))
+        .collect();
     *cloned.borrow_mut() = values;
     cloned
 }
@@ -245,6 +249,7 @@ fn clone_value(value: &Value, ctx: &mut CloneCtx) -> Value {
         Value::BuiltinObject(f, props) => {
             Value::BuiltinObject(Rc::clone(f), clone_object_data(props, ctx))
         }
+        Value::Promise(state) => Value::Promise(Rc::clone(state)),
     }
 }
 
@@ -911,11 +916,11 @@ fn run_harness_only(
                 continue;
             }
             if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                let rel = format!("harness/{}", name);
-                if rel == "harness/sta.js" || rel == "harness/assert.js" {
+                // Just store the filename, not the full path - it will be joined with harness dir later
+                if name == "sta.js" || name == "assert.js" {
                     continue;
                 }
-                extra.push(rel);
+                extra.push(name.to_string());
             }
         }
         extra.sort();
@@ -1046,42 +1051,7 @@ fn main() {
             builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
         }))),
     );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_instanceof".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let value = args.first().cloned().unwrap_or(Value::Undefined);
-            let ctor = args.get(1).cloned().unwrap_or(Value::Undefined);
-            vm.instance_of(&value, &ctor).map(Value::Bool)
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_inProperty".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let prop = args.first().cloned().unwrap_or(Value::Undefined);
-            let obj = args.get(1).cloned().unwrap_or(Value::Undefined);
-            vm.in_property(&prop, &obj).map(Value::Bool)
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_typeof".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
-            let value = args.first().cloned().unwrap_or(Value::Undefined);
-            let ty = match value {
-                Value::Undefined => "undefined",
-                Value::Null => "object",
-                Value::Bool(_) => "boolean",
-                Value::Number(_) => "number",
-                Value::String(_) => "string",
-                Value::BigInt(_) => "bigint",
-                Value::Symbol(_, _) => "symbol",
-                Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. } => {
-                    "function"
-                }
-                Value::Object(_) | Value::Array(..) => "object",
-            };
-            Ok(Value::String(ty.to_string()))
-        }))),
-    );
+
     let mut data = ObjectData::new();
     data.properties.insert(
         PropertyKey::String("evalScript".to_string()),
@@ -1104,7 +1074,7 @@ fn main() {
     // Add createRealm - creates a new realm with full global object and $262
     data.properties.insert(
         PropertyKey::String("createRealm".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, _args| {
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| {
             // Create a new global object for the realm
             let realm_global = Rc::new(RefCell::new(ObjectData::new()));
 
@@ -1141,17 +1111,16 @@ fn main() {
                 PropertyKey::String("createRealm".to_string()),
                 PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
                     // Call the main createRealm via the main $262
-                    if let Some(Value::Object(main_262_obj)) = vm.get_global("$262") {
-                        if let Some(PropertyDescriptor::Data {
+                    if let Some(Value::Object(main_262_obj)) = vm.get_global("$262")
+                        && let Some(PropertyDescriptor::Data {
                             value: Value::Builtin(f),
                             ..
                         }) = main_262_obj
                             .borrow()
                             .properties
                             .get(&PropertyKey::String("createRealm".to_string()))
-                        {
-                            return f.as_ref()(vm, args);
-                        }
+                    {
+                        return f.as_ref()(vm, args);
                     }
                     Err(tsblitz::errors::RuntimeError::from("createRealm not found"))
                 }))),
@@ -1171,6 +1140,17 @@ fn main() {
         PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(data)))),
     );
 
+    // ECMAScript global constants
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("NaN".to_string()),
+        PropertyDescriptor::data(Value::Number(f64::NAN)),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("Infinity".to_string()),
+        PropertyDescriptor::data(Value::Number(f64::INFINITY)),
+    );
+    // Note: undefined is the default value, not a property
+
     // Provide a few more kernel-native helpers the soft prelude expects.
     globals.borrow_mut().properties.insert(
         PropertyKey::String("__native_new_object".to_string()),
@@ -1184,39 +1164,6 @@ fn main() {
         PropertyKey::String("__define_property".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             vm.define_property_builtin(args)
-        }))),
-    );
-
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_toString".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let v = args.first().cloned().unwrap_or(Value::Undefined);
-            vm.to_string(&v).map(Value::String)
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_toNumber".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let v = args.first().cloned().unwrap_or(Value::Undefined);
-            vm.to_number_value(&v).map(Value::Number)
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_toBoolean".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let v = args.first().cloned().unwrap_or(Value::Undefined);
-            Ok(Value::Bool(vm.to_boolean(&v)))
-        }))),
-    );
-    globals.borrow_mut().properties.insert(
-        PropertyKey::String("__native_abstractEquality".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let a = args.first().cloned().unwrap_or(Value::Undefined);
-            let b = args.get(1).cloned().unwrap_or(Value::Undefined);
-            match vm.abstract_equality(&a, &b) {
-                Ok(v) => Ok(Value::Bool(v)),
-                Err(e) => Err(e),
-            }
         }))),
     );
 
