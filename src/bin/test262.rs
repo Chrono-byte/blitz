@@ -510,10 +510,12 @@ fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             );
             data.properties.insert(
                 PKey::String("constructor".to_string()),
-                PropertyDescriptor::data(test262_error_ctor_cell
-                    .borrow()
-                    .clone()
-                    .unwrap_or(Value::Undefined)),
+                PropertyDescriptor::data(
+                    test262_error_ctor_cell
+                        .borrow()
+                        .clone()
+                        .unwrap_or(Value::Undefined),
+                ),
             );
             Ok(Value::Object(Rc::new(RefCell::new(data))))
         }
@@ -967,18 +969,14 @@ fn run_test_file(
                     }
                     let to_string_key = PropertyKey::String("_toString".to_string());
                     if let Ok(helper) = vm.get_property_host(&assert_val, &to_string_key) {
-                        if let Ok(result) = vm.call_value_with_this(
-                            &helper,
-                            &assert_val,
-                            &[Value::Number(0.0)],
-                        ) {
+                        if let Ok(result) =
+                            vm.call_value_with_this(&helper, &assert_val, &[Value::Number(0.0)])
+                        {
                             eprintln!("[trace] assert._toString(0): {}", result);
                         }
-                        if let Ok(result) = vm.call_value_with_this(
-                            &helper,
-                            &assert_val,
-                            &[Value::Number(-0.0)],
-                        ) {
+                        if let Ok(result) =
+                            vm.call_value_with_this(&helper, &assert_val, &[Value::Number(-0.0)])
+                        {
                             eprintln!("[trace] assert._toString(-0): {}", result);
                         }
                     }

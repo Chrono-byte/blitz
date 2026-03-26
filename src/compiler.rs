@@ -456,7 +456,11 @@ impl Compiler {
                 self.resolve_local(&name)
                     .unwrap_or_else(|| self.add_var_local(name.clone(), None, mirror_global))
             } else {
-                if let Some(slot) = self.scopes[self.scopes.len() - 1].bindings.get(&name).copied() {
+                if let Some(slot) = self.scopes[self.scopes.len() - 1]
+                    .bindings
+                    .get(&name)
+                    .copied()
+                {
                     slot
                 } else {
                     self.add_local_with_mirror(name.clone(), None, mirror_global)

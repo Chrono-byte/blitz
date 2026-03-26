@@ -503,7 +503,9 @@ impl Vm {
         if crate::trace::enabled() {
             eprintln!(
                 "[trace] execute_call_method after pops stack_size={} receiver={:?} callee={:?}",
-                self.stack.len(), receiver, callee
+                self.stack.len(),
+                receiver,
+                callee
             );
         }
         match callee {
@@ -527,7 +529,10 @@ impl Vm {
                 let result = self.call_with_this(&callee, &receiver, &args)?;
                 self.stack.push(result);
                 if crate::trace::enabled() {
-                    eprintln!("[trace] execute_call_method after push stack_size={}", self.stack.len());
+                    eprintln!(
+                        "[trace] execute_call_method after push stack_size={}",
+                        self.stack.len()
+                    );
                 }
             }
             Value::Undefined if matches!(receiver, Value::Array(..)) => {
@@ -1338,6 +1343,11 @@ impl Vm {
                 let thrown = self.pop()?;
                 if crate::trace::enabled() {
                     crate::trace::value_string("[trace] Throw thrown", &thrown);
+                    if let Ok(msg) = self
+                        .get_property_value(&thrown, &PropertyKey::String("message".to_string()))
+                    {
+                        crate::trace::value_string("[trace] Throw message", &msg);
+                    }
                     eprintln!(
                         "[trace] Throw stack_size={} handlers={}",
                         self.stack.len(),
@@ -1768,10 +1778,8 @@ impl Vm {
                     _ => None,
                 });
             if let Some(string_ctor) = string_ctor
-                && let Ok(proto) = self.get_property_value(
-                    &string_ctor,
-                    &PropertyKey::String("prototype".to_string()),
-                )
+                && let Ok(proto) = self
+                    .get_property_value(&string_ctor, &PropertyKey::String("prototype".to_string()))
                 && !matches!(proto, Value::Null)
                 && let Ok(v) = get_property(&proto, key, 0)
             {
@@ -1788,13 +1796,13 @@ impl Vm {
                     PropertyDescriptor::Data { value, .. } => Some(value.clone()),
                     _ => None,
                 });
-            if let Some(array_ctor) = array_ctor {
-                if let Ok(proto) = self.get_property_value(&array_ctor, &PropertyKey::String("prototype".to_string()))
-                    && !matches!(proto, Value::Null)
-                    && let Ok(v) = get_property(&proto, key, 0)
-                {
-                    return Ok(v);
-                }
+            if let Some(array_ctor) = array_ctor
+                && let Ok(proto) = self
+                    .get_property_value(&array_ctor, &PropertyKey::String("prototype".to_string()))
+                && !matches!(proto, Value::Null)
+                && let Ok(v) = get_property(&proto, key, 0)
+            {
+                return Ok(v);
             }
         }
         Ok(Value::Undefined)
@@ -1960,8 +1968,11 @@ impl Vm {
             && !matches!(proto_val, Value::Null)
         {
             props.borrow_mut().prototype = proto_val;
-            if let Ok(for_each_val) = get_property(&props.borrow().prototype, &PropertyKey::String("forEach".to_string()), 0)
-                && !matches!(for_each_val, Value::Undefined)
+            if let Ok(for_each_val) = get_property(
+                &props.borrow().prototype,
+                &PropertyKey::String("forEach".to_string()),
+                0,
+            ) && !matches!(for_each_val, Value::Undefined)
             {
                 props.borrow_mut().properties.insert(
                     PropertyKey::String("forEach".to_string()),

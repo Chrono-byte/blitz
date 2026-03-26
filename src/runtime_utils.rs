@@ -296,7 +296,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             };
             for (i, item) in items.iter().enumerate() {
                 let idx = Value::Number(i as f64);
-                let _ = vm.call_value_with_this(&callback, &this_for_call, &[item.clone(), idx, this_for_call.clone()]);
+                let _ = vm.call_value_with_this(
+                    &callback,
+                    &this_for_call,
+                    &[item.clone(), idx, this_for_call.clone()],
+                );
             }
             Ok(Value::Undefined)
         }),
@@ -304,7 +308,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     );
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("forEach".to_string()),
-        PropertyDescriptor::data(for_each_fn.clone()),
+        PropertyDescriptor::data(for_each_fn),
     );
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("join".to_string()),
@@ -435,7 +439,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     );
 
     let function_ctor_proto = Rc::clone(&function_proto_map);
-    let function_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+    let function_ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
         let body = args
             .get(1)
             .cloned()
@@ -454,7 +458,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             eprintln!("[trace] Function ctor body='{}' expr='{}'", body_src, expr);
         }
         let call_target: BuiltinFn = Rc::new(move |vm, _call_args| {
-            if expr.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+            if expr
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+            {
                 let g = vm.get_global(&expr).unwrap_or(Value::Undefined);
                 if crate::trace::enabled() {
                     eprintln!("[trace] Function body identifier '{}' -> {:?}", expr, g);
@@ -463,9 +470,12 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             }
             vm.eval_expression_source(&expr)
         });
-        Ok(Value::BuiltinObject(call_target, Rc::new(RefCell::new(ObjectData::with_prototype(
-            Value::Object(Rc::clone(&function_ctor_proto)),
-        )))))
+        Ok(Value::BuiltinObject(
+            call_target,
+            Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+                Rc::clone(&function_ctor_proto),
+            )))),
+        ))
     });
     let function_ctor_val =
         Value::BuiltinObject(function_ctor_fn.clone(), Rc::clone(&function_ctor_map));
@@ -507,26 +517,32 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(builtin_object(
             Rc::new({
                 let function_proto_map = Rc::clone(&function_proto_map);
-                let _function_call_val = function_call_val.clone();
+                let _function_call_val = function_call_val;
                 move |_vm, args| {
                     let target = args.first().cloned().unwrap_or(Value::Undefined);
                     let bound_this = args.get(1).cloned().unwrap_or(Value::Undefined);
                     let bound_args: Vec<Value> = args.iter().skip(2).cloned().collect();
                     if crate::trace::enabled() {
-                        eprintln!("[trace] bind create target={:?} bound_this={:?} bound_args={:?}", target, bound_this, bound_args);
+                        eprintln!(
+                            "[trace] bind create target={:?} bound_this={:?} bound_args={:?}",
+                            target, bound_this, bound_args
+                        );
                     }
                     let bound_target = target;
                     let bound_this_arg = bound_this;
                     let prefix_args = bound_args;
                     Ok(builtin_object(
                         Rc::new(move |vm, call_args| {
-                    if crate::trace::enabled() {
-                        eprintln!("[trace] bound fn call target={:?} this={:?} args={:?}", bound_target, bound_this_arg, call_args);
-                    }
-                    let mut combined = prefix_args.clone();
-                    combined.extend(call_args.iter().cloned());
-                    vm.call_value_with_this(&bound_target, &bound_this_arg, &combined)
-                }),
+                            if crate::trace::enabled() {
+                                eprintln!(
+                                    "[trace] bound fn call target={:?} this={:?} args={:?}",
+                                    bound_target, bound_this_arg, call_args
+                                );
+                            }
+                            let mut combined = prefix_args.clone();
+                            combined.extend(call_args.iter().cloned());
+                            vm.call_value_with_this(&bound_target, &bound_this_arg, &combined)
+                        }),
                         &function_proto_map,
                     ))
                 }
@@ -577,55 +593,94 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("iterator".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_iterator(), Some("Symbol.iterator".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_iterator(),
+            Some("Symbol.iterator".to_string()),
+        )),
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("asyncIterator".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_async_iterator(), Some("Symbol.asyncIterator".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_async_iterator(),
+            Some("Symbol.asyncIterator".to_string()),
+        )),
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("toPrimitive".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_to_primitive(), Some("Symbol.toPrimitive".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_to_primitive(),
+            Some("Symbol.toPrimitive".to_string()),
+        )),
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("toStringTag".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_to_string_tag(), Some("Symbol.toStringTag".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_to_string_tag(),
+            Some("Symbol.toStringTag".to_string()),
+        )),
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("species".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_species(), Some("Symbol.species".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_species(),
+            Some("Symbol.species".to_string()),
+        )),
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("hasInstance".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_has_instance(), Some("Symbol.hasInstance".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_has_instance(),
+            Some("Symbol.hasInstance".to_string()),
+        )),
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("isConcatSpreadable".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_is_concat_spreadable(), Some("Symbol.isConcatSpreadable".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_is_concat_spreadable(),
+            Some("Symbol.isConcatSpreadable".to_string()),
+        )),
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("match".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_match(), Some("Symbol.match".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_match(),
+            Some("Symbol.match".to_string()),
+        )),
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("matchAll".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_match_all(), Some("Symbol.matchAll".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_match_all(),
+            Some("Symbol.matchAll".to_string()),
+        )),
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("replace".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_replace(), Some("Symbol.replace".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_replace(),
+            Some("Symbol.replace".to_string()),
+        )),
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("search".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_search(), Some("Symbol.search".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_search(),
+            Some("Symbol.search".to_string()),
+        )),
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("split".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_split(), Some("Symbol.split".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_split(),
+            Some("Symbol.split".to_string()),
+        )),
     );
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("unscopables".to_string()),
-        PropertyDescriptor::data(Value::Symbol(SymbolId::well_known_unscopables(), Some("Symbol.unscopables".to_string()))),
+        PropertyDescriptor::data(Value::Symbol(
+            SymbolId::well_known_unscopables(),
+            Some("Symbol.unscopables".to_string()),
+        )),
     );
     object_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
@@ -827,7 +882,12 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 }
                 let target = args[1].clone();
                 if crate::trace::enabled() {
-                    eprintln!("[trace] Object.defineProperty target={:?} key={:?} desc={:?}", target, args.get(2), args.get(3));
+                    eprintln!(
+                        "[trace] Object.defineProperty target={:?} key={:?} desc={:?}",
+                        target,
+                        args.get(2),
+                        args.get(3)
+                    );
                 }
                 let ok = vm.define_property_value(&target, &args[2], &args[3])?;
                 if ok {
@@ -1073,8 +1133,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     haystack
                         .char_indices()
                         .nth(start)
-                        .map(|(idx, _)| idx)
-                        .unwrap_or(haystack.len())
+                        .map_or(haystack.len(), |(idx, _)| idx)
                 };
                 if let Some(rel_byte) = haystack[start_byte..].find(&needle) {
                     let absolute_byte = start_byte + rel_byte;
@@ -1466,7 +1525,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             let target = args.get(1).cloned().unwrap_or(Value::Undefined);
             let key = args.get(2).cloned().unwrap_or(Value::Undefined);
             if crate::trace::enabled() {
-                eprintln!("[trace] __native_deleteProperty target={:?} key={:?}", target, key);
+                eprintln!(
+                    "[trace] __native_deleteProperty target={:?} key={:?}",
+                    target, key
+                );
             }
             let key = vm.to_property_key(&key)?;
             Ok(Value::Bool(vm.delete_property_host(&target, &key)?))
