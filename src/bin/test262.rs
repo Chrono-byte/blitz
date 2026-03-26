@@ -1107,13 +1107,13 @@ fn main() {
         PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, _args| {
             // Create a new global object for the realm
             let realm_global = Rc::new(RefCell::new(ObjectData::new()));
-            
+
             // Install all the standard built-in constructors using install_minimal_kernel_constructors
             tsblitz::runtime_utils::install_minimal_kernel_constructors(&realm_global);
-            
+
             // Create a new $262 object for this realm with the same structure as the main realm
             let mut new_262_data = ObjectData::new();
-            
+
             // Add evalScript
             new_262_data.properties.insert(
                 PropertyKey::String("evalScript".to_string()),
@@ -1121,13 +1121,13 @@ fn main() {
                     builtin_eval_script(vm, args).map_err(tsblitz::errors::RuntimeError::from)
                 }))),
             );
-            
+
             // Add IsHTMLDDA
             new_262_data.properties.insert(
                 PropertyKey::String("IsHTMLDDA".to_string()),
                 PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
             );
-            
+
             // Add detachArrayBuffer (no-op)
             new_262_data.properties.insert(
                 PropertyKey::String("detachArrayBuffer".to_string()),
@@ -1135,28 +1135,34 @@ fn main() {
                     Ok(Value::Undefined)
                 }))),
             );
-            
+
             // Add createRealm recursively so realms can create sub-realms
             new_262_data.properties.insert(
                 PropertyKey::String("createRealm".to_string()),
                 PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
                     // Call the main createRealm via the main $262
                     if let Some(Value::Object(main_262_obj)) = vm.get_global("$262") {
-                        if let Some(PropertyDescriptor::Data { value: Value::Builtin(f), .. }) = 
-                            main_262_obj.borrow().properties.get(&PropertyKey::String("createRealm".to_string())) {
+                        if let Some(PropertyDescriptor::Data {
+                            value: Value::Builtin(f),
+                            ..
+                        }) = main_262_obj
+                            .borrow()
+                            .properties
+                            .get(&PropertyKey::String("createRealm".to_string()))
+                        {
                             return f.as_ref()(vm, args);
                         }
                     }
                     Err(tsblitz::errors::RuntimeError::from("createRealm not found"))
                 }))),
             );
-            
+
             // Add global property pointing to the realm's global object
             new_262_data.properties.insert(
                 PropertyKey::String("global".to_string()),
                 PropertyDescriptor::data(Value::Object(Rc::clone(&realm_global))),
             );
-            
+
             Ok(Value::Object(Rc::new(RefCell::new(new_262_data))))
         }))),
     );

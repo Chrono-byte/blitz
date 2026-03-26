@@ -86,5 +86,8 @@ pub fn value_string(label: &str, v: &crate::value::Value) {
         Value::Builtin(_) | Value::BuiltinObject(_, _) => {
             eprintln!("[trace] {} Builtin", label)
         }
+        Value::Promise(_) => {
+            eprintln!("[trace] {} Promise", label)
+        }
     }
 }

@@ -177,6 +177,22 @@ impl ObjectData {
 
 use crate::bytecode::FunctionProto;
 
+/// Promise internal state
+#[derive(Clone, Debug)]
+pub enum PromiseState {
+    /// Promise is waiting for resolution
+    Pending {
+        /// Callbacks registered for fulfillment (on_fulfilled)
+        on_fulfilled: Vec<Value>,
+        /// Callbacks registered for rejection (on_rejected)
+        on_rejected: Vec<Value>,
+    },
+    /// Promise has been resolved with a value
+    Fulfilled(Value),
+    /// Promise has been rejected with a reason
+    Rejected(Value),
+}
+
 #[derive(Clone)]
 /// Runtime value enum
 pub enum Value {
@@ -216,6 +232,8 @@ pub enum Value {
     Builtin(BuiltinFn),
     /// Built-in function object with a property bag (e.g. `.prototype`).
     BuiltinObject(BuiltinFn, Rc<RefCell<ObjectData>>),
+    /// Promise value with internal state
+    Promise(Rc<RefCell<PromiseState>>),
 }
 
 /// Built-in function type.
@@ -277,6 +295,7 @@ impl Value {
             Value::Array(..) => "object",
             Value::Closure { .. } => "function",
             Value::Builtin(_) | Value::BuiltinObject(_, _) => "function",
+            Value::Promise(_) => "object",
         }
     }
 
@@ -293,6 +312,7 @@ impl Value {
             Value::Array(..) => "Array",
             Value::Object(_) => "Object",
             Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _) => "Function",
+            Value::Promise(_) => "Promise",
         }
     }
 }
@@ -321,6 +341,7 @@ impl std::fmt::Display for Value {
             }
             Value::Closure { proto, .. } => write!(f, "[Function: {}]", proto.name),
             Value::Builtin(_) | Value::BuiltinObject(_, _) => write!(f, "[Native Function]"),
+            Value::Promise(_) => write!(f, "[object Promise]"),
         }
     }
 }
@@ -349,6 +370,7 @@ impl std::fmt::Debug for Value {
             Value::BuiltinObject(_, props) => {
                 write!(f, "BuiltinObject(props={:p})", Rc::as_ptr(props))
             }
+            Value::Promise(state) => write!(f, "Promise({:p})", Rc::as_ptr(state)),
         }
     }
 }

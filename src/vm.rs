@@ -566,7 +566,10 @@ impl Vm {
             }
             _ => {
                 // Debug: print what value type we got
-                eprintln!("CallWithThis ERROR: callee={:?}, receiver={:?}", callee, receiver);
+                eprintln!(
+                    "CallWithThis ERROR: callee={:?}, receiver={:?}",
+                    callee, receiver
+                );
                 self.dump_diag("CallWithThis failed: callee not callable", &callee);
                 return Err(crate::errors::RuntimeError::from(
                     "CallWithThis: not a function",
@@ -660,33 +663,33 @@ impl Vm {
                     _ => instance,
                 })
             }
-             Value::BuiltinObject(_, _) => {
-                 let proto = self
-                     .get_property_value(callee, &PropertyKey::String("prototype".to_string()))
-                     .unwrap_or(Value::Null);
-                 let instance_proto = match proto {
-                     Value::Object(_)
-                     | Value::Array(..)
-                     | Value::Closure { .. }
-                     | Value::BuiltinObject(_, _) => proto,
-                     _ => Value::Null,
-                 };
-                 let instance = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
-                     instance_proto,
-                 ))));
-                 // For builtin constructors, pass user args directly. call_with_this will
-                 // prepend the instance as 'this'. Builtin constructors receive:
-                 // args[0] = the new instance (via call_with_this)
-                 // args[1..] = user-provided constructor arguments
-                 let result = self.call_with_this(callee, &instance, args)?;
-                 Ok(match result {
-                     Value::Object(_)
-                     | Value::Array(..)
-                     | Value::Closure { .. }
-                     | Value::BuiltinObject(_, _) => result,
-                     _ => instance,
-                 })
-             }
+            Value::BuiltinObject(_, _) => {
+                let proto = self
+                    .get_property_value(callee, &PropertyKey::String("prototype".to_string()))
+                    .unwrap_or(Value::Null);
+                let instance_proto = match proto {
+                    Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::BuiltinObject(_, _) => proto,
+                    _ => Value::Null,
+                };
+                let instance = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
+                    instance_proto,
+                ))));
+                // For builtin constructors, pass user args directly. call_with_this will
+                // prepend the instance as 'this'. Builtin constructors receive:
+                // args[0] = the new instance (via call_with_this)
+                // args[1..] = user-provided constructor arguments
+                let result = self.call_with_this(callee, &instance, args)?;
+                Ok(match result {
+                    Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::BuiltinObject(_, _) => result,
+                    _ => instance,
+                })
+            }
             Value::Builtin(f) => (f.as_ref())(self, args),
             _ => Err(crate::errors::RuntimeError::from(format!(
                 "Construct: not a constructor (actual={})",
@@ -2411,8 +2414,8 @@ impl Vm {
                         crate::errors::RuntimeError::from(format!("Uncaught: {}", s))
                     }
                     other => {
-                        if let Ok(Value::String(msg)) =
-                            self.get_property_value(&other, &PropertyKey::String("message".to_string()))
+                        if let Ok(Value::String(msg)) = self
+                            .get_property_value(&other, &PropertyKey::String("message".to_string()))
                         {
                             crate::errors::RuntimeError::from(format!("Uncaught: {}", msg))
                         } else {
@@ -2951,6 +2954,7 @@ fn value_to_type(v: &Value) -> Type {
             Type::Function(vec![], Box::new(Type::Void))
         }
         Value::Symbol(_, _) => Type::Builtin(BuiltinType::Symbol),
+        Value::Promise(_) => Type::Object(HashMap::new()),
     }
 }
 

@@ -540,7 +540,9 @@ impl Compiler {
         &mut self,
         stmt: &oast::Statement,
     ) -> Result<(), crate::errors::CompilerError> {
-        use oxc_ast::ast::{BindingPattern as OPat, ForStatementLeft as OForLeft, Statement as OStmt};
+        use oxc_ast::ast::{
+            BindingPattern as OPat, ForStatementLeft as OForLeft, Statement as OStmt,
+        };
         match stmt {
             OStmt::ImportDeclaration(_) => {}
             OStmt::ExportAllDeclaration(_) => {}
@@ -846,8 +848,7 @@ impl Compiler {
                         };
                         let mirror_global = self.is_root
                             && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
-                        let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var)
-                        {
+                        let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
                             self.resolve_local(&name).unwrap_or_else(|| {
                                 self.add_var_local(name.clone(), None, mirror_global)
                             })
