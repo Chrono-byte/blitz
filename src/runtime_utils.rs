@@ -2547,8 +2547,8 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     reflect.borrow_mut().properties.insert(
         PKey::String("ownKeys".to_string()),
         PropertyDescriptor::data(Value::BuiltinObject(
-            Rc::new(|vm, args| {
-                let target = args.get(0).cloned().unwrap_or(Value::Undefined);
+            Rc::new(|_vm, args| {
+                let target = args.first().cloned().unwrap_or(Value::Undefined);
                 let keys = own_property_keys(&target)
                     .into_iter()
                     .map(|key| property_key_to_value(&key))
