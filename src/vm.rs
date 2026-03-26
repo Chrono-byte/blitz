@@ -525,15 +525,10 @@ impl Vm {
                 let result = (f.as_ref())(self, &call_args)?;
                 self.stack.push(result);
             }
-            Value::Closure { .. } => {
-                let result = self.call_with_this(&callee, &receiver, &args)?;
-                self.stack.push(result);
-                if crate::trace::enabled() {
-                    eprintln!(
-                        "[trace] execute_call_method after push stack_size={}",
-                        self.stack.len()
-                    );
-                }
+            Value::Closure { ref proto, env, .. } => {
+                let call_args = self.prepare_call_args(&args, proto)?;
+                // Argument validation removed in JS-first mode.
+                self.push_call_frame(proto, &env, call_args, receiver)?;
             }
             Value::Undefined if matches!(receiver, Value::Array(..)) => {
                 if let Some(callback) = args.first().cloned() {
@@ -628,7 +623,7 @@ impl Vm {
         args: &[Value],
     ) -> Result<Value, crate::errors::RuntimeError> {
         match callee {
-            Value::Closure { .. } | Value::BuiltinObject(_, _) => {
+            Value::Closure { .. } => {
                 let proto = self
                     .get_property_value(callee, &PropertyKey::String("prototype".to_string()))
                     .unwrap_or(Value::Null);
@@ -651,6 +646,33 @@ impl Vm {
                     _ => instance,
                 })
             }
+             Value::BuiltinObject(_, _) => {
+                 let proto = self
+                     .get_property_value(callee, &PropertyKey::String("prototype".to_string()))
+                     .unwrap_or(Value::Null);
+                 let instance_proto = match proto {
+                     Value::Object(_)
+                     | Value::Array(..)
+                     | Value::Closure { .. }
+                     | Value::BuiltinObject(_, _) => proto,
+                     _ => Value::Null,
+                 };
+                 let instance = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
+                     instance_proto,
+                 ))));
+                 // For builtin constructors, pass user args directly. call_with_this will
+                 // prepend the instance as 'this'. Builtin constructors receive:
+                 // args[0] = the new instance (via call_with_this)
+                 // args[1..] = user-provided constructor arguments
+                 let result = self.call_with_this(callee, &instance, args)?;
+                 Ok(match result {
+                     Value::Object(_)
+                     | Value::Array(..)
+                     | Value::Closure { .. }
+                     | Value::BuiltinObject(_, _) => result,
+                     _ => instance,
+                 })
+             }
             Value::Builtin(f) => (f.as_ref())(self, args),
             _ => Err(crate::errors::RuntimeError::from(format!(
                 "Construct: not a constructor (actual={})",
@@ -693,7 +715,8 @@ impl Vm {
                     {
                         Ok(false)
                     }
-                    _ => Ok(d.properties.remove(key).is_some() || true),
+                    _ => Ok(true),
+
                 }
             }
             Value::Array(arr, props) => {
@@ -712,7 +735,8 @@ impl Vm {
                     {
                         Ok(false)
                     }
-                    _ => Ok(p.properties.remove(key).is_some() || true),
+                    _ => Ok(true),
+
                 }
             }
             Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
@@ -724,11 +748,25 @@ impl Vm {
                     {
                         Ok(false)
                     }
-                    _ => Ok(p.properties.remove(key).is_some() || true),
+                    _ => Ok(true),
+
                 }
             }
             _ => Ok(false),
         }
+    }
+
+    /// Host hook: set a property value on a target object-like value.
+    pub fn set_property_host(
+        &mut self,
+        obj: &Value,
+        key: &Value,
+        value: Value,
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        let prop = self.to_property_key(key)?;
+        let result = value.clone();
+        self.set_property_tracked(obj, &prop, value)?;
+        Ok(result)
     }
 
     fn call_with_this(
@@ -868,7 +906,7 @@ impl Vm {
                 self.locals[slot] = Rc::new(RefCell::new(value));
             }
             Op::GetGlobal => {
-                let idx = self.read_byte()? as usize;
+                let idx = self.read_short()? as usize;
                 let name = self.string_constant(idx)?;
                 let v = self
                     .globals
@@ -883,7 +921,7 @@ impl Vm {
                 self.stack.push(v);
             }
             Op::SetGlobal => {
-                let idx = self.read_byte()? as usize;
+                let idx = self.read_short()? as usize;
                 let name = self.string_constant(idx)?;
                 let v = self.pop()?;
                 self.globals
@@ -1343,11 +1381,6 @@ impl Vm {
                 let thrown = self.pop()?;
                 if crate::trace::enabled() {
                     crate::trace::value_string("[trace] Throw thrown", &thrown);
-                    if let Ok(msg) = self
-                        .get_property_value(&thrown, &PropertyKey::String("message".to_string()))
-                    {
-                        crate::trace::value_string("[trace] Throw message", &msg);
-                    }
                     eprintln!(
                         "[trace] Throw stack_size={} handlers={}",
                         self.stack.len(),
@@ -1799,6 +1832,31 @@ impl Vm {
             if let Some(array_ctor) = array_ctor
                 && let Ok(proto) = self
                     .get_property_value(&array_ctor, &PropertyKey::String("prototype".to_string()))
+                && !matches!(proto, Value::Null)
+                && let Ok(v) = get_property(&proto, key, 0)
+            {
+                return Ok(v);
+            }
+        }
+        if let Value::Symbol(_, desc) = obj {
+            if matches!(key, PropertyKey::String(name) if name == "description") {
+                return Ok(match desc {
+                    Some(d) => Value::String(d.clone()),
+                    None => Value::Undefined,
+                });
+            }
+            let symbol_ctor = self
+                .globals
+                .borrow()
+                .properties
+                .get(&PropertyKey::String("Symbol".to_string()))
+                .and_then(|d| match d {
+                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                    _ => None,
+                });
+            if let Some(symbol_ctor) = symbol_ctor
+                && let Ok(proto) = self
+                    .get_property_value(&symbol_ctor, &PropertyKey::String("prototype".to_string()))
                 && !matches!(proto, Value::Null)
                 && let Ok(v) = get_property(&proto, key, 0)
             {
@@ -2317,7 +2375,15 @@ impl Vm {
                     Value::String(s) => {
                         crate::errors::RuntimeError::from(format!("Uncaught: {}", s))
                     }
-                    _ => crate::errors::RuntimeError::from("Uncaught exception"),
+                    other => {
+                        if let Ok(Value::String(msg)) =
+                            self.get_property_value(&other, &PropertyKey::String("message".to_string()))
+                        {
+                            crate::errors::RuntimeError::from(format!("Uncaught: {}", msg))
+                        } else {
+                            crate::errors::RuntimeError::from("Uncaught exception")
+                        }
+                    }
                 });
             }
         };
@@ -2490,8 +2556,6 @@ impl Vm {
                             }
                             Op::SetLocal
                             | Op::GetLocal
-                            | Op::SetGlobal
-                            | Op::GetGlobal
                             | Op::Call
                             | Op::GetBuiltin
                             | Op::GetProperty
@@ -2499,6 +2563,12 @@ impl Vm {
                             | Op::GetPropertyIC
                             | Op::MakeClosure => {
                                 let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                eprintln!("[diag]   {}: {:?} {}", j, op, arg);
+                            }
+                            Op::SetGlobal | Op::GetGlobal => {
+                                let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
+                                let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                                let arg = ((hi << 8) | lo) as usize;
                                 eprintln!("[diag]   {}: {:?} {}", j, op, arg);
                             }
                             _ => eprintln!("[diag]   {}: {:?}", j, op),
@@ -2594,8 +2664,10 @@ impl Vm {
                         eprintln!("[diag] {:#06}  Const       {} ({})", j, arg, repr);
                     }
                     Op::GetGlobal | Op::SetGlobal => {
-                        let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
-                        let name = match self.chunk.constants.get(arg as usize) {
+                        let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
+                        let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                        let arg = ((hi << 8) | lo) as usize;
+                        let name = match self.chunk.constants.get(arg) {
                             Some(Value::String(s)) => s.clone(),
                             _ => "<non-string>".to_string(),
                         };
@@ -2708,11 +2780,10 @@ impl Vm {
 fn opcode_width(op: Op) -> usize {
     match op {
         Op::Const => 3,
+        Op::GetGlobal | Op::SetGlobal => 3,
         Op::GetLocal
         | Op::SetLocal
         | Op::CloneLocalCell
-        | Op::GetGlobal
-        | Op::SetGlobal
         | Op::Call
         | Op::CallMethod
         | Op::MakeClosure
@@ -2822,11 +2893,11 @@ fn to_uint32(v: &Value) -> Result<u32, crate::errors::RuntimeError> {
 // Helper methods on Vm for coercion that delegate to free functions but
 // provide clearer naming when used in opcode handlers.
 impl Vm {
-    fn to_int32_value(&self, v: &Value) -> Result<i32, crate::errors::RuntimeError> {
+    pub fn to_int32_value(&self, v: &Value) -> Result<i32, crate::errors::RuntimeError> {
         to_int32(v)
     }
 
-    fn to_uint32_value(&self, v: &Value) -> Result<u32, crate::errors::RuntimeError> {
+    pub fn to_uint32_value(&self, v: &Value) -> Result<u32, crate::errors::RuntimeError> {
         to_uint32(v)
     }
 }

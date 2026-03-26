@@ -546,14 +546,20 @@ fn main() -> Result<(), tsblitz::errors::Error> {
                     let mut extra = String::new();
                     match bytecode::Op::from_byte(b) {
                         Some(bytecode::Op::Const)
-                        | Some(bytecode::Op::GetGlobal)
-                        | Some(bytecode::Op::SetGlobal)
                         | Some(bytecode::Op::GetBuiltin)
                         | Some(bytecode::Op::MakeClosure)
                         | Some(bytecode::Op::GetPropertyIC)
                         | Some(bytecode::Op::Call) => {
                             if ip + 1 < f.chunk.code.len() {
                                 let v = f.chunk.code[ip + 1] as usize;
+                                extra = format!(" {}", v);
+                            }
+                        }
+                        Some(bytecode::Op::GetGlobal) | Some(bytecode::Op::SetGlobal) => {
+                            if ip + 2 < f.chunk.code.len() {
+                                let hi = f.chunk.code[ip + 1] as usize;
+                                let lo = f.chunk.code[ip + 2] as usize;
+                                let v = (hi << 8) | lo;
                                 extra = format!(" {}", v);
                             }
                         }
@@ -576,12 +582,11 @@ fn main() -> Result<(), tsblitz::errors::Error> {
                     ip += 1;
                     match bytecode::Op::from_byte(b) {
                         Some(bytecode::Op::Const)
-                        | Some(bytecode::Op::GetGlobal)
-                        | Some(bytecode::Op::SetGlobal)
                         | Some(bytecode::Op::GetBuiltin)
                         | Some(bytecode::Op::MakeClosure)
                         | Some(bytecode::Op::GetPropertyIC)
                         | Some(bytecode::Op::Call) => ip += 1,
+                        Some(bytecode::Op::GetGlobal) | Some(bytecode::Op::SetGlobal) => ip += 2,
                         Some(bytecode::Op::Jump)
                         | Some(bytecode::Op::JumpIfFalse)
                         | Some(bytecode::Op::PushHandler) => ip += 2,
@@ -609,14 +614,20 @@ fn main() -> Result<(), tsblitz::errors::Error> {
                 let mut extra = String::new();
                 match bytecode::Op::from_byte(b) {
                     Some(bytecode::Op::Const)
-                    | Some(bytecode::Op::GetGlobal)
-                    | Some(bytecode::Op::SetGlobal)
                     | Some(bytecode::Op::GetBuiltin)
                     | Some(bytecode::Op::MakeClosure)
                     | Some(bytecode::Op::GetPropertyIC)
                     | Some(bytecode::Op::Call) => {
                         if ip + 1 < chunk.code.len() {
                             let v = chunk.code[ip + 1] as usize;
+                            extra = format!(" {}", v);
+                        }
+                    }
+                    Some(bytecode::Op::GetGlobal) | Some(bytecode::Op::SetGlobal) => {
+                        if ip + 2 < chunk.code.len() {
+                            let hi = chunk.code[ip + 1] as usize;
+                            let lo = chunk.code[ip + 2] as usize;
+                            let v = (hi << 8) | lo;
                             extra = format!(" {}", v);
                         }
                     }
@@ -637,12 +648,11 @@ fn main() -> Result<(), tsblitz::errors::Error> {
                 ip += 1;
                 match bytecode::Op::from_byte(b) {
                     Some(bytecode::Op::Const)
-                    | Some(bytecode::Op::GetGlobal)
-                    | Some(bytecode::Op::SetGlobal)
                     | Some(bytecode::Op::GetBuiltin)
                     | Some(bytecode::Op::MakeClosure)
                     | Some(bytecode::Op::GetPropertyIC)
                     | Some(bytecode::Op::Call) => ip += 1,
+                    Some(bytecode::Op::GetGlobal) | Some(bytecode::Op::SetGlobal) => ip += 2,
                     Some(bytecode::Op::Jump)
                     | Some(bytecode::Op::JumpIfFalse)
                     | Some(bytecode::Op::PushHandler) => ip += 2,

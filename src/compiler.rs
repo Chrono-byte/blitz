@@ -286,9 +286,7 @@ impl Compiler {
             self.emit_byte(src_idx as u8, LINE);
             self.emit_byte(cname_idx as u8, LINE);
         } else {
-            let idx = self.global_name_index(name);
-            self.emit(Op::GetGlobal, LINE);
-            self.emit_byte(idx as u8, LINE);
+            self.emit_get_global_name(name);
         }
     }
 
@@ -346,6 +344,18 @@ impl Compiler {
         let idx = self.chunk.add_constant(Value::String(name.to_string()));
         self.globals.insert(name.to_string(), idx);
         idx
+    }
+
+    fn emit_get_global_name(&mut self, name: &str) {
+        let idx = self.global_name_index(name);
+        self.emit(Op::GetGlobal, LINE);
+        self.emit_u16(idx as u16, LINE);
+    }
+
+    fn emit_set_global_name(&mut self, name: &str) {
+        let idx = self.global_name_index(name);
+        self.emit(Op::SetGlobal, LINE);
+        self.emit_u16(idx as u16, LINE);
     }
 
     /// Transitional compiler entry that accepts an `oast::Program` reference.
@@ -472,9 +482,7 @@ impl Compiler {
             self.emit(Op::SetLocal, LINE);
             self.emit_byte(slot as u8, LINE);
             if self.is_root && mirror_global {
-                let idx = self.global_name_index(&name);
-                self.emit(Op::SetGlobal, LINE);
-                self.emit_byte(idx as u8, LINE);
+                self.emit_set_global_name(&name);
             }
             let is_exported = self
                 .current_module
@@ -511,9 +519,7 @@ impl Compiler {
             self.emit(Op::SetLocal, LINE);
             self.emit_byte(slot as u8, LINE);
             if self.is_root {
-                let gidx = self.global_name_index(&fname);
-                self.emit(Op::SetGlobal, LINE);
-                self.emit_byte(gidx as u8, LINE);
+                self.emit_set_global_name(&fname);
             }
             let is_exported = self
                 .current_module
@@ -534,7 +540,7 @@ impl Compiler {
         &mut self,
         stmt: &oast::Statement,
     ) -> Result<(), crate::errors::CompilerError> {
-        use oxc_ast::ast::{BindingPattern as OPat, Statement as OStmt};
+        use oxc_ast::ast::{BindingPattern as OPat, ForStatementLeft as OForLeft, Statement as OStmt};
         match stmt {
             OStmt::ImportDeclaration(_) => {}
             OStmt::ExportAllDeclaration(_) => {}
@@ -705,9 +711,7 @@ impl Compiler {
                                 self.emit(Op::SetLocal, LINE);
                                 self.emit_byte(slot as u8, LINE);
                                 if self.is_root && mirror_global {
-                                    let idx = self.global_name_index(&name);
-                                    self.emit(Op::SetGlobal, LINE);
-                                    self.emit_byte(idx as u8, LINE);
+                                    self.emit_set_global_name(&name);
                                 }
                             }
                         }
@@ -771,6 +775,143 @@ impl Compiler {
                 if let Some(exit_jump) = exit_jump {
                     self.patch_jump(exit_jump);
                 }
+                if let Some(patches) = self.break_patches.pop() {
+                    for patch_pos in patches {
+                        let target = self.chunk.code.len() - patch_pos - 2;
+                        self.chunk.code[patch_pos] = (target >> 8) as u8;
+                        self.chunk.code[patch_pos + 1] = (target & 0xff) as u8;
+                    }
+                }
+            }
+            OStmt::ForInStatement(f) => {
+                self.continue_patches.push(Vec::new());
+                self.break_patches.push(Vec::new());
+
+                self.emit_get_global_name("__native_forInKeys");
+                self.compile_expr_oast(&f.right)?;
+                self.emit(Op::Call, LINE);
+                self.emit_byte(1, LINE);
+
+                let keys_slot = self.add_local_with_mirror(
+                    format!("__forin_keys_{}", self.locals.len()),
+                    None,
+                    false,
+                );
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(keys_slot as u8, LINE);
+
+                self.emit_constant(Value::Number(0.0), LINE);
+                let index_slot = self.add_local_with_mirror(
+                    format!("__forin_i_{}", self.locals.len()),
+                    None,
+                    false,
+                );
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(index_slot as u8, LINE);
+
+                let loop_start = self.chunk.code.len();
+
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(index_slot as u8, LINE);
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(keys_slot as u8, LINE);
+                self.emit_constant(Value::String("length".to_string()), LINE);
+                self.emit(Op::GetProperty, LINE);
+                self.emit(Op::Lt, LINE);
+                self.emit(Op::JumpIfFalse, LINE);
+                let exit_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(keys_slot as u8, LINE);
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(index_slot as u8, LINE);
+                self.emit(Op::GetProperty, LINE);
+
+                match &f.left {
+                    OForLeft::VariableDeclaration(v) => {
+                        let Some(dec) = v.declarations.first() else {
+                            return Err(crate::errors::CompilerError::from(
+                                "unsupported empty for-in declaration",
+                            ));
+                        };
+                        let name = match &dec.id {
+                            OPat::BindingIdentifier(i) => i.name.to_string(),
+                            _ => {
+                                return Err(crate::errors::CompilerError::from(
+                                    "unsupported for-in declaration pattern",
+                                ));
+                            }
+                        };
+                        let mirror_global = self.is_root
+                            && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
+                        let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var)
+                        {
+                            self.resolve_local(&name).unwrap_or_else(|| {
+                                self.add_var_local(name.clone(), None, mirror_global)
+                            })
+                        } else {
+                            self.add_local_with_mirror(name.clone(), None, mirror_global)
+                        };
+                        self.emit(Op::SetLocal, LINE);
+                        self.emit_byte(slot as u8, LINE);
+                        if mirror_global {
+                            self.emit(Op::GetLocal, LINE);
+                            self.emit_byte(slot as u8, LINE);
+                            self.emit_set_global_name(&name);
+                        }
+                    }
+                    OForLeft::AssignmentTargetIdentifier(id) => {
+                        let name = id.name.as_str();
+                        if let Some(slot) = self.resolve_local(name) {
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(slot as u8, LINE);
+                            if self.local_mirrors_global(slot) {
+                                self.emit(Op::GetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
+                                self.emit_set_global_name(name);
+                            }
+                        } else if let Some(upvalue) = self.resolve_upvalue(name) {
+                            self.emit(Op::SetUpvalue, LINE);
+                            self.emit_byte(upvalue, LINE);
+                        } else {
+                            self.emit_set_global_name(name);
+                        }
+                    }
+                    _ => {
+                        return Err(crate::errors::CompilerError::from(
+                            "unsupported for-in assignment target",
+                        ));
+                    }
+                }
+
+                self.enter_block_scope();
+                self.compile_statement_oast(&f.body)?;
+                self.exit_scope();
+
+                let update_start = self.chunk.code.len();
+                if let Some(patches) = self.continue_patches.pop() {
+                    for patch_pos in patches {
+                        let target = update_start as isize - (patch_pos as isize) - 2;
+                        let v = target as i16;
+                        self.chunk.code[patch_pos] = (v >> 8) as u8;
+                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                    }
+                }
+
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(index_slot as u8, LINE);
+                self.emit_constant(Value::Number(1.0), LINE);
+                self.emit(Op::Add, LINE);
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(index_slot as u8, LINE);
+
+                self.emit(Op::Jump, LINE);
+                let back_offset = loop_start as isize - (self.chunk.code.len() + 2) as isize;
+                self.emit_short_signed(back_offset, LINE);
+
+                self.patch_jump(exit_jump);
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let target = self.chunk.code.len() - patch_pos - 2;
@@ -887,6 +1028,27 @@ impl Compiler {
         match expr {
             OExpr::NumericLiteral(n) => self.emit_constant(Value::Number(n.value), LINE),
             OExpr::StringLiteral(s) => self.emit_constant(Value::String(s.value.to_string()), LINE),
+            OExpr::TemplateLiteral(t) => {
+                let first = t
+                    .quasis
+                    .first()
+                    .and_then(|q| q.value.cooked.as_ref())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                self.emit_constant(Value::String(first), LINE);
+                for (i, expr) in t.expressions.iter().enumerate() {
+                    self.compile_expr_oast(expr)?;
+                    self.emit(Op::Add, LINE);
+                    let tail = t
+                        .quasis
+                        .get(i + 1)
+                        .and_then(|q| q.value.cooked.as_ref())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    self.emit_constant(Value::String(tail), LINE);
+                    self.emit(Op::Add, LINE);
+                }
+            }
             OExpr::BooleanLiteral(b) => {
                 if b.value {
                     self.emit(Op::True, LINE)
@@ -972,11 +1134,9 @@ impl Compiler {
                                 self.emit(Op::SetLocal, LINE);
                                 self.emit_byte(slot as u8, LINE);
                                 if self.local_mirrors_global(slot) {
-                                    let idx = self.global_name_index(name);
                                     self.emit(Op::GetLocal, LINE);
                                     self.emit_byte(slot as u8, LINE);
-                                    self.emit(Op::SetGlobal, LINE);
-                                    self.emit_byte(idx as u8, LINE);
+                                    self.emit_set_global_name(name);
                                 }
                                 // Check export membership without holding a borrow
                                 let is_exported = self
@@ -1011,9 +1171,7 @@ impl Compiler {
                                     self.emit_byte(src_idx as u8, LINE);
                                     self.emit_byte(cname_idx as u8, LINE);
                                 } else {
-                                    let idx = self.global_name_index(name);
-                                    self.emit(Op::SetGlobal, LINE);
-                                    self.emit_byte(idx as u8, LINE);
+                                    self.emit_set_global_name(name);
                                 }
                             }
                         }
@@ -1040,7 +1198,13 @@ impl Compiler {
                     | oast::AssignmentOperator::Multiplication
                     | oast::AssignmentOperator::Division
                     | oast::AssignmentOperator::Remainder
-                    | oast::AssignmentOperator::Exponential => match target {
+                    | oast::AssignmentOperator::Exponential
+                    | oast::AssignmentOperator::BitwiseAnd
+                    | oast::AssignmentOperator::BitwiseOR
+                    | oast::AssignmentOperator::BitwiseXOR
+                    | oast::AssignmentOperator::ShiftLeft
+                    | oast::AssignmentOperator::ShiftRight
+                    | oast::AssignmentOperator::ShiftRightZeroFill => match target {
                         oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
                             let name = id.name.as_str();
                             if let Some(slot) = self.resolve_local(name) {
@@ -1058,9 +1222,7 @@ impl Compiler {
                                     "cannot assign to imported binding",
                                 ));
                             } else {
-                                let idx = self.global_name_index(name);
-                                self.emit(Op::GetGlobal, LINE);
-                                self.emit_byte(idx as u8, LINE);
+                                self.emit_get_global_name(name);
                             }
                             self.compile_expr_oast(&a.right)?;
                             match a.operator {
@@ -1072,6 +1234,14 @@ impl Compiler {
                                 oast::AssignmentOperator::Division => self.emit(Op::Div, LINE),
                                 oast::AssignmentOperator::Remainder => self.emit(Op::Mod, LINE),
                                 oast::AssignmentOperator::Exponential => self.emit(Op::Pow, LINE),
+                                oast::AssignmentOperator::BitwiseAnd => self.emit(Op::BitAnd, LINE),
+                                oast::AssignmentOperator::BitwiseOR => self.emit(Op::BitOr, LINE),
+                                oast::AssignmentOperator::BitwiseXOR => self.emit(Op::BitXor, LINE),
+                                oast::AssignmentOperator::ShiftLeft => self.emit(Op::Shl, LINE),
+                                oast::AssignmentOperator::ShiftRight => self.emit(Op::Shr, LINE),
+                                oast::AssignmentOperator::ShiftRightZeroFill => {
+                                    self.emit(Op::Ushr, LINE)
+                                }
                                 _ => {}
                             }
                             self.emit(Op::Dup, LINE);
@@ -1079,20 +1249,64 @@ impl Compiler {
                                 self.emit(Op::SetLocal, LINE);
                                 self.emit_byte(slot as u8, LINE);
                                 if self.local_mirrors_global(slot) {
-                                    let idx = self.global_name_index(name);
                                     self.emit(Op::GetLocal, LINE);
                                     self.emit_byte(slot as u8, LINE);
-                                    self.emit(Op::SetGlobal, LINE);
-                                    self.emit_byte(idx as u8, LINE);
+                                    self.emit_set_global_name(name);
                                 }
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
                                 self.emit(Op::SetUpvalue, LINE);
                                 self.emit_byte(upvalue, LINE);
                             } else {
-                                let idx = self.global_name_index(name);
-                                self.emit(Op::SetGlobal, LINE);
-                                self.emit_byte(idx as u8, LINE);
+                                self.emit_set_global_name(name);
                             }
+                        }
+                        oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
+                            self.emit_get_global_name("__native_compoundAssign");
+                            self.compile_expr_oast(&m.object)?;
+                            self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                            self.compile_expr_oast(&a.right)?;
+                            let op = match a.operator {
+                                oast::AssignmentOperator::Addition => "+",
+                                oast::AssignmentOperator::Subtraction => "-",
+                                oast::AssignmentOperator::Multiplication => "*",
+                                oast::AssignmentOperator::Division => "/",
+                                oast::AssignmentOperator::Remainder => "%",
+                                oast::AssignmentOperator::Exponential => "**",
+                                oast::AssignmentOperator::BitwiseAnd => "&",
+                                oast::AssignmentOperator::BitwiseOR => "|",
+                                oast::AssignmentOperator::BitwiseXOR => "^",
+                                oast::AssignmentOperator::ShiftLeft => "<<",
+                                oast::AssignmentOperator::ShiftRight => ">>",
+                                oast::AssignmentOperator::ShiftRightZeroFill => ">>>",
+                                _ => unreachable!(),
+                            };
+                            self.emit_constant(Value::String(op.to_string()), LINE);
+                            self.emit(Op::Call, LINE);
+                            self.emit_byte(4, LINE);
+                        }
+                        oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
+                            self.emit_get_global_name("__native_compoundAssign");
+                            self.compile_expr_oast(&m.object)?;
+                            self.compile_expr_oast(&m.expression)?;
+                            self.compile_expr_oast(&a.right)?;
+                            let op = match a.operator {
+                                oast::AssignmentOperator::Addition => "+",
+                                oast::AssignmentOperator::Subtraction => "-",
+                                oast::AssignmentOperator::Multiplication => "*",
+                                oast::AssignmentOperator::Division => "/",
+                                oast::AssignmentOperator::Remainder => "%",
+                                oast::AssignmentOperator::Exponential => "**",
+                                oast::AssignmentOperator::BitwiseAnd => "&",
+                                oast::AssignmentOperator::BitwiseOR => "|",
+                                oast::AssignmentOperator::BitwiseXOR => "^",
+                                oast::AssignmentOperator::ShiftLeft => "<<",
+                                oast::AssignmentOperator::ShiftRight => ">>",
+                                oast::AssignmentOperator::ShiftRightZeroFill => ">>>",
+                                _ => unreachable!(),
+                            };
+                            self.emit_constant(Value::String(op.to_string()), LINE);
+                            self.emit(Op::Call, LINE);
+                            self.emit_byte(4, LINE);
                         }
                         _ => {
                             return Err(crate::errors::CompilerError::from(
@@ -1109,26 +1323,20 @@ impl Compiler {
             }
             OExpr::UnaryExpression(u) => match u.operator {
                 oast::UnaryOperator::Typeof => {
-                    let idx = self.global_name_index("__native_typeof");
-                    self.emit(Op::GetGlobal, LINE);
-                    self.emit_byte(idx as u8, LINE);
+                    self.emit_get_global_name("__native_typeof");
                     self.compile_expr_oast(&u.argument)?;
                     self.emit(Op::Call, LINE);
                     self.emit_byte(1, LINE);
                 }
                 oast::UnaryOperator::Delete => {
                     if let OExpr::StaticMemberExpression(m) = &u.argument {
-                        let idx = self.global_name_index("__native_deleteProperty");
-                        self.emit(Op::GetGlobal, LINE);
-                        self.emit_byte(idx as u8, LINE);
+                        self.emit_get_global_name("__native_deleteProperty");
                         self.compile_expr_oast(&m.object)?;
                         self.emit_constant(Value::String(m.property.name.to_string()), LINE);
                         self.emit(Op::Call, LINE);
                         self.emit_byte(2, LINE);
                     } else if let OExpr::ComputedMemberExpression(m) = &u.argument {
-                        let idx = self.global_name_index("__native_deleteProperty");
-                        self.emit(Op::GetGlobal, LINE);
-                        self.emit_byte(idx as u8, LINE);
+                        self.emit_get_global_name("__native_deleteProperty");
                         self.compile_expr_oast(&m.object)?;
                         self.compile_expr_oast(&m.expression)?;
                         self.emit(Op::Call, LINE);
@@ -1173,11 +1381,9 @@ impl Compiler {
                             self.emit(Op::SetLocal, LINE);
                             self.emit_byte(slot as u8, LINE);
                             if self.local_mirrors_global(slot) {
-                                let idx = self.global_name_index(name);
                                 self.emit(Op::GetLocal, LINE);
                                 self.emit_byte(slot as u8, LINE);
-                                self.emit(Op::SetGlobal, LINE);
-                                self.emit_byte(idx as u8, LINE);
+                                self.emit_set_global_name(name);
                             }
                         } else if let Some(upvalue) = self.resolve_upvalue(name) {
                             self.emit(Op::GetUpvalue, LINE);
@@ -1196,9 +1402,7 @@ impl Compiler {
                             self.emit(Op::SetUpvalue, LINE);
                             self.emit_byte(upvalue, LINE);
                         } else {
-                            let idx = self.global_name_index(name);
-                            self.emit(Op::GetGlobal, LINE);
-                            self.emit_byte(idx as u8, LINE);
+                            self.emit_get_global_name(name);
                             if !u.prefix {
                                 self.emit(Op::Dup, LINE);
                             }
@@ -1210,9 +1414,38 @@ impl Compiler {
                             if u.prefix {
                                 self.emit(Op::Dup, LINE);
                             }
-                            self.emit(Op::SetGlobal, LINE);
-                            self.emit_byte(idx as u8, LINE);
+                            self.emit_set_global_name(name);
                         }
+                    }
+                    OTarget::StaticMemberExpression(m) => {
+                        self.emit_get_global_name("__native_updateProperty");
+                        self.compile_expr_oast(&m.object)?;
+                        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                        self.emit_constant(
+                            Value::Number(match u.operator {
+                                oast::UpdateOperator::Increment => 1.0,
+                                oast::UpdateOperator::Decrement => -1.0,
+                            }),
+                            LINE,
+                        );
+                        self.emit_constant(Value::Bool(u.prefix), LINE);
+                        self.emit(Op::Call, LINE);
+                        self.emit_byte(4, LINE);
+                    }
+                    OTarget::ComputedMemberExpression(m) => {
+                        self.emit_get_global_name("__native_updateProperty");
+                        self.compile_expr_oast(&m.object)?;
+                        self.compile_expr_oast(&m.expression)?;
+                        self.emit_constant(
+                            Value::Number(match u.operator {
+                                oast::UpdateOperator::Increment => 1.0,
+                                oast::UpdateOperator::Decrement => -1.0,
+                            }),
+                            LINE,
+                        );
+                        self.emit_constant(Value::Bool(u.prefix), LINE);
+                        self.emit(Op::Call, LINE);
+                        self.emit_byte(4, LINE);
                     }
                     _ => {
                         return Err(crate::errors::CompilerError::from(
@@ -1231,9 +1464,7 @@ impl Compiler {
                     } else {
                         "__native_in"
                     };
-                    let idx = self.global_name_index(helper);
-                    self.emit(Op::GetGlobal, LINE);
-                    self.emit_byte(idx as u8, LINE);
+                    self.emit_get_global_name(helper);
                     self.compile_expr_oast(&b.left)?;
                     self.compile_expr_oast(&b.right)?;
                     self.emit(Op::Call, LINE);
@@ -1309,6 +1540,21 @@ impl Compiler {
                     ));
                 }
             },
+            OExpr::ConditionalExpression(c) => {
+                self.compile_expr_oast(&c.test)?;
+                self.emit(Op::JumpIfFalse, LINE);
+                let jump_else = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                self.compile_expr_oast(&c.consequent)?;
+                self.emit(Op::Jump, LINE);
+                let jump_end = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                self.patch_jump(jump_else);
+                self.compile_expr_oast(&c.alternate)?;
+                self.patch_jump(jump_end);
+            }
             OExpr::SequenceExpression(seq) => {
                 let len = seq.expressions.len();
                 for (idx, expr) in seq.expressions.iter().enumerate() {
@@ -1339,9 +1585,7 @@ impl Compiler {
                     && obj_ident.name.as_str() == "console"
                     && m.property.name.as_str() == "log"
                 {
-                    let idx = self.global_name_index("__native_print");
-                    self.emit(Op::GetGlobal, LINE);
-                    self.emit_byte(idx as u8, LINE);
+                    self.emit_get_global_name("__native_print");
                     let mut arg_count = 0usize;
                     for arg in &c.arguments {
                         if let Some(expr) = arg.as_expression() {
@@ -1399,24 +1643,59 @@ impl Compiler {
                     return Ok(());
                 }
 
-                self.compile_expr_oast(&c.callee)?;
-                let mut arg_count = 0usize;
-                for arg in &c.arguments {
-                    if let Some(expr) = arg.as_expression() {
-                        self.compile_expr_oast(expr)?;
-                        arg_count += 1;
-                    } else {
-                        self.emit(Op::Null, LINE);
-                        arg_count += 1;
+                let has_spread = c
+                    .arguments
+                    .iter()
+                    .any(|arg| matches!(arg, oast::Argument::SpreadElement(_)));
+                if has_spread {
+                    self.emit_get_global_name("__native_call_spread");
+                    self.compile_expr_oast(&c.callee)?;
+                    self.emit_constant(Value::Undefined, LINE);
+                    for arg in &c.arguments {
+                        match arg {
+                            oast::Argument::SpreadElement(s) => {
+                                self.compile_expr_oast(&s.argument)?;
+                            }
+                            _ => {
+                                if let Some(expr) = arg.as_expression() {
+                                    self.compile_expr_oast(expr)?;
+                                } else {
+                                    self.emit(Op::Null, LINE);
+                                }
+                            }
+                        }
                     }
+                    self.emit(Op::BuildArray, LINE);
+                    self.emit_byte(c.arguments.len() as u8, LINE);
+                    for arg in &c.arguments {
+                        if matches!(arg, oast::Argument::SpreadElement(_)) {
+                            self.emit(Op::True, LINE);
+                        } else {
+                            self.emit(Op::False, LINE);
+                        }
+                    }
+                    self.emit(Op::BuildArray, LINE);
+                    self.emit_byte(c.arguments.len() as u8, LINE);
+                    self.emit(Op::Call, LINE);
+                    self.emit_byte(4, LINE);
+                } else {
+                    self.compile_expr_oast(&c.callee)?;
+                    let mut arg_count = 0usize;
+                    for arg in &c.arguments {
+                        if let Some(expr) = arg.as_expression() {
+                            self.compile_expr_oast(expr)?;
+                            arg_count += 1;
+                        } else {
+                            self.emit(Op::Null, LINE);
+                            arg_count += 1;
+                        }
+                    }
+                    self.emit(Op::Call, LINE);
+                    self.emit_byte(arg_count as u8, LINE);
                 }
-                self.emit(Op::Call, LINE);
-                self.emit_byte(arg_count as u8, LINE);
             }
             OExpr::NewExpression(n) => {
-                let idx = self.global_name_index("__native_construct");
-                self.emit(Op::GetGlobal, LINE);
-                self.emit_byte(idx as u8, LINE);
+                self.emit_get_global_name("__native_construct");
                 self.compile_expr_oast(&n.callee)?;
                 let mut arg_count = 0usize;
                 for arg in &n.arguments {
@@ -1490,9 +1769,7 @@ impl Compiler {
                 self.emit(Op::SetLocal, LINE);
                 self.emit_byte(slot as u8, LINE);
                 if self.is_root {
-                    let gidx = self.global_name_index(&fname);
-                    self.emit(Op::SetGlobal, LINE);
-                    self.emit_byte(gidx as u8, LINE);
+                    self.emit_set_global_name(&fname);
                 }
             }
         }
@@ -1632,8 +1909,6 @@ impl Compiler {
             param_type_opts.push(None);
             inner.add_local_with_mirror(pname, None, false);
         }
-        let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
-
         // Pre-declare nested functions inside this function body.
         inner.pre_declare_variables_oast_stmts(&func.body.statements);
         inner.pre_declare_functions_oast_stmts(&func.body.statements);
@@ -1664,7 +1939,9 @@ impl Compiler {
                 has_rest,
                 has_prototype_property: false,
                 captures_this: true,
-                arguments_slot: Some(arguments_slot),
+                // Arrow functions do not create their own `arguments`; it is
+                // lexically resolved from the enclosing function/global scope.
+                arguments_slot: None,
                 return_type,
             },
             _env_len,
@@ -1717,9 +1994,11 @@ mod tests {
                 if let Some(op) = Op::from_byte(chunk.code[i]) {
                     match op {
                         Op::GetGlobal | Op::SetGlobal => {
-                            let ref_idx = chunk.code.get(i + 1).cloned().unwrap_or(0) as usize;
+                            let hi = chunk.code.get(i + 1).cloned().unwrap_or(0) as usize;
+                            let lo = chunk.code.get(i + 2).cloned().unwrap_or(0) as usize;
+                            let ref_idx = (hi << 8) | lo;
                             assert_ne!(ref_idx, idx, "found GetGlobal/SetGlobal referencing 'f'");
-                            i += 2;
+                            i += 3;
                         }
                         Op::Jump | Op::JumpIfFalse | Op::PushHandler => i += 3,
                         Op::Const
@@ -1767,10 +2046,9 @@ mod tests {
                     | Op::GetBuiltin
                     | Op::SetLocal
                     | Op::GetLocal
-                    | Op::SetGlobal
-                    | Op::GetGlobal
                     | Op::GetProperty
                     | Op::SetProperty => i += 2,
+                    Op::SetGlobal | Op::GetGlobal => i += 3,
                     _ => i += 1,
                 }
             } else {
@@ -1816,10 +2094,9 @@ mod tests {
                     | Op::GetBuiltin
                     | Op::SetLocal
                     | Op::GetLocal
-                    | Op::SetGlobal
-                    | Op::GetGlobal
                     | Op::GetProperty
                     | Op::SetProperty => i += 2,
+                    Op::SetGlobal | Op::GetGlobal => i += 3,
                     _ => i += 1,
                 }
             } else {
@@ -1858,12 +2135,11 @@ mod tests {
                     | Op::GetBuiltin
                     | Op::SetLocal
                     | Op::GetLocal
-                    | Op::SetGlobal
-                    | Op::GetGlobal
                     | Op::GetProperty
                     | Op::SetProperty
                     | Op::BuildArray
                     | Op::BuildObject => i += 2,
+                    Op::SetGlobal | Op::GetGlobal => i += 3,
                     _ => i += 1,
                 }
             } else {
@@ -1926,12 +2202,11 @@ mod tests {
                     | Op::GetBuiltin
                     | Op::SetLocal
                     | Op::GetLocal
-                    | Op::SetGlobal
-                    | Op::GetGlobal
                     | Op::GetProperty
                     | Op::SetProperty
                     | Op::BuildArray
                     | Op::BuildObject => i += 2,
+                    Op::SetGlobal | Op::GetGlobal => i += 3,
                     _ => i += 1,
                 }
             } else {
