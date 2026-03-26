@@ -399,6 +399,15 @@ impl Value {
             Value::Promise(_) => "Promise",
         }
     }
+
+    /// Returns whether this value exposes [[Construct]], i.e. can act as a constructor.
+    pub fn is_constructable(&self) -> bool {
+        match self {
+            Value::Closure { proto, .. } => proto.has_prototype_property && proto.is_constructor,
+            Value::BuiltinObject(_, _) => true,
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Display for Value {

@@ -1,3 +1,4 @@
+//! Module loading and evaluation.
 use crate::compiler::ModuleContext;
 use crate::errors::BundlerError;
 use crate::parser::ParserSession;

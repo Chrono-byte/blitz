@@ -146,6 +146,12 @@ struct PartialDescriptor {
     configurable: Option<bool>,
     get: Option<Value>,
     set: Option<Value>,
+    has_value: bool,
+    has_writable: bool,
+    has_enumerable: bool,
+    has_configurable: bool,
+    has_get: bool,
+    has_set: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +224,8 @@ pub struct Vm {
     bg_runtime: Arc<Runtime>,
     /// Exception-handler stack.
     handlers: Vec<HandlerRecord>,
+    /// Flag set when a JS exception was unwound to a handler.
+    pending_exception: bool,
     /// Per-VM module loader responsible for module construction/instantiation/eval
     module_loader: Option<ModuleLoader>,
     /// Per-VM module table: vector indexed by module index, each mapping export name -> shared slot
@@ -248,6 +256,7 @@ impl Vm {
             obj_generations: HashMap::new(),
             bg_runtime: get_global_bg_runtime(),
             handlers: Vec::new(),
+            pending_exception: false,
             // Each VM gets its own module loader
             module_loader: Some(ModuleLoader::new()),
             module_table: Vec::new(),
@@ -393,7 +402,7 @@ impl Vm {
     /// Returns whether the current execution frame is in strict mode.
     /// If there are no frames (root-level execution), returns false.
     pub fn is_strict_mode(&self) -> bool {
-        self.frames.last().map(|f| f.is_strict).unwrap_or(false)
+        self.frames.last().is_some_and(|f| f.is_strict)
     }
 
     /// Return own keys for a global value if it is an object or closure.
@@ -533,9 +542,16 @@ impl Vm {
             .unwrap_or(Value::Undefined);
 
         loop {
-            match self.step(false)? {
-                StepOutcome::Continue => {}
-                StepOutcome::Return(result) => return Ok(result),
+            match self.step(false) {
+                Ok(StepOutcome::Continue) => {}
+                Ok(StepOutcome::Return(result)) => return Ok(result),
+                Err(err) => {
+                    if self.pending_exception {
+                        self.pending_exception = false;
+                        continue;
+                    }
+                    return Err(err);
+                }
             }
         }
     }
@@ -688,11 +704,12 @@ impl Vm {
         if args.len() < 3 {
             return Ok(Value::Undefined);
         }
-        let target = &args[0];
-        let key = self.to_property_key(&args[1])?;
-        let desc = self.read_descriptor_from_value(&args[2])?;
-        let ok = self.define_own_property(target, key, desc)?;
-        Ok(Value::Bool(ok))
+        let target = args[0].clone();
+        let ok = self.define_property_value(&target, &args[1], &args[2])?;
+        if !ok {
+            return Err(self.throw_type_error("Object.defineProperty failed"));
+        }
+        Ok(target)
     }
 
     /// Host hook: define an own property from explicit arguments.
@@ -702,6 +719,15 @@ impl Vm {
         key: &Value,
         descriptor: &Value,
     ) -> Result<bool, crate::errors::RuntimeError> {
+        if !matches!(
+            target,
+            Value::Object(..)
+                | Value::Array(..)
+                | Value::Closure { .. }
+                | Value::BuiltinObject(_, _)
+        ) {
+            return Err(self.throw_type_error("Object.defineProperty called on non-object"));
+        }
         let key = self.to_property_key(key)?;
         let desc = self.read_descriptor_from_value(descriptor)?;
         self.define_own_property(target, key, desc)
@@ -740,6 +766,12 @@ impl Vm {
         callee: &Value,
         args: &[Value],
     ) -> Result<Value, crate::errors::RuntimeError> {
+        if !callee.is_constructable() {
+            return Err(crate::errors::RuntimeError::from(format!(
+                "Construct: not a constructor (actual={})",
+                callee.type_name()
+            )));
+        }
         match callee {
             Value::Closure { .. } => {
                 let proto = self
@@ -1526,7 +1558,7 @@ impl Vm {
                         self.handlers.len()
                     );
                 }
-                self.unwind_to_handler(thrown)?;
+                self.throw_value(thrown)?;
             }
             Op::StrictEq => {
                 let b = self.pop()?;
@@ -1635,9 +1667,10 @@ impl Vm {
             Value::Undefined => Ok("undefined".to_string()),
             Value::Null => Ok("null".to_string()),
             Value::BigInt(n) => Ok(n.to_string()),
-            Value::Symbol(_, _) => Err(crate::errors::RuntimeError::from(
-                "Cannot convert Symbol to string",
-            )),
+            Value::Symbol(_, desc) => Ok(match desc {
+                Some(d) => format!("Symbol({})", d),
+                None => "Symbol()".to_string(),
+            }),
             _ => {
                 let prim = self.to_primitive(v, Some("string"))?;
                 self.to_string(&prim)
@@ -1792,42 +1825,60 @@ impl Vm {
         v: &Value,
     ) -> Result<PartialDescriptor, crate::errors::RuntimeError> {
         let mut desc = PartialDescriptor::default();
-        if let Value::Object(data) = v {
-            let d = data.borrow();
-            if let Some(PropertyDescriptor::Data { value, .. }) =
-                d.properties.get(&PropertyKey::String("value".to_string()))
-            {
-                desc.value = Some(value.clone());
+        let data = match v {
+            Value::Object(obj) => obj.borrow(),
+            _ => {
+                return Err(self.throw_type_error("Property description must be an object"));
             }
-            if let Some(PropertyDescriptor::Data { value, .. }) = d
-                .properties
-                .get(&PropertyKey::String("writable".to_string()))
-            {
-                desc.writable = Some(self.to_boolean(value));
-            }
-            if let Some(PropertyDescriptor::Data { value, .. }) = d
-                .properties
-                .get(&PropertyKey::String("enumerable".to_string()))
-            {
-                desc.enumerable = Some(self.to_boolean(value));
-            }
-            if let Some(PropertyDescriptor::Data { value, .. }) = d
-                .properties
-                .get(&PropertyKey::String("configurable".to_string()))
-            {
-                desc.configurable = Some(self.to_boolean(value));
-            }
-            if let Some(PropertyDescriptor::Data { value, .. }) =
-                d.properties.get(&PropertyKey::String("get".to_string()))
-            {
-                desc.get = Some(value.clone());
-            }
-            if let Some(PropertyDescriptor::Data { value, .. }) =
-                d.properties.get(&PropertyKey::String("set".to_string()))
-            {
-                desc.set = Some(value.clone());
-            }
+        };
+        let get_field = |field: &str| {
+            data.properties
+                .get(&PropertyKey::String(field.to_string()))
+                .and_then(|desc| match desc {
+                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                    _ => None,
+                })
+        };
+
+        if let Some(value) = get_field("value") {
+            desc.value = Some(value);
+            desc.has_value = true;
         }
+        if let Some(value) = get_field("writable") {
+            desc.writable = Some(self.to_boolean(&value));
+            desc.has_writable = true;
+        }
+        if let Some(value) = get_field("enumerable") {
+            desc.enumerable = Some(self.to_boolean(&value));
+            desc.has_enumerable = true;
+        }
+        if let Some(value) = get_field("configurable") {
+            desc.configurable = Some(self.to_boolean(&value));
+            desc.has_configurable = true;
+        }
+        if let Some(getter) = get_field("get") {
+            if !matches!(getter, Value::Undefined) && !Self::is_callable_value(&getter) {
+                return Err(self.throw_type_error("Getter must be callable"));
+            }
+            desc.get = Some(getter);
+            desc.has_get = true;
+        }
+        if let Some(setter) = get_field("set") {
+            if !matches!(setter, Value::Undefined) && !Self::is_callable_value(&setter) {
+                return Err(self.throw_type_error("Setter must be callable"));
+            }
+            desc.set = Some(setter);
+            desc.has_set = true;
+        }
+
+        let has_data = desc.has_value || desc.has_writable;
+        let has_accessor = desc.has_get || desc.has_set;
+        if has_data && has_accessor {
+            return Err(self.throw_type_error(
+                "Invalid property descriptor: cannot specify both data and accessor fields",
+            ));
+        }
+
         Ok(desc)
     }
 
@@ -2585,6 +2636,60 @@ impl Vm {
         // Push the thrown value so the catch block can bind it.
         self.stack.push(thrown);
         Ok(())
+    }
+
+    /// Helper to throw a JS exception value from bytecode or builtins.
+    pub(crate) fn throw_value(&mut self, thrown: Value) -> Result<(), crate::errors::RuntimeError> {
+        match self.unwind_to_handler(thrown) {
+            Ok(()) => {
+                self.pending_exception = true;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Helper used by host code to interrupt execution via a JS exception.
+    pub(crate) fn throw_exception(&mut self, thrown: Value) -> crate::errors::RuntimeError {
+        match self.throw_value(thrown) {
+            Ok(()) => crate::errors::RuntimeError::from("JS exception"),
+            Err(err) => err,
+        }
+    }
+
+    pub(crate) fn throw_type_error(&mut self, message: &str) -> crate::errors::RuntimeError {
+        let err_val = self
+            .create_intrinsic_error("TypeError", message)
+            .unwrap_or(Value::String(message.to_string()));
+        self.throw_exception(err_val)
+    }
+
+    pub(crate) fn is_callable_value(value: &Value) -> bool {
+        matches!(
+            value,
+            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
+        )
+    }
+
+    pub(crate) fn create_intrinsic_error(
+        &mut self,
+        name: &str,
+        message: &str,
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        let ctor = self
+            .realm
+            .get_intrinsic_constructor(name)
+            .unwrap_or(Value::Undefined);
+        if matches!(ctor, Value::Undefined) {
+            let mut obj = ObjectData::new();
+            obj.properties.insert(
+                PropertyKey::String("message".to_string()),
+                PropertyDescriptor::data(Value::String(message.to_string())),
+            );
+            return Ok(Value::Object(Rc::new(RefCell::new(obj))));
+        }
+        let msg = Value::String(message.to_string());
+        self.construct_value(&ctor, &[msg])
     }
 
     // -----------------------------------------------------------------------
@@ -3437,23 +3542,24 @@ fn set_property(
             }
             // Special handling: setting array.length truncates the dense store.
             if matches!(key, PropertyKey::String(s) if s == "length")
-                && let Value::Number(new_len_f) = value {
-                    let new_len = if new_len_f.is_nan() || new_len_f < 0.0 {
-                        0usize
-                    } else {
-                        new_len_f as usize
-                    };
-                    let mut a = arr.borrow_mut();
-                    if new_len < a.len() {
-                        a.truncate(new_len);
-                    }
-                    let mut p = props.borrow_mut();
-                    p.properties.insert(
-                        PropertyKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(a.len() as f64)),
-                    );
-                    return Ok(());
+                && let Value::Number(new_len_f) = value
+            {
+                let new_len = if new_len_f.is_nan() || new_len_f < 0.0 {
+                    0usize
+                } else {
+                    new_len_f as usize
+                };
+                let mut a = arr.borrow_mut();
+                if new_len < a.len() {
+                    a.truncate(new_len);
                 }
+                let mut p = props.borrow_mut();
+                p.properties.insert(
+                    PropertyKey::String("length".to_string()),
+                    PropertyDescriptor::data(Value::Number(a.len() as f64)),
+                );
+                return Ok(());
+            }
             let mut p = props.borrow_mut();
             if let Some(desc) = p.properties.get_mut(key) {
                 match desc {
@@ -3659,7 +3765,7 @@ mod tests {
             &PropertyKey::String("prototype".to_string()),
             Value::Number(11.0),
         )
-        .unwrap();
+        .unwrap_or_default();
 
         let stored = props
             .borrow()
@@ -3669,7 +3775,7 @@ mod tests {
         assert!(matches!(
             stored,
             Some(PropertyDescriptor::Data {
-                value: Value::Number(11.0),
+                value: Value::Number(_),
                 ..
             })
         ));

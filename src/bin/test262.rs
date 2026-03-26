@@ -482,7 +482,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     // Per spec: each realm gets distinct intrinsic identities.
     data.properties.insert(
         PropertyKey::String("createRealm".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, _args| {
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| {
             // Create a fresh global object for the new realm.
             let realm_global = Rc::new(RefCell::new(ObjectData::new()));
 
@@ -508,10 +508,8 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
             );
             // Copy all properties from the $262 object
             if let Value::Object(ref obj) = new_262 {
-                for (k, v) in obj.borrow().properties.iter() {
-                    realm_wrapper
-                        .properties
-                        .insert(k.clone(), v.clone());
+                for (k, v) in &obj.borrow().properties {
+                    realm_wrapper.properties.insert(k.clone(), v.clone());
                 }
             }
 
@@ -606,7 +604,10 @@ fn snapshot_global_keys(globals: &Rc<RefCell<ObjectData>>) -> HashSet<PropertyKe
 /// properties that were MODIFIED. This is lighter than a full deep clone:
 /// we only track keys, and we rely on the fact that builtins/closures share
 /// state via `Rc`.
-fn restore_globals(globals: &Rc<RefCell<ObjectData>>, baseline: &HashMap<PropertyKey, PropertyDescriptor>) {
+fn restore_globals(
+    globals: &Rc<RefCell<ObjectData>>,
+    baseline: &HashMap<PropertyKey, PropertyDescriptor>,
+) {
     let mut g = globals.borrow_mut();
     // Remove keys that were added during the test
     g.properties.retain(|k, _| baseline.contains_key(k));

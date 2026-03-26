@@ -1,3 +1,5 @@
+//! Debug binary for arrow functions.
+
 use oxc_allocator::Allocator;
 use oxc_ast::ast as oast;
 use oxc_parser::Parser;

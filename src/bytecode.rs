@@ -90,6 +90,8 @@ pub struct FunctionProto {
     /// directive prologue. Used at runtime to set the per-function strict
     /// mode flag on the call frame.
     pub is_strict: bool,
+    /// Whether this function may be used as a constructor (per ECMAScript [[Construct]]).
+    pub is_constructor: bool,
 }
 
 impl Chunk {

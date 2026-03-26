@@ -1,3 +1,5 @@
+//! Utility functions for runtime operations.
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -254,6 +256,63 @@ fn descriptor_value_from_descriptor(
         }
     }
     Value::Object(Rc::new(RefCell::new(obj)))
+}
+
+fn own_property_keys(obj: &Value) -> Vec<PropertyKey> {
+    let mut keys = Vec::new();
+    let mut seen = HashSet::new();
+    match obj {
+        Value::Object(data) => {
+            for key in data.borrow().properties.keys() {
+                if seen.insert(key.clone()) {
+                    keys.push(key.clone());
+                }
+            }
+        }
+        Value::Array(arr, props) => {
+            for (idx, slot) in arr.borrow().iter().enumerate() {
+                if slot.is_some() {
+                    let key = PropertyKey::String(idx.to_string());
+                    if seen.insert(key.clone()) {
+                        keys.push(key);
+                    }
+                }
+            }
+            for key in props.borrow().properties.keys() {
+                if seen.insert(key.clone()) {
+                    keys.push(key.clone());
+                }
+            }
+        }
+        Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+            for key in props.borrow().properties.keys() {
+                if seen.insert(key.clone()) {
+                    keys.push(key.clone());
+                }
+            }
+        }
+        _ => {}
+    }
+    keys
+}
+
+fn property_key_to_value(key: &PropertyKey) -> Value {
+    match key {
+        PropertyKey::String(name) => Value::String(name.clone()),
+        PropertyKey::Symbol(id) => Value::Symbol(id.clone(), None),
+    }
+}
+
+fn array_from_values(values: Vec<Value>) -> Value {
+    let arr_rc = Rc::new(RefCell::new(
+        values.into_iter().map(Some).collect::<Vec<_>>(),
+    ));
+    let props = Rc::new(RefCell::new(ObjectData::new()));
+    props.borrow_mut().properties.insert(
+        PropertyKey::String("length".to_string()),
+        PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+    );
+    Value::Array(arr_rc, props)
 }
 
 fn canonical_index_key(s: &str) -> Option<u64> {
@@ -687,34 +746,23 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     let function_ctor_proto = Rc::clone(&function_proto_map);
     let function_ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
         let body = args
-            .get(1)
+            .last()
             .cloned()
             .unwrap_or(Value::String("return undefined".to_string()));
         let body_src = match body {
             Value::String(s) => s,
             _ => "return undefined".to_string(),
         };
-        let expr = body_src
-            .strip_prefix("return ")
-            .unwrap_or(&body_src)
-            .trim_end_matches(';')
-            .trim()
-            .to_string();
+        let body_src = body_src.trim().to_string();
         if crate::trace::enabled() {
-            eprintln!("[trace] Function ctor body='{}' expr='{}'", body_src, expr);
+            eprintln!("[trace] Function ctor body='{}'", body_src);
         }
         let call_target: BuiltinFn = Rc::new(move |vm, _call_args| {
-            if expr
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-            {
-                let g = vm.get_global(&expr).unwrap_or(Value::Undefined);
-                if crate::trace::enabled() {
-                    eprintln!("[trace] Function body identifier '{}' -> {:?}", expr, g);
-                }
-                return Ok(g);
+            let src = body_src.trim();
+            if src == "return this" || src == "return this;" {
+                return Ok(vm.get_global("globalThis").unwrap_or(Value::Undefined));
             }
-            vm.eval_expression_source(&expr)
+            vm.eval_expression_source(src)
         });
         Ok(Value::BuiltinObject(
             call_target,
@@ -1167,6 +1215,70 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let reason = args.first().cloned().unwrap_or(Value::Undefined);
                 let promise = Rc::new(RefCell::new(PromiseState::Rejected(reason)));
                 Ok(Value::Promise(promise))
+            }),
+            &function_proto_map,
+        )),
+    );
+
+    // Reflect.construct
+    let reflect_obj = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+        Rc::clone(&object_proto_map),
+    ))));
+    reflect_obj.borrow_mut().properties.insert(
+        PKey::String("construct".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let off = static_builtin_arg_offset(vm, args, "Reflect");
+                let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let arg_list = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                let new_target = args.get(off + 2).cloned().unwrap_or_else(|| target.clone());
+
+                let ctor = if matches!(new_target, Value::Undefined) {
+                    &target
+                } else {
+                    &new_target
+                };
+
+                if !target.is_constructable() {
+                    return Err(crate::errors::RuntimeError::from(
+                        "Reflect.construct: target is not a constructor",
+                    ));
+                }
+                if !ctor.is_constructable() {
+                    return Err(crate::errors::RuntimeError::from(
+                        "Reflect.construct: newTarget is not a constructor",
+                    ));
+                }
+
+                let args_vec: Vec<Value> = match arg_list {
+                    Value::Array(arr, _) => arr.borrow().iter().filter_map(Clone::clone).collect(),
+                    Value::Undefined | Value::Null => Vec::new(),
+                    _ => Vec::new(),
+                };
+
+                let result = vm.construct_value(&target, &args_vec)?;
+                if matches!(new_target, Value::Undefined) {
+                    return Ok(result);
+                }
+
+                let new_target_proto = vm
+                    .get_property_host(&new_target, &PropertyKey::String("prototype".to_string()))
+                    .unwrap_or(Value::Undefined);
+                let desired_proto = match new_target_proto {
+                    Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::BuiltinObject(_, _) => Some(new_target_proto),
+                    _ => None,
+                };
+
+                if let Some(proto_value) = desired_proto
+                    && let Value::Object(obj) = &result
+                {
+                    obj.borrow_mut().prototype = proto_value;
+                }
+
+                Ok(result)
             }),
             &function_proto_map,
         )),
@@ -1786,6 +1898,52 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             builtin
         }),
     );
+
+    object_ctor_map.borrow_mut().properties.insert(
+        PKey::String("getOwnPropertySymbols".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|_vm, args| {
+                let target = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let symbols = own_property_keys(&target)
+                    .into_iter()
+                    .filter_map(|key| {
+                        if let PropertyKey::Symbol(id) = key {
+                            Some(Value::Symbol(id, None))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                Ok(array_from_values(symbols))
+            }),
+            &function_proto_map,
+        )),
+    );
+
+    object_ctor_map.borrow_mut().properties.insert(
+        PKey::String("getOwnPropertyDescriptors".to_string()),
+        PropertyDescriptor::data({
+            let object_proto_map = Rc::clone(&object_proto_map);
+            builtin_object(
+                Rc::new(move |vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let mut result = ObjectData::new();
+                    for key in own_property_keys(&target) {
+                        if let Some(desc) = own_property_descriptor(&target, &key) {
+                            let descriptor_value =
+                                descriptor_value_from_descriptor(&object_proto_map, &desc);
+                            result
+                                .properties
+                                .insert(key.clone(), PropertyDescriptor::data(descriptor_value));
+                        }
+                    }
+                    Ok(Value::Object(Rc::new(RefCell::new(result))))
+                }),
+                &function_proto_map,
+            )
+        }),
+    );
     object_ctor_map.borrow_mut().properties.insert(
         PKey::String("getOwnPropertyNames".to_string()),
         PropertyDescriptor::data({
@@ -1860,13 +2018,43 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     );
                 }
                 let ok = vm.define_property_value(&target, &args[off + 1], &args[off + 2])?;
-                if ok {
-                    Ok(target)
-                } else {
-                    Err(crate::errors::RuntimeError::from(
-                        "Object.defineProperty failed",
-                    ))
+                if !ok {
+                    return Err(vm.throw_type_error("Object.defineProperty failed"));
                 }
+                Ok(target)
+            }),
+            &function_proto_map,
+        )),
+    );
+
+    object_ctor_map.borrow_mut().properties.insert(
+        PKey::String("defineProperties".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let off = static_builtin_arg_offset(vm, args, "Object");
+                let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let props = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                if !matches!(
+                    props,
+                    Value::Object(_)
+                        | Value::Array(..)
+                        | Value::Closure { .. }
+                        | Value::BuiltinObject(_, _)
+                ) {
+                    return Err(vm.throw_type_error("Object.defineProperties called on non-object"));
+                }
+                for key in own_property_keys(&props) {
+                    let descriptor = vm.get_property_host(&props, &key)?;
+                    if matches!(descriptor, Value::Undefined) {
+                        continue;
+                    }
+                    let key_value = property_key_to_value(&key);
+                    let ok = vm.define_property_value(&target, &key_value, &descriptor)?;
+                    if !ok {
+                        return Err(vm.throw_type_error("Object.defineProperties failed"));
+                    }
+                }
+                Ok(target)
             }),
             &function_proto_map,
         )),
@@ -2053,8 +2241,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     );
 
     let string_ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
-        let value_idx = if args.len() > 1 { 1 } else { 0 };
-        let value = args.get(value_idx);
+        let value = args.first();
         if value.is_none() {
             return Ok(Value::String(String::new()));
         }
@@ -2313,39 +2500,60 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(Value::BuiltinObject(
             Rc::new(|vm, args| {
                 let target = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let arguments_list = args.get(2).cloned().unwrap_or(Value::Undefined);
                 let new_target = args.get(3).cloned().unwrap_or_else(|| target.clone());
-                let proto = vm.get_property_host(
-                    &new_target,
-                    &PropertyKey::String("prototype".to_string()),
-                )?;
-                let fallback_proto = match &new_target {
-                    Value::Object(obj) => obj.borrow().prototype.clone(),
-                    Value::Array(_, props) => props.borrow().prototype.clone(),
-                    Value::Closure { props, .. } => props.borrow().prototype.clone(),
-                    Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
-                    _ => Value::Null,
-                };
-                let instance_proto = match proto {
-                    Value::Object(_)
-                    | Value::Array(..)
-                    | Value::Closure { .. }
-                    | Value::BuiltinObject(_, _) => proto,
-                    _ => fallback_proto,
-                };
-                let props = Rc::new(RefCell::new(ObjectData::new()));
-                props.borrow_mut().prototype = instance_proto;
-                let callable =
-                    Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), Rc::clone(&props));
-                let fn_proto_obj = Rc::new(RefCell::new(ObjectData::new()));
-                props.borrow_mut().properties.insert(
-                    PropertyKey::String("prototype".to_string()),
-                    PropertyDescriptor::data(Value::Object(Rc::clone(&fn_proto_obj))),
-                );
-                fn_proto_obj.borrow_mut().properties.insert(
-                    PropertyKey::String("constructor".to_string()),
-                    PropertyDescriptor::data(callable.clone()),
-                );
-                Ok(callable)
+
+                if !target.is_constructable() {
+                    let err =
+                        vm.create_intrinsic_error("TypeError", "target is not a constructor")?;
+                    return Err(vm.throw_exception(err));
+                }
+                if !new_target.is_constructable() {
+                    let err =
+                        vm.create_intrinsic_error("TypeError", "newTarget is not a constructor")?;
+                    return Err(vm.throw_exception(err));
+                }
+
+                let mut args_vec = Vec::new();
+                match &arguments_list {
+                    Value::Array(arr, _) => {
+                        for item in arr.borrow().iter().cloned() {
+                            if let Some(v) = item {
+                                args_vec.push(v);
+                            } else {
+                                args_vec.push(Value::Undefined);
+                            }
+                        }
+                    }
+                    other => {
+                        let len_val = vm
+                            .get_property_host(other, &PropertyKey::String("length".to_string()))?;
+                        let len = vm.to_number_value(&len_val)?.max(0.0) as usize;
+                        for idx in 0..len {
+                            let item =
+                                vm.get_property_host(other, &PropertyKey::String(idx.to_string()))?;
+                            args_vec.push(item);
+                        }
+                    }
+                }
+
+                vm.construct_value(&target, &args_vec)
+            }),
+            Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+                Rc::clone(&function_proto_map),
+            )))),
+        )),
+    );
+    reflect.borrow_mut().properties.insert(
+        PKey::String("ownKeys".to_string()),
+        PropertyDescriptor::data(Value::BuiltinObject(
+            Rc::new(|vm, args| {
+                let target = args.get(0).cloned().unwrap_or(Value::Undefined);
+                let keys = own_property_keys(&target)
+                    .into_iter()
+                    .map(|key| property_key_to_value(&key))
+                    .collect::<Vec<_>>();
+                Ok(array_from_values(keys))
             }),
             Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
                 Rc::clone(&function_proto_map),
@@ -2386,6 +2594,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             let mut eval_vm = crate::vm::Vm::new(vm.globals_rc());
             eval_vm.run(chunk)
         }))),
+    );
+    g.properties.insert(
+        PKey::String("Reflect".to_string()),
+        PropertyDescriptor::data(Value::Object(reflect_obj)),
     );
     // Add kernel helpers if missing, prefer host-provided values when present.
     let mut insert_if_missing = |name: &str, val: Value| {

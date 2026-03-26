@@ -37,30 +37,54 @@ use std::rc::Rc;
 #[derive(Clone, Debug, Default)]
 pub struct Intrinsics {
     // --- Constructors (callable objects) ---
+    // Constructors for objects
     pub object_constructor: Option<Value>,
+    // Constructors for arrays
     pub array_constructor: Option<Value>,
+    // Constructors for functions
     pub function_constructor: Option<Value>,
+    // Constructors for strings
     pub string_constructor: Option<Value>,
+    // Constructors for symbols
     pub symbol_constructor: Option<Value>,
+    // Constructors for errors
     pub error_constructor: Option<Value>,
+    // Constructors for type errors
     pub type_error_constructor: Option<Value>,
+    // Constructors for range errors
     pub range_error_constructor: Option<Value>,
+    // Constructors for reference errors
     pub reference_error_constructor: Option<Value>,
+    // Constructors for syntax errors
     pub syntax_error_constructor: Option<Value>,
+    // Constructors for promises
     pub promise_constructor: Option<Value>,
+    // Constructors for dates
     pub date_constructor: Option<Value>,
+    // Constructors for maps
     pub map_constructor: Option<Value>,
+    // Constructors for numbers
     pub number_constructor: Option<Value>,
 
     // --- Prototypes ---
+
+    // Prototypes for built-in object prototypes.
     pub object_prototype: Option<Value>,
+    // Prototypes for built-in array prototypes.
     pub array_prototype: Option<Value>,
+    // Prototypes for built-in function prototypes.
     pub function_prototype: Option<Value>,
+    // Prototypes for built-in string prototypes.
     pub string_prototype: Option<Value>,
+    // Prototypes for built-in symbol prototypes.
     pub symbol_prototype: Option<Value>,
+    // Prototypes for built-in error prototypes.
     pub error_prototype: Option<Value>,
+    // Prototypes for built-in promise prototypes.
     pub promise_prototype: Option<Value>,
+    // Prototypes for built-in date prototypes.
     pub date_prototype: Option<Value>,
+    // Prototypes for built-in map prototypes.
     pub map_prototype: Option<Value>,
 }
 

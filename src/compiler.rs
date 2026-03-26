@@ -54,12 +54,20 @@ pub fn compile(program: &oast::Program<'_>) -> Result<Chunk, crate::errors::Comp
 }
 
 /// Compile an oxc AST Program.
+///
+/// # Errors
+///
+/// Returns an error if compilation fails.
 pub fn compile_oxc(program: &oast::Program<'_>) -> Result<Chunk, crate::errors::CompilerError> {
     let mut c = Compiler::new();
     c.compile_oxc(program, None)
 }
 
 /// Compile an oxc AST Program with an optional ModuleContext.
+///
+/// # Errors
+///
+/// Returns an error if compilation fails.
 pub fn compile_oxc_with_ctx(
     program: &oast::Program<'_>,
     ctx: Option<&ModuleContext>,
@@ -1076,6 +1084,17 @@ impl Compiler {
                 self.emit(Op::MakeClosure, LINE);
                 self.emit_byte(idx as u8, LINE);
             }
+            OExpr::CallExpression(call) => {
+                let nargs = call.arguments.len();
+                self.compile_expr_oast(&call.callee)?;
+                for arg in &call.arguments {
+                    if let Some(expr) = arg.as_expression() {
+                        self.compile_expr_oast(expr)?;
+                    }
+                }
+                self.emit(Op::Call, LINE);
+                self.emit_byte(nargs as u8, LINE);
+            }
             OExpr::ObjectExpression(obj) => {
                 let mut count = 0usize;
                 for prop in &obj.properties {
@@ -1781,13 +1800,13 @@ impl Compiler {
     /// statements.
     fn has_use_strict_directive(stmts: &[oast::Statement]) -> bool {
         for stmt in stmts {
-            if let oast::Statement::ExpressionStatement(expr_stmt) = stmt {
-                if let oxc_ast::ast::Expression::StringLiteral(s) = &expr_stmt.expression {
-                    if s.value.as_str() == "use strict" {
-                        return true;
-                    }
-                    continue;
+            if let oast::Statement::ExpressionStatement(expr_stmt) = stmt
+                && let oxc_ast::ast::Expression::StringLiteral(s) = &expr_stmt.expression
+            {
+                if s.value.as_str() == "use strict" {
+                    return true;
                 }
+                continue;
             }
             // Non-string-literal ExpressionStatement or non-expression statement
             // terminates the directive prologue.
@@ -1868,7 +1887,11 @@ impl Compiler {
             .collect();
         let has_rest = func.params.rest.is_some();
         let has_prototype_property = !func.r#async;
-        let is_strict = func.body.as_ref().map_or(false, |body| Self::has_use_strict_directive(&body.statements));
+        let is_constructor = !func.r#async && !func.generator;
+        let is_strict = func
+            .body
+            .as_ref()
+            .is_some_and(|body| Self::has_use_strict_directive(&body.statements));
         Ok((
             FunctionProto {
                 name: name.to_string(),
@@ -1882,6 +1905,7 @@ impl Compiler {
                 arguments_slot: Some(arguments_slot),
                 return_type,
                 is_strict,
+                is_constructor,
             },
             _env_len,
         ))
@@ -1986,6 +2010,7 @@ impl Compiler {
                 arguments_slot: None,
                 return_type,
                 is_strict,
+                is_constructor: false,
             },
             _env_len,
         ))
@@ -2301,9 +2326,19 @@ mod tests {
     #[test]
     fn compile_member_call_uses_call_method() {
         let src = "obj.method(1);";
-        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let session = match crate::parser::Parser::parse_source(src) {
+            Ok(s) => s,
+            // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
+            #[allow(clippy::panic)]
+            Err(e) => panic!("parse_source failed: {:?}", e),
+        };
         let program = session.program();
-        let chunk = compile(program).expect("compile ok");
+        let chunk = match compile(program) {
+            Ok(c) => c,
+            // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
+            #[allow(clippy::panic)]
+            Err(e) => panic!("compile failed: {:?}", e),
+        };
 
         let saw_call_method = chunk
             .code
@@ -2317,7 +2352,8 @@ mod tests {
     #[test]
     fn compile_sequence_expression_keeps_last_value() {
         let src = "var x = (a = 1, 2);";
-        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let session = crate::parser::Parser::parse_source(src)
+            .unwrap_or_else(|e| panic!("parse_source failed: {:?}", e));
         let program = session.program();
         let chunk = compile(program).expect("compile ok");
 
