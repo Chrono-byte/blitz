@@ -2103,10 +2103,35 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PKey::String("Math".to_string()),
         PropertyDescriptor::data(Value::Object(math)),
     );
-    g.properties.insert(
-        PKey::String("Reflect".to_string()),
-        PropertyDescriptor::data(Value::Object(reflect)),
+
+    // Number constructor with static properties
+    let number_obj = Rc::new(RefCell::new(ObjectData::new()));
+    number_obj.borrow_mut().properties.insert(
+        PKey::String("NaN".to_string()),
+        PropertyDescriptor::data(Value::Number(f64::NAN)),
     );
+    number_obj.borrow_mut().properties.insert(
+        PKey::String("POSITIVE_INFINITY".to_string()),
+        PropertyDescriptor::data(Value::Number(f64::INFINITY)),
+    );
+    number_obj.borrow_mut().properties.insert(
+        PKey::String("NEGATIVE_INFINITY".to_string()),
+        PropertyDescriptor::data(Value::Number(f64::NEG_INFINITY)),
+    );
+    number_obj.borrow_mut().properties.insert(
+        PKey::String("MAX_VALUE".to_string()),
+        PropertyDescriptor::data(Value::Number(f64::MAX)),
+    );
+    number_obj.borrow_mut().properties.insert(
+        PKey::String("MIN_VALUE".to_string()),
+        PropertyDescriptor::data(Value::Number(f64::MIN_POSITIVE)),
+    );
+    g.properties.insert(
+        PKey::String("Number".to_string()),
+        PropertyDescriptor::data(Value::Object(number_obj)),
+    );
+
+    let reflect = Rc::new(RefCell::new(ObjectData::new()));
 
     // Ensure a few additional helpers the soft prelude expects. Do not
     // override host-provided values.
