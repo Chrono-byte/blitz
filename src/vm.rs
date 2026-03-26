@@ -599,6 +599,23 @@ impl Vm {
         self.call_with_this(callee, this_arg, args)
     }
 
+    pub fn eval_expression_source(
+        &mut self,
+        source: &str,
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        let wrapped = format!("__tsblitz_eval_result = ({});", source);
+        let session = crate::parser::Parser::parse_source(&wrapped)
+            .map_err(|e| crate::errors::RuntimeError::from(format!("parse: {}", e)))?;
+        let prog = session.program();
+        let chunk = crate::compiler::compile_oxc(prog)
+            .map_err(|e| crate::errors::RuntimeError::from(format!("compile: {}", e)))?;
+        let mut child = Vm::new(Rc::clone(&self.globals));
+        let _ = child.run(chunk)?;
+        Ok(child
+            .get_global("__tsblitz_eval_result")
+            .unwrap_or(Value::Undefined))
+    }
+
     /// Host hook: construct a callable with `new` semantics.
     pub fn construct_value(
         &mut self,
@@ -817,7 +834,7 @@ impl Vm {
 
         match op {
             Op::Const => {
-                let idx = self.read_byte()? as usize;
+                let idx = self.read_short()? as usize;
                 let v = self.constant(idx)?;
                 self.stack.push(v);
             }
@@ -1732,6 +1749,35 @@ impl Vm {
                 }
             };
         }
+        if let Value::String(text) = obj {
+            if matches!(key, PropertyKey::String(name) if name == "length") {
+                return Ok(Value::Number(text.chars().count() as f64));
+            }
+            if let Some(i) = array_index_from_key(key)
+                && let Some(ch) = text.chars().nth(i)
+            {
+                return Ok(Value::String(ch.to_string()));
+            }
+            let string_ctor = self
+                .globals
+                .borrow()
+                .properties
+                .get(&PropertyKey::String("String".to_string()))
+                .and_then(|d| match d {
+                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                    _ => None,
+                });
+            if let Some(string_ctor) = string_ctor
+                && let Ok(proto) = self.get_property_value(
+                    &string_ctor,
+                    &PropertyKey::String("prototype".to_string()),
+                )
+                && !matches!(proto, Value::Null)
+                && let Ok(v) = get_property(&proto, key, 0)
+            {
+                return Ok(v);
+            }
+        }
         if let Value::Array(_, _) = obj {
             let array_ctor = self
                 .globals
@@ -1822,9 +1868,15 @@ impl Vm {
 
     /// Pop the return value, restore the caller's frame, and push the result.
     fn execute_return(&mut self) -> Result<(), crate::errors::RuntimeError> {
-        let result = self.stack.pop().unwrap_or(Value::Undefined);
-
         let frame = self.frames.pop().ok_or("Return without call frame")?;
+        // Only consume a return value produced by the callee itself. If the
+        // callee leaves no value above its stack base, the return value is
+        // `undefined` and we must not pop caller operands.
+        let result = if self.stack.len() > frame.stack_base {
+            self.stack.pop().unwrap_or(Value::Undefined)
+        } else {
+            Value::Undefined
+        };
 
         if crate::trace::enabled() {
             eprintln!(
@@ -1878,7 +1930,7 @@ impl Vm {
         let mut fixed = Vec::with_capacity(ar);
 
         for i in 0..fixed_count {
-            fixed.push(args.get(i).cloned().unwrap_or(Value::Null));
+            fixed.push(args.get(i).cloned().unwrap_or(Value::Undefined));
         }
 
         let rest_slice: Vec<Value> = if args.len() > fixed_count {
@@ -1975,9 +2027,9 @@ impl Vm {
         self.current_slot_types = Some(proto.slot_types.clone());
 
         // Pre-allocate locals to at least `arity` slots, filling missing
-        // arguments with Null.
+        // arguments with `undefined` per JavaScript semantics.
         let args_for_arguments = call_args.clone();
-        self.locals = std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Null)))
+        self.locals = std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
             .take(proto.slot_types.len().max(proto.arity))
             .collect();
         for (i, value) in call_args.into_iter().enumerate().take(proto.arity) {
@@ -2259,14 +2311,15 @@ impl Vm {
             }
         };
 
-        // FIX: Pop frames back to the handler's level without
-        // sequentially restoring intermediate state. Only the handler's
-        // saved snapshot matters.
+        // Pop frames back to the handler's level, restoring caller state
+        // at each step so closure env/this/chunk stay consistent.
         while self.frames.len() > handler.frame_count {
             if let Some(frame) = self.frames.pop() {
-                // Restore the outermost caller's locals so we land in
-                // the correct local-variable scope.
+                self.chunk = frame.chunk;
+                self.ip = frame.ip;
                 self.locals = frame.locals;
+                self.this_value = frame.this_value;
+                self.current_closure_env = frame.closure_env;
                 self.current_slot_types = frame.slot_types;
             }
         }
@@ -2323,6 +2376,13 @@ impl Vm {
         let lo = self.read_byte()? as u16;
         let u = (hi << 8) | lo;
         Ok((u as i16) as isize)
+    }
+
+    #[inline(always)]
+    fn read_short(&mut self) -> Result<u16, crate::errors::RuntimeError> {
+        let hi = self.read_byte()? as u16;
+        let lo = self.read_byte()? as u16;
+        Ok((hi << 8) | lo)
     }
 
     // -----------------------------------------------------------------------
@@ -2402,7 +2462,9 @@ impl Vm {
                         let width = opcode_width(op);
                         match op {
                             Op::Const => {
-                                let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
+                                let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                                let arg = (hi << 8) | lo;
                                 if let Some(c) = self.chunk.constants.get(arg as usize) {
                                     eprintln!("[diag]   {}: {:?} {:?}", j, op, c);
                                 } else {
@@ -2508,7 +2570,9 @@ impl Vm {
                 let width = opcode_width(op);
                 match op {
                     Op::Const => {
-                        let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                        let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
+                        let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                        let arg = (hi << 8) | lo;
                         let repr = match self.chunk.constants.get(arg as usize) {
                             Some(Value::String(s)) => {
                                 format!("'{}'", s)
@@ -2632,8 +2696,8 @@ impl Vm {
 /// Return the bytecode width of an opcode (opcode byte + operand bytes).
 fn opcode_width(op: Op) -> usize {
     match op {
-        Op::Const
-        | Op::GetLocal
+        Op::Const => 3,
+        Op::GetLocal
         | Op::SetLocal
         | Op::CloneLocalCell
         | Op::GetGlobal
@@ -2826,6 +2890,8 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Object(am), Value::Object(bm)) => Rc::ptr_eq(am, bm),
         (Value::Array(ar, _), Value::Array(br, _)) => Rc::ptr_eq(ar, br),
         (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
+        (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
+        (Value::Builtin(af), Value::Builtin(bf)) => Rc::ptr_eq(af, bf),
         _ => false,
     }
 }

@@ -12,10 +12,7 @@ path = "src/main.rs"
 clap = { version = "4.5.57", features = ["derive"] }
 ouroboros = "0.15"
 oxc_allocator = "0.111.0"
-# Oxc AST with `serialize` feature enabled so we can produce ESTree JSON
 oxc_ast = { version = "0.111.0", features = ["serialize"] }
-# miette = "5"
-# Oxc parser and support crates (parser, allocator, span)
 oxc_parser = "0.111.0"
 oxc_semantic = "0.111.0"
 oxc_span = "0.111.0"
@@ -25,7 +22,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 oxc_resolver = "11.17.1"
-# Optional: for better errors later
 thiserror = "2.0"
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync"] }
 fastrand = "2.1"

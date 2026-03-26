@@ -339,7 +339,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(builtin_object(
             Rc::new(|_vm, args| {
                 let this = args.first().cloned().unwrap_or(Value::Undefined);
-                let mut items = match this {
+                let items = match this {
                     Value::Array(arr, _) => arr,
                     _ => return Ok(Value::Number(0.0)),
                 };
@@ -435,8 +435,38 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     );
 
     let function_ctor_proto = Rc::clone(&function_proto_map);
-    let function_ctor_fn: BuiltinFn =
-        Rc::new(move |_vm, _args| Ok(make_host_function_instance(&function_ctor_proto)));
+    let function_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+        let body = args
+            .get(1)
+            .cloned()
+            .unwrap_or(Value::String("return undefined".to_string()));
+        let body_src = match body {
+            Value::String(s) => s,
+            _ => "return undefined".to_string(),
+        };
+        let expr = body_src
+            .strip_prefix("return ")
+            .unwrap_or(&body_src)
+            .trim_end_matches(';')
+            .trim()
+            .to_string();
+        if crate::trace::enabled() {
+            eprintln!("[trace] Function ctor body='{}' expr='{}'", body_src, expr);
+        }
+        let call_target: BuiltinFn = Rc::new(move |vm, _call_args| {
+            if expr.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+                let g = vm.get_global(&expr).unwrap_or(Value::Undefined);
+                if crate::trace::enabled() {
+                    eprintln!("[trace] Function body identifier '{}' -> {:?}", expr, g);
+                }
+                return Ok(g);
+            }
+            vm.eval_expression_source(&expr)
+        });
+        Ok(Value::BuiltinObject(call_target, Rc::new(RefCell::new(ObjectData::with_prototype(
+            Value::Object(Rc::clone(&function_ctor_proto)),
+        )))))
+    });
     let function_ctor_val =
         Value::BuiltinObject(function_ctor_fn.clone(), Rc::clone(&function_ctor_map));
     let function_call_val = builtin_object(
@@ -477,7 +507,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(builtin_object(
             Rc::new({
                 let function_proto_map = Rc::clone(&function_proto_map);
-                let function_call_val = function_call_val.clone();
+                let _function_call_val = function_call_val.clone();
                 move |_vm, args| {
                     let target = args.first().cloned().unwrap_or(Value::Undefined);
                     let bound_this = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1016,16 +1046,53 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(string_ctor_val.clone()),
     );
+    string_proto_map.borrow_mut().properties.insert(
+        PKey::String("indexOf".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                let haystack = vm.to_string(&receiver)?;
+                let needle = vm.to_string(args.get(1).unwrap_or(&Value::Undefined))?;
+                let len_chars = haystack.chars().count();
+                let start = if let Some(pos) = args.get(2) {
+                    let n = vm.to_number_value(pos)?;
+                    if n.is_nan() || n <= 0.0 {
+                        0usize
+                    } else {
+                        (n.floor() as usize).min(len_chars)
+                    }
+                } else {
+                    0usize
+                };
+                if needle.is_empty() {
+                    return Ok(Value::Number(start as f64));
+                }
+                let start_byte = if start == 0 {
+                    0usize
+                } else {
+                    haystack
+                        .char_indices()
+                        .nth(start)
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(haystack.len())
+                };
+                if let Some(rel_byte) = haystack[start_byte..].find(&needle) {
+                    let absolute_byte = start_byte + rel_byte;
+                    let absolute_char = haystack[..absolute_byte].chars().count();
+                    return Ok(Value::Number(absolute_char as f64));
+                }
+                Ok(Value::Number(-1.0))
+            }),
+            &function_proto_map,
+        )),
+    );
 
-    let error_ctor_props = Rc::clone(&error_ctor_map);
-    let error_ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
-        let proto = error_ctor_props
-            .borrow()
-            .properties
-            .get(&PKey::String("prototype".to_string()))
-            .and_then(|d| match d {
-                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                _ => None,
+    let error_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+        let proto = vm
+            .get_global("Error")
+            .and_then(|ctor| {
+                vm.get_property_host(&ctor, &PKey::String("prototype".to_string()))
+                    .ok()
             })
             .unwrap_or(Value::Null);
         let mut inst = ObjectData::new();
@@ -1039,6 +1106,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         Ok(Value::Object(Rc::new(RefCell::new(inst))))
     });
     let error_ctor_val = Value::BuiltinObject(error_ctor_fn.clone(), Rc::clone(&error_ctor_map));
+    error_ctor_map.borrow_mut().properties.insert(
+        PKey::String("name".to_string()),
+        PropertyDescriptor::data(Value::String("Error".to_string())),
+    );
     error_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(error_ctor_val.clone()),
@@ -1048,15 +1119,12 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(Value::String("Error".to_string())),
     );
 
-    let aggregate_error_ctor_props = Rc::clone(&aggregate_error_ctor_map);
-    let aggregate_error_ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
-        let proto = aggregate_error_ctor_props
-            .borrow()
-            .properties
-            .get(&PKey::String("prototype".to_string()))
-            .and_then(|d| match d {
-                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                _ => None,
+    let aggregate_error_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+        let proto = vm
+            .get_global("AggregateError")
+            .and_then(|ctor| {
+                vm.get_property_host(&ctor, &PKey::String("prototype".to_string()))
+                    .ok()
             })
             .unwrap_or(Value::Null);
         let mut inst = ObjectData::new();
@@ -1072,6 +1140,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     let aggregate_error_ctor_val = Value::BuiltinObject(
         aggregate_error_ctor_fn.clone(),
         Rc::clone(&aggregate_error_ctor_map),
+    );
+    aggregate_error_ctor_map.borrow_mut().properties.insert(
+        PKey::String("name".to_string()),
+        PropertyDescriptor::data(Value::String("AggregateError".to_string())),
     );
     aggregate_error_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
@@ -1090,15 +1162,13 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             PKey::String("prototype".to_string()),
             PropertyDescriptor::data(Value::Object(Rc::clone(proto_map))),
         );
-        let ctor_props_for_fn = Rc::clone(&ctor_props);
-        let ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
-            let proto = ctor_props_for_fn
-                .borrow()
-                .properties
-                .get(&PKey::String("prototype".to_string()))
-                .and_then(|d| match d {
-                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                    _ => None,
+        let ctor_name = name.to_string();
+        let ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+            let proto = vm
+                .get_global(&ctor_name)
+                .and_then(|ctor| {
+                    vm.get_property_host(&ctor, &PKey::String("prototype".to_string()))
+                        .ok()
                 })
                 .unwrap_or(Value::Null);
             let mut inst = ObjectData::new();
@@ -1112,6 +1182,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             Ok(Value::Object(Rc::new(RefCell::new(inst))))
         });
         let ctor_val = Value::BuiltinObject(ctor_fn, Rc::clone(&ctor_props));
+        ctor_props.borrow_mut().properties.insert(
+            PKey::String("name".to_string()),
+            PropertyDescriptor::data(Value::String(name.to_string())),
+        );
         proto_map.borrow_mut().properties.insert(
             PKey::String("constructor".to_string()),
             PropertyDescriptor::data(ctor_val.clone()),

@@ -156,10 +156,16 @@ impl Compiler {
         self.chunk.write(byte, line);
     }
 
+    fn emit_u16(&mut self, value: u16, line: u32) {
+        self.emit_byte((value >> 8) as u8, line);
+        self.emit_byte((value & 0xff) as u8, line);
+    }
+
     fn emit_constant(&mut self, value: Value, line: u32) {
         let idx = self.chunk.add_constant(value);
         self.emit(Op::Const, line);
-        self.emit_byte(idx as u8, line);
+        let idx = u16::try_from(idx).expect("too many constants in chunk");
+        self.emit_u16(idx, line);
     }
 
     fn alloc_ic_slot(&mut self) -> Result<u8, crate::errors::CompilerError> {
@@ -354,8 +360,10 @@ impl Compiler {
         // complete walker for the node kinds we need. Module declarations are
         // treated as no-ops.
 
-        // Pre-declare functions for hoisting by scanning module items.
+        // Pre-declare bindings before hoisted function compilation so function
+        // bodies can capture later lexical declarations.
         self.pre_declare_functions_oast(program);
+        self.pre_declare_variables_oast(program);
 
         // Attach ModuleContext for compilation to consult when resolving
         // imports/exports. We store a clone so the compiler can borrow it
@@ -395,6 +403,33 @@ impl Compiler {
         }
     }
 
+    fn pre_declare_variables_oast(&mut self, program: &oast::Program<'_>) {
+        self.pre_declare_variables_oast_stmts(&program.body);
+    }
+
+    fn pre_declare_variables_oast_stmts(&mut self, stmts: &[oast::Statement]) {
+        use oxc_ast::ast::BindingPattern as OPat;
+        for stmt in stmts {
+            if let oast::Statement::VariableDeclaration(v) = stmt {
+                for dec in &v.declarations {
+                    let name = match &dec.id {
+                        OPat::BindingIdentifier(i) => i.name.to_string(),
+                        _ => continue,
+                    };
+                    if self.resolve_local(&name).is_none() {
+                        let mirror_global = self.is_root
+                            && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
+                        if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+                            self.add_var_local(name, None, mirror_global);
+                        } else {
+                            self.add_local_with_mirror(name, None, mirror_global);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn compile_variable_declaration_oast(
         &mut self,
         v: &oast::VariableDeclaration<'_>,
@@ -421,7 +456,11 @@ impl Compiler {
                 self.resolve_local(&name)
                     .unwrap_or_else(|| self.add_var_local(name.clone(), None, mirror_global))
             } else {
-                self.add_local_with_mirror(name.clone(), None, mirror_global)
+                if let Some(slot) = self.scopes[self.scopes.len() - 1].bindings.get(&name).copied() {
+                    slot
+                } else {
+                    self.add_local_with_mirror(name.clone(), None, mirror_global)
+                }
             };
             if self.is_root {
                 self.emit(Op::Dup, LINE);
@@ -1505,6 +1544,7 @@ impl Compiler {
 
         // Pre-declare nested functions inside this function body.
         if let Some(body) = &func.body {
+            inner.pre_declare_variables_oast_stmts(&body.statements);
             inner.pre_declare_functions_oast_stmts(&body.statements);
             inner.emit_hoisted_function_decls_oast_stmts(&body.statements)?;
         }
@@ -1591,6 +1631,7 @@ impl Compiler {
         let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
 
         // Pre-declare nested functions inside this function body.
+        inner.pre_declare_variables_oast_stmts(&func.body.statements);
         inner.pre_declare_functions_oast_stmts(&func.body.statements);
 
         inner.emit_hoisted_function_decls_oast_stmts(&func.body.statements)?;

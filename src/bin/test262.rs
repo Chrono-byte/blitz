@@ -467,7 +467,6 @@ fn builtin_eval_script(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 
 fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     use tsblitz::value::PropertyKey as PKey;
-    tsblitz::runtime_utils::install_minimal_kernel_constructors(globals);
 
     let function_proto = globals
         .borrow()
@@ -499,15 +498,27 @@ fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         Value::BuiltinObject(f, props)
     };
 
-    let test262_error_ctor = builtin_object(Rc::new(|_vm, args| {
-        let message = args.get(1).cloned().unwrap_or(Value::Undefined);
-        let mut data = ObjectData::new();
-        data.properties.insert(
-            PKey::String("message".to_string()),
-            PropertyDescriptor::data(message),
-        );
-        Ok(Value::Object(Rc::new(RefCell::new(data))))
+    let test262_error_ctor_cell: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+    let test262_error_ctor = builtin_object(Rc::new({
+        let test262_error_ctor_cell = Rc::clone(&test262_error_ctor_cell);
+        move |_vm, args| {
+            let message = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let mut data = ObjectData::new();
+            data.properties.insert(
+                PKey::String("message".to_string()),
+                PropertyDescriptor::data(message),
+            );
+            data.properties.insert(
+                PKey::String("constructor".to_string()),
+                PropertyDescriptor::data(test262_error_ctor_cell
+                    .borrow()
+                    .clone()
+                    .unwrap_or(Value::Undefined)),
+            );
+            Ok(Value::Object(Rc::new(RefCell::new(data))))
+        }
     }));
+    *test262_error_ctor_cell.borrow_mut() = Some(test262_error_ctor.clone());
 
     let assert_props = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
         Rc::clone(&function_proto),
@@ -668,6 +679,43 @@ fn install_test262_realm_helpers(
             PropertyKey::String("createRealm".to_string()),
             PropertyDescriptor::data(create_realm),
         );
+    }
+}
+
+fn relink_error_constructor_properties(globals: &Rc<RefCell<ObjectData>>) {
+    let mut vm = Vm::new(Rc::clone(globals));
+    for name in [
+        "Error",
+        "EvalError",
+        "RangeError",
+        "ReferenceError",
+        "SyntaxError",
+        "TypeError",
+        "URIError",
+    ] {
+        if let Some(ctor) = vm.get_global(name)
+            && let Ok(proto) =
+                vm.get_property_host(&ctor, &PropertyKey::String("prototype".to_string()))
+        {
+            let ctor_desc = PropertyDescriptor::data(ctor.clone());
+            match proto {
+                Value::Object(proto_obj) => {
+                    proto_obj
+                        .borrow_mut()
+                        .properties
+                        .insert(PropertyKey::String("constructor".to_string()), ctor_desc);
+                }
+                Value::Array(_, props)
+                | Value::Closure { props, .. }
+                | Value::BuiltinObject(_, props) => {
+                    props
+                        .borrow_mut()
+                        .properties
+                        .insert(PropertyKey::String("constructor".to_string()), ctor_desc);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -915,6 +963,23 @@ fn run_test_file(
                             &[Value::Number(1.0), Value::Number(1.0)],
                         ) {
                             eprintln!("[trace] assert._isSameValue(1,1): {}", result);
+                        }
+                    }
+                    let to_string_key = PropertyKey::String("_toString".to_string());
+                    if let Ok(helper) = vm.get_property_host(&assert_val, &to_string_key) {
+                        if let Ok(result) = vm.call_value_with_this(
+                            &helper,
+                            &assert_val,
+                            &[Value::Number(0.0)],
+                        ) {
+                            eprintln!("[trace] assert._toString(0): {}", result);
+                        }
+                        if let Ok(result) = vm.call_value_with_this(
+                            &helper,
+                            &assert_val,
+                            &[Value::Number(-0.0)],
+                        ) {
+                            eprintln!("[trace] assert._toString(-0): {}", result);
                         }
                     }
                 }
@@ -1465,6 +1530,11 @@ fn main() {
         }))),
     );
 
+    // Seed the realm with kernel constructors before running the soft prelude.
+    // The prelude may extend/replace these; we avoid re-installing kernel
+    // constructors afterward to preserve prelude-level constructor identity.
+    tsblitz::runtime_utils::install_minimal_kernel_constructors(&globals);
+
     let mut vm = Vm::new(globals.clone());
     // Run soft prelude once (if present) to install runtime helpers
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1490,6 +1560,7 @@ fn main() {
         }
     }
     install_minimal_kernel_constructors(&globals);
+    relink_error_constructor_properties(&globals);
     let realm_seed = clone_globals(&globals);
     install_test262_realm_helpers(&globals, &realm_seed);
 

@@ -5,7 +5,7 @@
 {
     "languages": {
         "TypeScript": {
-            // "enable_language_server": false
+            "enable_language_server": false
         }
     }
 }
