@@ -938,6 +938,125 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
          )),
      );
 
+     // ArrayBuffer constructor
+     let arraybuffer_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+         ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
+     ));
+     let arraybuffer_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+         ObjectData::with_prototype(Value::Object(Rc::clone(&function_proto_map))),
+     ));
+     let arraybuffer_ctor_fn: BuiltinFn = {
+         let proto_map_rc = Rc::clone(&arraybuffer_proto_map);
+         Rc::new(move |_vm, args| {
+             // Get length argument
+             let length = match args.get(1) {
+                 Some(Value::Number(n)) => (*n as usize).max(0),
+                 Some(Value::Undefined) => 0,
+                 Some(v) => {
+                     // Try to convert to number
+                     if let Value::String(s) = v {
+                         s.parse::<usize>().unwrap_or(0)
+                     } else {
+                         0
+                     }
+                 }
+                 None => 0,
+             };
+             
+             let mut arraybuffer_obj_data = ObjectData::with_prototype(Value::Object(Rc::clone(&proto_map_rc)));
+             arraybuffer_obj_data.properties.insert(
+                 PropertyKey::String("[[ArrayBufferData]]".to_string()),
+                 PropertyDescriptor::data(Value::Array(
+                     Rc::new(RefCell::new(vec![Value::Number(0.0); length])),
+                     Rc::new(RefCell::new(ObjectData::new()))
+                 )),
+             );
+             arraybuffer_obj_data.properties.insert(
+                 PropertyKey::String("byteLength".to_string()),
+                 PropertyDescriptor::data(Value::Number(length as f64)),
+             );
+             let arraybuffer_obj = Rc::new(RefCell::new(arraybuffer_obj_data));
+             Ok(Value::Object(arraybuffer_obj))
+         })
+     };
+     let arraybuffer_ctor_val = Value::BuiltinObject(arraybuffer_ctor_fn.clone(), Rc::clone(&arraybuffer_ctor_map));
+     arraybuffer_ctor_map.borrow_mut().properties.insert(
+         PKey::String("prototype".to_string()),
+         PropertyDescriptor::data(Value::Object(Rc::clone(&arraybuffer_proto_map))),
+     );
+     arraybuffer_proto_map.borrow_mut().properties.insert(
+         PKey::String("constructor".to_string()),
+         PropertyDescriptor::data(arraybuffer_ctor_val.clone()),
+     );
+     
+     // Typed Array constructors
+     macro_rules! create_typed_array_ctor {
+         ($name:expr, $element_count:expr) => {{
+             let proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+                 ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
+             ));
+             let ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+                 ObjectData::with_prototype(Value::Object(Rc::clone(&function_proto_map))),
+             ));
+             let ctor_fn: BuiltinFn = {
+                 let proto_map_rc = Rc::clone(&proto_map);
+                 Rc::new(move |_vm, args| {
+                     let length = match args.get(1) {
+                         Some(Value::Number(n)) => (*n as usize).max(0),
+                         Some(Value::Undefined) => 0,
+                         Some(v) => {
+                             if let Value::String(s) = v {
+                                 s.parse::<usize>().unwrap_or(0)
+                             } else {
+                                 0
+                             }
+                         }
+                         None => 0,
+                     };
+                     
+                     let mut typed_array_data = ObjectData::with_prototype(Value::Object(Rc::clone(&proto_map_rc)));
+                     typed_array_data.properties.insert(
+                         PropertyKey::String("[[TypedArrayData]]".to_string()),
+                         PropertyDescriptor::data(Value::Array(
+                             Rc::new(RefCell::new(vec![Value::Number(0.0); length])),
+                             Rc::new(RefCell::new(ObjectData::new()))
+                         )),
+                     );
+                     typed_array_data.properties.insert(
+                         PropertyKey::String("length".to_string()),
+                         PropertyDescriptor::data(Value::Number(length as f64)),
+                     );
+                     typed_array_data.properties.insert(
+                         PropertyKey::String("byteLength".to_string()),
+                         PropertyDescriptor::data(Value::Number((length * $element_count) as f64)),
+                     );
+                     let typed_array_obj = Rc::new(RefCell::new(typed_array_data));
+                     Ok(Value::Object(typed_array_obj))
+                 })
+             };
+             let ctor_val = Value::BuiltinObject(ctor_fn.clone(), Rc::clone(&ctor_map));
+             ctor_map.borrow_mut().properties.insert(
+                 PKey::String("prototype".to_string()),
+                 PropertyDescriptor::data(Value::Object(Rc::clone(&proto_map))),
+             );
+             proto_map.borrow_mut().properties.insert(
+                 PKey::String("constructor".to_string()),
+                 PropertyDescriptor::data(ctor_val.clone()),
+             );
+             ctor_val
+         }};
+     }
+     
+     let uint8array_ctor_val = create_typed_array_ctor!("Uint8Array", 1);
+     let int8array_ctor_val = create_typed_array_ctor!("Int8Array", 1);
+     let uint16array_ctor_val = create_typed_array_ctor!("Uint16Array", 2);
+     let int16array_ctor_val = create_typed_array_ctor!("Int16Array", 2);
+     let uint32array_ctor_val = create_typed_array_ctor!("Uint32Array", 4);
+     let int32array_ctor_val = create_typed_array_ctor!("Int32Array", 4);
+     let float32array_ctor_val = create_typed_array_ctor!("Float32Array", 4);
+     let float64array_ctor_val = create_typed_array_ctor!("Float64Array", 8);
+     let uint8clampedarray_ctor_val = create_typed_array_ctor!("Uint8ClampedArray", 1);
+
      let map_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
         ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
     ));
@@ -1922,6 +2041,46 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
      g.properties.insert(
          PKey::String("Date".to_string()),
          PropertyDescriptor::data(date_ctor_val),
+     );
+     g.properties.insert(
+         PKey::String("ArrayBuffer".to_string()),
+         PropertyDescriptor::data(arraybuffer_ctor_val),
+     );
+     g.properties.insert(
+         PKey::String("Uint8Array".to_string()),
+         PropertyDescriptor::data(uint8array_ctor_val),
+     );
+     g.properties.insert(
+         PKey::String("Int8Array".to_string()),
+         PropertyDescriptor::data(int8array_ctor_val),
+     );
+     g.properties.insert(
+         PKey::String("Uint16Array".to_string()),
+         PropertyDescriptor::data(uint16array_ctor_val),
+     );
+     g.properties.insert(
+         PKey::String("Int16Array".to_string()),
+         PropertyDescriptor::data(int16array_ctor_val),
+     );
+     g.properties.insert(
+         PKey::String("Uint32Array".to_string()),
+         PropertyDescriptor::data(uint32array_ctor_val),
+     );
+     g.properties.insert(
+         PKey::String("Int32Array".to_string()),
+         PropertyDescriptor::data(int32array_ctor_val),
+     );
+     g.properties.insert(
+         PKey::String("Float32Array".to_string()),
+         PropertyDescriptor::data(float32array_ctor_val),
+     );
+     g.properties.insert(
+         PKey::String("Float64Array".to_string()),
+         PropertyDescriptor::data(float64array_ctor_val),
+     );
+     g.properties.insert(
+         PKey::String("Uint8ClampedArray".to_string()),
+         PropertyDescriptor::data(uint8clampedarray_ctor_val),
      );
      g.properties.insert(
          PKey::String("Map".to_string()),
