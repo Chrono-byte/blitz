@@ -86,6 +86,10 @@ pub struct FunctionProto {
     pub arguments_slot: Option<usize>,
     /// Return type annotation
     pub return_type: Option<Type>,
+    /// Whether this function contains a "use strict" directive in its
+    /// directive prologue. Used at runtime to set the per-function strict
+    /// mode flag on the call frame.
+    pub is_strict: bool,
 }
 
 impl Chunk {

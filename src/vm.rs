@@ -114,6 +114,11 @@ struct Frame {
     /// On return the stack is truncated back to this point and the return
     /// value is pushed on top.
     stack_base: usize,
+    /// Whether this frame executes in strict mode.
+    /// Set from the callee's FunctionProto::is_strict field when the frame
+    /// is created during function entry. Used at runtime to apply strict
+    /// mode semantics (assignment errors, this binding, etc.).
+    is_strict: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +388,12 @@ impl Vm {
     /// Returns a mutable reference to the Realm this VM operates in.
     pub fn realm_mut(&mut self) -> &mut Realm {
         &mut self.realm
+    }
+
+    /// Returns whether the current execution frame is in strict mode.
+    /// If there are no frames (root-level execution), returns false.
+    pub fn is_strict_mode(&self) -> bool {
+        self.frames.last().map(|f| f.is_strict).unwrap_or(false)
     }
 
     /// Return own keys for a global value if it is an object or closure.
@@ -2238,6 +2249,7 @@ impl Vm {
             closure_env: self.current_closure_env.take(),
             slot_types: self.current_slot_types.take(),
             stack_base,
+            is_strict: proto.is_strict,
         });
 
         self.chunk = Rc::clone(&proto.chunk);

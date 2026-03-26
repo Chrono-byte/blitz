@@ -1775,6 +1775,27 @@ impl Compiler {
         Ok(())
     }
 
+    /// Check whether a function body contains a "use strict" directive
+    /// prologue. Per ECMAScript, directive prologue consists of leading
+    /// string-literal expression statements appearing before any other
+    /// statements.
+    fn has_use_strict_directive(stmts: &[oast::Statement]) -> bool {
+        for stmt in stmts {
+            if let oast::Statement::ExpressionStatement(expr_stmt) = stmt {
+                if let oxc_ast::ast::Expression::StringLiteral(s) = &expr_stmt.expression {
+                    if s.value.as_str() == "use strict" {
+                        return true;
+                    }
+                    continue;
+                }
+            }
+            // Non-string-literal ExpressionStatement or non-expression statement
+            // terminates the directive prologue.
+            break;
+        }
+        false
+    }
+
     fn compile_function(
         &mut self,
         name: &str,
@@ -1847,6 +1868,7 @@ impl Compiler {
             .collect();
         let has_rest = func.params.rest.is_some();
         let has_prototype_property = !func.r#async;
+        let is_strict = func.body.as_ref().map_or(false, |body| Self::has_use_strict_directive(&body.statements));
         Ok((
             FunctionProto {
                 name: name.to_string(),
@@ -1859,6 +1881,7 @@ impl Compiler {
                 captures_this: false,
                 arguments_slot: Some(arguments_slot),
                 return_type,
+                is_strict,
             },
             _env_len,
         ))
@@ -1947,6 +1970,7 @@ impl Compiler {
             .chain(inner.local_types)
             .collect();
         let has_rest = func.params.rest.is_some();
+        let is_strict = Self::has_use_strict_directive(&func.body.statements);
         Ok((
             FunctionProto {
                 name: name.to_string(),
@@ -1961,6 +1985,7 @@ impl Compiler {
                 // lexically resolved from the enclosing function/global scope.
                 arguments_slot: None,
                 return_type,
+                is_strict,
             },
             _env_len,
         ))
