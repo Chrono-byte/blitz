@@ -1915,14 +1915,33 @@ impl Compiler {
 
         inner.emit_hoisted_function_decls_oast_stmts(&func.body.statements)?;
 
-        for stmt in &func.body.statements {
-            if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-                continue;
+        // Check if this is an implicit-return arrow function (expression: true).
+        // In that case, the body contains a single ExpressionStatement that should be returned.
+        if func.expression && func.body.statements.len() == 1 {
+            if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
+                // Compile the expression and return its value
+                inner.compile_expr_oast(&expr_stmt.expression)?;
+                inner.emit(Op::Return, LINE);
+            } else {
+                // Shouldn't happen for expression: true, but handle it safely
+                for stmt in &func.body.statements {
+                    if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+                        inner.compile_statement_oast(stmt)?;
+                    }
+                }
+                inner.emit(Op::Return, LINE);
             }
-            inner.compile_statement_oast(stmt)?;
+        } else {
+            // Regular function body with explicit statements
+            for stmt in &func.body.statements {
+                if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+                    continue;
+                }
+                inner.compile_statement_oast(stmt)?;
+            }
+            inner.emit(Op::Return, LINE);
         }
 
-        inner.emit(Op::Return, LINE);
         let chunk = std::mem::take(&mut inner.chunk);
         let slot_types: Vec<Option<Type>> = param_type_opts
             .into_iter()

@@ -729,8 +729,15 @@ impl Vm {
                     {
                         Ok(false)
                     }
-                    _ => Ok(true),
-
+                    Some(_) => {
+                        // Property exists and is configurable, delete it
+                        d.properties.remove(key);
+                        Ok(true)
+                    }
+                    None => {
+                        // Property doesn't exist, return true
+                        Ok(true)
+                    }
                 }
             }
             Value::Array(arr, props) => {
@@ -749,8 +756,15 @@ impl Vm {
                     {
                         Ok(false)
                     }
-                    _ => Ok(true),
-
+                    Some(_) => {
+                        // Property exists and is configurable, delete it
+                        p.properties.remove(key);
+                        Ok(true)
+                    }
+                    None => {
+                        // Property doesn't exist, return true
+                        Ok(true)
+                    }
                 }
             }
             Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
@@ -762,8 +776,15 @@ impl Vm {
                     {
                         Ok(false)
                     }
-                    _ => Ok(true),
-
+                    Some(_) => {
+                        // Property exists and is configurable, delete it
+                        p.properties.remove(key);
+                        Ok(true)
+                    }
+                    None => {
+                        // Property doesn't exist, return true
+                        Ok(true)
+                    }
                 }
             }
             _ => Ok(false),
