@@ -2365,31 +2365,58 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     );
 
     // Mirror a selection of helpers onto globalThis if not present there.
+    // Special handling needed when globalThis is the same object as globals
+    let names = [
+        "__native_typeof",
+        "__native_toString",
+        "__native_toNumber",
+        "__native_toBoolean",
+        "__native_abstractEquality",
+        "__native_instanceof",
+        "__native_in",
+        "__native_construct",
+    ];
+    
+    // Get the globalThis value and check if it points back to globals
     if let Some(PropertyDescriptor::Data { value: gv, .. }) =
         g.properties.get(&global_this_key).cloned()
         && let Value::Object(obj_rc) = gv
     {
-        let mut obj = obj_rc.borrow_mut();
-        let mut mirror = |name: &str| {
-            let k = PropertyKey::String(name.to_string());
-            if !obj.properties.contains_key(&k)
-                && let Some(PropertyDescriptor::Data { value, .. }) =
-                    g.properties.get(&PKey::String(name.to_string())).cloned()
-            {
-                obj.properties.insert(k, PropertyDescriptor::data(value));
+        // Check if obj_rc is the same as globals by comparing Rc pointers
+        let is_globals = Rc::ptr_eq(&obj_rc, globals);
+        
+        if is_globals {
+            // If globalThis IS globals, we need to be careful with borrows
+            // Drop the mutable borrow of g first
+            drop(g);
+            
+            // Now borrow g mutably again to insert the missing properties
+            let mut g = globals.borrow_mut();
+            for name in names.iter() {
+                let k = PropertyKey::String(name.to_string());
+                if !g.properties.contains_key(&k) {
+                    // Get the value from globals itself - but we need to avoid double-borrow
+                    // This is handled by cloning what we need first
+                    // Actually, since both keys are in the same map (g), we can just skip
+                    // if the key already exists (which we checked above)
+                }
             }
-        };
-        for n in [
-            "__native_typeof",
-            "__native_toString",
-            "__native_toNumber",
-            "__native_toBoolean",
-            "__native_abstractEquality",
-            "__native_instanceof",
-            "__native_in",
-            "__native_construct",
-        ] {
-            mirror(n);
+        } else {
+            // obj_rc is a separate object, safe to borrow both
+            drop(g); // Drop mutable borrow
+            
+            let g = globals.borrow(); // Borrow immutably
+            let mut obj = obj_rc.borrow_mut();
+            for name in names.iter() {
+                let k = PropertyKey::String(name.to_string());
+                if !obj.properties.contains_key(&k)
+                    && let Some(PropertyDescriptor::Data { value, .. }) =
+                        g.properties.get(&PKey::String(name.to_string())).cloned()
+                {
+                    obj.properties.insert(k, PropertyDescriptor::data(value));
+                }
+            }
+            // g and obj borrows are dropped here
         }
     }
 }
