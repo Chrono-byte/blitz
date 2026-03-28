@@ -167,17 +167,19 @@ fn get_global_bg_runtime() -> Arc<Runtime> {
             let threads_from_env = env::var("TSBLITZ_BG_THREADS")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
-                .filter(|&n| n > 0);
+                .filter(|&n| n > 0 && n <= 1024); // upper bound for sanity
 
             let cpus = std::thread::available_parallelism()
-                .map(std::num::NonZero::get)
+                .map(|n| n.get())
                 .unwrap_or(4);
 
-            let threads = threads_from_env.unwrap_or_else(|| if cpus > 1 { cpus - 1 } else { 1 });
+            // Reserve 1 core for main thread, but at least 1 worker
+            let threads = threads_from_env
+                .unwrap_or_else(|| cpus.saturating_sub(1).max(1));
 
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(threads)
-                .enable_all()
+                .thread_name("blitz-bg")
                 .build()
                 .expect("Failed to build Tokio runtime for VM background tasks");
 
@@ -639,7 +641,7 @@ impl Vm {
             .unwrap_or(Value::Undefined);
 
         loop {
-            match self.step(false) {
+            match self.step(None) {
                 Ok(StepOutcome::Continue) => {
                     // `pending_exception` is only meant to swallow the
                     // immediate synthetic error returned by host throw helpers.
@@ -1129,8 +1131,9 @@ impl Vm {
         &mut self,
         stack_base: usize,
     ) -> Result<Value, crate::errors::RuntimeError> {
+        let target_frame_depth = self.frames.len();
         loop {
-            match self.step(true) {
+            match self.step(Some(target_frame_depth)) {
                 Ok(StepOutcome::Continue) => {
                     self.pending_exception = false;
                 }
@@ -1149,7 +1152,10 @@ impl Vm {
         }
     }
 
-    fn step(&mut self, stop_on_return: bool) -> Result<StepOutcome, crate::errors::RuntimeError> {
+    fn step(
+        &mut self,
+        stop_at_frame_depth: Option<usize>,
+    ) -> Result<StepOutcome, crate::errors::RuntimeError> {
         let op_byte = self.read_byte()?;
         if crate::trace::enabled() {
             eprintln!(
@@ -1545,9 +1551,13 @@ impl Vm {
                     return Ok(StepOutcome::Return(result));
                 }
                 self.execute_return()?;
-                if stop_on_return {
-                    let result = self.pop().unwrap_or(Value::Undefined);
-                    return Ok(StepOutcome::Return(result));
+                // Only stop if we've returned PAST the target frame depth
+                // (i.e., we've returned from the function we were waiting for)
+                if let Some(target_depth) = stop_at_frame_depth {
+                    if self.frames.len() < target_depth {
+                        let result = self.pop().unwrap_or(Value::Undefined);
+                        return Ok(StepOutcome::Return(result));
+                    }
                 }
             }
             Op::Jump => {
@@ -2685,16 +2695,11 @@ impl Vm {
         let handler = match self.handlers.pop() {
             Some(h) => h,
             None => {
-                // No handler: print the thrown value for diagnostics then
-                // propagate an error. Tests typically throw Test262Error
-                // instances (objects), so surface their contents to help
-                // debugging.
+                // No VM-level handler found. Store the exception value and
+                // propagate an error. Note: The exception may still be caught
+                // at a higher level (e.g., by the test runner or JavaScript
+                // try-catch blocks that don't create VM-level handlers).
                 self.last_uncaught_exception = Some(thrown.clone());
-                eprintln!("[unwind] uncaught thrown value: {:?}", thrown);
-                // Also print value string via trace helper when available.
-                if crate::trace::enabled() {
-                    crate::trace::value_string("[unwind] uncaught thrown (string) ", &thrown);
-                }
                 return Err(match thrown {
                     Value::String(s) => {
                         crate::errors::RuntimeError::from(format!("Uncaught: {}", s))
@@ -2748,7 +2753,12 @@ impl Vm {
                 self.pending_exception = true;
                 Ok(())
             }
-            Err(err) => Err(err),
+            Err(err) => {
+                // Ensure pending_exception is cleared for uncaught exceptions.
+                // Only caught exceptions should set it.
+                self.pending_exception = false;
+                Err(err)
+            }
         }
     }
 

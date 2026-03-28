@@ -11,8 +11,7 @@ use crate::parser::Parser;
 use crate::value::SymbolId;
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
-const MAX_ARRAY_LENGTH: usize = 0xFFFF_FFFF;
-const MAX_ARRAY_LENGTH_F: f64 = MAX_ARRAY_LENGTH as f64;
+const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
 
 /// Clear slot type annotations recursively for a Chunk graph.
 ///
@@ -26,7 +25,7 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
         rc_chunk: &Rc<bytecode::Chunk>,
         visited: &mut HashMap<*const bytecode::Chunk, Rc<bytecode::Chunk>>,
     ) -> Rc<bytecode::Chunk> {
-        let key = Rc::as_ptr(rc_chunk) as *const bytecode::Chunk;
+        let key = Rc::as_ptr(rc_chunk);
         if let Some(existing) = visited.get(&key) {
             return Rc::clone(existing);
         }
@@ -135,9 +134,10 @@ fn set_builtin_length(target: &Value, length: f64) {
     }
 }
 
+/// Converts a value to a non-negative integer length suitable for array operations.
 fn to_length(vm: &mut crate::vm::Vm, value: &Value) -> Result<usize, crate::errors::RuntimeError> {
     let num = vm.to_number_value(value)?;
-    if num.is_nan() || num <= 0.0 {
+    if num.is_nan() || num <= 0.0_f64 {
         return Ok(0);
     }
     if !num.is_finite() {
@@ -147,6 +147,7 @@ fn to_length(vm: &mut crate::vm::Vm, value: &Value) -> Result<usize, crate::erro
     if int_len > MAX_ARRAY_LENGTH_F {
         return Err(vm.throw_range_error("Invalid array length"));
     }
+
     Ok(int_len as usize)
 }
 
@@ -285,6 +286,7 @@ fn descriptor_value_from_descriptor(
     Value::Object(Rc::new(RefCell::new(obj)))
 }
 
+/// Returns the own property keys of an object.
 fn own_property_keys(obj: &Value) -> Vec<PropertyKey> {
     let mut keys = Vec::new();
     let mut seen = HashSet::new();
@@ -1394,7 +1396,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                             on_rejected: existing_rejected,
                         } => {
                             // Register wrappers that run handlers and settle the chained promise.
-                            let user_on_fulfilled = on_fulfilled.clone();
+                            let user_on_fulfilled = on_fulfilled;
                             let result_promise_for_fulfill = Rc::clone(&result_promise);
                             let on_fulfilled_fn = Value::Builtin(Rc::new(move |vm, args| {
                                 let value = args.first().cloned().unwrap_or(Value::Undefined);
@@ -1422,7 +1424,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                 Ok(Value::Undefined)
                             }));
 
-                            let user_on_rejected = on_rejected.clone();
+                            let user_on_rejected = on_rejected;
                             let result_promise_for_reject = Rc::clone(&result_promise);
                             let on_rejected_fn = Value::Builtin(Rc::new(move |vm, args| {
                                 let reason = args.first().cloned().unwrap_or(Value::Undefined);
@@ -1465,7 +1467,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                 *result_promise.borrow_mut() =
                                     PromiseState::Fulfilled(value.clone());
                             } else {
-                                let cb = on_fulfilled.clone();
+                                let cb = on_fulfilled;
                                 let val = value.clone();
                                 let chained = Rc::clone(&result_promise);
                                 vm.queue_microtask(move |vm| {
@@ -1493,7 +1495,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                 *result_promise.borrow_mut() =
                                     PromiseState::Rejected(reason.clone());
                             } else {
-                                let cb = on_rejected.clone();
+                                let cb = on_rejected;
                                 let val = reason.clone();
                                 let chained = Rc::clone(&result_promise);
                                 vm.queue_microtask(move |vm| {
