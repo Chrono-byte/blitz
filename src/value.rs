@@ -109,39 +109,51 @@ impl SymbolId {
         Self::well_known(1)
     }
 
+    /// Well-known symbol for `@@iterator`.
     pub fn well_known_iterator() -> Self {
         Self::well_known(2)
     }
+    /// Well-known symbol for `@@asyncIterator`.
     pub fn well_known_async_iterator() -> Self {
         Self::well_known(3)
     }
+    /// Well-known symbol for `@@toStringTag`.
     pub fn well_known_to_string_tag() -> Self {
         Self::well_known(4)
     }
+    /// Well-known symbol for `@@species`.
     pub fn well_known_species() -> Self {
         Self::well_known(5)
     }
+    /// Well-known symbol for `@@hasInstance`.
     pub fn well_known_has_instance() -> Self {
         Self::well_known(6)
     }
+    /// Well-known symbol for `@@isConcatSpreadable`.
     pub fn well_known_is_concat_spreadable() -> Self {
         Self::well_known(7)
     }
+    /// Well-known symbol for `@@match`.
     pub fn well_known_match() -> Self {
         Self::well_known(8)
     }
+    /// Well-known symbol for `@@matchAll`.
     pub fn well_known_match_all() -> Self {
         Self::well_known(9)
     }
+    /// Well-known symbol for `@@replace`.
     pub fn well_known_replace() -> Self {
         Self::well_known(10)
     }
+    /// Well-known symbol for `@@search`.
     pub fn well_known_search() -> Self {
         Self::well_known(11)
     }
+    /// Well-known symbol for `@@split`.
     pub fn well_known_split() -> Self {
         Self::well_known(12)
     }
+    /// Well-known symbol for `@@unscopables`.
     pub fn well_known_unscopables() -> Self {
         Self::well_known(13)
     }
@@ -404,7 +416,10 @@ impl Value {
     pub fn is_constructable(&self) -> bool {
         match self {
             Value::Closure { proto, .. } => proto.has_prototype_property && proto.is_constructor,
-            Value::BuiltinObject(_, _) => true,
+            Value::BuiltinObject(_, props) => props
+                .borrow()
+                .properties
+                .contains_key(&PropertyKey::String("prototype".to_string())),
             _ => false,
         }
     }

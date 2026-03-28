@@ -130,12 +130,23 @@ fn strict_mode() -> bool {
         .unwrap_or(false)
 }
 
+/// Override strict-mode behavior for type checking.
+///
+/// Passing `Some(true)` or `Some(false)` forces strict mode on or off.
+/// Passing `None` clears the override and restores environment-driven behavior.
+///
+/// # Panics
+/// Panics if the override mutex is poisoned.
 pub fn set_strict_override(v: Option<bool>) {
     let m = STRICT_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None));
     let mut g = m.lock().unwrap();
     *g = v;
 }
 
+/// Run static type checking for a parsed program.
+///
+/// # Errors
+/// Returns a `TypeCheckerError` if type checking fails.
 pub fn check(program: &oast::Program<'_>) -> Result<(), TypeCheckerError> {
     let mut ctx = TypeContext {
         scopes: vec![Scope::new()],
@@ -586,6 +597,7 @@ fn assignable(expected: &Type, actual: &Type) -> bool {
     }
 }
 
+/// Render a human-readable name for a checker `Type`.
 pub fn type_to_string(t: &Type) -> String {
     match t {
         Type::Number => "number".to_string(),

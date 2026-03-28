@@ -1,7 +1,7 @@
-//! CLI entry point for tsblitz VM.
+//! CLI entry point for Blitz VM.
 //!
 //! The CLI provides two main interfaces:
-//! - **File execution**: Run a TypeScript file directly
+//! - **File execution**: Run a JavaScript file directly
 //! - **REPL**: Interactive read-eval-print loop with history
 //!
 //! # Bootstrapping
@@ -21,8 +21,8 @@
 //! # Usage
 //!
 //! ```bash
-//! # Run a TypeScript file
-//! cargo run -- path/to/file.ts
+//! # Run a JavaScript file
+//! cargo run -- path/to/file.js
 //!
 //! # Start REPL
 //! cargo run -- --repl
@@ -118,7 +118,7 @@ fn run_program(
 
 /// Command line arguments for the tsblitz executable.
 #[derive(Parser, Debug)]
-#[command(name = "tsblitz", about = "Blitz — TypeScript VM (Rust runtime)")]
+#[command(name = "blitz", about = "Blitz — TypeScript VM (Rust runtime)")]
 struct Cli {
     /// TypeScript file to execute. If omitted the REPL will be started.
     #[arg(value_name = "FILE")]
@@ -488,7 +488,7 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     // tracing is enabled to avoid extra work in normal runs.
     if tsblitz::trace::enabled() {
         // Prepare a one-off chunk compilation and disassembly for the prelude.
-        match (|| -> Result<(), tsblitz::errors::Error> {
+        if let Err(e) = (|| -> Result<(), tsblitz::errors::Error> {
             // The loader.map keys are canonicalized; ensure we look up the same
             // canonical path when fetching the prelude record.
             let prelude_key =
@@ -567,9 +567,10 @@ fn main() -> Result<(), tsblitz::errors::Error> {
                         | Some(bytecode::Op::JumpIfFalse)
                         | Some(bytecode::Op::PushHandler) => {
                             if ip + 2 < f.chunk.code.len() {
-                                let hi = f.chunk.code[ip + 1] as usize;
-                                let lo = f.chunk.code[ip + 2] as usize;
-                                let short = ((hi << 8) | lo) as i16;
+                                let short = i16::from_be_bytes([
+                                    f.chunk.code[ip + 1],
+                                    f.chunk.code[ip + 2],
+                                ]);
                                 extra = format!(" {}", short);
                             }
                         }
@@ -635,9 +636,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
                     | Some(bytecode::Op::JumpIfFalse)
                     | Some(bytecode::Op::PushHandler) => {
                         if ip + 2 < chunk.code.len() {
-                            let hi = chunk.code[ip + 1] as usize;
-                            let lo = chunk.code[ip + 2] as usize;
-                            let short = ((hi << 8) | lo) as i16;
+                            let short =
+                                i16::from_be_bytes([chunk.code[ip + 1], chunk.code[ip + 2]]);
                             extra = format!(" {}", short);
                         }
                     }
@@ -665,8 +665,7 @@ fn main() -> Result<(), tsblitz::errors::Error> {
 
             Ok(())
         })() {
-            Err(e) => eprintln!("[trace] Prelude trace preparation failed: {}", e),
-            Ok(()) => {}
+            eprintln!("[trace] Prelude trace preparation failed: {}", e)
         }
     }
     // Create a persistent VM for the REPL and reuse it for every input so

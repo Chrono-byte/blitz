@@ -92,6 +92,8 @@ pub struct FunctionProto {
     pub is_strict: bool,
     /// Whether this function may be used as a constructor (per ECMAScript [[Construct]]).
     pub is_constructor: bool,
+    /// Whether this function was declared as `async`.
+    pub is_async: bool,
 }
 
 impl Chunk {

@@ -16,8 +16,8 @@ CLI (preferred over env):
 Segments may be labels like: annexB, language, built-ins, intl402, staging
 or paths relative to test262/test (e.g. built-ins/Array).
 
-This connector is intentionally conservative: it runs a small subset of
-tests that don't require modules, async harnesses, includes, or other
+This connector is intentionally conservative: it runs a subset of
+tests that don't require modules, raw-mode harness behavior, or other
 features not yet implemented by the engine. The goal is to provide a
 small, usable connector that validates end-to-end execution of simple
 Test262 tests and demonstrates how to wire up harness files and host
@@ -32,10 +32,11 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::rc::Rc;
 
+use clap::Parser as ClapParser;
 use serde::Deserialize;
 
 use tsblitz::compiler;
-use tsblitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
+use tsblitz::value::{ObjectData, PromiseState, PropertyDescriptor, PropertyKey};
 use tsblitz::{module::ModuleLoader, parser::Parser, typecheck, value::Value, vm::Vm};
 
 #[derive(Clone, Copy, Default)]
@@ -70,17 +71,26 @@ fn bucket_keys(test_root: &Path, file: &Path) -> (String, String) {
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
+    let dirs: Vec<String> = rel
+        .parent()
+        .map(|p| {
+            p.components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
 
-    let top = parts
+    let top = dirs
         .first()
         .cloned()
+        .or_else(|| parts.first().cloned())
         .unwrap_or_else(|| "<root>".to_string());
-    let subtree = if parts.len() >= 2 {
-        format!("{}/{}", parts[0], parts[1])
+    let subsection = if dirs.len() >= 2 {
+        format!("{}/{}", dirs[0], dirs[1])
     } else {
         top.clone()
     };
-    (top, subtree)
+    (top, subsection)
 }
 
 fn print_bucket_summary(
@@ -117,6 +127,14 @@ fn print_bucket_summary(
             stats.pass_pct()
         );
     }
+}
+
+fn has_distinct_subsections(
+    top_level: &HashMap<String, BucketStats>,
+    subsections: &HashMap<String, BucketStats>,
+) -> bool {
+    subsections.len() > top_level.len()
+        || subsections.keys().any(|key| !top_level.contains_key(key))
 }
 
 #[derive(Default)]
@@ -238,18 +256,34 @@ fn clone_value(value: &Value, ctx: &mut CloneCtx) -> Value {
             clone_object_data(props, ctx),
         ),
         Value::Closure {
-            proto, env, props, ..
+            proto,
+            env,
+            lexical_this,
+            props,
         } => Value::Closure {
             proto: Rc::clone(proto),
             env: clone_env(env, ctx),
-            lexical_this: None,
+            lexical_this: lexical_this.as_ref().map(|v| Box::new(clone_value(v, ctx))),
             props: clone_object_data(props, ctx),
         },
         Value::Builtin(f) => Value::Builtin(Rc::clone(f)),
         Value::BuiltinObject(f, props) => {
             Value::BuiltinObject(Rc::clone(f), clone_object_data(props, ctx))
         }
-        Value::Promise(state) => Value::Promise(Rc::clone(state)),
+        Value::Promise(state) => {
+            let next_state = match &*state.borrow() {
+                PromiseState::Pending {
+                    on_fulfilled,
+                    on_rejected,
+                } => PromiseState::Pending {
+                    on_fulfilled: on_fulfilled.iter().map(|v| clone_value(v, ctx)).collect(),
+                    on_rejected: on_rejected.iter().map(|v| clone_value(v, ctx)).collect(),
+                },
+                PromiseState::Fulfilled(v) => PromiseState::Fulfilled(clone_value(v, ctx)),
+                PromiseState::Rejected(v) => PromiseState::Rejected(clone_value(v, ctx)),
+            };
+            Value::Promise(Rc::new(RefCell::new(next_state)))
+        }
     }
 }
 
@@ -259,108 +293,68 @@ fn clone_globals(globals: &Rc<RefCell<ObjectData>>) -> Rc<RefCell<ObjectData>> {
 }
 
 /// Runner options for the test262 test runner.
+#[derive(ClapParser, Debug, Default)]
+#[command(
+    name = "test262",
+    about = "Run the local Test262 connector against the blitz VM"
+)]
 struct RunnerOptions {
     /// List of test segments to include.
+    #[arg(
+        long = "segment",
+        alias = "include",
+        value_name = "SEGMENT",
+        value_delimiter = ','
+    )]
     includes: Vec<String>,
     /// List of test segments to exclude.
+    #[arg(long = "exclude", value_name = "SEGMENT", value_delimiter = ',')]
     excludes: Vec<String>,
     /// Substring filter for test names.
+    #[arg(long = "filter", value_name = "SUBSTRING")]
     filter: Option<String>,
     /// Optional maximum number of tests to run.
+    #[arg(long = "limit", value_name = "N")]
     limit: Option<usize>,
     /// Run only harness files.
+    #[arg(long = "harness-only", alias = "harness", action)]
     harness_only: bool,
 }
 
-/// Prints the usage information for the test262 runner.
-fn print_usage() {
-    eprintln!("test262 runner options:");
-    eprintln!("  --segment <seg>[,<seg>...]   Include segment(s)");
-    eprintln!("  --exclude <seg>[,<seg>...]   Exclude segment(s)");
-    eprintln!("  --filter <substring>         Substring filter");
-    eprintln!("  --limit <n>                  Max tests (default: all)");
-    eprintln!("  --harness-only               Run only harness files");
-    eprintln!("segments: annexB, language, built-ins, intl402, staging, or path relative to test/");
+fn parse_csv_env(name: &str) -> Vec<String> {
+    env::var(name)
+        .ok()
+        .map(|val| {
+            val.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Parses the command line arguments
 fn parse_args() -> RunnerOptions {
-    let mut includes: Vec<String> = Vec::new();
-    let mut excludes: Vec<String> = Vec::new();
-    let mut filter = env::var("TEST262_FILTER").ok();
-    let mut limit: Option<usize> = env::var("TEST262_LIMIT").ok().and_then(|s| s.parse().ok());
-    let mut harness_only = false;
+    let mut opts = RunnerOptions::parse();
 
-    if let Ok(seg) = env::var("TEST262_SEGMENTS") {
-        includes.extend(
-            seg.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from),
-        );
+    // Keep historical env-var behavior as fallback when CLI flags are omitted.
+    if opts.includes.is_empty() {
+        opts.includes = parse_csv_env("TEST262_SEGMENTS");
     }
-    if let Ok(seg) = env::var("TEST262_EXCLUDE") {
-        excludes.extend(
-            seg.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from),
-        );
+    if opts.excludes.is_empty() {
+        opts.excludes = parse_csv_env("TEST262_EXCLUDE");
+    }
+    if opts.filter.is_none() {
+        opts.filter = env::var("TEST262_FILTER").ok();
+    }
+    if opts.limit.is_none() {
+        opts.limit = env::var("TEST262_LIMIT")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
     }
 
-    let mut it = env::args().skip(1);
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--help" | "-h" => {
-                print_usage();
-                exit(0);
-            }
-            "--segment" | "--include" => {
-                if let Some(val) = it.next() {
-                    includes.extend(
-                        val.split(',')
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(String::from),
-                    );
-                }
-            }
-            "--exclude" => {
-                if let Some(val) = it.next() {
-                    excludes.extend(
-                        val.split(',')
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(String::from),
-                    );
-                }
-            }
-            "--filter" => {
-                if let Some(val) = it.next() {
-                    filter = Some(val);
-                }
-            }
-            "--limit" => {
-                if let Some(val) = it.next()
-                    && let Ok(n) = val.parse::<usize>()
-                {
-                    limit = Some(n);
-                }
-            }
-            "--harness-only" | "--harness" => {
-                harness_only = true;
-            }
-            _ => {}
-        }
-    }
-
-    RunnerOptions {
-        includes,
-        excludes,
-        filter,
-        limit,
-        harness_only,
-    }
+    opts
 }
 
 /// Minimal subset of metadata we care about.
@@ -564,26 +558,23 @@ fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>, excludes: &[PathBuf]) {
 }
 
 /// Decide whether a test is unsupported before execution begins.
-fn unsupported_reason(_src: &str, meta: &Option<Meta>) -> Option<String> {
+fn unsupported_reason(_path: &Path, _src: &str, meta: &Option<Meta>) -> Option<String> {
     if let Some(m) = meta
         && let Some(flags) = &m.flags
         && flags.iter().any(|f| {
             matches!(
                 f.as_str(),
-                "module" | "raw" | "async" | "noStrict" | "onlyStrict" // onlyStrict/noStrict handled below, but we don't run `module/raw/async`
+                "module" | "raw" | "noStrict" | "onlyStrict" // onlyStrict/noStrict handled below, but we don't run `module/raw`
             )
         })
     {
         // We will still handle onlyStrict/noStrict below in a limited way,
-        // but module/raw/async are skipped entirely.
-        if flags
-            .iter()
-            .any(|f| f == "module" || f == "raw" || f == "async")
-        {
+        // but module/raw are skipped entirely.
+        if flags.iter().any(|f| f == "module" || f == "raw") {
             let unsupported: Vec<&str> = flags
                 .iter()
                 .filter_map(|f| match f.as_str() {
-                    "module" | "raw" | "async" => Some(f.as_str()),
+                    "module" | "raw" => Some(f.as_str()),
                     _ => None,
                 })
                 .collect();
@@ -619,7 +610,12 @@ fn restore_globals(
 
 /// Snapshot global property descriptors (deeper than just keys).
 fn snapshot_globals(globals: &Rc<RefCell<ObjectData>>) -> HashMap<PropertyKey, PropertyDescriptor> {
-    globals.borrow().properties.clone()
+    globals
+        .borrow()
+        .properties
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }
 
 /// Execute a single test file. Returns:
@@ -639,7 +635,7 @@ fn run_test_file(
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
     let meta = parse_meta(&src);
 
-    if let Some(reason) = unsupported_reason(&src, &meta) {
+    if let Some(reason) = unsupported_reason(path, &src, &meta) {
         return Err(format!("{} ({})", path.display(), reason));
     }
 
@@ -707,6 +703,10 @@ fn run_test_file(
 
         // Configure strictness for the engine (runtime-configured via TSBLITZ_STRICT).
         let is_strict = *mode_name == "strict";
+        let is_async = meta
+            .as_ref()
+            .and_then(|m| m.flags.as_ref())
+            .is_some_and(|flags| flags.iter().any(|f| f == "async"));
         // Use the test-friendly override rather than setting process env vars.
         typecheck::set_strict_override(Some(false));
         let _reset_strict = ResetStrict;
@@ -715,6 +715,28 @@ fn run_test_file(
         // This undoes any mutations from the previous test without deep cloning.
         restore_globals(globals, baseline_snapshot);
         let mut vm = Vm::new(Rc::clone(globals));
+
+        // Async tests must signal completion through $DONE(error?).
+        let done_state: Rc<RefCell<Option<Option<Value>>>> = Rc::new(RefCell::new(None));
+        if is_async {
+            let done_state_for_cb = Rc::clone(&done_state);
+            vm.globals_rc().borrow_mut().properties.insert(
+                PropertyKey::String("$DONE".to_string()),
+                PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+                    // Record only the first completion signal.
+                    if done_state_for_cb.borrow().is_none() {
+                        let first = args.first().cloned().unwrap_or(Value::Undefined);
+                        let payload = if matches!(first, Value::Undefined) {
+                            None
+                        } else {
+                            Some(first)
+                        };
+                        *done_state_for_cb.borrow_mut() = Some(payload);
+                    }
+                    Ok(Value::Undefined)
+                }))),
+            );
+        }
 
         // Evaluate harness files unless `raw`: compile & run them into the provided VM.
         if !raw_flag {
@@ -849,6 +871,26 @@ fn run_test_file(
 
         // Execute using the provided persistent VM
         let run_result = vm.run(chunk);
+
+        // Async tests report result via $DONE.
+        let run_result = if is_async {
+            match run_result {
+                Err(e) => Err(e),
+                Ok(v) => match done_state.borrow().as_ref() {
+                    Some(None) => Ok(v),
+                    Some(Some(done_err)) => {
+                        let msg = match vm.to_string(done_err) {
+                            Ok(s) => s,
+                            Err(_) => "async test failed".to_string(),
+                        };
+                        Err(format!("async $DONE called with error: {}", msg).into())
+                    }
+                    None => Err("async test did not call $DONE".into()),
+                },
+            }
+        } else {
+            run_result
+        };
 
         // If the test expects a runtime error, ensure one occurred.
         if let Some(m) = &meta
@@ -1040,7 +1082,7 @@ fn main() {
     let mut ran = 0usize;
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
     let mut top_level: HashMap<String, BucketStats> = HashMap::new();
-    let mut subtrees: HashMap<String, BucketStats> = HashMap::new();
+    let mut subsections: HashMap<String, BucketStats> = HashMap::new();
 
     // Create a persistent VM and globals, install host builtins and the soft-prelude
     let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
@@ -1151,18 +1193,18 @@ fn main() {
         }
 
         eprintln!("Running test: {}", f.display());
-        let (top_key, subtree_key) = bucket_keys(&test_root, &f);
+        let (top_key, subsection_key) = bucket_keys(&test_root, &f);
         match run_test_file(&f, &test262_dir, &globals, &baseline_snapshot) {
             Ok(()) => {
                 ran += 1;
                 top_level.entry(top_key).or_default().pass += 1;
-                subtrees.entry(subtree_key).or_default().pass += 1;
+                subsections.entry(subsection_key).or_default().pass += 1;
                 eprintln!("  PASS");
             }
             Err(e) => {
                 ran += 1;
                 top_level.entry(top_key).or_default().fail += 1;
-                subtrees.entry(subtree_key).or_default().fail += 1;
+                subsections.entry(subsection_key).or_default().fail += 1;
                 eprintln!("  FAIL: {}", e);
                 failed.push((f.clone(), e));
             }
@@ -1175,6 +1217,7 @@ fn main() {
     } else {
         (passed as f64 / ran as f64) * 100.0
     };
+    let show_subsections = has_distinct_subsections(&top_level, &subsections);
 
     if !failed.is_empty() {
         eprintln!(
@@ -1184,22 +1227,30 @@ fn main() {
             failed.len(),
             pass_pct
         );
-        print_bucket_summary("Top-level breakdown:", &top_level, 12, false);
-        print_bucket_summary("Worst subtrees:", &subtrees, 15, true);
-
-        // Instead of listing every failing file, group failures by subtree
-        // and print the failing folders only (top 20). This avoids long lists
-        // of individual files and surfaces which folders are problematic.
-        let mut failed_by_subtree: HashMap<String, usize> = HashMap::new();
-        for (p, _m) in &failed {
-            let (_top, subtree) = bucket_keys(&test_root, p);
-            *failed_by_subtree.entry(subtree).or_default() += 1;
+        print_bucket_summary("Sections:", &top_level, 12, false);
+        if show_subsections {
+            print_bucket_summary("Worst subsections:", &subsections, 15, true);
         }
-        let mut rows: Vec<_> = failed_by_subtree.into_iter().collect();
-        rows.sort_by(|(an, ac), (bn, bc)| bc.cmp(ac).then_with(|| an.cmp(bn)));
-        eprintln!("Failed folders:");
-        for (name, cnt) in rows.into_iter() {
-            eprintln!("  {:<40} fail {}", name, cnt);
+
+        // Instead of listing every failing file, group failures by subsection
+        // and print the failing subsection folders only.
+        if show_subsections {
+            let mut failed_by_subsection: HashMap<String, usize> = HashMap::new();
+            for (p, _m) in &failed {
+                let (_top, subsection) = bucket_keys(&test_root, p);
+                *failed_by_subsection.entry(subsection).or_default() += 1;
+            }
+            let mut rows: Vec<_> = failed_by_subsection.into_iter().collect();
+            rows.sort_by(|(an, ac), (bn, bc)| bc.cmp(ac).then_with(|| an.cmp(bn)));
+            eprintln!("Failed subsections:");
+            for (name, cnt) in rows.into_iter() {
+                eprintln!("  {:<40} fail {}", name, cnt);
+            }
+        }
+        eprintln!("Failed tests:");
+        for (path, msg) in &failed {
+            let rel = path.strip_prefix(&test262_dir).unwrap_or(path);
+            eprintln!("  {}: {}", rel.display(), msg);
         }
         exit(1);
     } else {
@@ -1207,8 +1258,10 @@ fn main() {
             "Test262 connector: ran {} tests, passed {} ({:.2}%)",
             ran, passed, pass_pct
         );
-        print_bucket_summary("Top-level breakdown:", &top_level, 12, false);
-        print_bucket_summary("Worst subtrees:", &subtrees, 15, true);
+        print_bucket_summary("Sections:", &top_level, 12, false);
+        if show_subsections {
+            print_bucket_summary("Worst subsections:", &subsections, 15, true);
+        }
         exit(0);
     }
 }

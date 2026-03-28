@@ -24,8 +24,11 @@ enum ModuleState {
 /// A ModuleRecord represents a source text module parsed from disk and
 /// holds cached artifacts required for linking and evaluation.
 pub struct ModuleRecord {
+    /// Canonical absolute path to the module source file.
     pub path: PathBuf,
+    /// Parsed module session containing the AST and parser artifacts.
     pub session: ParserSession,
+    /// Current loader lifecycle state for this module.
     pub state: ModuleState,
     /// Assigned numeric module index used by the VM module table. Set during instantiation.
     pub module_index: Option<usize>,
@@ -55,6 +58,7 @@ impl ModuleRecord {
 /// ModuleLoader holds a per-VM module map and implements Construction,
 /// Instantiation, and Evaluation per the ECMAScript module semantics.
 pub struct ModuleLoader {
+    /// Cache of constructed module records keyed by canonical module path.
     pub map: HashMap<PathBuf, Rc<RefCell<ModuleRecord>>>,
 }
 
@@ -65,6 +69,7 @@ impl Default for ModuleLoader {
 }
 
 impl ModuleLoader {
+    /// Create an empty module loader with no cached records.
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),

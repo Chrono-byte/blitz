@@ -6,7 +6,6 @@
  */
 
 import type { Value, Console } from "./core/types.js";
-import { BlitzObject as ObjectImpl, BlitzFunction as FunctionImpl } from "./core/objects.js";
 import { toString as runtimeToString } from "./core/runtime.js";
 // Host helpers are provided by the inlined `soft/host.ts` module and expose
 // top-level functions such as `host_print`, `native_new_object`, `native_print`
@@ -82,10 +81,6 @@ try {
     typeof globalThis !== "undefined" && (globalThis as any).console
       ? (globalThis as any).console
       : { log: function (..._args: any[]) {} };
-  let ObjectImplGlobal: any =
-    typeof globalThis !== "undefined" && (globalThis as any).Object
-      ? (globalThis as any).Object
-      : {};
   let ArrayImplGlobal: any =
     typeof globalThis !== "undefined" && (globalThis as any).Array ? (globalThis as any).Array : {};
   let StringImplGlobal: any =
@@ -531,7 +526,6 @@ try {
     try {
       if (typeof globalThis !== "undefined") {
         const g: any = globalThis as any;
-        if (g.Object) ObjectImplGlobal = g.Object;
         if (g.Array) ArrayImplGlobal = g.Array;
         if (g.String) StringImplGlobal = g.String;
       }
@@ -567,8 +561,8 @@ try {
     } catch (_) {}
 
     // Ensure an Array.prototype object exists so std library can install methods
-    // (the runtime's BlitzObject exposes `set`/`defineProperty` and prototype
-    // behavior; we use `ObjectImpl` to create a fresh prototype object and attach
+    // (the runtime's host object exposes `set`/`defineProperty` and prototype
+    // behavior; we create a fresh prototype object and attach
     // it to the constructor-like `Array` implementation).
     {
       // Create Array.prototype using the host-provided native object helper
@@ -588,20 +582,24 @@ try {
           protoObj = native_new_object();
           // If the host helper returned null/undefined, fall back
           if (protoObj === null || typeof protoObj === "undefined") {
-            protoObj = new ObjectImpl();
+            protoObj = {};
           }
         } catch (_e) {
-          protoObj = new ObjectImpl();
+          protoObj = {};
         }
       } else {
-        protoObj = new ObjectImpl();
+        protoObj = {};
       }
       // Set constructor on the prototype and attach the prototype to whichever
       // Array constructor we are using (runtime-provided or our soft one). Be
       // defensive: do not overwrite an existing prototype object if present.
       if (protoObj !== null && typeof protoObj !== "undefined") {
         try {
-          (protoObj as any)["constructor"] = (Array as any) || ArrayImplInstance;
+          const ctor =
+            typeof globalThis !== "undefined" && (globalThis as any).Array
+              ? (globalThis as any).Array
+              : ArrayImplInstance;
+          (protoObj as any)["constructor"] = ctor;
         } catch (e) {
           // Ignore failures here; host-provided objects may be immutable during
           // certain bootstrap scenarios.

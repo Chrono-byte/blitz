@@ -112,6 +112,8 @@ pub struct Compiler {
     upvalue_indices: HashMap<String, u8>,
     /// Upvalue capture specs for the current function.
     captured_upvalues: Vec<UpvalueSpec>,
+    /// Whether the immediately enclosing compiler is the root compiler.
+    outer_is_root: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -153,6 +155,7 @@ impl Compiler {
             outer_bindings: HashMap::new(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
+            outer_is_root: false,
         }
     }
 
@@ -255,7 +258,7 @@ impl Compiler {
         );
     }
 
-    fn visible_bindings_snapshot(&self) -> HashMap<String, CaptureSource> {
+    fn visible_bindings_snapshot(&mut self) -> HashMap<String, CaptureSource> {
         let mut bindings = HashMap::new();
         for scope in &self.scopes {
             for (name, slot) in &scope.bindings {
@@ -266,6 +269,20 @@ impl Compiler {
             bindings
                 .entry(name.clone())
                 .or_insert(CaptureSource::Upvalue(*idx));
+        }
+        // Allow pass-through capture for grandparent bindings needed only by
+        // deeper nested functions. Skip this when our parent is the root
+        // compiler to avoid eagerly capturing a very large root scope.
+        if !self.outer_is_root {
+            let outer_names: Vec<String> = self.outer_bindings.keys().cloned().collect();
+            for name in outer_names {
+                if bindings.contains_key(&name) {
+                    continue;
+                }
+                if let Some(idx) = self.resolve_upvalue(&name) {
+                    bindings.insert(name, CaptureSource::Upvalue(idx));
+                }
+            }
         }
         bindings
     }
@@ -329,7 +346,7 @@ impl Compiler {
             return Some(idx);
         }
         let source = *self.outer_bindings.get(name)?;
-        let idx = self.captured_upvalues.len() as u8;
+        let idx = u8::try_from(self.captured_upvalues.len()).ok()?;
         let spec = match source {
             CaptureSource::Local(slot) => UpvalueSpec {
                 is_local: true,
@@ -635,6 +652,85 @@ impl Compiler {
                     self.patch_jump(jump_else);
                 } else {
                     self.patch_jump(jump_over);
+                }
+            }
+            OStmt::SwitchStatement(s) => {
+                // Evaluate discriminant once and store in a local slot.
+                self.compile_expr_oast(&s.discriminant)?;
+                let discr_name = format!("__switch_discriminant_{}", self.locals.len());
+                let discr_slot = self.add_local_with_mirror(discr_name, None, false);
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(discr_slot as u8, LINE);
+
+                // `break` inside a switch should jump to switch end.
+                self.break_patches.push(Vec::new());
+
+                // First phase: dispatch checks, each successful match jumps to
+                // the corresponding case body.
+                let mut case_body_jumps: Vec<(usize, usize)> = Vec::new();
+                let mut default_index: Option<usize> = None;
+                for (case_idx, case) in s.cases.iter().enumerate() {
+                    if let Some(test) = &case.test {
+                        self.emit(Op::GetLocal, LINE);
+                        self.emit_byte(discr_slot as u8, LINE);
+                        self.compile_expr_oast(test)?;
+                        self.emit(Op::StrictEq, LINE);
+                        self.emit(Op::JumpIfFalse, LINE);
+                        let skip_jump = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+
+                        self.emit(Op::Jump, LINE);
+                        let body_jump = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        case_body_jumps.push((case_idx, body_jump));
+
+                        self.patch_jump(skip_jump);
+                    } else {
+                        default_index = Some(case_idx);
+                    }
+                }
+
+                // If no case matched, jump to default (if any), else to end.
+                self.emit(Op::Jump, LINE);
+                let no_match_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+
+                // Second phase: emit case bodies in source order. Fallthrough is
+                // represented naturally by layout.
+                let mut case_starts: Vec<usize> = vec![0; s.cases.len()];
+                for (case_idx, case) in s.cases.iter().enumerate() {
+                    case_starts[case_idx] = self.chunk.code.len();
+                    for stmt in &case.consequent {
+                        self.compile_statement_oast(stmt)?;
+                    }
+                }
+                let switch_end = self.chunk.code.len();
+
+                // Patch successful-case jumps to case body starts.
+                for (case_idx, jump_pos) in case_body_jumps {
+                    let target = case_starts[case_idx] as isize - (jump_pos as isize) - 2;
+                    let v = target as i16;
+                    self.chunk.code[jump_pos] = (v >> 8) as u8;
+                    self.chunk.code[jump_pos + 1] = (v & 0xff) as u8;
+                }
+
+                // Patch no-match jump to default start or end.
+                let default_target = default_index.map_or(switch_end, |idx| case_starts[idx]);
+                let no_match_off = default_target as isize - (no_match_jump as isize) - 2;
+                let no_match_v = no_match_off as i16;
+                self.chunk.code[no_match_jump] = (no_match_v >> 8) as u8;
+                self.chunk.code[no_match_jump + 1] = (no_match_v & 0xff) as u8;
+
+                // Patch `break` statements emitted within this switch.
+                if let Some(patches) = self.break_patches.pop() {
+                    for patch_pos in patches {
+                        let target = switch_end - patch_pos - 2;
+                        self.chunk.code[patch_pos] = (target >> 8) as u8;
+                        self.chunk.code[patch_pos + 1] = (target & 0xff) as u8;
+                    }
                 }
             }
             OStmt::WhileStatement(w) => {
@@ -970,14 +1066,8 @@ impl Compiler {
                 self.emit(Op::Throw, LINE);
             }
             OStmt::TryStatement(t) => {
-                if t.finalizer.is_some() {
-                    return Err(crate::errors::CompilerError::from(
-                        "try/finally not yet supported",
-                    ));
-                }
-                let handler = t.handler.as_ref().ok_or_else(|| {
-                    crate::errors::CompilerError::from("try without catch not supported")
-                })?;
+                let handler = t.handler.as_ref();
+                let finalizer = t.finalizer.as_ref();
 
                 self.emit(Op::PushHandler, LINE);
                 let handler_jump = self.chunk.code.len();
@@ -989,37 +1079,77 @@ impl Compiler {
                 }
 
                 self.emit(Op::PopHandler, LINE);
+
+                // Normal completion path: run finalizer (if present), then skip handler path.
+                if let Some(fin) = finalizer {
+                    for stmt in &fin.body {
+                        self.compile_statement_oast(stmt)?;
+                    }
+                }
                 self.emit(Op::Jump, LINE);
                 let end_jump = self.chunk.code.len();
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
 
+                // Exception path starts here.
                 self.patch_jump(handler_jump);
 
-                if let Some(param) = &handler.param {
-                    let name = match &param.pattern {
-                        OPat::BindingIdentifier(i) => i.name.to_string(),
-                        _ => {
+                match handler {
+                    Some(handler) => {
+                        if let Some(param) = &handler.param {
+                            let name = match &param.pattern {
+                                OPat::BindingIdentifier(i) => i.name.to_string(),
+                                _ => {
+                                    return Err(crate::errors::CompilerError::from(
+                                        "unsupported catch binding pattern",
+                                    ));
+                                }
+                            };
+                            self.enter_block_scope();
+                            let slot = self.add_local_with_mirror(name, None, false);
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(slot as u8, LINE);
+                            for stmt in &handler.body.body {
+                                self.compile_statement_oast(stmt)?;
+                            }
+                            self.exit_scope();
+                        } else {
+                            self.emit(Op::Pop, LINE);
+                            self.enter_block_scope();
+                            for stmt in &handler.body.body {
+                                self.compile_statement_oast(stmt)?;
+                            }
+                            self.exit_scope();
+                        }
+
+                        if let Some(fin) = finalizer {
+                            for stmt in &fin.body {
+                                self.compile_statement_oast(stmt)?;
+                            }
+                        }
+                    }
+                    None => {
+                        // try/finally with no catch: preserve thrown value, run finally, rethrow.
+                        if finalizer.is_none() {
                             return Err(crate::errors::CompilerError::from(
-                                "unsupported catch binding pattern",
+                                "try without catch/finally not supported",
                             ));
                         }
-                    };
-                    self.enter_block_scope();
-                    let slot = self.add_local_with_mirror(name, None, false);
-                    self.emit(Op::SetLocal, LINE);
-                    self.emit_byte(slot as u8, LINE);
-                    for stmt in &handler.body.body {
-                        self.compile_statement_oast(stmt)?;
+                        self.enter_block_scope();
+                        let slot =
+                            self.add_local_with_mirror("__finally_thrown".to_string(), None, false);
+                        self.emit(Op::SetLocal, LINE);
+                        self.emit_byte(slot as u8, LINE);
+                        if let Some(fin) = finalizer {
+                            for stmt in &fin.body {
+                                self.compile_statement_oast(stmt)?;
+                            }
+                        }
+                        self.emit(Op::GetLocal, LINE);
+                        self.emit_byte(slot as u8, LINE);
+                        self.emit(Op::Throw, LINE);
+                        self.exit_scope();
                     }
-                    self.exit_scope();
-                } else {
-                    self.emit(Op::Pop, LINE);
-                    self.enter_block_scope();
-                    for stmt in &handler.body.body {
-                        self.compile_statement_oast(stmt)?;
-                    }
-                    self.exit_scope();
                 }
 
                 self.patch_jump(end_jump);
@@ -1036,6 +1166,17 @@ impl Compiler {
         use oxc_ast::ast::Expression as OExpr;
         match expr {
             OExpr::NumericLiteral(n) => self.emit_constant(Value::Number(n.value), LINE),
+            OExpr::BigIntLiteral(n) => {
+                let raw =
+                    n.raw.as_ref().map(oxc_span::Atom::as_str).ok_or_else(|| {
+                        crate::errors::CompilerError::from("invalid bigint literal")
+                    })?;
+                let digits = raw.strip_suffix('n').unwrap_or(raw);
+                let parsed = digits
+                    .parse::<i128>()
+                    .map_err(|_| crate::errors::CompilerError::from("invalid bigint literal"))?;
+                self.emit_constant(Value::BigInt(parsed), LINE);
+            }
             OExpr::StringLiteral(s) => self.emit_constant(Value::String(s.value.to_string()), LINE),
             OExpr::TemplateLiteral(t) => {
                 let first = t
@@ -1057,6 +1198,31 @@ impl Compiler {
                     self.emit_constant(Value::String(tail), LINE);
                     self.emit(Op::Add, LINE);
                 }
+            }
+            OExpr::TaggedTemplateExpression(t) => {
+                // Minimal tagged template support: `tag` receives
+                // `(stringsArray, ...substitutions)`.
+                // We currently pass only cooked strings and omit template
+                // object caching/raw metadata.
+                self.compile_expr_oast(&t.tag)?;
+                for quasi in &t.quasi.quasis {
+                    let cooked = quasi
+                        .value
+                        .cooked
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
+                    self.emit_constant(Value::String(cooked), LINE);
+                }
+                self.emit(Op::BuildArray, LINE);
+                self.emit_byte(t.quasi.quasis.len() as u8, LINE);
+                let mut arg_count = 1usize;
+                for sub in &t.quasi.expressions {
+                    self.compile_expr_oast(sub)?;
+                    arg_count += 1;
+                }
+                self.emit(Op::Call, LINE);
+                self.emit_byte(arg_count as u8, LINE);
             }
             OExpr::BooleanLiteral(b) => {
                 if b.value {
@@ -1084,17 +1250,6 @@ impl Compiler {
                 self.emit(Op::MakeClosure, LINE);
                 self.emit_byte(idx as u8, LINE);
             }
-            OExpr::CallExpression(call) => {
-                let nargs = call.arguments.len();
-                self.compile_expr_oast(&call.callee)?;
-                for arg in &call.arguments {
-                    if let Some(expr) = arg.as_expression() {
-                        self.compile_expr_oast(expr)?;
-                    }
-                }
-                self.emit(Op::Call, LINE);
-                self.emit_byte(nargs as u8, LINE);
-            }
             OExpr::ObjectExpression(obj) => {
                 let mut count = 0usize;
                 for prop in &obj.properties {
@@ -1104,12 +1259,27 @@ impl Compiler {
                         }
                         let key = match &p.key {
                             oast::PropertyKey::StaticIdentifier(ident) => ident.name.to_string(),
+                            oast::PropertyKey::Identifier(ident) => ident.name.to_string(),
                             oast::PropertyKey::StringLiteral(s) => s.value.to_string(),
                             oast::PropertyKey::NumericLiteral(n) => n.value.to_string(),
                             _ => continue,
                         };
                         self.emit_constant(Value::String(key), LINE);
-                        self.compile_expr_oast(&p.value)?;
+                        if p.shorthand {
+                            match &p.key {
+                                oast::PropertyKey::StaticIdentifier(ident) => {
+                                    self.emit_get_binding(ident.name.as_str());
+                                }
+                                oast::PropertyKey::Identifier(ident) => {
+                                    self.emit_get_binding(ident.name.as_str());
+                                }
+                                _ => {
+                                    self.emit(Op::Null, LINE);
+                                }
+                            }
+                        } else {
+                            self.compile_expr_oast(&p.value)?;
+                        }
                         count += 1;
                     }
                 }
@@ -1343,10 +1513,31 @@ impl Compiler {
             }
             OExpr::UnaryExpression(u) => match u.operator {
                 oast::UnaryOperator::Typeof => {
-                    self.emit_get_global_name("__native_typeof");
-                    self.compile_expr_oast(&u.argument)?;
-                    self.emit(Op::Call, LINE);
-                    self.emit_byte(1, LINE);
+                    if let OExpr::Identifier(id) = &u.argument {
+                        // Preserve `typeof undeclaredIdentifier` semantics.
+                        // Normal global lookup now throws ReferenceError for
+                        // missing bindings, so use a name-based helper for the
+                        // identifier case.
+                        let name = id.name.to_string();
+                        if self.resolve_local(&name).is_some()
+                            || self.resolve_upvalue(&name).is_some()
+                        {
+                            self.emit_get_global_name("__native_typeof");
+                            self.compile_expr_oast(&u.argument)?;
+                            self.emit(Op::Call, LINE);
+                            self.emit_byte(1, LINE);
+                        } else {
+                            self.emit_get_global_name("__native_typeof_name");
+                            self.emit_constant(Value::String(name), LINE);
+                            self.emit(Op::Call, LINE);
+                            self.emit_byte(1, LINE);
+                        }
+                    } else {
+                        self.emit_get_global_name("__native_typeof");
+                        self.compile_expr_oast(&u.argument)?;
+                        self.emit(Op::Call, LINE);
+                        self.emit_byte(1, LINE);
+                    }
                 }
                 oast::UnaryOperator::Delete => {
                     if let OExpr::StaticMemberExpression(m) = &u.argument {
@@ -1731,6 +1922,10 @@ impl Compiler {
             OExpr::ParenthesizedExpression(p) => {
                 self.compile_expr_oast(&p.expression)?;
             }
+            OExpr::AwaitExpression(a) => {
+                self.compile_expr_oast(&a.argument)?;
+                self.emit(Op::AwaitPromise, LINE);
+            }
             _ => self.emit(Op::Null, LINE),
         }
         Ok(())
@@ -1840,6 +2035,7 @@ impl Compiler {
             outer_bindings: self.visible_bindings_snapshot(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
+            outer_is_root: self.is_root,
         };
 
         // Parameter placeholders (no type information available here).
@@ -1906,6 +2102,7 @@ impl Compiler {
                 return_type,
                 is_strict,
                 is_constructor,
+                is_async: func.r#async,
             },
             _env_len,
         ))
@@ -1936,6 +2133,7 @@ impl Compiler {
             outer_bindings: self.visible_bindings_snapshot(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
+            outer_is_root: self.is_root,
         };
 
         let mut param_type_opts: Vec<Option<Type>> = Vec::new();
@@ -2011,6 +2209,7 @@ impl Compiler {
                 return_type,
                 is_strict,
                 is_constructor: false,
+                is_async: false,
             },
             _env_len,
         ))

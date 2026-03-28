@@ -37,54 +37,53 @@ use std::rc::Rc;
 #[derive(Clone, Debug, Default)]
 pub struct Intrinsics {
     // --- Constructors (callable objects) ---
-    // Constructors for objects
+    /// Canonical `Object` constructor for this realm.
     pub object_constructor: Option<Value>,
-    // Constructors for arrays
+    /// Canonical `Array` constructor for this realm.
     pub array_constructor: Option<Value>,
-    // Constructors for functions
+    /// Canonical `Function` constructor for this realm.
     pub function_constructor: Option<Value>,
-    // Constructors for strings
+    /// Canonical `String` constructor for this realm.
     pub string_constructor: Option<Value>,
-    // Constructors for symbols
+    /// Canonical `Symbol` constructor for this realm.
     pub symbol_constructor: Option<Value>,
-    // Constructors for errors
+    /// Canonical `Error` constructor for this realm.
     pub error_constructor: Option<Value>,
-    // Constructors for type errors
+    /// Canonical `TypeError` constructor for this realm.
     pub type_error_constructor: Option<Value>,
-    // Constructors for range errors
+    /// Canonical `RangeError` constructor for this realm.
     pub range_error_constructor: Option<Value>,
-    // Constructors for reference errors
+    /// Canonical `ReferenceError` constructor for this realm.
     pub reference_error_constructor: Option<Value>,
-    // Constructors for syntax errors
+    /// Canonical `SyntaxError` constructor for this realm.
     pub syntax_error_constructor: Option<Value>,
-    // Constructors for promises
+    /// Canonical `Promise` constructor for this realm.
     pub promise_constructor: Option<Value>,
-    // Constructors for dates
+    /// Canonical `Date` constructor for this realm.
     pub date_constructor: Option<Value>,
-    // Constructors for maps
+    /// Canonical `Map` constructor for this realm.
     pub map_constructor: Option<Value>,
-    // Constructors for numbers
+    /// Canonical `Number` constructor for this realm.
     pub number_constructor: Option<Value>,
 
     // --- Prototypes ---
-
-    // Prototypes for built-in object prototypes.
+    /// Canonical `Object.prototype` for this realm.
     pub object_prototype: Option<Value>,
-    // Prototypes for built-in array prototypes.
+    /// Canonical `Array.prototype` for this realm.
     pub array_prototype: Option<Value>,
-    // Prototypes for built-in function prototypes.
+    /// Canonical `Function.prototype` for this realm.
     pub function_prototype: Option<Value>,
-    // Prototypes for built-in string prototypes.
+    /// Canonical `String.prototype` for this realm.
     pub string_prototype: Option<Value>,
-    // Prototypes for built-in symbol prototypes.
+    /// Canonical `Symbol.prototype` for this realm.
     pub symbol_prototype: Option<Value>,
-    // Prototypes for built-in error prototypes.
+    /// Canonical `Error.prototype` for this realm.
     pub error_prototype: Option<Value>,
-    // Prototypes for built-in promise prototypes.
+    /// Canonical `Promise.prototype` for this realm.
     pub promise_prototype: Option<Value>,
-    // Prototypes for built-in date prototypes.
+    /// Canonical `Date.prototype` for this realm.
     pub date_prototype: Option<Value>,
-    // Prototypes for built-in map prototypes.
+    /// Canonical `Map.prototype` for this realm.
     pub map_prototype: Option<Value>,
 }
 
