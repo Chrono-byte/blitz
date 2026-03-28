@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```
-//! use tsblitz::lexer::Lexer;
+//! use blitz::lexer::Lexer;
 //!
 //! let mut lexer = Lexer::new("let x = 42;");
 //! let tokens = lexer.tokenize().unwrap();

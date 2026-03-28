@@ -38,7 +38,7 @@ export type Value =
   | BlitzFunction;
 
 // Property descriptor following JavaScript specification
-// In the tsblitz runtime a property descriptor is represented as a runtime
+// In the Blitz runtime a property descriptor is represented as a runtime
 // value (BlitzObject). Keep the compile-time shape permissive to match that
 // runtime representation while allowing std/prelude code to access descriptor
 // fields.

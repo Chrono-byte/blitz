@@ -24,7 +24,7 @@
 //! # Example
 //!
 //! ```
-//! use tsblitz::bytecode::{Chunk, Op};
+//! use blitz::bytecode::{Chunk, Op};
 //!
 //! let mut chunk = Chunk::new();
 //! chunk.write(Op::Const as u8, 1);

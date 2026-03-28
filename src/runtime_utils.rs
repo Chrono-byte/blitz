@@ -1263,11 +1263,16 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         // Call all registered fulfillment callbacks synchronously
                         // (In a real implementation, these would be queued as microtasks)
                         for callback in callbacks {
-                            let _ = vm.call_value_with_this(
-                                &callback,
-                                &Value::Undefined,
-                                &[value_for_return.clone()],
-                            );
+                            let cb = callback.clone();
+                            let arg_value = value_for_return.clone();
+                            vm.queue_microtask(move |vm| {
+                                let _ = vm.call_value_with_this(
+                                    &cb,
+                                    &Value::Undefined,
+                                    &[arg_value.clone()],
+                                );
+                                Ok(())
+                            });
                         }
                     }
                     _ => {
@@ -1293,11 +1298,16 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         // Call all registered rejection callbacks synchronously
                         // (In a real implementation, these would be queued as microtasks)
                         for callback in callbacks {
-                            let _ = vm.call_value_with_this(
-                                &callback,
-                                &Value::Undefined,
-                                &[reason_for_return.clone()],
-                            );
+                            let cb = callback.clone();
+                            let arg_value = reason_for_return.clone();
+                            vm.queue_microtask(move |vm| {
+                                let _ = vm.call_value_with_this(
+                                    &cb,
+                                    &Value::Undefined,
+                                    &[arg_value.clone()],
+                                );
+                                Ok(())
+                            });
                         }
                     }
                     _ => {
@@ -1455,22 +1465,27 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                 *result_promise.borrow_mut() =
                                     PromiseState::Fulfilled(value.clone());
                             } else {
-                                vm.last_uncaught_exception = None;
-                                match vm.call_value_with_this(
-                                    &on_fulfilled,
-                                    &Value::Undefined,
-                                    &[value.clone()],
-                                ) {
-                                    Ok(out) => settle_from_output(out, &result_promise),
-                                    Err(err) => {
-                                        let reason = vm
-                                            .last_uncaught_exception
-                                            .take()
-                                            .unwrap_or(Value::String(format!("{}", err)));
-                                        *result_promise.borrow_mut() =
-                                            PromiseState::Rejected(reason);
+                                let cb = on_fulfilled.clone();
+                                let val = value.clone();
+                                let chained = Rc::clone(&result_promise);
+                                vm.queue_microtask(move |vm| {
+                                    vm.last_uncaught_exception = None;
+                                    match vm.call_value_with_this(
+                                        &cb,
+                                        &Value::Undefined,
+                                        &[val.clone()],
+                                    ) {
+                                        Ok(out) => settle_from_output(out, &chained),
+                                        Err(err) => {
+                                            let reason = vm
+                                                .last_uncaught_exception
+                                                .take()
+                                                .unwrap_or(Value::String(format!("{}", err)));
+                                            *chained.borrow_mut() = PromiseState::Rejected(reason);
+                                        }
                                     }
-                                }
+                                    Ok(())
+                                });
                             }
                         }
                         PromiseState::Rejected(reason) => {
@@ -1478,22 +1493,28 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                 *result_promise.borrow_mut() =
                                     PromiseState::Rejected(reason.clone());
                             } else {
-                                vm.last_uncaught_exception = None;
-                                match vm.call_value_with_this(
-                                    &on_rejected,
-                                    &Value::Undefined,
-                                    &[reason.clone()],
-                                ) {
-                                    Ok(out) => settle_from_output(out, &result_promise),
-                                    Err(err) => {
-                                        let reject_reason = vm
-                                            .last_uncaught_exception
-                                            .take()
-                                            .unwrap_or(Value::String(format!("{}", err)));
-                                        *result_promise.borrow_mut() =
-                                            PromiseState::Rejected(reject_reason);
+                                let cb = on_rejected.clone();
+                                let val = reason.clone();
+                                let chained = Rc::clone(&result_promise);
+                                vm.queue_microtask(move |vm| {
+                                    vm.last_uncaught_exception = None;
+                                    match vm.call_value_with_this(
+                                        &cb,
+                                        &Value::Undefined,
+                                        &[val.clone()],
+                                    ) {
+                                        Ok(out) => settle_from_output(out, &chained),
+                                        Err(err) => {
+                                            let reject_reason = vm
+                                                .last_uncaught_exception
+                                                .take()
+                                                .unwrap_or(Value::String(format!("{}", err)));
+                                            *chained.borrow_mut() =
+                                                PromiseState::Rejected(reject_reason);
+                                        }
                                     }
-                                }
+                                    Ok(())
+                                });
                             }
                         }
                     }

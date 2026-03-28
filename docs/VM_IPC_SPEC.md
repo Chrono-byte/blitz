@@ -249,7 +249,7 @@ Notes
 
 Integration with existing codebase
 ----------------------------------
-This spec targets the current `tsblitz` repository layout. Key existing files to integrate
+This spec targets the current `blitz` repository layout. Key existing files to integrate
 with are:
 
 - `src/vm.rs` — the synchronous interpreter and `Vm::run` loop. The scheduler will call

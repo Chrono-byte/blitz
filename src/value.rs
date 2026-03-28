@@ -26,7 +26,7 @@
 //! # Example
 //!
 //! ```
-//! use tsblitz::value::Value;
+//! use blitz::value::Value;
 //!
 //! let num = Value::Number(42.0);
 //! let s = Value::String("hello".to_string());

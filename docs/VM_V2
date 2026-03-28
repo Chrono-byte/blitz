@@ -2,7 +2,7 @@ VM V2 Threading & Isolation Plan (Updated for single-VM multithreading)
 
 Purpose
 -------
-This document describes how to evolve the existing `tsblitz` interpreter into a
+This document describes how to evolve the existing `blitz` interpreter into a
 multithreaded, single-VM runtime that provides BEAM-style process isolation without
 spawning multiple full `Vm` instances. The design keeps one executable VM, shares
 immutable/runtime-shared code, and isolates per-process mutable state and heaps.

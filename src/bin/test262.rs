@@ -1,5 +1,5 @@
 /*!
-Test262 connector script for tsblitz.
+Test262 connector script for Blitz.
 
 Usage:
 - Optionally set `TEST262_FILTER` to a substring to limit which tests are run
@@ -35,9 +35,9 @@ use std::rc::Rc;
 use clap::Parser as ClapParser;
 use serde::Deserialize;
 
-use tsblitz::compiler;
-use tsblitz::value::{ObjectData, PromiseState, PropertyDescriptor, PropertyKey};
-use tsblitz::{module::ModuleLoader, parser::Parser, typecheck, value::Value, vm::Vm};
+use blitz::compiler;
+use blitz::value::{ObjectData, PromiseState, PropertyDescriptor, PropertyKey};
+use blitz::{module::ModuleLoader, parser::Parser, typecheck, value::Value, vm::Vm};
 
 #[derive(Clone, Copy, Default)]
 struct BucketStats {
@@ -442,7 +442,8 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     data.properties.insert(
         PropertyKey::String("evalScript".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-            builtin_eval_script(&eval_globals, args).map_err(tsblitz::errors::RuntimeError::from)
+            builtin_eval_script(&eval_globals, args)
+                .map_err(|e| blitz::errors::RuntimeError::from(e))
         }))),
     );
 
@@ -483,7 +484,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
             // Install builtins from scratch — gives each realm distinct
             // constructor/prototype identities. This is correct per spec:
             // Realm = fresh intrinsics, not a clone of the parent.
-            tsblitz::runtime_utils::install_minimal_kernel_constructors(&realm_global);
+            blitz::runtime_utils::install_minimal_kernel_constructors(&realm_global);
 
             // Copy the calling realm's $262 object structure into the new realm.
             let new_262 = make_test262_object(&realm_global);
@@ -1089,13 +1090,13 @@ fn main() {
     globals.borrow_mut().properties.insert(
         PropertyKey::String("__native_print".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+            builtin_print(vm, args).map_err(blitz::errors::RuntimeError::from)
         }))),
     );
     globals.borrow_mut().properties.insert(
         PropertyKey::String("print".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            builtin_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+            builtin_print(vm, args).map_err(blitz::errors::RuntimeError::from)
         }))),
     );
 
@@ -1128,7 +1129,7 @@ fn main() {
     // Seed the realm with kernel constructors before running the soft prelude.
     // The prelude may extend/replace these; we avoid re-installing kernel
     // constructors afterward to preserve prelude-level constructor identity.
-    tsblitz::runtime_utils::install_minimal_kernel_constructors(&globals);
+    blitz::runtime_utils::install_minimal_kernel_constructors(&globals);
 
     // Wire $262 test harness object with proper createRealm (fresh intrinsics,
     // not heap clone) and evalScript (shares globals via Rc::clone).

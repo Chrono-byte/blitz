@@ -12,7 +12,7 @@
 //! to emit diagnostic information:
 //!
 //! ```
-//! use tsblitz::trace;
+//! use blitz::trace;
 //!
 //! if trace::enabled() {
 //!     trace::string("debug label", "value to inspect");

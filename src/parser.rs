@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use tsblitz::parser::Parser;
+//! use blitz::parser::Parser;
 //!
 //! let source = "let x: number = 42;";
 //! let program = Parser::parse_source(source)?;

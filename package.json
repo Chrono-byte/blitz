@@ -1,7 +1,7 @@
 {
-  "name": "tsblitz",
+  "name": "blitz",
   "version": "0.1.0",
-  "description": "TypeScript VM: Rust base layer + self-hosted TS soft layer",
+  "description": "JavaScript VM: Rust base layer + self-hosted TS soft layer",
   "type": "module",
   "scripts": {
     "build": "cargo build --release && tsc",

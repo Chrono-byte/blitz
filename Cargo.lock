@@ -98,6 +98,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "blitz"
+version = "0.1.1"
+dependencies = [
+ "clap",
+ "fastrand",
+ "ouroboros",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_resolver",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1073,9 +1095,9 @@ dependencies = [
 
 [[package]]
 name = "rustc-hash"
-version = "2.1.1"
+version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
+checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 
 [[package]]
 name = "rustix"
@@ -1433,28 +1455,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tsblitz"
-version = "0.1.1"
-dependencies = [
- "clap",
- "fastrand",
- "ouroboros",
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_resolver",
- "oxc_semantic",
- "oxc_span",
- "oxc_syntax",
- "rustyline",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "unicode-id-start"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1474,9 +1474,9 @@ checksum = "3b09c83c3c29d37506a3e260c08c03743a6bb66a9cd432c6934ab501a190571f"
 
 [[package]]
 name = "unicode-segmentation"
-version = "1.13.1"
+version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da36089a805484bcccfffe0739803392c8298778a2d2f09febf76fac5ad9025b"
+checksum = "9629274872b2bfaf8d66f5f15725007f635594914870f65218920345aa11aa8c"
 
 [[package]]
 name = "unicode-width"

@@ -32,11 +32,11 @@
 //! # Example
 //!
 //! ```
-//! use tsblitz::vm::Vm;
-//! use tsblitz::bytecode::Chunk;
+//! use blitz::vm::Vm;
+//! use blitz::bytecode::Chunk;
 //! use std::cell::RefCell;
 //! use std::rc::Rc;
-//! use tsblitz::value::ObjectData;
+//! use blitz::value::ObjectData;
 //!
 //! let globals = Rc::new(RefCell::new(ObjectData::new()));
 //! let mut vm = Vm::new(globals);
@@ -50,7 +50,7 @@ use crate::typecheck::BuiltinType;
 use crate::typecheck::Type;
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::future::Future;
 use std::rc::Rc;
@@ -136,6 +136,8 @@ enum StepOutcome {
     Continue,
     Return(Value),
 }
+
+type Microtask = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 
 #[derive(Clone, Debug, Default)]
 struct PartialDescriptor {
@@ -233,6 +235,7 @@ pub struct Vm {
     construct_new_target: Option<Value>,
     /// Last uncaught thrown JS value observed during unwinding.
     pub(crate) last_uncaught_exception: Option<Value>,
+    microtasks: VecDeque<Microtask>,
 }
 
 impl Vm {
@@ -276,6 +279,7 @@ impl Vm {
             module_table: Vec::new(),
             construct_new_target: None,
             last_uncaught_exception: None,
+            microtasks: VecDeque::new(),
         };
         vm.populate_realm_intrinsics();
         vm
@@ -291,6 +295,20 @@ impl Vm {
         Value::Promise(Rc::new(RefCell::new(crate::value::PromiseState::Rejected(
             reason,
         ))))
+    }
+
+    pub(crate) fn queue_microtask<F>(&mut self, job: F)
+    where
+        F: FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError> + 'static,
+    {
+        self.microtasks.push_back(Box::new(job));
+    }
+
+    pub(crate) fn drain_microtasks(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        while let Some(mut job) = self.microtasks.pop_front() {
+            job(self)?;
+        }
+        Ok(())
     }
 
     fn invoke_async_closure(
@@ -629,7 +647,10 @@ impl Vm {
                     // future runtime errors are not masked.
                     self.pending_exception = false;
                 }
-                Ok(StepOutcome::Return(result)) => return Ok(result),
+                Ok(StepOutcome::Return(result)) => {
+                    self.drain_microtasks()?;
+                    return Ok(result);
+                }
                 Err(err) => {
                     if self.pending_exception {
                         self.pending_exception = false;

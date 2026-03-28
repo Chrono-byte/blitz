@@ -16,7 +16,7 @@
 //! # Usage
 //!
 //! ```
-//! use tsblitz::errors::{Error, ParserError};
+//! use blitz::errors::{Error, ParserError};
 //!
 //! fn may_fail() -> Result<(), Error> {
 //!     Err(ParserError::from("Unexpected token"))?

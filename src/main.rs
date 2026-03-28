@@ -37,9 +37,9 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use tsblitz::bytecode;
-use tsblitz::compiler;
-use tsblitz::{
+use blitz::bytecode;
+use blitz::compiler;
+use blitz::{
     module::ModuleLoader, parser::Parser as TsParser, resolver::resolve_specifier, typecheck,
     value::Value, vm::Vm,
 };
@@ -47,10 +47,10 @@ use tsblitz::{
 /// Minimal native hook: print to stdout. The TS soft layer wraps this as console.log.
 fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     // Diagnostic wrapper: emit arg debug then print joined string
-    if tsblitz::trace::enabled() {
+    if blitz::trace::enabled() {
         eprintln!("[diag] host.native_print called nargs={}", args.len());
         for (i, v) in args.iter().enumerate() {
-            tsblitz::trace::value_string(&format!("host.native_print arg[{}]", i), v);
+            blitz::trace::value_string(&format!("host.native_print arg[{}]", i), v);
             eprintln!(
                 "[diag] host.native_print debug arg[{}] type={}",
                 i,
@@ -67,7 +67,7 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
         .join(" ");
 
     // Print synchronously so output is visible before the VM exits.
-    if tsblitz::trace::enabled() {
+    if blitz::trace::enabled() {
         eprintln!(
             "[diag] host.native_print write len={} repr={:?}",
             s.len(),
@@ -88,22 +88,22 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 /// # Errors
 ///
 /// Returns an error string if any stage of compilation fails
-fn run_source(vm: &mut Vm, source: &str) -> Result<Value, tsblitz::errors::Error> {
+fn run_source(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> {
     let session = TsParser::parse_source(source)?;
     let oast_prog = session.program();
     typecheck::check_oxc(oast_prog)?;
     // Use the temporary compile_oxc shim so we can avoid converting to local_ast here.
-    let chunk = compiler::compile_oxc(oast_prog).map_err(tsblitz::errors::Error::from)?;
-    vm.run(chunk).map_err(tsblitz::errors::Error::from)
+    let chunk = compiler::compile_oxc(oast_prog).map_err(blitz::errors::Error::from)?;
+    vm.run(chunk).map_err(blitz::errors::Error::from)
 }
 
 fn run_program(
     vm: &mut Vm,
     program: &oxc_ast::ast::Program<'_>,
-) -> Result<Value, tsblitz::errors::Error> {
+) -> Result<Value, blitz::errors::Error> {
     typecheck::check_oxc(program)?;
-    let chunk = compiler::compile_oxc(program).map_err(tsblitz::errors::Error::from)?;
-    vm.run(chunk).map_err(tsblitz::errors::Error::from)
+    let chunk = compiler::compile_oxc(program).map_err(blitz::errors::Error::from)?;
+    vm.run(chunk).map_err(blitz::errors::Error::from)
 }
 
 // Slot/global type annotations were removed; use the runtime_utils helper to
@@ -129,10 +129,10 @@ struct Cli {
     repl: bool,
 }
 
-fn main() -> Result<(), tsblitz::errors::Error> {
+fn main() -> Result<(), blitz::errors::Error> {
     // Public globals visible to user code (populated by the prelude)
-    let globals: Rc<RefCell<tsblitz::value::ObjectData>> =
-        Rc::new(RefCell::new(tsblitz::value::ObjectData::new()));
+    let globals: Rc<RefCell<blitz::value::ObjectData>> =
+        Rc::new(RefCell::new(blitz::value::ObjectData::new()));
 
     // Provide a `globalThis` object that reflects the VM globals map so soft
     // layer code that writes `globalThis.x = ...` updates the VM globals.
@@ -142,8 +142,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     {
         let mut g = globals.borrow_mut();
         g.properties.insert(
-            tsblitz::value::PropertyKey::String("globalThis".to_string()),
-            tsblitz::value::PropertyDescriptor::data(global_this),
+            blitz::value::PropertyKey::String("globalThis".to_string()),
+            blitz::value::PropertyDescriptor::data(global_this),
         );
     }
 
@@ -151,9 +151,9 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     // them as ordinary globals (e.g. `globalThis.__native_print`). This keeps
     // the runtime simpler and avoids an extra indirection.
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_print".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            native_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+        blitz::value::PropertyKey::String("__native_print".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            native_print(vm, args).map_err(blitz::errors::RuntimeError::from)
         }))),
     );
 
@@ -162,20 +162,20 @@ fn main() -> Result<(), tsblitz::errors::Error> {
         use std::cell::RefCell;
         use std::rc::Rc;
         Ok(Value::Object(Rc::new(RefCell::new(
-            tsblitz::value::ObjectData::new(),
+            blitz::value::ObjectData::new(),
         ))))
     }
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_new_object".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            native_new_object(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+        blitz::value::PropertyKey::String("__native_new_object".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            native_new_object(vm, args).map_err(blitz::errors::RuntimeError::from)
         }))),
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__define_property".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__define_property".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             vm.define_property_builtin(args)
         }))),
     );
@@ -185,30 +185,30 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     // helpers implemented in `Vm` so soft runtime can use authoritative semantics
     // without reimplementing them in TypeScript.
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_toString".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_toString".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let v = args.first().cloned().unwrap_or(Value::Undefined);
             vm.to_string(&v).map(Value::String)
         }))),
     );
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_toNumber".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_toNumber".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let v = args.first().cloned().unwrap_or(Value::Undefined);
             vm.to_number_value(&v).map(Value::Number)
         }))),
     );
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_toBoolean".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_toBoolean".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let v = args.first().cloned().unwrap_or(Value::Undefined);
             Ok(Value::Bool(vm.to_boolean(&v)))
         }))),
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_abstractEquality".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_abstractEquality".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let a = args.first().cloned().unwrap_or(Value::Undefined);
             let b = args.get(1).cloned().unwrap_or(Value::Undefined);
             match vm.abstract_equality(&a, &b) {
@@ -219,8 +219,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_instanceof".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_instanceof".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let value = args.first().cloned().unwrap_or(Value::Undefined);
             let ctor = args.get(1).cloned().unwrap_or(Value::Undefined);
             match vm.instance_of(&value, &ctor) {
@@ -231,8 +231,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_inProperty".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_inProperty".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let prop = args.first().cloned().unwrap_or(Value::Undefined);
             let obj = args.get(1).cloned().unwrap_or(Value::Undefined);
             match vm.in_property(&prop, &obj) {
@@ -243,8 +243,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_typeof".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_typeof".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let v = args.first().cloned().unwrap_or(Value::Undefined);
             Ok(Value::String(vm.typeof_value(&v)))
         }))),
@@ -252,8 +252,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
 
     // Arithmetic and relational native helpers
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_add".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_add".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             // BigInt handling
@@ -263,7 +263,7 @@ fn main() -> Result<(), tsblitz::errors::Error> {
                 if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
                     return Ok(Value::BigInt(*x + *y));
                 } else {
-                    return Err(tsblitz::errors::RuntimeError::from(
+                    return Err(blitz::errors::RuntimeError::from(
                         "Add: cannot mix BigInt and other types",
                     ));
                 }
@@ -283,8 +283,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_subtract".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_subtract".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
@@ -297,8 +297,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_multiply".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_multiply".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
@@ -311,13 +311,13 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_divide".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_divide".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             // BigInt division is not supported
             if matches!(a, Value::BigInt(_)) || matches!(b, Value::BigInt(_)) {
-                return Err(tsblitz::errors::RuntimeError::from(
+                return Err(blitz::errors::RuntimeError::from(
                     "Div: bigint not supported",
                 ));
             }
@@ -328,8 +328,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_remainder".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_remainder".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
@@ -342,14 +342,14 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_exponentiate".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_exponentiate".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
                 // BigInt exponentiation: use integer pow if y >= 0 and fits
                 if *y < 0 {
-                    return Err(tsblitz::errors::RuntimeError::from(
+                    return Err(blitz::errors::RuntimeError::from(
                         "Exponentiation with negative BigInt not supported",
                     ));
                 }
@@ -359,13 +359,13 @@ fn main() -> Result<(), tsblitz::errors::Error> {
                 while exp > 0 {
                     if (exp & 1) == 1 {
                         res = res.checked_mul(base).ok_or_else(|| {
-                            tsblitz::errors::RuntimeError::from("BigInt overflow in exponentiation")
+                            blitz::errors::RuntimeError::from("BigInt overflow in exponentiation")
                         })?;
                     }
                     exp >>= 1;
                     if exp > 0 {
                         base = base.checked_mul(base).ok_or_else(|| {
-                            tsblitz::errors::RuntimeError::from("BigInt overflow in exponentiation")
+                            blitz::errors::RuntimeError::from("BigInt overflow in exponentiation")
                         })?;
                     }
                 }
@@ -379,8 +379,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
 
     // Relational
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_lessThan".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_lessThan".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             let ap = vm.to_primitive(&a, None)?;
@@ -395,8 +395,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_lessThanOrEqual".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_lessThanOrEqual".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             let ap = vm.to_primitive(&a, None)?;
@@ -411,8 +411,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_greaterThan".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_greaterThan".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             let ap = vm.to_primitive(&a, None)?;
@@ -427,8 +427,8 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     );
 
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("__native_greaterThanOrEqual".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+        blitz::value::PropertyKey::String("__native_greaterThanOrEqual".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             let ap = vm.to_primitive(&a, None)?;
@@ -444,20 +444,20 @@ fn main() -> Result<(), tsblitz::errors::Error> {
 
     // Provide a minimal builtin console.log for early bootstrap and REPL use.
     globals.borrow_mut().properties.insert(
-        tsblitz::value::PropertyKey::String("console".to_string()),
-        tsblitz::value::PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new({
-            let mut data = tsblitz::value::ObjectData::new();
+        blitz::value::PropertyKey::String("console".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new({
+            let mut data = blitz::value::ObjectData::new();
             data.properties.insert(
-                tsblitz::value::PropertyKey::String("log".to_string()),
-                tsblitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-                    native_print(vm, args).map_err(tsblitz::errors::RuntimeError::from)
+                blitz::value::PropertyKey::String("log".to_string()),
+                blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+                    native_print(vm, args).map_err(blitz::errors::RuntimeError::from)
                 }))),
             );
             data
         })))),
     );
 
-    tsblitz::runtime_utils::install_minimal_kernel_constructors(&globals);
+    blitz::runtime_utils::install_minimal_kernel_constructors(&globals);
 
     // Parse CLI early so clap can handle --help/--version before doing work.
     let cli = Cli::parse();
@@ -481,14 +481,14 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     )?;
     loader
         .instantiate_all()
-        .map_err(tsblitz::errors::Error::from)?;
+        .map_err(blitz::errors::Error::from)?;
     // One-time diagnostic: compile the prelude module and print chunk info so
     // we can map bytecode ip locations back to source-level functions during
     // debugging. Compilation here is best-effort and only performed when
     // tracing is enabled to avoid extra work in normal runs.
-    if tsblitz::trace::enabled() {
+    if blitz::trace::enabled() {
         // Prepare a one-off chunk compilation and disassembly for the prelude.
-        if let Err(e) = (|| -> Result<(), tsblitz::errors::Error> {
+        if let Err(e) = (|| -> Result<(), blitz::errors::Error> {
             // The loader.map keys are canonicalized; ensure we look up the same
             // canonical path when fetching the prelude record.
             let prelude_key =
@@ -496,7 +496,7 @@ fn main() -> Result<(), tsblitz::errors::Error> {
             let rec_rc = loader
                 .map
                 .get(&prelude_key)
-                .ok_or_else(|| tsblitz::errors::BundlerError::from("Prelude module not found"))?
+                .ok_or_else(|| blitz::errors::BundlerError::from("Prelude module not found"))?
                 .clone();
 
             // Hold the borrow across compilation so parser session data remains
@@ -504,9 +504,9 @@ fn main() -> Result<(), tsblitz::errors::Error> {
             let chunk = {
                 let rec_b = rec_rc.borrow();
                 let program = rec_b.session.program();
-                let chunk = compiler::compile_oxc(program).map_err(tsblitz::errors::Error::from)?;
+                let chunk = compiler::compile_oxc(program).map_err(blitz::errors::Error::from)?;
                 // Use the runtime_utils helper to clear slot types for the prelude chunk.
-                tsblitz::runtime_utils::clear_slot_types_in_chunk(chunk)
+                blitz::runtime_utils::clear_slot_types_in_chunk(chunk)
             };
 
             eprintln!(
@@ -681,10 +681,10 @@ fn main() -> Result<(), tsblitz::errors::Error> {
     // Evaluate prelude via ModuleLoader into the repl_vm
     if let Err(e) = loader
         .evaluate_entry(&prelude_resolved, &mut repl_vm)
-        .map_err(tsblitz::errors::Error::from)
+        .map_err(blitz::errors::Error::from)
     {
         eprintln!("Runtime error in soft layer: {}", e);
-        return Err(tsblitz::errors::RuntimeError::from(format!(
+        return Err(blitz::errors::RuntimeError::from(format!(
             "Runtime error in soft layer: {}",
             e
         ))
@@ -701,17 +701,17 @@ fn main() -> Result<(), tsblitz::errors::Error> {
         )?;
         loader
             .instantiate_all()
-            .map_err(tsblitz::errors::Error::from)?;
+            .map_err(blitz::errors::Error::from)?;
         loader
             .evaluate_entry(&path, &mut repl_vm)
-            .map_err(tsblitz::errors::Error::from)?;
+            .map_err(blitz::errors::Error::from)?;
         return Ok(());
     }
 
     // Start REPL (explicit flag or no file provided)
     println!("Blitz — TypeScript VM (Rust runtime). Type exit to quit.");
     let mut rl = rustyline::Editor::<(), rustyline::history::DefaultHistory>::new()
-        .map_err(|e| tsblitz::errors::RuntimeError::from(format!("Readline init error: {}", e)))?;
+        .map_err(|e| blitz::errors::RuntimeError::from(format!("Readline init error: {}", e)))?;
     let history_path = env::temp_dir().join("blitz_repl_history");
     let _ = rl.load_history(&history_path);
     loop {

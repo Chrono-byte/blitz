@@ -39,13 +39,13 @@
 //! # Usage
 //!
 //! ```no_run
-//! use tsblitz::Vm;
+//! use blitz::Vm;
 //!
 //! // Example: construct a VM with an empty globals map. Compilation APIs are
 //! // available via the `compiler`/`parser` modules; this snippet shows VM usage.
 //! use std::rc::Rc;
 //! use std::cell::RefCell;
-//! use tsblitz::value::ObjectData;
+//! use blitz::value::ObjectData;
 //! let globals = Rc::new(RefCell::new(ObjectData::new()));
 //! let mut vm = Vm::new(globals);
 //! // vm.run(&bytecode)?; // run compiled bytecode when available
