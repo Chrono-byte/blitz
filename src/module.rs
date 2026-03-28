@@ -18,7 +18,6 @@ enum ModuleState {
     Instantiated,
     Evaluating,
     Evaluated,
-    Errored,
 }
 
 /// A ModuleRecord represents a source text module parsed from disk and
@@ -29,7 +28,7 @@ pub struct ModuleRecord {
     /// Parsed module session containing the AST and parser artifacts.
     pub session: ParserSession,
     /// Current loader lifecycle state for this module.
-    pub state: ModuleState,
+    state: ModuleState,
     /// Assigned numeric module index used by the VM module table. Set during instantiation.
     pub module_index: Option<usize>,
     /// Export slots: mapping export name -> shared slot (Rc<RefCell<Value>>)
@@ -438,6 +437,7 @@ impl ModuleLoader {
         &mut self,
         entry: &Path,
         vm: &mut Vm,
+        enable_typecheck: bool,
     ) -> Result<(), crate::errors::RuntimeError> {
         // Populate vm.module_table with the export slot maps for each
         // instantiated module. ModuleRecord.module_index must have been set
@@ -461,9 +461,11 @@ impl ModuleLoader {
                 if matches!(rec.state, ModuleState::Instantiated) {
                     rec.state = ModuleState::Evaluating;
                     let program = rec.session.program();
-                    crate::typecheck::check_oxc(program).map_err(|e| {
-                        crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
-                    })?;
+                    if enable_typecheck {
+                        crate::typecheck::check_oxc(program).map_err(|e| {
+                            crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
+                        })?;
+                    }
                     // Build ModuleContext from the instantiated record so the compiler
                     // can emit module ops for imports/exports.
                     let module_idx = rec.module_index.expect("module_index should be set");
@@ -472,10 +474,14 @@ impl ModuleLoader {
                         imports: rec.import_sources.clone(),
                         exports: rec.exports.keys().cloned().collect(),
                     };
-                    let chunk = crate::compiler::compile_oxc_with_ctx(program, Some(&ctx))
-                        .map_err(|e| {
-                            crate::errors::RuntimeError::from(format!("Compile failed: {}", e))
-                        })?;
+                    let chunk = crate::compiler::compile_oxc_with_ctx(
+                        program,
+                        Some(&ctx),
+                        rec.session.source(),
+                    )
+                    .map_err(|e| {
+                        crate::errors::RuntimeError::from(format!("Compile failed: {}", e))
+                    })?;
                     let chunk = crate::runtime_utils::clear_slot_types_in_chunk(chunk);
                     vm.run(chunk)?;
                     rec.state = ModuleState::Evaluated;
@@ -487,7 +493,11 @@ impl ModuleLoader {
     }
 
     /// Evaluate module graph in depth-first, post-order. For now synchronous.
-    pub fn evaluate_all(&mut self, vm: &mut Vm) -> Result<(), crate::errors::RuntimeError> {
+    pub fn evaluate_all(
+        &mut self,
+        vm: &mut Vm,
+        enable_typecheck: bool,
+    ) -> Result<(), crate::errors::RuntimeError> {
         // For simplicity evaluate modules in insertion order after instantiation.
         for rec_rc in self.map.values() {
             let mut rec = rec_rc.borrow_mut();
@@ -495,12 +505,16 @@ impl ModuleLoader {
                 rec.state = ModuleState::Evaluating;
                 // Compile program
                 let program = rec.session.program();
-                crate::typecheck::check_oxc(program).map_err(|e| {
-                    crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
-                })?;
-                let chunk = crate::compiler::compile_oxc_with_ctx(program, None).map_err(|e| {
-                    crate::errors::RuntimeError::from(format!("Compile failed: {}", e))
-                })?;
+                if enable_typecheck {
+                    crate::typecheck::check_oxc(program).map_err(|e| {
+                        crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
+                    })?;
+                }
+                let chunk =
+                    crate::compiler::compile_oxc_with_ctx(program, None, rec.session.source())
+                        .map_err(|e| {
+                            crate::errors::RuntimeError::from(format!("Compile failed: {}", e))
+                        })?;
                 // Clear slot types to allow dynamic prelude patterns
                 let chunk = crate::runtime_utils::clear_slot_types_in_chunk(chunk);
                 // Run chunk

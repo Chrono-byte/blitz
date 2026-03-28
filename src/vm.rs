@@ -46,9 +46,9 @@
 use crate::bytecode::{Chunk, FunctionProto, Op};
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
-use crate::typecheck::BuiltinType;
+use crate::runtime_utils::{fulfill_pending_promise, reject_pending_promise};
 use crate::typecheck::Type;
-use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
@@ -73,34 +73,9 @@ const FRAMES_INITIAL_CAPACITY: usize = 64;
 /// Maximum prototype chain traversal depth before we assume a cycle.
 const MAX_PROTOTYPE_DEPTH: usize = 128;
 
-/// Default IC slot count per chunk (grows on demand).
-const IC_SLOTS_DEFAULT: usize = 256;
-
 /// Maximum gap we materialize into the dense backing store before treating an
 /// array write as sparse and storing it on the property bag instead.
 const MAX_DENSE_ARRAY_GROWTH: usize = 1024;
-
-// ---------------------------------------------------------------------------
-// Inline-cache entry
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-struct IcEntry {
-    /// Raw `Rc` pointer used as an object identity token.
-    obj_ptr: usize,
-    /// Property key cached at this site.
-    key: PropertyKey,
-    /// Object generation at the time the entry was cached. If the object
-    /// has been mutated since, the generation will have advanced and this
-    /// entry is stale.
-    generation: u64,
-    /// Cached property value.
-    value: Value,
-    /// Whether the property was an accessor when cached. Accessor results
-    /// are never served from cache because the getter may return different
-    /// values on each invocation.
-    is_accessor: bool,
-}
 
 // Call frame
 struct Frame {
@@ -216,8 +191,6 @@ pub struct Vm {
     root_chunk: Option<Rc<Chunk>>,
     /// Slot-type annotations for the current function (formerly used by TS checks).
     current_slot_types: Option<Vec<Option<Type>>>,
-    /// Per-chunk inline-cache storage, keyed by chunk `Rc` pointer address.
-    ic_caches: HashMap<usize, Vec<Option<IcEntry>>>,
     /// Per-object mutation generation counter, keyed by `Rc` pointer address.
     /// Incremented on every `SetProperty` so that stale IC entries are
     /// detected and evicted on the next lookup.
@@ -260,7 +233,7 @@ impl Vm {
         let realm = Realm::with_globals(Rc::clone(&globals));
         let mut vm = Self {
             realm,
-            chunk: Rc::new(Chunk::new()),
+            chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
             ip: 0,
             stack: Vec::with_capacity(STACK_INITIAL_CAPACITY),
             locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
@@ -270,7 +243,6 @@ impl Vm {
             frames: Vec::with_capacity(FRAMES_INITIAL_CAPACITY),
             root_chunk: None,
             current_slot_types: None,
-            ic_caches: HashMap::new(),
             obj_generations: HashMap::new(),
             bg_runtime: get_global_bg_runtime(),
             handlers: Vec::new(),
@@ -284,18 +256,6 @@ impl Vm {
         };
         vm.populate_realm_intrinsics();
         vm
-    }
-
-    fn promise_fulfilled(&self, value: Value) -> Value {
-        Value::Promise(Rc::new(RefCell::new(
-            crate::value::PromiseState::Fulfilled(value),
-        )))
-    }
-
-    fn promise_rejected(&self, reason: Value) -> Value {
-        Value::Promise(Rc::new(RefCell::new(crate::value::PromiseState::Rejected(
-            reason,
-        ))))
     }
 
     pub(crate) fn queue_microtask<F>(&mut self, job: F)
@@ -312,6 +272,18 @@ impl Vm {
         Ok(())
     }
 
+    fn run_microtasks_if_needed(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        if self.microtasks.is_empty() {
+            return Ok(());
+        }
+        self.drain_microtasks()
+    }
+
+    /// Drain any pending microtasks, ensuring async bootstrap work completes.
+    pub fn flush_microtasks(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        self.run_microtasks_if_needed()
+    }
+
     fn invoke_async_closure(
         &mut self,
         proto: &Rc<FunctionProto>,
@@ -319,42 +291,63 @@ impl Vm {
         call_args: Vec<Value>,
         this_arg: Value,
     ) -> Result<Value, crate::errors::RuntimeError> {
-        let stack_base = self.stack.len();
-        let saved_stack = self.stack[..stack_base].to_vec();
-        let caller_chunk = Rc::clone(&self.chunk);
-        let caller_ip = self.ip;
-        let caller_locals = self.locals.clone();
-        let caller_this = self.this_value.clone();
-        let caller_env = self.current_closure_env.clone();
-        let caller_slot_types = self.current_slot_types.clone();
-        let caller_frame_len = self.frames.len();
-        let caller_handler_len = self.handlers.len();
+        let promise = Rc::new(RefCell::new(PromiseState::Pending {
+            on_fulfilled: Vec::new(),
+            on_rejected: Vec::new(),
+        }));
 
-        self.last_uncaught_exception = None;
-        self.push_call_frame(proto, env, call_args, this_arg)?;
-        let promise = match self.run_until_return(stack_base) {
-            Ok(result) => self.promise_fulfilled(result),
-            Err(_err) => {
-                let thrown = self
-                    .last_uncaught_exception
-                    .take()
-                    .unwrap_or(Value::String("async rejection".to_string()));
-                self.promise_rejected(thrown)
+        let proto = Rc::clone(proto);
+        let env = Rc::clone(env);
+        let promise_for_job = Rc::clone(&promise);
+        let mut pending_call_args = Some(call_args);
+        let mut pending_this_arg = Some(this_arg);
+        self.queue_microtask(move |vm| {
+            let stack_base = vm.stack.len();
+            let saved_stack = vm.stack[..stack_base].to_vec();
+            let caller_chunk = Rc::clone(&vm.chunk);
+            let caller_ip = vm.ip;
+            let caller_locals = vm.locals.clone();
+            let caller_this = vm.this_value.clone();
+            let caller_env = vm.current_closure_env.clone();
+            let caller_slot_types = vm.current_slot_types.clone();
+            let caller_frame_len = vm.frames.len();
+            let caller_handler_len = vm.handlers.len();
+
+            vm.last_uncaught_exception = None;
+            let exec_result = (|| {
+                let call_args = pending_call_args.take().unwrap();
+                let this_arg = pending_this_arg.take().unwrap();
+                vm.push_call_frame(&proto, &env, call_args, this_arg)?;
+                vm.run_until_return(stack_base)
+            })();
+
+            vm.chunk = caller_chunk;
+            vm.ip = caller_ip;
+            vm.locals = caller_locals;
+            vm.this_value = caller_this;
+            vm.current_closure_env = caller_env;
+            vm.current_slot_types = caller_slot_types;
+            vm.stack = saved_stack;
+            vm.frames.truncate(caller_frame_len);
+            vm.handlers.truncate(caller_handler_len);
+
+            match exec_result {
+                Ok(result) => {
+                    fulfill_pending_promise(vm, &promise_for_job, result);
+                }
+                Err(err) => {
+                    let reason = vm
+                        .last_uncaught_exception
+                        .take()
+                        .unwrap_or(Value::String(format!("{}", err)));
+                    reject_pending_promise(vm, &promise_for_job, reason);
+                }
             }
-        };
 
-        // Restore caller state.
-        self.chunk = caller_chunk;
-        self.ip = caller_ip;
-        self.locals = caller_locals;
-        self.this_value = caller_this;
-        self.current_closure_env = caller_env;
-        self.current_slot_types = caller_slot_types;
-        self.stack = saved_stack;
-        self.frames.truncate(caller_frame_len);
-        self.handlers.truncate(caller_handler_len);
+            Ok(())
+        });
 
-        Ok(promise)
+        Ok(Value::Promise(promise))
     }
 
     /// Create a new VM and ensure the minimal kernel constructors and
@@ -565,8 +558,7 @@ impl Vm {
             .unwrap_or(Value::Undefined);
         self.current_closure_env = None;
         self.ip = 0;
-        self.chunk = Rc::new(Chunk::new());
-        self.ic_caches.clear();
+        self.chunk = Rc::new(Chunk::new(Rc::new(String::new())));
         self.obj_generations.clear();
         let mut g = self.globals.borrow_mut();
         g.properties
@@ -614,10 +606,6 @@ impl Vm {
 
     /// Run a chunk of bytecode to completion.
     pub fn run(&mut self, chunk: Chunk) -> Result<Value, crate::errors::RuntimeError> {
-        // IC entries are keyed by chunk identity. Clear per top-level run to
-        // avoid stale slot collisions when allocator pointer reuse makes a new
-        // chunk appear to match a prior cache key.
-        self.ic_caches.clear();
         let chunk_rc = Rc::new(chunk);
         self.root_chunk = Some(Rc::clone(&chunk_rc));
         self.chunk = chunk_rc;
@@ -647,9 +635,10 @@ impl Vm {
                     // If execution continues normally, clear it so unrelated
                     // future runtime errors are not masked.
                     self.pending_exception = false;
+                    self.run_microtasks_if_needed()?;
                 }
                 Ok(StepOutcome::Return(result)) => {
-                    self.drain_microtasks()?;
+                    self.run_microtasks_if_needed()?;
                     return Ok(result);
                 }
                 Err(err) => {
@@ -847,7 +836,7 @@ impl Vm {
         let session = crate::parser::Parser::parse_source(&wrapped)
             .map_err(|e| crate::errors::RuntimeError::from(format!("parse: {}", e)))?;
         let prog = session.program();
-        let chunk = crate::compiler::compile_oxc(prog)
+        let chunk = crate::compiler::compile_oxc(prog, &wrapped)
             .map_err(|e| crate::errors::RuntimeError::from(format!("compile: {}", e)))?;
         let mut child = Vm::new(Rc::clone(&self.globals));
         let _ = child.run(chunk)?;
@@ -1135,9 +1124,11 @@ impl Vm {
             match self.step(Some(target_frame_depth)) {
                 Ok(StepOutcome::Continue) => {
                     self.pending_exception = false;
+                    self.run_microtasks_if_needed()?;
                 }
                 Ok(StepOutcome::Return(result)) => {
                     self.stack.truncate(stack_base);
+                    self.run_microtasks_if_needed()?;
                     return Ok(result);
                 }
                 Err(err) => {
@@ -1553,10 +1544,11 @@ impl Vm {
                 // Only stop if we've returned PAST the target frame depth
                 // (i.e., we've returned from the function we were waiting for)
                 if let Some(target_depth) = stop_at_frame_depth
-                    && self.frames.len() < target_depth {
-                        let result = self.pop().unwrap_or(Value::Undefined);
-                        return Ok(StepOutcome::Return(result));
-                    }
+                    && self.frames.len() < target_depth
+                {
+                    let result = self.pop().unwrap_or(Value::Undefined);
+                    return Ok(StepOutcome::Return(result));
+                }
             }
             Op::Jump => {
                 let offset = self.read_short_signed()?;
@@ -1704,17 +1696,20 @@ impl Vm {
                 let a = self.pop()?;
                 self.stack.push(Value::Bool(!values_equal(&a, &b)));
             }
+            Op::Yield | Op::YieldStar => {
+                return Err(self.throw_type_error("Generator support not implemented"));
+            }
             Op::AwaitPromise => {
                 let awaited = self.pop()?;
                 match awaited {
                     Value::Promise(state) => match &*state.borrow() {
-                        crate::value::PromiseState::Fulfilled(v) => {
+                        PromiseState::Fulfilled(v) => {
                             self.stack.push(v.clone());
                         }
-                        crate::value::PromiseState::Rejected(reason) => {
+                        PromiseState::Rejected(reason) => {
                             self.throw_value(reason.clone())?;
                         }
-                        crate::value::PromiseState::Pending { .. } => {
+                        PromiseState::Pending { .. } => {
                             self.stack.push(Value::Undefined);
                         }
                     },
@@ -1822,6 +1817,39 @@ impl Vm {
                 let prim = self.to_primitive(v, Some("string"))?;
                 self.to_string(&prim)
             }
+        }
+    }
+
+    /// Return the stored source or native template for a callable's `toString`.
+    pub fn function_to_string(
+        &mut self,
+        value: &Value,
+    ) -> Result<String, crate::errors::RuntimeError> {
+        if !Self::is_callable_value(value) {
+            return Err(self.throw_type_error("Function.prototype.toString called on non-callable"));
+        }
+        if let Value::Closure { proto, .. } = value
+            && let Some(src) = proto.source_text()
+        {
+            return Ok(src);
+        }
+        Ok(self.format_native_function_source(value))
+    }
+
+    fn native_function_name(&mut self, value: &Value) -> Option<String> {
+        match self.get_property_host(value, &PropertyKey::String("name".to_string())) {
+            Ok(Value::String(name)) => Some(name),
+            Ok(_) => None,
+            Err(_) => None,
+        }
+    }
+
+    fn format_native_function_source(&mut self, value: &Value) -> String {
+        let name = self.native_function_name(value).unwrap_or_default();
+        if name.is_empty() {
+            "function () { [native code] }".to_string()
+        } else {
+            format!("function {}() {{ [native code] }}", name)
         }
     }
 
@@ -2994,18 +3022,6 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     #[inline(always)]
-    fn binary_num<F>(&mut self, f: F) -> Result<(), crate::errors::RuntimeError>
-    where
-        F: FnOnce(f64, f64) -> f64,
-    {
-        let b = self.pop()?;
-        let a = self.pop()?;
-        let (x, y) = (to_number(&a)?, to_number(&b)?);
-        self.stack.push(Value::Number(f(x, y)));
-        Ok(())
-    }
-
-    #[inline(always)]
     fn binary_num_bigint<F, G>(&mut self, f: F, g: G) -> Result<(), crate::errors::RuntimeError>
     where
         F: FnOnce(f64, f64) -> f64,
@@ -3327,59 +3343,6 @@ impl Vm {
     /// Convert a runtime value with `ToUint32` semantics.
     pub fn to_uint32_value(&self, v: &Value) -> Result<u32, crate::errors::RuntimeError> {
         to_uint32(v)
-    }
-}
-
-fn value_to_type(v: &Value) -> Type {
-    match v {
-        Value::Undefined => Type::Builtin(BuiltinType::Undefined),
-        Value::Number(_) => Type::Number,
-        Value::String(_) => Type::String,
-        Value::Bool(_) => Type::Boolean,
-        Value::BigInt(_) => Type::Builtin(BuiltinType::BigInt),
-        Value::Null => Type::Null,
-        Value::Object(_) => Type::Object(HashMap::new()),
-        Value::Array(_, _) => Type::Array(Box::new(Type::Void)),
-        Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _) => {
-            Type::Function(vec![], Box::new(Type::Void))
-        }
-        Value::Symbol(_, _) => Type::Builtin(BuiltinType::Symbol),
-        Value::Promise(_) => Type::Object(HashMap::new()),
-    }
-}
-
-/// Check if `actual` is assignable to `expected` at runtime.
-///
-/// For `Type::Union` we now check each variant instead of blindly accepting.
-fn runtime_assignable(expected: &Type, actual: &Value) -> bool {
-    match expected {
-        Type::Number => matches!(actual, Value::Number(_)),
-        Type::String => matches!(actual, Value::String(_)),
-        Type::Boolean => matches!(actual, Value::Bool(_)),
-        Type::Null => matches!(actual, Value::Null),
-        Type::Void => true,
-        Type::Any => true,
-        Type::Unknown => true,
-        Type::Array(_) => matches!(actual, Value::Array(_, _)),
-        Type::Object(_) => matches!(actual, Value::Object(_)),
-        Type::Function(_, _) => matches!(
-            actual,
-            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
-        ),
-        Type::Union(variants) => variants.iter().any(|t| runtime_assignable(t, actual)),
-        Type::Builtin(_) | Type::TypeReference { .. } => true,
-    }
-}
-
-fn check_assign(expected: &Type, actual: &Value) -> Result<(), crate::errors::RuntimeError> {
-    if runtime_assignable(expected, actual) {
-        Ok(())
-    } else {
-        Err(crate::errors::RuntimeError::from(format!(
-            "Runtime type error: expected {}, got {}",
-            crate::typecheck::type_to_string(expected),
-            crate::typecheck::type_to_string(&value_to_type(actual))
-        )))
     }
 }
 
@@ -3939,6 +3902,7 @@ mod tests {
             constants: vec![],
             functions: vec![],
             lines: vec![1],
+            source_text: Rc::new(String::new()),
         });
         vm.ip = 0;
         vm.stack.push(obj.clone());
@@ -4030,7 +3994,7 @@ mod tests {
     fn top_level_assignment_updates_global_binding() {
         let session = Parser::parse_source("var x; x = 5;").expect("parse ok");
         let program = session.program();
-        let chunk = compiler::compile(program).expect("compile ok");
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
         let globals = test_globals();
         let mut vm = Vm::new(Rc::clone(&globals));
@@ -4051,7 +4015,7 @@ mod tests {
         "#;
         let session = Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        let chunk = compiler::compile(program).expect("compile ok");
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
         let globals = test_globals();
         runtime_utils::install_minimal_kernel_constructors(&globals);
@@ -4072,7 +4036,7 @@ mod tests {
     fn void_operator_evaluates_to_undefined() {
         let session = Parser::parse_source("var x = void 0;").expect("parse ok");
         let program = session.program();
-        let chunk = compiler::compile(program).expect("compile ok");
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
         let globals = test_globals();
         let mut vm = Vm::new(Rc::clone(&globals));
@@ -4086,7 +4050,7 @@ mod tests {
     fn logical_and_short_circuits_and_preserves_left_operand() {
         let session = Parser::parse_source("var x = 0 && bump();").expect("parse ok");
         let program = session.program();
-        let chunk = compiler::compile(program).expect("compile ok");
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
         let calls = Rc::new(RefCell::new(0usize));
         let globals = test_globals();
@@ -4113,7 +4077,7 @@ mod tests {
     fn logical_or_short_circuits_and_preserves_left_operand() {
         let session = Parser::parse_source("var x = 1 || bump();").expect("parse ok");
         let program = session.program();
-        let chunk = compiler::compile(program).expect("compile ok");
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
         let calls = Rc::new(RefCell::new(0usize));
         let globals = test_globals();

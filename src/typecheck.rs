@@ -564,10 +564,34 @@ impl TypeContext {
     }
 }
 
-fn convert_type_ann(_ty: &oast::TSTypeAnnotation) -> Result<Type, TypeCheckerError> {
-    // For now, be permissive: map many annotations to simple Type variants.
-    // A full mapping is out of scope for this migration patch.
-    Ok(Type::Any)
+fn convert_type_ann(_ty: &oast::TSTypeAnnotation<'_>) -> Result<Type, TypeCheckerError> {
+    convert_ts_type(&_ty.type_annotation)
+}
+
+fn convert_ts_type(ty: &oast::TSType<'_>) -> Result<Type, TypeCheckerError> {
+    use oast::TSType::*;
+
+    match ty {
+        TSNumberKeyword(_) => Ok(Type::Number),
+        TSStringKeyword(_) => Ok(Type::String),
+        TSBooleanKeyword(_) => Ok(Type::Boolean),
+        TSNullKeyword(_) => Ok(Type::Null),
+        TSUndefinedKeyword(_) => Ok(Type::Null),
+        TSVoidKeyword(_) => Ok(Type::Void),
+        TSAnyKeyword(_) => Ok(Type::Any),
+        TSUnknownKeyword(_) => Ok(Type::Unknown),
+        TSObjectKeyword(_) => Ok(Type::Object(HashMap::new())),
+        TSArrayType(t) => Ok(Type::Array(Box::new(convert_ts_type(&t.element_type)?))),
+        TSParenthesizedType(t) => convert_ts_type(&t.type_annotation),
+        TSUnionType(u) => {
+            let mut variants = Vec::new();
+            for member in &u.types {
+                variants.push(convert_ts_type(member)?);
+            }
+            Ok(Type::Union(variants))
+        }
+        _ => Ok(Type::Any),
+    }
 }
 
 fn assignable(expected: &Type, actual: &Type) -> bool {

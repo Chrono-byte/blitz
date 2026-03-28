@@ -48,8 +48,12 @@ const LINE: u32 = 1;
 ///
 /// Returns an error string if compilation fails.
 // Public API: compile an oxc AST Program directly.
-pub fn compile(program: &oast::Program<'_>) -> Result<Chunk, crate::errors::CompilerError> {
-    let mut c = Compiler::new();
+pub fn compile(
+    program: &oast::Program<'_>,
+    source: &str,
+) -> Result<Chunk, crate::errors::CompilerError> {
+    let source_text = Rc::new(source.to_string());
+    let mut c = Compiler::new(Rc::clone(&source_text));
     c.compile_oxc(program, None)
 }
 
@@ -58,8 +62,12 @@ pub fn compile(program: &oast::Program<'_>) -> Result<Chunk, crate::errors::Comp
 /// # Errors
 ///
 /// Returns an error if compilation fails.
-pub fn compile_oxc(program: &oast::Program<'_>) -> Result<Chunk, crate::errors::CompilerError> {
-    let mut c = Compiler::new();
+pub fn compile_oxc(
+    program: &oast::Program<'_>,
+    source: &str,
+) -> Result<Chunk, crate::errors::CompilerError> {
+    let source_text = Rc::new(source.to_string());
+    let mut c = Compiler::new(Rc::clone(&source_text));
     c.compile_oxc(program, None)
 }
 
@@ -71,8 +79,10 @@ pub fn compile_oxc(program: &oast::Program<'_>) -> Result<Chunk, crate::errors::
 pub fn compile_oxc_with_ctx(
     program: &oast::Program<'_>,
     ctx: Option<&ModuleContext>,
+    source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
-    let mut c = Compiler::new();
+    let source_text = Rc::new(source.to_string());
+    let mut c = Compiler::new(Rc::clone(&source_text));
     c.compile_oxc(program, ctx)
 }
 
@@ -83,6 +93,8 @@ pub fn compile_oxc_with_ctx(
 pub struct Compiler {
     /// Current chunk being compiled
     chunk: Chunk,
+    /// Original source text for this compilation unit
+    source_text: Rc<String>,
     /// Local variable names
     locals: Vec<String>,
     /// Type annotations for local variables
@@ -136,9 +148,10 @@ struct Scope {
 
 impl Compiler {
     /// Creates a new compiler instance
-    pub fn new() -> Self {
+    pub fn new(source_text: Rc<String>) -> Self {
         Self {
-            chunk: Chunk::new(),
+            chunk: Chunk::new(Rc::clone(&source_text)),
+            source_text,
             locals: Vec::new(),
             local_types: Vec::new(),
             local_mirror_globals: Vec::new(),
@@ -1665,6 +1678,18 @@ impl Compiler {
                     }
                 }
             }
+            OExpr::YieldExpression(y) => {
+                if let Some(arg) = &y.argument {
+                    self.compile_expr_oast(arg)?;
+                } else {
+                    self.emit_constant(Value::Undefined, LINE);
+                }
+                if y.delegate {
+                    self.emit(Op::YieldStar, LINE);
+                } else {
+                    self.emit(Op::Yield, LINE);
+                }
+            }
             OExpr::BinaryExpression(b) => {
                 if matches!(
                     b.operator,
@@ -2018,7 +2043,8 @@ impl Compiler {
     ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
         let _env_len = self.locals.len();
         let mut inner = Compiler {
-            chunk: Chunk::new(),
+            chunk: Chunk::new(Rc::clone(&self.source_text)),
+            source_text: Rc::clone(&self.source_text),
             locals: Vec::new(),
             local_types: Vec::new(),
             local_mirror_globals: Vec::new(),
@@ -2091,6 +2117,7 @@ impl Compiler {
         Ok((
             FunctionProto {
                 name: name.to_string(),
+                span: func.span,
                 arity: func.params.items.len() + if has_rest { 1 } else { 0 },
                 chunk: Rc::new(chunk),
                 slot_types,
@@ -2103,6 +2130,7 @@ impl Compiler {
                 is_strict,
                 is_constructor,
                 is_async: func.r#async,
+                is_generator: func.generator,
             },
             _env_len,
         ))
@@ -2116,7 +2144,8 @@ impl Compiler {
     ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
         let _env_len = self.locals.len();
         let mut inner = Compiler {
-            chunk: Chunk::new(),
+            chunk: Chunk::new(Rc::clone(&self.source_text)),
+            source_text: Rc::clone(&self.source_text),
             locals: Vec::new(),
             local_types: Vec::new(),
             local_mirror_globals: Vec::new(),
@@ -2196,6 +2225,7 @@ impl Compiler {
         Ok((
             FunctionProto {
                 name: name.to_string(),
+                span: func.span,
                 arity: func.params.items.len() + if has_rest { 1 } else { 0 },
                 chunk: Rc::new(chunk),
                 slot_types,
@@ -2210,6 +2240,7 @@ impl Compiler {
                 is_strict,
                 is_constructor: false,
                 is_async: false,
+                is_generator: false,
             },
             _env_len,
         ))
@@ -2220,7 +2251,7 @@ impl Compiler {
 
 impl Default for Compiler {
     fn default() -> Self {
-        Self::new()
+        Self::new(Rc::new(String::new()))
     }
 }
 
@@ -2242,7 +2273,7 @@ mod tests {
         let src = "f(); function f() { return 42; }";
         let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        let chunk = compile(program).expect("compile ok");
+        let chunk = compile(program, session.source()).expect("compile ok");
 
         // If a constant "f" exists, ensure it is not referenced via GetGlobal/SetGlobal.
         let mut f_const_idx: Option<usize> = None;
@@ -2288,7 +2319,7 @@ mod tests {
         let src = "for (var i = 0; i < 3; i = i + 1) { console.log(i); }";
         let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        let chunk = compile(program).expect("compile ok");
+        let chunk = compile(program, session.source()).expect("compile ok");
 
         // Ensure we emitted a JumpIfFalse (test) and at least one Jump (back/jump-over)
         let mut saw_jump_if_false = false;
@@ -2335,7 +2366,7 @@ mod tests {
         let src = "for (var i = 0; i < 3; i = i + 1) { if (i == 1) { continue; } console.log(i); }";
         let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        let chunk = compile(program).expect("compile ok");
+        let chunk = compile(program, session.source()).expect("compile ok");
 
         // Expect multiple Jump opcodes: one for the test exit, one for the back-jump,
         // and at least one emitted for 'continue' which should be patched to jump to update.
@@ -2383,7 +2414,7 @@ mod tests {
         let src = "a.x; a.y; a.x;";
         let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        let chunk = compile(program).expect("compile ok");
+        let chunk = compile(program, session.source()).expect("compile ok");
 
         let mut slots = Vec::new();
         let mut i = 0usize;
@@ -2422,7 +2453,7 @@ mod tests {
         let src = "for (var i = 0; i < 100; i = i + 1) {}";
         let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        let chunk = compile(program).expect("compile ok");
+        let chunk = compile(program, session.source()).expect("compile ok");
 
         let saw_lt = chunk
             .code
@@ -2441,7 +2472,7 @@ mod tests {
         let src = "for (var i = 0; i < 3; i = i + 1) {}";
         let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        let chunk = compile(program).expect("compile ok");
+        let chunk = compile(program, session.source()).expect("compile ok");
 
         let mut i = 0usize;
         let mut loop_start = None;
@@ -2489,7 +2520,7 @@ mod tests {
         let src = "new Array(1, 2, 3);";
         let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        let chunk = compile(program).expect("compile ok");
+        let chunk = compile(program, session.source()).expect("compile ok");
 
         let saw_call = chunk
             .code
@@ -2505,7 +2536,7 @@ mod tests {
         let src = "for (var i = 0; i < 3; i++) {}";
         let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        let chunk = compile(program).expect("compile ok");
+        let chunk = compile(program, session.source()).expect("compile ok");
 
         let saw_add = chunk
             .code
@@ -2532,7 +2563,7 @@ mod tests {
             Err(e) => panic!("parse_source failed: {:?}", e),
         };
         let program = session.program();
-        let chunk = match compile(program) {
+        let chunk = match compile(program, session.source()) {
             Ok(c) => c,
             // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
             #[allow(clippy::panic)]
@@ -2554,7 +2585,7 @@ mod tests {
         let session = crate::parser::Parser::parse_source(src)
             .unwrap_or_else(|e| panic!("parse_source failed: {:?}", e));
         let program = session.program();
-        let chunk = compile(program).expect("compile ok");
+        let chunk = compile(program, session.source()).expect("compile ok");
 
         let saw_pop = chunk
             .code
@@ -2579,7 +2610,8 @@ mod tests {
             exports: HashSet::new(),
         };
 
-        let err = compile_oxc_with_ctx(program, Some(&ctx)).expect_err("compile should fail");
+        let err = compile_oxc_with_ctx(program, Some(&ctx), session.source())
+            .expect_err("compile should fail");
         assert!(
             err.to_string().contains("imported binding"),
             "unexpected error: {err}"
@@ -2592,7 +2624,7 @@ mod tests {
         let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
 
-        let err = compile(program).expect_err("compile should fail");
+        let err = compile(program, session.source()).expect_err("compile should fail");
         assert!(
             err.to_string().contains("coalesce") || err.to_string().contains("unsupported"),
             "unexpected error: {err}"
@@ -2604,7 +2636,7 @@ mod tests {
         let src = "{ let x = 1; } x = 2;";
         let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        let chunk = compile(program).expect("compile ok");
+        let chunk = compile(program, session.source()).expect("compile ok");
 
         let globals = Rc::new(RefCell::new(ObjectData::new()));
         let mut vm = Vm::new(Rc::clone(&globals));

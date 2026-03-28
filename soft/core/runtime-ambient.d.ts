@@ -12,7 +12,7 @@
 
 /* Basic global reference */
 // Use the host-provided globalThis (we still declare it to satisfy the compiler)
-declare const globalThis: any;
+declare const globalThis: {};
 
 /* Fundamental global types missing when `noLib` is enabled.
    Provide minimal `Function` and `IArguments` types so the compiler

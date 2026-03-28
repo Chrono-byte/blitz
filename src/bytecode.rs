@@ -25,14 +25,16 @@
 //!
 //! ```
 //! use blitz::bytecode::{Chunk, Op};
+//! use std::rc::Rc;
 //!
-//! let mut chunk = Chunk::new();
+//! let mut chunk = Chunk::new(Rc::new(String::new()));
 //! chunk.write(Op::Const as u8, 1);
 //! chunk.write(0, 1); // Constant index
 //! ```
 
 use crate::typecheck::Type;
 use crate::value::Value;
+use oxc_span::Span;
 use std::convert::TryFrom;
 use std::rc::Rc;
 
@@ -57,6 +59,8 @@ pub struct Chunk {
     pub functions: Vec<FunctionProto>,
     /// Line number information for debugging
     pub lines: Vec<u32>,
+    /// Original source text for this chunk
+    pub source_text: Rc<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +68,8 @@ pub struct Chunk {
 pub struct FunctionProto {
     /// Function name
     pub name: String,
+    /// Source span in the original script
+    pub span: Span,
     /// Number of parameters
     pub arity: usize,
     /// Compiled bytecode for this function
@@ -94,16 +100,19 @@ pub struct FunctionProto {
     pub is_constructor: bool,
     /// Whether this function was declared as `async`.
     pub is_async: bool,
+    /// Whether this function was declared as a generator (`function*`).
+    pub is_generator: bool,
 }
 
 impl Chunk {
     /// Creates a new empty chunk
-    pub fn new() -> Self {
+    pub fn new(source_text: Rc<String>) -> Self {
         Self {
             code: Vec::new(),
             constants: Vec::new(),
             functions: Vec::new(),
             lines: Vec::new(),
+            source_text,
         }
     }
 
@@ -251,9 +260,23 @@ impl Chunk {
     }
 }
 
+impl FunctionProto {
+    /// Return the exact source substring used to define this function, if tracked.
+    pub fn source_text(&self) -> Option<String> {
+        let text = &self.chunk.source_text;
+        let start = self.span.start as usize;
+        let end = self.span.end as usize;
+        if start <= end && end <= text.len() {
+            Some(text[start..end].to_string())
+        } else {
+            None
+        }
+    }
+}
+
 impl Default for Chunk {
     fn default() -> Self {
-        Self::new()
+        Self::new(Rc::new(String::new()))
     }
 }
 
@@ -381,6 +404,10 @@ pub enum Op {
     StrictEq,
     /// Strict inequality comparison (!==)
     StrictNeq,
+    /// Yield a value from a generator function (non-delegating `yield`).
+    Yield,
+    /// Delegate iteration for `yield*` expressions.
+    YieldStar,
 }
 
 impl Op {
@@ -496,6 +523,8 @@ impl TryFrom<u8> for Op {
             55 => Ok(Op::AwaitPromise),
             56 => Ok(Op::StrictEq),
             57 => Ok(Op::StrictNeq),
+            58 => Ok(Op::Yield),
+            59 => Ok(Op::YieldStar),
             _ => Err(()),
         }
     }
@@ -513,7 +542,7 @@ mod tests {
 
     #[test]
     fn op_round_trip() {
-        for i in 0u8..=Op::AwaitPromise as u8 {
+        for i in 0u8..=Op::YieldStar as u8 {
             let op = Op::try_from(i).expect("valid op");
             let b = u8::from(op);
             assert_eq!(b, i);
@@ -527,7 +556,7 @@ mod tests {
     fn hotwire_jump_helpers() {
         // Build a simple chunk with: Jump <offset to later>, followed by a small body.
         // Layout: [Jump opcode][offset lo][offset hi][...]
-        let mut c = Chunk::new();
+        let mut c = Chunk::new(Rc::new(String::new()));
         // reserve some code so indices are meaningful
         // instruction at 0: Jump -> target will be at instruction index 6 (for example)
         c.code = vec![

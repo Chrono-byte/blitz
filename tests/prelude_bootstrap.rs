@@ -23,7 +23,7 @@ fn clear_slot_types_in_chunk(chunk: Chunk) -> Chunk {
             return Rc::clone(existing);
         }
 
-        let mut new_chunk = Chunk::new();
+        let mut new_chunk = Chunk::new(Rc::new(String::new()));
         new_chunk.code = rc_chunk.code.clone();
         new_chunk.constants = rc_chunk.constants.clone();
         new_chunk.lines = rc_chunk.lines.clone();
@@ -311,7 +311,7 @@ fn prelude_bootstrap_runs() {
     // Hold the borrow while calling compile so the Program reference remains valid.
     let rec_b = rec.borrow();
     let program = rec_b.session.program();
-    let chunk = compile(program).expect("compile prelude ok");
+    let chunk = compile(program, rec_b.session.source()).expect("compile prelude ok");
 
     // Clear slot types (the prelude is intentionally dynamic)
     let chunk = clear_slot_types_in_chunk(chunk);

@@ -7,6 +7,7 @@
 
 import type { Value, Console } from "./core/types.js";
 import { toString as runtimeToString } from "./core/runtime.js";
+
 // Host helpers are provided by the inlined `soft/host.ts` module and expose
 // top-level functions such as `host_print`, `native_new_object`, `native_print`
 // and `debugValue`. Import them explicitly from the host module so the soft

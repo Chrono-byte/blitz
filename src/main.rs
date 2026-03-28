@@ -40,7 +40,7 @@ use std::rc::Rc;
 use blitz::bytecode;
 use blitz::compiler;
 use blitz::{
-    module::ModuleLoader, parser::Parser as TsParser, resolver::resolve_specifier, typecheck,
+    module::ModuleLoader, parser::Parser as TsParser, resolver::resolve_specifier, runtime_utils,
     value::Value, vm::Vm,
 };
 
@@ -91,18 +91,9 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 fn run_source(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> {
     let session = TsParser::parse_source(source)?;
     let oast_prog = session.program();
-    typecheck::check_oxc(oast_prog)?;
-    // Use the temporary compile_oxc shim so we can avoid converting to local_ast here.
-    let chunk = compiler::compile_oxc(oast_prog).map_err(blitz::errors::Error::from)?;
-    vm.run(chunk).map_err(blitz::errors::Error::from)
-}
 
-fn run_program(
-    vm: &mut Vm,
-    program: &oxc_ast::ast::Program<'_>,
-) -> Result<Value, blitz::errors::Error> {
-    typecheck::check_oxc(program)?;
-    let chunk = compiler::compile_oxc(program).map_err(blitz::errors::Error::from)?;
+    // Use the temporary compile_oxc shim so we can avoid converting to local_ast here.
+    let chunk = compiler::compile_oxc(oast_prog, source).map_err(blitz::errors::Error::from)?;
     vm.run(chunk).map_err(blitz::errors::Error::from)
 }
 
@@ -127,6 +118,10 @@ struct Cli {
     /// Start the REPL even when a file is not provided.
     #[arg(short, long, action)]
     repl: bool,
+
+    /// Run the TypeScript typechecker before execution.
+    #[arg(long, action)]
+    typecheck: bool,
 }
 
 fn main() -> Result<(), blitz::errors::Error> {
@@ -457,7 +452,7 @@ fn main() -> Result<(), blitz::errors::Error> {
         })))),
     );
 
-    blitz::runtime_utils::install_minimal_kernel_constructors(&globals);
+    runtime_utils::install_minimal_kernel_constructors(&globals);
 
     // Parse CLI early so clap can handle --help/--version before doing work.
     let cli = Cli::parse();
@@ -504,9 +499,10 @@ fn main() -> Result<(), blitz::errors::Error> {
             let chunk = {
                 let rec_b = rec_rc.borrow();
                 let program = rec_b.session.program();
-                let chunk = compiler::compile_oxc(program).map_err(blitz::errors::Error::from)?;
+                let chunk = compiler::compile_oxc(program, rec_b.session.source())
+                    .map_err(blitz::errors::Error::from)?;
                 // Use the runtime_utils helper to clear slot types for the prelude chunk.
-                blitz::runtime_utils::clear_slot_types_in_chunk(chunk)
+                runtime_utils::clear_slot_types_in_chunk(chunk)
             };
 
             eprintln!(
@@ -668,6 +664,7 @@ fn main() -> Result<(), blitz::errors::Error> {
             eprintln!("[trace] Prelude trace preparation failed: {}", e)
         }
     }
+
     // Create a persistent VM for the REPL and reuse it for every input so
     // we don't recompile and recreate the VM on each line. The soft layer
     // (prelude) is executed into the same VM so its globals and any
@@ -680,7 +677,7 @@ fn main() -> Result<(), blitz::errors::Error> {
     // Run prelude. The soft layer provides all base objects (Object, Array, console, etc.).
     // Evaluate prelude via ModuleLoader into the repl_vm
     if let Err(e) = loader
-        .evaluate_entry(&prelude_resolved, &mut repl_vm)
+        .evaluate_entry(&prelude_resolved, &mut repl_vm, cli.typecheck)
         .map_err(blitz::errors::Error::from)
     {
         eprintln!("Runtime error in soft layer: {}", e);
@@ -690,6 +687,7 @@ fn main() -> Result<(), blitz::errors::Error> {
         ))
         .into());
     }
+    repl_vm.flush_microtasks()?;
 
     // If a file was provided, run it and exit. Otherwise start REPL.
     if let Some(path) = cli.file {
@@ -703,7 +701,7 @@ fn main() -> Result<(), blitz::errors::Error> {
             .instantiate_all()
             .map_err(blitz::errors::Error::from)?;
         loader
-            .evaluate_entry(&path, &mut repl_vm)
+            .evaluate_entry(&path, &mut repl_vm, cli.typecheck)
             .map_err(blitz::errors::Error::from)?;
         return Ok(());
     }

@@ -37,7 +37,7 @@ use serde::Deserialize;
 
 use blitz::compiler;
 use blitz::trace;
-use blitz::value::{ObjectData, PromiseState, PropertyDescriptor, PropertyKey};
+use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
 use blitz::{module::ModuleLoader, parser::Parser, typecheck, value::Value, vm::Vm};
 
 #[derive(Clone, Copy, Default)]
@@ -138,161 +138,6 @@ fn has_distinct_subsections(
         || subsections.keys().any(|key| !top_level.contains_key(key))
 }
 
-#[derive(Default)]
-struct CloneCtx {
-    objects: HashMap<usize, Rc<RefCell<ObjectData>>>,
-    arrays: HashMap<usize, Rc<RefCell<Vec<Option<Value>>>>>,
-    envs: HashMap<usize, Rc<RefCell<Vec<Rc<RefCell<Value>>>>>>,
-}
-
-fn clone_descriptor(desc: &PropertyDescriptor, ctx: &mut CloneCtx) -> PropertyDescriptor {
-    match desc {
-        PropertyDescriptor::Data {
-            value,
-            writable,
-            enumerable,
-            configurable,
-        } => PropertyDescriptor::Data {
-            value: clone_value(value, ctx),
-            writable: *writable,
-            enumerable: *enumerable,
-            configurable: *configurable,
-        },
-        PropertyDescriptor::Accessor {
-            get,
-            set,
-            enumerable,
-            configurable,
-        } => PropertyDescriptor::Accessor {
-            get: get.as_ref().map(|v| clone_value(v, ctx)),
-            set: set.as_ref().map(|v| clone_value(v, ctx)),
-            enumerable: *enumerable,
-            configurable: *configurable,
-        },
-    }
-}
-
-fn clone_object_data(obj: &Rc<RefCell<ObjectData>>, ctx: &mut CloneCtx) -> Rc<RefCell<ObjectData>> {
-    let key = Rc::as_ptr(obj) as usize;
-    if let Some(existing) = ctx.objects.get(&key) {
-        return Rc::clone(existing);
-    }
-
-    let cloned = Rc::new(RefCell::new(ObjectData::new()));
-    ctx.objects.insert(key, Rc::clone(&cloned));
-
-    let src = obj.borrow();
-    let prototype = clone_value(&src.prototype, ctx);
-    let extensible = src.extensible;
-    let properties = src
-        .properties
-        .iter()
-        .map(|(k, v)| (k.clone(), clone_descriptor(v, ctx)))
-        .collect();
-    drop(src);
-
-    let mut dst = cloned.borrow_mut();
-    dst.prototype = prototype;
-    dst.extensible = extensible;
-    dst.properties = properties;
-    drop(dst);
-
-    cloned
-}
-
-fn clone_array_elements(
-    arr: &Rc<RefCell<Vec<Option<Value>>>>,
-    ctx: &mut CloneCtx,
-) -> Rc<RefCell<Vec<Option<Value>>>> {
-    let key = Rc::as_ptr(arr) as usize;
-    if let Some(existing) = ctx.arrays.get(&key) {
-        return Rc::clone(existing);
-    }
-
-    let cloned = Rc::new(RefCell::new(Vec::new()));
-    ctx.arrays.insert(key, Rc::clone(&cloned));
-
-    let values = arr
-        .borrow()
-        .iter()
-        .map(|opt_v| opt_v.as_ref().map(|v| clone_value(v, ctx)))
-        .collect();
-    *cloned.borrow_mut() = values;
-    cloned
-}
-
-fn clone_env(
-    env: &Rc<RefCell<Vec<Rc<RefCell<Value>>>>>,
-    ctx: &mut CloneCtx,
-) -> Rc<RefCell<Vec<Rc<RefCell<Value>>>>> {
-    let key = Rc::as_ptr(env) as usize;
-    if let Some(existing) = ctx.envs.get(&key) {
-        return Rc::clone(existing);
-    }
-
-    let cloned = Rc::new(RefCell::new(Vec::new()));
-    ctx.envs.insert(key, Rc::clone(&cloned));
-
-    let values = env
-        .borrow()
-        .iter()
-        .map(|cell| Rc::new(RefCell::new(clone_value(&cell.borrow(), ctx))))
-        .collect();
-    *cloned.borrow_mut() = values;
-    cloned
-}
-
-fn clone_value(value: &Value, ctx: &mut CloneCtx) -> Value {
-    match value {
-        Value::Number(n) => Value::Number(*n),
-        Value::String(s) => Value::String(s.clone()),
-        Value::Bool(b) => Value::Bool(*b),
-        Value::Undefined => Value::Undefined,
-        Value::BigInt(n) => Value::BigInt(*n),
-        Value::Symbol(id, desc) => Value::Symbol(id.clone(), desc.clone()),
-        Value::Null => Value::Null,
-        Value::Object(obj) => Value::Object(clone_object_data(obj, ctx)),
-        Value::Array(arr, props) => Value::Array(
-            clone_array_elements(arr, ctx),
-            clone_object_data(props, ctx),
-        ),
-        Value::Closure {
-            proto,
-            env,
-            lexical_this,
-            props,
-        } => Value::Closure {
-            proto: Rc::clone(proto),
-            env: clone_env(env, ctx),
-            lexical_this: lexical_this.as_ref().map(|v| Box::new(clone_value(v, ctx))),
-            props: clone_object_data(props, ctx),
-        },
-        Value::Builtin(f) => Value::Builtin(Rc::clone(f)),
-        Value::BuiltinObject(f, props) => {
-            Value::BuiltinObject(Rc::clone(f), clone_object_data(props, ctx))
-        }
-        Value::Promise(state) => {
-            let next_state = match &*state.borrow() {
-                PromiseState::Pending {
-                    on_fulfilled,
-                    on_rejected,
-                } => PromiseState::Pending {
-                    on_fulfilled: on_fulfilled.iter().map(|v| clone_value(v, ctx)).collect(),
-                    on_rejected: on_rejected.iter().map(|v| clone_value(v, ctx)).collect(),
-                },
-                PromiseState::Fulfilled(v) => PromiseState::Fulfilled(clone_value(v, ctx)),
-                PromiseState::Rejected(v) => PromiseState::Rejected(clone_value(v, ctx)),
-            };
-            Value::Promise(Rc::new(RefCell::new(next_state)))
-        }
-    }
-}
-
-fn clone_globals(globals: &Rc<RefCell<ObjectData>>) -> Rc<RefCell<ObjectData>> {
-    let mut ctx = CloneCtx::default();
-    clone_object_data(globals, &mut ctx)
-}
-
 /// Runner options for the test262 test runner.
 #[derive(ClapParser, Debug, Default)]
 #[command(
@@ -363,6 +208,7 @@ fn parse_args() -> RunnerOptions {
 struct Negative {
     phase: String,
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     ty: Option<String>,
 }
 
@@ -371,6 +217,7 @@ struct Meta {
     flags: Option<Vec<String>>,
     includes: Option<Vec<String>>,
     negative: Option<Negative>,
+    #[allow(dead_code)]
     locale: Option<Vec<String>>,
 }
 
@@ -426,7 +273,8 @@ fn builtin_eval_script(globals: &Rc<RefCell<ObjectData>>, args: &[Value]) -> Res
     // in the SAME realm.
     let session = Parser::parse_source(&src).map_err(|e| format!("evalScript parse: {}", e))?;
     let prog = session.program();
-    let chunk = compiler::compile_oxc(prog).map_err(|e| format!("evalScript compile: {}", e))?;
+    let chunk =
+        compiler::compile_oxc(prog, &src).map_err(|e| format!("evalScript compile: {}", e))?;
     let mut eval_vm = Vm::new(Rc::clone(globals));
     eval_vm
         .run(chunk)
@@ -443,8 +291,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     data.properties.insert(
         PropertyKey::String("evalScript".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-            builtin_eval_script(&eval_globals, args)
-                .map_err(blitz::errors::RuntimeError::from)
+            builtin_eval_script(&eval_globals, args).map_err(blitz::errors::RuntimeError::from)
         }))),
     );
 
@@ -586,11 +433,6 @@ fn unsupported_reason(_path: &Path, _src: &str, meta: &Option<Meta>) -> Option<S
     None
 }
 
-/// Snapshot the set of global property keys (for test isolation).
-fn snapshot_global_keys(globals: &Rc<RefCell<ObjectData>>) -> HashSet<PropertyKey> {
-    globals.borrow().properties.keys().cloned().collect()
-}
-
 /// Restore globals to the state captured by a snapshot.
 ///
 /// This removes properties that were ADDED during the test, and restores
@@ -664,9 +506,19 @@ fn run_test_file(
         .as_ref()
         .and_then(|m| m.flags.as_ref())
         .is_some_and(|f| f.iter().any(|s| s == "raw"));
+    let has_async_flag = meta
+        .as_ref()
+        .and_then(|m| m.flags.as_ref())
+        .is_some_and(|f| f.iter().any(|s| s == "async"));
 
     // Required harness files as per Test262 interpreting instructions.
-    let mut harness_files: Vec<String> = vec!["sta.js".to_string(), "assert.js".to_string()];
+    let mut harness_files: Vec<String> = vec!["assert.js".to_string(), "sta.js".to_string()];
+    if has_async_flag && !raw_flag {
+        harness_files.push("doneprintHandle.js".to_string());
+    }
+
+    // Include metadata-specified files after the harness.
+    let mut include_files: Vec<String> = Vec::new();
     if let Some(m) = &meta
         && let Some(includes) = &m.includes
     {
@@ -682,14 +534,36 @@ fn run_test_file(
                 inc.clone()
             };
 
-            if normalized != "sta.js"
-                && normalized != "assert.js"
-                && !harness_files.iter().any(|h| h == &normalized)
+            if normalized == "sta.js"
+                || normalized == "assert.js"
+                || normalized == "doneprintHandle.js"
+                || include_files.iter().any(|h| h == &normalized)
             {
-                harness_files.push(normalized);
+                continue;
             }
+            include_files.push(normalized);
         }
     }
+
+    let include_sources = if raw_flag {
+        Vec::new()
+    } else {
+        let mut sources = Vec::new();
+        for inc in &include_files {
+            let path = test262_root.join("harness").join(inc);
+            if !path.exists() {
+                return Err(format!(
+                    "{} (UNSUPPORTED: include {} missing)",
+                    path.display(),
+                    inc
+                ));
+            }
+            let inc_src = fs::read_to_string(&path)
+                .map_err(|e| format!("Failed to read include {}: {}", path.display(), e))?;
+            sources.push(inc_src);
+        }
+        sources
+    };
 
     // For both modes, run and validate according to `negative` metadata.
     struct ResetStrict;
@@ -705,10 +579,7 @@ fn run_test_file(
 
         // Configure strictness for the engine (runtime-configured via TSBLITZ_STRICT).
         let is_strict = *mode_name == "strict";
-        let is_async = meta
-            .as_ref()
-            .and_then(|m| m.flags.as_ref())
-            .is_some_and(|flags| flags.iter().any(|f| f == "async"));
+        let is_async = has_async_flag;
         // Use the test-friendly override rather than setting process env vars.
         typecheck::set_strict_override(Some(false));
         let _reset_strict = ResetStrict;
@@ -716,14 +587,20 @@ fn run_test_file(
         // Restore globals from the baseline snapshot (test isolation).
         // This undoes any mutations from the previous test without deep cloning.
         restore_globals(globals, baseline_snapshot);
+        globals.borrow_mut().properties.insert(
+            PropertyKey::String("__TSBLITZ_TEST_PATH".to_string()),
+            PropertyDescriptor::data(Value::String(path.to_string_lossy().to_string())),
+        );
         let mut vm = Vm::new(Rc::clone(globals));
 
         // Async tests must signal completion through $DONE(error?).
         let done_state: Rc<RefCell<Option<Option<Value>>>> = Rc::new(RefCell::new(None));
         if is_async {
             let done_state_for_cb = Rc::clone(&done_state);
+            // Install host $DONE callback as __$DONE_HOST
+            // This will be called by doneprintHandle.js after printing
             vm.globals_rc().borrow_mut().properties.insert(
-                PropertyKey::String("$DONE".to_string()),
+                PropertyKey::String("__$DONE_HOST".to_string()),
                 PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
                     if trace::enabled() {
                         eprintln!("[DONE host] called args={:?}", args);
@@ -769,7 +646,7 @@ fn run_test_file(
                         }
                     };
                     let prog = session.program();
-                    let chunk = match compiler::compile_oxc(prog) {
+                    let chunk = match compiler::compile_oxc(prog, &hsrc) {
                         Ok(c) => c,
                         Err(e) => {
                             eprintln!(
@@ -814,17 +691,20 @@ fn run_test_file(
                 }
             }
         }
-
         // Apply strict override for the test source after harness setup.
         typecheck::set_strict_override(Some(is_strict));
 
-        // Prepare source for this run (strict-mode transformation if needed)
-        let run_src = if *mode_name == "strict" && !raw_flag {
-            // Per INTERPRETING.md: insert "use strict"; at the start
-            format!("\"use strict\";\n{}", src)
-        } else {
-            src.clone()
-        };
+        // Prepare source for this run (includes + test, with optional strict directive)
+        let mut run_src = String::new();
+        if *mode_name == "strict" && !raw_flag {
+            // Per INTERPRETING.md: strict-mode run prefixes the entire source with "use strict".
+            run_src.push_str("\"use strict\";\n");
+        }
+        for inc_src in &include_sources {
+            run_src.push_str(inc_src);
+            run_src.push('\n');
+        }
+        run_src.push_str(&src);
 
         // Handle parse-phase negative expectations first
         if let Some(m) = &meta
@@ -862,7 +742,7 @@ fn run_test_file(
         let prog = session.program();
 
         // Compile the JS source directly; Test262 should not be gated on TS-only checks.
-        let chunk = match compiler::compile_oxc(prog) {
+        let chunk = match compiler::compile_oxc(prog, &run_src) {
             Ok(c) => c,
             Err(e) => {
                 return Err(format!(
@@ -877,21 +757,30 @@ fn run_test_file(
         // Execute using the provided persistent VM
         let run_result = vm.run(chunk);
 
-        // Async tests report result via $DONE.
+        // For async tests, drain the microtask queue to ensure promise callbacks execute
         let run_result = if is_async {
+            // First check if synchronous execution failed
             match run_result {
                 Err(e) => Err(e),
-                Ok(v) => match done_state.borrow().as_ref() {
-                    Some(None) => Ok(v),
-                    Some(Some(done_err)) => {
-                        let msg = match vm.to_string(done_err) {
-                            Ok(s) => s,
-                            Err(_) => "async test failed".to_string(),
-                        };
-                        Err(format!("async $DONE called with error: {}", msg).into())
+                Ok(v) => {
+                    // Drain microtasks to allow promise callbacks to run
+                    if let Err(e) = vm.flush_microtasks() {
+                        Err(e)
+                    } else {
+                        // Now check if $DONE was called
+                        match done_state.borrow().as_ref() {
+                            Some(None) => Ok(v),
+                            Some(Some(done_err)) => {
+                                let msg = match vm.to_string(done_err) {
+                                    Ok(s) => s,
+                                    Err(_) => "async test failed".to_string(),
+                                };
+                                Err(format!("async $DONE called with error: {}", msg).into())
+                            }
+                            None => Err("async test did not call $DONE".into()),
+                        }
                     }
-                    None => Err("async test did not call $DONE".into()),
-                },
+                }
             }
         } else {
             run_result
@@ -1033,7 +922,7 @@ fn run_harness_only(
         let session = Parser::parse_source(&hsrc)
             .map_err(|e| format!("Harness {} parse failed: {}", h, e))?;
         let prog = session.program();
-        let chunk = compiler::compile_oxc(prog)
+        let chunk = compiler::compile_oxc(prog, &hsrc)
             .map_err(|e| format!("Harness {} compile failed: {}", h, e))?;
         match vm.run(chunk) {
             Ok(_) => {
@@ -1160,7 +1049,7 @@ fn main() {
                 .instantiate_all()
                 .map_err(|e| format!("instantiate prelude failed: {}", e))?;
             loader
-                .evaluate_entry(&prelude_path, &mut vm)
+                .evaluate_entry(&prelude_path, &mut vm, true)
                 .map_err(|e| format!("evaluate prelude failed: {}", e))?;
             Ok(())
         })() {
@@ -1197,20 +1086,23 @@ fn main() {
             continue;
         }
 
-        eprintln!("Running test: {}", f.display());
         let (top_key, subsection_key) = bucket_keys(&test_root, &f);
         match run_test_file(&f, &test262_dir, &globals, &baseline_snapshot) {
             Ok(()) => {
                 ran += 1;
                 top_level.entry(top_key).or_default().pass += 1;
                 subsections.entry(subsection_key).or_default().pass += 1;
-                eprintln!("  PASS");
             }
             Err(e) => {
                 ran += 1;
                 top_level.entry(top_key).or_default().fail += 1;
                 subsections.entry(subsection_key).or_default().fail += 1;
-                eprintln!("  FAIL: {}", e);
+                // Print failing test immediately to aid debugging during execution
+                if let Ok(rel) = f.strip_prefix(&test262_dir) {
+                    eprintln!("FAIL: {}: {}", rel.display(), e);
+                } else {
+                    eprintln!("FAIL: {}: {}", f.display(), e);
+                }
                 failed.push((f.clone(), e));
             }
         }
@@ -1222,51 +1114,14 @@ fn main() {
     } else {
         (passed as f64 / ran as f64) * 100.0
     };
-    let show_subsections = has_distinct_subsections(&top_level, &subsections);
 
-    if !failed.is_empty() {
-        eprintln!(
-            "Summary: ran {}, passed {}, failed {}, pass rate {:.2}%",
-            ran,
-            passed,
-            failed.len(),
-            pass_pct
-        );
-        print_bucket_summary("Sections:", &top_level, 12, false);
-        if show_subsections {
-            print_bucket_summary("Worst subsections:", &subsections, 15, true);
-        }
-
-        // Instead of listing every failing file, group failures by subsection
-        // and print the failing subsection folders only.
-        if show_subsections {
-            let mut failed_by_subsection: HashMap<String, usize> = HashMap::new();
-            for (p, _m) in &failed {
-                let (_top, subsection) = bucket_keys(&test_root, p);
-                *failed_by_subsection.entry(subsection).or_default() += 1;
-            }
-            let mut rows: Vec<_> = failed_by_subsection.into_iter().collect();
-            rows.sort_by(|(an, ac), (bn, bc)| bc.cmp(ac).then_with(|| an.cmp(bn)));
-            eprintln!("Failed subsections:");
-            for (name, cnt) in rows.into_iter() {
-                eprintln!("  {:<40} fail {}", name, cnt);
-            }
-        }
-        eprintln!("Failed tests:");
-        for (path, msg) in &failed {
-            let rel = path.strip_prefix(&test262_dir).unwrap_or(path);
-            eprintln!("  {}: {}", rel.display(), msg);
-        }
-        exit(1);
-    } else {
-        eprintln!(
-            "Test262 connector: ran {} tests, passed {} ({:.2}%)",
-            ran, passed, pass_pct
-        );
-        print_bucket_summary("Sections:", &top_level, 12, false);
-        if show_subsections {
-            print_bucket_summary("Worst subsections:", &subsections, 15, true);
-        }
-        exit(0);
-    }
+    let exit_code = if failed.is_empty() { 0 } else { 1 };
+    
+    eprintln!(
+        "Test262: ran {}, passed {}, failed {} ({:.2}% pass rate)",
+        ran, passed, failed.len(), pass_pct
+    );
+    print_bucket_summary("Sections:", &top_level, 12, false);
+    
+    exit(exit_code);
 }

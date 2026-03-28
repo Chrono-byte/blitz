@@ -269,4 +269,9 @@ impl ParserSession {
     pub fn program(&self) -> &oast::Program<'_> {
         self.borrow_program()
     }
+
+    /// Access the underlying source text
+    pub fn source(&self) -> &str {
+        self.borrow_source()
+    }
 }

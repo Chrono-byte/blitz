@@ -133,6 +133,7 @@ export function debugValue(name: string, v: any): void {
     } else {
       repr = "[object]";
     }
+
     // Avoid heavy formatting when tracing is disabled. If the host wants
     // tracing it should set a global flag `__TSBLITZ_TRACE` to a truthy value.
     try {

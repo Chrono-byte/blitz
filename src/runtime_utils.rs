@@ -1,15 +1,18 @@
 //! Utility functions for runtime operations.
 
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::bytecode;
 use crate::compiler;
+use crate::compiler::ModuleContext;
 use crate::parser::Parser;
 use crate::value::SymbolId;
-use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
+use crate::vm::Vm;
 
 const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
 
@@ -31,7 +34,7 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
         }
 
         // Rebuild the chunk fields, replacing functions with cleared slot types.
-        let mut new_chunk = bytecode::Chunk::new();
+        let mut new_chunk = bytecode::Chunk::new(Rc::clone(&rc_chunk.source_text));
         new_chunk.code = rc_chunk.code.clone();
         new_chunk.constants = rc_chunk.constants.clone();
         new_chunk.lines = rc_chunk.lines.clone();
@@ -80,7 +83,7 @@ fn strict_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
-fn static_builtin_arg_offset(vm: &crate::vm::Vm, args: &[Value], global_name: &str) -> usize {
+fn static_builtin_arg_offset(vm: &Vm, args: &[Value], global_name: &str) -> usize {
     if let (Some(first), Some(global)) = (args.first(), vm.get_global(global_name))
         && strict_equal(first, &global)
     {
@@ -95,20 +98,232 @@ fn builtin_object(f: BuiltinFn, function_proto: &Rc<RefCell<ObjectData>>) -> Val
     Value::BuiltinObject(f, props)
 }
 
-fn make_host_function_instance(function_proto: &Rc<RefCell<ObjectData>>) -> Value {
-    let props = Rc::new(RefCell::new(ObjectData::new()));
-    props.borrow_mut().prototype = Value::Object(Rc::clone(function_proto));
-    let callable = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), Rc::clone(&props));
-    let proto_obj = Rc::new(RefCell::new(ObjectData::new()));
-    props.borrow_mut().properties.insert(
-        PropertyKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&proto_obj))),
-    );
-    proto_obj.borrow_mut().properties.insert(
-        PropertyKey::String("constructor".to_string()),
-        PropertyDescriptor::data(callable.clone()),
-    );
-    callable
+thread_local! {
+    static SHADOW_REALM_REGISTRY: RefCell<HashMap<usize, Rc<ShadowRealmRecord>>> =
+        RefCell::new(HashMap::new());
+}
+
+struct ShadowRealmRecord {
+    vm: RefCell<Vm>,
+    base_dir: PathBuf,
+}
+
+impl ShadowRealmRecord {
+    fn new(base_dir: PathBuf) -> Self {
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        install_minimal_kernel_constructors(&globals);
+        Self {
+            vm: RefCell::new(Vm::new(Rc::clone(&globals))),
+            base_dir,
+        }
+    }
+
+    fn borrow_vm(&self) -> RefMut<'_, Vm> {
+        self.vm.borrow_mut()
+    }
+
+    fn base_dir(&self) -> PathBuf {
+        self.base_dir.clone()
+    }
+}
+
+fn register_shadow_realm(obj: &Rc<RefCell<ObjectData>>, record: Rc<ShadowRealmRecord>) {
+    let key = Rc::as_ptr(obj) as usize;
+    SHADOW_REALM_REGISTRY.with(|registry| {
+        registry.borrow_mut().insert(key, record);
+    });
+}
+
+fn get_shadow_realm_record(value: &Value) -> Option<Rc<ShadowRealmRecord>> {
+    if let Value::Object(obj) = value {
+        let key = Rc::as_ptr(obj) as usize;
+        SHADOW_REALM_REGISTRY.with(|registry| registry.borrow().get(&key).cloned())
+    } else {
+        None
+    }
+}
+
+fn require_shadow_realm_record(
+    vm: &mut Vm,
+    value: &Value,
+) -> Result<Rc<ShadowRealmRecord>, crate::errors::RuntimeError> {
+    get_shadow_realm_record(value)
+        .ok_or_else(|| vm.throw_type_error("ShadowRealm method called on incompatible receiver"))
+}
+
+fn current_test_path(vm: &Vm) -> Option<PathBuf> {
+    vm.get_global("__TSBLITZ_TEST_PATH")
+        .and_then(|value| match value {
+            Value::String(s) => Some(PathBuf::from(s)),
+            _ => None,
+        })
+}
+
+fn resolve_shadowrealm_base_dir(vm: &Vm) -> PathBuf {
+    if let Some(path) = current_test_path(vm)
+        && let Some(parent) = path.parent()
+    {
+        return parent.to_path_buf();
+    }
+    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+pub(crate) fn fulfill_pending_promise(
+    vm: &mut Vm,
+    promise: &Rc<RefCell<PromiseState>>,
+    value: Value,
+) {
+    use crate::value::PromiseState;
+
+    let mut state = promise.borrow_mut();
+    if let PromiseState::Pending { on_fulfilled, .. } = &mut *state {
+        let callbacks = on_fulfilled.clone();
+        let stored_value = value.clone();
+        *state = PromiseState::Fulfilled(value);
+        drop(state);
+        for callback in callbacks {
+            let mut arg_value = Some(stored_value.clone());
+            vm.queue_microtask(move |vm| {
+                let args = [arg_value.take().unwrap()];
+                let _ = vm.call_value_with_this(&callback, &Value::Undefined, &args);
+                Ok(())
+            });
+        }
+    }
+}
+
+pub(crate) fn reject_pending_promise(
+    vm: &mut Vm,
+    promise: &Rc<RefCell<PromiseState>>,
+    reason: Value,
+) {
+    use crate::value::PromiseState;
+
+    let mut state = promise.borrow_mut();
+    if let PromiseState::Pending { on_rejected, .. } = &mut *state {
+        let callbacks = on_rejected.clone();
+        let stored_reason = reason.clone();
+        *state = PromiseState::Rejected(reason);
+        drop(state);
+        for callback in callbacks {
+            let mut arg_reason = Some(stored_reason.clone());
+            vm.queue_microtask(move |vm| {
+                let args = [arg_reason.take().unwrap()];
+                let _ = vm.call_value_with_this(&callback, &Value::Undefined, &args);
+                Ok(())
+            });
+        }
+    }
+}
+
+fn shadowrealm_evaluate(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::errors::RuntimeError> {
+    let target = args.first().cloned().unwrap_or(Value::Undefined);
+    let record = require_shadow_realm_record(vm, &target)?;
+    let source = match args.first() {
+        Some(Value::String(s)) => s.clone(),
+        _ => {
+            return Err(
+                vm.throw_type_error("ShadowRealm.prototype.evaluate requires a string argument")
+            );
+        }
+    };
+    let session = Parser::parse_source(&source)
+        .map_err(|e| syntax_error(vm, format!("ShadowRealm evaluate parse: {}", e)))?;
+    let chunk = compiler::compile_oxc(session.program(), &source)
+        .map_err(|e| syntax_error(vm, format!("ShadowRealm evaluate compile: {}", e)))?;
+    record
+        .borrow_vm()
+        .run(chunk)
+        .map_err(|err| vm.throw_type_error(&format!("ShadowRealm evaluate error: {}", err)))
+}
+
+fn shadowrealm_import_value(
+    vm: &mut Vm,
+    args: &[Value],
+) -> Result<Value, crate::errors::RuntimeError> {
+    let target = args.first().cloned().unwrap_or(Value::Undefined);
+    let record = require_shadow_realm_record(vm, &target)?;
+    let specifier = args.first().cloned().unwrap_or(Value::Undefined);
+    let specifier_str = vm.to_string(&specifier)?;
+    let export_name = match args.get(1) {
+        Some(Value::String(s)) => s.clone(),
+        _ => {
+            return Err(vm.throw_type_error(
+                "ShadowRealm.prototype.importValue requires export name string",
+            ));
+        }
+    };
+
+    let promise = Rc::new(RefCell::new(PromiseState::Pending {
+        on_fulfilled: Vec::new(),
+        on_rejected: Vec::new(),
+    }));
+    let promise_value = Value::Promise(Rc::clone(&promise));
+
+    let record_handle = Rc::clone(&record);
+    let base_dir = record.base_dir();
+    let specifier_clone = specifier_str;
+    let export_clone = export_name;
+
+    vm.queue_microtask(move |vm| {
+        let result = (|| -> Result<Value, String> {
+            let entry = {
+                let mut inner_vm = record_handle.borrow_vm();
+                let loader = inner_vm.module_loader_mut();
+                let entry = loader
+                    .construct(&base_dir, &specifier_clone)
+                    .map_err(|err| format!("module construct failed: {}", err))?;
+                loader
+                    .instantiate_all()
+                    .map_err(|err| format!("module instantiate failed: {}", err))?;
+                entry
+            };
+            let chunk = {
+                let rec = entry.borrow();
+                let module_index = rec
+                    .module_index
+                    .ok_or_else(|| "module missing index".to_string())?;
+                let module_ctx = ModuleContext {
+                    module_index,
+                    imports: rec.import_sources.clone(),
+                    exports: rec.exports.keys().cloned().collect(),
+                };
+                compiler::compile_oxc_with_ctx(
+                    rec.session.program(),
+                    Some(&module_ctx),
+                    rec.session.source(),
+                )
+                .map_err(|err| format!("module compile failed: {}", err))?
+            };
+            let chunk = clear_slot_types_in_chunk(chunk);
+            {
+                let mut inner_vm = record_handle.borrow_vm();
+                inner_vm
+                    .run(chunk)
+                    .map_err(|err| format!("module runtime failed: {}", err))?;
+            }
+            let slot = entry
+                .borrow()
+                .exports
+                .get(&export_clone)
+                .cloned()
+                .ok_or_else(|| format!("export {} not found", export_clone))?;
+            Ok(slot.borrow().clone())
+        })();
+
+        match result {
+            Ok(value) => fulfill_pending_promise(vm, &promise, value),
+            Err(msg) => {
+                let err_val = vm
+                    .create_intrinsic_error("TypeError", &msg)
+                    .unwrap_or(Value::String(msg.clone()));
+                reject_pending_promise(vm, &promise, err_val);
+            }
+        }
+        Ok(())
+    });
+
+    Ok(promise_value)
 }
 
 fn set_builtin_length(target: &Value, length: f64) {
@@ -135,7 +350,7 @@ fn set_builtin_length(target: &Value, length: f64) {
 }
 
 /// Converts a value to a non-negative integer length suitable for array operations.
-fn to_length(vm: &mut crate::vm::Vm, value: &Value) -> Result<usize, crate::errors::RuntimeError> {
+fn to_length(vm: &mut Vm, value: &Value) -> Result<usize, crate::errors::RuntimeError> {
     let num = vm.to_number_value(value)?;
     if num.is_nan() || num <= 0.0_f64 {
         return Ok(0);
@@ -342,6 +557,13 @@ fn array_from_values(values: Vec<Value>) -> Value {
         PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
     );
     Value::Array(arr_rc, props)
+}
+
+fn syntax_error(vm: &mut Vm, message: String) -> crate::errors::RuntimeError {
+    let err_val = vm
+        .create_intrinsic_error("SyntaxError", &message)
+        .unwrap_or(Value::String(message.clone()));
+    vm.throw_exception(err_val)
 }
 
 fn canonical_index_key(s: &str) -> Option<u64> {
@@ -940,43 +1162,32 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(Value::Object(Rc::clone(&aggregate_error_proto_map))),
     );
 
-    let function_ctor_proto = Rc::clone(&function_proto_map);
-    let function_ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
-        let body = args
-            .last()
-            .cloned()
-            .unwrap_or(Value::String("return undefined".to_string()));
-        let body_src = match body {
-            Value::String(s) => s,
-            _ => "return undefined".to_string(),
+    let function_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+        let body_src = if let Some(last) = args.last() {
+            vm.to_string(last)?
+        } else {
+            "return undefined".to_string()
         };
-        let body_src = body_src.trim().to_string();
-        if crate::trace::enabled() {
-            eprintln!("[trace] Function ctor body='{}'", body_src);
+        let param_count = args.len().saturating_sub(1);
+        let mut params = Vec::with_capacity(param_count);
+        for idx in 0..param_count {
+            params.push(vm.to_string(&args[idx])?);
         }
-        let call_target: BuiltinFn = Rc::new(move |vm, _call_args| {
-            let src = body_src.trim();
-            if src == "return this" || src == "return this;" {
-                return Ok(vm.get_global("globalThis").unwrap_or(Value::Undefined));
-            }
-            if src == "return;" || src == "return" {
-                return Ok(Value::Undefined);
-            }
-            if let Some(rest) = src.strip_prefix("return ") {
-                let expr = rest.trim_end_matches(';').trim();
-                if expr.is_empty() {
-                    return Ok(Value::Undefined);
-                }
-                return vm.eval_expression_source(expr);
-            }
-            vm.eval_expression_source(src)
-        });
-        Ok(Value::BuiltinObject(
-            call_target,
-            Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-                Rc::clone(&function_ctor_proto),
-            )))),
-        ))
+        let source = format!(
+            "function __tsblitz_dynamic({}) {{\n{}\n}}\n__tsblitz_eval_result = __tsblitz_dynamic;",
+            params.join(","),
+            body_src
+        );
+        let session =
+            Parser::parse_source(&source).map_err(|e| syntax_error(vm, format!("parse: {}", e)))?;
+        let prog = session.program();
+        let chunk = compiler::compile_oxc(prog, &source)
+            .map_err(|e| syntax_error(vm, format!("compile: {}", e)))?;
+        let mut child = Vm::new(vm.globals_rc());
+        child.run(chunk)?;
+        Ok(child
+            .get_global("__tsblitz_eval_result")
+            .unwrap_or(Value::Undefined))
     });
     let function_ctor_val =
         Value::BuiltinObject(function_ctor_fn.clone(), Rc::clone(&function_ctor_map));
@@ -1049,6 +1260,23 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         &function_proto_map,
                     ))
                 }
+            }),
+            &function_proto_map,
+        )),
+    );
+
+    function_proto_map.borrow_mut().properties.insert(
+        PKey::String("toString".to_string()),
+        non_enum_data(builtin_object(
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                if !Vm::is_callable_value(&this) {
+                    return Err(
+                        vm.throw_type_error("Function.prototype.toString called on non-callable")
+                    );
+                }
+                let source = vm.function_to_string(&this)?;
+                Ok(Value::String(source))
             }),
             &function_proto_map,
         )),
@@ -1253,34 +1481,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             let promise_for_resolve = Rc::clone(&promise);
             let resolve_fn = Value::Builtin(Rc::new(move |vm, args| {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
-                let mut state = promise_for_resolve.borrow_mut();
-                match &*state {
-                    PromiseState::Pending { on_fulfilled, .. } => {
-                        // Transition to fulfilled state
-                        let callbacks = on_fulfilled.clone();
-                        let value_for_return = value.clone();
-                        *state = PromiseState::Fulfilled(value);
-                        drop(state);
-
-                        // Call all registered fulfillment callbacks synchronously
-                        // (In a real implementation, these would be queued as microtasks)
-                        for callback in callbacks {
-                            let cb = callback.clone();
-                            let arg_value = value_for_return.clone();
-                            vm.queue_microtask(move |vm| {
-                                let _ = vm.call_value_with_this(
-                                    &cb,
-                                    &Value::Undefined,
-                                    &[arg_value.clone()],
-                                );
-                                Ok(())
-                            });
-                        }
-                    }
-                    _ => {
-                        // Already settled, do nothing
-                    }
-                }
+                fulfill_pending_promise(vm, &promise_for_resolve, value);
                 Ok(Value::Undefined)
             }));
 
@@ -1288,34 +1489,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             let promise_for_reject = Rc::clone(&promise);
             let reject_fn = Value::Builtin(Rc::new(move |vm, args| {
                 let reason = args.first().cloned().unwrap_or(Value::Undefined);
-                let mut state = promise_for_reject.borrow_mut();
-                match &*state {
-                    PromiseState::Pending { on_rejected, .. } => {
-                        // Transition to rejected state
-                        let callbacks = on_rejected.clone();
-                        let reason_for_return = reason.clone();
-                        *state = PromiseState::Rejected(reason);
-                        drop(state);
-
-                        // Call all registered rejection callbacks synchronously
-                        // (In a real implementation, these would be queued as microtasks)
-                        for callback in callbacks {
-                            let cb = callback.clone();
-                            let arg_value = reason_for_return.clone();
-                            vm.queue_microtask(move |vm| {
-                                let _ = vm.call_value_with_this(
-                                    &cb,
-                                    &Value::Undefined,
-                                    &[arg_value.clone()],
-                                );
-                                Ok(())
-                            });
-                        }
-                    }
-                    _ => {
-                        // Already settled, do nothing
-                    }
-                }
+                reject_pending_promise(vm, &promise_for_reject, reason);
                 Ok(Value::Undefined)
             }));
 
@@ -1355,6 +1529,16 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let this = args.first().cloned().unwrap_or(Value::Undefined);
                 let on_fulfilled = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let on_rejected = args.get(2).cloned().unwrap_or(Value::Undefined);
+                let on_fulfilled = if Vm::is_callable_value(&on_fulfilled) {
+                    on_fulfilled
+                } else {
+                    Value::Undefined
+                };
+                let on_rejected = if Vm::is_callable_value(&on_rejected) {
+                    on_rejected
+                } else {
+                    Value::Undefined
+                };
 
                 if let Value::Promise(promise_rc) = this {
                     use crate::value::PromiseState;
@@ -3248,15 +3432,14 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let s = vm.to_string(&receiver)?;
                 let len = s.chars().count() as isize;
 
-                let to_int = |vm: &mut crate::vm::Vm,
-                              v: &Value|
-                 -> Result<isize, crate::errors::RuntimeError> {
-                    let n = vm.to_number_value(v)?;
-                    if !n.is_finite() {
-                        return Ok(0);
-                    }
-                    Ok(n.trunc() as isize)
-                };
+                let to_int =
+                    |vm: &mut Vm, v: &Value| -> Result<isize, crate::errors::RuntimeError> {
+                        let n = vm.to_number_value(v)?;
+                        if !n.is_finite() {
+                            return Ok(0);
+                        }
+                        Ok(n.trunc() as isize)
+                    };
 
                 let start_raw = match args.get(1) {
                     Some(v) => to_int(vm, v)?,
@@ -3593,6 +3776,83 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         )),
     );
 
+    let shadowrealm_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+        ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
+    ));
+    let shadowrealm_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+        ObjectData::with_prototype(Value::Object(Rc::clone(&function_proto_map))),
+    ));
+    let shadowrealm_proto_val = Value::Object(Rc::clone(&shadowrealm_proto_map));
+    let shadowrealm_ctor_fn: BuiltinFn = Rc::new({
+        let shadowrealm_proto_val = shadowrealm_proto_val;
+        move |vm, _args| {
+            if vm.current_new_target().is_none() {
+                return Err(vm.throw_type_error("ShadowRealm must be called with new"));
+            }
+            let obj = ObjectData::with_prototype(shadowrealm_proto_val.clone());
+            let obj_rc = Rc::new(RefCell::new(obj));
+            let record = Rc::new(ShadowRealmRecord::new(resolve_shadowrealm_base_dir(vm)));
+            register_shadow_realm(&obj_rc, record);
+            Ok(Value::Object(obj_rc))
+        }
+    });
+    let shadowrealm_ctor_val =
+        Value::BuiltinObject(shadowrealm_ctor_fn, Rc::clone(&shadowrealm_ctor_map));
+    shadowrealm_ctor_map.borrow_mut().properties.insert(
+        PKey::String("prototype".to_string()),
+        PropertyDescriptor::data(Value::Object(Rc::clone(&shadowrealm_proto_map))),
+    );
+    shadowrealm_proto_map.borrow_mut().properties.insert(
+        PKey::String("constructor".to_string()),
+        non_enum_data(shadowrealm_ctor_val.clone()),
+    );
+    set_builtin_length(&shadowrealm_ctor_val, 0.0);
+    shadowrealm_ctor_map.borrow_mut().properties.insert(
+        PKey::String("name".to_string()),
+        PropertyDescriptor::data(Value::String("ShadowRealm".to_string())),
+    );
+
+    let shadowrealm_evaluate_val =
+        builtin_object(Rc::new(shadowrealm_evaluate), &function_proto_map);
+    {
+        set_builtin_length(&shadowrealm_evaluate_val, 1.0);
+        if let Value::BuiltinObject(_, props) = &shadowrealm_evaluate_val {
+            props.borrow_mut().properties.insert(
+                PKey::String("name".to_string()),
+                PropertyDescriptor::data(Value::String("evaluate".to_string())),
+            );
+        }
+    }
+    shadowrealm_proto_map.borrow_mut().properties.insert(
+        PKey::String("evaluate".to_string()),
+        non_enum_data(shadowrealm_evaluate_val),
+    );
+
+    let shadowrealm_import_val =
+        builtin_object(Rc::new(shadowrealm_import_value), &function_proto_map);
+    {
+        set_builtin_length(&shadowrealm_import_val, 2.0);
+        if let Value::BuiltinObject(_, props) = &shadowrealm_import_val {
+            props.borrow_mut().properties.insert(
+                PKey::String("name".to_string()),
+                PropertyDescriptor::data(Value::String("importValue".to_string())),
+            );
+        }
+    }
+    shadowrealm_proto_map.borrow_mut().properties.insert(
+        PKey::String("importValue".to_string()),
+        non_enum_data(shadowrealm_import_val),
+    );
+    shadowrealm_proto_map.borrow_mut().properties.insert(
+        PropertyKey::Symbol(SymbolId::well_known_to_string_tag()),
+        PropertyDescriptor::Data {
+            value: Value::String("ShadowRealm".to_string()),
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        },
+    );
+
     let mut g = globals.borrow_mut();
     // Ensure `globalThis` aliases the actual global object.
     let global_this_key = PKey::String("globalThis".to_string());
@@ -3621,9 +3881,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             let session = Parser::parse_source(&src)
                 .map_err(|e| crate::errors::RuntimeError::from(format!("eval parse: {}", e)))?;
             let prog = session.program();
-            let chunk = compiler::compile_oxc(prog)
+            let chunk = compiler::compile_oxc(prog, &src)
                 .map_err(|e| crate::errors::RuntimeError::from(format!("eval compile: {}", e)))?;
-            let mut eval_vm = crate::vm::Vm::new(vm.globals_rc());
+            let mut eval_vm = Vm::new(vm.globals_rc());
             eval_vm.run(chunk)
         }))),
     );
@@ -3998,6 +4258,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     g.properties.insert(
         PKey::String("Number".to_string()),
         PropertyDescriptor::data(number_ctor_val),
+    );
+    g.properties.insert(
+        PKey::String("ShadowRealm".to_string()),
+        PropertyDescriptor::data(shadowrealm_ctor_val),
     );
 
     let _reflect = Rc::new(RefCell::new(ObjectData::new()));
