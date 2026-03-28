@@ -444,7 +444,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
         PropertyKey::String("evalScript".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
             builtin_eval_script(&eval_globals, args)
-                .map_err(|e| blitz::errors::RuntimeError::from(e))
+                .map_err(blitz::errors::RuntimeError::from)
         }))),
     );
 
@@ -725,7 +725,7 @@ fn run_test_file(
             vm.globals_rc().borrow_mut().properties.insert(
                 PropertyKey::String("$DONE".to_string()),
                 PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                    if crate::trace::enabled() {
+                    if trace::enabled() {
                         eprintln!("[DONE host] called args={:?}", args);
                     }
                     // Record only the first completion signal.

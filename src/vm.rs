@@ -170,12 +170,11 @@ fn get_global_bg_runtime() -> Arc<Runtime> {
                 .filter(|&n| n > 0 && n <= 1024); // upper bound for sanity
 
             let cpus = std::thread::available_parallelism()
-                .map(|n| n.get())
+                .map(std::num::NonZero::get)
                 .unwrap_or(4);
 
             // Reserve 1 core for main thread, but at least 1 worker
-            let threads = threads_from_env
-                .unwrap_or_else(|| cpus.saturating_sub(1).max(1));
+            let threads = threads_from_env.unwrap_or_else(|| cpus.saturating_sub(1).max(1));
 
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(threads)
@@ -1553,12 +1552,11 @@ impl Vm {
                 self.execute_return()?;
                 // Only stop if we've returned PAST the target frame depth
                 // (i.e., we've returned from the function we were waiting for)
-                if let Some(target_depth) = stop_at_frame_depth {
-                    if self.frames.len() < target_depth {
+                if let Some(target_depth) = stop_at_frame_depth
+                    && self.frames.len() < target_depth {
                         let result = self.pop().unwrap_or(Value::Undefined);
                         return Ok(StepOutcome::Return(result));
                     }
-                }
             }
             Op::Jump => {
                 let offset = self.read_short_signed()?;
