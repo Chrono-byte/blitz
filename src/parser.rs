@@ -4,7 +4,7 @@
 //! to OXC and returning the produced AST (`oxc_ast::ast::Program`). It handles:
 //! - Source text parsing into AST
 //! - Import extraction for module graph building
-//! - Error conversion to tsblitz error types
+//! - Error conversion to Blitz error types
 //!
 //! # Migration Note
 //!

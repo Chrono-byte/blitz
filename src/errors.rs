@@ -1,4 +1,4 @@
-//! Error types for the tsblitz kernel.
+//! Error types for the Blitz kernel.
 //!
 //! This module defines a structured error hierarchy using `thiserror` for
 //! ergonomic error handling throughout the VM subsystems.
@@ -26,7 +26,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-/// Top-level error enum for tsblitz.
+/// Top-level error enum for Blitz.
 ///
 /// This aggregates specific error kinds produced by different subsystems:
 /// - `Parser` for lexical/parse errors

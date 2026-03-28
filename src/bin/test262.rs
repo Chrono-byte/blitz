@@ -36,6 +36,7 @@ use clap::Parser as ClapParser;
 use serde::Deserialize;
 
 use blitz::compiler;
+use blitz::trace;
 use blitz::value::{ObjectData, PromiseState, PropertyDescriptor, PropertyKey};
 use blitz::{module::ModuleLoader, parser::Parser, typecheck, value::Value, vm::Vm};
 
@@ -724,6 +725,9 @@ fn run_test_file(
             vm.globals_rc().borrow_mut().properties.insert(
                 PropertyKey::String("$DONE".to_string()),
                 PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+                    if crate::trace::enabled() {
+                        eprintln!("[DONE host] called args={:?}", args);
+                    }
                     // Record only the first completion signal.
                     if done_state_for_cb.borrow().is_none() {
                         let first = args.first().cloned().unwrap_or(Value::Undefined);

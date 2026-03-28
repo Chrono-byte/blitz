@@ -116,7 +116,7 @@ fn run_program(
 // and evaluate entry modules; it handles parsing dependencies, compilation,
 // and execution into a VM.
 
-/// Command line arguments for the tsblitz executable.
+/// Command line arguments for the Blitz executable.
 #[derive(Parser, Debug)]
 #[command(name = "blitz", about = "Blitz — TypeScript VM (Rust runtime)")]
 struct Cli {
