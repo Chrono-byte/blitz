@@ -1116,12 +1116,15 @@ fn main() {
     };
 
     let exit_code = if failed.is_empty() { 0 } else { 1 };
-    
+
     eprintln!(
         "Test262: ran {}, passed {}, failed {} ({:.2}% pass rate)",
-        ran, passed, failed.len(), pass_pct
+        ran,
+        passed,
+        failed.len(),
+        pass_pct
     );
     print_bucket_summary("Sections:", &top_level, 12, false);
-    
+
     exit(exit_code);
 }

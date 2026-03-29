@@ -686,6 +686,13 @@ impl Vm {
                 }
             }
             _ => {
+                if crate::trace::enabled() {
+                    eprintln!("[trace] execute_call: callee not callable, dumping context...");
+                    crate::trace::value_string("[trace]   callee", &callee);
+                    for (i, v) in self.stack.iter().rev().take(8).enumerate() {
+                        crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
+                    }
+                }
                 self.dump_diag("Call failed: callee not callable", &callee);
                 return Err(
                     self.throw_type_error(&format!("{} is not a function", callee.type_name()))
@@ -759,11 +766,22 @@ impl Vm {
                 return Err(self.throw_type_error("null is not a function"));
             }
             _ => {
-                // Debug: print what value type we got
-                eprintln!(
-                    "CallWithThis ERROR: callee={:?}, receiver={:?}",
-                    callee, receiver
-                );
+                // Debug: print what value type we got and nearby stack when tracing
+                if crate::trace::enabled() {
+                    eprintln!(
+                        "[trace] execute_call_method: callee not callable, receiver and stack follow"
+                    );
+                    crate::trace::value_string("[trace]   callee", &callee);
+                    crate::trace::value_string("[trace]   receiver", &receiver);
+                    for (i, v) in self.stack.iter().rev().take(12).enumerate() {
+                        crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
+                    }
+                } else {
+                    eprintln!(
+                        "CallWithThis ERROR: callee={:?}, receiver={:?}",
+                        callee, receiver
+                    );
+                }
                 self.dump_diag("CallWithThis failed: callee not callable", &callee);
                 return Err(
                     self.throw_type_error(&format!("{} is not a function", callee.type_name()))
@@ -1107,6 +1125,14 @@ impl Vm {
                 result
             }
             _ => {
+                if crate::trace::enabled() {
+                    eprintln!("[trace] call_with_this: callee not callable (final fallback)");
+                    crate::trace::value_string("[trace]   callee", callee);
+                    crate::trace::value_string("[trace]   this_arg", this_arg);
+                    for (i, v) in self.stack.iter().rev().take(8).enumerate() {
+                        crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
+                    }
+                }
                 self.dump_diag("CallWithThis failed: callee not callable", callee);
                 Err(crate::errors::RuntimeError::from(
                     "CallWithThis: not a function",
@@ -3063,6 +3089,26 @@ impl Vm {
         let start = self.ip.saturating_sub(8);
         let end = usize::min(self.ip + 8, self.chunk.code.len());
         eprintln!("[diag] disasm window ({}..{}):", start, end);
+
+        // Print a brief summary of any function prototypes present in the
+        // current chunk to help map MakeClosure indexes to human-readable
+        // names when diagnosing callee/runtime mismatches.
+        eprintln!(
+            "[diag] current chunk functions (len={}):",
+            self.chunk.functions.len()
+        );
+        for (i, proto) in self.chunk.functions.iter().enumerate().take(40) {
+            eprintln!(
+                "[diag]   fn[{}] name='{}' arity={} has_prototype_property={} is_async={} proto_chunk_ptr={:p} chunk_len={}",
+                i,
+                proto.name,
+                proto.arity,
+                proto.has_prototype_property,
+                proto.is_async,
+                Rc::as_ptr(&proto.chunk),
+                proto.chunk.code.len()
+            );
+        }
 
         let mut j = start;
         while j < end {
