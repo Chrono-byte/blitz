@@ -285,6 +285,16 @@ impl Vm {
         Ok(())
     }
 
+    /// Run the prototype mark/sweep collector and return mark statistics.
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    pub fn collect_garbage_prototype(&self) -> crate::gc::GcStats {
+        let mut roots: Vec<Value> = Vec::new();
+        roots.push(Value::Object(Rc::clone(&self.globals)));
+        roots.extend(self.stack.iter().cloned());
+        roots.extend(self.locals.iter().map(|c| c.borrow().clone()));
+        crate::gc::collect(&roots)
+    }
+
     fn run_microtasks_if_needed(&mut self) -> Result<(), crate::errors::RuntimeError> {
         if self.microtasks.is_empty() {
             return Ok(());
@@ -665,7 +675,6 @@ impl Vm {
                     // If execution continues normally, clear it so unrelated
                     // future runtime errors are not masked.
                     self.pending_exception = false;
-                    self.run_microtasks_if_needed()?;
                 }
                 Ok(StepOutcome::Return(result)) => {
                     self.run_microtasks_if_needed()?;
@@ -773,10 +782,12 @@ impl Vm {
         match callee {
             Value::Builtin(f) => {
                 let result = (f.as_ref())(self, &args)?;
+                self.run_microtasks_if_needed()?;
                 self.stack.push(result);
             }
             Value::BuiltinObject(f, _props) => {
                 let result = (f.as_ref())(self, &args)?;
+                self.run_microtasks_if_needed()?;
                 self.stack.push(result);
             }
             Value::Closure { ref proto, env, .. } => {
@@ -848,6 +859,7 @@ impl Vm {
                 call_args.push(receiver);
                 call_args.extend_from_slice(&args);
                 let result = (f.as_ref())(self, &call_args)?;
+                self.run_microtasks_if_needed()?;
                 self.stack.push(result);
             }
             Value::BuiltinObject(f, _props) => {
@@ -855,6 +867,7 @@ impl Vm {
                 call_args.push(receiver);
                 call_args.extend_from_slice(&args);
                 let result = (f.as_ref())(self, &call_args)?;
+                self.run_microtasks_if_needed()?;
                 self.stack.push(result);
             }
             Value::Closure { ref proto, env, .. } => {
@@ -1183,6 +1196,7 @@ impl Vm {
                 call_args.push(this_arg.clone());
                 call_args.extend_from_slice(args);
                 let result = (f.as_ref())(self, &call_args)?;
+                self.run_microtasks_if_needed()?;
                 Ok(result)
             }
             Value::BuiltinObject(f, _props) => {
@@ -1190,6 +1204,7 @@ impl Vm {
                 call_args.push(this_arg.clone());
                 call_args.extend_from_slice(args);
                 let result = (f.as_ref())(self, &call_args)?;
+                self.run_microtasks_if_needed()?;
                 Ok(result)
             }
             Value::Closure { proto, .. } => {
@@ -1259,7 +1274,6 @@ impl Vm {
             match self.step(Some(target_frame_depth)) {
                 Ok(StepOutcome::Continue) => {
                     self.pending_exception = false;
-                    self.run_microtasks_if_needed()?;
                 }
                 Ok(StepOutcome::Return(result)) => {
                     self.stack.truncate(stack_base);
@@ -4362,5 +4376,18 @@ mod tests {
             get_property(&d, &PropertyKey::String("done".to_string()), 0).unwrap(),
             Value::Bool(true)
         ));
+    }
+
+    #[test]
+    fn class_declaration_binds_constructor_function() {
+        let src = r#"
+            class A {}
+        "#;
+        let session = Parser::parse_source(src).expect("parse ok");
+        let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+        assert!(matches!(vm.get_global("A"), Some(Value::Closure { .. })));
     }
 }

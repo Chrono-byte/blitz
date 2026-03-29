@@ -9,9 +9,9 @@ environment records: completing iterator and generator execution semantics.
 Current status
 --------------
 - Bytecode has `Yield` / `YieldStar` opcodes.
-- VM currently errors for both (`Generator support not implemented`).
-- Basic iterator helpers exist for arrays and `Symbol.iterator`, but generator
-  objects and resume protocols are not implemented.
+- VM now supports a baseline generator object with `next/throw/return`.
+- Remaining work focuses on delegation (`yield*`) and stronger protocol
+  semantics/edge cases.
 
 Work blocks
 -----------

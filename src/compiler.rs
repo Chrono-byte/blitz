@@ -606,10 +606,8 @@ impl Compiler {
                         oast::Declaration::FunctionDeclaration(f) => {
                             self.compile_function_declaration_oast(f)?
                         }
-                        oast::Declaration::ClassDeclaration(_) => {
-                            return Err(crate::errors::CompilerError::from(
-                                "exported class declarations not yet supported",
-                            ));
+                        oast::Declaration::ClassDeclaration(c) => {
+                            self.compile_class_declaration_oast(c)?;
                         }
                         _ => {}
                     }
@@ -650,6 +648,7 @@ impl Compiler {
             }
             OStmt::VariableDeclaration(v) => self.compile_variable_declaration_oast(v)?,
             OStmt::FunctionDeclaration(f) => self.compile_function_declaration_oast(f)?,
+            OStmt::ClassDeclaration(c) => self.compile_class_declaration_oast(c)?,
             OStmt::ExpressionStatement(e) => {
                 self.compile_expr_oast(&e.expression)?;
                 self.emit(Op::Pop, LINE);
@@ -1181,6 +1180,52 @@ impl Compiler {
                 self.patch_jump(end_jump);
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn compile_class_declaration_oast(
+        &mut self,
+        c: &oast::Class<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        let name =
+            c.id.as_ref()
+                .map(|id| id.name.to_string())
+                .ok_or_else(|| crate::errors::CompilerError::from("anonymous class declaration"))?;
+        let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
+        ctor_chunk.write(Op::Return as u8, LINE);
+        let proto = FunctionProto {
+            name: name.clone(),
+            span: c.span,
+            arity: 0,
+            chunk: Rc::new(ctor_chunk),
+            slot_types: Vec::new(),
+            slot_names: Vec::new(),
+            lexical_tdz: Vec::new(),
+            upvalues: Vec::new(),
+            has_rest: false,
+            has_prototype_property: true,
+            captures_this: false,
+            arguments_slot: None,
+            return_type: None,
+            is_strict: true,
+            is_constructor: true,
+            is_async: false,
+            is_generator: false,
+        };
+        let idx = self.chunk.add_function(proto);
+        self.emit(Op::MakeClosure, LINE);
+        self.emit_byte(idx as u8, LINE);
+        let slot = self
+            .resolve_local(&name)
+            .unwrap_or_else(|| self.add_local_with_mirror(name.clone(), None, self.is_root));
+        if self.is_root {
+            self.emit(Op::Dup, LINE);
+        }
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(slot as u8, LINE);
+        if self.is_root {
+            self.emit_set_global_name(&name);
         }
         Ok(())
     }
