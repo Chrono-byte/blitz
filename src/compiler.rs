@@ -99,6 +99,8 @@ pub struct Compiler {
     locals: Vec<String>,
     /// Type annotations for local variables
     local_types: Vec<Option<Type>>,
+    /// Per-local TDZ marker for lexical bindings.
+    local_tdz: Vec<bool>,
     /// Whether writes to this local should mirror to the global object.
     local_mirror_globals: Vec<bool>,
     /// Lexical scope stack for name visibility.
@@ -154,6 +156,7 @@ impl Compiler {
             source_text,
             locals: Vec::new(),
             local_types: Vec::new(),
+            local_tdz: Vec::new(),
             local_mirror_globals: Vec::new(),
             scopes: vec![Scope {
                 kind: ScopeKind::Function,
@@ -228,9 +231,16 @@ impl Compiler {
         let slot = self.locals.len();
         self.locals.push(name.clone());
         self.local_types.push(type_ann);
+        self.local_tdz.push(false);
         self.local_mirror_globals.push(mirror_global);
         self.scopes[scope_index].bindings.insert(name, slot);
         slot
+    }
+
+    fn mark_local_tdz(&mut self, slot: usize) {
+        if let Some(flag) = self.local_tdz.get_mut(slot) {
+            *flag = true;
+        }
     }
 
     fn add_local_with_mirror(
@@ -470,7 +480,8 @@ impl Compiler {
                         if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
                             self.add_var_local(name, None, mirror_global);
                         } else {
-                            self.add_local_with_mirror(name, None, mirror_global);
+                            let slot = self.add_local_with_mirror(name, None, mirror_global);
+                            self.mark_local_tdz(slot);
                         }
                     }
                 }
@@ -511,7 +522,9 @@ impl Compiler {
                 {
                     slot
                 } else {
-                    self.add_local_with_mirror(name.clone(), None, mirror_global)
+                    let slot = self.add_local_with_mirror(name.clone(), None, mirror_global);
+                    self.mark_local_tdz(slot);
+                    slot
                 }
             };
             if self.is_root {
@@ -2047,6 +2060,7 @@ impl Compiler {
             source_text: Rc::clone(&self.source_text),
             locals: Vec::new(),
             local_types: Vec::new(),
+            local_tdz: Vec::new(),
             local_mirror_globals: Vec::new(),
             scopes: vec![Scope {
                 kind: ScopeKind::Function,
@@ -2066,12 +2080,14 @@ impl Compiler {
 
         // Parameter placeholders (no type information available here).
         let mut param_type_opts: Vec<Option<Type>> = Vec::new();
+        let mut param_slot_names: Vec<Option<String>> = Vec::new();
         for p in &func.params.items {
             let pname = match &p.pattern {
                 oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
                 _ => "_".to_string(),
             };
             param_type_opts.push(None);
+            param_slot_names.push(Some(pname.clone()));
             inner.add_local_with_mirror(pname, None, false);
         }
         if let Some(rest) = &func.params.rest {
@@ -2080,6 +2096,7 @@ impl Compiler {
                 _ => "_".to_string(),
             };
             param_type_opts.push(None);
+            param_slot_names.push(Some(pname.clone()));
             inner.add_local_with_mirror(pname, None, false);
         }
         let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
@@ -2103,11 +2120,19 @@ impl Compiler {
 
         inner.emit(Op::Return, LINE);
         let chunk = std::mem::take(&mut inner.chunk);
+        let has_rest = func.params.rest.is_some();
         let slot_types: Vec<Option<Type>> = param_type_opts
             .into_iter()
             .chain(inner.local_types)
             .collect();
-        let has_rest = func.params.rest.is_some();
+        let slot_names: Vec<Option<String>> = param_slot_names
+            .into_iter()
+            .chain(inner.locals.into_iter().map(Some))
+            .collect();
+        let lexical_tdz: Vec<bool> =
+            std::iter::repeat_n(false, func.params.items.len() + usize::from(has_rest))
+                .chain(inner.local_tdz)
+                .collect();
         let has_prototype_property = !func.r#async;
         let is_constructor = !func.r#async && !func.generator;
         let is_strict = func
@@ -2121,6 +2146,8 @@ impl Compiler {
                 arity: func.params.items.len() + if has_rest { 1 } else { 0 },
                 chunk: Rc::new(chunk),
                 slot_types,
+                slot_names,
+                lexical_tdz,
                 upvalues: inner.captured_upvalues,
                 has_rest,
                 has_prototype_property,
@@ -2148,6 +2175,7 @@ impl Compiler {
             source_text: Rc::clone(&self.source_text),
             locals: Vec::new(),
             local_types: Vec::new(),
+            local_tdz: Vec::new(),
             local_mirror_globals: Vec::new(),
             scopes: vec![Scope {
                 kind: ScopeKind::Function,
@@ -2166,12 +2194,14 @@ impl Compiler {
         };
 
         let mut param_type_opts: Vec<Option<Type>> = Vec::new();
+        let mut param_slot_names: Vec<Option<String>> = Vec::new();
         for p in &func.params.items {
             let pname = match &p.pattern {
                 oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
                 _ => "_".to_string(),
             };
             param_type_opts.push(None);
+            param_slot_names.push(Some(pname.clone()));
             inner.add_local_with_mirror(pname, None, false);
         }
         if let Some(rest) = &func.params.rest {
@@ -2180,6 +2210,7 @@ impl Compiler {
                 _ => "_".to_string(),
             };
             param_type_opts.push(None);
+            param_slot_names.push(Some(pname.clone()));
             inner.add_local_with_mirror(pname, None, false);
         }
         // Pre-declare nested functions inside this function body.
@@ -2216,11 +2247,19 @@ impl Compiler {
         }
 
         let chunk = std::mem::take(&mut inner.chunk);
+        let has_rest = func.params.rest.is_some();
         let slot_types: Vec<Option<Type>> = param_type_opts
             .into_iter()
             .chain(inner.local_types)
             .collect();
-        let has_rest = func.params.rest.is_some();
+        let slot_names: Vec<Option<String>> = param_slot_names
+            .into_iter()
+            .chain(inner.locals.into_iter().map(Some))
+            .collect();
+        let lexical_tdz: Vec<bool> =
+            std::iter::repeat_n(false, func.params.items.len() + usize::from(has_rest))
+                .chain(inner.local_tdz)
+                .collect();
         let is_strict = Self::has_use_strict_directive(&func.body.statements);
         Ok((
             FunctionProto {
@@ -2229,6 +2268,8 @@ impl Compiler {
                 arity: func.params.items.len() + if has_rest { 1 } else { 0 },
                 chunk: Rc::new(chunk),
                 slot_types,
+                slot_names,
+                lexical_tdz,
                 upvalues: inner.captured_upvalues,
                 has_rest,
                 has_prototype_property: false,

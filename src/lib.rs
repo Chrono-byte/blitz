@@ -58,6 +58,7 @@
 // bundling flows.
 pub mod bytecode;
 pub mod compiler;
+pub mod environment;
 pub mod errors;
 pub mod lexer;
 pub mod module;
