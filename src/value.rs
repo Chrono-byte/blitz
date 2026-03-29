@@ -447,7 +447,7 @@ impl Value {
         }
     }
 
-    /// Return the internal [[Class]] / object tag used by Object.prototype.toString.
+    /// Return the internal `Class` / object tag used by Object.prototype.toString.
     pub fn object_tag(&self) -> &'static str {
         match self {
             Value::Uninitialized => "Undefined",
@@ -465,7 +465,7 @@ impl Value {
         }
     }
 
-    /// Returns whether this value exposes [[Construct]], i.e. can act as a constructor.
+    /// Returns whether this value exposes `Construct`, i.e. can act as a constructor.
     pub fn is_constructable(&self) -> bool {
         match self {
             Value::Closure { proto, .. } => proto.has_prototype_property && proto.is_constructor,

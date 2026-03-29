@@ -45,6 +45,25 @@ impl Vm {
         self.microtasks.push_back(Box::new(job));
     }
 
+    /// Install a host hook which will be invoked for unhandled promise
+    /// rejections and microtask exceptions. The hook receives (vm, promise, reason)
+    /// where `promise` is the rejected promise object or `Undefined` for
+    /// microtask exceptions that aren't tied to a specific promise.
+    pub fn set_unhandled_rejection_hook<F>(&mut self, hook: F)
+    where
+        F: FnMut(&mut Vm, Value, Value) + 'static,
+    {
+        self.unhandled_rejection_hook = Some(Rc::new(RefCell::new(hook)));
+    }
+
+    /// Invoke the installed unhandled rejection hook, if present.
+    pub(crate) fn call_unhandled_rejection(&mut self, promise: Value, reason: Value) {
+        if let Some(hook_rc) = self.unhandled_rejection_hook.as_ref().map(Rc::clone) {
+            let mut hook = hook_rc.borrow_mut();
+            (hook)(self, promise, reason);
+        }
+    }
+
     /// Drain all pending microtasks, executing them in FIFO order.
     ///
     /// # Errors
@@ -60,7 +79,14 @@ impl Vm {
                 // Record the last uncaught exception so callers or host hooks
                 // can inspect it. Convert the runtime error into a JS value
                 // string for now; hosts may implement richer reporting.
-                self.last_uncaught_exception = Some(Value::String(format!("{}", err)));
+                let exc_val = Value::String(format!("{}", err));
+                self.last_uncaught_exception = Some(exc_val.clone());
+                // If a host hook is installed, call it with Undefined promise
+                // to indicate this was a microtask exception.
+                if let Some(hook_rc) = self.unhandled_rejection_hook.as_ref().map(Rc::clone) {
+                    let mut hook = hook_rc.borrow_mut();
+                    (hook)(self, Value::Undefined, exc_val.clone());
+                }
                 // Continue draining remaining microtasks rather than returning.
                 continue;
             }

@@ -52,6 +52,7 @@ impl Vm {
             construct_new_target: None,
             last_uncaught_exception: None,
             microtasks: VecDeque::new(),
+            unhandled_rejection_hook: None,
             lexical_env: Rc::clone(&global_env),
             global_env,
             yield_star_queue: None,

@@ -361,13 +361,22 @@ pub(crate) fn reject_pending_promise(
         let stored_reason = reason.clone();
         *state = PromiseState::Rejected(reason);
         drop(state);
-        for callback in callbacks {
-            let mut arg_reason = Some(stored_reason.clone());
-            vm.queue_microtask(move |vm| {
-                let args = [arg_reason.take().unwrap()];
-                let _ = vm.call_value_with_this(&callback, &Value::Undefined, &args);
-                Ok(())
-            });
+        if callbacks.is_empty() {
+            // No rejection handlers registered: notify host hook about an
+            // unhandled rejection. Hosts may inspect the promise and reason.
+            // The promise object is not directly accessible here, so pass
+            // Undefined as the placeholder. Embedding the Promise object
+            // would require changing PromiseState layout.
+            vm.call_unhandled_rejection(Value::Undefined, stored_reason.clone());
+        } else {
+            for callback in callbacks {
+                let mut arg_reason = Some(stored_reason.clone());
+                vm.queue_microtask(move |vm| {
+                    let args = [arg_reason.take().unwrap()];
+                    let _ = vm.call_value_with_this(&callback, &Value::Undefined, &args);
+                    Ok(())
+                });
+            }
         }
     }
 }
@@ -387,10 +396,18 @@ fn shadowrealm_evaluate(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
         .map_err(|e| syntax_error(vm, format!("ShadowRealm evaluate parse: {}", e)))?;
     let chunk = compiler::compile_oxc(session.program(), &source)
         .map_err(|e| syntax_error(vm, format!("ShadowRealm evaluate compile: {}", e)))?;
-    record
+
+    // Run the code inside the ShadowRealm VM and clone the resulting value
+    // into the current (host) VM using a pragmatic structured-clone that
+    // supports primitives, plain objects, and arrays. Non-cloneable values
+    // (functions, promises, symbols, accessors, cyclic structures) will
+    // result in a TypeError to avoid leaking object identity across realms.
+    let inner_result = record
         .borrow_vm()
         .run(chunk)
-        .map_err(|err| vm.throw_type_error(&format!("ShadowRealm evaluate error: {}", err)))
+        .map_err(|err| vm.throw_type_error(&format!("ShadowRealm evaluate error: {}", err)))?;
+
+    Ok(clone_value_across_realms(vm, &inner_result).map_err(|s| vm.throw_type_error(&s))?)
 }
 
 fn shadowrealm_import_value(
@@ -468,7 +485,18 @@ fn shadowrealm_import_value(
         })();
 
         match result {
-            Ok(value) => fulfill_pending_promise(vm, &promise, value),
+            Ok(value) => match clone_value_across_realms(vm, &value) {
+                Ok(cloned) => fulfill_pending_promise(vm, &promise, cloned),
+                Err(err) => {
+                    let err_val = vm
+                        .create_intrinsic_error(
+                            "TypeError",
+                            &format!("ShadowRealm clone failed: {}", err),
+                        )
+                        .unwrap_or(Value::String(format!("{}", err)));
+                    reject_pending_promise(vm, &promise, err_val);
+                }
+            },
             Err(msg) => {
                 let err_val = vm
                     .create_intrinsic_error("TypeError", &msg)
@@ -526,8 +554,22 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
 
     match result {
         Ok(value) => {
-            let mut state = promise.borrow_mut();
-            *state = PromiseState::Fulfilled(value);
+            // Return a namespace value cloned into the host realm rather than
+            // directly returning a reference into the imported VM. If cloning
+            // fails, reject the promise.
+            match clone_value_across_realms(vm, &value) {
+                Ok(cloned) => {
+                    let mut state = promise.borrow_mut();
+                    *state = PromiseState::Fulfilled(cloned);
+                }
+                Err(err) => {
+                    let mut state = promise.borrow_mut();
+                    *state = PromiseState::Rejected(Value::String(format!(
+                        "ShadowRealm clone failed: {}",
+                        err
+                    )));
+                }
+            }
         }
         Err(reason) => {
             let mut state = promise.borrow_mut();
@@ -860,6 +902,112 @@ fn canonical_index_key(s: &str) -> Option<u64> {
         return None;
     }
     Some(idx)
+}
+
+/// Pragmatic structured-clone helper used for cross-realm ShadowRealm value
+/// transfers. Supports primitives, plain objects (data properties), and
+/// arrays with non-cyclic graphs. Returns an Err(string) when cloning is
+/// unsupported (functions, promises, symbols, accessors, or cycles).
+fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String> {
+    use std::collections::HashMap;
+
+    fn helper(
+        vm: &mut Vm,
+        v: &Value,
+        visited: &mut HashMap<usize, Value>,
+    ) -> Result<Value, String> {
+        match v {
+            Value::Undefined => Ok(Value::Undefined),
+            Value::Null => Ok(Value::Null),
+            Value::Bool(b) => Ok(Value::Bool(*b)),
+            Value::Number(n) => Ok(Value::Number(*n)),
+            Value::String(s) => Ok(Value::String(s.clone())),
+            Value::BigInt(bi) => Ok(Value::BigInt(bi.clone())),
+            Value::Symbol(_, _) => Err("Cannot clone Symbol across realms".to_string()),
+            Value::Promise(_) => Err("Cannot clone Promise across realms".to_string()),
+            Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. } => {
+                Err("Cannot clone functions/closures across realms".to_string())
+            }
+            Value::Array(arr_rc, props) => {
+                let addr = Rc::as_ptr(arr_rc) as usize;
+                if let Some(_existing) = visited.get(&addr) {
+                    return Err("Cycle detected during clone".to_string());
+                }
+                // Mark as visited with a placeholder to detect cycles.
+                visited.insert(addr, Value::Undefined);
+                let mut out: Vec<Option<Value>> = Vec::new();
+                for slot in arr_rc.borrow().iter() {
+                    if let Some(v) = slot {
+                        let cloned = helper(vm, v, visited)?;
+                        out.push(Some(cloned));
+                    } else {
+                        out.push(None);
+                    }
+                }
+                // Clone properties (shallow data properties only)
+                let mut prop_map = HashMap::new();
+                for (k, desc) in &props.borrow().properties {
+                    match desc {
+                        PropertyDescriptor::Data { value, .. } => {
+                            let cloned_v = helper(vm, value, visited)?;
+                            prop_map.insert(k.clone(), cloned_v);
+                        }
+                        _ => {
+                            return Err("Cannot clone accessor properties across realms".to_string());
+                        }
+                    }
+                }
+                // Build array in host realm
+                let arr_rc2 = Rc::new(RefCell::new(out));
+                let props2 = Rc::new(RefCell::new(ObjectData::new()));
+                // copy prototype to host realm's Array.prototype if available
+                if let Some(proto) = vm.realm().intrinsics.array_prototype.clone() {
+                    props2.borrow_mut().prototype = proto;
+                }
+                // copy length property
+                props2.borrow_mut().properties.insert(
+                    PropertyKey::String("length".to_string()),
+                    PropertyDescriptor::data(Value::Number(arr_rc2.borrow().len() as f64)),
+                );
+                for (k, v) in prop_map {
+                    props2
+                        .borrow_mut()
+                        .properties
+                        .insert(k, PropertyDescriptor::data(v));
+                }
+                Ok(Value::Array(arr_rc2, props2))
+            }
+            Value::Object(obj_rc) => {
+                let addr = Rc::as_ptr(obj_rc) as usize;
+                if let Some(_existing) = visited.get(&addr) {
+                    return Err("Cycle detected during clone".to_string());
+                }
+                visited.insert(addr, Value::Undefined);
+                let mut out = ObjectData::new();
+                // Determine prototype mapping: use host intrinsics where possible
+                if let Some(proto) = vm.realm().intrinsics.object_prototype.clone() {
+                    out.prototype = proto;
+                }
+                for (k, desc) in &obj_rc.borrow().properties {
+                    match desc {
+                        PropertyDescriptor::Data { value, .. } => {
+                            let cloned_v = helper(vm, value, visited)?;
+                            out.properties
+                                .insert(k.clone(), PropertyDescriptor::data(cloned_v));
+                        }
+                        _ => {
+                            return Err("Cannot clone accessor properties across realms".to_string());
+                        }
+                    }
+                }
+                Ok(Value::Object(Rc::new(RefCell::new(out))))
+            }
+            Value::Uninitialized => Err("Cannot clone uninitialized value".to_string()),
+        }
+    }
+
+    let mut visited: HashMap<usize, Value> = HashMap::new();
+    helper(vm, value, &mut visited)
 }
 
 /// Install a minimal set of kernel constructors and prototypes on `globals`.

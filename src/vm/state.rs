@@ -178,6 +178,11 @@ pub struct Vm {
     /// Last uncaught thrown JS value observed during unwinding.
     pub(crate) last_uncaught_exception: Option<Value>,
     pub(super) microtasks: VecDeque<Microtask>,
+    /// Optional hook invoked when an unhandled rejection or microtask exception
+    /// is observed. The hook receives two Values: the first is the promise
+    /// object (or Undefined for non-promise microtask exceptions) and the
+    /// second is the rejection reason / exception value.
+    pub(super) unhandled_rejection_hook: Option<Rc<RefCell<dyn FnMut(&mut Vm, Value, Value)>>>,
     pub(super) lexical_env: Rc<RefCell<EnvironmentRecord>>,
     pub(super) global_env: Rc<RefCell<EnvironmentRecord>>,
     pub(super) yield_star_queue: Option<VecDeque<Value>>,

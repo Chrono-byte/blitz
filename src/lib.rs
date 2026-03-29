@@ -1,8 +1,8 @@
-//! Blitz VM: **TypeScript/JavaScript VM in Rust**.
+//! Blitz: **ECMAScript Engine in Rust**.
 //!
 //! # Architecture
 //!
-//! This crate provides the execution engine for JavaScript/TypeScript code:
+//! This crate provides the execution engine for ECMAScript code:
 //!
 //! - **Kernel (Rust)** - The bare-metal runtime layer containing:
 //!   - [`lexer`] - Tokenizes source code into tokens
@@ -27,7 +27,7 @@
 //! | [`trace`] | Debug tracing and logging |
 //! | [`mod@typecheck`] | TypeScript type checking integration |
 //! | [`value`] | Runtime value system |
-//! | [`vm`] - | Bytecode interpreter and execution engine |
+//! | [`vm`] | Bytecode interpreter and execution engine |
 //!
 //! # Usage
 //!

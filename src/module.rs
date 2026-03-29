@@ -95,7 +95,7 @@ pub struct ModuleRecord {
     state: ModuleState,
     /// Assigned numeric module index used by the VM module table. Set during instantiation.
     pub module_index: Option<usize>,
-    /// Export slots: mapping export name -> shared slot (Rc<RefCell<Value>>)
+    /// Export slots: mapping export name -> shared slot (`Rc<RefCell<Value>>`)
     pub exports: HashMap<String, Rc<RefCell<Value>>>,
     /// Import bindings: local name -> exporter slot
     pub imports: HashMap<String, Rc<RefCell<Value>>>,
@@ -190,7 +190,7 @@ impl ModuleLoader {
     }
 
     /// Instantiate modules by allocating export slots. This is a simple
-    /// implementation that creates shared Rc<RefCell<Value>> slots for
+    /// implementation that creates shared `Rc<RefCell<Value>>` slots for
     /// exported names so importers can hold live bindings to the same slot.
     pub fn instantiate_all(&mut self) -> Result<(), BundlerError> {
         // For each module, examine its AST for exported names and allocate slots.

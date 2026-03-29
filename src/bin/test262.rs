@@ -8,10 +8,10 @@ Usage:
 - Optionally set `TEST262_EXCLUDE` to a comma-separated list of segments to skip
 
 CLI (preferred over env):
-- --segment <seg>[,<seg>...] (repeatable)
-- --exclude <seg>[,<seg>...] (repeatable)
-- --filter <substring>
-- --limit <n>
+- --segment seg [,seg...] (repeatable)
+- --exclude seg [,seg...] (repeatable)
+- --filter substring
+- --limit number
 
 Segments may be labels like: annexB, language, built-ins, intl402, staging
 or paths relative to test262/test (e.g. built-ins/Array).
