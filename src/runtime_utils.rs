@@ -119,11 +119,11 @@ pub(crate) fn resolve_promise_with_value(
             return Ok(());
         }
 
-        if let Value::Promise(ref p_rc) = value {
-            if Rc::ptr_eq(p_rc, result_promise) {
-                *already_resolved.borrow_mut() = true;
-                return Err(vm.throw_type_error("Chaining cycle detected"));
-            }
+        if let Value::Promise(ref p_rc) = value
+            && Rc::ptr_eq(p_rc, result_promise)
+        {
+            *already_resolved.borrow_mut() = true;
+            return Err(vm.throw_type_error("Chaining cycle detected"));
         }
 
         if value.is_object() {
