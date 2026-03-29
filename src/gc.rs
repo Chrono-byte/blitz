@@ -27,6 +27,7 @@ pub fn collect(roots: &[Value]) -> GcStats {
     }
 }
 
+/// Recursively mark all reachable values from the given root.
 fn mark_value(value: &Value, marked: &mut HashSet<usize>) {
     match value {
         Value::Object(obj) => mark_object(obj, marked),

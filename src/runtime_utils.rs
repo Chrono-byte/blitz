@@ -543,6 +543,7 @@ fn own_property_descriptor(obj: &Value, key: &PropertyKey) -> Option<PropertyDes
     }
 }
 
+/// Returns the value of the own property descriptor for the given key, if one exists.
 pub fn own_property_descriptor_value(obj: &Value, key: &PropertyKey) -> Option<Value> {
     own_property_descriptor(obj, key).map(|desc| {
         let mut obj = ObjectData::new();

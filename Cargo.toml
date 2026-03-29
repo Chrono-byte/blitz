@@ -5,7 +5,7 @@ edition = "2024"
 description = "ECMAScript VM: Rust base layer"
 
 [features]
-default = []
+default = ["gc_mark_sweep_prototype"]
 gc_mark_sweep_prototype = []
 
 [[bin]]
@@ -27,7 +27,7 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 oxc_resolver = "11.17.1"
 thiserror = "2.0"
-tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread"] }
 fastrand = "2.1"
 regex = "1"
 num-bigint = "0.4"
