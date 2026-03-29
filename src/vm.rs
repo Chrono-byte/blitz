@@ -47,7 +47,7 @@ use crate::bytecode::{Chunk, FunctionProto, Op};
 use crate::environment::EnvironmentRecord;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
-use crate::runtime_utils::{fulfill_pending_promise, reject_pending_promise};
+use crate::runtime_utils::{reject_pending_promise, resolve_promise_with_value};
 use crate::typecheck::Type;
 use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
 use std::cell::RefCell;
@@ -437,16 +437,18 @@ impl Vm {
             let caller_locals = vm.locals.clone();
             let caller_this = vm.this_value.clone();
             let caller_env = vm.current_closure_env.clone();
+            let caller_lexical_env = vm.lexical_env.clone();
             let caller_slot_types = vm.current_slot_types.clone();
             let caller_frame_len = vm.frames.len();
             let caller_handler_len = vm.handlers.len();
+            let thrown_value = vm.stack.last().cloned();
 
             vm.last_uncaught_exception = None;
             let exec_result = (|| {
                 let call_args = pending_call_args.take().unwrap();
                 let this_arg = pending_this_arg.take().unwrap();
                 vm.push_call_frame(&proto, &env, call_args, this_arg)?;
-                vm.run_until_return(stack_base)
+                vm.run_until_return(stack_base, false)
             })();
 
             vm.chunk = caller_chunk;
@@ -454,6 +456,7 @@ impl Vm {
             vm.locals = caller_locals;
             vm.this_value = caller_this;
             vm.current_closure_env = caller_env;
+            vm.lexical_env = caller_lexical_env;
             vm.current_slot_types = caller_slot_types;
             vm.stack = saved_stack;
             vm.frames.truncate(caller_frame_len);
@@ -461,16 +464,17 @@ impl Vm {
 
             match exec_result {
                 Ok(result) => {
-                    fulfill_pending_promise(vm, &promise_for_job, result);
+                    let _ = resolve_promise_with_value(vm, &promise_for_job, result);
                 }
                 Err(err) => {
-                    let reason = vm
-                        .last_uncaught_exception
-                        .take()
-                        .unwrap_or(Value::String(format!("{}", err)));
+                    let reason = thrown_value
+                        .or_else(|| vm.last_uncaught_exception.take())
+                        .unwrap_or_else(|| Value::String(format!("{}", err)));
                     reject_pending_promise(vm, &promise_for_job, reason);
                 }
             }
+
+            vm.run_microtasks_if_needed()?;
 
             Ok(())
         });
@@ -575,8 +579,7 @@ impl Vm {
             self.module_loader = Some(ModuleLoader::new());
         }
         // SAFETY: we just ensured module_loader is Some
-        self.module_loader
-            .get_or_insert_with(|| ModuleLoader::new())
+        self.module_loader.get_or_insert_with(ModuleLoader::new)
     }
 
     /// Enter a new declarative lexical environment whose outer is the current environment.
@@ -950,14 +953,18 @@ impl Vm {
                 let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
                 let result = (f.as_ref())(self, &args)?;
                 self.this_value = prev_this;
-                self.run_microtasks_if_needed()?;
+                if self.frames.is_empty() {
+                    self.run_microtasks_if_needed()?;
+                }
                 self.stack.push(result);
             }
             Value::BuiltinObject(f, _props) => {
                 let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
                 let result = (f.as_ref())(self, &args)?;
                 self.this_value = prev_this;
-                self.run_microtasks_if_needed()?;
+                if self.frames.is_empty() {
+                    self.run_microtasks_if_needed()?;
+                }
                 self.stack.push(result);
             }
             Value::Closure { ref proto, env, .. } => {
@@ -1042,7 +1049,9 @@ impl Vm {
                 let prev_this = std::mem::replace(&mut self.this_value, receiver);
                 let result = (f.as_ref())(self, &call_args)?;
                 self.this_value = prev_this;
-                self.run_microtasks_if_needed()?;
+                if self.frames.is_empty() {
+                    self.run_microtasks_if_needed()?;
+                }
                 self.stack.push(result);
             }
             Value::BuiltinObject(f, _props) => {
@@ -1052,7 +1061,9 @@ impl Vm {
                 let prev_this = std::mem::replace(&mut self.this_value, receiver);
                 let result = (f.as_ref())(self, &call_args)?;
                 self.this_value = prev_this;
-                self.run_microtasks_if_needed()?;
+                if self.frames.is_empty() {
+                    self.run_microtasks_if_needed()?;
+                }
                 self.stack.push(result);
             }
             Value::Closure { ref proto, env, .. } => {
@@ -1493,7 +1504,7 @@ impl Vm {
                     _ => unreachable!(),
                 };
                 self.push_call_frame(proto, &closure_env, call_args, this_arg.clone())?;
-                let result = self.run_until_return(stack_base);
+                let result = self.run_until_return(stack_base, true);
                 // Restore caller state (run_until_return already truncated stack)
                 self.chunk = caller_chunk;
                 self.ip = caller_ip;
@@ -1526,6 +1537,7 @@ impl Vm {
     fn run_until_return(
         &mut self,
         stack_base: usize,
+        drain_microtasks: bool,
     ) -> Result<Value, crate::errors::RuntimeError> {
         let target_frame_depth = self.frames.len();
         loop {
@@ -1535,7 +1547,9 @@ impl Vm {
                 }
                 Ok(StepOutcome::Return(result)) => {
                     self.stack.truncate(stack_base);
-                    self.run_microtasks_if_needed()?;
+                    if drain_microtasks {
+                        self.run_microtasks_if_needed()?;
+                    }
                     return Ok(result);
                 }
                 Ok(StepOutcome::Yield(_)) => {
@@ -3315,6 +3329,7 @@ impl Vm {
                 // at a higher level (e.g., by the test runner or JavaScript
                 // try-catch blocks that don't create VM-level handlers).
                 self.last_uncaught_exception = Some(thrown.clone());
+                self.stack.push(thrown.clone());
                 return Err(match thrown {
                     Value::String(s) => {
                         crate::errors::RuntimeError::from(format!("Uncaught: {}", s))

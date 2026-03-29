@@ -467,7 +467,6 @@ impl Op {
 }
 
 // Safe conversions between `u8` and `Op`.
-// Implementing TryFrom<u8> avoids the previous unsafe `transmute` approach.
 impl TryFrom<u8> for Op {
     type Error = ();
 

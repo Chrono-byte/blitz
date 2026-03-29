@@ -109,10 +109,27 @@ if (Error.prototype && !Error.prototype.toString) {
   };
 }
 
-(Error as any) = ErrorImpl;
-(TypeError as any) = TypeErrorImpl;
-(RangeError as any) = RangeErrorImpl;
-(ReferenceError as any) = ReferenceErrorImpl;
-(SyntaxError as any) = SyntaxErrorImpl;
-(EvalError as any) = EvalErrorImpl;
-(URIError as any) = URIErrorImpl;
+// Preserve kernel constructors when they already exist. The kernel runtime
+// now provides working Error subclasses, and replacing them with the soft
+// shims can degrade exception construction into primitive-string throws.
+if (typeof Error !== "function") {
+  (Error as any) = ErrorImpl;
+}
+if (typeof TypeError !== "function") {
+  (TypeError as any) = TypeErrorImpl;
+}
+if (typeof RangeError !== "function") {
+  (RangeError as any) = RangeErrorImpl;
+}
+if (typeof ReferenceError !== "function") {
+  (ReferenceError as any) = ReferenceErrorImpl;
+}
+if (typeof SyntaxError !== "function") {
+  (SyntaxError as any) = SyntaxErrorImpl;
+}
+if (typeof EvalError !== "function") {
+  (EvalError as any) = EvalErrorImpl;
+}
+if (typeof URIError !== "function") {
+  (URIError as any) = URIErrorImpl;
+}

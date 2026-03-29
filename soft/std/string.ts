@@ -133,17 +133,28 @@ if (!String.prototype.padEnd) {
   };
 }
 
-// Basic String constructor implementation
+// Basic String constructor implementation.
+//
+// The soft layer should not recursively call the reassigned global `String`
+// binding here, because that would route back into this same function and
+// break `String(value)` coercion for objects and functions. Use the kernel
+// stringification helper when available, and only fall back to a local
+// primitive conversion when it is not.
+const nativeToString = (globalThis as any).__native_toString;
 const StringImpl: StringConstructor = function (value?: any): string {
-  // Avoid `instanceof` since parser subset doesn't support it. Heuristically
-  // detect constructor call by checking if `this` has a `__is_constructor_call` flag
-  // that the runtime may set; otherwise assume function call form.
   try {
     if ((this as any) && (this as any).__is_constructor_call) {
       return new String(value);
     }
   } catch (_) {}
-  return value !== undefined ? String(value) : "";
+
+  if (value === undefined) {
+    return "";
+  }
+  if (typeof nativeToString === "function") {
+    return nativeToString(value);
+  }
+  return "" + value;
 } as any;
 
 StringImpl.fromCharCode = function (...codes: number[]): string {

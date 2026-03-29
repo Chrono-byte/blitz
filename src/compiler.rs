@@ -475,8 +475,7 @@ impl Compiler {
                         _ => continue,
                     };
                     if self.resolve_local(&name).is_none() {
-                        let mirror_global = self.is_root
-                            && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
+                        let mirror_global = self.is_root;
                         if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
                             self.add_var_local(name, None, mirror_global);
                         } else {
@@ -520,8 +519,7 @@ impl Compiler {
         name: &str,
         kind: oxc_ast::ast::VariableDeclarationKind,
     ) -> Result<(), crate::errors::CompilerError> {
-        let mirror_global =
-            self.is_root && matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var);
+        let mirror_global = self.is_root;
         let slot = if matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var) {
             self.resolve_local(name)
                 .unwrap_or_else(|| self.add_var_local(name.to_string(), None, mirror_global))
@@ -867,8 +865,7 @@ impl Compiler {
                                         ));
                                     }
                                 };
-                                let mirror_global = self.is_root
-                                    && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
+                                let mirror_global = self.is_root;
                                 let slot =
                                     if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var)
                                     {
@@ -1274,10 +1271,17 @@ impl Compiler {
                     n.raw.as_ref().map(oxc_span::Atom::as_str).ok_or_else(|| {
                         crate::errors::CompilerError::from("invalid bigint literal")
                     })?;
-                let digits = raw.strip_suffix('n').unwrap_or(raw);
-                let parsed = digits
-                    .parse::<i128>()
-                    .map_err(|_| crate::errors::CompilerError::from("invalid bigint literal"))?;
+                let digits = raw.strip_suffix('n').unwrap_or(raw).replace('_', "");
+                let parsed = if let Some(hex) = digits.strip_prefix("0x") {
+                    i128::from_str_radix(hex, 16)
+                } else if let Some(bin) = digits.strip_prefix("0b") {
+                    i128::from_str_radix(bin, 2)
+                } else if let Some(oct) = digits.strip_prefix("0o") {
+                    i128::from_str_radix(oct, 8)
+                } else {
+                    digits.parse::<i128>()
+                }
+                .map_err(|_| crate::errors::CompilerError::from("invalid bigint literal"))?;
                 self.emit_constant(Value::BigInt(parsed), LINE);
             }
             OExpr::StringLiteral(s) => self.emit_constant(Value::String(s.value.to_string()), LINE),
@@ -1859,9 +1863,17 @@ impl Compiler {
                     self.patch_jump(jump_end);
                 }
                 oast::LogicalOperator::Coalesce => {
-                    return Err(crate::errors::CompilerError::from(
-                        "?? logical coalesce not supported",
-                    ));
+                    self.compile_expr_oast(&l.left)?;
+                    self.emit(Op::Dup, LINE);
+                    self.emit(Op::Undefined, LINE);
+                    self.emit(Op::Eq, LINE);
+                    self.emit(Op::JumpIfFalse, LINE);
+                    let jump_end = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.emit(Op::Pop, LINE);
+                    self.compile_expr_oast(&l.right)?;
+                    self.patch_jump(jump_end);
                 }
             },
             OExpr::ConditionalExpression(c) => {
@@ -2033,6 +2045,13 @@ impl Compiler {
                 }
                 self.emit(Op::Call, LINE);
                 self.emit_byte((arg_count + 1) as u8, LINE);
+            }
+            OExpr::RegExpLiteral(re) => {
+                self.emit_get_global_name("RegExp");
+                self.emit_constant(Value::String(re.regex.pattern.text.to_string()), LINE);
+                self.emit_constant(Value::String(re.regex.flags.to_string()), LINE);
+                self.emit(Op::Call, LINE);
+                self.emit_byte(2, LINE);
             }
             OExpr::ParenthesizedExpression(p) => {
                 self.compile_expr_oast(&p.expression)?;
@@ -2713,15 +2732,20 @@ mod tests {
     }
 
     #[test]
-    fn unknown_binary_operator_is_not_silently_treated_as_addition() {
+    fn nullish_coalescing_is_supported() {
         let src = "1 ?? 2;";
         let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
 
-        let err = compile(program, session.source()).expect_err("compile should fail");
+        let chunk = compile(program, session.source()).expect("compile ok");
+        let saw_coalesce = chunk
+            .code
+            .iter()
+            .filter_map(|b| Op::from_byte(*b))
+            .any(|op| matches!(op, Op::Eq | Op::JumpIfFalse));
         assert!(
-            err.to_string().contains("coalesce") || err.to_string().contains("unsupported"),
-            "unexpected error: {err}"
+            saw_coalesce,
+            "expected nullish coalescing lowering to emit Eq/JumpIfFalse"
         );
     }
 

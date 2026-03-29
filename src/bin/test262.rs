@@ -30,7 +30,6 @@ use clap::Parser as ClapParser;
 use serde::Deserialize;
 
 use blitz::compiler;
-use blitz::trace;
 use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
 use blitz::{module::ModuleLoader, parser::Parser, typecheck, value::Value, vm::Vm};
 
@@ -88,6 +87,7 @@ fn bucket_keys(test_root: &Path, file: &Path) -> (String, String) {
     (top, subsection)
 }
 
+/// Prints a summary of the test results for a given label and bucket of tests.
 fn print_bucket_summary(
     label: &str,
     buckets: &HashMap<String, BucketStats>,
@@ -122,14 +122,6 @@ fn print_bucket_summary(
             stats.pass_pct()
         );
     }
-}
-
-fn has_distinct_subsections(
-    top_level: &HashMap<String, BucketStats>,
-    subsections: &HashMap<String, BucketStats>,
-) -> bool {
-    subsections.len() > top_level.len()
-        || subsections.keys().any(|key| !top_level.contains_key(key))
 }
 
 /// Runner options for the test262 test runner.
@@ -237,13 +229,25 @@ fn parse_meta(src: &str) -> Option<Meta> {
 
 /// Simple builtin print that writes to stderr (and returns `null`).
 fn builtin_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
-    let s = args
-        .iter()
-        .map(|v| format!("{}", v))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let s = print_args(args);
     eprintln!("[test262 print] {}", s);
     Ok(Value::Null)
+}
+
+fn print_args(args: &[Value]) -> String {
+    args.iter()
+        .map(|v| format!("{}", v))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_async_done_marker(s: &str) -> Option<Option<String>> {
+    if s == "Test262:AsyncTestComplete" {
+        Some(None)
+    } else {
+        s.strip_prefix("Test262:AsyncTestFailure:")
+            .map(|rest| Some(rest.to_string()))
+    }
 }
 
 /// A simple `$262.evalScript` implementation that evaluates the provided
@@ -279,12 +283,105 @@ fn builtin_eval_script(globals: &Rc<RefCell<ObjectData>>, args: &[Value]) -> Res
 /// fresh intrinsics (not a heap clone) and evalScript that shares globals.
 fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     let mut data = ObjectData::new();
+    let agent_reports: Rc<RefCell<std::collections::VecDeque<String>>> =
+        Rc::new(RefCell::new(std::collections::VecDeque::new()));
+    let agent_clock_start = std::time::Instant::now();
+    let mut agent_data = ObjectData::new();
+    let function_proto = globals
+        .borrow()
+        .properties
+        .get(&PropertyKey::String("Function".to_string()))
+        .and_then(|desc| match desc {
+            PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+        .and_then(|function_ctor| match function_ctor {
+            Value::Object(obj) => obj
+                .borrow()
+                .properties
+                .get(&PropertyKey::String("prototype".to_string()))
+                .and_then(|desc| match desc {
+                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                    _ => None,
+                }),
+            Value::BuiltinObject(_, props) => props
+                .borrow()
+                .properties
+                .get(&PropertyKey::String("prototype".to_string()))
+                .and_then(|desc| match desc {
+                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                    _ => None,
+                }),
+            _ => None,
+        })
+        .unwrap_or(Value::Null);
+
+    let host_builtin = |f: blitz::value::BuiltinFn| {
+        let props = Rc::new(RefCell::new(ObjectData::with_prototype(
+            function_proto.clone(),
+        )));
+        Value::BuiltinObject(f, props)
+    };
+
+    {
+        let agent_reports = Rc::clone(&agent_reports);
+        agent_data.properties.insert(
+            PropertyKey::String("getReport".to_string()),
+            PropertyDescriptor::data(host_builtin(Rc::new(move |_vm, _args| {
+                Ok(match agent_reports.borrow_mut().pop_front() {
+                    Some(msg) => Value::String(msg),
+                    None => Value::Null,
+                })
+            }))),
+        );
+    }
+    {
+        let agent_reports = Rc::clone(&agent_reports);
+        agent_data.properties.insert(
+            PropertyKey::String("report".to_string()),
+            PropertyDescriptor::data(host_builtin(Rc::new(move |vm, args| {
+                let msg = match args.first() {
+                    Some(v) => vm.to_string(v)?,
+                    None => String::new(),
+                };
+                agent_reports.borrow_mut().push_back(msg);
+                Ok(Value::Undefined)
+            }))),
+        );
+    }
+    agent_data.properties.insert(
+        PropertyKey::String("sleep".to_string()),
+        PropertyDescriptor::data(host_builtin(Rc::new(|vm, args| {
+            let ms = match args.first() {
+                Some(v) => vm.to_number_value(v)?,
+                None => 0.0,
+            };
+            if ms.is_finite() && ms > 0.0 {
+                std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+            }
+            Ok(Value::Undefined)
+        }))),
+    );
+    agent_data.properties.insert(
+        PropertyKey::String("monotonicNow".to_string()),
+        PropertyDescriptor::data(host_builtin(Rc::new(move |_vm, _args| {
+            Ok(Value::Number(
+                agent_clock_start.elapsed().as_secs_f64() * 1000.0,
+            ))
+        }))),
+    );
+    for name in ["start", "broadcast", "leaving", "receiveBroadcast"] {
+        agent_data.properties.insert(
+            PropertyKey::String(name.to_string()),
+            PropertyDescriptor::data(host_builtin(Rc::new(|_vm, _args| Ok(Value::Undefined)))),
+        );
+    }
 
     // evalScript: shares globals via Rc::clone (not deep clone)
     let eval_globals = Rc::clone(globals);
     data.properties.insert(
         PropertyKey::String("evalScript".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+        PropertyDescriptor::data(host_builtin(Rc::new(move |_vm, args| {
             builtin_eval_script(&eval_globals, args).map_err(blitz::errors::RuntimeError::from)
         }))),
     );
@@ -298,7 +395,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     // detachArrayBuffer: null out [[ArrayBufferData]] and set byteLength to 0
     data.properties.insert(
         PropertyKey::String("detachArrayBuffer".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+        PropertyDescriptor::data(host_builtin(Rc::new(|_vm, args| {
             if let Some(Value::Object(obj)) = args.first() {
                 let mut obj_data = obj.borrow_mut();
                 // Per spec: [[ArrayBufferData]] = null
@@ -315,11 +412,16 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
         }))),
     );
 
+    data.properties.insert(
+        PropertyKey::String("agent".to_string()),
+        PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(agent_data)))),
+    );
+
     // createRealm: builds a FRESH realm with fresh intrinsics, NOT a heap clone.
     // Per spec: each realm gets distinct intrinsic identities.
     data.properties.insert(
         PropertyKey::String("createRealm".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| {
+        PropertyDescriptor::data(host_builtin(Rc::new(|_vm, _args| {
             // Create a fresh global object for the new realm.
             let realm_global = Rc::new(RefCell::new(ObjectData::new()));
 
@@ -595,29 +697,21 @@ fn run_test_file(
         let mut vm = Vm::new(Rc::clone(globals));
 
         // Async tests must signal completion through $DONE(error?).
-        let done_state: Rc<RefCell<Option<Option<Value>>>> = Rc::new(RefCell::new(None));
+        let done_state: Rc<RefCell<Option<Option<String>>>> = Rc::new(RefCell::new(None));
         if is_async {
-            let done_state_for_cb = Rc::clone(&done_state);
-            // Install host $DONE callback as __$DONE_HOST
-            // This will be called by doneprintHandle.js after printing
+            let done_state_for_print = Rc::clone(&done_state);
             vm.globals_rc().borrow_mut().properties.insert(
-                PropertyKey::String("__$DONE_HOST".to_string()),
+                PropertyKey::String("print".to_string()),
                 PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                    if trace::enabled() {
-                        eprintln!("[DONE host] called args={:?}", args);
+                    let s = print_args(args);
+                    if done_state_for_print.borrow().is_none()
+                        && let Some(marker) = is_async_done_marker(&s)
+                    {
+                        *done_state_for_print.borrow_mut() = Some(marker);
+                        return Ok(Value::Null);
                     }
-                    // Record only the first completion signal.
-                    if done_state_for_cb.borrow().is_none() {
-                        // Skip prepended receiver at args[0]
-                        let first = args.get(1).cloned().unwrap_or(Value::Undefined);
-                        let payload = if matches!(first, Value::Undefined) {
-                            None
-                        } else {
-                            Some(first)
-                        };
-                        *done_state_for_cb.borrow_mut() = Some(payload);
-                    }
-                    Ok(Value::Undefined)
+                    eprintln!("[test262 print] {}", s);
+                    Ok(Value::Null)
                 }))),
             );
         }
@@ -773,11 +867,7 @@ fn run_test_file(
                         match done_state.borrow().as_ref() {
                             Some(None) => Ok(v),
                             Some(Some(done_err)) => {
-                                let msg = match vm.to_string(done_err) {
-                                    Ok(s) => s,
-                                    Err(_) => "async test failed".to_string(),
-                                };
-                                Err(format!("async $DONE called with error: {}", msg).into())
+                                Err(format!("async test failed: {}", done_err).into())
                             }
                             None => Err("async test did not call $DONE".into()),
                         }
@@ -842,7 +932,7 @@ fn run_harness_only(
     baseline_snapshot: &HashMap<PropertyKey, PropertyDescriptor>,
 ) -> Result<(), String> {
     let harness_dir = test262_root.join("harness");
-    let mut harness_files: Vec<String> = Vec::new();
+    let mut harness_files: Vec<String> = vec!["assert.js".to_string(), "sta.js".to_string()];
     if harness_dir.exists() {
         let mut extra: Vec<String> = Vec::new();
         for ent in fs::read_dir(&harness_dir)
@@ -858,7 +948,7 @@ fn run_harness_only(
                 continue;
             }
             if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                // Just store the filename, not the full path - it will be joined with harness dir later
+                // Just store the filename, not the full path - it will be joined with harness dir later.
                 if name == "sta.js" || name == "assert.js" {
                     continue;
                 }
@@ -912,9 +1002,9 @@ fn run_harness_only(
         })
         .collect();
 
+    restore_globals(globals, baseline_snapshot);
+    let mut vm = Vm::new(Rc::clone(globals));
     for h in &harness_files {
-        restore_globals(globals, baseline_snapshot);
-        let mut vm = Vm::new(Rc::clone(globals));
         let p = test262_root.join("harness").join(h);
         if !p.exists() {
             return Err(format!("Harness file missing: {}", p.display()));

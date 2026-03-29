@@ -40,9 +40,6 @@ const host_debugValue = (_name: string, _v: any): void => {};
 // type/shape information that may be lost otherwise.
 try {
   if (typeof globalThis !== "undefined") (globalThis as any).__TSBLITZ_TRACE = true;
-  try {
-    host_print("PRELUDE: trace enabled");
-  } catch (_) {}
 } catch (_) {}
 
 // Marker and top-level try/catch to surface a full stack trace when the
@@ -529,9 +526,6 @@ try {
     } else {
       console = builtConsole;
     }
-    try {
-      host_print("PRELUDE: console assigned");
-    } catch (_) {}
   } catch (_) {
     try {
       console = globalConsole;
