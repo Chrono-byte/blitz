@@ -65,16 +65,6 @@ pub struct ParserSession {
 }
 
 impl Parser {
-    /// Legacy constructor kept for API compatibility. This will return an error
-    /// at parse time instructing users to switch to `new_from_source`.
-    #[deprecated(
-        since = "0.1.0",
-        note = "Use `Parser::new_from_source(...)` or `parse_source(...)` instead"
-    )]
-    pub fn new(_tokens: Vec<crate::lexer::Token>) -> Self {
-        Self { source: None }
-    }
-
     /// Construct a parser from a source text string. This is the preferred
     /// constructor: it uses the Oxc parser under the hood.
     pub fn new_from_source(source: &str) -> Self {
@@ -86,6 +76,9 @@ impl Parser {
     /// Convenience top-level API: parse source text and return a
     /// `ParserSession` which owns backing data (allocator + source) and
     /// exposes the parsed `Program` that borrows that backing data.
+    ///
+    /// # Errors
+    ///
     pub fn parse_source(source: &str) -> Result<ParserSession, ParserError> {
         // Default to TypeScript parsing for callers that don't provide
         // filename/extension information (preserves previous behavior).
@@ -93,6 +86,9 @@ impl Parser {
     }
 
     /// Parse source text with an explicit Oxc SourceType (js or ts).
+    ///
+    /// # Errors
+    /// Throws an error if parsing the given source fails.
     pub fn parse_source_with_type(
         source: &str,
         source_type: SourceType,
@@ -128,6 +124,9 @@ impl Parser {
     ///
     /// If `self.source` is None, returns an error explaining that the token
     /// based constructor is no longer supported.
+    ///
+    /// # Errors
+    /// Returns an error if the parse fails.
     pub fn parse(&mut self) -> Result<ParserSession, ParserError> {
         let source_owned = match self.source.take() {
             Some(s) => s,
@@ -164,6 +163,15 @@ impl Parser {
     /// Extract top-level static import specifiers (e.g. "./mod") from a source
     /// text without converting the entire ESTree into the internal AST. This
     /// helper is used by the module loader to build the module graph.
+    ///
+    /// # Errors
+    /// Returns a ParserError if:
+    /// - The Oxc parser reports syntax or other parse errors. All reported errors are
+    ///   converted to strings and combined into the returned ParserError.
+    /// - The ESTree JSON produced by Oxc cannot be parsed (serde_json failure).
+    /// - The parsed program does not contain an expected "body" array.
+    /// - In each case the returned ParserError contains a human-readable description
+    ///   of the failure.
     pub fn extract_imports_from_source(source: &str) -> Result<Vec<String>, ParserError> {
         // Run Oxc parser using a temporary allocator and borrowed source string.
         // We only need the ESTree JSON here so keeping allocator scoped is fine.
@@ -214,6 +222,15 @@ impl Parser {
     }
 
     /// Extract top-level static import specifiers from source text with explicit SourceType.
+    ///
+    /// # Errors
+    /// Returns a ParserError if:
+    /// - The Oxc parser reports syntax or other parse errors. All reported errors are
+    ///   converted to strings and combined into the returned ParserError.
+    /// - The ESTree JSON produced by Oxc cannot be parsed (serde_json failure).
+    /// - The parsed program does not contain an expected "body" array.
+    /// - In each case the returned ParserError contains a human-readable description
+    ///   of the failure.
     pub fn extract_imports_from_source_with_type(
         source: &str,
         source_type: SourceType,
