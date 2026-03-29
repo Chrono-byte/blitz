@@ -93,6 +93,45 @@ fn static_builtin_arg_offset(vm: &Vm, args: &[Value], _global_name: &str) -> usi
     0
 }
 
+fn resolve_promise_with_value(
+    vm: &mut Vm,
+    result_promise: &Rc<RefCell<PromiseState>>,
+    value: Value,
+) -> Result<(), crate::errors::RuntimeError> {
+    if let Value::Promise(ref p_rc) = value {
+        if Rc::ptr_eq(p_rc, result_promise) {
+            return Err(vm.throw_type_error("Chaining cycle detected"));
+        }
+        // Call .then on the value to settle result_promise
+        let then_val = vm.get_property_host(&value, &PropertyKey::String("then".to_string()))?;
+        if Vm::is_callable_value(&then_val) {
+            let res_p = Rc::clone(result_promise);
+            let p_rc_inner = Rc::clone(p_rc);
+            let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
+                let off = static_builtin_arg_offset(vm, args, "");
+                let v = args.get(off).cloned().unwrap_or(Value::Undefined);
+                resolve_promise_with_value(vm, &res_p, v)?;
+                Ok(Value::Undefined)
+            }));
+            let res_p2 = Rc::clone(result_promise);
+            let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
+                let off = static_builtin_arg_offset(vm, args, "");
+                let r = args.get(off).cloned().unwrap_or(Value::Undefined);
+                reject_pending_promise(vm, &res_p2, r);
+                Ok(Value::Undefined)
+            }));
+            vm.call_value_with_this(
+                &then_val,
+                &Value::Promise(p_rc_inner),
+                &[resolve_cb, reject_cb],
+            )?;
+            return Ok(());
+        }
+    }
+    fulfill_pending_promise(vm, result_promise, value);
+    Ok(())
+}
+
 fn builtin_object(f: BuiltinFn, function_proto: &Rc<RefCell<ObjectData>>) -> Value {
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().prototype = Value::Object(Rc::clone(function_proto));
@@ -1564,45 +1603,22 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         on_fulfilled: Vec::new(),
                         on_rejected: Vec::new(),
                     }));
-
-                    let settle_from_output =
-                        |out: Value, result: &Rc<RefCell<PromiseState>>| match out {
-                            Value::Promise(p) => {
-                                let p_state = p.borrow();
-                                match &*p_state {
-                                    PromiseState::Fulfilled(v) => {
-                                        *result.borrow_mut() = PromiseState::Fulfilled(v.clone());
-                                    }
-                                    PromiseState::Rejected(r) => {
-                                        *result.borrow_mut() = PromiseState::Rejected(r.clone());
-                                    }
-                                    PromiseState::Pending { .. } => {
-                                        *result.borrow_mut() = PromiseState::Pending {
-                                            on_fulfilled: Vec::new(),
-                                            on_rejected: Vec::new(),
-                                        };
-                                    }
-                                }
-                            }
-                            v => {
-                                *result.borrow_mut() = PromiseState::Fulfilled(v);
-                            }
-                        };
+                    let result_promise_value = Value::Promise(Rc::clone(&result_promise));
 
                     let mut state = promise_rc.borrow_mut();
-                    match &*state {
+                    match &mut *state {
                         PromiseState::Pending {
                             on_fulfilled: existing_fulfilled,
                             on_rejected: existing_rejected,
                         } => {
                             // Register wrappers that run handlers and settle the chained promise.
                             let user_on_fulfilled = on_fulfilled;
-                            let result_promise_for_fulfill = Rc::clone(&result_promise);
+                            let res_p_f = Rc::clone(&result_promise);
                             let on_fulfilled_fn = Value::Builtin(Rc::new(move |vm, args| {
-                                let value = args.first().cloned().unwrap_or(Value::Undefined);
+                                let off = static_builtin_arg_offset(vm, args, "");
+                                let value = args.get(off).cloned().unwrap_or(Value::Undefined);
                                 if matches!(user_on_fulfilled, Value::Undefined) {
-                                    *result_promise_for_fulfill.borrow_mut() =
-                                        PromiseState::Fulfilled(value);
+                                    resolve_promise_with_value(vm, &res_p_f, value)?;
                                     return Ok(Value::Undefined);
                                 }
                                 vm.last_uncaught_exception = None;
@@ -1611,26 +1627,25 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                     &Value::Undefined,
                                     &[value],
                                 ) {
-                                    Ok(out) => settle_from_output(out, &result_promise_for_fulfill),
+                                    Ok(out) => resolve_promise_with_value(vm, &res_p_f, out)?,
                                     Err(err) => {
                                         let reason = vm
                                             .last_uncaught_exception
                                             .take()
                                             .unwrap_or(Value::String(format!("{}", err)));
-                                        *result_promise_for_fulfill.borrow_mut() =
-                                            PromiseState::Rejected(reason);
+                                        reject_pending_promise(vm, &res_p_f, reason);
                                     }
                                 }
                                 Ok(Value::Undefined)
                             }));
 
                             let user_on_rejected = on_rejected;
-                            let result_promise_for_reject = Rc::clone(&result_promise);
+                            let res_p_r = Rc::clone(&result_promise);
                             let on_rejected_fn = Value::Builtin(Rc::new(move |vm, args| {
-                                let reason = args.first().cloned().unwrap_or(Value::Undefined);
+                                let off = static_builtin_arg_offset(vm, args, "");
+                                let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
                                 if matches!(user_on_rejected, Value::Undefined) {
-                                    *result_promise_for_reject.borrow_mut() =
-                                        PromiseState::Rejected(reason);
+                                    *res_p_r.borrow_mut() = PromiseState::Rejected(reason);
                                     return Ok(Value::Undefined);
                                 }
                                 vm.last_uncaught_exception = None;
@@ -1639,89 +1654,79 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                     &Value::Undefined,
                                     &[reason],
                                 ) {
-                                    Ok(out) => settle_from_output(out, &result_promise_for_reject),
+                                    Ok(out) => resolve_promise_with_value(vm, &res_p_r, out)?,
                                     Err(err) => {
                                         let reject_reason = vm
                                             .last_uncaught_exception
                                             .take()
                                             .unwrap_or(Value::String(format!("{}", err)));
-                                        *result_promise_for_reject.borrow_mut() =
-                                            PromiseState::Rejected(reject_reason);
+                                        *res_p_r.borrow_mut() = PromiseState::Rejected(reject_reason);
                                     }
                                 }
                                 Ok(Value::Undefined)
                             }));
 
-                            let mut new_fulfilled = existing_fulfilled.clone();
-                            new_fulfilled.push(on_fulfilled_fn);
-                            let mut new_rejected = existing_rejected.clone();
-                            new_rejected.push(on_rejected_fn);
-
-                            *state = PromiseState::Pending {
-                                on_fulfilled: new_fulfilled,
-                                on_rejected: new_rejected,
-                            };
+                            existing_fulfilled.push(on_fulfilled_fn);
+                            existing_rejected.push(on_rejected_fn);
                         }
                         PromiseState::Fulfilled(value) => {
-                            if matches!(on_fulfilled, Value::Undefined) {
-                                *result_promise.borrow_mut() =
-                                    PromiseState::Fulfilled(value.clone());
-                            } else {
-                                let cb = on_fulfilled;
-                                let val = value.clone();
-                                let chained = Rc::clone(&result_promise);
-                                vm.queue_microtask(move |vm| {
+                            let value = value.clone();
+                            let user_on_fulfilled = on_fulfilled;
+                            let res_p_f = Rc::clone(&result_promise);
+                            vm.queue_microtask(move |vm| {
+                                if matches!(user_on_fulfilled, Value::Undefined) {
+                                    resolve_promise_with_value(vm, &res_p_f, value.clone())?;
+                                } else {
                                     vm.last_uncaught_exception = None;
                                     match vm.call_value_with_this(
-                                        &cb,
+                                        &user_on_fulfilled,
                                         &Value::Undefined,
-                                        &[val.clone()],
+                                        &[value.clone()],
                                     ) {
-                                        Ok(out) => settle_from_output(out, &chained),
+                                        Ok(out) => resolve_promise_with_value(vm, &res_p_f, out)?,
                                         Err(err) => {
                                             let reason = vm
                                                 .last_uncaught_exception
                                                 .take()
                                                 .unwrap_or(Value::String(format!("{}", err)));
-                                            *chained.borrow_mut() = PromiseState::Rejected(reason);
+                                            reject_pending_promise(vm, &res_p_f, reason);
                                         }
                                     }
-                                    Ok(())
-                                });
-                            }
+                                }
+                                Ok(())
+                            });
                         }
                         PromiseState::Rejected(reason) => {
-                            if matches!(on_rejected, Value::Undefined) {
-                                *result_promise.borrow_mut() =
-                                    PromiseState::Rejected(reason.clone());
-                            } else {
-                                let cb = on_rejected;
-                                let val = reason.clone();
-                                let chained = Rc::clone(&result_promise);
-                                vm.queue_microtask(move |vm| {
+                            let reason = reason.clone();
+                            let user_on_rejected = on_rejected;
+                            let res_p_r = Rc::clone(&result_promise);
+                            vm.queue_microtask(move |vm| {
+                                if matches!(user_on_rejected, Value::Undefined) {
+                                    *res_p_r.borrow_mut() = PromiseState::Rejected(reason.clone());
+                                } else {
                                     vm.last_uncaught_exception = None;
                                     match vm.call_value_with_this(
-                                        &cb,
+                                        &user_on_rejected,
                                         &Value::Undefined,
-                                        &[val.clone()],
+                                        &[reason.clone()],
                                     ) {
-                                        Ok(out) => settle_from_output(out, &chained),
+                                        Ok(out) => resolve_promise_with_value(vm, &res_p_r, out)?,
                                         Err(err) => {
                                             let reject_reason = vm
                                                 .last_uncaught_exception
                                                 .take()
                                                 .unwrap_or(Value::String(format!("{}", err)));
-                                            *chained.borrow_mut() =
+                                            *res_p_r.borrow_mut() =
                                                 PromiseState::Rejected(reject_reason);
                                         }
                                     }
-                                    Ok(())
-                                });
-                            }
+                                }
+                                Ok(())
+                            });
                         }
                     }
 
-                    Ok(Value::Promise(result_promise))
+                    Ok(result_promise_value)
                 } else {
                     Err(vm.throw_type_error("Promise.prototype.then called on non-promise"))
                 }
@@ -2866,11 +2871,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     object_ctor_map.borrow_mut().properties.insert(
         PKey::String("is".to_string()),
         PropertyDescriptor::data(builtin_object(
-            Rc::new(|vm, args| {
-                let off = static_builtin_arg_offset(vm, args, "Object");
-                let left = args.get(off).cloned().unwrap_or(Value::Undefined);
-                let right = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
-                Ok(Value::Bool(crate::vm::same_value(&left, &right)))
+            Rc::new(|_vm, args| {
+                let off = static_builtin_arg_offset(_vm, args, "Object");
+                let a = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let b = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                Ok(Value::Bool(crate::vm::same_value(&a, &b)))
             }),
             &function_proto_map,
         )),

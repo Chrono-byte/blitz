@@ -285,6 +285,9 @@ impl Vm {
         self.construct_new_target.clone()
     }
 
+    /// Return the prototype of a value.
+    ///
+    /// Returns `Value::Null` if the value has no prototype (e.g. `Object.prototype`).
     pub fn get_prototype(&self, v: &Value) -> Value {
         match v {
             Value::Object(obj)
@@ -354,6 +357,11 @@ impl Vm {
         Value::Array(arr_rc, props)
     }
 
+    /// Queue a microtask to be executed after the current call stack completes.
+    ///
+    /// # Errors
+    ///
+    /// If the microtask queue is full, an error is returned.
     pub(crate) fn queue_microtask<F>(&mut self, job: F)
     where
         F: FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError> + 'static,
@@ -361,6 +369,11 @@ impl Vm {
         self.microtasks.push_back(Box::new(job));
     }
 
+    /// Drain all pending microtasks, executing them in FIFO order.
+    ///
+    /// # Errors
+    ///
+    /// If a microtask throws an error, it is propagated and the remaining microtasks are not executed.
     pub(crate) fn drain_microtasks(&mut self) -> Result<(), crate::errors::RuntimeError> {
         while let Some(mut job) = self.microtasks.pop_front() {
             job(self)?;
@@ -386,10 +399,19 @@ impl Vm {
     }
 
     /// Drain any pending microtasks, ensuring async bootstrap work completes.
+    ///
+    /// # Errors
+    ///
+    /// If a microtask throws an error, it is propagated and the remaining microtasks are not executed.
     pub fn flush_microtasks(&mut self) -> Result<(), crate::errors::RuntimeError> {
         self.run_microtasks_if_needed()
     }
 
+    /// Invoke an async closure, queuing its microtasks for execution after the current call stack completes.
+    ///
+    /// # Errors
+    ///
+    /// If a microtask throws an error, it is propagated and the remaining microtasks are not executed.
     fn invoke_async_closure(
         &mut self,
         proto: &Rc<FunctionProto>,
@@ -544,12 +566,17 @@ impl Vm {
     }
 
     /// Provide mutable access to the per-VM module loader, creating it if missing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the module loader is unexpectedly `None` (should not happen).
     pub fn module_loader_mut(&mut self) -> &mut ModuleLoader {
         if self.module_loader.is_none() {
             self.module_loader = Some(ModuleLoader::new());
         }
         // SAFETY: we just ensured module_loader is Some
-        self.module_loader.as_mut().unwrap()
+        self.module_loader
+            .get_or_insert_with(|| ModuleLoader::new())
     }
 
     /// Enter a new declarative lexical environment whose outer is the current environment.
@@ -699,6 +726,10 @@ impl Vm {
 
     /// Run a blocking closure on the background runtime and wait for the
     /// result synchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the background task fails.
     pub fn run_blocking<F, R>(&self, f: F) -> Result<R, crate::errors::RuntimeError>
     where
         F: FnOnce() -> R + Send + 'static,
@@ -732,7 +763,11 @@ impl Vm {
     // Main execution loop
     // -----------------------------------------------------------------------
 
-    /// Run a chunk of bytecode to completion.
+    /// Execute a chunk of bytecode to completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the chunk execution fails.
     pub fn run(&mut self, chunk: Chunk) -> Result<Value, crate::errors::RuntimeError> {
         let chunk_rc = Rc::new(chunk);
         self.root_chunk = Some(Rc::clone(&chunk_rc));

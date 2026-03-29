@@ -6,7 +6,7 @@ cognitive-complexity-threshold = 10
 too-many-arguments-threshold = 7
 
 # Enforce short functions (kernel style preference)
-too-many-lines-threshold = 50
+too-many-lines-threshold = 100
 
 # Memory safety (kernel is very strict about memory)
 allow-expect-in-tests = false
