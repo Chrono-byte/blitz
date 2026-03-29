@@ -692,6 +692,14 @@ impl Vm {
                     for (i, v) in self.stack.iter().rev().take(8).enumerate() {
                         crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
                     }
+                    // Try to locate the callee value inside any known constant
+                    // pools referenced by the active frames to help map origins.
+                    let matches = self.find_constants_containing_value(&callee);
+                    if !matches.is_empty() {
+                        for (fi, ci) in matches {
+                            eprintln!("[trace]   callee appears in frame[{}] constants[{}]", fi, ci);
+                        }
+                    }
                 }
                 self.dump_diag("Call failed: callee not callable", &callee);
                 return Err(
@@ -775,6 +783,13 @@ impl Vm {
                     crate::trace::value_string("[trace]   receiver", &receiver);
                     for (i, v) in self.stack.iter().rev().take(12).enumerate() {
                         crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
+                    }
+                    // Attempt to locate the callee in constants for active frames
+                    let matches = self.find_constants_containing_value(&callee);
+                    if !matches.is_empty() {
+                        for (fi, ci) in matches {
+                            eprintln!("[trace]   callee appears in frame[{}] constants[{}]", fi, ci);
+                        }
                     }
                 } else {
                     eprintln!(
@@ -2454,6 +2469,13 @@ impl Vm {
         }
 
         fixed.push(Value::Array(arr_rc, props));
+        if crate::trace::enabled() {
+            // Log allocation site for rest-array used as arguments so we can
+            // correlate a later callee pointing at the same props pointer.
+            if let Value::Array(_arr, props_rc) = fixed.last().cloned().unwrap() {
+                eprintln!("[trace] prepare_call_args: created rest-Array props_ptr={:p} proto='{}'", Rc::as_ptr(&props_rc), proto.name);
+            }
+        }
         Ok(fixed)
     }
 
@@ -2567,7 +2589,15 @@ impl Vm {
             props.borrow_mut().prototype = proto_val;
         }
 
-        self.stack.push(Value::Array(arr_rc, props));
+        self.stack.push(Value::Array(Rc::clone(&arr_rc), Rc::clone(&props)));
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] build_array: created Array arr_ptr={:p} props_ptr={:p} ip={}",
+                Rc::as_ptr(&arr_rc),
+                Rc::as_ptr(&props),
+                self.ip.saturating_sub(1)
+            );
+        }
         Ok(())
     }
 
@@ -2610,7 +2640,11 @@ impl Vm {
         {
             data.prototype = proto_val;
         }
-        self.stack.push(Value::Object(Rc::new(RefCell::new(data))));
+        let obj_rc = Rc::new(RefCell::new(data));
+        self.stack.push(Value::Object(Rc::clone(&obj_rc)));
+        if crate::trace::enabled() {
+            eprintln!("[trace] build_object: created Object obj_ptr={:p} ip={}", Rc::as_ptr(&obj_rc), self.ip.saturating_sub(1));
+        }
         Ok(())
     }
 
@@ -2687,7 +2721,32 @@ impl Vm {
             );
         }
 
-        self.stack.push(closure);
+        self.stack.push(closure.clone());
+        if crate::trace::enabled() {
+            // Log closure and optional prototype object pointers so traces can
+            // be correlated back to the allocation site.
+            if let Value::Closure { props, .. } = &closure {
+                eprintln!(
+                    "[trace] make_closure: created Closure props_ptr={:p} proto_idx={} proto_chunk_ptr={:p} ip={}",
+                    Rc::as_ptr(props),
+                    idx,
+                    Rc::as_ptr(&closure_proto.chunk),
+                    self.ip.saturating_sub(1)
+                );
+            }
+            if has_prototype_property {
+                // proto_obj_map was allocated when creating the prototype
+                // object above; print its pointer if available via the props
+                // object we just attached.
+                if let Value::Closure { props, .. } = &closure {
+                    if let Some(PropertyDescriptor::Data { value, .. }) = props.borrow().properties.get(&PropertyKey::String("prototype".to_string())) {
+                        if let Value::Object(proto_obj_map) = value {
+                            eprintln!("[trace] make_closure: created proto_obj props_ptr={:p}", Rc::as_ptr(proto_obj_map));
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3082,13 +3141,16 @@ impl Vm {
         crate::trace::value_string("[diag] offending value", offender);
 
         eprintln!("[diag] Stack snapshot (top -> bottom):");
-        for (idx, v) in self.stack.iter().rev().take(8).enumerate() {
+        for (idx, v) in self.stack.iter().rev().take(32).enumerate() {
             crate::trace::value_string(&format!("[diag]   stack[{}]", idx), v);
         }
 
         let start = self.ip.saturating_sub(8);
         let end = usize::min(self.ip + 8, self.chunk.code.len());
         eprintln!("[diag] disasm window ({}..{}):", start, end);
+
+        // Print current chunk pointer to help correlate disasm with function proto
+        eprintln!("[diag] current chunk ptr={:p} chunk_len={}", Rc::as_ptr(&self.chunk), self.chunk.code.len());
 
         // Print a brief summary of any function prototypes present in the
         // current chunk to help map MakeClosure indexes to human-readable
@@ -3110,6 +3172,90 @@ impl Vm {
             );
         }
 
+        // Also print a short dump of the constant pool for this chunk which
+        // helps map large Const indices back to concrete values during
+        // diagnostic analysis.
+        eprintln!("[diag] chunk constants (len={}):", self.chunk.constants.len());
+        for (i, c) in self.chunk.constants.iter().enumerate().take(64) {
+            eprintln!("[diag]   const[{}] = {:?}", i, c);
+        }
+
+        // Additionally, some Const operands printed in caller disassembly may
+        // refer to constants in a function prototype's own chunk. To help
+        // correlate large Const indices back to their owning proto, print a
+        // brief summary and constant dump for the first few function proto
+        // chunks referenced by the current chunk. This is intentionally
+        // limited and only for diagnostic builds (gated by tracing).
+        for (i, proto) in self.chunk.functions.iter().enumerate().take(4) {
+            eprintln!(
+                "[diag] proto[{}] name='{}' proto_chunk_ptr={:p} proto_chunk_len={} proto_consts_len={}",
+                i,
+                proto.name,
+                Rc::as_ptr(&proto.chunk),
+                proto.chunk.code.len(),
+                proto.chunk.constants.len()
+            );
+            // Print a small slice of the proto's constant pool to help map
+            // Const operands that are actually meant to index this proto.
+            for (ci, cc) in proto.chunk.constants.iter().enumerate().take(16) {
+                eprintln!("[diag]   proto[{}].const[{}] = {:?}", i, ci, cc);
+            }
+
+            // Disassemble the start of the proto chunk to give context where
+            // MakeClosure/Call sequences often appear (IIFE patterns, etc.).
+            let end = usize::min(128, proto.chunk.code.len());
+            if end > 0 {
+                eprintln!("[diag] proto[{}] disasm (0..{}):", i, end);
+                let mut j = 0usize;
+                while j < end {
+                    let b = proto.chunk.code[j];
+                    if let Some(op) = Op::from_byte(b) {
+                        let width = opcode_width(op);
+                        match op {
+                            Op::Const => {
+                                let hi = proto.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
+                                let lo = proto.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                                let arg = (hi << 8) | lo;
+                                let repr = match proto.chunk.constants.get(arg as usize) {
+                                    Some(Value::String(s)) => format!("'{}'", s),
+                                    Some(v) => v.type_name().to_string(),
+                                    None => "<undef>".to_string(),
+                                };
+                                eprintln!("[diag] {:#06}  Const       {} ({})", j, arg, repr);
+                            }
+                            Op::GetGlobal | Op::SetGlobal => {
+                                let hi = proto.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
+                                let lo = proto.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                                let arg = ((hi << 8) | lo) as usize;
+                                let name = match proto.chunk.constants.get(arg) {
+                                    Some(Value::String(s)) => s.clone(),
+                                    _ => "<non-string>".to_string(),
+                                };
+                                eprintln!("[diag] {:#06}  {:12?} {} ({})", j, op, arg, name);
+                            }
+                            Op::Jump | Op::JumpIfFalse | Op::PushHandler => {
+                                let hi = proto.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
+                                let lo = proto.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                                let val = ((hi << 8) | lo) as i16;
+                                eprintln!("[diag] {:#06}  {:12?} {}", j, op, val);
+                            }
+                            _ if opcode_width(op) == 2 => {
+                                let arg = proto.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                eprintln!("[diag] {:#06}  {:12?} {}", j, op, arg);
+                            }
+                            _ => {
+                                eprintln!("[diag] {:#06}  {:?}", j, op);
+                            }
+                        }
+                        j += width;
+                    } else {
+                        eprintln!("[diag] {:#06}  ???  0x{:02x}", j, b);
+                        j += 1;
+                    }
+                }
+            }
+        }
+
         let mut j = start;
         while j < end {
             let b = self.chunk.code[j];
@@ -3120,14 +3266,26 @@ impl Vm {
                         let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
                         let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
                         let arg = (hi << 8) | lo;
-                        let repr = match self.chunk.constants.get(arg as usize) {
-                            Some(Value::String(s)) => {
-                                format!("'{}'", s)
+                        if (arg as usize) < self.chunk.constants.len() {
+                            let repr = match self.chunk.constants.get(arg as usize) {
+                                Some(Value::String(s)) => format!("'{}'", s),
+                                Some(v) => v.type_name().to_string(),
+                                None => "<undef>".to_string(),
+                            };
+                            eprintln!("[diag] {:#06}  Const       {} ({})", j, arg, repr);
+                        } else {
+                            eprintln!("[diag] {:#06}  Const       {} (<out-of-range for current chunk constants len={}>)", j, arg, self.chunk.constants.len());
+                            // Try to locate a function proto whose constant pool would contain this index
+                            for (pi, proto) in self.chunk.functions.iter().enumerate() {
+                                if (arg as usize) < proto.chunk.constants.len() {
+                                    eprintln!("[diag]   -> const {} appears valid in proto[{}] '{}', proto_chunk_ptr={:p} proto_consts_len={}", arg, pi, proto.name, Rc::as_ptr(&proto.chunk), proto.chunk.constants.len());
+                                    // Print a small slice of that proto's constants
+                                    for (ci, cc) in proto.chunk.constants.iter().enumerate().skip((arg as usize).saturating_sub(4)).take(8) {
+                                        eprintln!("[diag]     proto[{}].const[{}] = {:?}", pi, ci, cc);
+                                    }
+                                }
                             }
-                            Some(v) => v.type_name().to_string(),
-                            None => "<undef>".to_string(),
-                        };
-                        eprintln!("[diag] {:#06}  Const       {} ({})", j, arg, repr);
+                        }
                     }
                     Op::GetGlobal | Op::SetGlobal => {
                         let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
@@ -3159,6 +3317,79 @@ impl Vm {
                 j += 1;
             }
         }
+
+        // Print active call frames to help map which chunk/ip belongs to which
+        // JavaScript function. Limit to first 8 frames for brevity.
+        eprintln!("[diag] Frames (count={}):", self.frames.len());
+        for (fi, frame) in self.frames.iter().enumerate().take(8) {
+            eprintln!(
+                "[diag]  frame[{}] chunk_ptr={:p} chunk_len={} ip={} stack_base={} is_strict={}",
+                fi,
+                Rc::as_ptr(&frame.chunk),
+                frame.chunk.code.len(),
+                frame.ip,
+                frame.stack_base,
+                frame.is_strict,
+            );
+
+            // Disassemble a small window around the frame ip to see recent ops
+            let fstart = frame.ip.saturating_sub(8);
+            let fend = usize::min(frame.ip + 8, frame.chunk.code.len());
+            eprintln!("[diag]  frame[{}] disasm ({}..{}):", fi, fstart, fend);
+            let mut k = fstart;
+            while k < fend {
+                let b = frame.chunk.code[k];
+                if let Some(op) = Op::from_byte(b) {
+                    let width = opcode_width(op);
+                    match op {
+                        Op::Const => {
+                            let hi = frame.chunk.code.get(k + 1).cloned().unwrap_or(0) as u16;
+                            let lo = frame.chunk.code.get(k + 2).cloned().unwrap_or(0) as u16;
+                            let arg = (hi << 8) | lo;
+                            let repr = match frame.chunk.constants.get(arg as usize) {
+                                Some(Value::String(s)) => format!("'{}'", s),
+                                Some(v) => v.type_name().to_string(),
+                                None => "<undef>".to_string(),
+                            };
+                            eprintln!("[diag]    {:#06}  Const       {} ({})", k, arg, repr);
+                        }
+                        Op::GetGlobal | Op::SetGlobal => {
+                            let hi = frame.chunk.code.get(k + 1).cloned().unwrap_or(0) as u16;
+                            let lo = frame.chunk.code.get(k + 2).cloned().unwrap_or(0) as u16;
+                            let arg = ((hi << 8) | lo) as usize;
+                            let name = match frame.chunk.constants.get(arg) {
+                                Some(Value::String(s)) => s.clone(),
+                                _ => "<non-string>".to_string(),
+                            };
+                            eprintln!("[diag]    {:#06}  {:12?} {} ({})", k, op, arg, name);
+                        }
+                        _ if opcode_width(op) == 2 => {
+                            let arg = frame.chunk.code.get(k + 1).cloned().unwrap_or(0);
+                            eprintln!("[diag]    {:#06}  {:12?} {}", k, op, arg);
+                        }
+                        _ => eprintln!("[diag]    {:#06}  {:?}", k, op),
+                    }
+                    k += width;
+                } else {
+                    eprintln!("[diag]    {:#06}  ???  0x{:02x}", k, b);
+                    k += 1;
+                }
+            }
+        }
+    }
+
+    /// Try to find a runtime value in the constant pools of recent frames.
+    /// Returns a vector of (frame_index, const_index) matches.
+    fn find_constants_containing_value(&self, v: &Value) -> Vec<(usize, usize)> {
+        let mut found = Vec::new();
+        for (fi, frame) in self.frames.iter().enumerate().take(12) {
+            for (ci, c) in frame.chunk.constants.iter().enumerate() {
+                if values_equal(c, v) {
+                    found.push((fi, ci));
+                }
+            }
+        }
+        found
     }
 
     /// Instanceof helper: checks whether `value` has `constructor.prototype` in its prototype chain.

@@ -1,37 +1,68 @@
 Blitz
-===================================
+=====
 
-What this project is
-- Blitz is a small TypeScript runtime: a Rust kernel (parser, bytecode compiler, VM, GC) that runs a TypeScript "soft" layer which provides the JavaScript-visible runtime surface and standard library.
-- The TypeScript layer (stored in `soft/` and conceptually referred to as "blitzlib") is the canonical host prelude + stdlib: it installs globals, prototypes, std APIs and implements higher-level semantics in TypeScript so behavior is auditable and easy to iterate.
+Blitz is a compact ECMAScript engine/runtime centered on a minimal Rust kernel that exposes strictly documented native primitives to a self-hosted TypeScript surface (the “soft” layer). The Rust base handles parsing, bytecode compilation, the VM/GC, and defensive kernels, while the TypeScript soft layer (`blitzlib` in `soft/`) installs the visible globals, prototypes, stdlib, and higher-level semantics so behavior stays auditable and easy to iterate.
 
-Repo layout (high level)
-- `src/` — Rust kernel: lexer, parser, compiler, VM, native hooks. Entry point is `src/main.rs`.
-- `soft/` — TypeScript host prelude and standard library (prelude at `soft/prelude.ts`, runtime helpers at `soft/core/`, small stdlib under `soft/std/`).
-- `test262/`, `tests/` — tests and conformance harnesses (where present).
+Key layers
+----------
+
+- `src/` — the Rust kernel that ships the lexer, parser, compiler, VM, GC, and the few native hooks (`__native_*`) that blitzlib can call. `src/main.rs` boots the soft prelude, exposes natives, and can run a REPL or a script.
+- `soft/` — the TypeScript host prelude at `soft/prelude.ts`, runtime helpers in `soft/core/`, stdlib packages under `soft/std/`, and any TypeScript-driven tests under `soft/tests/`. The soft layer is compiled via `soft/tsconfig.json`, which emits JS/declaration artifacts into `soft/dist/std`.
+- `tests/` and `test262/` — Rust integration tests plus the upstream ECMAScript Test262 harness for the conformance material we exercise manually or with auxiliary runners.
 
 Quick start
-- Build and run the REPL: `cargo run` (starts the REPL; type `exit` to quit).
-- Run a TypeScript file: `cargo run -- path/to/file.ts` (the runtime loads the soft prelude and executes your entry file in the same VM instance).
+-----------
 
-How blitzlib and the kernel interact
-- The Rust kernel provides a minimal, well-documented native ABI (examples: `__native_print`, `__native_new_object`, and scheduling/file primitives). The kernel enforces low-level invariants (object identity, descriptor semantics, numeric behavior, GC).
-- blitzlib (the TypeScript soft layer in `soft/`) implements user-visible builtins, prototypes, stdlib functions and higher-level runtime behavior. blitzlib can only access native capabilities that the kernel deliberately exposes.
+### Prerequisites
 
-Goals and constraints
-- Make the TypeScript layer authoritative for user-facing semantics while keeping the Rust kernel minimal, stable, and defensive about inputs crossing the boundary.
-- Keep the native surface small and explicit; add natives only when necessary and well-documented.
+- [Rust](https://www.rust-lang.org/tools/install) 1.70+ (cargo build/test/run).
+- [Node.js](https://nodejs.org/) 20+ and npm for the TypeScript toolchain.
 
-Where to look first
-- `soft/prelude.ts` — bootstraps globals and installs builtins at startup.
-- `soft/core/` — runtime scaffolding and types used by the prelude.
-- `src/main.rs` — shows how the prelude is loaded and executed and which natives are injected into the VM.
-- `ARCHITECTURE.md` — design goals and the VM ↔ blitzlib contract.
+### Building & running
 
-Next steps for contributors
-1. Read `ARCHITECTURE.md` to understand responsibilities between kernel and blitzlib.
-2. Add small, well-tested TypeScript implementations in `soft/` with unit tests under `soft/tests/` when appropriate.
-3. When adding native hooks, update the contract in `ARCHITECTURE.md` and document the safety/semantics.
+1. `npm install` to pull `typescript`/`@types/node`.
+2. `npm run build` (runs `cargo build --release` and `tsc` using the soft layer tsconfig).
+3. Use the npm shortcuts or cargo directly:
+   - `npm run vm` ⇢ `cargo run --` (starts the REPL).
+   - `npm run repl` ⇢ `cargo run -- --repl`.
+   - `npm run run -- path/to/file.ts` ⇢ `cargo run --release -- path/to/file.ts` (loads the soft prelude first).
 
-License and governance
-- See project root for license and contributor guidelines (if present). Follow the migration roadmap in `ARCHITECTURE.md` for large runtime changes.
+Of course you can also use `cargo run [-- path.ts]` directly if you prefer.
+
+Soft layer (blitzlib)
+---------------------
+
+The TypeScript soft layer is the canonical runtime surface that user code runs inside:
+
+- `soft/prelude.ts` bootstraps globals, prototypes, and installs the builtin objects that user code expects to see.
+- `soft/core/` contains runtime scaffolding (type definitions, runtime helpers, interpreter-like utilities) and ambient declaration files that describe the native ABI.
+- `soft/std/` is a handwritten standard library that sits on top of the minimal native primitives; its modules are compiled through `soft/tsconfig.json`, which keeps strictness low so we can use flexible TypeScript while generating `dist/std`.
+- `soft/tests/` is where you can add regression/unit tests that run inside blitzlib.
+
+Documentation
+-------------
+
+- `docs/VM_V2` — the threading, isolation, and scheduling roadmap for the next-generation single-VM runtime.
+- `docs/VM_IPC_SPEC.md` — the kernel ↔ scheduler/NIF IPC contract, framing, and serialization guidance that any new native hook or scheduler needs to follow.
+- `test262/` — the upstream ECMAScript conformance suite; read `test262/README.md` for how to interpret and run the harness against blitz.
+
+Testing
+-------
+
+- `cargo test` — exercise the Rust units and integration harness (see `tests/prelude_bootstrap.rs` for an example bootstrap run).
+- `cargo clippy` and `cargo fmt` keep the kernel code clean.
+- Keep `soft/tests/` in sync with any new API exposed to blitzlib; the TypeScript code is compiled with `tsc` during `npm run build`.
+- Use the `test262/` material when you want to validate parser/VM conformance. The tree includes its own runner instructions.
+
+Contributing
+------------
+
+1. Read the docs above so you understand the kernel ↔ blitzlib contract before adding features.
+2. Add small, well-tested TypeScript implementations under `soft/` (and `soft/tests/` when appropriate).
+3. When expanding native APIs, update the IPC/architecture documents and keep the surface documented in the soft layer so nothing is hidden behind an undocumented native hook.
+4. Keep the TypeScript layer authoritative (call blitzlib functions, not native ones, unless absolutely necessary) and document how the new behavior maps to the Rust kernel.
+
+License & governance
+--------------------
+
+- The `test262/` tree is governed by the Test262 license embedded inside that directory.
