@@ -18,11 +18,6 @@ declare global {
 }
 
 const BooleanImpl: BooleanConstructor = function (value?: any): boolean {
-  try {
-    if ((this as any) && (this as any).__is_constructor_call) {
-      return new Boolean(value);
-    }
-  } catch (_) {}
   return Boolean(value);
 } as any;
 
@@ -31,15 +26,15 @@ if (typeof Boolean !== "undefined") {
   if (prototype) {
     if (!prototype.valueOf) {
       prototype.valueOf = function (): boolean {
-        return this.valueOf();
+        return Boolean(this as any).valueOf();
       };
     }
     if (!prototype.toString) {
       prototype.toString = function (): string {
-        return this.valueOf() ? "true" : "false";
+        return Boolean(this as any).valueOf() ? "true" : "false";
       };
     }
   }
 }
 
-(Boolean as any) = BooleanImpl;
+void BooleanImpl;

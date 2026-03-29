@@ -1620,6 +1620,11 @@ impl Vm {
         }
     }
 
+    /// Executes a single instruction, returning the outcome (return value or yield).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the instruction fails.
     fn step(
         &mut self,
         stop_at_frame_depth: Option<usize>,
@@ -2233,6 +2238,10 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     /// Apply ECMAScript `ToPrimitive` coercion with an optional preferred hint.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
     pub fn to_primitive(
         &mut self,
         v: &Value,
@@ -2305,6 +2314,10 @@ impl Vm {
     }
 
     /// Apply ECMAScript `ToString` coercion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
     pub fn to_string(&mut self, v: &Value) -> Result<String, crate::errors::RuntimeError> {
         match v {
             Value::String(s) => Ok(s.clone()),
@@ -2329,6 +2342,10 @@ impl Vm {
     }
 
     /// Return the stored source or native template for a callable's `toString`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the value is not a callable.
     pub fn function_to_string(
         &mut self,
         value: &Value,
@@ -2362,6 +2379,10 @@ impl Vm {
     }
 
     /// Apply ECMAScript `ToNumber` coercion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
     pub fn to_number_value(&mut self, v: &Value) -> Result<f64, crate::errors::RuntimeError> {
         match v {
             Value::Number(n) => Ok(*n),
@@ -2387,6 +2408,10 @@ impl Vm {
     }
 
     /// Apply ECMAScript `ToPropertyKey` coercion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
     pub fn to_property_key(
         &mut self,
         v: &Value,
@@ -2431,6 +2456,10 @@ impl Vm {
     /// Kernel helper: abstract equality comparison (==). Exposed so the
     /// soft layer can delegate equality semantics to the kernel during
     /// migration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
     pub fn abstract_equality(
         &mut self,
         x: &Value,
@@ -2550,6 +2579,10 @@ impl Vm {
     }
 
     /// Read a property descriptor from a value, following the prototype chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the operation fails.
     fn read_descriptor_from_value(
         &mut self,
         v: &Value,
@@ -2613,6 +2646,10 @@ impl Vm {
     }
 
     /// Define a property on an object, replacing any existing descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the operation fails.
     fn define_own_property(
         &mut self,
         obj: &Value,

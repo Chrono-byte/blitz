@@ -1167,9 +1167,10 @@ fn main() {
             vm.run(chunk)
                 .map_err(|e| format!("evaluate prelude failed: {}", e))?;
             Ok(())
-        })() {
-            eprintln!("Failed to execute soft prelude: {}", e);
-        }
+        })()
+    {
+        eprintln!("Failed to execute soft prelude: {}", e);
+    }
 
     // Snapshot the fully bootstrapped globals for test isolation.
     // Each test restores from this snapshot instead of deep-cloning.

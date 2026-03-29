@@ -1254,12 +1254,21 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     let boolean_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
         ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
     ));
+    boolean_proto_map.borrow_mut().properties.insert(
+        PKey::String("[[PrimitiveValue]]".to_string()),
+        PropertyDescriptor::data(Value::Bool(false)),
+    );
     let boolean_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
         ObjectData::with_prototype(Value::Object(Rc::clone(&function_proto_map))),
     ));
     boolean_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&boolean_proto_map))),
+        PropertyDescriptor::Data {
+            value: Value::Object(Rc::clone(&boolean_proto_map)),
+            writable: false,
+            enumerable: false,
+            configurable: false,
+        },
     );
 
     let error_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
@@ -2840,6 +2849,15 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         non_enum_data(builtin_object(
             Rc::new(|_vm, args| {
                 let this = args.first().cloned().unwrap_or(Value::Null);
+                if let Value::Object(obj) = &this
+                    && let Some(PropertyDescriptor::Data { value, .. }) = obj
+                        .borrow()
+                        .properties
+                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                    && matches!(value, Value::Bool(_))
+                {
+                    return Ok(Value::String("[object Boolean]".to_string()));
+                }
                 Ok(Value::String(format!("[object {}]", this.object_tag())))
             }),
             &function_proto_map,
@@ -3688,8 +3706,12 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     let boolean_ctor_fn: BuiltinFn = Rc::new(|vm, args| {
         // Called as function: Boolean(value)
         // Called via call/apply: Boolean.call(thisArg, value)
-        let value_idx = if args.len() > 1 { 1 } else { 0 };
-        let value = args.get(value_idx).cloned().unwrap_or(Value::Undefined);
+        let value = if vm.current_new_target().is_some() {
+            args.get(1).cloned().unwrap_or(Value::Undefined)
+        } else {
+            let value_idx = if args.len() > 1 { 1 } else { 0 };
+            args.get(value_idx).cloned().unwrap_or(Value::Undefined)
+        };
         let prim = Value::Bool(vm.to_boolean(&value));
         if vm.current_new_target().is_some()
             && let Some(Value::Object(obj)) = args.first()
@@ -3712,38 +3734,88 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(builtin_object(
             Rc::new(|_vm, args| {
                 let this = args.first().cloned().unwrap_or(Value::Undefined);
-                if let Value::Object(obj) = this
-                    && let Some(PropertyDescriptor::Data { value, .. }) = obj
-                        .borrow()
-                        .properties
-                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                {
-                    return Ok(value.clone());
+                match this {
+                    Value::Bool(b) => return Ok(Value::Bool(b)),
+                    Value::Object(obj) => {
+                        if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                            .borrow()
+                            .properties
+                            .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                        {
+                            return Ok(value.clone());
+                        }
+                    }
+                    _ => {}
                 }
-                Ok(Value::Bool(false))
+                Err(crate::errors::RuntimeError::from(
+                    "Boolean.prototype.valueOf called on incompatible receiver",
+                ))
             }),
             &function_proto_map,
         )),
     );
+    if let Some(PropertyDescriptor::Data { value, .. }) = boolean_proto_map
+        .borrow()
+        .properties
+        .get(&PKey::String("valueOf".to_string()))
+        .cloned()
+        && let Value::BuiltinObject(_, props) = value
+    {
+        props.borrow_mut().properties.insert(
+            PKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(0.0)),
+        );
+        props.borrow_mut().properties.insert(
+            PKey::String("name".to_string()),
+            PropertyDescriptor::data(Value::String("valueOf".to_string())),
+        );
+    }
     boolean_proto_map.borrow_mut().properties.insert(
         PKey::String("toString".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|_vm, args| {
                 let this = args.first().cloned().unwrap_or(Value::Undefined);
-                if let Value::Object(obj) = this
-                    && let Some(PropertyDescriptor::Data { value, .. }) = obj
-                        .borrow()
-                        .properties
-                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                    && let Value::Bool(b) = value
-                {
-                    return Ok(Value::String(if *b { "true" } else { "false" }.to_string()));
+                match this {
+                    Value::Bool(b) => {
+                        return Ok(Value::String(if b { "true" } else { "false" }.to_string()));
+                    }
+                    Value::Object(obj) => {
+                        if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                            .borrow()
+                            .properties
+                            .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                            && let Value::Bool(b) = value
+                        {
+                            return Ok(Value::String(
+                                if *b { "true" } else { "false" }.to_string(),
+                            ));
+                        }
+                    }
+                    _ => {}
                 }
-                Ok(Value::String("false".to_string()))
+                Err(crate::errors::RuntimeError::from(
+                    "Boolean.prototype.toString called on incompatible receiver",
+                ))
             }),
             &function_proto_map,
         )),
     );
+    if let Some(PropertyDescriptor::Data { value, .. }) = boolean_proto_map
+        .borrow()
+        .properties
+        .get(&PKey::String("toString".to_string()))
+        .cloned()
+        && let Value::BuiltinObject(_, props) = value
+    {
+        props.borrow_mut().properties.insert(
+            PKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(0.0)),
+        );
+        props.borrow_mut().properties.insert(
+            PKey::String("name".to_string()),
+            PropertyDescriptor::data(Value::String("toString".to_string())),
+        );
+    }
     let regexp_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
         ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
     ));
@@ -4568,7 +4640,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     );
     g.properties.insert(
         PKey::String("Boolean".to_string()),
-        PropertyDescriptor::data(boolean_ctor_val),
+        non_enum_data(boolean_ctor_val),
     );
     g.properties.insert(
         PKey::String("RegExp".to_string()),
