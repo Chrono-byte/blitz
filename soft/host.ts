@@ -207,19 +207,16 @@ export function defineProperty(target: any, key: any, desc: any): boolean {
 // Provide a global `host` object so modules that were written as
 // `import * as host from "./host"` continue to work when modules are
 // inlined by an earlier tooling flow. This mirrors the exported helpers above.
-// Keep this as a non-exported const so it's available as a plain
-// top-level binding at runtime.
-const host = {
+// Export it so named-import consumers can bind it directly.
+export const host = {
   host_print,
   native_new_object,
   native_print,
   debugValue,
   getHostGetter,
   getBuiltinCached,
+  defineProperty,
 };
-
-// Also export the symbol for module consumers that import named exports.
-export { host };
 
 // Do not publish internal host helpers onto the global object. Exported module
 // bindings should be used by other modules instead of relying on global lookups.

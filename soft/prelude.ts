@@ -6,19 +6,35 @@
  */
 
 import type { Value, Console } from "./core/types.js";
-import { toString as runtimeToString } from "./core/runtime.js";
 
-// Host helpers are provided by the inlined `soft/host.ts` module and expose
-// top-level functions such as `host_print`, `native_new_object`, `native_print`
-// and `debugValue`. Import them explicitly from the host module so the soft
-// prelude doesn't accidentally shadow or redefine these helpers.
-import {
-  host_print,
-  native_new_object,
-  native_print,
-  debugValue as host_debugValue,
-  host as host_ns,
-} from "./host.js";
+const __preludeGlobal: any = typeof globalThis !== "undefined" ? (globalThis as any) : {};
+const runtimeToString = (v: any): string => {
+  try {
+    return __preludeGlobal.String ? __preludeGlobal.String(v) : "" + v;
+  } catch (_) {
+    return "" + v;
+  }
+};
+const host_print = (msg: string): void => {
+  try {
+    const p = __preludeGlobal.__native_print || __preludeGlobal.native_print;
+    if (typeof p === "function" && msg !== "") p(msg);
+  } catch (_) {}
+};
+const native_new_object = (): any => {
+  try {
+    const f = __preludeGlobal.__native_new_object || __preludeGlobal.native_new_object;
+    if (typeof f === "function") return f();
+  } catch (_) {}
+  return {};
+};
+const native_print = (...args: any[]): void => {
+  try {
+    const p = __preludeGlobal.__native_print || __preludeGlobal.native_print;
+    if (typeof p === "function") p(args.map((a) => runtimeToString(a)).join(" "));
+  } catch (_) {}
+};
+const host_debugValue = (_name: string, _v: any): void => {};
 
 // Enable tracing for host.debugValue during bootstrap to help capture
 // type/shape information that may be lost otherwise.
@@ -41,7 +57,12 @@ try {
 
   // Note: we imported the runtime helpers above. For clarity expose local
   // aliases used by the rest of the prelude.
-  const host = host_ns;
+  const host = {
+    host_print,
+    native_new_object,
+    native_print,
+    debugValue: host_debugValue,
+  };
   const debugValue = host_debugValue;
   // Provide a short alias expected by some bootstrap helpers.
   const toString = runtimeToString;
