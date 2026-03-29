@@ -43,6 +43,7 @@ use blitz::{
     module::ModuleLoader, parser::Parser as TsParser, resolver::resolve_specifier, runtime_utils,
     value::Value, vm::Vm,
 };
+use num_traits::{Signed, ToPrimitive};
 
 /// Minimal native hook: print to stdout. The TS soft layer wraps this as console.log.
 fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
@@ -256,7 +257,7 @@ fn main() -> Result<(), blitz::errors::Error> {
                 // Match on references to avoid moving `a`/`b` so they can be
                 // borrowed again later in the closure.
                 if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
-                    return Ok(Value::BigInt(*x + *y));
+                    return Ok(Value::BigInt(x.clone() + y.clone()));
                 } else {
                     return Err(blitz::errors::RuntimeError::from(
                         "Add: cannot mix BigInt and other types",
@@ -283,7 +284,7 @@ fn main() -> Result<(), blitz::errors::Error> {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
-                return Ok(Value::BigInt(*x - *y));
+                return Ok(Value::BigInt(x.clone() - y.clone()));
             }
             let na = vm.to_number_value(&a)?;
             let nb = vm.to_number_value(&b)?;
@@ -297,7 +298,7 @@ fn main() -> Result<(), blitz::errors::Error> {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
-                return Ok(Value::BigInt(*x * *y));
+                return Ok(Value::BigInt(x.clone() * y.clone()));
             }
             let na = vm.to_number_value(&a)?;
             let nb = vm.to_number_value(&b)?;
@@ -328,7 +329,7 @@ fn main() -> Result<(), blitz::errors::Error> {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
-                return Ok(Value::BigInt(*x % *y));
+                return Ok(Value::BigInt(x.clone() % y.clone()));
             }
             let na = vm.to_number_value(&a)?;
             let nb = vm.to_number_value(&b)?;
@@ -343,28 +344,15 @@ fn main() -> Result<(), blitz::errors::Error> {
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
                 // BigInt exponentiation: use integer pow if y >= 0 and fits
-                if *y < 0 {
+                if y.is_negative() {
                     return Err(blitz::errors::RuntimeError::from(
                         "Exponentiation with negative BigInt not supported",
                     ));
                 }
-                let mut res: i128 = 1;
-                let mut base = *x;
-                let mut exp = *y as u128;
-                while exp > 0 {
-                    if (exp & 1) == 1 {
-                        res = res.checked_mul(base).ok_or_else(|| {
-                            blitz::errors::RuntimeError::from("BigInt overflow in exponentiation")
-                        })?;
-                    }
-                    exp >>= 1;
-                    if exp > 0 {
-                        base = base.checked_mul(base).ok_or_else(|| {
-                            blitz::errors::RuntimeError::from("BigInt overflow in exponentiation")
-                        })?;
-                    }
-                }
-                return Ok(Value::BigInt(res));
+                let exp = y.to_u32().ok_or_else(|| {
+                    blitz::errors::RuntimeError::from("Exponentiation with huge BigInt exponent")
+                })?;
+                return Ok(Value::BigInt(x.clone().pow(exp)));
             }
             let na = vm.to_number_value(&a)?;
             let nb = vm.to_number_value(&b)?;

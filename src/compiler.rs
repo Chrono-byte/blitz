@@ -109,6 +109,10 @@ pub struct Compiler {
     globals: HashMap<String, usize>,
     /// True only for the top-level compiler (so we can record global_types).
     is_root: bool,
+    /// Whether the current compilation context is strict.
+    strict_context: bool,
+    /// Current nested loop depth.
+    loop_depth: usize,
     /// Stack of continue patch sites for nested loops. Each entry holds a list
     /// of code offsets (index of the first placeholder byte) that must be
     /// patched to jump to the loop's continue target when the loop is closed.
@@ -116,6 +120,12 @@ pub struct Compiler {
     /// Stack of break patch sites for nested loops. Each entry holds a list of
     /// jump operands that must be patched to the loop exit target.
     break_patches: Vec<Vec<usize>>,
+    /// Stack of active `try {}` blocks with `finally` clauses so `return`
+    /// statements in the protected region can run the finalizer before
+    /// unwinding.
+    finally_patches: Vec<FinallyPatchState>,
+    /// Stack of active labels for `break`/`continue` resolution.
+    label_patches: Vec<LabelPatchState>,
     /// Optional module context when compiling a module
     current_module: Option<ModuleContext>,
     /// Monotonic inline-cache slot allocator for the current chunk.
@@ -148,6 +158,23 @@ struct Scope {
     bindings: HashMap<String, usize>,
 }
 
+#[derive(Debug)]
+struct FinallyPatchState {
+    return_slot: usize,
+    did_return_slot: usize,
+    return_jumps: Vec<usize>,
+    in_finalizer: bool,
+}
+
+#[derive(Debug)]
+struct LabelPatchState {
+    name: String,
+    can_continue: bool,
+    owner_loop_depth: usize,
+    continue_patches: Vec<usize>,
+    break_patches: Vec<usize>,
+}
+
 impl Compiler {
     /// Creates a new compiler instance
     pub fn new(source_text: Rc<String>) -> Self {
@@ -164,8 +191,12 @@ impl Compiler {
             }],
             globals: HashMap::new(),
             is_root: true,
+            strict_context: false,
+            loop_depth: 0,
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
+            finally_patches: Vec::new(),
+            label_patches: Vec::new(),
             current_module: None,
             next_ic_slot: 0,
             outer_bindings: HashMap::new(),
@@ -431,6 +462,11 @@ impl Compiler {
         } else {
             self.current_module = None;
         }
+        self.strict_context = program.source_type.is_strict()
+            || program
+                .directives
+                .iter()
+                .any(|directive| directive.directive.as_str() == "use strict");
 
         self.emit_hoisted_function_decls_oast_stmts(&program.body)?;
 
@@ -681,19 +717,75 @@ impl Compiler {
             OStmt::ExportDefaultDeclaration(export) => {
                 match &export.declaration {
                     oast::ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
-                        let fname =
-                            f.id.as_ref()
-                                .map_or_else(|| "<default>".to_string(), |id| id.name.to_string());
-                        let (proto, _env_len) = self.compile_function(&fname, f, None)?;
-                        let idx = self.chunk.add_function(proto);
-                        self.emit(Op::MakeClosure, LINE);
-                        self.emit_byte(idx as u8, LINE);
+                        if let Some(id) = &f.id {
+                            self.compile_function_declaration_oast(f)?;
+                            self.emit_get_binding(id.name.as_str());
+                        } else {
+                            let fname = "<default>".to_string();
+                            let (proto, _env_len) = self.compile_function(&fname, f, None)?;
+                            let idx = self.chunk.add_function(proto);
+                            self.emit(Op::MakeClosure, LINE);
+                            self.emit_byte(idx as u8, LINE);
+                        }
                     }
-                    _ => {
+                    oast::ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+                        if let Some(id) = &c.id {
+                            self.compile_class_declaration_oast(c)?;
+                            self.emit_get_binding(id.name.as_str());
+                        } else {
+                            return Err(crate::errors::CompilerError::from(
+                                "unsupported anonymous export default class declaration",
+                            ));
+                        }
+                    }
+                    oast::ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
                         return Err(crate::errors::CompilerError::from(
                             "unsupported export default declaration",
                         ));
                     }
+                    other => match other {
+                        oast::ExportDefaultDeclarationKind::NumericLiteral(n) => {
+                            self.emit_constant(Value::Number(n.value), LINE)
+                        }
+                        oast::ExportDefaultDeclarationKind::StringLiteral(s) => {
+                            self.emit_constant(Value::String(s.value.to_string()), LINE)
+                        }
+                        oast::ExportDefaultDeclarationKind::BooleanLiteral(b) => {
+                            if b.value {
+                                self.emit(Op::True, LINE);
+                            } else {
+                                self.emit(Op::False, LINE);
+                            }
+                        }
+                        oast::ExportDefaultDeclarationKind::NullLiteral(_) => {
+                            self.emit(Op::Null, LINE)
+                        }
+                        oast::ExportDefaultDeclarationKind::BigIntLiteral(n) => {
+                            let raw =
+                                n.raw.as_ref().map(oxc_span::Atom::as_str).ok_or_else(|| {
+                                    crate::errors::CompilerError::from("invalid bigint literal")
+                                })?;
+                            let digits = raw.strip_suffix('n').unwrap_or(raw).replace('_', "");
+                            let parsed = if let Some(hex) = digits.strip_prefix("0x") {
+                                num_bigint::BigInt::parse_bytes(hex.as_bytes(), 16)
+                            } else if let Some(bin) = digits.strip_prefix("0b") {
+                                num_bigint::BigInt::parse_bytes(bin.as_bytes(), 2)
+                            } else if let Some(oct) = digits.strip_prefix("0o") {
+                                num_bigint::BigInt::parse_bytes(oct.as_bytes(), 8)
+                            } else {
+                                num_bigint::BigInt::parse_bytes(digits.as_bytes(), 10)
+                            }
+                            .ok_or_else(|| {
+                                crate::errors::CompilerError::from("invalid bigint literal")
+                            })?;
+                            self.emit_constant(Value::BigInt(parsed), LINE);
+                        }
+                        _ => {
+                            return Err(crate::errors::CompilerError::from(
+                                "unsupported export default declaration",
+                            ));
+                        }
+                    },
                 }
                 self.emit_set_own_module_export("default")?;
             }
@@ -703,6 +795,46 @@ impl Compiler {
             OStmt::ExpressionStatement(e) => {
                 self.compile_expr_oast(&e.expression)?;
                 self.emit(Op::Pop, LINE);
+            }
+            OStmt::LabeledStatement(l) => {
+                let can_continue = matches!(
+                    &l.body,
+                    OStmt::WhileStatement(_) | OStmt::ForStatement(_) | OStmt::ForInStatement(_)
+                );
+                self.label_patches.push(LabelPatchState {
+                    name: l.label.name.to_string(),
+                    can_continue,
+                    owner_loop_depth: if can_continue {
+                        self.loop_depth + 1
+                    } else {
+                        self.loop_depth
+                    },
+                    continue_patches: Vec::new(),
+                    break_patches: Vec::new(),
+                });
+                self.compile_statement_oast(&l.body)?;
+                let label_state = self
+                    .label_patches
+                    .pop()
+                    .ok_or_else(|| crate::errors::CompilerError::from("label stack underflow"))?;
+                if !label_state.can_continue && !label_state.continue_patches.is_empty() {
+                    return Err(crate::errors::CompilerError::from(
+                        "'continue' used with non-iteration label",
+                    ));
+                }
+                if !label_state.break_patches.is_empty() {
+                    let target = self.chunk.code.len();
+                    self.patch_jump_list(label_state.break_patches, target);
+                }
+            }
+            OStmt::WithStatement(w) => {
+                // The VM currently models `with` as a normal scoped block after
+                // evaluating the object expression for side effects.
+                self.compile_expr_oast(&w.object)?;
+                self.emit(Op::Pop, LINE);
+                self.enter_block_scope();
+                self.compile_statement_oast(&w.body)?;
+                self.exit_scope();
             }
             OStmt::BlockStatement(b) => {
                 self.enter_block_scope();
@@ -810,6 +942,7 @@ impl Compiler {
                 }
             }
             OStmt::WhileStatement(w) => {
+                self.loop_depth += 1;
                 self.continue_patches.push(Vec::new());
                 self.break_patches.push(Vec::new());
                 let loop_start = self.chunk.code.len();
@@ -841,9 +974,28 @@ impl Compiler {
                         self.chunk.code[patch_pos + 1] = (target & 0xff) as u8;
                     }
                 }
+                let label_patches = if let Some(state) = self.label_patches.last_mut() {
+                    if state.can_continue && state.owner_loop_depth == self.loop_depth {
+                        Some((
+                            std::mem::take(&mut state.continue_patches),
+                            std::mem::take(&mut state.break_patches),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((continue_patches, break_patches)) = label_patches {
+                    let loop_end = self.chunk.code.len();
+                    self.patch_jump_list(continue_patches, loop_start);
+                    self.patch_jump_list(break_patches, loop_end);
+                }
+                self.loop_depth = self.loop_depth.saturating_sub(1);
             }
             OStmt::ForStatement(f) => {
                 use oxc_ast::ast::ForStatementInit as OForInit;
+                self.loop_depth += 1;
                 self.continue_patches.push(Vec::new());
                 self.break_patches.push(Vec::new());
                 let mut per_iteration_slots = Vec::new();
@@ -963,8 +1115,27 @@ impl Compiler {
                         self.chunk.code[patch_pos + 1] = (target & 0xff) as u8;
                     }
                 }
+                let label_patches = if let Some(state) = self.label_patches.last_mut() {
+                    if state.can_continue && state.owner_loop_depth == self.loop_depth {
+                        Some((
+                            std::mem::take(&mut state.continue_patches),
+                            std::mem::take(&mut state.break_patches),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((continue_patches, break_patches)) = label_patches {
+                    let loop_end = self.chunk.code.len();
+                    self.patch_jump_list(continue_patches, update_start);
+                    self.patch_jump_list(break_patches, loop_end);
+                }
+                self.loop_depth = self.loop_depth.saturating_sub(1);
             }
             OStmt::ForInStatement(f) => {
+                self.loop_depth += 1;
                 self.continue_patches.push(Vec::new());
                 self.break_patches.push(Vec::new());
 
@@ -1076,6 +1247,24 @@ impl Compiler {
                         self.chunk.code[patch_pos + 1] = (target & 0xff) as u8;
                     }
                 }
+                let label_patches = if let Some(state) = self.label_patches.last_mut() {
+                    if state.can_continue && state.owner_loop_depth == self.loop_depth {
+                        Some((
+                            std::mem::take(&mut state.continue_patches),
+                            std::mem::take(&mut state.break_patches),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((continue_patches, break_patches)) = label_patches {
+                    let loop_end = self.chunk.code.len();
+                    self.patch_jump_list(continue_patches, update_start);
+                    self.patch_jump_list(break_patches, loop_end);
+                }
+                self.loop_depth = self.loop_depth.saturating_sub(1);
             }
             OStmt::ReturnStatement(r) => {
                 if let Some(arg) = &r.argument {
@@ -1083,34 +1272,92 @@ impl Compiler {
                 } else {
                     self.emit(Op::Undefined, LINE);
                 }
+                let return_target = self.finally_patches.last().and_then(|state| {
+                    if state.in_finalizer {
+                        None
+                    } else {
+                        Some((state.return_slot, state.did_return_slot))
+                    }
+                });
+                if let Some((return_slot, did_return_slot)) = return_target {
+                    self.emit(Op::Dup, LINE);
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(return_slot as u8, LINE);
+                    self.emit(Op::True, LINE);
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(did_return_slot as u8, LINE);
+                    self.emit(Op::Jump, LINE);
+                    let patch_pos = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    if let Some(state) = self.finally_patches.last_mut() {
+                        state.return_jumps.push(patch_pos);
+                    }
+                    return Ok(());
+                }
                 self.emit(Op::Return, LINE);
             }
-            OStmt::ContinueStatement(_) => {
-                if self.continue_patches.is_empty() {
-                    return Err(crate::errors::CompilerError::from(
-                        "'continue' used outside of a loop",
-                    ));
-                }
+            OStmt::ContinueStatement(c) => {
                 self.emit(Op::Jump, LINE);
                 let patch_pos = self.chunk.code.len();
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
-                if let Some(patches) = self.continue_patches.last_mut() {
-                    patches.push(patch_pos);
+                if let Some(label) = &c.label {
+                    let label_name = label.name.to_string();
+                    let idx = self
+                        .label_patches
+                        .iter()
+                        .rposition(|state| state.name == label_name)
+                        .ok_or_else(|| {
+                            crate::errors::CompilerError::from(format!(
+                                "unknown label '{}'",
+                                label_name
+                            ))
+                        })?;
+                    if !self.label_patches[idx].can_continue {
+                        return Err(crate::errors::CompilerError::from(
+                            "'continue' used with non-iteration label",
+                        ));
+                    }
+                    self.label_patches[idx].continue_patches.push(patch_pos);
+                } else {
+                    if self.continue_patches.is_empty() {
+                        return Err(crate::errors::CompilerError::from(
+                            "'continue' used outside of a loop",
+                        ));
+                    }
+                    if let Some(patches) = self.continue_patches.last_mut() {
+                        patches.push(patch_pos);
+                    }
                 }
             }
-            OStmt::BreakStatement(_) => {
-                if self.break_patches.is_empty() {
-                    return Err(crate::errors::CompilerError::from(
-                        "'break' used outside of a loop",
-                    ));
-                }
+            OStmt::BreakStatement(b) => {
                 self.emit(Op::Jump, LINE);
                 let patch_pos = self.chunk.code.len();
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
-                if let Some(patches) = self.break_patches.last_mut() {
-                    patches.push(patch_pos);
+                if let Some(label) = &b.label {
+                    let label_name = label.name.to_string();
+                    let idx = self
+                        .label_patches
+                        .iter()
+                        .rposition(|state| state.name == label_name)
+                        .ok_or_else(|| {
+                            crate::errors::CompilerError::from(format!(
+                                "unknown label '{}'",
+                                label_name
+                            ))
+                        })?;
+                    self.label_patches[idx].break_patches.push(patch_pos);
+                } else {
+                    if self.break_patches.is_empty() {
+                        return Err(crate::errors::CompilerError::from(
+                            "'break' used outside of a loop",
+                        ));
+                    }
+                    if let Some(patches) = self.break_patches.last_mut() {
+                        patches.push(patch_pos);
+                    }
                 }
             }
             OStmt::ThrowStatement(t) => {
@@ -1120,6 +1367,33 @@ impl Compiler {
             OStmt::TryStatement(t) => {
                 let handler = t.handler.as_ref();
                 let finalizer = t.finalizer.as_ref();
+                if finalizer.is_some() {
+                    let return_slot = self.add_local_with_mirror(
+                        format!("__finally_return_{}", self.locals.len()),
+                        None,
+                        false,
+                    );
+                    let did_return_slot = self.add_local_with_mirror(
+                        format!("__finally_did_return_{}", self.locals.len() + 1),
+                        None,
+                        false,
+                    );
+                    self.emit(Op::Undefined, LINE);
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(return_slot as u8, LINE);
+                    self.emit(Op::False, LINE);
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(did_return_slot as u8, LINE);
+                    self.finally_patches.push(FinallyPatchState {
+                        return_slot,
+                        did_return_slot,
+                        return_jumps: Vec::new(),
+                        in_finalizer: false,
+                    });
+                }
+                let finally_idx = finalizer
+                    .as_ref()
+                    .map(|_| self.finally_patches.len().saturating_sub(1));
 
                 self.emit(Op::PushHandler, LINE);
                 let handler_jump = self.chunk.code.len();
@@ -1134,9 +1408,43 @@ impl Compiler {
 
                 // Normal completion path: run finalizer (if present), then skip handler path.
                 if let Some(fin) = finalizer {
+                    let finally_idx = finally_idx.ok_or_else(|| {
+                        crate::errors::CompilerError::from("finally state missing")
+                    })?;
+                    {
+                        let state = self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
+                            crate::errors::CompilerError::from("finally state missing")
+                        })?;
+                        state.in_finalizer = true;
+                    }
+                    let body_start = self.chunk.code.len();
                     for stmt in &fin.body {
                         self.compile_statement_oast(stmt)?;
                     }
+                    let (did_return_slot, return_slot) = {
+                        let state = self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
+                            crate::errors::CompilerError::from("finally state missing")
+                        })?;
+                        state.in_finalizer = false;
+                        let return_jumps = std::mem::take(&mut state.return_jumps);
+                        for patch_pos in return_jumps {
+                            let target = body_start as isize - (patch_pos as isize) - 2;
+                            let v = target as i16;
+                            self.chunk.code[patch_pos] = (v >> 8) as u8;
+                            self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                        }
+                        (state.did_return_slot, state.return_slot)
+                    };
+                    self.emit(Op::GetLocal, LINE);
+                    self.emit_byte(did_return_slot as u8, LINE);
+                    self.emit(Op::JumpIfFalse, LINE);
+                    let skip_return = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.emit(Op::GetLocal, LINE);
+                    self.emit_byte(return_slot as u8, LINE);
+                    self.emit(Op::Return, LINE);
+                    self.patch_jump(skip_return);
                 }
                 self.emit(Op::Jump, LINE);
                 let end_jump = self.chunk.code.len();
@@ -1177,9 +1485,24 @@ impl Compiler {
                         }
 
                         if let Some(fin) = finalizer {
+                            let finally_idx = finally_idx.ok_or_else(|| {
+                                crate::errors::CompilerError::from("finally state missing")
+                            })?;
+                            {
+                                let state =
+                                    self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
+                                        crate::errors::CompilerError::from("finally state missing")
+                                    })?;
+                                state.in_finalizer = true;
+                            }
                             for stmt in &fin.body {
                                 self.compile_statement_oast(stmt)?;
                             }
+                            let state =
+                                self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
+                                    crate::errors::CompilerError::from("finally state missing")
+                                })?;
+                            state.in_finalizer = false;
                         }
                     }
                     None => {
@@ -1195,9 +1518,24 @@ impl Compiler {
                         self.emit(Op::SetLocal, LINE);
                         self.emit_byte(slot as u8, LINE);
                         if let Some(fin) = finalizer {
+                            let finally_idx = finally_idx.ok_or_else(|| {
+                                crate::errors::CompilerError::from("finally state missing")
+                            })?;
+                            {
+                                let state =
+                                    self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
+                                        crate::errors::CompilerError::from("finally state missing")
+                                    })?;
+                                state.in_finalizer = true;
+                            }
                             for stmt in &fin.body {
                                 self.compile_statement_oast(stmt)?;
                             }
+                            let state =
+                                self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
+                                    crate::errors::CompilerError::from("finally state missing")
+                                })?;
+                            state.in_finalizer = false;
                         }
                         self.emit(Op::GetLocal, LINE);
                         self.emit_byte(slot as u8, LINE);
@@ -1207,6 +1545,9 @@ impl Compiler {
                 }
 
                 self.patch_jump(end_jump);
+                if finalizer.is_some() {
+                    self.finally_patches.pop();
+                }
             }
             _ => {}
         }
@@ -1236,6 +1577,7 @@ impl Compiler {
             has_prototype_property: true,
             captures_this: false,
             arguments_slot: None,
+            has_simple_parameter_list: true,
             return_type: None,
             is_strict: true,
             is_constructor: true,
@@ -1273,15 +1615,15 @@ impl Compiler {
                     })?;
                 let digits = raw.strip_suffix('n').unwrap_or(raw).replace('_', "");
                 let parsed = if let Some(hex) = digits.strip_prefix("0x") {
-                    i128::from_str_radix(hex, 16)
+                    num_bigint::BigInt::parse_bytes(hex.as_bytes(), 16)
                 } else if let Some(bin) = digits.strip_prefix("0b") {
-                    i128::from_str_radix(bin, 2)
+                    num_bigint::BigInt::parse_bytes(bin.as_bytes(), 2)
                 } else if let Some(oct) = digits.strip_prefix("0o") {
-                    i128::from_str_radix(oct, 8)
+                    num_bigint::BigInt::parse_bytes(oct.as_bytes(), 8)
                 } else {
-                    digits.parse::<i128>()
+                    num_bigint::BigInt::parse_bytes(digits.as_bytes(), 10)
                 }
-                .map_err(|_| crate::errors::CompilerError::from("invalid bigint literal"))?;
+                .ok_or_else(|| crate::errors::CompilerError::from("invalid bigint literal"))?;
                 self.emit_constant(Value::BigInt(parsed), LINE);
             }
             OExpr::StringLiteral(s) => self.emit_constant(Value::String(s.value.to_string()), LINE),
@@ -2046,6 +2388,17 @@ impl Compiler {
                 self.emit(Op::Call, LINE);
                 self.emit_byte((arg_count + 1) as u8, LINE);
             }
+            OExpr::ImportExpression(i) => {
+                self.emit_get_global_name("__native_dynamic_import");
+                self.compile_expr_oast(&i.source)?;
+                if let Some(options) = &i.options {
+                    self.compile_expr_oast(options)?;
+                } else {
+                    self.emit(Op::Undefined, LINE);
+                }
+                self.emit(Op::Call, LINE);
+                self.emit_byte(2, LINE);
+            }
             OExpr::RegExpLiteral(re) => {
                 self.emit_get_global_name("RegExp");
                 self.emit_constant(Value::String(re.regex.pattern.text.to_string()), LINE);
@@ -2133,21 +2486,51 @@ impl Compiler {
     /// prologue. Per ECMAScript, directive prologue consists of leading
     /// string-literal expression statements appearing before any other
     /// statements.
-    fn has_use_strict_directive(stmts: &[oast::Statement]) -> bool {
-        for stmt in stmts {
-            if let oast::Statement::ExpressionStatement(expr_stmt) = stmt
-                && let oxc_ast::ast::Expression::StringLiteral(s) = &expr_stmt.expression
-            {
-                if s.value.as_str() == "use strict" {
-                    return true;
-                }
+    fn has_use_strict_directive(body: &oast::FunctionBody<'_>) -> bool {
+        body.directives
+            .iter()
+            .any(|directive| directive.directive.as_str() == "use strict")
+    }
+
+    fn has_simple_parameter_list(func: &oast::Function<'_>) -> bool {
+        func.params.rest.is_none()
+            && func.params.items.iter().all(|param| {
+                matches!(param.pattern, oast::BindingPattern::BindingIdentifier(_))
+                    && param.initializer.is_none()
+            })
+    }
+
+    fn emit_parameter_initializers(
+        &mut self,
+        params: &oast::FormalParameters<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        for (idx, param) in params.items.iter().enumerate() {
+            let Some(init) = &param.initializer else {
                 continue;
-            }
-            // Non-string-literal ExpressionStatement or non-expression statement
-            // terminates the directive prologue.
-            break;
+            };
+            self.emit(Op::GetLocal, LINE);
+            self.emit_byte(idx as u8, LINE);
+            self.emit(Op::Undefined, LINE);
+            self.emit(Op::StrictEq, LINE);
+            self.emit(Op::JumpIfFalse, LINE);
+            let skip_jump = self.chunk.code.len();
+            self.emit_byte(0, LINE);
+            self.emit_byte(0, LINE);
+            self.compile_expr_oast(init)?;
+            self.emit(Op::SetLocal, LINE);
+            self.emit_byte(idx as u8, LINE);
+            self.patch_jump(skip_jump);
         }
-        false
+        Ok(())
+    }
+
+    fn patch_jump_list(&mut self, patches: Vec<usize>, target: usize) {
+        for patch_pos in patches {
+            let offset = target as isize - (patch_pos as isize) - 2;
+            let v = offset as i16;
+            self.chunk.code[patch_pos] = (v >> 8) as u8;
+            self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+        }
     }
 
     fn compile_function(
@@ -2170,8 +2553,12 @@ impl Compiler {
             }],
             globals: HashMap::new(),
             is_root: false,
+            strict_context: self.strict_context,
+            loop_depth: 0,
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
+            finally_patches: Vec::new(),
+            label_patches: Vec::new(),
             current_module: None,
             next_ic_slot: 0,
             outer_bindings: self.visible_bindings_snapshot(),
@@ -2204,6 +2591,8 @@ impl Compiler {
             inner.emit_hoisted_function_decls_oast_stmts(&body.statements)?;
         }
 
+        inner.emit_parameter_initializers(&func.params)?;
+
         // Compile function body statements into inner compiler.
         if let Some(body) = &func.body {
             for stmt in &body.statements {
@@ -2217,15 +2606,17 @@ impl Compiler {
         inner.emit(Op::Return, LINE);
         let chunk = std::mem::take(&mut inner.chunk);
         let has_rest = func.params.rest.is_some();
+        let has_simple_parameter_list = Self::has_simple_parameter_list(func);
         let slot_types = inner.local_types;
         let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
         let lexical_tdz = inner.local_tdz;
         let has_prototype_property = !func.r#async;
         let is_constructor = !func.r#async && !func.generator;
-        let is_strict = func
-            .body
-            .as_ref()
-            .is_some_and(|body| Self::has_use_strict_directive(&body.statements));
+        let is_strict = self.strict_context
+            || func
+                .body
+                .as_ref()
+                .is_some_and(|body| Self::has_use_strict_directive(body));
         Ok((
             FunctionProto {
                 name: name.to_string(),
@@ -2240,6 +2631,7 @@ impl Compiler {
                 has_prototype_property,
                 captures_this: false,
                 arguments_slot: Some(arguments_slot),
+                has_simple_parameter_list,
                 return_type,
                 is_strict,
                 is_constructor,
@@ -2270,8 +2662,12 @@ impl Compiler {
             }],
             globals: HashMap::new(),
             is_root: false,
+            strict_context: self.strict_context,
+            loop_depth: 0,
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
+            finally_patches: Vec::new(),
+            label_patches: Vec::new(),
             current_module: None,
             next_ic_slot: 0,
             outer_bindings: self.visible_bindings_snapshot(),
@@ -2329,10 +2725,15 @@ impl Compiler {
 
         let chunk = std::mem::take(&mut inner.chunk);
         let has_rest = func.params.rest.is_some();
+        let has_simple_parameter_list = func.params.rest.is_none()
+            && func.params.items.iter().all(|param| {
+                matches!(param.pattern, oast::BindingPattern::BindingIdentifier(_))
+                    && param.initializer.is_none()
+            });
         let slot_types = inner.local_types;
         let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
         let lexical_tdz = inner.local_tdz;
-        let is_strict = Self::has_use_strict_directive(&func.body.statements);
+        let is_strict = self.strict_context || Self::has_use_strict_directive(&func.body);
         Ok((
             FunctionProto {
                 name: name.to_string(),
@@ -2349,6 +2750,7 @@ impl Compiler {
                 // Arrow functions do not create their own `arguments`; it is
                 // lexically resolved from the enclosing function/global scope.
                 arguments_slot: None,
+                has_simple_parameter_list,
                 return_type,
                 is_strict,
                 is_constructor: false,

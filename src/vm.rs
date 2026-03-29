@@ -50,6 +50,8 @@ use crate::realm::Realm;
 use crate::runtime_utils::{reject_pending_promise, resolve_promise_with_value};
 use crate::typecheck::Type;
 use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
+use num_bigint::BigInt as BigIntValue;
+use num_traits::{FromPrimitive, Signed, ToPrimitive};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
@@ -427,57 +429,49 @@ impl Vm {
         let proto = Rc::clone(proto);
         let env = Rc::clone(env);
         let promise_for_job = Rc::clone(&promise);
-        let mut pending_call_args = Some(call_args);
-        let mut pending_this_arg = Some(this_arg);
-        self.queue_microtask(move |vm| {
-            let stack_base = vm.stack.len();
-            let saved_stack = vm.stack[..stack_base].to_vec();
-            let caller_chunk = Rc::clone(&vm.chunk);
-            let caller_ip = vm.ip;
-            let caller_locals = vm.locals.clone();
-            let caller_this = vm.this_value.clone();
-            let caller_env = vm.current_closure_env.clone();
-            let caller_lexical_env = vm.lexical_env.clone();
-            let caller_slot_types = vm.current_slot_types.clone();
-            let caller_frame_len = vm.frames.len();
-            let caller_handler_len = vm.handlers.len();
-            let thrown_value = vm.stack.last().cloned();
+        let stack_base = self.stack.len();
+        let saved_stack = self.stack[..stack_base].to_vec();
+        let caller_chunk = Rc::clone(&self.chunk);
+        let caller_ip = self.ip;
+        let caller_locals = self.locals.clone();
+        let caller_this = self.this_value.clone();
+        let caller_env = self.current_closure_env.clone();
+        let caller_lexical_env = self.lexical_env.clone();
+        let caller_slot_types = self.current_slot_types.clone();
+        let caller_frame_len = self.frames.len();
+        let caller_handler_len = self.handlers.len();
+        let thrown_value = self.stack.last().cloned();
 
-            vm.last_uncaught_exception = None;
-            let exec_result = (|| {
-                let call_args = pending_call_args.take().unwrap();
-                let this_arg = pending_this_arg.take().unwrap();
-                vm.push_call_frame(&proto, &env, call_args, this_arg)?;
-                vm.run_until_return(stack_base, false)
-            })();
+        self.last_uncaught_exception = None;
+        let exec_result = (|| {
+            self.push_call_frame(&proto, &env, call_args, this_arg)?;
+            self.run_until_return(stack_base, false)
+        })();
 
-            vm.chunk = caller_chunk;
-            vm.ip = caller_ip;
-            vm.locals = caller_locals;
-            vm.this_value = caller_this;
-            vm.current_closure_env = caller_env;
-            vm.lexical_env = caller_lexical_env;
-            vm.current_slot_types = caller_slot_types;
-            vm.stack = saved_stack;
-            vm.frames.truncate(caller_frame_len);
-            vm.handlers.truncate(caller_handler_len);
+        self.chunk = caller_chunk;
+        self.ip = caller_ip;
+        self.locals = caller_locals;
+        self.this_value = caller_this;
+        self.current_closure_env = caller_env;
+        self.lexical_env = caller_lexical_env;
+        self.current_slot_types = caller_slot_types;
+        self.stack = saved_stack;
+        self.frames.truncate(caller_frame_len);
+        self.handlers.truncate(caller_handler_len);
 
-            match exec_result {
-                Ok(result) => {
-                    let _ = resolve_promise_with_value(vm, &promise_for_job, result);
-                }
-                Err(err) => {
-                    let reason = thrown_value
-                        .or_else(|| vm.last_uncaught_exception.take())
-                        .unwrap_or_else(|| Value::String(format!("{}", err)));
-                    reject_pending_promise(vm, &promise_for_job, reason);
-                }
+        match exec_result {
+            Ok(result) => {
+                let _ = resolve_promise_with_value(self, &promise_for_job, result);
             }
+            Err(err) => {
+                let reason = thrown_value
+                    .or_else(|| self.last_uncaught_exception.take())
+                    .unwrap_or_else(|| Value::String(format!("{}", err)));
+                reject_pending_promise(self, &promise_for_job, reason);
+            }
+        }
 
-            vm.run_microtasks_if_needed()?;
-
-            Ok(())
-        });
+        self.run_microtasks_if_needed()?;
 
         Ok(Value::Promise(promise))
     }
@@ -615,6 +609,14 @@ impl Vm {
         self.module_table[module_index] = exports;
     }
 
+    /// Return the current namespace object for a module, if available.
+    pub fn module_namespace_value(&self, module_index: usize) -> Option<Value> {
+        self.module_table
+            .get(module_index)
+            .and_then(|exports| exports.get("*"))
+            .map(|slot| slot.borrow().clone())
+    }
+
     /// Debug helper: get a global value by name (cloned).
     pub fn get_global(&self, name: &str) -> Option<Value> {
         self.globals
@@ -746,6 +748,10 @@ impl Vm {
     }
 
     /// Synchronously execute an async future on the background runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the background task fails.
     pub fn block_on<Fut>(&self, fut: Fut) -> Result<Fut::Output, crate::errors::RuntimeError>
     where
         Fut: Future + Send + 'static,
@@ -1120,6 +1126,10 @@ impl Vm {
     }
 
     /// Host hook: define an own property with a descriptor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the property definition fails.
     pub fn define_property_builtin(
         &mut self,
         args: &[Value],
@@ -1136,6 +1146,10 @@ impl Vm {
     }
 
     /// Host hook: define an own property from explicit arguments.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the property definition fails.
     pub fn define_property_value(
         &mut self,
         target: &Value,
@@ -1162,6 +1176,10 @@ impl Vm {
     }
 
     /// Apply ECMAScript `ToObject` coercion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
     pub fn to_object_value(&mut self, v: Value) -> Result<Value, crate::errors::RuntimeError> {
         match v {
             Value::Object(_)
@@ -1221,6 +1239,10 @@ impl Vm {
     }
 
     /// Host hook: invoke a callable with an explicit receiver.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the call fails.
     pub fn call_value_with_this(
         &mut self,
         callee: &Value,
@@ -1233,6 +1255,10 @@ impl Vm {
     /// Parse and evaluate a single expression source string in an isolated VM.
     ///
     /// The expression result is written to `__tsblitz_eval_result` and returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the evaluation fails.
     pub fn eval_expression_source(
         &mut self,
         source: &str,
@@ -1251,6 +1277,10 @@ impl Vm {
     }
 
     /// Host hook: construct a callable with `new` semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the construction fails.
     pub fn construct_value(
         &mut self,
         callee: &Value,
@@ -1333,6 +1363,10 @@ impl Vm {
     }
 
     /// Host hook: read a property value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the property read fails.
     pub fn get_property_host(
         &mut self,
         obj: &Value,
@@ -1342,6 +1376,10 @@ impl Vm {
     }
 
     /// Host hook: test whether a property exists on the receiver or its prototype chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the property lookup fails.
     pub fn has_property_host(
         &self,
         obj: &Value,
@@ -1351,6 +1389,10 @@ impl Vm {
     }
 
     /// Host hook: delete an own property.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the property deletion fails.
     pub fn delete_property_host(
         &mut self,
         obj: &Value,
@@ -1434,6 +1476,10 @@ impl Vm {
     }
 
     /// Host hook: set a property value on a target object-like value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the property setting fails.
     pub fn set_property_host(
         &mut self,
         obj: &Value,
@@ -1481,6 +1527,18 @@ impl Vm {
                 call_args.extend_from_slice(args);
                 let call_args = self.prepare_call_args(&call_args, proto)?;
                 self.validate_call_args(&call_args, proto)?;
+                let closure_env = match callee {
+                    Value::Closure { env, .. } => Rc::clone(env),
+                    _ => unreachable!(),
+                };
+                if proto.is_async {
+                    return self.invoke_async_closure(
+                        proto,
+                        &closure_env,
+                        call_args,
+                        this_arg.clone(),
+                    );
+                }
                 let stack_base = self.stack.len();
                 let saved_stack = self.stack[..stack_base].to_vec();
                 if crate::trace::enabled() {
@@ -1499,10 +1557,6 @@ impl Vm {
                 let caller_slot_types = self.current_slot_types.clone();
                 let caller_frame_len = self.frames.len();
                 let caller_handler_len = self.handlers.len();
-                let closure_env = match callee {
-                    Value::Closure { env, .. } => Rc::clone(env),
-                    _ => unreachable!(),
-                };
                 self.push_call_frame(proto, &closure_env, call_args, this_arg.clone())?;
                 let result = self.run_until_return(stack_base, true);
                 // Restore caller state (run_until_return already truncated stack)
@@ -1749,7 +1803,7 @@ impl Vm {
                 // Helper: ToNumeric approximation returning either Number(f64) or BigInt(i128)
                 enum Numeric {
                     Number(f64),
-                    BigInt(i128),
+                    BigInt(BigIntValue),
                 }
 
                 let to_numeric = |vm: &mut Vm,
@@ -1764,10 +1818,7 @@ impl Vm {
                             match prim {
                                 Value::BigInt(n) => Ok(Numeric::BigInt(n)),
                                 Value::Number(n) => Ok(Numeric::Number(n)),
-                                Value::String(s) => {
-                                    let parsed = s.parse::<f64>().unwrap_or(f64::NAN);
-                                    Ok(Numeric::Number(parsed))
-                                }
+                                Value::String(s) => Ok(Numeric::Number(parse_js_number_string(&s))),
                                 Value::Bool(b) => Ok(Numeric::Number(if b { 1.0 } else { 0.0 })),
                                 Value::Null => Ok(Numeric::Number(0.0)),
                                 Value::Undefined => Ok(Numeric::Number(f64::NAN)),
@@ -1813,7 +1864,7 @@ impl Vm {
                     (Numeric::BigInt(x), Numeric::BigInt(y)) => {
                         // BigInt exponent must be non-negative
                         let exp = y;
-                        if exp < 0 {
+                        if exp.is_negative() {
                             let ctor = self.get_global("RangeError").unwrap_or(Value::Undefined);
                             let thrown = self
                                 .construct_value(&ctor, &[])
@@ -1823,24 +1874,10 @@ impl Vm {
                                 Err(err) => return Err(err),
                             }
                         }
-                        // Exponentiation by repeated squaring for i128 (may overflow)
-                        let mut base = x;
-                        let mut exp_mut = exp;
-                        let mut result: i128 = 1;
-                        while exp_mut > 0 {
-                            if (exp_mut & 1) != 0 {
-                                result = result.checked_mul(base).ok_or_else(|| {
-                                    crate::errors::RuntimeError::from("Pow: bigint overflow")
-                                })?;
-                            }
-                            exp_mut >>= 1;
-                            if exp_mut > 0 {
-                                base = base.checked_mul(base).ok_or_else(|| {
-                                    crate::errors::RuntimeError::from("Pow: bigint overflow")
-                                })?;
-                            }
-                        }
-                        self.stack.push(Value::BigInt(result));
+                        let exp_u32 = exp.to_u32().ok_or_else(|| {
+                            crate::errors::RuntimeError::from("Pow: bigint exponent too large")
+                        })?;
+                        self.stack.push(Value::BigInt(x.pow(exp_u32)));
                     }
                     (Numeric::Number(x), Numeric::Number(y)) => {
                         let r = x.powf(y);
@@ -1862,12 +1899,14 @@ impl Vm {
             Op::Eq => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                self.stack.push(Value::Bool(abstract_equal(&a, &b)));
+                let result = self.abstract_equality(&a, &b)?;
+                self.stack.push(Value::Bool(result));
             }
             Op::Neq => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                self.stack.push(Value::Bool(!abstract_equal(&a, &b)));
+                let result = self.abstract_equality(&a, &b)?;
+                self.stack.push(Value::Bool(!result));
             }
             Op::Lt => {
                 let b = self.pop()?;
@@ -2156,17 +2195,32 @@ impl Vm {
             Op::AwaitPromise => {
                 let awaited = self.pop()?;
                 match awaited {
-                    Value::Promise(state) => match &*state.borrow() {
-                        PromiseState::Fulfilled(v) => {
-                            self.stack.push(v.clone());
+                    Value::Promise(state) => {
+                        let mut settled = false;
+                        for _ in 0..1024 {
+                            match &*state.borrow() {
+                                PromiseState::Fulfilled(v) => {
+                                    self.stack.push(v.clone());
+                                    settled = true;
+                                    break;
+                                }
+                                PromiseState::Rejected(reason) => {
+                                    self.throw_value(reason.clone())?;
+                                    settled = true;
+                                    break;
+                                }
+                                PromiseState::Pending { .. } => {
+                                    if self.microtasks.is_empty() {
+                                        break;
+                                    }
+                                    self.run_microtasks_if_needed()?;
+                                }
+                            }
                         }
-                        PromiseState::Rejected(reason) => {
-                            self.throw_value(reason.clone())?;
-                        }
-                        PromiseState::Pending { .. } => {
+                        if !settled {
                             self.stack.push(Value::Undefined);
                         }
-                    },
+                    }
                     other => self.stack.push(other),
                 }
             }
@@ -2312,10 +2366,16 @@ impl Vm {
         match v {
             Value::Number(n) => Ok(*n),
             Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
-            Value::String(s) => Ok(s.parse::<f64>().unwrap_or(f64::NAN)),
+            Value::String(s) => Ok(parse_js_number_string(s)),
             Value::Undefined => Ok(f64::NAN),
             Value::Null => Ok(0.0),
-            Value::BigInt(n) => Ok(*n as f64),
+            Value::BigInt(n) => Ok(n.to_f64().unwrap_or_else(|| {
+                if n.is_negative() {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                }
+            })),
             Value::Symbol(_, _) => Err(crate::errors::RuntimeError::from(
                 "Cannot convert Symbol to number",
             )),
@@ -2403,6 +2463,33 @@ impl Vm {
             }
         }
 
+        // BigInt and String
+        if matches!(x, Value::BigInt(_)) && matches!(y, Value::String(_)) {
+            if let (Value::BigInt(xn), Value::String(ys)) = (x, y)
+                && let Some(yn) = parse_js_bigint_string(ys)
+            {
+                return Ok(xn == &yn);
+            }
+            return Ok(false);
+        }
+        if matches!(x, Value::String(_)) && matches!(y, Value::BigInt(_)) {
+            return self.abstract_equality(y, x);
+        }
+
+        // BigInt and Number
+        if let (Value::BigInt(xn), Value::Number(yn)) = (x, y) {
+            if !yn.is_finite() {
+                return Ok(false);
+            }
+            if let Some(yn_big) = BigIntValue::from_f64(*yn) {
+                return Ok(xn == &yn_big);
+            }
+            return Ok(false);
+        }
+        if let (Value::Number(_), Value::BigInt(_)) = (x, y) {
+            return self.abstract_equality(y, x);
+        }
+
         // Boolean -> Number coercion
         if matches!(x, Value::Bool(_)) {
             let xn = if let Value::Bool(b) = x {
@@ -2421,37 +2508,48 @@ impl Vm {
             return self.abstract_equality(x, &Value::Number(yn));
         }
 
-        // Object compared with String/Number: ToPrimitive on object
-        if (matches!(x, Value::String(_)) || matches!(x, Value::Number(_)))
-            && matches!(
-                y,
-                Value::Object(_)
-                    | Value::Array(..)
-                    | Value::Closure { .. }
-                    | Value::Builtin(_)
-                    | Value::BuiltinObject(_, _)
-            )
-        {
-            let yprim = self.to_primitive(y, None)?;
-            return self.abstract_equality(x, &yprim);
-        }
-        if (matches!(y, Value::String(_)) || matches!(y, Value::Number(_)))
-            && matches!(
-                x,
-                Value::Object(_)
-                    | Value::Array(..)
-                    | Value::Closure { .. }
-                    | Value::Builtin(_)
-                    | Value::BuiltinObject(_, _)
-            )
-        {
+        // Object compared with primitive: ToPrimitive on object
+        if matches!(
+            x,
+            Value::Object(_)
+                | Value::Array(..)
+                | Value::Closure { .. }
+                | Value::Builtin(_)
+                | Value::BuiltinObject(_, _)
+        ) && matches!(
+            y,
+            Value::String(_)
+                | Value::Number(_)
+                | Value::BigInt(_)
+                | Value::Symbol(_, _)
+                | Value::Bool(_)
+        ) {
             let xprim = self.to_primitive(x, None)?;
             return self.abstract_equality(&xprim, y);
+        }
+        if matches!(
+            y,
+            Value::Object(_)
+                | Value::Array(..)
+                | Value::Closure { .. }
+                | Value::Builtin(_)
+                | Value::BuiltinObject(_, _)
+        ) && matches!(
+            x,
+            Value::String(_)
+                | Value::Number(_)
+                | Value::BigInt(_)
+                | Value::Symbol(_, _)
+                | Value::Bool(_)
+        ) {
+            let yprim = self.to_primitive(y, None)?;
+            return self.abstract_equality(x, &yprim);
         }
 
         Ok(false)
     }
 
+    /// Read a property descriptor from a value, following the prototype chain.
     fn read_descriptor_from_value(
         &mut self,
         v: &Value,
@@ -2514,6 +2612,7 @@ impl Vm {
         Ok(desc)
     }
 
+    /// Define a property on an object, replacing any existing descriptor.
     fn define_own_property(
         &mut self,
         obj: &Value,
@@ -2615,6 +2714,7 @@ impl Vm {
         Ok(true)
     }
 
+    /// Get the value of a property on an object, following the prototype chain.
     fn get_property_value(
         &mut self,
         obj: &Value,
@@ -2713,6 +2813,7 @@ impl Vm {
         Ok(Value::Undefined)
     }
 
+    /// Lookup a property descriptor on an object, following the prototype chain.
     fn lookup_property_descriptor(
         &self,
         obj: &Value,
@@ -3019,16 +3120,73 @@ impl Vm {
         if let Some(slot) = proto.arguments_slot
             && slot < self.locals.len()
         {
-            let arr_rc = Rc::new(RefCell::new(args_for_arguments));
-            let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
-            props.borrow_mut().properties.insert(
-                PropertyKey::String("length".to_string()),
-                PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
-            );
-            self.locals[slot] = Rc::new(RefCell::new(Value::Array(arr_rc, props)));
+            if proto.has_simple_parameter_list && !proto.is_strict {
+                let args_obj = self.build_mapped_arguments_object(proto, &args_for_arguments);
+                self.locals[slot] = Rc::new(RefCell::new(args_obj));
+            } else {
+                let arr_rc = Rc::new(RefCell::new(args_for_arguments));
+                let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+                props.borrow_mut().properties.insert(
+                    PropertyKey::String("length".to_string()),
+                    PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+                );
+                self.locals[slot] = Rc::new(RefCell::new(Value::Array(arr_rc, props)));
+            }
         }
 
         Ok(())
+    }
+
+    fn build_mapped_arguments_object(
+        &self,
+        proto: &FunctionProto,
+        args_for_arguments: &[Option<Value>],
+    ) -> Value {
+        let obj_rc = Rc::new(RefCell::new(ObjectData::new()));
+        let arg_count = args_for_arguments.len();
+        let mapped_count = proto.arity.min(self.locals.len());
+        for idx in 0..arg_count {
+            let key = PropertyKey::String(idx.to_string());
+            if idx < mapped_count {
+                let getter_cell = Rc::clone(&self.locals[idx]);
+                let setter_cell = Rc::clone(&self.locals[idx]);
+                let getter =
+                    Value::Builtin(Rc::new(move |_vm, _args| Ok(getter_cell.borrow().clone())));
+                let setter = Value::Builtin(Rc::new(move |_vm, args| {
+                    let value = args
+                        .get(1)
+                        .cloned()
+                        .unwrap_or_else(|| args.first().cloned().unwrap_or(Value::Undefined));
+                    *setter_cell.borrow_mut() = value;
+                    Ok(Value::Undefined)
+                }));
+                obj_rc.borrow_mut().properties.insert(
+                    key,
+                    PropertyDescriptor::Accessor {
+                        get: Some(getter),
+                        set: Some(setter),
+                        enumerable: true,
+                        configurable: true,
+                    },
+                );
+            } else {
+                obj_rc.borrow_mut().properties.insert(
+                    key,
+                    PropertyDescriptor::data(
+                        args_for_arguments
+                            .get(idx)
+                            .cloned()
+                            .flatten()
+                            .unwrap_or(Value::Undefined),
+                    ),
+                );
+            }
+        }
+        obj_rc.borrow_mut().properties.insert(
+            PropertyKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(arg_count as f64)),
+        );
+        Value::Object(obj_rc)
     }
 
     fn build_array(&mut self) -> Result<(), crate::errors::RuntimeError> {
@@ -3629,7 +3787,7 @@ impl Vm {
     fn binary_num_bigint<F, G>(&mut self, f: F, g: G) -> Result<(), crate::errors::RuntimeError>
     where
         F: FnOnce(f64, f64) -> f64,
-        G: FnOnce(i128, i128) -> Result<i128, crate::errors::RuntimeError>,
+        G: FnOnce(BigIntValue, BigIntValue) -> Result<BigIntValue, crate::errors::RuntimeError>,
     {
         let b = self.pop()?;
         let a = self.pop()?;
@@ -4115,10 +4273,16 @@ fn to_number(v: &Value) -> Result<f64, crate::errors::RuntimeError> {
     match v {
         Value::Number(n) => Ok(*n),
         Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
-        Value::String(s) => Ok(s.parse::<f64>().unwrap_or(f64::NAN)),
+        Value::String(s) => Ok(parse_js_number_string(s)),
         Value::Undefined => Ok(f64::NAN),
         Value::Null => Ok(0.0),
-        Value::BigInt(n) => Ok(*n as f64),
+        Value::BigInt(n) => Ok(n.to_f64().unwrap_or_else(|| {
+            if n.is_negative() {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            }
+        })),
         _ => Err(crate::errors::RuntimeError::from("Expected number")),
     }
 }
@@ -4138,7 +4302,13 @@ fn to_uint32(v: &Value) -> Result<u32, crate::errors::RuntimeError> {
     // ToUint32 per ECMAScript: ToNumber(v), then take the integer part modulo 2^32
     let n = match v {
         Value::Number(x) => *x,
-        Value::BigInt(x) => *x as f64,
+        Value::BigInt(x) => x.to_f64().unwrap_or_else(|| {
+            if x.is_negative() {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            }
+        }),
         _ => {
             return Err(crate::errors::RuntimeError::from(
                 "Expected number for bitwise operation",
@@ -4155,6 +4325,69 @@ fn to_uint32(v: &Value) -> Result<u32, crate::errors::RuntimeError> {
     let int_part = n.trunc();
     let vmod = int_part.rem_euclid(TWO32);
     Ok(vmod as u32)
+}
+
+fn parse_js_number_string(s: &str) -> f64 {
+    let s = s.trim();
+    if s.is_empty() {
+        return 0.0;
+    }
+    if matches!(s, "Infinity" | "+Infinity") {
+        return f64::INFINITY;
+    }
+    if s == "-Infinity" {
+        return f64::NEG_INFINITY;
+    }
+
+    let (sign, body) = match s.as_bytes().first() {
+        Some(b'+') => (1.0, &s[1..]),
+        Some(b'-') => (-1.0, &s[1..]),
+        _ => (1.0, s),
+    };
+
+    let parsed = if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+        BigIntValue::parse_bytes(hex.as_bytes(), 16)
+            .and_then(|n| n.to_f64())
+            .unwrap_or(f64::NAN)
+    } else if let Some(bin) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
+        BigIntValue::parse_bytes(bin.as_bytes(), 2)
+            .and_then(|n| n.to_f64())
+            .unwrap_or(f64::NAN)
+    } else if let Some(oct) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
+        BigIntValue::parse_bytes(oct.as_bytes(), 8)
+            .and_then(|n| n.to_f64())
+            .unwrap_or(f64::NAN)
+    } else {
+        body.parse::<f64>().unwrap_or(f64::NAN)
+    };
+
+    sign * parsed
+}
+
+fn parse_js_bigint_string(s: &str) -> Option<BigIntValue> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (neg, body) = match s.as_bytes().first() {
+        Some(b'+') => (false, &s[1..]),
+        Some(b'-') => (true, &s[1..]),
+        _ => (false, s),
+    };
+    let mut parsed = if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X"))
+    {
+        BigIntValue::parse_bytes(hex.as_bytes(), 16)?
+    } else if let Some(bin) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
+        BigIntValue::parse_bytes(bin.as_bytes(), 2)?
+    } else if let Some(oct) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
+        BigIntValue::parse_bytes(oct.as_bytes(), 8)?
+    } else {
+        BigIntValue::parse_bytes(body.as_bytes(), 10)?
+    };
+    if neg {
+        parsed = -parsed;
+    }
+    Some(parsed)
 }
 
 // Helper methods on Vm for coercion that delegate to free functions but
@@ -4193,56 +4426,6 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Builtin(af), Value::Builtin(bf)) => Rc::ptr_eq(af, bf),
         _ => false,
     }
-}
-
-/// ECMAScript abstract equality (==) semantics
-/// https://tc39.es/ecma262/#sec-abstract-equality-comparison
-fn abstract_equal(a: &Value, b: &Value) -> bool {
-    // Step 1: If types are the same, use strict equality
-    if std::mem::discriminant(a) == std::mem::discriminant(b) {
-        return values_equal(a, b);
-    }
-
-    // Step 2: If one is null and other is undefined
-    if (matches!(a, Value::Null) && matches!(b, Value::Undefined))
-        || (matches!(a, Value::Undefined) && matches!(b, Value::Null))
-    {
-        return true;
-    }
-
-    // Step 3: If one is number and other is string, convert string to number
-    if let (Value::Number(n), Value::String(s)) = (a, b) {
-        if let Ok(s_num) = s.parse::<f64>() {
-            return n == &s_num;
-        }
-        return false;
-    }
-    if let (Value::String(s), Value::Number(n)) = (a, b) {
-        if let Ok(s_num) = s.parse::<f64>() {
-            return &s_num == n;
-        }
-        return false;
-    }
-
-    // Step 4: If one is boolean, convert to number
-    if let Value::Bool(b_val) = a {
-        let a_num = if *b_val {
-            Value::Number(1.0)
-        } else {
-            Value::Number(0.0)
-        };
-        return abstract_equal(&a_num, b);
-    }
-    if let Value::Bool(b_val) = b {
-        let b_num = if *b_val {
-            Value::Number(1.0)
-        } else {
-            Value::Number(0.0)
-        };
-        return abstract_equal(a, &b_num);
-    }
-
-    false
 }
 
 /// ECMAScript SameValue semantics used by `Object.is`.
@@ -4605,23 +4788,32 @@ impl PartialOrd for Value {
             (Value::Number(a), Value::Number(b)) => a.partial_cmp(b),
             // Both strings: string comparison
             (Value::String(a), Value::String(b)) => a.partial_cmp(b),
+            (Value::BigInt(a), Value::BigInt(b)) => a.partial_cmp(b),
             // Number and String: convert string to number
             (Value::Number(a), Value::String(b)) => {
-                if let Ok(b_num) = b.parse::<f64>() {
-                    a.partial_cmp(&b_num)
-                } else {
-                    // String doesn't parse as number, becomes NaN
-                    // NaN comparisons return None (undefined in JS)
+                let b_num = parse_js_number_string(b);
+                if b_num.is_nan() {
                     None
+                } else {
+                    a.partial_cmp(&b_num)
                 }
             }
             // String and Number: convert string to number
             (Value::String(a), Value::Number(b)) => {
-                if let Ok(a_num) = a.parse::<f64>() {
-                    a_num.partial_cmp(b)
-                } else {
+                let a_num = parse_js_number_string(a);
+                if a_num.is_nan() {
                     None
+                } else {
+                    a_num.partial_cmp(b)
                 }
+            }
+            (Value::BigInt(a), Value::Number(b)) => a.to_f64().and_then(|x| x.partial_cmp(b)),
+            (Value::Number(a), Value::BigInt(b)) => b.to_f64().and_then(|x| a.partial_cmp(&x)),
+            (Value::BigInt(a), Value::String(b)) => {
+                parse_js_bigint_string(b).and_then(|bb| a.partial_cmp(&bb))
+            }
+            (Value::String(a), Value::BigInt(b)) => {
+                parse_js_bigint_string(a).and_then(|aa| aa.partial_cmp(b))
             }
             // Boolean: convert to number (1.0 or 0.0)
             (Value::Bool(a), other) => {

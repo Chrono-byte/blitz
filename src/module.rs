@@ -6,11 +6,23 @@ use crate::resolver::resolve_specifier;
 use crate::value::Value;
 use crate::vm::Vm;
 
+use oxc_span::SourceType;
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+
+fn source_type_for_path(path: &Path) -> SourceType {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if name.ends_with(".tsx") {
+        SourceType::tsx()
+    } else if name.ends_with(".ts") || name.ends_with(".mts") || name.ends_with(".cts") {
+        SourceType::ts()
+    } else {
+        SourceType::unambiguous()
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum ModuleState {
@@ -94,9 +106,11 @@ impl ModuleLoader {
                 e
             ))
         })?;
-        let session = crate::parser::Parser::parse_source(&src).map_err(|e| {
-            BundlerError::from(format!("Parse error {}: {}", resolved_canon.display(), e))
-        })?;
+        let source_type = source_type_for_path(&resolved_canon);
+        let session =
+            crate::parser::Parser::parse_source_with_type(&src, source_type).map_err(|e| {
+                BundlerError::from(format!("Parse error {}: {}", resolved_canon.display(), e))
+            })?;
         let rec = Rc::new(RefCell::new(ModuleRecord::new(
             resolved_canon.clone(),
             session,
@@ -104,9 +118,11 @@ impl ModuleLoader {
         self.map.insert(resolved_canon.clone(), Rc::clone(&rec));
 
         // Recurse into dependencies discovered by parser helper
-        let imports = crate::parser::Parser::extract_imports_from_source(&src).map_err(|e| {
-            BundlerError::from(format!("Parse error {}: {}", resolved_canon.display(), e))
-        })?;
+        let imports =
+            crate::parser::Parser::extract_imports_from_source_with_type(&src, source_type)
+                .map_err(|e| {
+                    BundlerError::from(format!("Parse error {}: {}", resolved_canon.display(), e))
+                })?;
         for spec in imports {
             if spec.starts_with('.') || spec.starts_with('/') {
                 let base_dir = resolved_canon.parent().unwrap_or(Path::new("."));
@@ -157,7 +173,8 @@ impl ModuleLoader {
                                             );
                                         }
                                     }
-                                } else if let Some(decl) = item.get("declaration")
+                                }
+                                if let Some(decl) = item.get("declaration")
                                     && let Some(decl_type) =
                                         decl.get("type").and_then(|d| d.as_str())
                                 {
@@ -401,10 +418,11 @@ impl ModuleLoader {
             let src = std::fs::read_to_string(path).map_err(|e| {
                 BundlerError::from(format!("Failed to read module {}: {}", path.display(), e))
             })?;
-            let imports =
-                crate::parser::Parser::extract_imports_from_source(&src).map_err(|e| {
-                    BundlerError::from(format!("Parse error {}: {}", path.display(), e))
-                })?;
+            let imports = crate::parser::Parser::extract_imports_from_source_with_type(
+                &src,
+                source_type_for_path(path),
+            )
+            .map_err(|e| BundlerError::from(format!("Parse error {}: {}", path.display(), e)))?;
             for spec in imports {
                 let base_dir = path.parent().unwrap_or(Path::new("."));
                 // attempt to ensure dependency constructed

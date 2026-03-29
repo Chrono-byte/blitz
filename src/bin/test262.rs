@@ -27,11 +27,12 @@ use std::process::exit;
 use std::rc::Rc;
 
 use clap::Parser as ClapParser;
+use oxc_span::SourceType;
 use serde::Deserialize;
 
 use blitz::compiler;
 use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
-use blitz::{module::ModuleLoader, parser::Parser, typecheck, value::Value, vm::Vm};
+use blitz::{parser::Parser, typecheck, value::Value, vm::Vm};
 
 #[derive(Clone, Copy, Default)]
 struct BucketStats {
@@ -239,6 +240,24 @@ fn print_args(args: &[Value]) -> String {
         .map(|v| format!("{}", v))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn parse_source_for_path(
+    source: &str,
+    path: &Path,
+) -> Result<blitz::parser::ParserSession, blitz::errors::ParserError> {
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let source_type = if file_name.ends_with(".tsx") {
+        SourceType::tsx()
+    } else if file_name.ends_with(".ts")
+        || file_name.ends_with(".mts")
+        || file_name.ends_with(".cts")
+    {
+        SourceType::ts()
+    } else {
+        SourceType::unambiguous()
+    };
+    Parser::parse_source_with_type(source, source_type)
 }
 
 fn is_async_done_marker(s: &str) -> Option<Option<String>> {
@@ -724,7 +743,7 @@ fn run_test_file(
                     let hsrc = fs::read_to_string(&p)
                         .map_err(|e| format!("Failed to read harness {}: {}", p.display(), e))?;
                     // Parse/typecheck/compile the harness and run it in the provided VM
-                    let session = match Parser::parse_source(&hsrc) {
+                    let session = match parse_source_for_path(&hsrc, &p) {
                         Ok(s) => s,
                         Err(e) => {
                             eprintln!(
@@ -1011,7 +1030,7 @@ fn run_harness_only(
         }
         let hsrc = fs::read_to_string(&p)
             .map_err(|e| format!("Failed to read harness {}: {}", p.display(), e))?;
-        let session = Parser::parse_source(&hsrc)
+        let session = parse_source_for_path(&hsrc, &p)
             .map_err(|e| format!("Harness {} parse failed: {}", h, e))?;
         let prog = session.program();
         let chunk = compiler::compile_oxc(prog, &hsrc)
@@ -1136,26 +1155,21 @@ fn main() {
     // Run soft prelude once (if present) to install runtime helpers
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let prelude_path = manifest_dir.join("soft/prelude.ts");
-    if prelude_path.exists() {
-        let mut loader = ModuleLoader::new();
-        if let Err(e) = (|| -> Result<(), String> {
-            loader
-                .construct(
-                    prelude_path.parent().unwrap_or(Path::new(".")),
-                    &format!("./{}", prelude_path.file_name().unwrap().to_string_lossy()),
-                )
-                .map_err(|e| format!("construct prelude failed: {}", e))?;
-            loader
-                .instantiate_all()
-                .map_err(|e| format!("instantiate prelude failed: {}", e))?;
-            loader
-                .evaluate_entry(&prelude_path, &mut vm, true)
+    if prelude_path.exists()
+        && let Err(e) = (|| -> Result<(), String> {
+            let psrc = fs::read_to_string(&prelude_path)
+                .map_err(|e| format!("Failed to read prelude {}: {}", prelude_path.display(), e))?;
+            let session = Parser::parse_source_with_type(&psrc, SourceType::ts())
+                .map_err(|e| format!("parse prelude failed: {}", e))?;
+            let prog = session.program();
+            let chunk = compiler::compile_oxc(prog, &psrc)
+                .map_err(|e| format!("compile prelude failed: {}", e))?;
+            vm.run(chunk)
                 .map_err(|e| format!("evaluate prelude failed: {}", e))?;
             Ok(())
         })() {
             eprintln!("Failed to execute soft prelude: {}", e);
         }
-    }
 
     // Snapshot the fully bootstrapped globals for test isolation.
     // Each test restores from this snapshot instead of deep-cloning.

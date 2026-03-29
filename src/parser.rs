@@ -80,9 +80,11 @@ impl Parser {
     /// # Errors
     ///
     pub fn parse_source(source: &str) -> Result<ParserSession, ParserError> {
-        // Default to TypeScript parsing for callers that don't provide
-        // filename/extension information (preserves previous behavior).
-        Self::parse_source_with_type(source, SourceType::ts())
+        // Default to JavaScript parsing for callers that don't provide
+        // filename/extension information. JS is the runtime default for
+        // this engine; callers that need TypeScript syntax should opt in via
+        // `parse_source_with_type(..., SourceType::ts())`.
+        Self::parse_source_with_type(source, SourceType::unambiguous())
     }
 
     /// Parse source text with an explicit Oxc SourceType (js or ts).
@@ -140,7 +142,7 @@ impl Parser {
         // Build a self-referencing ParserSession using try_new so we can return
         // parsing errors as ParserError when the underlying Oxc parser fails.
         ParserSession::try_new(Allocator::default(), source_owned, |alloc, source| {
-            let ret = OxcParser::new(alloc, source, SourceType::ts())
+            let ret = OxcParser::new(alloc, source, SourceType::unambiguous())
                 .with_options(ParseOptions {
                     parse_regular_expression: true,
                     ..ParseOptions::default()
@@ -177,9 +179,8 @@ impl Parser {
         // We only need the ESTree JSON here so keeping allocator scoped is fine.
         let alloc = Allocator::default();
         let leaked_source = source; // short-lived borrow for parser
-        // Default to TypeScript parsing for import extraction. Callers that
-        // know the file is JavaScript should use `extract_imports_from_source_with_type`.
-        let ret = OxcParser::new(&alloc, leaked_source, SourceType::ts())
+        // Default to JavaScript parsing for import extraction.
+        let ret = OxcParser::new(&alloc, leaked_source, SourceType::unambiguous())
             .with_options(ParseOptions {
                 parse_regular_expression: true,
                 ..ParseOptions::default()

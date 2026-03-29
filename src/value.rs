@@ -39,6 +39,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::rc::Weak;
 
+use num_bigint::BigInt as BigIntValue;
+use num_traits::Zero;
+
 /// A weak reference to an ObjectData that can be upgraded when needed.
 /// This helps prevent reference cycles in prototype chains.
 #[derive(Clone)]
@@ -307,7 +310,7 @@ pub enum Value {
     /// Undefined value
     Undefined,
     /// BigInt value
-    BigInt(i128),
+    BigInt(BigIntValue),
     /// Symbol value
     Symbol(SymbolId, Option<String>),
     /// Null value
@@ -380,7 +383,7 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Number(n) => *n != 0.0 && !n.is_nan(),
             Value::String(s) => !s.is_empty(),
-            Value::BigInt(n) => *n != 0,
+            Value::BigInt(n) => !n.is_zero(),
             _ => true,
         }
     }

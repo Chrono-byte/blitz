@@ -96,6 +96,8 @@ pub struct FunctionProto {
     pub captures_this: bool,
     /// Slot index for the implicit `arguments` binding, if reserved.
     pub arguments_slot: Option<usize>,
+    /// Whether the formal parameter list is simple enough for mapped arguments.
+    pub has_simple_parameter_list: bool,
     /// Return type annotation
     pub return_type: Option<Type>,
     /// Whether this function contains a "use strict" directive in its
