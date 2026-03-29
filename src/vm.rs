@@ -746,7 +746,10 @@ impl Vm {
                 if !runner.started {
                     runner.started = true;
                 } else {
-                    runner.vm.stack.push(args.first().cloned().unwrap_or(Value::Undefined));
+                    runner
+                        .vm
+                        .stack
+                        .push(args.first().cloned().unwrap_or(Value::Undefined));
                 }
 
                 loop {
@@ -773,7 +776,7 @@ impl Vm {
                 }
 
                 let thrown = args.first().cloned().unwrap_or(Value::Undefined);
-                if let Err(err) = runner.vm.throw_value(thrown.clone()) {
+                if let Err(err) = runner.vm.throw_value(thrown) {
                     runner.completed = true;
                     return Err(err);
                 }
@@ -861,7 +864,10 @@ impl Vm {
                     let matches = self.find_constants_containing_value(&callee);
                     if !matches.is_empty() {
                         for (fi, ci) in matches {
-                            eprintln!("[trace]   callee appears in frame[{}] constants[{}]", fi, ci);
+                            eprintln!(
+                                "[trace]   callee appears in frame[{}] constants[{}]",
+                                fi, ci
+                            );
                         }
                     }
                 }
@@ -954,7 +960,10 @@ impl Vm {
                     let matches = self.find_constants_containing_value(&callee);
                     if !matches.is_empty() {
                         for (fi, ci) in matches {
-                            eprintln!("[trace]   callee appears in frame[{}] constants[{}]", fi, ci);
+                            eprintln!(
+                                "[trace]   callee appears in frame[{}] constants[{}]",
+                                fi, ci
+                            );
                         }
                     }
                 } else {
@@ -1930,12 +1939,11 @@ impl Vm {
                     }
                     self.yield_star_queue = Some(queue);
                 }
-                if let Some(queue) = &mut self.yield_star_queue {
-                    if let Some(value) = queue.pop_front() {
+                if let Some(queue) = &mut self.yield_star_queue
+                    && let Some(value) = queue.pop_front() {
                         self.ip = self.ip.saturating_sub(1);
                         return Ok(StepOutcome::Yield(value));
                     }
-                }
                 self.yield_star_queue = None;
                 self.stack.push(Value::Undefined);
             }
@@ -2674,7 +2682,11 @@ impl Vm {
             // Log allocation site for rest-array used as arguments so we can
             // correlate a later callee pointing at the same props pointer.
             if let Value::Array(_arr, props_rc) = fixed.last().cloned().unwrap() {
-                eprintln!("[trace] prepare_call_args: created rest-Array props_ptr={:p} proto='{}'", Rc::as_ptr(&props_rc), proto.name);
+                eprintln!(
+                    "[trace] prepare_call_args: created rest-Array props_ptr={:p} proto='{}'",
+                    Rc::as_ptr(&props_rc),
+                    proto.name
+                );
             }
         }
         Ok(fixed)
@@ -2814,7 +2826,8 @@ impl Vm {
             props.borrow_mut().prototype = proto_val;
         }
 
-        self.stack.push(Value::Array(Rc::clone(&arr_rc), Rc::clone(&props)));
+        self.stack
+            .push(Value::Array(Rc::clone(&arr_rc), Rc::clone(&props)));
         if crate::trace::enabled() {
             eprintln!(
                 "[trace] build_array: created Array arr_ptr={:p} props_ptr={:p} ip={}",
@@ -2868,7 +2881,11 @@ impl Vm {
         let obj_rc = Rc::new(RefCell::new(data));
         self.stack.push(Value::Object(Rc::clone(&obj_rc)));
         if crate::trace::enabled() {
-            eprintln!("[trace] build_object: created Object obj_ptr={:p} ip={}", Rc::as_ptr(&obj_rc), self.ip.saturating_sub(1));
+            eprintln!(
+                "[trace] build_object: created Object obj_ptr={:p} ip={}",
+                Rc::as_ptr(&obj_rc),
+                self.ip.saturating_sub(1)
+            );
         }
         Ok(())
     }
@@ -2963,13 +2980,17 @@ impl Vm {
                 // proto_obj_map was allocated when creating the prototype
                 // object above; print its pointer if available via the props
                 // object we just attached.
-                if let Value::Closure { props, .. } = &closure {
-                    if let Some(PropertyDescriptor::Data { value, .. }) = props.borrow().properties.get(&PropertyKey::String("prototype".to_string())) {
-                        if let Value::Object(proto_obj_map) = value {
-                            eprintln!("[trace] make_closure: created proto_obj props_ptr={:p}", Rc::as_ptr(proto_obj_map));
+                if let Value::Closure { props, .. } = &closure
+                    && let Some(PropertyDescriptor::Data { value, .. }) = props
+                        .borrow()
+                        .properties
+                        .get(&PropertyKey::String("prototype".to_string()))
+                        && let Value::Object(proto_obj_map) = value {
+                            eprintln!(
+                                "[trace] make_closure: created proto_obj props_ptr={:p}",
+                                Rc::as_ptr(proto_obj_map)
+                            );
                         }
-                    }
-                }
             }
         }
         Ok(())
@@ -3375,7 +3396,11 @@ impl Vm {
         eprintln!("[diag] disasm window ({}..{}):", start, end);
 
         // Print current chunk pointer to help correlate disasm with function proto
-        eprintln!("[diag] current chunk ptr={:p} chunk_len={}", Rc::as_ptr(&self.chunk), self.chunk.code.len());
+        eprintln!(
+            "[diag] current chunk ptr={:p} chunk_len={}",
+            Rc::as_ptr(&self.chunk),
+            self.chunk.code.len()
+        );
 
         // Print a brief summary of any function prototypes present in the
         // current chunk to help map MakeClosure indexes to human-readable
@@ -3400,7 +3425,10 @@ impl Vm {
         // Also print a short dump of the constant pool for this chunk which
         // helps map large Const indices back to concrete values during
         // diagnostic analysis.
-        eprintln!("[diag] chunk constants (len={}):", self.chunk.constants.len());
+        eprintln!(
+            "[diag] chunk constants (len={}):",
+            self.chunk.constants.len()
+        );
         for (i, c) in self.chunk.constants.iter().enumerate().take(64) {
             eprintln!("[diag]   const[{}] = {:?}", i, c);
         }
@@ -3499,14 +3527,36 @@ impl Vm {
                             };
                             eprintln!("[diag] {:#06}  Const       {} ({})", j, arg, repr);
                         } else {
-                            eprintln!("[diag] {:#06}  Const       {} (<out-of-range for current chunk constants len={}>)", j, arg, self.chunk.constants.len());
+                            eprintln!(
+                                "[diag] {:#06}  Const       {} (<out-of-range for current chunk constants len={}>)",
+                                j,
+                                arg,
+                                self.chunk.constants.len()
+                            );
                             // Try to locate a function proto whose constant pool would contain this index
                             for (pi, proto) in self.chunk.functions.iter().enumerate() {
                                 if (arg as usize) < proto.chunk.constants.len() {
-                                    eprintln!("[diag]   -> const {} appears valid in proto[{}] '{}', proto_chunk_ptr={:p} proto_consts_len={}", arg, pi, proto.name, Rc::as_ptr(&proto.chunk), proto.chunk.constants.len());
+                                    eprintln!(
+                                        "[diag]   -> const {} appears valid in proto[{}] '{}', proto_chunk_ptr={:p} proto_consts_len={}",
+                                        arg,
+                                        pi,
+                                        proto.name,
+                                        Rc::as_ptr(&proto.chunk),
+                                        proto.chunk.constants.len()
+                                    );
                                     // Print a small slice of that proto's constants
-                                    for (ci, cc) in proto.chunk.constants.iter().enumerate().skip((arg as usize).saturating_sub(4)).take(8) {
-                                        eprintln!("[diag]     proto[{}].const[{}] = {:?}", pi, ci, cc);
+                                    for (ci, cc) in proto
+                                        .chunk
+                                        .constants
+                                        .iter()
+                                        .enumerate()
+                                        .skip((arg as usize).saturating_sub(4))
+                                        .take(8)
+                                    {
+                                        eprintln!(
+                                            "[diag]     proto[{}].const[{}] = {:?}",
+                                            pi, ci, cc
+                                        );
                                     }
                                 }
                             }
