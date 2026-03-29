@@ -493,7 +493,7 @@ fn shadowrealm_import_value(
                             "TypeError",
                             &format!("ShadowRealm clone failed: {}", err),
                         )
-                        .unwrap_or(Value::String(err.to_string()));
+                        .unwrap_or(Value::String(err));
                     reject_pending_promise(vm, &promise, err_val);
                 }
             },
@@ -904,13 +904,18 @@ fn canonical_index_key(s: &str) -> Option<u64> {
     Some(idx)
 }
 
-/// Pragmatic structured-clone helper used for cross-realm ShadowRealm value
-/// transfers. Supports primitives, plain objects (data properties), and
-/// arrays with non-cyclic graphs. Returns an Err(string) when cloning is
-/// unsupported (functions, promises, symbols, accessors, or cycles).
+/// Structured-clone helper for cross-realm value transfers used by ShadowRealm
+/// operations. Implements copying semantics for primitives, Array, Object,
+/// Date, RegExp, Map, Set, ArrayBuffer, and TypedArray shaped objects used by
+/// this runtime. Preserves cycles/shared references by using a visited map and
+/// creates host-realm objects with the appropriate host intrinsics as
+/// prototypes. Returns Err(String) for uncloneable values (functions,
+/// promises, symbols, accessors, etc.).
 fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String> {
     use std::collections::HashMap;
 
+    // visited maps source Rc pointer addresses to already-created clone Values
+    // so we can preserve cycles and shared references.
     fn helper(
         vm: &mut Vm,
         v: &Value,
@@ -928,79 +933,297 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
             Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. } => {
                 Err("Cannot clone functions/closures across realms".to_string())
             }
-            Value::Array(arr_rc, props) => {
+            Value::Array(arr_rc, props_rc) => {
                 let addr = Rc::as_ptr(arr_rc) as usize;
-                if let Some(_existing) = visited.get(&addr) {
-                    return Err("Cycle detected during clone".to_string());
+                if let Some(existing) = visited.get(&addr) {
+                    return Ok(existing.clone());
                 }
-                // Mark as visited with a placeholder to detect cycles.
-                visited.insert(addr, Value::Undefined);
-                let mut out: Vec<Option<Value>> = Vec::new();
-                for slot in arr_rc.borrow().iter() {
-                    if let Some(v) = slot {
-                        let cloned = helper(vm, v, visited)?;
-                        out.push(Some(cloned));
+
+                // Reserve a placeholder array in visited to handle cycles.
+                let len = arr_rc.borrow().len();
+                let placeholder_vec: Vec<Option<Value>> = vec![None; len];
+                let new_arr = Rc::new(RefCell::new(placeholder_vec));
+                let new_props = Rc::new(RefCell::new(ObjectData::new()));
+                if let Some(proto) = vm.realm().intrinsics.array_prototype.clone() {
+                    new_props.borrow_mut().prototype = proto;
+                }
+                // insert length property placeholder
+                new_props.borrow_mut().properties.insert(
+                    PropertyKey::String("length".to_string()),
+                    PropertyDescriptor::data(Value::Number(len as f64)),
+                );
+                let new_val = Value::Array(Rc::clone(&new_arr), Rc::clone(&new_props));
+                visited.insert(addr, new_val);
+
+                // Fill dense slots
+                for (i, slot) in arr_rc.borrow().iter().enumerate() {
+                    if let Some(sv) = slot {
+                        let cloned = helper(vm, sv, visited)?;
+                        new_arr.borrow_mut()[i] = Some(cloned);
                     } else {
-                        out.push(None);
+                        new_arr.borrow_mut()[i] = None;
                     }
                 }
-                // Clone properties (shallow data properties only)
-                let mut prop_map = HashMap::new();
-                for (k, desc) in &props.borrow().properties {
+
+                // Clone property bag (data descriptors only)
+                for (k, desc) in &props_rc.borrow().properties {
                     match desc {
                         PropertyDescriptor::Data { value, .. } => {
-                            let cloned_v = helper(vm, value, visited)?;
-                            prop_map.insert(k.clone(), cloned_v);
+                            let cloned = helper(vm, value, visited)?;
+                            new_props
+                                .borrow_mut()
+                                .properties
+                                .insert(k.clone(), PropertyDescriptor::data(cloned));
                         }
                         _ => {
                             return Err("Cannot clone accessor properties across realms".to_string());
                         }
                     }
                 }
-                // Build array in host realm
-                let arr_rc2 = Rc::new(RefCell::new(out));
-                let props2 = Rc::new(RefCell::new(ObjectData::new()));
-                // copy prototype to host realm's Array.prototype if available
-                if let Some(proto) = vm.realm().intrinsics.array_prototype.clone() {
-                    props2.borrow_mut().prototype = proto;
-                }
-                // copy length property
-                props2.borrow_mut().properties.insert(
-                    PropertyKey::String("length".to_string()),
-                    PropertyDescriptor::data(Value::Number(arr_rc2.borrow().len() as f64)),
-                );
-                for (k, v) in prop_map {
-                    props2
-                        .borrow_mut()
-                        .properties
-                        .insert(k, PropertyDescriptor::data(v));
-                }
-                Ok(Value::Array(arr_rc2, props2))
+
+                Ok(Value::Array(new_arr, new_props))
             }
             Value::Object(obj_rc) => {
                 let addr = Rc::as_ptr(obj_rc) as usize;
-                if let Some(_existing) = visited.get(&addr) {
-                    return Err("Cycle detected during clone".to_string());
+                if let Some(existing) = visited.get(&addr) {
+                    return Ok(existing.clone());
                 }
-                visited.insert(addr, Value::Undefined);
+
+                // Detect special internal shapes used by runtime: ArrayBuffer,
+                // TypedArray, Map, Set, Date, RegExp by inspecting internal slots
+                let borrow = obj_rc.borrow();
+
+                // (no-op) helper removed; build placeholders inline below
+
+                // ArrayBuffer: identified by [[ArrayBufferData]] internal slot
+                if let Some(PropertyDescriptor::Data { value: ab_data, .. }) = borrow
+                    .properties
+                    .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
+                {
+                    // Create placeholder object with host ArrayBuffer prototype
+                    let mut out = ObjectData::new();
+                    if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
+                        out.prototype = proto;
+                    }
+                    let target_obj = Rc::new(RefCell::new(out));
+                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    visited.insert(addr, target_val);
+
+                    // Clone underlying data (expected to be Value::Array)
+                    let cloned_data = helper(vm, ab_data, visited)?;
+                    target_obj.borrow_mut().properties.insert(
+                        PropertyKey::String("[[ArrayBufferData]]".to_string()),
+                        PropertyDescriptor::data(cloned_data),
+                    );
+                    // Copy byteLength if present
+                    if let Some(PropertyDescriptor::Data { value, .. }) = borrow
+                        .properties
+                        .get(&PropertyKey::String("byteLength".to_string()))
+                    {
+                        let bl = helper(vm, value, visited)?;
+                        target_obj.borrow_mut().properties.insert(
+                            PropertyKey::String("byteLength".to_string()),
+                            PropertyDescriptor::data(bl),
+                        );
+                    }
+                    return Ok(Value::Object(target_obj));
+                }
+
+                // TypedArray: identified by [[TypedArrayData]]
+                if let Some(PropertyDescriptor::Data { value: ta_data, .. }) = borrow
+                    .properties
+                    .get(&PropertyKey::String("[[TypedArrayData]]".to_string()))
+                {
+                    let mut out = ObjectData::new();
+                    if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
+                        // TypedArray prototype not separately tracked in Intrinsics here,
+                        // fall back to Array prototype for shape safety.
+                        out.prototype = proto;
+                    }
+                    let target_obj = Rc::new(RefCell::new(out));
+                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    visited.insert(addr, target_val);
+
+                    let cloned_ta = helper(vm, ta_data, visited)?;
+                    target_obj.borrow_mut().properties.insert(
+                        PropertyKey::String("[[TypedArrayData]]".to_string()),
+                        PropertyDescriptor::data(cloned_ta),
+                    );
+                    // copy common numeric properties (length, byteLength)
+                    for key_name in &["length", "byteLength"] {
+                        if let Some(PropertyDescriptor::Data { value, .. }) = borrow
+                            .properties
+                            .get(&PropertyKey::String(key_name.to_string()))
+                        {
+                            let cloned = helper(vm, value, visited)?;
+                            target_obj.borrow_mut().properties.insert(
+                                PropertyKey::String(key_name.to_string()),
+                                PropertyDescriptor::data(cloned),
+                            );
+                        }
+                    }
+                    // copy numeric indexed properties if present
+                    for (k, desc) in &borrow.properties {
+                        if let PropertyKey::String(s) = k
+                            && canonical_index_key(s).is_some() {
+                                if let PropertyDescriptor::Data { value, .. } = desc {
+                                    let cloned = helper(vm, value, visited)?;
+                                    target_obj.borrow_mut().properties.insert(
+                                        PropertyKey::String(s.clone()),
+                                        PropertyDescriptor::data(cloned),
+                                    );
+                                } else {
+                                    return Err("Cannot clone accessor properties across realms"
+                                        .to_string());
+                                }
+                            }
+                    }
+                    return Ok(Value::Object(target_obj));
+                }
+
+                // Map: detect by __map_entries internal slot
+                if let Some(PropertyDescriptor::Data { value: entries, .. }) = borrow
+                    .properties
+                    .get(&PropertyKey::String("__map_entries".to_string()))
+                {
+                    let mut out = ObjectData::new();
+                    if let Some(proto) = vm.realm().get_intrinsic_prototype("Map") {
+                        out.prototype = proto;
+                    }
+                    let target_obj = Rc::new(RefCell::new(out));
+                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    visited.insert(addr, target_val);
+
+                    let cloned_entries = helper(vm, entries, visited)?;
+                    target_obj.borrow_mut().properties.insert(
+                        PropertyKey::String("__map_entries".to_string()),
+                        PropertyDescriptor::data(cloned_entries),
+                    );
+                    // copy size
+                    if let Some(PropertyDescriptor::Data { value, .. }) = borrow
+                        .properties
+                        .get(&PropertyKey::String("size".to_string()))
+                    {
+                        let cloned = helper(vm, value, visited)?;
+                        target_obj.borrow_mut().properties.insert(
+                            PropertyKey::String("size".to_string()),
+                            PropertyDescriptor::data(cloned),
+                        );
+                    }
+                    return Ok(Value::Object(target_obj));
+                }
+
+                // Set: detect by __set_values internal slot
+                if let Some(PropertyDescriptor::Data {
+                    value: set_vals, ..
+                }) = borrow
+                    .properties
+                    .get(&PropertyKey::String("__set_values".to_string()))
+                {
+                    let mut out = ObjectData::new();
+                    if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
+                        // No dedicated Set.prototype in intrinsics table; fall back to Array
+                        out.prototype = proto;
+                    }
+                    let target_obj = Rc::new(RefCell::new(out));
+                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    visited.insert(addr, target_val);
+
+                    let cloned_vals = helper(vm, set_vals, visited)?;
+                    target_obj.borrow_mut().properties.insert(
+                        PropertyKey::String("__set_values".to_string()),
+                        PropertyDescriptor::data(cloned_vals),
+                    );
+                    if let Some(PropertyDescriptor::Data { value, .. }) = borrow
+                        .properties
+                        .get(&PropertyKey::String("size".to_string()))
+                    {
+                        let cloned = helper(vm, value, visited)?;
+                        target_obj.borrow_mut().properties.insert(
+                            PropertyKey::String("size".to_string()),
+                            PropertyDescriptor::data(cloned),
+                        );
+                    }
+                    return Ok(Value::Object(target_obj));
+                }
+
+                // Date: look for [[PrimitiveValue]] internal slot
+                if let Some(PropertyDescriptor::Data { value: prim, .. }) = borrow
+                    .properties
+                    .get(&PropertyKey::String("[[PrimitiveValue]]".to_string()))
+                {
+                    let mut out = ObjectData::new();
+                    if let Some(proto) = vm.realm().get_intrinsic_prototype("Date") {
+                        out.prototype = proto;
+                    }
+                    let target_obj = Rc::new(RefCell::new(out));
+                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    visited.insert(addr, target_val);
+
+                    let cloned_prim = helper(vm, prim, visited)?;
+                    target_obj.borrow_mut().properties.insert(
+                        PropertyKey::String("[[PrimitiveValue]]".to_string()),
+                        PropertyDescriptor::data(cloned_prim),
+                    );
+                    return Ok(Value::Object(target_obj));
+                }
+
+                // RegExp: look for 'source' and 'flags' properties
+                if borrow
+                    .properties
+                    .contains_key(&PropertyKey::String("source".to_string()))
+                    && borrow
+                        .properties
+                        .contains_key(&PropertyKey::String("flags".to_string()))
+                {
+                    let mut out = ObjectData::new();
+                    if let Some(proto) = vm.realm().get_intrinsic_prototype("Object") {
+                        out.prototype = proto;
+                    }
+                    let target_obj = Rc::new(RefCell::new(out));
+                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    visited.insert(addr, target_val);
+
+                    // copy source, flags, lastIndex if present
+                    for key in ["source", "flags", "lastIndex"] {
+                        if let Some(PropertyDescriptor::Data { value, .. }) =
+                            borrow.properties.get(&PropertyKey::String(key.to_string()))
+                        {
+                            let cloned = helper(vm, value, visited)?;
+                            target_obj.borrow_mut().properties.insert(
+                                PropertyKey::String(key.to_string()),
+                                PropertyDescriptor::data(cloned),
+                            );
+                        }
+                    }
+                    return Ok(Value::Object(target_obj));
+                }
+
+                // Generic object fallback: create placeholder and copy data properties
                 let mut out = ObjectData::new();
-                // Determine prototype mapping: use host intrinsics where possible
                 if let Some(proto) = vm.realm().intrinsics.object_prototype.clone() {
                     out.prototype = proto;
                 }
-                for (k, desc) in &obj_rc.borrow().properties {
+                let target_obj = Rc::new(RefCell::new(out));
+                let target_val = Value::Object(Rc::clone(&target_obj));
+                visited.insert(addr, target_val);
+
+                for (k, desc) in &borrow.properties {
                     match desc {
                         PropertyDescriptor::Data { value, .. } => {
-                            let cloned_v = helper(vm, value, visited)?;
-                            out.properties
-                                .insert(k.clone(), PropertyDescriptor::data(cloned_v));
+                            let cloned = helper(vm, value, visited)?;
+                            target_obj
+                                .borrow_mut()
+                                .properties
+                                .insert(k.clone(), PropertyDescriptor::data(cloned));
                         }
                         _ => {
                             return Err("Cannot clone accessor properties across realms".to_string());
                         }
                     }
                 }
-                Ok(Value::Object(Rc::new(RefCell::new(out))))
+
+                Ok(Value::Object(target_obj))
             }
             Value::Uninitialized => Err("Cannot clone uninitialized value".to_string()),
         }

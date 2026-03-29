@@ -85,8 +85,7 @@ vec_box = "warn"
 wrong_self_convention = "warn"
 
 [lints.rust]
-# Enforce good practices similar to kernel coding style
-missing_docs = "warn"
+missing_docs = "deny"
 trivial_casts = "warn"
 trivial_numeric_casts = "warn"
 unused_extern_crates = "warn"
