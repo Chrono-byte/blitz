@@ -136,6 +136,7 @@ struct PartialDescriptor {
 
 struct GeneratorRunner {
     vm: Vm,
+    started: bool,
     completed: bool,
 }
 
@@ -727,6 +728,7 @@ impl Vm {
         child.push_call_frame(proto, closure_env, call_args, this_value)?;
         let runner = Rc::new(RefCell::new(GeneratorRunner {
             vm: child,
+            started: false,
             completed: false,
         }));
         let next_runner = Rc::clone(&runner);
@@ -735,11 +737,18 @@ impl Vm {
         let gen_obj = Rc::new(RefCell::new(ObjectData::new()));
         gen_obj.borrow_mut().properties.insert(
             PropertyKey::String("next".to_string()),
-            PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, _args| {
+            PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
                 let mut runner = next_runner.borrow_mut();
                 if runner.completed {
                     return Ok(Self::make_iterator_result(Value::Undefined, true));
                 }
+
+                if !runner.started {
+                    runner.started = true;
+                } else {
+                    runner.vm.stack.push(args.first().cloned().unwrap_or(Value::Undefined));
+                }
+
                 loop {
                     match runner.vm.step(Some(1))? {
                         StepOutcome::Continue => runner.vm.run_microtasks_if_needed()?,
@@ -755,11 +764,41 @@ impl Vm {
         gen_obj.borrow_mut().properties.insert(
             PropertyKey::String("throw".to_string()),
             PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                throw_runner.borrow_mut().completed = true;
-                Err(crate::errors::RuntimeError::from(format!(
-                    "Uncaught: {}",
-                    args.first().cloned().unwrap_or(Value::Undefined)
-                )))
+                let mut runner = throw_runner.borrow_mut();
+                if runner.completed {
+                    return Err(crate::errors::RuntimeError::from(format!(
+                        "Uncaught: {}",
+                        args.first().cloned().unwrap_or(Value::Undefined)
+                    )));
+                }
+
+                let thrown = args.first().cloned().unwrap_or(Value::Undefined);
+                if let Err(err) = runner.vm.throw_value(thrown.clone()) {
+                    runner.completed = true;
+                    return Err(err);
+                }
+
+                loop {
+                    match runner.vm.step(Some(1)) {
+                        Ok(StepOutcome::Continue) => {
+                            if let Err(e) = runner.vm.run_microtasks_if_needed() {
+                                runner.completed = true;
+                                return Err(e);
+                            }
+                        }
+                        Ok(StepOutcome::Yield(v)) => {
+                            return Ok(Self::make_iterator_result(v, false));
+                        }
+                        Ok(StepOutcome::Return(v)) => {
+                            runner.completed = true;
+                            return Ok(Self::make_iterator_result(v, true));
+                        }
+                        Err(e) => {
+                            runner.completed = true;
+                            return Err(e);
+                        }
+                    }
+                }
             }))),
         );
         gen_obj.borrow_mut().properties.insert(
@@ -1859,7 +1898,7 @@ impl Vm {
                 self.stack.push(Value::Bool(!values_equal(&a, &b)));
             }
             Op::Yield => {
-                let yielded = self.stack.last().cloned().unwrap_or(Value::Undefined);
+                let yielded = self.pop()?;
                 return Ok(StepOutcome::Yield(yielded));
             }
             Op::YieldStar => {
