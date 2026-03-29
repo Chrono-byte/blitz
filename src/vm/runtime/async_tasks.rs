@@ -1,4 +1,28 @@
 //! Async/microtask helpers and background runtime utilities.
+//!
+//! This module provides utilities the VM uses to schedule and run
+//! microtasks, interact with the background Tokio runtime, and bridge
+//! synchronous VM execution with asynchronous operations (promises,
+//! async functions, etc.).
+//!
+//! Microtask / job queue semantics
+//! - The current microtask queue implementation stores closures and runs
+//!   them in FIFO order. If a microtask throws an error while being drained,
+//!   the draining routine returns early and remaining microtasks are not
+//!   executed. This is a host-specific choice and differs from the behaviour
+//!   of mainstream engines which typically process microtasks to completion
+//!   and surface exceptions to the host's unhandled rejection/exception
+//!   mechanism.
+//! - Promises and thenable resolution in this runtime may synchronously
+//!   invoke reactions depending on call sites; the spec requires careful
+//!   job scheduling for promise resolution (PromiseJobs) to guarantee
+//!   observable ordering.
+//!
+//! Recommendations:
+//! - When targeting ECMA-262 conformance, schedule promise reactions and
+//!   thenable resolution work via microtasks/jobs and adjust `drain_*
+//!   ` helpers to run jobs to completion while exposing unhandled
+//!   exceptions through a host hook.
 use crate::bytecode::FunctionProto;
 use crate::runtime_utils::{reject_pending_promise, resolve_promise_with_value};
 use crate::value::{PromiseState, Value};

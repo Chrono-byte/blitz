@@ -477,6 +477,21 @@ impl Vm {
         Value::Object(obj)
     }
 
+    // -----------------------------------------------------------------------
+    // Iterator / iterator protocol notes
+    // -----------------------------------------------------------------------
+    //
+    // The VM exposes `make_iterator_result` as a helper to build objects of
+    // the form { value, done }. However, several iterator factories in the
+    // runtime are lightweight and currently produce simplified iterator
+    // objects. A full ECMAScript-compliant iterator should be an object that
+    // implements the `next` method and preserves iteration state across
+    // successive calls. Where the runtime uses simplified iterators (for
+    // example, array iterator factories), those implementations should be
+    // replaced with proper iterator objects that maintain internal iteration
+    // state and follow the spec's IteratorClose semantics for proper
+    // conformance.
+
     fn create_generator_object(
         &mut self,
         proto: &Rc<FunctionProto>,

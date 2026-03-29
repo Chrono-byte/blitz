@@ -1,35 +1,23 @@
-//! Stack-based bytecode interpreter with runtime type enforcement.
+//! Stack-based bytecode interpreter with runtime safety helpers.
 //!
-//! The VM executes compiled bytecode in a stack-based environment. It provides:
-//! - Stack and local variable management
-//! - Function call frames and closures
-//! - Property access with generation-guarded inline caching
-//! - Exception handling (try/catch)
-//! - Runtime type checking
+//! This module implements the VM core: a fetch-decode-execute loop that
+//! evaluates compiled bytecode in a stack-based environment. It contains
+//! the Vm struct, frame/handler implementations, and tuning constants used
+//! by the runtime.
 //!
-//! # Architecture
+//! Key responsibilities:
+//! - Manage the operand stack and locals
+//! - Maintain call frames, exception handlers, and generator state
+//! - Provide property access support with generation-guarded inline
+//!   caching to accelerate repeated lookups
+//! - Integrate with a background runtime for blocking/async work
 //!
-//! The VM maintains:
-//! - A value stack for operands and intermediate results
-//! - A locals array for function-local variables
-//! - A globals map for global variables
-//! - A call stack of frames for function calls
-//! - Exception handler records for try/catch
-//! - A per-object generation table for IC invalidation
+//! Runtime safety:
+//! When type annotations are available the VM performs runtime checks on
+//! local and global assignments as well as function arguments. These checks
+//! are defensive and intended to surface type errors during development.
 //!
-//! # Execution
-//!
-//! The VM uses a fetch-decode-execute loop over bytecode instructions.
-//! Each instruction manipulates the stack or control flow.
-//!
-//! # Type Safety
-//!
-//! When type annotations are available, the VM enforces them at runtime:
-//! - Local variable assignments check slot types
-//! - Global variable assignments check global types
-//! - Function arguments are validated on call
-//!
-//! # Example
+//! Example
 //!
 //! ```
 //! use blitz::vm::Vm;
@@ -125,6 +113,28 @@ pub(super) fn get_global_bg_runtime() -> Arc<Runtime> {
 // ---------------------------------------------------------------------------
 
 /// Virtual machine for executing bytecode.
+//
+// Conformance notes
+//
+// The VM implements a stack-based bytecode interpreter suitable for
+// executing compiled chunks produced by the project's compiler. A few
+// runtime behaviors are intentionally non-standard or are pragmatic
+// approximations of ECMAScript semantics:
+//
+// - Runtime type checking: the VM can enforce TypeScript-like slot type
+//   annotations at runtime. This is a non-spec extension and should be
+//   disabled for strict ECMA-262 conformance or made opt-in.
+// - Global background runtime: a shared Tokio runtime backs blocking and
+//   background operations; this is a host implementation detail and not
+//   mandated by ECMA-262.
+// - Inline caching and generation counters: the VM implements a simple
+//   generation counter approach for invalidating property caches. The
+//   mechanism is an implementation detail and should be validated against
+//   correctness tests rather than spec text.
+//
+// See `src/runtime_utils.rs`, `src/module.rs`, and the `runtime` submodules
+// for additional documentation about known deviations and recommended fixes
+// when stricter conformance is required.
 pub struct Vm {
     /// The ECMAScript Realm this VM operates in.
     pub(super) realm: Realm,

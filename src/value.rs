@@ -23,6 +23,25 @@
 //! Objects, arrays, and closures use `Rc<RefCell<...>>` for shared mutable
 //! ownership within a single thread. The VM is not thread-safe.
 //!
+//! Conformance and implementation notes
+//!
+//! - Prototype representation: ObjectData currently stores both a `weak_prototype`
+//!   (an optional WeakObject) and a strong `prototype` Value. This is a
+//!   transitional implementation detail (see the TODO in the struct) introduced
+//!   to avoid reference cycles. Callers should prefer `get_prototype` which
+//!   prefers the weak prototype when present. When converting to a spec-faithful
+//!   implementation, unify the prototype representation and ensure prototype
+//!   chain traversal matches the ECMAScript semantics exactly.
+//!
+//! - SameValue vs Strict Equality: the runtime contains several equality
+//!   helpers. The semantics of `SameValue`, `SameValueZero`, and strict equality
+//!   (===) differ in edge cases (for example, NaN should be SameValue-equal to
+//!   itself while strict equality is false for NaN). The codebase currently
+//!   mixes different equality checks; if strict ECMA-262 conformance is
+//!   required, add explicit helpers named `same_value`, `same_value_zero`, and
+//!   `strict_equal` and make sure the correct variant is used at each spec
+//!   algorithm site (e.g., Map/Set keying, Object.is, SameValue operations).
+//!
 //! # Example
 //!
 //! ```

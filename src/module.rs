@@ -1,4 +1,56 @@
 //! Module loading and evaluation.
+//!
+//! Conformance notes and known deviations from ECMA-262
+//!
+//! This ModuleLoader implements a practical subset of ECMAScript module
+//! semantics suitable for running test harnesses and small module graphs, but
+//! it intentionally simplifies or omits some of the spec's details. The most
+//! important divergences are documented here so callers and reviewers can make
+//! informed decisions about correctness and prioritise future work.
+//!
+//! 1) Module namespace objects
+//! - Current behaviour: namespace imports (`import * as ns from 'mod'`) are
+//!   represented as plain `Object` values whose own properties are populated
+//!   by copying the current export slots' values at time of construction.
+//! - Spec behaviour: module namespace objects must be exotic objects that
+//!   present live bindings to exporter slots, be non-writable and
+//!   non-configurable for exported names, and be non-extensible. The
+//!   runtime should expose the same live-binding view that importers see.
+//! - Impact: code that modifies exported bindings after namespace creation
+//!   will not be observed by existing namespace objects. Replace the plain
+//!   object with an exotic namespace object backed by the export slots to
+//!   become spec-compliant.
+//!
+//! 2) Dynamic import timing and async behaviour
+//! - Current behaviour: dynamic import resolution/evaluation is performed
+//!   synchronously in some paths and the returned `Promise` may be resolved
+//!   immediately rather than being resolved via a host job/microtask.
+//! - Spec behaviour: `import()` returns a Promise that is resolved/rejected
+//!   asynchronously via the host job queue; module linking/evaluation must be
+//!   performed according to the module linking steps and errors surface as
+//!   rejected promises.
+//! - Impact: timing differences are observable in Promise ordering and
+//!   microtask sequencing tests.
+//!
+//! 3) Linking/instantiation simplifications
+//! - Current behaviour: instantiate_all uses a simplified ESTree-based scan
+//!   to allocate export slots and wire imports. Re-exports (export *),
+//!   indirect exports, and some symbol/export resolution edge cases are not
+//!   fully implemented.
+//! - Spec behaviour: module linking includes a precise export resolution
+//!   algorithm that handles indirect exports, re-exports, and cycles.
+//! - Impact: complex module graphs and advanced re-export patterns may not
+//!   behave as the spec describes.
+//!
+//! Recommendations:
+//! - Implement module namespace objects backed by Rc slots and mark
+//!   properties non-configurable/non-writable; ensure the object is
+//!   non-extensible.
+//! - Update dynamic import to schedule resolution via microtasks/jobs and
+//!   follow the module linking steps exactly (Construct, Instantiate,
+//!   Evaluate) with proper error propagation.
+//! - Replace ESTree-copy wiring with a full export resolution pass that
+//!   handles indirect and export-all semantics.
 use crate::compiler::ModuleContext;
 use crate::errors::BundlerError;
 use crate::parser::ParserSession;

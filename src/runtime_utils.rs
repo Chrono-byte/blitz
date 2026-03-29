@@ -1,4 +1,56 @@
 //! Utility functions for runtime operations.
+//!
+//! Notes on ECMAScript conformance
+//!
+//! This module contains a number of pragmatic, simplified, or host-specific
+//! implementations of ECMAScript semantics used by the VM. The implementations
+//! in this file are intentionally pragmatic (smaller and easier to test) and
+//! therefore diverge from ECMA-262 in several observable ways. Call sites
+//! should treat the behaviour here as engine-specific unless the code is
+//! adjusted to follow the spec precisely.
+//!
+//! Known divergences (summary):
+//! - Module namespace objects are created as plain objects with copied values
+//!   rather than the spec-defined exotic namespace objects backed by live
+//!   export slots. See `ModuleLoader` in `src/module.rs` for details.
+//! - Dynamic `import()` is implemented synchronously in places and does not
+//!   always follow Promise job/microtask timing; import `options` are
+//!   currently ignored in some paths.
+//! - Promise/thenable resolution is implemented with direct calls to `then`
+//!   helpers which can resolve synchronously; the spec requires careful job
+//!   scheduling (PromiseResolveThenableJob) to match observed ordering. Concretely
+//!   this runtime calls a detected `then` property synchronously and invokes
+//!   the resolve/reject callbacks immediately which can produce different
+//!   microtask ordering compared to a spec-conformant engine.
+//! - Microtask/job queue draining is host-specific: thrown errors will abort
+//!   remaining microtasks in the current implementation. Hosts usually run
+//!   microtasks to completion and handle exceptions via host-defined hooks.
+//! - Some Array prototype methods are simplified and differ from spec (for
+//!   example `reduce` and `sort` edge cases and iterator behaviour). Concrete
+//!   deviations include:
+//!   * `Array.prototype.reduce`: when no initial value is provided and the
+//!     array has no defined elements the spec requires a TypeError; current
+//!     implementation returns `undefined` or behaves differently.
+//!   * `Array.prototype.sort`: comparator semantics are simplified; compare
+//!     results were interpreted via `is_sign_positive` rather than the proper
+//!     ToNumber negative/zero/positive semantics and NaN handling.
+//!   * Array iterators: the iterator factory is implemented as a stub that
+//!     does not produce a proper iterator over elements (iterator `next`
+//!     semantics are simplified). Implementing a proper iterator object is
+//!     required for conformance.
+//! - Object own-key ordering is built from HashMap iteration and thus does
+//!   not follow the spec ordering rules for integer indices / string keys /
+//!   symbols.
+//! - TypeScript slot-type runtime checks are a non-standard extension: the
+//!   VM can optionally enforce compile-time slot types at runtime; this is
+//!   not part of ECMA-262.
+//!
+//! Where behaviour is observable by user code (module namespace live bindings,
+//! promise/microtask ordering, array semantics, property key order), the
+//! implementation is considered non-compliant with ECMA-262 and should be
+//! updated if strict conformance is required. See the project notes and
+//! module-level comments in `src/module.rs`, `src/vm/runtime/async_tasks.rs`,
+//! and `src/vm/state.rs` for targeted recommendations.
 
 use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
@@ -5357,3 +5409,25 @@ fn sticky_caret_allows(subject: &str, start_index: usize, pattern: &str, multili
         .nth(start_index.saturating_sub(1))
         .is_some_and(|c| c == '\n' || c == '\r')
 }
+// ShadowRealm and host intrinsics
+//
+// - ShadowRealm: a minimal ShadowRealm host is provided (see `shadowrealm_*`
+//   helpers). Its behaviour is a pragmatic helper for tests and is not a
+//   authoritative ShadowRealm implementation. In particular, ShadowRealm
+//   import/evaluate currently uses the project's compiler and VM.run in a
+//   separate VM instance and does not fully replicate all Realm host semantics.
+// - Intrinsics bootstrapping: `install_minimal_kernel_constructors` installs a
+//   limited set of constructors and prototype objects sufficient for the
+//   runtime prelude. These intrinsics are intentionally minimal and may omit
+//   some property attribute details or exotic object behaviors required by the
+//   spec.
+//
+// Promise constructor matching
+//
+// - `promise_constructor_matches` currently checks the `constructor` property
+//   of a promise object for equality with the provided constructor. This is a
+//   pragmatic check that may be fragile for embellished prototype chains or
+//   host-constructed promise-like objects. Spec-compliant engines use
+//   internal brand checks and the Promise constructor's intrinsic behaviour.
+//   Consider replacing property-based checks with a stricter internal brand
+//   or explicit slot marking on promise state.
