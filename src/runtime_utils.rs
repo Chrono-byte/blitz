@@ -190,7 +190,7 @@ pub(crate) fn resolve_promise_with_value(
                 let resolve_called = Rc::clone(&already_resolved);
                 let res_p = Rc::clone(result_promise);
                 let thenable = value.clone();
-                let then_func = then_val.clone();
+                let then_func = then_val;
 
                 vm.queue_microtask(move |vm| {
                     // Build resolve and reject callbacks that will settle res_p
@@ -367,7 +367,7 @@ pub(crate) fn reject_pending_promise(
             // The promise object is not directly accessible here, so pass
             // Undefined as the placeholder. Embedding the Promise object
             // would require changing PromiseState layout.
-            vm.call_unhandled_rejection(Value::Undefined, stored_reason.clone());
+            vm.call_unhandled_rejection(Value::Undefined, stored_reason);
         } else {
             for callback in callbacks {
                 let mut arg_reason = Some(stored_reason.clone());
@@ -407,7 +407,7 @@ fn shadowrealm_evaluate(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
         .run(chunk)
         .map_err(|err| vm.throw_type_error(&format!("ShadowRealm evaluate error: {}", err)))?;
 
-    Ok(clone_value_across_realms(vm, &inner_result).map_err(|s| vm.throw_type_error(&s))?)
+    clone_value_across_realms(vm, &inner_result).map_err(|s| vm.throw_type_error(&s))
 }
 
 fn shadowrealm_import_value(
@@ -493,7 +493,7 @@ fn shadowrealm_import_value(
                             "TypeError",
                             &format!("ShadowRealm clone failed: {}", err),
                         )
-                        .unwrap_or(Value::String(format!("{}", err)));
+                        .unwrap_or(Value::String(err.to_string()));
                     reject_pending_promise(vm, &promise, err_val);
                 }
             },
