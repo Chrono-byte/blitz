@@ -1137,10 +1137,20 @@ fn main() {
             vm.define_property_builtin(args)
         }))),
     );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_getOwnPropertyDescriptor".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let target = args.first().cloned().unwrap_or(Value::Undefined);
+            let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let key = vm.to_property_key(&key_value)?;
+            Ok(
+                blitz::runtime_utils::own_property_descriptor_value(&target, &key)
+                    .unwrap_or(Value::Undefined),
+            )
+        }))),
+    );
 
-    // Seed the realm with kernel constructors before running the soft prelude.
-    // The prelude may extend/replace these; we avoid re-installing kernel
-    // constructors afterward to preserve prelude-level constructor identity.
+    // Seed the realm with kernel constructors before running tests.
     blitz::runtime_utils::install_minimal_kernel_constructors(&globals);
 
     // Wire $262 test harness object with proper createRealm (fresh intrinsics,
@@ -1151,28 +1161,9 @@ fn main() {
         PropertyDescriptor::data(test262_obj),
     );
 
-    let mut vm = Vm::new(globals.clone());
-    // Run soft prelude once (if present) to install runtime helpers
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let prelude_path = manifest_dir.join("soft/prelude.ts");
-    if prelude_path.exists()
-        && let Err(e) = (|| -> Result<(), String> {
-            let psrc = fs::read_to_string(&prelude_path)
-                .map_err(|e| format!("Failed to read prelude {}: {}", prelude_path.display(), e))?;
-            let session = Parser::parse_source_with_type(&psrc, SourceType::ts())
-                .map_err(|e| format!("parse prelude failed: {}", e))?;
-            let prog = session.program();
-            let chunk = compiler::compile_oxc(prog, &psrc)
-                .map_err(|e| format!("compile prelude failed: {}", e))?;
-            vm.run(chunk)
-                .map_err(|e| format!("evaluate prelude failed: {}", e))?;
-            Ok(())
-        })()
-    {
-        eprintln!("Failed to execute soft prelude: {}", e);
-    }
+    let _vm = Vm::new(globals.clone());
 
-    // Snapshot the fully bootstrapped globals for test isolation.
+    // Snapshot the bootstrapped globals for test isolation.
     // Each test restores from this snapshot instead of deep-cloning.
     let baseline_snapshot = snapshot_globals(&globals);
 

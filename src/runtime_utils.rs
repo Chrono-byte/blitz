@@ -94,43 +94,80 @@ fn static_builtin_arg_offset(vm: &Vm, args: &[Value], _global_name: &str) -> usi
     0
 }
 
+fn promise_constructor_matches(
+    vm: &mut Vm,
+    promise: &Value,
+    constructor: &Value,
+) -> Result<bool, crate::errors::RuntimeError> {
+    let promise_constructor =
+        vm.get_property_host(promise, &PropertyKey::String("constructor".to_string()))?;
+    Ok(strict_equal(&promise_constructor, constructor))
+}
+
 pub(crate) fn resolve_promise_with_value(
     vm: &mut Vm,
     result_promise: &Rc<RefCell<PromiseState>>,
     value: Value,
 ) -> Result<(), crate::errors::RuntimeError> {
-    if let Value::Promise(ref p_rc) = value {
-        if Rc::ptr_eq(p_rc, result_promise) {
-            return Err(vm.throw_type_error("Chaining cycle detected"));
-        }
-        // Call .then on the value to settle result_promise
-        let then_val = vm.get_property_host(&value, &PropertyKey::String("then".to_string()))?;
-        if Vm::is_callable_value(&then_val) {
-            let res_p = Rc::clone(result_promise);
-            let p_rc_inner = Rc::clone(p_rc);
-            let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
-                let off = if args.len() > 1 { 1 } else { 0 };
-                let v = args.get(off).cloned().unwrap_or(Value::Undefined);
-                resolve_promise_with_value(vm, &res_p, v)?;
-                Ok(Value::Undefined)
-            }));
-            let res_p2 = Rc::clone(result_promise);
-            let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
-                let off = if args.len() > 1 { 1 } else { 0 };
-                let r = args.get(off).cloned().unwrap_or(Value::Undefined);
-                reject_pending_promise(vm, &res_p2, r);
-                Ok(Value::Undefined)
-            }));
-            vm.call_value_with_this(
-                &then_val,
-                &Value::Promise(p_rc_inner),
-                &[resolve_cb, reject_cb],
-            )?;
+    fn resolve_promise_with_value_inner(
+        vm: &mut Vm,
+        result_promise: &Rc<RefCell<PromiseState>>,
+        value: Value,
+        already_resolved: Rc<RefCell<bool>>,
+    ) -> Result<(), crate::errors::RuntimeError> {
+        if *already_resolved.borrow() {
             return Ok(());
         }
+
+        if let Value::Promise(ref p_rc) = value {
+            if Rc::ptr_eq(p_rc, result_promise) {
+                *already_resolved.borrow_mut() = true;
+                return Err(vm.throw_type_error("Chaining cycle detected"));
+            }
+        }
+
+        if value.is_object() {
+            let then_val =
+                vm.get_property_host(&value, &PropertyKey::String("then".to_string()))?;
+            if Vm::is_callable_value(&then_val) {
+                let resolve_called = Rc::clone(&already_resolved);
+                let res_p = Rc::clone(result_promise);
+                let thenable = value.clone();
+                let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
+                    if *resolve_called.borrow() {
+                        return Ok(Value::Undefined);
+                    }
+                    *resolve_called.borrow_mut() = true;
+                    let off = if args.len() > 1 { 1 } else { 0 };
+                    let v = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    resolve_promise_with_value(vm, &res_p, v)?;
+                    Ok(Value::Undefined)
+                }));
+                let reject_called = Rc::clone(&already_resolved);
+                let res_p2 = Rc::clone(result_promise);
+                let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
+                    if *reject_called.borrow() {
+                        return Ok(Value::Undefined);
+                    }
+                    *reject_called.borrow_mut() = true;
+                    let off = if args.len() > 1 { 1 } else { 0 };
+                    let r = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    reject_pending_promise(vm, &res_p2, r);
+                    Ok(Value::Undefined)
+                }));
+                vm.call_value_with_this(&then_val, &thenable, &[resolve_cb, reject_cb])?;
+                return Ok(());
+            }
+        }
+
+        if !*already_resolved.borrow() {
+            *already_resolved.borrow_mut() = true;
+            fulfill_pending_promise(vm, result_promise, value);
+        }
+        Ok(())
     }
-    fulfill_pending_promise(vm, result_promise, value);
-    Ok(())
+
+    resolve_promise_with_value_inner(vm, result_promise, value, Rc::new(RefCell::new(false)))
 }
 
 fn builtin_object(f: BuiltinFn, function_proto: &Rc<RefCell<ObjectData>>) -> Value {
@@ -504,6 +541,61 @@ fn own_property_descriptor(obj: &Value, key: &PropertyKey) -> Option<PropertyDes
         }
         _ => None,
     }
+}
+
+pub fn own_property_descriptor_value(obj: &Value, key: &PropertyKey) -> Option<Value> {
+    own_property_descriptor(obj, key).map(|desc| {
+        let mut obj = ObjectData::new();
+        match desc {
+            PropertyDescriptor::Data {
+                value,
+                writable,
+                enumerable,
+                configurable,
+            } => {
+                obj.properties.insert(
+                    PropertyKey::String("value".to_string()),
+                    PropertyDescriptor::data(value),
+                );
+                obj.properties.insert(
+                    PropertyKey::String("writable".to_string()),
+                    PropertyDescriptor::data(Value::Bool(writable)),
+                );
+                obj.properties.insert(
+                    PropertyKey::String("enumerable".to_string()),
+                    PropertyDescriptor::data(Value::Bool(enumerable)),
+                );
+                obj.properties.insert(
+                    PropertyKey::String("configurable".to_string()),
+                    PropertyDescriptor::data(Value::Bool(configurable)),
+                );
+            }
+            PropertyDescriptor::Accessor {
+                get,
+                set,
+                enumerable,
+                configurable,
+            } => {
+                obj.properties.insert(
+                    PropertyKey::String("get".to_string()),
+                    PropertyDescriptor::data(get.unwrap_or(Value::Undefined)),
+                );
+                obj.properties.insert(
+                    PropertyKey::String("set".to_string()),
+                    PropertyDescriptor::data(set.unwrap_or(Value::Undefined)),
+                );
+                obj.properties.insert(
+                    PropertyKey::String("enumerable".to_string()),
+                    PropertyDescriptor::data(Value::Bool(enumerable)),
+                );
+                obj.properties.insert(
+                    PropertyKey::String("configurable".to_string()),
+                    PropertyDescriptor::data(Value::Bool(configurable)),
+                );
+            }
+        }
+        Value::Object(Rc::new(RefCell::new(obj)))
+    })
 }
 
 fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
@@ -1642,18 +1734,35 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
 
             // Create resolve function
             let promise_for_resolve = Rc::clone(&promise);
+            let resolve_called = Rc::new(RefCell::new(false));
+            let resolve_called_for_resolve = Rc::clone(&resolve_called);
             let resolve_fn = Value::Builtin(Rc::new(move |vm, args| {
+                if *resolve_called_for_resolve.borrow() {
+                    return Ok(Value::Undefined);
+                }
+                *resolve_called_for_resolve.borrow_mut() = true;
                 let value = args
                     .get(1)
                     .cloned()
                     .unwrap_or_else(|| args.first().cloned().unwrap_or(Value::Undefined));
-                fulfill_pending_promise(vm, &promise_for_resolve, value);
+                if let Err(err) = resolve_promise_with_value(vm, &promise_for_resolve, value) {
+                    let reason = vm
+                        .last_uncaught_exception
+                        .take()
+                        .unwrap_or(Value::String(format!("{}", err)));
+                    reject_pending_promise(vm, &promise_for_resolve, reason);
+                }
                 Ok(Value::Undefined)
             }));
 
             // Create reject function
             let promise_for_reject = Rc::clone(&promise);
+            let reject_called = Rc::clone(&resolve_called);
             let reject_fn = Value::Builtin(Rc::new(move |vm, args| {
+                if *reject_called.borrow() {
+                    return Ok(Value::Undefined);
+                }
+                *reject_called.borrow_mut() = true;
                 let reason = args
                     .get(1)
                     .cloned()
@@ -1855,11 +1964,45 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PKey::String("resolve".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                use crate::value::PromiseState;
                 let off = static_builtin_arg_offset(vm, args, "Promise");
                 let value = args.get(off).cloned().unwrap_or(Value::Undefined);
-                let promise = Rc::new(RefCell::new(PromiseState::Fulfilled(value)));
-                Ok(Value::Promise(promise))
+                let this_val = vm.this_value();
+                if !this_val.is_object() {
+                    return Err(vm.throw_type_error("Promise.resolve called on non-object"));
+                }
+                if let Value::Promise(_) = &value
+                    && promise_constructor_matches(vm, &value, &this_val)?
+                {
+                    return Ok(value);
+                }
+
+                let resolve_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+                let reject_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+                let resolve_slot_capture = Rc::clone(&resolve_slot);
+                let reject_slot_capture = Rc::clone(&reject_slot);
+                let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
+                    let off = if executor_args.len() > 2 { 1 } else { 0 };
+                    *resolve_slot_capture.borrow_mut() = executor_args.get(off).cloned();
+                    *reject_slot_capture.borrow_mut() = executor_args.get(off + 1).cloned();
+                    Ok(Value::Undefined)
+                }));
+
+                let promise = vm.construct_value(&this_val, &[executor])?;
+                let resolve_fn = resolve_slot
+                    .borrow()
+                    .clone()
+                    .ok_or_else(|| vm.throw_type_error("Promise capability resolve missing"))?;
+                if let Err(err) = vm.call_value_with_this(&resolve_fn, &Value::Undefined, &[value])
+                {
+                    let reason = vm
+                        .last_uncaught_exception
+                        .take()
+                        .unwrap_or(Value::String(format!("{}", err)));
+                    if let Value::Promise(promise_state) = &promise {
+                        reject_pending_promise(vm, promise_state, reason);
+                    }
+                }
+                Ok(promise)
             }),
             &function_proto_map,
         )),
@@ -1870,11 +2013,40 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PKey::String("reject".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                use crate::value::PromiseState;
                 let off = static_builtin_arg_offset(vm, args, "Promise");
                 let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
-                let promise = Rc::new(RefCell::new(PromiseState::Rejected(reason)));
-                Ok(Value::Promise(promise))
+                let this_val = vm.this_value();
+                if !this_val.is_object() {
+                    return Err(vm.throw_type_error("Promise.reject called on non-object"));
+                }
+
+                let resolve_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+                let reject_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+                let resolve_slot_capture = Rc::clone(&resolve_slot);
+                let reject_slot_capture = Rc::clone(&reject_slot);
+                let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
+                    let off = if executor_args.len() > 2 { 1 } else { 0 };
+                    *resolve_slot_capture.borrow_mut() = executor_args.get(off).cloned();
+                    *reject_slot_capture.borrow_mut() = executor_args.get(off + 1).cloned();
+                    Ok(Value::Undefined)
+                }));
+
+                let promise = vm.construct_value(&this_val, &[executor])?;
+                let reject_fn = reject_slot
+                    .borrow()
+                    .clone()
+                    .ok_or_else(|| vm.throw_type_error("Promise capability reject missing"))?;
+                if let Err(err) = vm.call_value_with_this(&reject_fn, &Value::Undefined, &[reason])
+                {
+                    let reject_reason = vm
+                        .last_uncaught_exception
+                        .take()
+                        .unwrap_or(Value::String(format!("{}", err)));
+                    if let Value::Promise(promise_state) = &promise {
+                        reject_pending_promise(vm, promise_state, reject_reason);
+                    }
+                }
+                Ok(promise)
             }),
             &function_proto_map,
         )),
@@ -2945,6 +3117,17 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             &function_proto_map,
         )),
     );
+    object_proto_map.borrow_mut().properties.insert(
+        PKey::String("isPrototypeOf".to_string()),
+        non_enum_data(builtin_object(
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let value = args.get(1).cloned().unwrap_or(Value::Undefined);
+                Ok(Value::Bool(vm.is_prototype_of(&this, &value)?))
+            }),
+            &function_proto_map,
+        )),
+    );
     object_ctor_map.borrow_mut().properties.insert(
         PKey::String("create".to_string()),
         PropertyDescriptor::data({
@@ -2995,8 +3178,8 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     object_ctor_map.borrow_mut().properties.insert(
         PKey::String("is".to_string()),
         PropertyDescriptor::data(builtin_object(
-            Rc::new(|_vm, args| {
-                let off = static_builtin_arg_offset(_vm, args, "Object");
+            Rc::new(|vm, args| {
+                let off = static_builtin_arg_offset(vm, args, "Object");
                 let a = args.get(off).cloned().unwrap_or(Value::Undefined);
                 let b = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
                 Ok(Value::Bool(crate::vm::same_value(&a, &b)))
@@ -3725,6 +3908,8 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         Ok(prim)
     });
     let boolean_ctor_val = Value::BuiltinObject(boolean_ctor_fn, Rc::clone(&boolean_ctor_map));
+    set_builtin_length(&boolean_ctor_val, 1.0);
+    set_builtin_name(&boolean_ctor_val, "Boolean");
     boolean_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(boolean_ctor_val.clone()),
@@ -3732,7 +3917,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     boolean_proto_map.borrow_mut().properties.insert(
         PKey::String("valueOf".to_string()),
         PropertyDescriptor::data(builtin_object(
-            Rc::new(|_vm, args| {
+            Rc::new(|vm, args| {
                 let this = args.first().cloned().unwrap_or(Value::Undefined);
                 match this {
                     Value::Bool(b) => return Ok(Value::Bool(b)),
@@ -3747,33 +3932,16 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     }
                     _ => {}
                 }
-                Err(crate::errors::RuntimeError::from(
-                    "Boolean.prototype.valueOf called on incompatible receiver",
-                ))
+                Err(vm
+                    .throw_type_error("Boolean.prototype.valueOf called on incompatible receiver"))
             }),
             &function_proto_map,
         )),
     );
-    if let Some(PropertyDescriptor::Data { value, .. }) = boolean_proto_map
-        .borrow()
-        .properties
-        .get(&PKey::String("valueOf".to_string()))
-        .cloned()
-        && let Value::BuiltinObject(_, props) = value
-    {
-        props.borrow_mut().properties.insert(
-            PKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(0.0)),
-        );
-        props.borrow_mut().properties.insert(
-            PKey::String("name".to_string()),
-            PropertyDescriptor::data(Value::String("valueOf".to_string())),
-        );
-    }
     boolean_proto_map.borrow_mut().properties.insert(
         PKey::String("toString".to_string()),
         PropertyDescriptor::data(builtin_object(
-            Rc::new(|_vm, args| {
+            Rc::new(|vm, args| {
                 let this = args.first().cloned().unwrap_or(Value::Undefined);
                 match this {
                     Value::Bool(b) => {
@@ -3793,29 +3961,12 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     }
                     _ => {}
                 }
-                Err(crate::errors::RuntimeError::from(
-                    "Boolean.prototype.toString called on incompatible receiver",
-                ))
+                Err(vm
+                    .throw_type_error("Boolean.prototype.toString called on incompatible receiver"))
             }),
             &function_proto_map,
         )),
     );
-    if let Some(PropertyDescriptor::Data { value, .. }) = boolean_proto_map
-        .borrow()
-        .properties
-        .get(&PKey::String("toString".to_string()))
-        .cloned()
-        && let Value::BuiltinObject(_, props) = value
-    {
-        props.borrow_mut().properties.insert(
-            PKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(0.0)),
-        );
-        props.borrow_mut().properties.insert(
-            PKey::String("name".to_string()),
-            PropertyDescriptor::data(Value::String("toString".to_string())),
-        );
-    }
     let regexp_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
         ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
     ));

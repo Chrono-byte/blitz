@@ -1,5 +1,4 @@
-//! Blitz VM: **TypeScript/JavaScript VM in Rust**. A Rust kernel bootstraps into
-//! a TypeScript runtime that provides the standard library and high-level APIs.
+//! Blitz VM: **TypeScript/JavaScript VM in Rust**.
 //!
 //! # Architecture
 //!
@@ -15,17 +14,11 @@
 //!   - [`errors`] - Error types for all VM operations
 //!   - [`trace`] - Execution tracing and debugging utilities
 //!
-//! - **Soft Layer (TypeScript)** - Lives in the `soft/` directory and contains:
-//!   - `blitzlib` - Standard library (console, Array, Object, String, Math, etc.)
-//!   - Runtime APIs and host integration
-//!   - All written in TS, executed by the Rust VM
-//!
 //! # Module Overview
 //!
 //! | Module | Purpose |
 //! |--------|---------|
 //! | [`ast`] | Re-export of oxc_ast types for AST representation |
-//! | (removed) | Entry-point bundling has been removed; use [`module::ModuleLoader`] |
 //! | [`bytecode`] | VM instruction set and bytecode encoding/decoding |
 //! | [`compiler`] | AST-to-bytecode compilation |
 //! | [`errors`] | Error types for parsing, compilation, and runtime |
@@ -54,8 +47,6 @@
 //!
 //! See individual module documentation for detailed API usage.
 
-// Entry-point bundling removed; `ModuleLoader` in `module` replaces previous
-// bundling flows.
 pub mod bytecode;
 pub mod compiler;
 pub mod environment;

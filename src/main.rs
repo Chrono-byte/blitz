@@ -6,15 +6,12 @@
 //!
 //! # Bootstrapping
 //!
-//! On startup, the CLI:
-//! 1. Creates a VM with native host bindings (`__native_print`, etc.)
-//! 2. Loads and executes the soft layer prelude (`soft/prelude.ts`)
-//! 3. The prelude installs standard library globals (console, Array, Object, etc.)
-//! 4. Executes user code in the initialized VM
+//! On startup, the CLI creates a VM with native host bindings and executes
+//! user code directly in the initialized VM.
 //!
 //! # Host Bindings
 //!
-//! Native functions exposed to the soft layer:
+//! Native functions exposed to the runtime:
 //! - `__native_print` - Print to stdout
 //! - `__native_new_object` - Create VM-backed objects
 //!
@@ -37,11 +34,9 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use blitz::bytecode;
 use blitz::compiler;
 use blitz::{
-    module::ModuleLoader, parser::Parser as TsParser, resolver::resolve_specifier, runtime_utils,
-    value::Value, vm::Vm,
+    module::ModuleLoader, parser::Parser as TsParser, runtime_utils, value::Value, vm::Vm,
 };
 use num_traits::{Signed, ToPrimitive};
 
@@ -97,16 +92,6 @@ fn run_source(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> 
     let chunk = compiler::compile_oxc(oast_prog, source).map_err(blitz::errors::Error::from)?;
     vm.run(chunk).map_err(blitz::errors::Error::from)
 }
-
-// Slot/global type annotations were removed; use the runtime_utils helper to
-// clear any lingering slot metadata when needed. The implementation lives in
-// `src/runtime_utils.rs` and is intentionally a no-op in JS-first mode.
-
-// Textual import inlining was removed. The project now uses a proper
-// module-graph loader that parses modules and wires imports at runtime.
-// Use `ModuleLoader` (see `module::ModuleLoader`) to construct/instantiate
-// and evaluate entry modules; it handles parsing dependencies, compilation,
-// and execution into a VM.
 
 /// Command line arguments for the Blitz executable.
 #[derive(Parser, Debug)]
@@ -173,6 +158,16 @@ fn main() -> Result<(), blitz::errors::Error> {
         blitz::value::PropertyKey::String("__define_property".to_string()),
         blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             vm.define_property_builtin(args)
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        blitz::value::PropertyKey::String("__native_getOwnPropertyDescriptor".to_string()),
+        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let target = args.first().cloned().unwrap_or(Value::Undefined);
+            let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let key = vm.to_property_key(&key_value)?;
+            Ok(runtime_utils::own_property_descriptor_value(&target, &key)
+                .unwrap_or(Value::Undefined))
         }))),
     );
 
@@ -445,237 +440,12 @@ fn main() -> Result<(), blitz::errors::Error> {
     // Parse CLI early so clap can handle --help/--version before doing work.
     let cli = Cli::parse();
 
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let prelude_path = manifest_dir.join("soft/prelude.ts");
-    // Resolve the prelude path into a concrete file using oxc_resolver wrapper
-    let prelude_resolved = resolve_specifier(
-        prelude_path.parent().unwrap_or(Path::new(".")),
-        &format!("./{}", prelude_path.file_name().unwrap().to_string_lossy()),
-    )?;
-    // Use ModuleLoader to construct/instantiate/evaluate the soft prelude which
-    // handles parsing dependencies, compiling, clearing slot types, and running.
-    let mut loader = ModuleLoader::new();
-    loader.construct(
-        prelude_resolved.parent().unwrap_or(Path::new(".")),
-        &format!(
-            "./{}",
-            prelude_resolved.file_name().unwrap().to_string_lossy()
-        ),
-    )?;
-    loader
-        .instantiate_all()
-        .map_err(blitz::errors::Error::from)?;
-    // One-time diagnostic: compile the prelude module and print chunk info so
-    // we can map bytecode ip locations back to source-level functions during
-    // debugging. Compilation here is best-effort and only performed when
-    // tracing is enabled to avoid extra work in normal runs.
-    if blitz::trace::enabled() {
-        // Prepare a one-off chunk compilation and disassembly for the prelude.
-        if let Err(e) = (|| -> Result<(), blitz::errors::Error> {
-            // The loader.map keys are canonicalized; ensure we look up the same
-            // canonical path when fetching the prelude record.
-            let prelude_key =
-                std::fs::canonicalize(&prelude_resolved).unwrap_or(prelude_resolved.clone());
-            let rec_rc = loader
-                .map
-                .get(&prelude_key)
-                .ok_or_else(|| blitz::errors::BundlerError::from("Prelude module not found"))?
-                .clone();
-
-            // Hold the borrow across compilation so parser session data remains
-            // valid for the duration of compile_oxc.
-            let chunk = {
-                let rec_b = rec_rc.borrow();
-                let program = rec_b.session.program();
-                let chunk = compiler::compile_oxc(program, rec_b.session.source())
-                    .map_err(blitz::errors::Error::from)?;
-                // Use the runtime_utils helper to clear slot types for the prelude chunk.
-                runtime_utils::clear_slot_types_in_chunk(chunk)
-            };
-
-            eprintln!(
-                "[trace] Prelude chunk: code_len={} constants={}",
-                chunk.code.len(),
-                chunk.constants.len()
-            );
-            eprintln!("[trace] Prelude functions (index -> name, arity, bytecode_len):");
-            for (i, f) in chunk.functions.iter().enumerate() {
-                eprintln!(
-                    "[trace]  fn[{}] name='{}' arity={} bytecode_len={}",
-                    i,
-                    f.name,
-                    f.arity,
-                    f.chunk.code.len()
-                );
-            }
-            // Print annotated bytecode for each function: opcode, operand preview, and source line
-            for (i, f) in chunk.functions.iter().enumerate() {
-                eprintln!(
-                    "[trace] --- fn[{}] '{}' bytecode (len={}) ---",
-                    i,
-                    f.name,
-                    f.chunk.code.len()
-                );
-                let mut ip = 0usize;
-                while ip < f.chunk.code.len() {
-                    let b = f.chunk.code[ip];
-                    let op = bytecode::Op::from_byte(b)
-                        .map_or_else(|| format!("0x{:02x}", b), |o| format!("{:?}", o));
-                    // line number for this opcode if available
-                    let line = if ip < f.chunk.lines.len() {
-                        f.chunk.lines[ip]
-                    } else {
-                        0
-                    };
-                    let mut extra = String::new();
-                    match bytecode::Op::from_byte(b) {
-                        Some(bytecode::Op::Const)
-                        | Some(bytecode::Op::GetBuiltin)
-                        | Some(bytecode::Op::MakeClosure)
-                        | Some(bytecode::Op::GetPropertyIC)
-                        | Some(bytecode::Op::Call) => {
-                            if ip + 1 < f.chunk.code.len() {
-                                let v = f.chunk.code[ip + 1] as usize;
-                                extra = format!(" {}", v);
-                            }
-                        }
-                        Some(bytecode::Op::GetGlobal) | Some(bytecode::Op::SetGlobal) => {
-                            if ip + 2 < f.chunk.code.len() {
-                                let hi = f.chunk.code[ip + 1] as usize;
-                                let lo = f.chunk.code[ip + 2] as usize;
-                                let v = (hi << 8) | lo;
-                                extra = format!(" {}", v);
-                            }
-                        }
-                        Some(bytecode::Op::Jump)
-                        | Some(bytecode::Op::JumpIfFalse)
-                        | Some(bytecode::Op::PushHandler) => {
-                            if ip + 2 < f.chunk.code.len() {
-                                let short = i16::from_be_bytes([
-                                    f.chunk.code[ip + 1],
-                                    f.chunk.code[ip + 2],
-                                ]);
-                                extra = format!(" {}", short);
-                            }
-                        }
-                        _ => {}
-                    }
-                    eprintln!(
-                        "[trace] fn[{}] {:04} (line {})  {}{}",
-                        i, ip, line, op, extra
-                    );
-                    ip += 1;
-                    match bytecode::Op::from_byte(b) {
-                        Some(bytecode::Op::Const)
-                        | Some(bytecode::Op::GetBuiltin)
-                        | Some(bytecode::Op::MakeClosure)
-                        | Some(bytecode::Op::GetPropertyIC)
-                        | Some(bytecode::Op::Call) => ip += 1,
-                        Some(bytecode::Op::GetGlobal) | Some(bytecode::Op::SetGlobal) => ip += 2,
-                        Some(bytecode::Op::Jump)
-                        | Some(bytecode::Op::JumpIfFalse)
-                        | Some(bytecode::Op::PushHandler) => ip += 2,
-                        _ => {}
-                    }
-                }
-            }
-            for (i, c) in chunk.constants.iter().enumerate() {
-                match c {
-                    Value::String(s) => eprintln!("[trace] const[{}] (string) = {:?}", i, s),
-                    Value::Number(n) => eprintln!("[trace] const[{}] (number) = {}", i, n),
-                    Value::Bool(b) => eprintln!("[trace] const[{}] (bool) = {}", i, b),
-                    Value::Null => eprintln!("[trace] const[{}] = null", i),
-                    other => eprintln!("[trace] const[{}] (other) = {}", i, other.type_name()),
-                }
-            }
-            // Very small disassembly to map ip -> opcode and operand (first 2000 bytes)
-            eprintln!("[trace] Prelude chunk disassembly (first 2000 bytes):");
-            let mut ip = 0usize;
-            while ip < chunk.code.len() {
-                let b = chunk.code[ip];
-                let op = bytecode::Op::from_byte(b)
-                    .map_or_else(|| format!("0x{:02x}", b), |o| format!("{:?}", o));
-                // Prepare a short operand preview depending on opcode
-                let mut extra = String::new();
-                match bytecode::Op::from_byte(b) {
-                    Some(bytecode::Op::Const)
-                    | Some(bytecode::Op::GetBuiltin)
-                    | Some(bytecode::Op::MakeClosure)
-                    | Some(bytecode::Op::GetPropertyIC)
-                    | Some(bytecode::Op::Call) => {
-                        if ip + 1 < chunk.code.len() {
-                            let v = chunk.code[ip + 1] as usize;
-                            extra = format!(" {}", v);
-                        }
-                    }
-                    Some(bytecode::Op::GetGlobal) | Some(bytecode::Op::SetGlobal) => {
-                        if ip + 2 < chunk.code.len() {
-                            let hi = chunk.code[ip + 1] as usize;
-                            let lo = chunk.code[ip + 2] as usize;
-                            let v = (hi << 8) | lo;
-                            extra = format!(" {}", v);
-                        }
-                    }
-                    Some(bytecode::Op::Jump)
-                    | Some(bytecode::Op::JumpIfFalse)
-                    | Some(bytecode::Op::PushHandler) => {
-                        if ip + 2 < chunk.code.len() {
-                            let short =
-                                i16::from_be_bytes([chunk.code[ip + 1], chunk.code[ip + 2]]);
-                            extra = format!(" {}", short);
-                        }
-                    }
-                    _ => {}
-                }
-                eprintln!("[trace] {:04}  {}{}", ip, op, extra);
-                // Advance ip by opcode + operand length heuristically
-                ip += 1;
-                match bytecode::Op::from_byte(b) {
-                    Some(bytecode::Op::Const)
-                    | Some(bytecode::Op::GetBuiltin)
-                    | Some(bytecode::Op::MakeClosure)
-                    | Some(bytecode::Op::GetPropertyIC)
-                    | Some(bytecode::Op::Call) => ip += 1,
-                    Some(bytecode::Op::GetGlobal) | Some(bytecode::Op::SetGlobal) => ip += 2,
-                    Some(bytecode::Op::Jump)
-                    | Some(bytecode::Op::JumpIfFalse)
-                    | Some(bytecode::Op::PushHandler) => ip += 2,
-                    _ => {}
-                }
-                if ip > 2000 {
-                    break;
-                }
-            }
-
-            Ok(())
-        })() {
-            eprintln!("[trace] Prelude trace preparation failed: {}", e)
-        }
-    }
-
     // Create a persistent VM for the REPL and reuse it for every input so
-    // we don't recompile and recreate the VM on each line. The soft layer
-    // (prelude) is executed into the same VM so its globals and any
-    // runtime-installed state are available to the REPL.
+    // we don't recompile and recreate the VM on each line.
     // Create VM and run prelude. blitzlib can call `__host_get(name)` during
     // bootstrap to capture host-provided values; raw host entries are never
     // placed into the globals table.
     let mut repl_vm = Vm::new(globals);
-
-    // Run prelude. The soft layer provides all base objects (Object, Array, console, etc.).
-    // Evaluate prelude via ModuleLoader into the repl_vm
-    if let Err(e) = loader
-        .evaluate_entry(&prelude_resolved, &mut repl_vm, cli.typecheck)
-        .map_err(blitz::errors::Error::from)
-    {
-        eprintln!("Runtime error in soft layer: {}", e);
-        return Err(blitz::errors::RuntimeError::from(format!(
-            "Runtime error in soft layer: {}",
-            e
-        ))
-        .into());
-    }
-    repl_vm.flush_microtasks()?;
 
     // If a file was provided, run it and exit. Otherwise start REPL.
     if let Some(path) = cli.file {

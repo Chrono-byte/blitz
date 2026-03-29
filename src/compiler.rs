@@ -136,8 +136,6 @@ pub struct Compiler {
     upvalue_indices: HashMap<String, u8>,
     /// Upvalue capture specs for the current function.
     captured_upvalues: Vec<UpvalueSpec>,
-    /// Whether the immediately enclosing compiler is the root compiler.
-    outer_is_root: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -202,7 +200,6 @@ impl Compiler {
             outer_bindings: HashMap::new(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
-            outer_is_root: false,
         }
     }
 
@@ -324,18 +321,17 @@ impl Compiler {
                 .entry(name.clone())
                 .or_insert(CaptureSource::Upvalue(*idx));
         }
-        // Allow pass-through capture for grandparent bindings needed only by
-        // deeper nested functions. Skip this when our parent is the root
-        // compiler to avoid eagerly capturing a very large root scope.
-        if !self.outer_is_root {
-            let outer_names: Vec<String> = self.outer_bindings.keys().cloned().collect();
-            for name in outer_names {
-                if bindings.contains_key(&name) {
-                    continue;
-                }
-                if let Some(idx) = self.resolve_upvalue(&name) {
-                    bindings.insert(name, CaptureSource::Upvalue(idx));
-                }
+        // Allow pass-through capture for grandparent bindings needed by
+        // deeper nested functions. Root bindings must remain capturable so
+        // callbacks created inside a top-level function can still see the
+        // surrounding module scope after that function returns.
+        let outer_names: Vec<String> = self.outer_bindings.keys().cloned().collect();
+        for name in outer_names {
+            if bindings.contains_key(&name) {
+                continue;
+            }
+            if let Some(idx) = self.resolve_upvalue(&name) {
+                bindings.insert(name, CaptureSource::Upvalue(idx));
             }
         }
         bindings
@@ -2564,7 +2560,6 @@ impl Compiler {
             outer_bindings: self.visible_bindings_snapshot(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
-            outer_is_root: self.is_root,
         };
 
         // Parameter placeholders (no type information available here).
@@ -2673,7 +2668,6 @@ impl Compiler {
             outer_bindings: self.visible_bindings_snapshot(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
-            outer_is_root: self.is_root,
         };
 
         for p in &func.params.items {

@@ -1287,7 +1287,7 @@ impl Vm {
         args: &[Value],
     ) -> Result<Value, crate::errors::RuntimeError> {
         if !callee.is_constructable() {
-            return Err(crate::errors::RuntimeError::from(format!(
+            return Err(self.throw_type_error(&format!(
                 "Construct: not a constructor (actual={})",
                 callee.type_name()
             )));
@@ -4216,6 +4216,57 @@ impl Vm {
             };
         }
 
+        Ok(false)
+    }
+
+    /// ECMAScript `Object.prototype.isPrototypeOf` semantics.
+    pub fn is_prototype_of(
+        &mut self,
+        proto: &Value,
+        value: &Value,
+    ) -> Result<bool, crate::errors::RuntimeError> {
+        let target_proto = match proto {
+            Value::Object(_)
+            | Value::Array(..)
+            | Value::Closure { .. }
+            | Value::BuiltinObject(_, _)
+            | Value::Promise(_) => proto.clone(),
+            _ => return Ok(false),
+        };
+
+        let mut current = match value {
+            Value::Object(d) => d.borrow().prototype.clone(),
+            Value::Array(_, props) => props.borrow().prototype.clone(),
+            Value::Closure { props, .. } => props.borrow().prototype.clone(),
+            Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
+            Value::Promise(_) => self
+                .realm
+                .intrinsics
+                .promise_prototype
+                .clone()
+                .unwrap_or(Value::Null),
+            _ => return Ok(false),
+        };
+
+        let mut seen: HashSet<usize> = HashSet::new();
+        while !matches!(current, Value::Null) {
+            if values_equal(&current, &target_proto) {
+                return Ok(true);
+            }
+            let Some(identity) = object_identity(&current) else {
+                break;
+            };
+            if !seen.insert(identity) {
+                return Ok(false);
+            }
+            current = match &current {
+                Value::Object(d) => d.borrow().prototype.clone(),
+                Value::Array(_, props) => props.borrow().prototype.clone(),
+                Value::Closure { props, .. } => props.borrow().prototype.clone(),
+                Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
+                _ => Value::Null,
+            };
+        }
         Ok(false)
     }
 
