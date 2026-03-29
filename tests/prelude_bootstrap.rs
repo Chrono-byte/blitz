@@ -99,9 +99,8 @@ fn prelude_bootstrap_runs() {
 
     // Publish host primitives into globals as main.rs does.
     // Construct builtins with explicit BuiltinFn typing to avoid inference issues
-    let builtin_print: blitz::value::BuiltinFn = Rc::new(|vm, args| test_native_print(vm, args));
-    let builtin_new_object: blitz::value::BuiltinFn =
-        Rc::new(|vm, args| test_native_new_object(vm, args));
+    let builtin_print: blitz::value::BuiltinFn = Rc::new(test_native_print);
+    let builtin_new_object: blitz::value::BuiltinFn = Rc::new(test_native_new_object);
 
     globals.borrow_mut().properties.insert(
         PropertyKey::String("__native_print".to_string()),
@@ -129,35 +128,35 @@ fn prelude_bootstrap_runs() {
 
     // Provide minimal kernel-native helpers the soft runtime expects.
     let builtin_typeof: blitz::value::BuiltinFn = Rc::new(|vm, args| {
-        let v = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let v = args.first().cloned().unwrap_or(Value::Undefined);
         Ok(Value::String(vm.typeof_value(&v)))
     });
     let builtin_to_string: blitz::value::BuiltinFn = Rc::new(|vm, args| {
-        let v = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let v = args.first().cloned().unwrap_or(Value::Undefined);
         let s = vm.to_string(&v)?;
         Ok(Value::String(s))
     });
     let builtin_to_number: blitz::value::BuiltinFn = Rc::new(|vm, args| {
-        let v = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let v = args.first().cloned().unwrap_or(Value::Undefined);
         let n = vm.to_number_value(&v)?;
         Ok(Value::Number(n))
     });
     let builtin_to_boolean: blitz::value::BuiltinFn = Rc::new(|vm, args| {
-        let v = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let v = args.first().cloned().unwrap_or(Value::Undefined);
         Ok(Value::Bool(vm.to_boolean(&v)))
     });
     let builtin_abstract_equality: blitz::value::BuiltinFn = Rc::new(|vm, args| {
-        let a = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let a = args.first().cloned().unwrap_or(Value::Undefined);
         let b = args.get(1).cloned().unwrap_or(Value::Undefined);
         Ok(Value::Bool(vm.abstract_equality(&a, &b)?))
     });
     let builtin_instanceof: blitz::value::BuiltinFn = Rc::new(|vm, args| {
-        let value = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let value = args.first().cloned().unwrap_or(Value::Undefined);
         let ctor = args.get(1).cloned().unwrap_or(Value::Undefined);
         Ok(Value::Bool(vm.instance_of(&value, &ctor)?))
     });
     let builtin_in_property: blitz::value::BuiltinFn = Rc::new(|vm, args| {
-        let prop = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let prop = args.first().cloned().unwrap_or(Value::Undefined);
         let obj = args.get(1).cloned().unwrap_or(Value::Undefined);
         Ok(Value::Bool(vm.in_property(&prop, &obj)?))
     });

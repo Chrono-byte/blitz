@@ -2372,11 +2372,11 @@ mod tests {
         // If a constant "f" exists, ensure it is not referenced via GetGlobal/SetGlobal.
         let mut f_const_idx: Option<usize> = None;
         for (i, c) in chunk.constants.iter().enumerate() {
-            if let Value::String(s) = c {
-                if s == "f" {
-                    f_const_idx = Some(i);
-                    break;
-                }
+            if let Value::String(s) = c
+                && s == "f"
+            {
+                f_const_idx = Some(i);
+                break;
             }
         }
 
