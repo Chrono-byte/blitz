@@ -4521,6 +4521,8 @@ fn build_module_namespace_object(exports: &HashMap<String, Rc<RefCell<Value>>>) 
             },
         );
     }
+    // Namespace objects are non-extensible per the ECMAScript specification.
+    namespace.borrow_mut().extensible = false;
     Value::Object(namespace)
 }
 

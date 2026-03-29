@@ -182,32 +182,58 @@ pub(crate) fn resolve_promise_with_value(
             let then_val =
                 vm.get_property_host(&value, &PropertyKey::String("then".to_string()))?;
             if Vm::is_callable_value(&then_val) {
+                // Per-spec PromiseResolveThenableJob semantics: calling a thenable's
+                // `then` should not synchronously settle the outer promise. Instead
+                // schedule a microtask that will invoke `then` with resolve/reject
+                // callbacks. This preserves observable job ordering when a thenable
+                // calls back synchronously.
                 let resolve_called = Rc::clone(&already_resolved);
                 let res_p = Rc::clone(result_promise);
                 let thenable = value.clone();
-                let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
-                    if *resolve_called.borrow() {
-                        return Ok(Value::Undefined);
+                let then_func = then_val.clone();
+
+                vm.queue_microtask(move |vm| {
+                    // Build resolve and reject callbacks that will settle res_p
+                    let resolve_called_inner = Rc::clone(&resolve_called);
+                    let res_p_inner = Rc::clone(&res_p);
+                    let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
+                        if *resolve_called_inner.borrow() {
+                            return Ok(Value::Undefined);
+                        }
+                        *resolve_called_inner.borrow_mut() = true;
+                        let off = if args.len() > 1 { 1 } else { 0 };
+                        let v = args.get(off).cloned().unwrap_or(Value::Undefined);
+                        resolve_promise_with_value(vm, &res_p_inner, v)?;
+                        Ok(Value::Undefined)
+                    }));
+
+                    let reject_called_inner = Rc::clone(&resolve_called);
+                    let res_p2_inner = Rc::clone(&res_p);
+                    let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
+                        if *reject_called_inner.borrow() {
+                            return Ok(Value::Undefined);
+                        }
+                        *reject_called_inner.borrow_mut() = true;
+                        let off = if args.len() > 1 { 1 } else { 0 };
+                        let r = args.get(off).cloned().unwrap_or(Value::Undefined);
+                        reject_pending_promise(vm, &res_p2_inner, r);
+                        Ok(Value::Undefined)
+                    }));
+
+                    // Call the then function with the thenable as `this`.
+                    // Errors thrown here should reject the promise.
+                    match vm.call_value_with_this(&then_func, &thenable, &[resolve_cb, reject_cb]) {
+                        Ok(_) => Ok(()),
+                        Err(err) => {
+                            let reason = vm
+                                .last_uncaught_exception
+                                .take()
+                                .unwrap_or(Value::String(format!("{}", err)));
+                            reject_pending_promise(vm, &res_p, reason);
+                            Ok(())
+                        }
                     }
-                    *resolve_called.borrow_mut() = true;
-                    let off = if args.len() > 1 { 1 } else { 0 };
-                    let v = args.get(off).cloned().unwrap_or(Value::Undefined);
-                    resolve_promise_with_value(vm, &res_p, v)?;
-                    Ok(Value::Undefined)
-                }));
-                let reject_called = Rc::clone(&already_resolved);
-                let res_p2 = Rc::clone(result_promise);
-                let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
-                    if *reject_called.borrow() {
-                        return Ok(Value::Undefined);
-                    }
-                    *reject_called.borrow_mut() = true;
-                    let off = if args.len() > 1 { 1 } else { 0 };
-                    let r = args.get(off).cloned().unwrap_or(Value::Undefined);
-                    reject_pending_promise(vm, &res_p2, r);
-                    Ok(Value::Undefined)
-                }));
-                vm.call_value_with_this(&then_val, &thenable, &[resolve_cb, reject_cb])?;
+                });
                 return Ok(());
             }
         }

@@ -49,10 +49,21 @@ impl Vm {
     ///
     /// # Errors
     ///
-    /// If a microtask throws an error, it is propagated and the remaining microtasks are not executed.
+    /// Microtask callbacks are executed to completion. If a microtask returns
+    /// an error the VM records it on `last_uncaught_exception` and continues
+    /// draining the remaining microtasks. This mirrors the common host policy
+    /// of running microtasks to completion while surfaceing exceptions via a
+    /// host hook instead of aborting the queue on first error.
     pub(crate) fn drain_microtasks(&mut self) -> Result<(), crate::errors::RuntimeError> {
         while let Some(mut job) = self.microtasks.pop_front() {
-            job(self)?;
+            if let Err(err) = job(self) {
+                // Record the last uncaught exception so callers or host hooks
+                // can inspect it. Convert the runtime error into a JS value
+                // string for now; hosts may implement richer reporting.
+                self.last_uncaught_exception = Some(Value::String(format!("{}", err)));
+                // Continue draining remaining microtasks rather than returning.
+                continue;
+            }
         }
         Ok(())
     }

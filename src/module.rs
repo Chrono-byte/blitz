@@ -406,21 +406,41 @@ impl ModuleLoader {
                                         .and_then(|n| n.as_str())
                                         .unwrap_or("")
                                         .to_string();
-                                    // Create a namespace object backed by a property map
-                                    let ns_obj = Value::Object(Rc::new(RefCell::new(
-                                        crate::value::ObjectData::new(),
-                                    )));
+                                    // Create a module namespace object backed by live export slots.
+                                    // Per ECMAScript semantics the namespace should present
+                                    // live bindings to the exported slots. We implement
+                                    // that by installing accessor properties whose getter
+                                    // reads the underlying shared `Rc<RefCell<Value>>`
+                                    // slot.
+                                    let ns_map: Rc<RefCell<crate::value::ObjectData>> =
+                                        Rc::new(RefCell::new(crate::value::ObjectData::new()));
+
+                                    // For each exported name, install an accessor that
+                                    // returns the current value of the export slot. The
+                                    // accessor has no setter (immutable from JS), and is
+                                    // non-configurable to match namespace invariants.
                                     let exports_snapshot = { dep_rec_rc.borrow().exports.clone() };
                                     for (k, slot) in &exports_snapshot {
-                                        let v = slot.borrow().clone();
-                                        if let Value::Object(o) = &ns_obj {
-                                            o.borrow_mut().properties.insert(
-                                                crate::value::PropertyKey::String(k.clone()),
-                                                crate::value::PropertyDescriptor::data(v),
-                                            );
-                                        }
+                                        let slot = Rc::clone(slot);
+                                        let getter: crate::value::BuiltinFn =
+                                            Rc::new(move |_vm: &mut Vm, _args: &[Value]| {
+                                                Ok(slot.borrow().clone())
+                                            });
+                                        ns_map.borrow_mut().properties.insert(
+                                            crate::value::PropertyKey::String(k.clone()),
+                                            crate::value::PropertyDescriptor::Accessor {
+                                                get: Some(Value::Builtin(getter)),
+                                                set: None,
+                                                enumerable: true,
+                                                configurable: false,
+                                            },
+                                        );
                                     }
-                                    let boxed = Rc::new(RefCell::new(ns_obj));
+
+                                    // Namespace objects are not extensible per the spec.
+                                    ns_map.borrow_mut().extensible = false;
+
+                                    let boxed = Rc::new(RefCell::new(Value::Object(ns_map)));
                                     rec.imports.insert(local.clone(), boxed);
                                     // Namespace imports are represented as plain objects for now.
                                     // Record a synthetic import source with module index and special "*" name
