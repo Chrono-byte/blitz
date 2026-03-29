@@ -4136,6 +4136,10 @@ impl Vm {
     }
 
     /// Instanceof helper: checks whether `value` has `constructor.prototype` in its prototype chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the operation fails.
     pub fn instance_of(
         &mut self,
         value: &Value,
@@ -4216,6 +4220,10 @@ impl Vm {
     }
 
     /// 'in' operator helper. Returns true if property (after ToPropertyKey) is in object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the operation fails.
     pub fn in_property(
         &mut self,
         property: &Value,
