@@ -2163,15 +2163,11 @@ impl Compiler {
         };
 
         // Parameter placeholders (no type information available here).
-        let mut param_type_opts: Vec<Option<Type>> = Vec::new();
-        let mut param_slot_names: Vec<Option<String>> = Vec::new();
         for p in &func.params.items {
             let pname = match &p.pattern {
                 oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
                 _ => "_".to_string(),
             };
-            param_type_opts.push(None);
-            param_slot_names.push(Some(pname.clone()));
             inner.add_local_with_mirror(pname, None, false);
         }
         if let Some(rest) = &func.params.rest {
@@ -2179,8 +2175,6 @@ impl Compiler {
                 oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
                 _ => "_".to_string(),
             };
-            param_type_opts.push(None);
-            param_slot_names.push(Some(pname.clone()));
             inner.add_local_with_mirror(pname, None, false);
         }
         let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
@@ -2205,18 +2199,9 @@ impl Compiler {
         inner.emit(Op::Return, LINE);
         let chunk = std::mem::take(&mut inner.chunk);
         let has_rest = func.params.rest.is_some();
-        let slot_types: Vec<Option<Type>> = param_type_opts
-            .into_iter()
-            .chain(inner.local_types)
-            .collect();
-        let slot_names: Vec<Option<String>> = param_slot_names
-            .into_iter()
-            .chain(inner.locals.into_iter().map(Some))
-            .collect();
-        let lexical_tdz: Vec<bool> =
-            std::iter::repeat_n(false, func.params.items.len() + usize::from(has_rest))
-                .chain(inner.local_tdz)
-                .collect();
+        let slot_types = inner.local_types;
+        let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
+        let lexical_tdz = inner.local_tdz;
         let has_prototype_property = !func.r#async;
         let is_constructor = !func.r#async && !func.generator;
         let is_strict = func
@@ -2277,15 +2262,11 @@ impl Compiler {
             outer_is_root: self.is_root,
         };
 
-        let mut param_type_opts: Vec<Option<Type>> = Vec::new();
-        let mut param_slot_names: Vec<Option<String>> = Vec::new();
         for p in &func.params.items {
             let pname = match &p.pattern {
                 oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
                 _ => "_".to_string(),
             };
-            param_type_opts.push(None);
-            param_slot_names.push(Some(pname.clone()));
             inner.add_local_with_mirror(pname, None, false);
         }
         if let Some(rest) = &func.params.rest {
@@ -2293,8 +2274,6 @@ impl Compiler {
                 oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
                 _ => "_".to_string(),
             };
-            param_type_opts.push(None);
-            param_slot_names.push(Some(pname.clone()));
             inner.add_local_with_mirror(pname, None, false);
         }
         // Pre-declare nested functions inside this function body.
@@ -2332,18 +2311,9 @@ impl Compiler {
 
         let chunk = std::mem::take(&mut inner.chunk);
         let has_rest = func.params.rest.is_some();
-        let slot_types: Vec<Option<Type>> = param_type_opts
-            .into_iter()
-            .chain(inner.local_types)
-            .collect();
-        let slot_names: Vec<Option<String>> = param_slot_names
-            .into_iter()
-            .chain(inner.locals.into_iter().map(Some))
-            .collect();
-        let lexical_tdz: Vec<bool> =
-            std::iter::repeat_n(false, func.params.items.len() + usize::from(has_rest))
-                .chain(inner.local_tdz)
-                .collect();
+        let slot_types = inner.local_types;
+        let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
+        let lexical_tdz = inner.local_tdz;
         let is_strict = Self::has_use_strict_directive(&func.body.statements);
         Ok((
             FunctionProto {
