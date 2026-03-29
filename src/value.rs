@@ -291,6 +291,8 @@ pub enum PromiseState {
 #[derive(Clone)]
 /// Runtime value enum
 pub enum Value {
+    /// Internal sentinel for temporal dead zone bindings.
+    Uninitialized,
     /// Number value
     Number(f64),
     /// String value
@@ -367,6 +369,7 @@ impl Value {
     /// Returns true if the value is truthy (not falsy)
     pub fn is_truthy(&self) -> bool {
         match self {
+            Value::Uninitialized => false,
             Value::Undefined => false,
             Value::Null => false,
             Value::Bool(b) => *b,
@@ -380,6 +383,7 @@ impl Value {
     /// Returns the type name of the value as a static string
     pub fn type_name(&self) -> &'static str {
         match self {
+            Value::Uninitialized => "uninitialized",
             Value::Undefined => "undefined",
             Value::Number(_) => "number",
             Value::String(_) => "string",
@@ -398,6 +402,7 @@ impl Value {
     /// Return the internal [[Class]] / object tag used by Object.prototype.toString.
     pub fn object_tag(&self) -> &'static str {
         match self {
+            Value::Uninitialized => "Undefined",
             Value::Undefined => "Undefined",
             Value::Null => "Null",
             Value::Bool(_) => "Boolean",
@@ -428,6 +433,7 @@ impl Value {
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Value::Uninitialized => write!(f, "<uninitialized>"),
             Value::Undefined => write!(f, "undefined"),
             Value::Number(n) => write!(f, "{}", n),
             Value::String(s) => write!(f, "{}", s),
@@ -460,6 +466,7 @@ impl std::fmt::Display for Value {
 impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Value::Uninitialized => write!(f, "Uninitialized"),
             Value::Undefined => write!(f, "Undefined"),
             Value::Number(n) => write!(f, "Number({})", n),
             Value::String(s) => write!(f, "String({:?})", s),
@@ -489,6 +496,7 @@ impl std::fmt::Debug for Value {
 impl PartialEq for Value {
     fn eq(&self, other: &Value) -> bool {
         match (self, other) {
+            (Value::Uninitialized, Value::Uninitialized) => true,
             (Value::Undefined, Value::Undefined) => true,
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,

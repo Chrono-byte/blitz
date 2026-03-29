@@ -99,6 +99,8 @@ pub struct Compiler {
     locals: Vec<String>,
     /// Type annotations for local variables
     local_types: Vec<Option<Type>>,
+    /// Per-local TDZ marker for lexical bindings.
+    local_tdz: Vec<bool>,
     /// Whether writes to this local should mirror to the global object.
     local_mirror_globals: Vec<bool>,
     /// Lexical scope stack for name visibility.
@@ -154,6 +156,7 @@ impl Compiler {
             source_text,
             locals: Vec::new(),
             local_types: Vec::new(),
+            local_tdz: Vec::new(),
             local_mirror_globals: Vec::new(),
             scopes: vec![Scope {
                 kind: ScopeKind::Function,
@@ -228,9 +231,16 @@ impl Compiler {
         let slot = self.locals.len();
         self.locals.push(name.clone());
         self.local_types.push(type_ann);
+        self.local_tdz.push(false);
         self.local_mirror_globals.push(mirror_global);
         self.scopes[scope_index].bindings.insert(name, slot);
         slot
+    }
+
+    fn mark_local_tdz(&mut self, slot: usize) {
+        if let Some(flag) = self.local_tdz.get_mut(slot) {
+            *flag = true;
+        }
     }
 
     fn add_local_with_mirror(
@@ -470,7 +480,8 @@ impl Compiler {
                         if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
                             self.add_var_local(name, None, mirror_global);
                         } else {
-                            self.add_local_with_mirror(name, None, mirror_global);
+                            let slot = self.add_local_with_mirror(name, None, mirror_global);
+                            self.mark_local_tdz(slot);
                         }
                     }
                 }
@@ -482,57 +493,117 @@ impl Compiler {
         &mut self,
         v: &oast::VariableDeclaration<'_>,
     ) -> Result<(), crate::errors::CompilerError> {
-        use oxc_ast::ast::BindingPattern as OPat;
-
         for dec in &v.declarations {
             if let Some(init) = &dec.init {
                 self.compile_expr_oast(init)?;
             } else {
                 self.emit(Op::Null, LINE);
             }
-            let name = match &dec.id {
-                OPat::BindingIdentifier(i) => i.name.to_string(),
-                _ => {
-                    return Err(crate::errors::CompilerError::from(
-                        "unsupported var pattern",
-                    ));
-                }
-            };
-            let mirror_global =
-                self.is_root && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
-            let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
-                self.resolve_local(&name)
-                    .unwrap_or_else(|| self.add_var_local(name.clone(), None, mirror_global))
-            } else {
-                if let Some(slot) = self.scopes[self.scopes.len() - 1]
-                    .bindings
-                    .get(&name)
-                    .copied()
-                {
-                    slot
-                } else {
-                    self.add_local_with_mirror(name.clone(), None, mirror_global)
-                }
-            };
-            if self.is_root {
-                self.emit(Op::Dup, LINE);
-            }
-            self.emit(Op::SetLocal, LINE);
-            self.emit_byte(slot as u8, LINE);
-            if self.is_root && mirror_global {
-                self.emit_set_global_name(&name);
-            }
-            let is_exported = self
-                .current_module
-                .as_ref()
-                .is_some_and(|c| c.exports.contains(&name));
-            if is_exported {
-                self.emit(Op::GetLocal, LINE);
-                self.emit_byte(slot as u8, LINE);
-                self.emit_set_own_module_export(&name)?;
+            self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
+            if !matches!(dec.id, oast::BindingPattern::BindingIdentifier(_)) {
+                self.emit(Op::Pop, LINE);
             }
         }
 
+        Ok(())
+    }
+
+    fn binding_property_key_to_value(key: &oast::PropertyKey<'_>) -> Option<Value> {
+        match key {
+            oast::PropertyKey::StaticIdentifier(i) => Some(Value::String(i.name.to_string())),
+            oast::PropertyKey::Identifier(i) => Some(Value::String(i.name.to_string())),
+            oast::PropertyKey::StringLiteral(s) => Some(Value::String(s.value.to_string())),
+            oast::PropertyKey::NumericLiteral(n) => Some(Value::String(n.value.to_string())),
+            _ => None,
+        }
+    }
+
+    fn store_binding_identifier(
+        &mut self,
+        name: &str,
+        kind: oxc_ast::ast::VariableDeclarationKind,
+    ) -> Result<(), crate::errors::CompilerError> {
+        let mirror_global =
+            self.is_root && matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var);
+        let slot = if matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+            self.resolve_local(name)
+                .unwrap_or_else(|| self.add_var_local(name.to_string(), None, mirror_global))
+        } else if let Some(slot) = self.scopes[self.scopes.len() - 1]
+            .bindings
+            .get(name)
+            .copied()
+        {
+            slot
+        } else {
+            let slot = self.add_local_with_mirror(name.to_string(), None, mirror_global);
+            self.mark_local_tdz(slot);
+            slot
+        };
+        if self.is_root {
+            self.emit(Op::Dup, LINE);
+        }
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(slot as u8, LINE);
+        if self.is_root && mirror_global {
+            self.emit_set_global_name(name);
+        }
+        let is_exported = self
+            .current_module
+            .as_ref()
+            .is_some_and(|c| c.exports.contains(name));
+        if is_exported {
+            self.emit(Op::GetLocal, LINE);
+            self.emit_byte(slot as u8, LINE);
+            self.emit_set_own_module_export(name)?;
+        }
+        Ok(())
+    }
+
+    fn compile_binding_pattern_assignment_oast(
+        &mut self,
+        pattern: &oast::BindingPattern<'_>,
+        kind: oxc_ast::ast::VariableDeclarationKind,
+    ) -> Result<(), crate::errors::CompilerError> {
+        match pattern {
+            oast::BindingPattern::BindingIdentifier(i) => {
+                self.store_binding_identifier(i.name.as_str(), kind)?;
+            }
+            oast::BindingPattern::AssignmentPattern(a) => {
+                self.compile_binding_pattern_assignment_oast(&a.left, kind)?;
+            }
+            oast::BindingPattern::ArrayPattern(a) => {
+                for (idx, el) in a.elements.iter().enumerate() {
+                    let Some(el) = el else { continue };
+                    self.emit(Op::Dup, LINE);
+                    self.emit_constant(Value::String(idx.to_string()), LINE);
+                    self.emit(Op::GetProperty, LINE);
+                    self.compile_binding_pattern_assignment_oast(el, kind)?;
+                    self.emit(Op::Pop, LINE);
+                }
+                if let Some(rest) = &a.rest {
+                    self.emit(Op::Dup, LINE);
+                    self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
+                    self.emit(Op::Pop, LINE);
+                }
+            }
+            oast::BindingPattern::ObjectPattern(o) => {
+                for prop in &o.properties {
+                    let key = Self::binding_property_key_to_value(&prop.key).ok_or_else(|| {
+                        crate::errors::CompilerError::from("unsupported object binding key")
+                    })?;
+                    self.emit(Op::Dup, LINE);
+                    self.emit_constant(key, LINE);
+                    self.emit(Op::GetProperty, LINE);
+                    self.compile_binding_pattern_assignment_oast(&prop.value, kind)?;
+                    self.emit(Op::Pop, LINE);
+                }
+                if let Some(rest) = &o.rest {
+                    self.emit(Op::Dup, LINE);
+                    self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
+                    self.emit(Op::Pop, LINE);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -593,10 +664,8 @@ impl Compiler {
                         oast::Declaration::FunctionDeclaration(f) => {
                             self.compile_function_declaration_oast(f)?
                         }
-                        oast::Declaration::ClassDeclaration(_) => {
-                            return Err(crate::errors::CompilerError::from(
-                                "exported class declarations not yet supported",
-                            ));
+                        oast::Declaration::ClassDeclaration(c) => {
+                            self.compile_class_declaration_oast(c)?;
                         }
                         _ => {}
                     }
@@ -637,6 +706,7 @@ impl Compiler {
             }
             OStmt::VariableDeclaration(v) => self.compile_variable_declaration_oast(v)?,
             OStmt::FunctionDeclaration(f) => self.compile_function_declaration_oast(f)?,
+            OStmt::ClassDeclaration(c) => self.compile_class_declaration_oast(c)?,
             OStmt::ExpressionStatement(e) => {
                 self.compile_expr_oast(&e.expression)?;
                 self.emit(Op::Pop, LINE);
@@ -955,30 +1025,8 @@ impl Compiler {
                                 "unsupported empty for-in declaration",
                             ));
                         };
-                        let name = match &dec.id {
-                            OPat::BindingIdentifier(i) => i.name.to_string(),
-                            _ => {
-                                return Err(crate::errors::CompilerError::from(
-                                    "unsupported for-in declaration pattern",
-                                ));
-                            }
-                        };
-                        let mirror_global = self.is_root
-                            && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
-                        let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
-                            self.resolve_local(&name).unwrap_or_else(|| {
-                                self.add_var_local(name.clone(), None, mirror_global)
-                            })
-                        } else {
-                            self.add_local_with_mirror(name.clone(), None, mirror_global)
-                        };
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(slot as u8, LINE);
-                        if mirror_global {
-                            self.emit(Op::GetLocal, LINE);
-                            self.emit_byte(slot as u8, LINE);
-                            self.emit_set_global_name(&name);
-                        }
+                        self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
+                        self.emit(Op::Pop, LINE);
                     }
                     OForLeft::AssignmentTargetIdentifier(id) => {
                         let name = id.name.as_str();
@@ -1112,16 +1160,19 @@ impl Compiler {
                         if let Some(param) = &handler.param {
                             let name = match &param.pattern {
                                 OPat::BindingIdentifier(i) => i.name.to_string(),
-                                _ => {
-                                    return Err(crate::errors::CompilerError::from(
-                                        "unsupported catch binding pattern",
-                                    ));
-                                }
+                                _ => "__catch_pattern".to_string(),
                             };
                             self.enter_block_scope();
                             let slot = self.add_local_with_mirror(name, None, false);
                             self.emit(Op::SetLocal, LINE);
                             self.emit_byte(slot as u8, LINE);
+                            self.emit(Op::GetLocal, LINE);
+                            self.emit_byte(slot as u8, LINE);
+                            self.compile_binding_pattern_assignment_oast(
+                                &param.pattern,
+                                oxc_ast::ast::VariableDeclarationKind::Let,
+                            )?;
+                            self.emit(Op::Pop, LINE);
                             for stmt in &handler.body.body {
                                 self.compile_statement_oast(stmt)?;
                             }
@@ -1168,6 +1219,52 @@ impl Compiler {
                 self.patch_jump(end_jump);
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn compile_class_declaration_oast(
+        &mut self,
+        c: &oast::Class<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        let name =
+            c.id.as_ref()
+                .map(|id| id.name.to_string())
+                .ok_or_else(|| crate::errors::CompilerError::from("anonymous class declaration"))?;
+        let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
+        ctor_chunk.write(Op::Return as u8, LINE);
+        let proto = FunctionProto {
+            name: name.clone(),
+            span: c.span,
+            arity: 0,
+            chunk: Rc::new(ctor_chunk),
+            slot_types: Vec::new(),
+            slot_names: Vec::new(),
+            lexical_tdz: Vec::new(),
+            upvalues: Vec::new(),
+            has_rest: false,
+            has_prototype_property: true,
+            captures_this: false,
+            arguments_slot: None,
+            return_type: None,
+            is_strict: true,
+            is_constructor: true,
+            is_async: false,
+            is_generator: false,
+        };
+        let idx = self.chunk.add_function(proto);
+        self.emit(Op::MakeClosure, LINE);
+        self.emit_byte(idx as u8, LINE);
+        let slot = self
+            .resolve_local(&name)
+            .unwrap_or_else(|| self.add_local_with_mirror(name.clone(), None, self.is_root));
+        if self.is_root {
+            self.emit(Op::Dup, LINE);
+        }
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(slot as u8, LINE);
+        if self.is_root {
+            self.emit_set_global_name(&name);
         }
         Ok(())
     }
@@ -2047,6 +2144,7 @@ impl Compiler {
             source_text: Rc::clone(&self.source_text),
             locals: Vec::new(),
             local_types: Vec::new(),
+            local_tdz: Vec::new(),
             local_mirror_globals: Vec::new(),
             scopes: vec![Scope {
                 kind: ScopeKind::Function,
@@ -2066,12 +2164,14 @@ impl Compiler {
 
         // Parameter placeholders (no type information available here).
         let mut param_type_opts: Vec<Option<Type>> = Vec::new();
+        let mut param_slot_names: Vec<Option<String>> = Vec::new();
         for p in &func.params.items {
             let pname = match &p.pattern {
                 oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
                 _ => "_".to_string(),
             };
             param_type_opts.push(None);
+            param_slot_names.push(Some(pname.clone()));
             inner.add_local_with_mirror(pname, None, false);
         }
         if let Some(rest) = &func.params.rest {
@@ -2080,6 +2180,7 @@ impl Compiler {
                 _ => "_".to_string(),
             };
             param_type_opts.push(None);
+            param_slot_names.push(Some(pname.clone()));
             inner.add_local_with_mirror(pname, None, false);
         }
         let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
@@ -2103,11 +2204,19 @@ impl Compiler {
 
         inner.emit(Op::Return, LINE);
         let chunk = std::mem::take(&mut inner.chunk);
+        let has_rest = func.params.rest.is_some();
         let slot_types: Vec<Option<Type>> = param_type_opts
             .into_iter()
             .chain(inner.local_types)
             .collect();
-        let has_rest = func.params.rest.is_some();
+        let slot_names: Vec<Option<String>> = param_slot_names
+            .into_iter()
+            .chain(inner.locals.into_iter().map(Some))
+            .collect();
+        let lexical_tdz: Vec<bool> =
+            std::iter::repeat_n(false, func.params.items.len() + usize::from(has_rest))
+                .chain(inner.local_tdz)
+                .collect();
         let has_prototype_property = !func.r#async;
         let is_constructor = !func.r#async && !func.generator;
         let is_strict = func
@@ -2121,6 +2230,8 @@ impl Compiler {
                 arity: func.params.items.len() + if has_rest { 1 } else { 0 },
                 chunk: Rc::new(chunk),
                 slot_types,
+                slot_names,
+                lexical_tdz,
                 upvalues: inner.captured_upvalues,
                 has_rest,
                 has_prototype_property,
@@ -2148,6 +2259,7 @@ impl Compiler {
             source_text: Rc::clone(&self.source_text),
             locals: Vec::new(),
             local_types: Vec::new(),
+            local_tdz: Vec::new(),
             local_mirror_globals: Vec::new(),
             scopes: vec![Scope {
                 kind: ScopeKind::Function,
@@ -2166,12 +2278,14 @@ impl Compiler {
         };
 
         let mut param_type_opts: Vec<Option<Type>> = Vec::new();
+        let mut param_slot_names: Vec<Option<String>> = Vec::new();
         for p in &func.params.items {
             let pname = match &p.pattern {
                 oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
                 _ => "_".to_string(),
             };
             param_type_opts.push(None);
+            param_slot_names.push(Some(pname.clone()));
             inner.add_local_with_mirror(pname, None, false);
         }
         if let Some(rest) = &func.params.rest {
@@ -2180,6 +2294,7 @@ impl Compiler {
                 _ => "_".to_string(),
             };
             param_type_opts.push(None);
+            param_slot_names.push(Some(pname.clone()));
             inner.add_local_with_mirror(pname, None, false);
         }
         // Pre-declare nested functions inside this function body.
@@ -2216,11 +2331,19 @@ impl Compiler {
         }
 
         let chunk = std::mem::take(&mut inner.chunk);
+        let has_rest = func.params.rest.is_some();
         let slot_types: Vec<Option<Type>> = param_type_opts
             .into_iter()
             .chain(inner.local_types)
             .collect();
-        let has_rest = func.params.rest.is_some();
+        let slot_names: Vec<Option<String>> = param_slot_names
+            .into_iter()
+            .chain(inner.locals.into_iter().map(Some))
+            .collect();
+        let lexical_tdz: Vec<bool> =
+            std::iter::repeat_n(false, func.params.items.len() + usize::from(has_rest))
+                .chain(inner.local_tdz)
+                .collect();
         let is_strict = Self::has_use_strict_directive(&func.body.statements);
         Ok((
             FunctionProto {
@@ -2229,6 +2352,8 @@ impl Compiler {
                 arity: func.params.items.len() + if has_rest { 1 } else { 0 },
                 chunk: Rc::new(chunk),
                 slot_types,
+                slot_names,
+                lexical_tdz,
                 upvalues: inner.captured_upvalues,
                 has_rest,
                 has_prototype_property: false,

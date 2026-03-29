@@ -3980,6 +3980,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         Value::Builtin(Rc::new(move |_vm, args| {
             let value = args.first().cloned().unwrap_or(Value::Undefined);
             let ty = match value {
+                Value::Uninitialized => "undefined",
                 Value::Undefined => "undefined",
                 Value::Null => "object",
                 Value::Bool(_) => "boolean",
@@ -4007,6 +4008,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 .unwrap_or_default();
             let value = vm.get_global(&name).unwrap_or(Value::Undefined);
             let ty = match value {
+                Value::Uninitialized => "undefined",
                 Value::Undefined => "undefined",
                 Value::Null => "object",
                 Value::Bool(_) => "boolean",
@@ -4145,6 +4147,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     let off = if args.len() > 1 { 1 } else { 0 };
                     let value = args.get(off).cloned().unwrap_or(Value::Undefined);
                     let out = match value {
+                        Value::Uninitialized => Value::Undefined,
                         Value::Undefined | Value::Builtin(_) | Value::BuiltinObject(_, _) => {
                             Value::Undefined
                         }

@@ -77,6 +77,12 @@ pub struct FunctionProto {
     /// NOTE: slot type annotations have been removed in JS-first mode; the
     /// runtime no longer enforces TypeScript annotations.
     pub slot_types: Vec<Option<Type>>,
+    /// Per-slot binding names when available.
+    pub slot_names: Vec<Option<String>>,
+    /// Per-slot temporal dead zone flags for lexical bindings (`let`/`const`).
+    /// When true, the slot must start as `Value::Uninitialized` and throw on
+    /// read until initialized.
+    pub lexical_tdz: Vec<bool>,
     /// Captured binding descriptors for nested closures.
     pub upvalues: Vec<UpvalueSpec>,
     /// Whether the last parameter is a rest parameter (`...args`). If true,
