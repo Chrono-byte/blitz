@@ -95,6 +95,7 @@ struct Frame {
     /// mode semantics (assignment errors, this binding, etc.).
     is_strict: bool,
     lexical_env: Rc<RefCell<EnvironmentRecord>>,
+    yield_star_queue: Option<VecDeque<Value>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +221,7 @@ pub struct Vm {
     microtasks: VecDeque<Microtask>,
     lexical_env: Rc<RefCell<EnvironmentRecord>>,
     global_env: Rc<RefCell<EnvironmentRecord>>,
+    yield_star_queue: Option<VecDeque<Value>>,
 }
 
 impl Vm {
@@ -266,6 +268,7 @@ impl Vm {
             microtasks: VecDeque::new(),
             lexical_env: Rc::clone(&global_env),
             global_env,
+            yield_star_queue: None,
         };
         vm.populate_realm_intrinsics();
         vm
@@ -596,6 +599,7 @@ impl Vm {
             .unwrap_or(Value::Undefined);
         self.current_closure_env = None;
         self.lexical_env = Rc::clone(&self.global_env);
+        self.yield_star_queue = None;
         self.ip = 0;
         self.chunk = Rc::new(Chunk::new(Rc::new(String::new())));
         self.obj_generations.clear();
@@ -656,6 +660,7 @@ impl Vm {
         self.current_slot_types = None;
         self.current_closure_env = None;
         self.lexical_env = Rc::clone(&self.global_env);
+        self.yield_star_queue = None;
         self.this_value = self
             .globals
             .borrow()
@@ -1853,9 +1858,32 @@ impl Vm {
                 let a = self.pop()?;
                 self.stack.push(Value::Bool(!values_equal(&a, &b)));
             }
-            Op::Yield | Op::YieldStar => {
+            Op::Yield => {
                 let yielded = self.stack.last().cloned().unwrap_or(Value::Undefined);
                 return Ok(StepOutcome::Yield(yielded));
+            }
+            Op::YieldStar => {
+                if self.yield_star_queue.is_none() {
+                    let iterand = self.stack.pop().unwrap_or(Value::Undefined);
+                    let mut queue = VecDeque::new();
+                    match iterand {
+                        Value::Array(arr, _) => {
+                            for value in arr.borrow().iter().flatten() {
+                                queue.push_back(value.clone());
+                            }
+                        }
+                        other => queue.push_back(other),
+                    }
+                    self.yield_star_queue = Some(queue);
+                }
+                if let Some(queue) = &mut self.yield_star_queue {
+                    if let Some(value) = queue.pop_front() {
+                        self.ip = self.ip.saturating_sub(1);
+                        return Ok(StepOutcome::Yield(value));
+                    }
+                }
+                self.yield_star_queue = None;
+                self.stack.push(Value::Undefined);
             }
             Op::AwaitPromise => {
                 let awaited = self.pop()?;
@@ -2511,6 +2539,7 @@ impl Vm {
         self.this_value = frame.this_value;
         self.current_closure_env = frame.closure_env;
         self.lexical_env = frame.lexical_env;
+        self.yield_star_queue = frame.yield_star_queue;
         // Handlers registered in the returning frame are now invalid.
         self.prune_stale_handlers();
         self.stack.push(result);
@@ -2637,6 +2666,7 @@ impl Vm {
             stack_base,
             is_strict: proto.is_strict,
             lexical_env: Rc::clone(&self.lexical_env),
+            yield_star_queue: self.yield_star_queue.take(),
         });
 
         self.chunk = Rc::clone(&proto.chunk);
@@ -2644,6 +2674,7 @@ impl Vm {
         self.stack.clear();
         self.current_closure_env = Some(Rc::clone(closure_env));
         self.current_slot_types = Some(proto.slot_types.clone());
+        self.yield_star_queue = None;
 
         // Pre-allocate locals to at least `arity` slots, filling missing
         // arguments with `undefined` per JavaScript semantics.

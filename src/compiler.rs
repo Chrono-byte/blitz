@@ -493,59 +493,117 @@ impl Compiler {
         &mut self,
         v: &oast::VariableDeclaration<'_>,
     ) -> Result<(), crate::errors::CompilerError> {
-        use oxc_ast::ast::BindingPattern as OPat;
-
         for dec in &v.declarations {
             if let Some(init) = &dec.init {
                 self.compile_expr_oast(init)?;
             } else {
                 self.emit(Op::Null, LINE);
             }
-            let name = match &dec.id {
-                OPat::BindingIdentifier(i) => i.name.to_string(),
-                _ => {
-                    return Err(crate::errors::CompilerError::from(
-                        "unsupported var pattern",
-                    ));
-                }
-            };
-            let mirror_global =
-                self.is_root && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
-            let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
-                self.resolve_local(&name)
-                    .unwrap_or_else(|| self.add_var_local(name.clone(), None, mirror_global))
-            } else {
-                if let Some(slot) = self.scopes[self.scopes.len() - 1]
-                    .bindings
-                    .get(&name)
-                    .copied()
-                {
-                    slot
-                } else {
-                    let slot = self.add_local_with_mirror(name.clone(), None, mirror_global);
-                    self.mark_local_tdz(slot);
-                    slot
-                }
-            };
-            if self.is_root {
-                self.emit(Op::Dup, LINE);
-            }
-            self.emit(Op::SetLocal, LINE);
-            self.emit_byte(slot as u8, LINE);
-            if self.is_root && mirror_global {
-                self.emit_set_global_name(&name);
-            }
-            let is_exported = self
-                .current_module
-                .as_ref()
-                .is_some_and(|c| c.exports.contains(&name));
-            if is_exported {
-                self.emit(Op::GetLocal, LINE);
-                self.emit_byte(slot as u8, LINE);
-                self.emit_set_own_module_export(&name)?;
+            self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
+            if !matches!(dec.id, oast::BindingPattern::BindingIdentifier(_)) {
+                self.emit(Op::Pop, LINE);
             }
         }
 
+        Ok(())
+    }
+
+    fn binding_property_key_to_value(key: &oast::PropertyKey<'_>) -> Option<Value> {
+        match key {
+            oast::PropertyKey::StaticIdentifier(i) => Some(Value::String(i.name.to_string())),
+            oast::PropertyKey::Identifier(i) => Some(Value::String(i.name.to_string())),
+            oast::PropertyKey::StringLiteral(s) => Some(Value::String(s.value.to_string())),
+            oast::PropertyKey::NumericLiteral(n) => Some(Value::String(n.value.to_string())),
+            _ => None,
+        }
+    }
+
+    fn store_binding_identifier(
+        &mut self,
+        name: &str,
+        kind: oxc_ast::ast::VariableDeclarationKind,
+    ) -> Result<(), crate::errors::CompilerError> {
+        let mirror_global =
+            self.is_root && matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var);
+        let slot = if matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+            self.resolve_local(name)
+                .unwrap_or_else(|| self.add_var_local(name.to_string(), None, mirror_global))
+        } else if let Some(slot) = self.scopes[self.scopes.len() - 1]
+            .bindings
+            .get(name)
+            .copied()
+        {
+            slot
+        } else {
+            let slot = self.add_local_with_mirror(name.to_string(), None, mirror_global);
+            self.mark_local_tdz(slot);
+            slot
+        };
+        if self.is_root {
+            self.emit(Op::Dup, LINE);
+        }
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(slot as u8, LINE);
+        if self.is_root && mirror_global {
+            self.emit_set_global_name(name);
+        }
+        let is_exported = self
+            .current_module
+            .as_ref()
+            .is_some_and(|c| c.exports.contains(name));
+        if is_exported {
+            self.emit(Op::GetLocal, LINE);
+            self.emit_byte(slot as u8, LINE);
+            self.emit_set_own_module_export(name)?;
+        }
+        Ok(())
+    }
+
+    fn compile_binding_pattern_assignment_oast(
+        &mut self,
+        pattern: &oast::BindingPattern<'_>,
+        kind: oxc_ast::ast::VariableDeclarationKind,
+    ) -> Result<(), crate::errors::CompilerError> {
+        match pattern {
+            oast::BindingPattern::BindingIdentifier(i) => {
+                self.store_binding_identifier(i.name.as_str(), kind)?;
+            }
+            oast::BindingPattern::AssignmentPattern(a) => {
+                self.compile_binding_pattern_assignment_oast(&a.left, kind)?;
+            }
+            oast::BindingPattern::ArrayPattern(a) => {
+                for (idx, el) in a.elements.iter().enumerate() {
+                    let Some(el) = el else { continue };
+                    self.emit(Op::Dup, LINE);
+                    self.emit_constant(Value::String(idx.to_string()), LINE);
+                    self.emit(Op::GetProperty, LINE);
+                    self.compile_binding_pattern_assignment_oast(el, kind)?;
+                    self.emit(Op::Pop, LINE);
+                }
+                if let Some(rest) = &a.rest {
+                    self.emit(Op::Dup, LINE);
+                    self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
+                    self.emit(Op::Pop, LINE);
+                }
+            }
+            oast::BindingPattern::ObjectPattern(o) => {
+                for prop in &o.properties {
+                    let key = Self::binding_property_key_to_value(&prop.key).ok_or_else(|| {
+                        crate::errors::CompilerError::from("unsupported object binding key")
+                    })?;
+                    self.emit(Op::Dup, LINE);
+                    self.emit_constant(key, LINE);
+                    self.emit(Op::GetProperty, LINE);
+                    self.compile_binding_pattern_assignment_oast(&prop.value, kind)?;
+                    self.emit(Op::Pop, LINE);
+                }
+                if let Some(rest) = &o.rest {
+                    self.emit(Op::Dup, LINE);
+                    self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
+                    self.emit(Op::Pop, LINE);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -967,30 +1025,8 @@ impl Compiler {
                                 "unsupported empty for-in declaration",
                             ));
                         };
-                        let name = match &dec.id {
-                            OPat::BindingIdentifier(i) => i.name.to_string(),
-                            _ => {
-                                return Err(crate::errors::CompilerError::from(
-                                    "unsupported for-in declaration pattern",
-                                ));
-                            }
-                        };
-                        let mirror_global = self.is_root
-                            && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
-                        let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
-                            self.resolve_local(&name).unwrap_or_else(|| {
-                                self.add_var_local(name.clone(), None, mirror_global)
-                            })
-                        } else {
-                            self.add_local_with_mirror(name.clone(), None, mirror_global)
-                        };
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(slot as u8, LINE);
-                        if mirror_global {
-                            self.emit(Op::GetLocal, LINE);
-                            self.emit_byte(slot as u8, LINE);
-                            self.emit_set_global_name(&name);
-                        }
+                        self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
+                        self.emit(Op::Pop, LINE);
                     }
                     OForLeft::AssignmentTargetIdentifier(id) => {
                         let name = id.name.as_str();
@@ -1124,16 +1160,19 @@ impl Compiler {
                         if let Some(param) = &handler.param {
                             let name = match &param.pattern {
                                 OPat::BindingIdentifier(i) => i.name.to_string(),
-                                _ => {
-                                    return Err(crate::errors::CompilerError::from(
-                                        "unsupported catch binding pattern",
-                                    ));
-                                }
+                                _ => "__catch_pattern".to_string(),
                             };
                             self.enter_block_scope();
                             let slot = self.add_local_with_mirror(name, None, false);
                             self.emit(Op::SetLocal, LINE);
                             self.emit_byte(slot as u8, LINE);
+                            self.emit(Op::GetLocal, LINE);
+                            self.emit_byte(slot as u8, LINE);
+                            self.compile_binding_pattern_assignment_oast(
+                                &param.pattern,
+                                oxc_ast::ast::VariableDeclarationKind::Let,
+                            )?;
+                            self.emit(Op::Pop, LINE);
                             for stmt in &handler.body.body {
                                 self.compile_statement_oast(stmt)?;
                             }
