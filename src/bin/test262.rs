@@ -15,12 +15,6 @@ CLI (preferred over env):
 
 Segments may be labels like: annexB, language, built-ins, intl402, staging
 or paths relative to test262/test (e.g. built-ins/Array).
-
-This connector is intentionally conservative: it runs a subset of
-tests that don't require modules, raw-mode harness behavior, or other
-features not yet implemented by the engine. The goal is to provide a
-small, usable connector that validates end-to-end execution of simple
-Test262 tests and demonstrates how to wire up harness files and host
 APIs.
 */
 
@@ -614,7 +608,8 @@ fn run_test_file(
                     }
                     // Record only the first completion signal.
                     if done_state_for_cb.borrow().is_none() {
-                        let first = args.first().cloned().unwrap_or(Value::Undefined);
+                        // Skip prepended receiver at args[0]
+                        let first = args.get(1).cloned().unwrap_or(Value::Undefined);
                         let payload = if matches!(first, Value::Undefined) {
                             None
                         } else {
@@ -987,6 +982,14 @@ fn main() {
 
     // Create a persistent VM and globals, install host builtins and the soft-prelude
     let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+
+    // Provide globalThis reference
+    let global_this = Value::Object(Rc::clone(&globals));
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("globalThis".to_string()),
+        PropertyDescriptor::data(global_this),
+    );
+
     globals.borrow_mut().properties.insert(
         PropertyKey::String("__native_print".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {

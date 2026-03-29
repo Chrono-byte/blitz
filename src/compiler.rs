@@ -497,12 +497,9 @@ impl Compiler {
             if let Some(init) = &dec.init {
                 self.compile_expr_oast(init)?;
             } else {
-                self.emit(Op::Null, LINE);
+                self.emit(Op::Undefined, LINE);
             }
             self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
-            if !matches!(dec.id, oast::BindingPattern::BindingIdentifier(_)) {
-                self.emit(Op::Pop, LINE);
-            }
         }
 
         Ok(())
@@ -578,13 +575,12 @@ impl Compiler {
                     self.emit_constant(Value::String(idx.to_string()), LINE);
                     self.emit(Op::GetProperty, LINE);
                     self.compile_binding_pattern_assignment_oast(el, kind)?;
-                    self.emit(Op::Pop, LINE);
                 }
                 if let Some(rest) = &a.rest {
                     self.emit(Op::Dup, LINE);
                     self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
-                    self.emit(Op::Pop, LINE);
                 }
+                self.emit(Op::Pop, LINE);
             }
             oast::BindingPattern::ObjectPattern(o) => {
                 for prop in &o.properties {
@@ -595,13 +591,12 @@ impl Compiler {
                     self.emit_constant(key, LINE);
                     self.emit(Op::GetProperty, LINE);
                     self.compile_binding_pattern_assignment_oast(&prop.value, kind)?;
-                    self.emit(Op::Pop, LINE);
                 }
                 if let Some(rest) = &o.rest {
                     self.emit(Op::Dup, LINE);
                     self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
-                    self.emit(Op::Pop, LINE);
                 }
+                self.emit(Op::Pop, LINE);
             }
         }
         Ok(())
@@ -862,7 +857,7 @@ impl Compiler {
                                 if let Some(init) = &dec.init {
                                     self.compile_expr_oast(init)?;
                                 } else {
-                                    self.emit(Op::Null, LINE);
+                                    self.emit(Op::Undefined, LINE);
                                 }
                                 let name = match &dec.id {
                                     OPat::BindingIdentifier(i) => i.name.to_string(),
@@ -1026,7 +1021,6 @@ impl Compiler {
                             ));
                         };
                         self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
-                        self.emit(Op::Pop, LINE);
                     }
                     OForLeft::AssignmentTargetIdentifier(id) => {
                         let name = id.name.as_str();
@@ -1090,7 +1084,7 @@ impl Compiler {
                 if let Some(arg) = &r.argument {
                     self.compile_expr_oast(arg)?;
                 } else {
-                    self.emit(Op::Null, LINE);
+                    self.emit(Op::Undefined, LINE);
                 }
                 self.emit(Op::Return, LINE);
             }
@@ -1172,7 +1166,6 @@ impl Compiler {
                                 &param.pattern,
                                 oxc_ast::ast::VariableDeclarationKind::Let,
                             )?;
-                            self.emit(Op::Pop, LINE);
                             for stmt in &handler.body.body {
                                 self.compile_statement_oast(stmt)?;
                             }
@@ -1338,7 +1331,7 @@ impl Compiler {
                 if b.value {
                     self.emit(Op::True, LINE)
                 } else {
-                    self.emit(Op::False, LINE)
+                    self.emit(Op::False, LINE);
                 }
             }
             OExpr::NullLiteral(_) => self.emit(Op::Null, LINE),
@@ -1384,7 +1377,7 @@ impl Compiler {
                                     self.emit_get_binding(ident.name.as_str());
                                 }
                                 _ => {
-                                    self.emit(Op::Null, LINE);
+                                    self.emit(Op::Undefined, LINE);
                                 }
                             }
                         } else {
@@ -1401,7 +1394,7 @@ impl Compiler {
                     if let Some(expr) = el.as_expression() {
                         self.compile_expr_oast(expr)?;
                     } else {
-                        self.emit(Op::Null, LINE);
+                        self.emit(Op::Undefined, LINE);
                     }
                 }
                 self.emit(Op::BuildArray, LINE);
@@ -1673,7 +1666,7 @@ impl Compiler {
                         oast::UnaryOperator::UnaryNegation => self.emit(Op::Neg, LINE),
                         oast::UnaryOperator::Void => {
                             self.emit(Op::Pop, LINE);
-                            self.emit_constant(Value::Undefined, LINE);
+                            self.emit(Op::Undefined, LINE);
                         }
                         _ => {}
                     }
@@ -1779,12 +1772,12 @@ impl Compiler {
                 if let Some(arg) = &y.argument {
                     self.compile_expr_oast(arg)?;
                 } else {
-                    self.emit_constant(Value::Undefined, LINE);
+                    self.emit(Op::Undefined, LINE);
                 }
                 if y.delegate {
                     self.emit(Op::YieldStar, LINE);
                 } else {
-                    self.emit(Op::Yield, LINE);
+                    self.emit(Op::Undefined, LINE);
                 }
             }
             OExpr::BinaryExpression(b) => {
@@ -1895,7 +1888,7 @@ impl Compiler {
                     }
                 }
                 if len == 0 {
-                    self.emit(Op::Null, LINE);
+                    self.emit(Op::Undefined, LINE);
                 }
             }
             OExpr::StaticMemberExpression(m) => {
@@ -1923,7 +1916,7 @@ impl Compiler {
                             self.compile_expr_oast(expr)?;
                             arg_count += 1;
                         } else {
-                            self.emit(Op::Null, LINE);
+                            self.emit(Op::Undefined, LINE);
                             arg_count += 1;
                         }
                     }
@@ -1945,7 +1938,7 @@ impl Compiler {
                             self.compile_expr_oast(expr)?;
                             arg_count += 1;
                         } else {
-                            self.emit(Op::Null, LINE);
+                            self.emit(Op::Undefined, LINE);
                             arg_count += 1;
                         }
                     }
@@ -1965,7 +1958,7 @@ impl Compiler {
                             self.compile_expr_oast(expr)?;
                             arg_count += 1;
                         } else {
-                            self.emit(Op::Null, LINE);
+                            self.emit(Op::Undefined, LINE);
                             arg_count += 1;
                         }
                     }
@@ -1981,7 +1974,7 @@ impl Compiler {
                 if has_spread {
                     self.emit_get_global_name("__native_call_spread");
                     self.compile_expr_oast(&c.callee)?;
-                    self.emit_constant(Value::Undefined, LINE);
+                    self.emit(Op::Undefined, LINE);
                     for arg in &c.arguments {
                         match arg {
                             oast::Argument::SpreadElement(s) => {
@@ -1991,7 +1984,7 @@ impl Compiler {
                                 if let Some(expr) = arg.as_expression() {
                                     self.compile_expr_oast(expr)?;
                                 } else {
-                                    self.emit(Op::Null, LINE);
+                                    self.emit(Op::Undefined, LINE);
                                 }
                             }
                         }
@@ -2017,7 +2010,7 @@ impl Compiler {
                             self.compile_expr_oast(expr)?;
                             arg_count += 1;
                         } else {
-                            self.emit(Op::Null, LINE);
+                            self.emit(Op::Undefined, LINE);
                             arg_count += 1;
                         }
                     }
@@ -2034,7 +2027,7 @@ impl Compiler {
                         self.compile_expr_oast(expr)?;
                         arg_count += 1;
                     } else {
-                        self.emit(Op::Null, LINE);
+                        self.emit(Op::Undefined, LINE);
                         arg_count += 1;
                     }
                 }
@@ -2048,7 +2041,13 @@ impl Compiler {
                 self.compile_expr_oast(&a.argument)?;
                 self.emit(Op::AwaitPromise, LINE);
             }
-            _ => self.emit(Op::Null, LINE),
+            OExpr::TSAsExpression(a) => {
+                self.compile_expr_oast(&a.expression)?;
+            }
+            OExpr::TSNonNullExpression(n) => {
+                self.compile_expr_oast(&n.expression)?;
+            }
+            _ => self.emit(Op::Undefined, LINE),
         }
         Ok(())
     }

@@ -414,6 +414,8 @@ pub enum Op {
     Yield,
     /// Delegate iteration for `yield*` expressions.
     YieldStar,
+    /// Push undefined value
+    Undefined,
 }
 
 impl Op {
@@ -531,6 +533,7 @@ impl TryFrom<u8> for Op {
             57 => Ok(Op::StrictNeq),
             58 => Ok(Op::Yield),
             59 => Ok(Op::YieldStar),
+            60 => Ok(Op::Undefined),
             _ => Err(()),
         }
     }

@@ -251,7 +251,7 @@ impl Vm {
             ip: 0,
             stack: Vec::with_capacity(STACK_INITIAL_CAPACITY),
             locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
-            this_value: Value::Undefined,
+            this_value: Value::Object(Rc::clone(&globals)),
             current_closure_env: None,
             globals,
             frames: Vec::with_capacity(FRAMES_INITIAL_CAPACITY),
@@ -273,6 +273,85 @@ impl Vm {
         };
         vm.populate_realm_intrinsics();
         vm
+    }
+
+    /// Return the current `this` value.
+    pub fn this_value(&self) -> Value {
+        self.this_value.clone()
+    }
+
+    /// Return the current `[[NewTarget]]` value.
+    pub fn current_new_target(&self) -> Option<Value> {
+        self.construct_new_target.clone()
+    }
+
+    pub fn get_prototype(&self, v: &Value) -> Value {
+        match v {
+            Value::Object(obj)
+            | Value::Array(_, obj)
+            | Value::Closure { props: obj, .. }
+            | Value::BuiltinObject(_, obj) => obj.borrow().get_prototype(),
+            Value::Promise(_) => self
+                .realm
+                .intrinsics
+                .promise_prototype
+                .clone()
+                .unwrap_or(Value::Null),
+            Value::String(_) => self
+                .realm
+                .intrinsics
+                .string_prototype
+                .clone()
+                .unwrap_or(Value::Null),
+            Value::Number(_) => self
+                .realm
+                .intrinsics
+                .number_prototype
+                .clone()
+                .unwrap_or(Value::Null),
+            Value::Bool(_) => self
+                .realm
+                .intrinsics
+                .boolean_prototype
+                .clone()
+                .unwrap_or(Value::Null),
+            Value::Symbol(_, _) => self
+                .realm
+                .intrinsics
+                .symbol_prototype
+                .clone()
+                .unwrap_or(Value::Null),
+            Value::BigInt(_) => self
+                .realm
+                .intrinsics
+                .bigint_prototype
+                .clone()
+                .unwrap_or(Value::Null),
+            Value::Null | Value::Undefined | Value::Uninitialized => Value::Null,
+            Value::Builtin(_) => self
+                .realm
+                .intrinsics
+                .function_prototype
+                .clone()
+                .unwrap_or(Value::Null),
+        }
+    }
+
+    /// Create a new Array object with the given elements and correct prototype.
+    pub fn new_array(&self, elems: Vec<Option<Value>>) -> Value {
+        let arr_rc = Rc::new(RefCell::new(elems));
+        let props = Rc::new(RefCell::new(ObjectData::new()));
+        let len = arr_rc.borrow().len();
+        props.borrow_mut().properties.insert(
+            PropertyKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(len as f64)),
+        );
+
+        if let Some(proto) = self.realm.intrinsics.array_prototype.clone() {
+            props.borrow_mut().prototype = proto;
+        }
+
+        Value::Array(arr_rc, props)
     }
 
     pub(crate) fn queue_microtask<F>(&mut self, job: F)
@@ -433,6 +512,8 @@ impl Vm {
         let date_ctor = get_ctor(g, "Date");
         let map_ctor = get_ctor(g, "Map");
         let num_ctor = get_ctor(g, "Number");
+        let bool_ctor = get_ctor(g, "Boolean");
+        let bigint_ctor = get_ctor(g, "BigInt");
 
         self.realm.intrinsics.object_constructor = obj_ctor.clone();
         self.realm.intrinsics.object_prototype = obj_ctor.as_ref().and_then(get_proto);
@@ -456,7 +537,10 @@ impl Vm {
         self.realm.intrinsics.date_prototype = date_ctor.as_ref().and_then(get_proto);
         self.realm.intrinsics.map_constructor = map_ctor.clone();
         self.realm.intrinsics.map_prototype = map_ctor.as_ref().and_then(get_proto);
-        self.realm.intrinsics.number_constructor = num_ctor;
+        self.realm.intrinsics.number_constructor = num_ctor.clone();
+        self.realm.intrinsics.number_prototype = num_ctor.as_ref().and_then(get_proto);
+        self.realm.intrinsics.boolean_prototype = bool_ctor.as_ref().and_then(get_proto);
+        self.realm.intrinsics.bigint_prototype = bigint_ctor.as_ref().and_then(get_proto);
     }
 
     /// Provide mutable access to the per-VM module loader, creating it if missing.
@@ -828,12 +912,16 @@ impl Vm {
 
         match callee {
             Value::Builtin(f) => {
+                let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
                 let result = (f.as_ref())(self, &args)?;
+                self.this_value = prev_this;
                 self.run_microtasks_if_needed()?;
                 self.stack.push(result);
             }
             Value::BuiltinObject(f, _props) => {
+                let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
                 let result = (f.as_ref())(self, &args)?;
+                self.this_value = prev_this;
                 self.run_microtasks_if_needed()?;
                 self.stack.push(result);
             }
@@ -914,17 +1002,21 @@ impl Vm {
                 // Builtins invoked as methods receive the receiver as the
                 // first argument.
                 let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-                call_args.push(receiver);
+                call_args.push(receiver.clone());
                 call_args.extend_from_slice(&args);
+                let prev_this = std::mem::replace(&mut self.this_value, receiver);
                 let result = (f.as_ref())(self, &call_args)?;
+                self.this_value = prev_this;
                 self.run_microtasks_if_needed()?;
                 self.stack.push(result);
             }
             Value::BuiltinObject(f, _props) => {
                 let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-                call_args.push(receiver);
+                call_args.push(receiver.clone());
                 call_args.extend_from_slice(&args);
+                let prev_this = std::mem::replace(&mut self.this_value, receiver);
                 let result = (f.as_ref())(self, &call_args)?;
+                self.this_value = prev_this;
                 self.run_microtasks_if_needed()?;
                 self.stack.push(result);
             }
@@ -1023,6 +1115,65 @@ impl Vm {
         Ok(ok)
     }
 
+    /// Apply ECMAScript `ToObject` coercion.
+    pub fn to_object_value(&mut self, v: Value) -> Result<Value, crate::errors::RuntimeError> {
+        match v {
+            Value::Object(_)
+            | Value::Array(..)
+            | Value::Closure { .. }
+            | Value::BuiltinObject(_, _)
+            | Value::Promise(_) => Ok(v),
+            Value::Undefined | Value::Null => {
+                Err(self.throw_type_error("Cannot convert undefined or null to object"))
+            }
+            Value::Bool(b) => {
+                let ctor = self.get_global("Boolean").unwrap_or(Value::Undefined);
+                self.construct_value(&ctor, &[Value::Bool(b)])
+            }
+            Value::Number(n) => {
+                let ctor = self.get_global("Number").unwrap_or(Value::Undefined);
+                self.construct_value(&ctor, &[Value::Number(n)])
+            }
+            Value::String(s) => {
+                let ctor = self.get_global("String").unwrap_or(Value::Undefined);
+                self.construct_value(&ctor, &[Value::String(s)])
+            }
+            Value::BigInt(n) => {
+                let ctor = self.get_global("BigInt").unwrap_or(Value::Undefined);
+                self.construct_value(&ctor, &[Value::BigInt(n)])
+            }
+            Value::Symbol(id, desc) => {
+                // Wrap Symbol in an object.
+                let mut data = ObjectData::new();
+                data.properties.insert(
+                    PropertyKey::String("__isSymbol".to_string()),
+                    PropertyDescriptor::data(Value::Bool(true)),
+                );
+                data.properties.insert(
+                    PropertyKey::String("_id".to_string()),
+                    PropertyDescriptor::data(Value::Number(id.as_u64() as f64)),
+                );
+                if let Some(d) = desc {
+                    data.properties.insert(
+                        PropertyKey::String("description".to_string()),
+                        PropertyDescriptor::data(Value::String(d)),
+                    );
+                }
+                // Try to find Symbol.prototype
+                if let Some(proto) = self.realm.intrinsics.symbol_prototype.clone() {
+                    data.prototype = proto;
+                }
+                Ok(Value::Object(Rc::new(RefCell::new(data))))
+            }
+            Value::Uninitialized => Err(self.throw_type_error("Uninitialized value")),
+            Value::Builtin(_) => {
+                // Builtins are callable but might not be full objects.
+                // However, in this VM they are often treated as such or wrapped.
+                Ok(v)
+            }
+        }
+    }
+
     /// Host hook: invoke a callable with an explicit receiver.
     pub fn call_value_with_this(
         &mut self,
@@ -1080,7 +1231,11 @@ impl Vm {
                 let instance = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
                     instance_proto,
                 ))));
-                let result = self.call_with_this(callee, &instance, args)?;
+                let prev_new_target = self.construct_new_target.clone();
+                self.construct_new_target = Some(callee.clone());
+                let result = self.call_with_this(callee, &instance, args);
+                self.construct_new_target = prev_new_target;
+                let result = result?;
                 Ok(match result {
                     Value::Object(_)
                     | Value::Array(..)
@@ -1129,10 +1284,6 @@ impl Vm {
                 callee.type_name()
             ))),
         }
-    }
-
-    pub(crate) fn current_new_target(&self) -> Option<Value> {
-        self.construct_new_target.clone()
     }
 
     /// Host hook: read a property value.
@@ -1263,7 +1414,9 @@ impl Vm {
                 let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
                 call_args.push(this_arg.clone());
                 call_args.extend_from_slice(args);
+                let prev_this = std::mem::replace(&mut self.this_value, this_arg.clone());
                 let result = (f.as_ref())(self, &call_args)?;
+                self.this_value = prev_this;
                 self.run_microtasks_if_needed()?;
                 Ok(result)
             }
@@ -1271,7 +1424,9 @@ impl Vm {
                 let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
                 call_args.push(this_arg.clone());
                 call_args.extend_from_slice(args);
+                let prev_this = std::mem::replace(&mut self.this_value, this_arg.clone());
                 let result = (f.as_ref())(self, &call_args)?;
+                self.this_value = prev_this;
                 self.run_microtasks_if_needed()?;
                 Ok(result)
             }
@@ -1393,6 +1548,7 @@ impl Vm {
                 self.stack.push(v);
             }
             Op::Null => self.stack.push(Value::Null),
+            Op::Undefined => self.stack.push(Value::Undefined),
             Op::True => self.stack.push(Value::Bool(true)),
             Op::False => self.stack.push(Value::Bool(false)),
             Op::GetLocal => {
@@ -1940,10 +2096,11 @@ impl Vm {
                     self.yield_star_queue = Some(queue);
                 }
                 if let Some(queue) = &mut self.yield_star_queue
-                    && let Some(value) = queue.pop_front() {
-                        self.ip = self.ip.saturating_sub(1);
-                        return Ok(StepOutcome::Yield(value));
-                    }
+                    && let Some(value) = queue.pop_front()
+                {
+                    self.ip = self.ip.saturating_sub(1);
+                    return Ok(StepOutcome::Yield(value));
+                }
                 self.yield_star_queue = None;
                 self.stack.push(Value::Undefined);
             }
@@ -2414,6 +2571,13 @@ impl Vm {
         obj: &Value,
         key: &PropertyKey,
     ) -> Result<Value, crate::errors::RuntimeError> {
+        if matches!(obj, Value::Undefined | Value::Null) {
+            return Err(self.throw_type_error(&format!(
+                "Cannot read property '{:?}' of {}",
+                key,
+                obj.type_name()
+            )));
+        }
         if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
             return match desc {
                 PropertyDescriptor::Data { value, .. } => Ok(value),
@@ -2567,6 +2731,21 @@ impl Vm {
                     return self.lookup_property_descriptor(&proto, key, depth + 1);
                 }
             }
+            Value::Bool(_) => {
+                if let Some(proto) = self.realm.intrinsics.boolean_prototype.clone() {
+                    return self.lookup_property_descriptor(&proto, key, depth + 1);
+                }
+            }
+            Value::Number(_) => {
+                if let Some(proto) = self.realm.intrinsics.number_prototype.clone() {
+                    return self.lookup_property_descriptor(&proto, key, depth + 1);
+                }
+            }
+            Value::BigInt(_) => {
+                if let Some(proto) = self.realm.intrinsics.bigint_prototype.clone() {
+                    return self.lookup_property_descriptor(&proto, key, depth + 1);
+                }
+            }
             _ => {}
         }
         Ok(None)
@@ -2710,8 +2889,16 @@ impl Vm {
         proto: &Rc<FunctionProto>,
         closure_env: &Rc<RefCell<Vec<Rc<RefCell<Value>>>>>,
         call_args: Vec<Value>,
-        this_value: Value,
+        mut this_value: Value,
     ) -> Result<(), crate::errors::RuntimeError> {
+        if !proto.is_strict {
+            if matches!(this_value, Value::Undefined | Value::Null) {
+                this_value = Value::Object(Rc::clone(&self.globals));
+            } else {
+                this_value = self.to_object_value(this_value)?;
+            }
+        }
+
         let caller_stack = std::mem::take(&mut self.stack);
         let stack_base = caller_stack.len();
 
@@ -2950,9 +3137,37 @@ impl Vm {
             props: Rc::clone(&props),
         };
 
+        props.borrow_mut().properties.insert(
+            PropertyKey::String("name".to_string()),
+            PropertyDescriptor::data(Value::String(closure_proto.name.clone())),
+        );
+        props.borrow_mut().properties.insert(
+            PropertyKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(closure_proto.arity as f64)),
+        );
+
         if has_prototype_property {
-            let proto_obj_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+            let object_proto = self
+                .realm
+                .intrinsics
+                .object_prototype
+                .clone()
+                .unwrap_or(Value::Null);
+            let proto_obj_map: Rc<RefCell<ObjectData>> =
+                Rc::new(RefCell::new(ObjectData::with_prototype(object_proto)));
             let proto_obj = Value::Object(Rc::clone(&proto_obj_map));
+
+            // Set F.prototype.constructor = F
+            proto_obj_map.borrow_mut().properties.insert(
+                PropertyKey::String("constructor".to_string()),
+                PropertyDescriptor::Data {
+                    value: closure.clone(),
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                },
+            );
+
             props.borrow_mut().properties.insert(
                 PropertyKey::String("prototype".to_string()),
                 PropertyDescriptor::data(proto_obj),
@@ -2985,12 +3200,13 @@ impl Vm {
                         .borrow()
                         .properties
                         .get(&PropertyKey::String("prototype".to_string()))
-                        && let Value::Object(proto_obj_map) = value {
-                            eprintln!(
-                                "[trace] make_closure: created proto_obj props_ptr={:p}",
-                                Rc::as_ptr(proto_obj_map)
-                            );
-                        }
+                    && let Value::Object(proto_obj_map) = value
+                {
+                    eprintln!(
+                        "[trace] make_closure: created proto_obj props_ptr={:p}",
+                        Rc::as_ptr(proto_obj_map)
+                    );
+                }
             }
         }
         Ok(())
@@ -3018,6 +3234,13 @@ impl Vm {
         key: &PropertyKey,
         value: Value,
     ) -> Result<(), crate::errors::RuntimeError> {
+        if matches!(obj, Value::Undefined | Value::Null) {
+            return Err(self.throw_type_error(&format!(
+                "Cannot set property '{:?}' of {}",
+                key,
+                obj.type_name()
+            )));
+        }
         if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)?
             && let PropertyDescriptor::Accessor { set, .. } = desc
         {

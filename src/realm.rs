@@ -85,6 +85,17 @@ pub struct Intrinsics {
     pub date_prototype: Option<Value>,
     /// Canonical `Map.prototype` for this realm.
     pub map_prototype: Option<Value>,
+    /// Canonical `Boolean.prototype` for this realm.
+    pub boolean_prototype: Option<Value>,
+    /// Canonical `Number.prototype` for this realm.
+    pub number_prototype: Option<Value>,
+    /// Canonical `BigInt.prototype` for this realm.
+    pub bigint_prototype: Option<Value>,
+
+    /// Canonical `EvalError` constructor for this realm.
+    pub eval_error_constructor: Option<Value>,
+    /// Canonical `URIError` constructor for this realm.
+    pub uri_error_constructor: Option<Value>,
 }
 
 /// An ECMAScript Realm.

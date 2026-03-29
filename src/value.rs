@@ -104,6 +104,11 @@ impl SymbolId {
         Self(id)
     }
 
+    /// Return the raw id.
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
     /// Well-known symbol for @@toPrimitive
     pub fn well_known_to_primitive() -> Self {
         Self::well_known(1)
@@ -378,6 +383,27 @@ impl Value {
             Value::BigInt(n) => *n != 0,
             _ => true,
         }
+    }
+
+    /// Returns true if the value is an object type (per ECMAScript).
+    pub fn is_object(&self) -> bool {
+        matches!(
+            self,
+            Value::Object(_)
+                | Value::Array(..)
+                | Value::Closure { .. }
+                | Value::Builtin(_)
+                | Value::BuiltinObject(_, _)
+                | Value::Promise(_)
+        )
+    }
+
+    /// Returns true if the value is a callable type.
+    pub fn is_callable(&self) -> bool {
+        matches!(
+            self,
+            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
+        )
     }
 
     /// Returns the type name of the value as a static string
