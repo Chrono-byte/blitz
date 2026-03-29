@@ -1,3 +1,4 @@
+//! Async/microtask helpers and background runtime utilities.
 use crate::bytecode::FunctionProto;
 use crate::runtime_utils::{reject_pending_promise, resolve_promise_with_value};
 use crate::value::{PromiseState, Value};

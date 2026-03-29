@@ -152,6 +152,10 @@ impl Vm {
         crate::gc::collect(&roots)
     }
 
+    /// Install the minimal kernel helpers and populate intrinsics before use.
+    ///
+    /// This ensures every VM starts with a fully populated global object and
+    /// intrinsic constructors before any bytecode executes.
     pub fn with_runtime(mut self) -> Self {
         // Install minimal kernel constructors/helpers onto the globals map.
         // This is defensive: the installer will only populate missing keys
