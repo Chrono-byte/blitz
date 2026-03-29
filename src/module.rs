@@ -458,6 +458,11 @@ impl ModuleLoader {
         for path in order {
             if let Some(rec_rc) = self.map.get(&path) {
                 let mut rec = rec_rc.borrow_mut();
+                if matches!(rec.state, ModuleState::Evaluating) {
+                    // Basic cycle-tolerance: if this record is already in-progress,
+                    // do not recursively re-enter evaluation.
+                    continue;
+                }
                 if matches!(rec.state, ModuleState::Instantiated) {
                     rec.state = ModuleState::Evaluating;
                     let program = rec.session.program();

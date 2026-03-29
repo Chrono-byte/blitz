@@ -44,6 +44,7 @@
 //! ```
 
 use crate::bytecode::{Chunk, FunctionProto, Op};
+use crate::environment::EnvironmentRecord;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
 use crate::runtime_utils::{fulfill_pending_promise, reject_pending_promise};
@@ -93,6 +94,8 @@ struct Frame {
     /// is created during function entry. Used at runtime to apply strict
     /// mode semantics (assignment errors, this binding, etc.).
     is_strict: bool,
+    lexical_env: Rc<RefCell<EnvironmentRecord>>,
+    yield_star_queue: Option<VecDeque<Value>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +113,7 @@ struct HandlerRecord {
 enum StepOutcome {
     Continue,
     Return(Value),
+    Yield(Value),
 }
 
 type Microtask = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
@@ -128,6 +132,12 @@ struct PartialDescriptor {
     has_configurable: bool,
     has_get: bool,
     has_set: bool,
+}
+
+struct GeneratorRunner {
+    vm: Vm,
+    started: bool,
+    completed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +220,9 @@ pub struct Vm {
     /// Last uncaught thrown JS value observed during unwinding.
     pub(crate) last_uncaught_exception: Option<Value>,
     microtasks: VecDeque<Microtask>,
+    lexical_env: Rc<RefCell<EnvironmentRecord>>,
+    global_env: Rc<RefCell<EnvironmentRecord>>,
+    yield_star_queue: Option<VecDeque<Value>>,
 }
 
 impl Vm {
@@ -231,6 +244,7 @@ impl Vm {
     /// Create a new virtual machine.
     pub fn new(globals: Rc<RefCell<ObjectData>>) -> Self {
         let realm = Realm::with_globals(Rc::clone(&globals));
+        let global_env = Rc::new(RefCell::new(EnvironmentRecord::new(None)));
         let mut vm = Self {
             realm,
             chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
@@ -253,6 +267,9 @@ impl Vm {
             construct_new_target: None,
             last_uncaught_exception: None,
             microtasks: VecDeque::new(),
+            lexical_env: Rc::clone(&global_env),
+            global_env,
+            yield_star_queue: None,
         };
         vm.populate_realm_intrinsics();
         vm
@@ -270,6 +287,16 @@ impl Vm {
             job(self)?;
         }
         Ok(())
+    }
+
+    /// Run the prototype mark/sweep collector and return mark statistics.
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    pub fn collect_garbage_prototype(&self) -> crate::gc::GcStats {
+        let mut roots: Vec<Value> = Vec::new();
+        roots.push(Value::Object(Rc::clone(&self.globals)));
+        roots.extend(self.stack.iter().cloned());
+        roots.extend(self.locals.iter().map(|c| c.borrow().clone()));
+        crate::gc::collect(&roots)
     }
 
     fn run_microtasks_if_needed(&mut self) -> Result<(), crate::errors::RuntimeError> {
@@ -441,6 +468,21 @@ impl Vm {
         self.module_loader.as_mut().unwrap()
     }
 
+    /// Enter a new declarative lexical environment whose outer is the current environment.
+    pub fn enter_lexical_scope(&mut self) {
+        self.lexical_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(Rc::clone(
+            &self.lexical_env,
+        )))));
+    }
+
+    /// Leave the current lexical environment and restore its outer.
+    pub fn exit_lexical_scope(&mut self) {
+        let outer = self.lexical_env.borrow().outer();
+        if let Some(outer) = outer {
+            self.lexical_env = outer;
+        }
+    }
+
     /// Install a module's export slot map into the VM module table at the
     /// specified numeric module index. The provided `exports` map contains
     /// shared `Rc<RefCell<Value>>` slots allocated by the ModuleLoader so both
@@ -557,6 +599,8 @@ impl Vm {
             })
             .unwrap_or(Value::Undefined);
         self.current_closure_env = None;
+        self.lexical_env = Rc::clone(&self.global_env);
+        self.yield_star_queue = None;
         self.ip = 0;
         self.chunk = Rc::new(Chunk::new(Rc::new(String::new())));
         self.obj_generations.clear();
@@ -616,6 +660,8 @@ impl Vm {
         self.handlers.clear();
         self.current_slot_types = None;
         self.current_closure_env = None;
+        self.lexical_env = Rc::clone(&self.global_env);
+        self.yield_star_queue = None;
         self.this_value = self
             .globals
             .borrow()
@@ -635,11 +681,13 @@ impl Vm {
                     // If execution continues normally, clear it so unrelated
                     // future runtime errors are not masked.
                     self.pending_exception = false;
-                    self.run_microtasks_if_needed()?;
                 }
                 Ok(StepOutcome::Return(result)) => {
                     self.run_microtasks_if_needed()?;
                     return Ok(result);
+                }
+                Ok(StepOutcome::Yield(_)) => {
+                    return Err(self.throw_type_error("yield used outside generator resume"));
                 }
                 Err(err) => {
                     if self.pending_exception {
@@ -656,6 +704,116 @@ impl Vm {
     // Opcode helpers (called from the main loop)
     // -----------------------------------------------------------------------
 
+    fn make_iterator_result(value: Value, done: bool) -> Value {
+        let obj = Rc::new(RefCell::new(ObjectData::new()));
+        obj.borrow_mut().properties.insert(
+            PropertyKey::String("value".to_string()),
+            PropertyDescriptor::data(value),
+        );
+        obj.borrow_mut().properties.insert(
+            PropertyKey::String("done".to_string()),
+            PropertyDescriptor::data(Value::Bool(done)),
+        );
+        Value::Object(obj)
+    }
+
+    fn create_generator_object(
+        &mut self,
+        proto: &Rc<FunctionProto>,
+        closure_env: &Rc<RefCell<Vec<Rc<RefCell<Value>>>>>,
+        call_args: Vec<Value>,
+        this_value: Value,
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        let mut child = Vm::new(Rc::clone(&self.globals));
+        child.push_call_frame(proto, closure_env, call_args, this_value)?;
+        let runner = Rc::new(RefCell::new(GeneratorRunner {
+            vm: child,
+            started: false,
+            completed: false,
+        }));
+        let next_runner = Rc::clone(&runner);
+        let throw_runner = Rc::clone(&runner);
+        let return_runner = Rc::clone(&runner);
+        let gen_obj = Rc::new(RefCell::new(ObjectData::new()));
+        gen_obj.borrow_mut().properties.insert(
+            PropertyKey::String("next".to_string()),
+            PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+                let mut runner = next_runner.borrow_mut();
+                if runner.completed {
+                    return Ok(Self::make_iterator_result(Value::Undefined, true));
+                }
+
+                if !runner.started {
+                    runner.started = true;
+                } else {
+                    runner.vm.stack.push(args.first().cloned().unwrap_or(Value::Undefined));
+                }
+
+                loop {
+                    match runner.vm.step(Some(1))? {
+                        StepOutcome::Continue => runner.vm.run_microtasks_if_needed()?,
+                        StepOutcome::Yield(v) => return Ok(Self::make_iterator_result(v, false)),
+                        StepOutcome::Return(v) => {
+                            runner.completed = true;
+                            return Ok(Self::make_iterator_result(v, true));
+                        }
+                    }
+                }
+            }))),
+        );
+        gen_obj.borrow_mut().properties.insert(
+            PropertyKey::String("throw".to_string()),
+            PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+                let mut runner = throw_runner.borrow_mut();
+                if runner.completed {
+                    return Err(crate::errors::RuntimeError::from(format!(
+                        "Uncaught: {}",
+                        args.first().cloned().unwrap_or(Value::Undefined)
+                    )));
+                }
+
+                let thrown = args.first().cloned().unwrap_or(Value::Undefined);
+                if let Err(err) = runner.vm.throw_value(thrown.clone()) {
+                    runner.completed = true;
+                    return Err(err);
+                }
+
+                loop {
+                    match runner.vm.step(Some(1)) {
+                        Ok(StepOutcome::Continue) => {
+                            if let Err(e) = runner.vm.run_microtasks_if_needed() {
+                                runner.completed = true;
+                                return Err(e);
+                            }
+                        }
+                        Ok(StepOutcome::Yield(v)) => {
+                            return Ok(Self::make_iterator_result(v, false));
+                        }
+                        Ok(StepOutcome::Return(v)) => {
+                            runner.completed = true;
+                            return Ok(Self::make_iterator_result(v, true));
+                        }
+                        Err(e) => {
+                            runner.completed = true;
+                            return Err(e);
+                        }
+                    }
+                }
+            }))),
+        );
+        gen_obj.borrow_mut().properties.insert(
+            PropertyKey::String("return".to_string()),
+            PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+                return_runner.borrow_mut().completed = true;
+                Ok(Self::make_iterator_result(
+                    args.first().cloned().unwrap_or(Value::Undefined),
+                    true,
+                ))
+            }))),
+        );
+        Ok(Value::Object(gen_obj))
+    }
+
     fn execute_call(&mut self) -> Result<(), crate::errors::RuntimeError> {
         let nargs = self.read_byte()? as usize;
         let mut args: Vec<Value> = Vec::with_capacity(nargs);
@@ -668,16 +826,22 @@ impl Vm {
         match callee {
             Value::Builtin(f) => {
                 let result = (f.as_ref())(self, &args)?;
+                self.run_microtasks_if_needed()?;
                 self.stack.push(result);
             }
             Value::BuiltinObject(f, _props) => {
                 let result = (f.as_ref())(self, &args)?;
+                self.run_microtasks_if_needed()?;
                 self.stack.push(result);
             }
             Value::Closure { ref proto, env, .. } => {
                 let call_args = self.prepare_call_args(&args, proto)?;
                 // Argument validation removed in JS-first mode.
-                if proto.is_async {
+                if proto.is_generator {
+                    let generator =
+                        self.create_generator_object(proto, &env, call_args, Value::Undefined)?;
+                    self.stack.push(generator);
+                } else if proto.is_async {
                     let promise =
                         self.invoke_async_closure(proto, &env, call_args, Value::Undefined)?;
                     self.stack.push(promise);
@@ -747,6 +911,7 @@ impl Vm {
                 call_args.push(receiver);
                 call_args.extend_from_slice(&args);
                 let result = (f.as_ref())(self, &call_args)?;
+                self.run_microtasks_if_needed()?;
                 self.stack.push(result);
             }
             Value::BuiltinObject(f, _props) => {
@@ -754,6 +919,7 @@ impl Vm {
                 call_args.push(receiver);
                 call_args.extend_from_slice(&args);
                 let result = (f.as_ref())(self, &call_args)?;
+                self.run_microtasks_if_needed()?;
                 self.stack.push(result);
             }
             Value::Closure { ref proto, env, .. } => {
@@ -1089,6 +1255,7 @@ impl Vm {
                 call_args.push(this_arg.clone());
                 call_args.extend_from_slice(args);
                 let result = (f.as_ref())(self, &call_args)?;
+                self.run_microtasks_if_needed()?;
                 Ok(result)
             }
             Value::BuiltinObject(f, _props) => {
@@ -1096,6 +1263,7 @@ impl Vm {
                 call_args.push(this_arg.clone());
                 call_args.extend_from_slice(args);
                 let result = (f.as_ref())(self, &call_args)?;
+                self.run_microtasks_if_needed()?;
                 Ok(result)
             }
             Value::Closure { proto, .. } => {
@@ -1165,12 +1333,14 @@ impl Vm {
             match self.step(Some(target_frame_depth)) {
                 Ok(StepOutcome::Continue) => {
                     self.pending_exception = false;
-                    self.run_microtasks_if_needed()?;
                 }
                 Ok(StepOutcome::Return(result)) => {
                     self.stack.truncate(stack_base);
                     self.run_microtasks_if_needed()?;
                     return Ok(result);
+                }
+                Ok(StepOutcome::Yield(_)) => {
+                    return Err(self.throw_type_error("yield used outside generator resume"));
                 }
                 Err(err) => {
                     if self.pending_exception {
@@ -1223,6 +1393,11 @@ impl Vm {
                     .get(slot)
                     .map(|cell| cell.borrow().clone())
                     .ok_or("Bad local slot")?;
+                if matches!(v, Value::Uninitialized) {
+                    return Err(self.throw_reference_error(
+                        "Cannot access lexical binding before initialization",
+                    ));
+                }
                 self.stack.push(v);
             }
             Op::SetLocal => {
@@ -1737,8 +1912,32 @@ impl Vm {
                 let a = self.pop()?;
                 self.stack.push(Value::Bool(!values_equal(&a, &b)));
             }
-            Op::Yield | Op::YieldStar => {
-                return Err(self.throw_type_error("Generator support not implemented"));
+            Op::Yield => {
+                let yielded = self.pop()?;
+                return Ok(StepOutcome::Yield(yielded));
+            }
+            Op::YieldStar => {
+                if self.yield_star_queue.is_none() {
+                    let iterand = self.stack.pop().unwrap_or(Value::Undefined);
+                    let mut queue = VecDeque::new();
+                    match iterand {
+                        Value::Array(arr, _) => {
+                            for value in arr.borrow().iter().flatten() {
+                                queue.push_back(value.clone());
+                            }
+                        }
+                        other => queue.push_back(other),
+                    }
+                    self.yield_star_queue = Some(queue);
+                }
+                if let Some(queue) = &mut self.yield_star_queue {
+                    if let Some(value) = queue.pop_front() {
+                        self.ip = self.ip.saturating_sub(1);
+                        return Ok(StepOutcome::Yield(value));
+                    }
+                }
+                self.yield_star_queue = None;
+                self.stack.push(Value::Undefined);
             }
             Op::AwaitPromise => {
                 let awaited = self.pop()?;
@@ -2393,6 +2592,8 @@ impl Vm {
         self.locals = frame.locals;
         self.this_value = frame.this_value;
         self.current_closure_env = frame.closure_env;
+        self.lexical_env = frame.lexical_env;
+        self.yield_star_queue = frame.yield_star_queue;
         // Handlers registered in the returning frame are now invalid.
         self.prune_stale_handlers();
         self.stack.push(result);
@@ -2525,6 +2726,8 @@ impl Vm {
             slot_types: self.current_slot_types.take(),
             stack_base,
             is_strict: proto.is_strict,
+            lexical_env: Rc::clone(&self.lexical_env),
+            yield_star_queue: self.yield_star_queue.take(),
         });
 
         self.chunk = Rc::clone(&proto.chunk);
@@ -2532,6 +2735,7 @@ impl Vm {
         self.stack.clear();
         self.current_closure_env = Some(Rc::clone(closure_env));
         self.current_slot_types = Some(proto.slot_types.clone());
+        self.yield_star_queue = None;
 
         // Pre-allocate locals to at least `arity` slots, filling missing
         // arguments with `undefined` per JavaScript semantics.
@@ -2540,6 +2744,27 @@ impl Vm {
         self.locals = std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
             .take(proto.slot_types.len().max(proto.arity))
             .collect();
+        for (idx, is_tdz) in proto.lexical_tdz.iter().copied().enumerate() {
+            if is_tdz && idx < self.locals.len() {
+                *self.locals[idx].borrow_mut() = Value::Uninitialized;
+            }
+        }
+        let fn_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(Rc::clone(
+            &self.lexical_env,
+        )))));
+        for (idx, maybe_name) in proto.slot_names.iter().enumerate() {
+            if let Some(name) = maybe_name
+                && idx < self.locals.len()
+            {
+                let initialized = !proto.lexical_tdz.get(idx).copied().unwrap_or(false);
+                fn_env.borrow_mut().create_mutable_binding(
+                    name.clone(),
+                    Rc::clone(&self.locals[idx]),
+                    initialized,
+                );
+            }
+        }
+        self.lexical_env = fn_env;
         for (i, value) in call_args.into_iter().enumerate().take(proto.arity) {
             *self.locals[i].borrow_mut() = value;
         }
@@ -4375,5 +4600,95 @@ mod tests {
         assert_eq!(*calls.borrow(), 0);
         assert!(matches!(result, Value::Undefined));
         assert!(matches!(vm.get_global("x"), Some(Value::Number(n)) if n == 1.0));
+    }
+
+    #[test]
+    fn lexical_binding_reads_before_init_throw_reference_error() {
+        let session = Parser::parse_source("function f(){ x; let x = 1; } f();").expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+        let globals = test_globals();
+        runtime_utils::install_minimal_kernel_constructors(&globals);
+        let mut vm = Vm::new(globals);
+        let err = vm.run(chunk).expect_err("run should fail for TDZ read");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Cannot access lexical binding before initialization"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn var_binding_reads_before_init_return_undefined() {
+        let session = Parser::parse_source("function f(){ return x; var x = 1; } var out = f();")
+            .expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+        let globals = test_globals();
+        runtime_utils::install_minimal_kernel_constructors(&globals);
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+        assert!(matches!(vm.get_global("out"), Some(Value::Undefined)));
+    }
+
+    #[test]
+    fn generator_next_yields_values_and_done() {
+        let src = r#"
+            function* g() { yield 1; yield 2; return 3; }
+            var it = g();
+            var a = it.next();
+            var b = it.next();
+            var c = it.next();
+            var d = it.next();
+        "#;
+        let session = Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+
+        let a = vm.get_global("a").expect("a exists");
+        let b = vm.get_global("b").expect("b exists");
+        let c = vm.get_global("c").expect("c exists");
+        let d = vm.get_global("d").expect("d exists");
+
+        assert!(matches!(
+            get_property(&a, &PropertyKey::String("value".to_string()), 0).unwrap(),
+            Value::Number(n) if n == 1.0
+        ));
+        assert!(matches!(
+            get_property(&a, &PropertyKey::String("done".to_string()), 0).unwrap(),
+            Value::Bool(false)
+        ));
+        assert!(matches!(
+            get_property(&b, &PropertyKey::String("value".to_string()), 0).unwrap(),
+            Value::Number(n) if n == 2.0
+        ));
+        assert!(matches!(
+            get_property(&c, &PropertyKey::String("value".to_string()), 0).unwrap(),
+            Value::Number(n) if n == 3.0
+        ));
+        assert!(matches!(
+            get_property(&c, &PropertyKey::String("done".to_string()), 0).unwrap(),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            get_property(&d, &PropertyKey::String("done".to_string()), 0).unwrap(),
+            Value::Bool(true)
+        ));
+    }
+
+    #[test]
+    fn class_declaration_binds_constructor_function() {
+        let src = r#"
+            class A {}
+        "#;
+        let session = Parser::parse_source(src).expect("parse ok");
+        let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+        assert!(matches!(vm.get_global("A"), Some(Value::Closure { .. })));
     }
 }

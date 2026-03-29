@@ -419,11 +419,18 @@ fn unsupported_reason(_path: &Path, _src: &str, meta: &Option<Meta>) -> Option<S
     {
         // We will still handle onlyStrict/noStrict below in a limited way,
         // but module/raw are skipped entirely.
-        if flags.iter().any(|f| f == "module" || f == "raw") {
+        let allow_module = env::var("TSBLITZ_TEST262_ENABLE_MODULE")
+            .ok()
+            .is_none_or(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        if flags
+            .iter()
+            .any(|f| (f == "module" && !allow_module) || f == "raw")
+        {
             let unsupported: Vec<&str> = flags
                 .iter()
                 .filter_map(|f| match f.as_str() {
-                    "module" | "raw" => Some(f.as_str()),
+                    "module" if !allow_module => Some(f.as_str()),
+                    "raw" => Some(f.as_str()),
                     _ => None,
                 })
                 .collect();
@@ -552,11 +559,11 @@ fn run_test_file(
         for inc in &include_files {
             let path = test262_root.join("harness").join(inc);
             if !path.exists() {
-                return Err(format!(
-                    "{} (UNSUPPORTED: include {} missing)",
-                    path.display(),
-                    inc
-                ));
+                eprintln!(
+                    "[test262] optional include missing (continuing): {}",
+                    path.display()
+                );
+                continue;
             }
             let inc_src = fs::read_to_string(&path)
                 .map_err(|e| format!("Failed to read include {}: {}", path.display(), e))?;
