@@ -755,32 +755,24 @@ impl Vm {
                             .push(args.first().cloned().unwrap_or(Value::Undefined));
                     }
 
-                    let mut outcome = Ok(Self::make_iterator_result(Value::Undefined, true));
                     loop {
                         match runner.vm.step(Some(1)) {
                             Ok(StepOutcome::Continue) => {
                                 if let Err(err) = runner.vm.run_microtasks_if_needed() {
-                                    outcome = Err(err);
-                                    break;
+                                    break Err(err);
                                 }
                                 runner.vm.maybe_collect_garbage_prototype();
                             }
                             Ok(StepOutcome::Yield(v)) => {
-                                outcome = Ok(Self::make_iterator_result(v, false));
-                                break;
+                                break Ok(Self::make_iterator_result(v, false));
                             }
                             Ok(StepOutcome::Return(v)) => {
                                 runner.completed = true;
-                                outcome = Ok(Self::make_iterator_result(v, true));
-                                break;
+                                break Ok(Self::make_iterator_result(v, true));
                             }
-                            Err(err) => {
-                                outcome = Err(err);
-                                break;
-                            }
+                            Err(err) => break Err(err),
                         }
                     }
-                    outcome
                 };
                 runner.vm.gc_temp_roots.truncate(temp_root_base);
                 outcome
@@ -807,35 +799,27 @@ impl Vm {
                         runner.completed = true;
                         Err(err)
                     } else {
-                        let mut outcome = Err(crate::errors::RuntimeError::from(
-                            "TypeError: generator failed to produce a value",
-                        ));
                         loop {
                             match runner.vm.step(Some(1)) {
                                 Ok(StepOutcome::Continue) => {
                                     if let Err(e) = runner.vm.run_microtasks_if_needed() {
                                         runner.completed = true;
-                                        outcome = Err(e);
-                                        break;
+                                        break Err(e);
                                     }
                                 }
                                 Ok(StepOutcome::Yield(v)) => {
-                                    outcome = Ok(Self::make_iterator_result(v, false));
-                                    break;
+                                    break Ok(Self::make_iterator_result(v, false));
                                 }
                                 Ok(StepOutcome::Return(v)) => {
                                     runner.completed = true;
-                                    outcome = Ok(Self::make_iterator_result(v, true));
-                                    break;
+                                    break Ok(Self::make_iterator_result(v, true));
                                 }
                                 Err(e) => {
                                     runner.completed = true;
-                                    outcome = Err(e);
-                                    break;
+                                    break Err(e);
                                 }
                             }
                         }
-                        outcome
                     }
                 };
                 runner.vm.gc_temp_roots.truncate(temp_root_base);
