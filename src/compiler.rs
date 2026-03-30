@@ -37,7 +37,7 @@ pub struct ModuleContext {
     /// Imports: local name -> (module_index, exported_name)
     pub imports: HashMap<String, (usize, String)>,
     /// Exported local names (set)
-    pub exports: std::collections::HashSet<String>,
+    pub exports: HashSet<String>,
 }
 
 const LINE: u32 = 1;
@@ -179,6 +179,7 @@ struct Scope {
     kind: ScopeKind,
     bindings: HashMap<String, usize>,
     lexical_bindings: HashSet<String>,
+    block_var_names: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -212,6 +213,7 @@ impl Compiler {
                 kind: ScopeKind::Function,
                 bindings: HashMap::new(),
                 lexical_bindings: HashSet::new(),
+                block_var_names: HashSet::new(),
             }],
             globals: HashMap::new(),
             is_root: true,
@@ -337,8 +339,91 @@ impl Compiler {
                     name
                 ));
             }
+            if scope.block_var_names.contains(name) {
+                return Some(format!(
+                    "SyntaxError: redeclaration of lexical binding `{}`",
+                    name
+                ));
+            }
         }
         None
+    }
+
+    fn collect_var_names_from_statement(&self, stmt: &oast::Statement<'_>) -> HashSet<String> {
+        let mut names = HashSet::new();
+        self.add_var_names_from_statement(stmt, &mut names);
+        names
+    }
+
+    fn add_var_names_from_statement(
+        &self,
+        stmt: &oast::Statement<'_>,
+        names: &mut HashSet<String>,
+    ) {
+        match stmt {
+            oast::Statement::VariableDeclaration(v) => {
+                if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+                    for decl in &v.declarations {
+                        self.add_var_names_from_binding(&decl.id, names);
+                    }
+                }
+            }
+            oast::Statement::FunctionDeclaration(f) => {
+                if let Some(id) = &f.id {
+                    names.insert(id.name.to_string());
+                }
+            }
+            oast::Statement::ClassDeclaration(c) => {
+                if let Some(id) = &c.id {
+                    names.insert(id.name.to_string());
+                }
+            }
+            oast::Statement::BlockStatement(b) => {
+                for s in &b.body {
+                    self.add_var_names_from_statement(s, names);
+                }
+            }
+            oast::Statement::IfStatement(i) => {
+                self.add_var_names_from_statement(&i.consequent, names);
+                if let Some(alt) = &i.alternate {
+                    self.add_var_names_from_statement(alt, names);
+                }
+            }
+            oast::Statement::LabeledStatement(l) => {
+                self.add_var_names_from_statement(&l.body, names);
+            }
+            oast::Statement::WithStatement(w) => {
+                self.add_var_names_from_statement(&w.body, names);
+            }
+            _ => {}
+        }
+    }
+
+    fn add_var_names_from_binding(
+        &self,
+        pattern: &oast::BindingPattern<'_>,
+        names: &mut HashSet<String>,
+    ) {
+        match pattern {
+            oast::BindingPattern::BindingIdentifier(i) => {
+                names.insert(i.name.to_string());
+            }
+            oast::BindingPattern::AssignmentPattern(a) => {
+                self.add_var_names_from_binding(&a.left, names);
+            }
+            oast::BindingPattern::ObjectPattern(o) => {
+                for prop in &o.properties {
+                    self.add_var_names_from_binding(&prop.value, names);
+                }
+            }
+            oast::BindingPattern::ArrayPattern(a) => {
+                for element in &a.elements {
+                    if let Some(elem) = element {
+                        self.add_var_names_from_binding(elem, names);
+                    }
+                }
+            }
+        }
     }
 
     fn enter_block_scope(&mut self) {
@@ -346,6 +431,21 @@ impl Compiler {
             kind: ScopeKind::Block,
             bindings: HashMap::new(),
             lexical_bindings: HashSet::new(),
+            block_var_names: HashSet::new(),
+        });
+    }
+
+    fn enter_block_scope_with_vars(&mut self, stmts: &[oast::Statement<'_>]) {
+        let mut block_var_names = HashSet::new();
+        for stmt in stmts {
+            let stmt_vars = self.collect_var_names_from_statement(stmt);
+            block_var_names.extend(stmt_vars);
+        }
+        self.scopes.push(Scope {
+            kind: ScopeKind::Block,
+            bindings: HashMap::new(),
+            lexical_bindings: HashSet::new(),
+            block_var_names,
         });
     }
 
@@ -625,10 +725,10 @@ impl Compiler {
     ) -> Result<(), crate::errors::CompilerError> {
         let mirror_global = self.is_root;
 
-        if matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var) {
-            if let Some(err) = self.check_var_lexical_conflict(name) {
-                return Err(crate::errors::CompilerError::from(err));
-            }
+        if matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var)
+            && let Some(err) = self.check_var_lexical_conflict(name)
+        {
+            return Err(crate::errors::CompilerError::from(err));
         }
 
         let is_var = matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var);
@@ -944,7 +1044,7 @@ impl Compiler {
                 self.exit_scope();
             }
             OStmt::BlockStatement(b) => {
-                self.enter_block_scope();
+                self.enter_block_scope_with_vars(&b.body);
                 for s in &b.body {
                     self.compile_statement_oast(s)?;
                 }
@@ -1568,7 +1668,7 @@ impl Compiler {
                                 OPat::BindingIdentifier(i) => i.name.to_string(),
                                 _ => "__catch_pattern".to_string(),
                             };
-                            self.enter_block_scope();
+                            self.enter_block_scope_with_vars(&handler.body.body);
                             let slot = self.add_local_with_mirror(name, None, false);
                             self.emit(Op::SetLocal, LINE);
                             self.emit_byte(slot as u8, LINE);
@@ -1584,7 +1684,7 @@ impl Compiler {
                             self.exit_scope();
                         } else {
                             self.emit(Op::Pop, LINE);
-                            self.enter_block_scope();
+                            self.enter_block_scope_with_vars(&handler.body.body);
                             for stmt in &handler.body.body {
                                 self.compile_statement_oast(stmt)?;
                             }
@@ -1602,9 +1702,11 @@ impl Compiler {
                                     })?;
                                 state.in_finalizer = true;
                             }
+                            self.enter_block_scope_with_vars(&fin.body);
                             for stmt in &fin.body {
                                 self.compile_statement_oast(stmt)?;
                             }
+                            self.exit_scope();
                             let state =
                                 self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
                                     crate::errors::CompilerError::from("finally state missing")
@@ -2947,6 +3049,7 @@ impl Compiler {
                 kind: ScopeKind::Function,
                 bindings: HashMap::new(),
                 lexical_bindings: HashSet::new(),
+                block_var_names: HashSet::new(),
             }],
             globals: HashMap::new(),
             is_root: false,
@@ -3058,6 +3161,7 @@ impl Compiler {
                 kind: ScopeKind::Function,
                 bindings: HashMap::new(),
                 lexical_bindings: HashSet::new(),
+                block_var_names: HashSet::new(),
             }],
             globals: HashMap::new(),
             is_root: false,

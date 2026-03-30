@@ -189,7 +189,7 @@ fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
                     let _ = tx.send(TestResult::Pass);
                 }
                 Ok(Err(e)) => {
-                    let _ = tx.send(TestResult::Fail(e.to_string()));
+                    let _ = tx.send(TestResult::Fail(e));
                 }
                 Err(panic_payload) => {
                     let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
@@ -533,7 +533,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
                 None => 0.0,
             };
             if ms.is_finite() && ms > 0.0 {
-                std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+                thread::sleep(std::time::Duration::from_millis(ms as u64));
             }
             Ok(Value::Undefined)
         }))),
