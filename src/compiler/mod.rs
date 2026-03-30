@@ -26,6 +26,13 @@ use crate::bytecode::{Chunk, Op};
 use oxc_ast::ast as oast;
 use std::rc::Rc;
 
+#[cfg(test)]
+use {
+    crate::{ObjectData, Value, Vm},
+    std::cell::RefCell,
+    std::collections::{HashMap, HashSet},
+};
+
 pub mod core;
 pub use core::{
     CaptureSource, Compiler, FinallyPatchState, LabelPatchState, ModuleContext, Scope, ScopeKind,
@@ -396,14 +403,12 @@ fn compile_member_call_uses_call_method() {
     let session = match crate::parser::Parser::parse_source(src) {
         Ok(s) => s,
         // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
-        #[allow(clippy::panic)]
         Err(e) => panic!("parse_source failed: {:?}", e),
     };
     let program = session.program();
     let chunk = match compile(program, session.source()) {
         Ok(c) => c,
         // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
-        #[allow(clippy::panic)]
         Err(e) => panic!("compile failed: {:?}", e),
     };
 

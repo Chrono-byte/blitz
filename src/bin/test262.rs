@@ -352,7 +352,6 @@ fn parse_args() -> RunnerOptions {
 struct Negative {
     phase: String,
     #[serde(rename = "type")]
-    #[allow(dead_code)]
     ty: Option<String>,
 }
 
