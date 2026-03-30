@@ -507,3 +507,47 @@ fn main() -> Result<(), blitz::errors::Error> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn test_globals() -> Rc<RefCell<ObjectData>> {
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        globals.borrow_mut().properties.insert(
+            PropertyKey::String("globalThis".to_string()),
+            PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+        );
+        runtime_utils::install_minimal_kernel_constructors(&globals);
+        globals.borrow_mut().properties.insert(
+            PropertyKey::String("print".to_string()),
+            PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+                native_print(vm, args).map_err(blitz::errors::RuntimeError::from)
+            }))),
+        );
+        globals
+    }
+
+    #[test]
+    fn run_source_executes_basic_program() {
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        let mut vm = Vm::new(Rc::clone(&globals));
+
+        run_source(&mut vm, "var answer = 1 + 2; answer;").expect("run");
+
+        assert!(
+            matches!(vm.get_global("answer"), Some(Value::Number(n)) if (n - 3.0).abs() < f64::EPSILON)
+        );
+    }
+
+    #[test]
+    fn run_source_can_call_print_builtin() {
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+
+        run_source(&mut vm, "print(1, 2, 3);").expect("run");
+    }
+}

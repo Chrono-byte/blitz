@@ -215,3 +215,80 @@ impl Vm {
         let _ = self.bg_runtime.spawn(fut);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::RuntimeError;
+    use crate::value::{ObjectData, Value};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn test_vm() -> Vm {
+        Vm::new(Rc::new(RefCell::new(ObjectData::new())))
+    }
+
+    #[test]
+    fn microtasks_continue_after_error_and_notify_hook() {
+        let mut vm = test_vm();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let hook_calls: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+
+        vm.set_unhandled_rejection_hook({
+            let hook_calls = Rc::clone(&hook_calls);
+            move |_vm, promise, reason| {
+                hook_calls
+                    .borrow_mut()
+                    .push((promise.type_name().to_string(), format!("{}", reason)));
+            }
+        });
+
+        vm.queue_microtask({
+            let events = Rc::clone(&events);
+            move |_vm| {
+                events.borrow_mut().push("first".to_string());
+                Ok(())
+            }
+        });
+        vm.queue_microtask({
+            let events = Rc::clone(&events);
+            move |_vm| {
+                events.borrow_mut().push("second".to_string());
+                Err(RuntimeError::from("microtask failed"))
+            }
+        });
+        vm.queue_microtask({
+            let events = Rc::clone(&events);
+            move |_vm| {
+                events.borrow_mut().push("third".to_string());
+                Ok(())
+            }
+        });
+
+        vm.flush_microtasks().expect("flush");
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["first".to_string(), "second".to_string(), "third".to_string()]
+        );
+        assert!(matches!(
+            vm.last_uncaught_exception.as_ref(),
+            Some(Value::String(s)) if s.contains("microtask failed")
+        ));
+        assert_eq!(
+            hook_calls.borrow().as_slice(),
+            [(
+                "undefined".to_string(),
+                "Runtime error: microtask failed".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn run_blocking_executes_closure() {
+        let vm = test_vm();
+        let value = vm.run_blocking(|| 4usize + 5).expect("run blocking");
+
+        assert_eq!(value, 9);
+    }
+}
