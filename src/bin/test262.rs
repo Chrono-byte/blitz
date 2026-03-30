@@ -681,27 +681,19 @@ fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>, excludes: &[PathBuf]) {
 fn unsupported_reason(_path: &Path, _src: &str, meta: &Option<Meta>) -> Option<String> {
     if let Some(m) = meta
         && let Some(flags) = &m.flags
-        && flags.iter().any(|f| {
-            matches!(
-                f.as_str(),
-                "module" | "raw" | "noStrict" | "onlyStrict" // onlyStrict/noStrict handled below, but we don't run `module/raw`
-            )
-        })
+        && flags
+            .iter()
+            .any(|f| matches!(f.as_str(), "module" | "noStrict" | "onlyStrict"))
     {
-        // We will still handle onlyStrict/noStrict below in a limited way,
-        // but module/raw are skipped entirely.
+        // We will still handle onlyStrict/noStrict below in a limited way.
         let allow_module = env::var("TSBLITZ_TEST262_ENABLE_MODULE")
             .ok()
             .is_none_or(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-        if flags
-            .iter()
-            .any(|f| (f == "module" && !allow_module) || f == "raw")
-        {
+        if flags.iter().any(|f| f == "module" && !allow_module) {
             let unsupported: Vec<&str> = flags
                 .iter()
                 .filter_map(|f| match f.as_str() {
                     "module" if !allow_module => Some(f.as_str()),
-                    "raw" => Some(f.as_str()),
                     _ => None,
                 })
                 .collect();
@@ -761,6 +753,16 @@ fn run_test_file(
         return Err(format!("{} ({})", path.display(), reason));
     }
 
+    // Unless the test is `raw`, harness files should be evaluated first in the test realm.
+    let raw_flag = meta
+        .as_ref()
+        .and_then(|m| m.flags.as_ref())
+        .is_some_and(|f| f.iter().any(|s| s == "raw"));
+    let has_async_flag = meta
+        .as_ref()
+        .and_then(|m| m.flags.as_ref())
+        .is_some_and(|f| f.iter().any(|s| s == "async"));
+
     // Determine the run modes (non-strict / strict) according to flags:
     // - onlyStrict -> run strict only
     // - noStrict -> run non-strict only
@@ -778,16 +780,10 @@ fn run_test_file(
             run_strict = false;
         }
     }
-
-    // Unless the test is `raw`, harness files should be evaluated first in the test realm.
-    let raw_flag = meta
-        .as_ref()
-        .and_then(|m| m.flags.as_ref())
-        .is_some_and(|f| f.iter().any(|s| s == "raw"));
-    let has_async_flag = meta
-        .as_ref()
-        .and_then(|m| m.flags.as_ref())
-        .is_some_and(|f| f.iter().any(|s| s == "async"));
+    if raw_flag {
+        run_non_strict = true;
+        run_strict = false;
+    }
 
     // Required harness files as per Test262 interpreting instructions.
     let mut harness_files: Vec<String> = vec!["assert.js".to_string(), "sta.js".to_string()];
