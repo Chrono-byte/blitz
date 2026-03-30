@@ -4,6 +4,7 @@ Test262 connector script for Blitz.
 Usage:
 - Optionally set `TEST262_FILTER` to a substring to limit which tests are run
 - Optionally set `TEST262_LIMIT` to limit how many tests are executed (default: all)
+- Optionally set `TEST262_JOBS` to control parallelism (default: available parallelism)
 - Optionally set `TEST262_SEGMENTS` to a comma-separated list of segments
 - Optionally set `TEST262_EXCLUDE` to a comma-separated list of segments to skip
 
@@ -12,6 +13,7 @@ CLI (preferred over env):
 - --exclude seg [,seg...] (repeatable)
 - --filter substring
 - --limit number
+- --jobs number
 
 Segments may be labels like: annexB, language, built-ins, intl402, staging
 or paths relative to test262/test (e.g. built-ins/Array).
@@ -26,13 +28,15 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::Parser as ClapParser;
 use oxc_span::SourceType;
 use serde::Deserialize;
+use tokio::runtime::Builder;
+use tokio::sync::Semaphore;
 
 use blitz::compiler;
 use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
@@ -69,6 +73,95 @@ enum TestResult {
     Fail(String),
     StackOverflow,
     Panic(String),
+}
+
+fn select_files_to_run(
+    files: Vec<PathBuf>,
+    filter: Option<&str>,
+    limit: Option<usize>,
+) -> Vec<PathBuf> {
+    let mut selected = Vec::new();
+    for file in files {
+        if let Some(flt) = filter
+            && !file.to_string_lossy().contains(flt)
+        {
+            continue;
+        }
+        selected.push(file);
+        if let Some(limit) = limit
+            && selected.len() >= limit
+        {
+            break;
+        }
+    }
+    selected
+}
+
+fn resolve_job_count(
+    requested_jobs: Option<usize>,
+    selected_count: usize,
+    available_parallelism: Option<usize>,
+) -> usize {
+    requested_jobs
+        .or(available_parallelism)
+        .unwrap_or(1)
+        .max(1)
+        .min(selected_count.max(1))
+}
+
+fn sort_test_results(results: &mut [(usize, PathBuf, TestResult)]) {
+    results.sort_by_key(|(idx, _, _)| *idx);
+}
+
+fn run_selected_tests(
+    files_to_run: Vec<PathBuf>,
+    test262_dir: PathBuf,
+    job_count: usize,
+) -> Vec<(usize, PathBuf, TestResult)> {
+    if job_count <= 1 || files_to_run.len() <= 1 {
+        return files_to_run
+            .into_iter()
+            .enumerate()
+            .map(|(idx, file)| {
+                let result = run_test_in_thread(file.clone(), test262_dir.clone());
+                (idx, file, result)
+            })
+            .collect();
+    }
+
+    let runtime = Builder::new_current_thread()
+        .build()
+        .expect("failed to build tokio runtime for test262");
+
+    runtime.block_on(async move {
+        let semaphore = Arc::new(Semaphore::new(job_count));
+        let mut handles = Vec::with_capacity(files_to_run.len());
+
+        for (idx, file) in files_to_run.into_iter().enumerate() {
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("test262 semaphore unexpectedly closed");
+            let test262_dir = test262_dir.clone();
+            handles.push(tokio::spawn(async move {
+                let file_for_result = file.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    run_test_in_thread(file, test262_dir)
+                })
+                .await
+                .expect("test262 blocking task panicked");
+                (idx, file_for_result, result)
+            }));
+        }
+
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            results.push(handle.await.expect("test262 dispatch task panicked"));
+        }
+        results
+    })
 }
 
 fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
@@ -1509,66 +1602,17 @@ fn main() {
         }
     }
 
-    let mut files_to_run = Vec::new();
-    for f in files {
-        if let Some(ref flt) = opts.filter
-            && !f.to_string_lossy().contains(flt)
-        {
-            continue;
-        }
-        files_to_run.push(f);
-        if let Some(limit) = opts.limit
-            && files_to_run.len() >= limit
-        {
-            break;
-        }
-    }
-
-    let job_count = opts
-        .jobs
-        .or_else(|| thread::available_parallelism().ok().map(|n| n.get()))
-        .unwrap_or(1)
-        .max(1)
-        .min(files_to_run.len().max(1));
-    let total_jobs = files_to_run.len();
-
-    let (job_tx, job_rx) = mpsc::channel::<(usize, PathBuf)>();
-    let job_rx = Arc::new(Mutex::new(job_rx));
-    let (result_tx, result_rx) = mpsc::channel::<(usize, PathBuf, TestResult)>();
-    let mut workers = Vec::with_capacity(job_count);
-
-    for _ in 0..job_count {
-        let job_rx = Arc::clone(&job_rx);
-        let result_tx = result_tx.clone();
-        let test262_dir = test262_dir.clone();
-        workers.push(thread::spawn(move || {
-            loop {
-                let job = {
-                    let rx = job_rx.lock().expect("job receiver poisoned");
-                    rx.recv().ok()
-                };
-                let Some((idx, file)) = job else {
-                    break;
-                };
-                let result = run_test_in_thread(file.clone(), test262_dir.clone());
-                if result_tx.send((idx, file, result)).is_err() {
-                    break;
-                }
-            }
-        }));
-    }
-    drop(result_tx);
-
-    for (idx, file) in files_to_run.into_iter().enumerate() {
-        job_tx.send((idx, file)).unwrap();
-    }
-    drop(job_tx);
+    let files_to_run = select_files_to_run(files, opts.filter.as_deref(), opts.limit);
+    let job_count = resolve_job_count(
+        opts.jobs,
+        files_to_run.len(),
+        thread::available_parallelism().ok().map(|n| n.get()),
+    );
+    let mut test_results = run_selected_tests(files_to_run, test262_dir.clone(), job_count);
+    sort_test_results(&mut test_results);
 
     let mut failed_cases = Vec::new();
-    for _ in 0..total_jobs {
-        let (idx, f, result) = result_rx
-            .recv()
-            .expect("worker threads failed to return a test result");
+    for (idx, f, result) in test_results {
         let (top_key, subsection_key) = bucket_keys(&test_root, &f);
         match result {
             TestResult::Pass => {
@@ -1595,10 +1639,6 @@ fn main() {
                 failed_cases.push((idx, f.clone(), format!("Panic: {}", msg)));
             }
         }
-    }
-
-    for worker in workers {
-        let _ = worker.join();
     }
 
     failed_cases.sort_by_key(|(idx, _, _)| *idx);
@@ -1678,6 +1718,27 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent dirs");
         }
         fs::write(path, contents).expect("write file");
+    }
+
+    #[test]
+    fn resolve_job_count_clamps_to_selected_files() {
+        assert_eq!(resolve_job_count(Some(64), 5, Some(8)), 5);
+        assert_eq!(resolve_job_count(None, 5, Some(8)), 5);
+        assert_eq!(resolve_job_count(Some(0), 5, Some(8)), 1);
+    }
+
+    #[test]
+    fn sort_test_results_orders_by_original_index() {
+        let mut results = vec![
+            (2, PathBuf::from("c.js"), TestResult::Pass),
+            (0, PathBuf::from("a.js"), TestResult::Fail("x".to_string())),
+            (1, PathBuf::from("b.js"), TestResult::StackOverflow),
+        ];
+
+        sort_test_results(&mut results);
+
+        let indices: Vec<_> = results.iter().map(|(idx, _, _)| *idx).collect();
+        assert_eq!(indices, vec![0, 1, 2]);
     }
 
     #[test]
