@@ -339,6 +339,15 @@ impl Compiler {
                     name
                 ));
             }
+        }
+        None
+    }
+
+    fn check_var_or_lexical_against_block_vars(&self, name: &str) -> Option<String> {
+        for scope in self.scopes.iter().rev() {
+            if matches!(scope.kind, ScopeKind::Function) {
+                break;
+            }
             if scope.block_var_names.contains(name) {
                 return Some(format!(
                     "SyntaxError: redeclaration of lexical binding `{}`",
