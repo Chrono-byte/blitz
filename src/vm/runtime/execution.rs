@@ -2061,22 +2061,30 @@ impl Vm {
                     Value::Promise(state) => {
                         let mut settled = false;
                         for _ in 0..1024 {
-                            match &*state.borrow() {
-                                PromiseState::Fulfilled(v) => {
-                                    self.stack.push(v.clone());
+                            let settled_state = {
+                                let state_ref = state.borrow();
+                                match &*state_ref {
+                                    PromiseState::Fulfilled(v) => Some(Ok(v.clone())),
+                                    PromiseState::Rejected(reason) => Some(Err(reason.clone())),
+                                    PromiseState::Pending { .. } => None,
+                                }
+                            };
+
+                            match settled_state {
+                                Some(Ok(value)) => {
+                                    self.stack.push(value);
                                     settled = true;
                                     break;
                                 }
-                                PromiseState::Rejected(reason) => {
-                                    self.throw_value(reason.clone())?;
+                                Some(Err(reason)) => {
+                                    self.throw_value(reason)?;
                                     settled = true;
                                     break;
                                 }
-                                PromiseState::Pending { .. } => {
-                                    if self.microtasks.is_empty() {
-                                        break;
+                                None => {
+                                    if !self.microtasks.is_empty() {
+                                        self.run_microtasks_if_needed()?;
                                     }
-                                    self.run_microtasks_if_needed()?;
                                 }
                             }
                         }

@@ -1036,7 +1036,7 @@ fn run_test_file(
                         let start = Instant::now();
                         let timeout = Duration::from_secs(2);
 
-                        let done_result = loop {
+                        loop {
                             if let Some(state) = done_state.borrow().as_ref() {
                                 let async_result = match state {
                                     None => Ok(v),
@@ -1050,9 +1050,7 @@ fn run_test_file(
                             }
 
                             thread::sleep(Duration::from_millis(10));
-                        };
-
-                        done_result
+                        }
                     }
                 }
             }

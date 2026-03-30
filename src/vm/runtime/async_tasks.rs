@@ -75,7 +75,10 @@ impl Vm {
     /// host hook instead of aborting the queue on first error.
     pub(crate) fn drain_microtasks(&mut self) -> Result<(), crate::errors::RuntimeError> {
         while let Some(mut job) = self.microtasks.pop_front() {
-            if let Err(err) = job(self) {
+            let caller_handlers = std::mem::take(&mut self.handlers);
+            let result = job(self);
+            self.handlers = caller_handlers;
+            if let Err(err) = result {
                 // Record the last uncaught exception so callers or host hooks
                 // can inspect it. Convert the runtime error into a JS value
                 // string for now; hosts may implement richer reporting.
@@ -140,7 +143,7 @@ impl Vm {
         let caller_lexical_env = self.lexical_env.clone();
         let caller_slot_types = self.current_slot_types.clone();
         let caller_frame_len = self.frames.len();
-        let caller_handler_len = self.handlers.len();
+        let caller_handlers = std::mem::take(&mut self.handlers);
         let thrown_value = self.stack.last().cloned();
 
         self.last_uncaught_exception = None;
@@ -158,7 +161,7 @@ impl Vm {
         self.current_slot_types = caller_slot_types;
         self.stack = saved_stack;
         self.frames.truncate(caller_frame_len);
-        self.handlers.truncate(caller_handler_len);
+        self.handlers = caller_handlers;
 
         self.run_microtasks_if_needed()?;
         match exec_result {

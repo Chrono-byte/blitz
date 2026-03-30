@@ -65,6 +65,8 @@ use crate::parser::Parser;
 use crate::value::SymbolId;
 use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
+use num_bigint::{BigInt as BigIntValue, Sign};
+use num_traits::FromPrimitive;
 use regex::RegexBuilder;
 
 const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
@@ -337,11 +339,74 @@ pub(crate) fn resolve_promise_with_value(
             return Ok(());
         }
 
-        if let Value::Promise(ref p_rc) = value
-            && Rc::ptr_eq(p_rc, result_promise)
-        {
-            *already_resolved.borrow_mut() = true;
-            return Err(vm.throw_type_error("Chaining cycle detected"));
+        if let Value::Promise(ref p_rc) = value {
+            if Rc::ptr_eq(p_rc, result_promise) {
+                *already_resolved.borrow_mut() = true;
+                return Err(vm.throw_type_error("Chaining cycle detected"));
+            }
+
+            let mut state = p_rc.borrow_mut();
+            match &mut *state {
+                PromiseState::Pending {
+                    on_fulfilled,
+                    on_rejected,
+                } => {
+                    let resolve_called = Rc::clone(&already_resolved);
+                    let res_p = Rc::clone(result_promise);
+                    on_fulfilled.push(Value::Builtin(Rc::new(move |vm, args| {
+                        if *resolve_called.borrow() {
+                            return Ok(Value::Undefined);
+                        }
+                        *resolve_called.borrow_mut() = true;
+                        let off = if args.len() > 1 { 1 } else { 0 };
+                        let v = args.get(off).cloned().unwrap_or(Value::Undefined);
+                        resolve_promise_with_value(vm, &res_p, v)?;
+                        Ok(Value::Undefined)
+                    })));
+
+                    let reject_called = Rc::clone(&already_resolved);
+                    let res_p2 = Rc::clone(result_promise);
+                    on_rejected.push(Value::Builtin(Rc::new(move |vm, args| {
+                        if *reject_called.borrow() {
+                            return Ok(Value::Undefined);
+                        }
+                        *reject_called.borrow_mut() = true;
+                        let off = if args.len() > 1 { 1 } else { 0 };
+                        let r = args.get(off).cloned().unwrap_or(Value::Undefined);
+                        reject_pending_promise(vm, &res_p2, r);
+                        Ok(Value::Undefined)
+                    })));
+                    return Ok(());
+                }
+                PromiseState::Fulfilled(v) => {
+                    let v = v.clone();
+                    let resolve_called = Rc::clone(&already_resolved);
+                    let res_p = Rc::clone(result_promise);
+                    vm.queue_microtask(move |vm| {
+                        if *resolve_called.borrow() {
+                            return Ok(());
+                        }
+                        *resolve_called.borrow_mut() = true;
+                        fulfill_pending_promise(vm, &res_p, v.clone());
+                        Ok(())
+                    });
+                    return Ok(());
+                }
+                PromiseState::Rejected(reason) => {
+                    let reason = reason.clone();
+                    let reject_called = Rc::clone(&already_resolved);
+                    let res_p = Rc::clone(result_promise);
+                    vm.queue_microtask(move |vm| {
+                        if *reject_called.borrow() {
+                            return Ok(());
+                        }
+                        *reject_called.borrow_mut() = true;
+                        reject_pending_promise(vm, &res_p, reason.clone());
+                        Ok(())
+                    });
+                    return Ok(());
+                }
+            }
         }
 
         if value.is_object() {
@@ -922,6 +987,481 @@ fn to_index(vm: &mut Vm, value: &Value) -> Result<usize, crate::errors::RuntimeE
         return Err(vm.throw_range_error("Invalid array index"));
     }
     Ok(int_val as usize)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtomicsValueKind {
+    Number { bits: u32, signed: bool },
+    BigInt { signed: bool },
+}
+
+#[derive(Clone)]
+struct AtomicsViewInfo {
+    view: Rc<RefCell<ObjectData>>,
+    data: Rc<RefCell<Vec<Option<Value>>>>,
+    buffer: Rc<RefCell<ObjectData>>,
+    kind_name: String,
+    value_kind: AtomicsValueKind,
+    length: usize,
+    is_shared: bool,
+}
+
+fn atomics_value_kind(kind_name: &str) -> Option<AtomicsValueKind> {
+    match kind_name {
+        "Int8Array" => Some(AtomicsValueKind::Number {
+            bits: 8,
+            signed: true,
+        }),
+        "Uint8Array" => Some(AtomicsValueKind::Number {
+            bits: 8,
+            signed: false,
+        }),
+        "Int16Array" => Some(AtomicsValueKind::Number {
+            bits: 16,
+            signed: true,
+        }),
+        "Uint16Array" => Some(AtomicsValueKind::Number {
+            bits: 16,
+            signed: false,
+        }),
+        "Int32Array" => Some(AtomicsValueKind::Number {
+            bits: 32,
+            signed: true,
+        }),
+        "Uint32Array" => Some(AtomicsValueKind::Number {
+            bits: 32,
+            signed: false,
+        }),
+        "BigInt64Array" => Some(AtomicsValueKind::BigInt { signed: true }),
+        "BigUint64Array" => Some(AtomicsValueKind::BigInt { signed: false }),
+        _ => None,
+    }
+}
+
+fn atomics_wait_kind(kind_name: &str) -> bool {
+    matches!(kind_name, "Int32Array" | "BigInt64Array")
+}
+
+fn atomics_normalize_integer(value: i128, bits: u32, signed: bool) -> i128 {
+    let modulus = 1i128 << bits;
+    let mut v = value % modulus;
+    if v < 0 {
+        v += modulus;
+    }
+    if signed {
+        let sign_bit = 1i128 << (bits - 1);
+        if v >= sign_bit {
+            v -= modulus;
+        }
+    }
+    v
+}
+
+fn atomics_normalize_bigint(value: BigIntValue, signed: bool) -> BigIntValue {
+    let modulus = BigIntValue::from(1u8) << 64u32;
+    let half = BigIntValue::from(1u8) << 63u32;
+    let mut v = value % &modulus;
+    if v.sign() == Sign::Minus {
+        v += &modulus;
+    }
+    if signed && v >= half {
+        v -= &modulus;
+    }
+    v
+}
+
+fn atomics_value_to_integer(
+    vm: &mut Vm,
+    value: &Value,
+    bits: u32,
+    signed: bool,
+) -> Result<Value, crate::errors::RuntimeError> {
+    let n = vm.to_number_value(value)?;
+    let int = atomics_normalize_integer(n.trunc() as i128, bits, signed);
+    Ok(Value::Number(int as f64))
+}
+
+fn atomics_value_to_bigint(
+    vm: &mut Vm,
+    value: &Value,
+    signed: bool,
+) -> Result<Value, crate::errors::RuntimeError> {
+    let bigint = match value {
+        Value::BigInt(n) => n.clone(),
+        Value::Number(n) => BigIntValue::from_f64(n.trunc()).ok_or_else(|| {
+            vm.throw_type_error("Atomics BigInt operations require BigInt values")
+        })?,
+        Value::String(s) => BigIntValue::parse_bytes(s.as_bytes(), 10).ok_or_else(|| {
+            vm.throw_type_error("Atomics BigInt operations require BigInt values")
+        })?,
+        _ => {
+            let prim = vm.to_primitive(value, Some("number"))?;
+            match prim {
+                Value::BigInt(n) => n,
+                Value::Number(n) => BigIntValue::from_f64(n.trunc()).ok_or_else(|| {
+                    vm.throw_type_error("Atomics BigInt operations require BigInt values")
+                })?,
+                _ => {
+                    return Err(
+                        vm.throw_type_error("Atomics BigInt operations require BigInt values")
+                    );
+                }
+            }
+        }
+    };
+    Ok(Value::BigInt(atomics_normalize_bigint(bigint, signed)))
+}
+
+fn atomics_view_info(
+    vm: &mut Vm,
+    view: &Value,
+) -> Result<AtomicsViewInfo, crate::errors::RuntimeError> {
+    let Value::Object(view_obj) = view else {
+        return Err(vm.throw_type_error("Atomics requires a TypedArray"));
+    };
+    let (data, buffer, kind_name, length, is_shared) = {
+        let view_data = view_obj.borrow();
+        let data = match view_data
+            .properties
+            .get(&PropertyKey::String("[[TypedArrayData]]".to_string()))
+        {
+            Some(PropertyDescriptor::Data {
+                value: Value::Array(arr, _),
+                ..
+            }) => Rc::clone(arr),
+            _ => return Err(vm.throw_type_error("Atomics requires a TypedArray")),
+        };
+        let kind_name = match view_data
+            .properties
+            .get(&PropertyKey::String("[[TypedArrayKind]]".to_string()))
+        {
+            Some(PropertyDescriptor::Data {
+                value: Value::String(kind),
+                ..
+            }) => kind.clone(),
+            _ => return Err(vm.throw_type_error("Atomics requires a TypedArray")),
+        };
+        let length = match view_data
+            .properties
+            .get(&PropertyKey::String("[[TypedArrayLength]]".to_string()))
+        {
+            Some(PropertyDescriptor::Data {
+                value: Value::Number(n),
+                ..
+            }) if n.is_finite() && *n >= 0.0 => *n as usize,
+            _ => data.borrow().len(),
+        };
+        let buffer = match view_data
+            .properties
+            .get(&PropertyKey::String("[[TypedArrayBuffer]]".to_string()))
+        {
+            Some(PropertyDescriptor::Data {
+                value: Value::Object(buffer),
+                ..
+            }) => Rc::clone(buffer),
+            _ => return Err(vm.throw_type_error("Atomics requires a TypedArray")),
+        };
+        let is_shared = {
+            let buffer_data = buffer.borrow();
+            matches!(
+                buffer_data
+                    .properties
+                    .get(&PropertyKey::String("[[IsSharedArrayBuffer]]".to_string())),
+                Some(PropertyDescriptor::Data {
+                    value: Value::Bool(true),
+                    ..
+                })
+            )
+        };
+        (data, buffer, kind_name, length, is_shared)
+    };
+    let value_kind = atomics_value_kind(&kind_name)
+        .ok_or_else(|| vm.throw_type_error("Atomics requires a numeric or BigInt typed array"))?;
+    Ok(AtomicsViewInfo {
+        view: Rc::clone(view_obj),
+        data,
+        buffer,
+        kind_name,
+        value_kind,
+        length,
+        is_shared,
+    })
+}
+
+fn atomics_view_index(
+    vm: &mut Vm,
+    info: &AtomicsViewInfo,
+    index_value: &Value,
+) -> Result<usize, crate::errors::RuntimeError> {
+    let index = to_index(vm, index_value)?;
+    if index >= info.length {
+        return Err(vm.throw_range_error("Atomics index out of range"));
+    }
+    Ok(index)
+}
+
+fn atomics_read_view_slot(
+    vm: &mut Vm,
+    info: &AtomicsViewInfo,
+    index: usize,
+) -> Result<Value, crate::errors::RuntimeError> {
+    let prop_key = PropertyKey::String(index.to_string());
+    let value = vm.get_property_host(&Value::Object(Rc::clone(&info.view)), &prop_key)?;
+    if !matches!(value, Value::Undefined) {
+        return Ok(value);
+    }
+    Ok(info
+        .data
+        .borrow()
+        .get(index)
+        .cloned()
+        .flatten()
+        .unwrap_or(Value::Undefined))
+}
+
+fn atomics_write_view_slot(
+    vm: &mut Vm,
+    info: &AtomicsViewInfo,
+    index: usize,
+    value: Value,
+) -> Result<(), crate::errors::RuntimeError> {
+    let prop_key = Value::Number(index as f64);
+    let stored = value.clone();
+    let _ = vm.set_property_host(&Value::Object(Rc::clone(&info.view)), &prop_key, value)?;
+    if let Some(slot) = info.data.borrow_mut().get_mut(index) {
+        *slot = Some(stored);
+    }
+    Ok(())
+}
+
+fn atomics_waiters_array(buffer: &Rc<RefCell<ObjectData>>) -> Rc<RefCell<Vec<Option<Value>>>> {
+    let mut buffer_data = buffer.borrow_mut();
+    if let Some(PropertyDescriptor::Data {
+        value: Value::Array(arr, _),
+        ..
+    }) = buffer_data
+        .properties
+        .get(&PropertyKey::String("[[AtomicsWaiters]]".to_string()))
+    {
+        return Rc::clone(arr);
+    }
+    let arr = Rc::new(RefCell::new(Vec::new()));
+    buffer_data.properties.insert(
+        PropertyKey::String("[[AtomicsWaiters]]".to_string()),
+        PropertyDescriptor::data(Value::Array(
+            Rc::clone(&arr),
+            Rc::new(RefCell::new(ObjectData::new())),
+        )),
+    );
+    arr
+}
+
+fn atomics_make_waiter_record(index: usize, resolve: Option<Value>) -> Value {
+    let mut data = ObjectData::new();
+    data.properties.insert(
+        PropertyKey::String("index".to_string()),
+        PropertyDescriptor::data(Value::Number(index as f64)),
+    );
+    data.properties.insert(
+        PropertyKey::String("resolve".to_string()),
+        PropertyDescriptor::data(resolve.unwrap_or(Value::Undefined)),
+    );
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
+fn atomics_make_wait_result(async_flag: bool, value: Value) -> Value {
+    let result = Rc::new(RefCell::new(ObjectData::new()));
+    result.borrow_mut().properties.insert(
+        PropertyKey::String("async".to_string()),
+        PropertyDescriptor::data(Value::Bool(async_flag)),
+    );
+    result.borrow_mut().properties.insert(
+        PropertyKey::String("value".to_string()),
+        PropertyDescriptor::data(value),
+    );
+    Value::Object(result)
+}
+
+fn atomics_wake_waiters(
+    vm: &mut Vm,
+    info: &AtomicsViewInfo,
+    index: usize,
+    count: usize,
+) -> Result<usize, crate::errors::RuntimeError> {
+    let waiters = atomics_waiters_array(&info.buffer);
+    let mut to_wake: Vec<Value> = Vec::new();
+    {
+        let mut waiters_mut = waiters.borrow_mut();
+        let mut remaining: Vec<Option<Value>> = Vec::with_capacity(waiters_mut.len());
+        for entry in waiters_mut.iter().cloned() {
+            if to_wake.len() >= count {
+                remaining.push(entry);
+                continue;
+            }
+            let Some(waiter) = entry else {
+                continue;
+            };
+            let record_index =
+                match vm.get_property_host(&waiter, &PropertyKey::String("index".to_string())) {
+                    Ok(Value::Number(n)) if n.is_finite() && n >= 0.0 => n as usize,
+                    _ => {
+                        remaining.push(Some(waiter));
+                        continue;
+                    }
+                };
+            if record_index != index {
+                remaining.push(Some(waiter));
+                continue;
+            }
+            to_wake.push(waiter);
+        }
+        *waiters_mut = remaining;
+    }
+
+    for waiter in &to_wake {
+        if let Ok(resolve) =
+            vm.get_property_host(waiter, &PropertyKey::String("resolve".to_string()))
+            && !matches!(resolve, Value::Undefined)
+        {
+            let _ = vm.call_value_with_this(
+                &resolve,
+                &Value::Undefined,
+                &[Value::String("ok".to_string())],
+            );
+        }
+    }
+
+    Ok(to_wake.len())
+}
+
+fn atomics_register_waiter(
+    _vm: &mut Vm,
+    info: &AtomicsViewInfo,
+    index: usize,
+    resolve: Option<Value>,
+) -> Result<(), crate::errors::RuntimeError> {
+    let waiters = atomics_waiters_array(&info.buffer);
+    waiters
+        .borrow_mut()
+        .push(Some(atomics_make_waiter_record(index, resolve)));
+    Ok(())
+}
+
+fn atomics_coerce_view_value(
+    vm: &mut Vm,
+    info: &AtomicsViewInfo,
+    value: &Value,
+) -> Result<Value, crate::errors::RuntimeError> {
+    match info.value_kind {
+        AtomicsValueKind::Number { bits, signed } => {
+            atomics_value_to_integer(vm, value, bits, signed)
+        }
+        AtomicsValueKind::BigInt { signed } => atomics_value_to_bigint(vm, value, signed),
+    }
+}
+
+fn atomics_normalized_current(
+    vm: &mut Vm,
+    info: &AtomicsViewInfo,
+    index: usize,
+) -> Result<Value, crate::errors::RuntimeError> {
+    let current = atomics_read_view_slot(vm, info, index)?;
+    atomics_coerce_view_value(vm, info, &current)
+}
+
+fn atomics_load_current(
+    vm: &mut Vm,
+    info: &AtomicsViewInfo,
+    index: usize,
+) -> Result<Value, crate::errors::RuntimeError> {
+    atomics_normalized_current(vm, info, index)
+}
+
+fn atomics_store_current(
+    vm: &mut Vm,
+    info: &AtomicsViewInfo,
+    index: usize,
+    value: &Value,
+) -> Result<Value, crate::errors::RuntimeError> {
+    let stored = atomics_coerce_view_value(vm, info, value)?;
+    atomics_write_view_slot(vm, info, index, stored.clone())?;
+    Ok(stored)
+}
+
+fn atomics_exchange_current(
+    vm: &mut Vm,
+    info: &AtomicsViewInfo,
+    index: usize,
+    value: &Value,
+) -> Result<Value, crate::errors::RuntimeError> {
+    let current = atomics_normalized_current(vm, info, index)?;
+    let stored = atomics_coerce_view_value(vm, info, value)?;
+    atomics_write_view_slot(vm, info, index, stored)?;
+    Ok(current)
+}
+
+fn atomics_binary_update(
+    vm: &mut Vm,
+    info: &AtomicsViewInfo,
+    index: usize,
+    value: &Value,
+    op: &str,
+) -> Result<Value, crate::errors::RuntimeError> {
+    let current = atomics_normalized_current(vm, info, index)?;
+    let operand = atomics_coerce_view_value(vm, info, value)?;
+    let result = match (info.value_kind, current.clone(), operand) {
+        (
+            AtomicsValueKind::Number { bits, signed },
+            Value::Number(current_n),
+            Value::Number(operand_n),
+        ) => {
+            let lhs = current_n.trunc() as i128;
+            let rhs = operand_n.trunc() as i128;
+            let raw = match op {
+                "add" => lhs + rhs,
+                "sub" => lhs - rhs,
+                "and" => lhs & rhs,
+                "or" => lhs | rhs,
+                "xor" => lhs ^ rhs,
+                _ => lhs,
+            };
+            Value::Number(atomics_normalize_integer(raw, bits, signed) as f64)
+        }
+        (
+            AtomicsValueKind::BigInt { signed },
+            Value::BigInt(current_n),
+            Value::BigInt(operand_n),
+        ) => {
+            let raw = match op {
+                "add" => current_n + operand_n,
+                "sub" => current_n - operand_n,
+                "and" => current_n & operand_n,
+                "or" => current_n | operand_n,
+                "xor" => current_n ^ operand_n,
+                _ => current_n,
+            };
+            Value::BigInt(atomics_normalize_bigint(raw, signed))
+        }
+        _ => return Err(vm.throw_type_error("Atomics type coercion failed")),
+    };
+    atomics_write_view_slot(vm, info, index, result)?;
+    Ok(current)
+}
+
+fn atomics_compare_exchange(
+    vm: &mut Vm,
+    info: &AtomicsViewInfo,
+    index: usize,
+    expected: &Value,
+    replacement: &Value,
+) -> Result<Value, crate::errors::RuntimeError> {
+    let current = atomics_normalized_current(vm, info, index)?;
+    let expected = atomics_coerce_view_value(vm, info, expected)?;
+    if current == expected {
+        let replacement = atomics_coerce_view_value(vm, info, replacement)?;
+        atomics_write_view_slot(vm, info, index, replacement)?;
+    }
+    Ok(current)
 }
 
 fn own_property_descriptor(obj: &Value, key: &PropertyKey) -> Option<PropertyDescriptor> {
@@ -2529,8 +3069,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     .last_uncaught_exception
                     .take()
                     .unwrap_or(Value::String(format!("{}", err)));
-                let mut state = promise.borrow_mut();
-                *state = PromiseState::Rejected(reason);
+                reject_pending_promise(vm, &promise, reason);
             }
 
             // Return the promise
@@ -2617,7 +3156,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                 let off = if args.len() > 1 { 1 } else { 0 };
                                 let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
                                 if matches!(user_on_rejected, Value::Undefined) {
-                                    *res_p_r.borrow_mut() = PromiseState::Rejected(reason);
+                                    reject_pending_promise(vm, &res_p_r, reason);
                                     return Ok(Value::Undefined);
                                 }
                                 vm.last_uncaught_exception = None;
@@ -2632,8 +3171,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                             .last_uncaught_exception
                                             .take()
                                             .unwrap_or(Value::String(format!("{}", err)));
-                                        *res_p_r.borrow_mut() =
-                                            PromiseState::Rejected(reject_reason);
+                                        reject_pending_promise(vm, &res_p_r, reject_reason);
                                     }
                                 }
                                 Ok(Value::Undefined)
@@ -2675,7 +3213,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                             let res_p_r = Rc::clone(&result_promise);
                             vm.queue_microtask(move |vm| {
                                 if matches!(user_on_rejected, Value::Undefined) {
-                                    *res_p_r.borrow_mut() = PromiseState::Rejected(reason.clone());
+                                    reject_pending_promise(vm, &res_p_r, reason.clone());
                                 } else {
                                     vm.last_uncaught_exception = None;
                                     match vm.call_value_with_this(
@@ -2689,8 +3227,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                                 .last_uncaught_exception
                                                 .take()
                                                 .unwrap_or(Value::String(format!("{}", err)));
-                                            *res_p_r.borrow_mut() =
-                                                PromiseState::Rejected(reject_reason);
+                                            reject_pending_promise(vm, &res_p_r, reject_reason);
                                         }
                                     }
                                 }
@@ -3230,7 +3767,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     );
 
     macro_rules! create_typed_array_ctor {
-        ($name:expr, $element_count:expr) => {{
+        ($name:expr, $element_count:expr, $zero_value:expr) => {{
             let proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
                 ObjectData::with_prototype(Value::Object(Rc::clone(&typedarray_proto_map))),
             ));
@@ -3341,7 +3878,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     typed_array_data.properties.insert(
                         PropertyKey::String("[[TypedArrayData]]".to_string()),
                         PropertyDescriptor::data(Value::Array(
-                            Rc::new(RefCell::new(vec![Some(Value::Number(0.0)); length])),
+                            Rc::new(RefCell::new(vec![Some($zero_value.clone()); length])),
                             Rc::new(RefCell::new(ObjectData::new())),
                         )),
                     );
@@ -3408,18 +3945,28 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         }};
     }
 
-    let (uint8array_ctor_val, _uint8array_ctor_map) = create_typed_array_ctor!("Uint8Array", 1);
-    let (int8array_ctor_val, _int8array_ctor_map) = create_typed_array_ctor!("Int8Array", 1);
-    let (uint16array_ctor_val, _uint16array_ctor_map) = create_typed_array_ctor!("Uint16Array", 2);
-    let (int16array_ctor_val, _int16array_ctor_map) = create_typed_array_ctor!("Int16Array", 2);
-    let (uint32array_ctor_val, _uint32array_ctor_map) = create_typed_array_ctor!("Uint32Array", 4);
-    let (int32array_ctor_val, _int32array_ctor_map) = create_typed_array_ctor!("Int32Array", 4);
+    let (uint8array_ctor_val, _uint8array_ctor_map) =
+        create_typed_array_ctor!("Uint8Array", 1, Value::Number(0.0));
+    let (int8array_ctor_val, _int8array_ctor_map) =
+        create_typed_array_ctor!("Int8Array", 1, Value::Number(0.0));
+    let (uint16array_ctor_val, _uint16array_ctor_map) =
+        create_typed_array_ctor!("Uint16Array", 2, Value::Number(0.0));
+    let (int16array_ctor_val, _int16array_ctor_map) =
+        create_typed_array_ctor!("Int16Array", 2, Value::Number(0.0));
+    let (uint32array_ctor_val, _uint32array_ctor_map) =
+        create_typed_array_ctor!("Uint32Array", 4, Value::Number(0.0));
+    let (int32array_ctor_val, _int32array_ctor_map) =
+        create_typed_array_ctor!("Int32Array", 4, Value::Number(0.0));
     let (float32array_ctor_val, _float32array_ctor_map) =
-        create_typed_array_ctor!("Float32Array", 4);
+        create_typed_array_ctor!("Float32Array", 4, Value::Number(0.0));
     let (float64array_ctor_val, _float64array_ctor_map) =
-        create_typed_array_ctor!("Float64Array", 8);
+        create_typed_array_ctor!("Float64Array", 8, Value::Number(0.0));
+    let (bigint64array_ctor_val, _bigint64array_ctor_map) =
+        create_typed_array_ctor!("BigInt64Array", 8, Value::BigInt(BigIntValue::from(0u8)));
+    let (biguint64array_ctor_val, _biguint64array_ctor_map) =
+        create_typed_array_ctor!("BigUint64Array", 8, Value::BigInt(BigIntValue::from(0u8)));
     let (uint8clampedarray_ctor_val, _uint8clampedarray_ctor_map) =
-        create_typed_array_ctor!("Uint8ClampedArray", 1);
+        create_typed_array_ctor!("Uint8ClampedArray", 1, Value::Number(0.0));
 
     let dataview_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
         ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
@@ -5860,6 +6407,14 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(uint8clampedarray_ctor_val),
     );
     g.properties.insert(
+        PKey::String("BigInt64Array".to_string()),
+        PropertyDescriptor::data(bigint64array_ctor_val),
+    );
+    g.properties.insert(
+        PKey::String("BigUint64Array".to_string()),
+        PropertyDescriptor::data(biguint64array_ctor_val),
+    );
+    g.properties.insert(
         PKey::String("Map".to_string()),
         PropertyDescriptor::data(map_ctor_val),
     );
@@ -6431,14 +6986,242 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             );
         }
 
-        for &name in &[
-            "Atomics",
-            "Temporal",
-            "TypedArrayConstructors",
-            "NativeErrors",
+        let atomics_props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+            ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
+        ));
+        let insert_atomics_method = |name: &str, length: f64, f: BuiltinFn| {
+            let func_val = builtin_object(f, &function_proto_map);
+            set_builtin_name(&func_val, name);
+            set_builtin_length(&func_val, length);
+            atomics_props.borrow_mut().properties.insert(
+                PKey::String(name.to_string()),
+                PropertyDescriptor::data(func_val),
+            );
+        };
+        insert_atomics_method(
+            "load",
+            2.0,
+            Rc::new(|vm, args| {
+                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                let info = atomics_view_info(vm, &receiver)?;
+                let index =
+                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
+                atomics_load_current(vm, &info, index)
+            }),
+        );
+        insert_atomics_method(
+            "store",
+            3.0,
+            Rc::new(|vm, args| {
+                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                let info = atomics_view_info(vm, &receiver)?;
+                let index =
+                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
+                let value = args.get(2).cloned().unwrap_or(Value::Undefined);
+                atomics_store_current(vm, &info, index, &value)
+            }),
+        );
+        for (name, op) in [
+            ("add", "add"),
+            ("sub", "sub"),
+            ("and", "and"),
+            ("or", "or"),
+            ("xor", "xor"),
         ] {
+            insert_atomics_method(
+                name,
+                3.0,
+                Rc::new(move |vm, args| {
+                    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                    let info = atomics_view_info(vm, &receiver)?;
+                    let index =
+                        atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
+                    let value = args.get(2).cloned().unwrap_or(Value::Undefined);
+                    atomics_binary_update(vm, &info, index, &value, op)
+                }),
+            );
+        }
+        insert_atomics_method(
+            "exchange",
+            3.0,
+            Rc::new(|vm, args| {
+                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                let info = atomics_view_info(vm, &receiver)?;
+                let index =
+                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
+                let value = args.get(2).cloned().unwrap_or(Value::Undefined);
+                atomics_exchange_current(vm, &info, index, &value)
+            }),
+        );
+        insert_atomics_method(
+            "compareExchange",
+            4.0,
+            Rc::new(|vm, args| {
+                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                let info = atomics_view_info(vm, &receiver)?;
+                let index =
+                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
+                let expected = args.get(2).cloned().unwrap_or(Value::Undefined);
+                let replacement = args.get(3).cloned().unwrap_or(Value::Undefined);
+                atomics_compare_exchange(vm, &info, index, &expected, &replacement)
+            }),
+        );
+        insert_atomics_method(
+            "isLockFree",
+            1.0,
+            Rc::new(|vm, args| {
+                let size = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let n = match vm.to_number_value(&size) {
+                    Ok(n) if n.is_finite() && n >= 0.0 => n.trunc() as usize,
+                    _ => 0,
+                };
+                Ok(Value::Bool(matches!(n, 1 | 2 | 4 | 8)))
+            }),
+        );
+        insert_atomics_method(
+            "notify",
+            3.0,
+            Rc::new(|vm, args| {
+                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                let info = atomics_view_info(vm, &receiver)?;
+                if !info.is_shared {
+                    return Err(vm.throw_type_error(
+                        "Atomics.notify requires a SharedArrayBuffer-backed typed array",
+                    ));
+                }
+                if !atomics_wait_kind(&info.kind_name) {
+                    return Err(vm.throw_type_error(
+                        "Atomics.notify requires an Int32Array or BigInt64Array",
+                    ));
+                }
+                let index =
+                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
+                let count = match args.get(2) {
+                    None | Some(Value::Undefined) => usize::MAX,
+                    Some(value) => {
+                        let n = vm.to_number_value(value)?;
+                        if !n.is_finite() {
+                            usize::MAX
+                        } else if n <= 0.0 {
+                            0
+                        } else {
+                            n.trunc() as usize
+                        }
+                    }
+                };
+                let woke = atomics_wake_waiters(vm, &info, index, count)?;
+                Ok(Value::Number(woke as f64))
+            }),
+        );
+        insert_atomics_method(
+            "wait",
+            4.0,
+            Rc::new(|vm, args| {
+                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                let info = atomics_view_info(vm, &receiver)?;
+                if !info.is_shared {
+                    return Err(vm.throw_type_error(
+                        "Atomics.wait requires a SharedArrayBuffer-backed typed array",
+                    ));
+                }
+                if !atomics_wait_kind(&info.kind_name) {
+                    return Err(
+                        vm.throw_type_error("Atomics.wait requires an Int32Array or BigInt64Array")
+                    );
+                }
+                let index =
+                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
+                let expected = args.get(2).cloned().unwrap_or(Value::Undefined);
+                let timeout = match args.get(3) {
+                    None | Some(Value::Undefined) => f64::INFINITY,
+                    Some(value) => {
+                        let n = vm.to_number_value(value)?;
+                        if n.is_nan() || n < 0.0 { 0.0 } else { n }
+                    }
+                };
+                let current = atomics_normalized_current(vm, &info, index)?;
+                let expected = atomics_coerce_view_value(vm, &info, &expected)?;
+                if current != expected {
+                    return Ok(Value::String("not-equal".to_string()));
+                }
+                if timeout == 0.0 {
+                    return Ok(Value::String("timed-out".to_string()));
+                }
+                atomics_register_waiter(vm, &info, index, None)?;
+                Ok(Value::String("ok".to_string()))
+            }),
+        );
+        insert_atomics_method(
+            "waitAsync",
+            4.0,
+            Rc::new(|vm, args| {
+                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                let info = atomics_view_info(vm, &receiver)?;
+                if !info.is_shared {
+                    return Err(vm.throw_type_error(
+                        "Atomics.waitAsync requires a SharedArrayBuffer-backed typed array",
+                    ));
+                }
+                if !atomics_wait_kind(&info.kind_name) {
+                    return Err(vm.throw_type_error(
+                        "Atomics.waitAsync requires an Int32Array or BigInt64Array",
+                    ));
+                }
+                let index =
+                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
+                let expected = args.get(2).cloned().unwrap_or(Value::Undefined);
+                let timeout = match args.get(3) {
+                    None | Some(Value::Undefined) => f64::INFINITY,
+                    Some(value) => {
+                        let n = vm.to_number_value(value)?;
+                        if n.is_nan() || n < 0.0 { 0.0 } else { n }
+                    }
+                };
+                let current = atomics_normalized_current(vm, &info, index)?;
+                let expected = atomics_coerce_view_value(vm, &info, &expected)?;
+                if current != expected {
+                    return Ok(atomics_make_wait_result(
+                        false,
+                        Value::String("not-equal".to_string()),
+                    ));
+                }
+                if timeout == 0.0 {
+                    return Ok(atomics_make_wait_result(
+                        false,
+                        Value::String("timed-out".to_string()),
+                    ));
+                }
+
+                let resolve_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+                let resolve_slot_capture = Rc::clone(&resolve_slot);
+                let promise_ctor = vm
+                    .get_global("Promise")
+                    .ok_or_else(|| vm.throw_type_error("Promise constructor missing"))?;
+                let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
+                    let off = if executor_args.len() > 2 { 1 } else { 0 };
+                    *resolve_slot_capture.borrow_mut() = executor_args.get(off).cloned();
+                    Ok(Value::Undefined)
+                }));
+                let promise = vm.construct_value(&promise_ctor, &[executor])?;
+                let resolve_fn = resolve_slot
+                    .borrow()
+                    .clone()
+                    .ok_or_else(|| vm.throw_type_error("Atomics.waitAsync resolve missing"))?;
+                atomics_waiters_array(&info.buffer)
+                    .borrow_mut()
+                    .push(Some(atomics_make_waiter_record(index, Some(resolve_fn))));
+                Ok(atomics_make_wait_result(true, promise))
+            }),
+        );
+        let atomics_obj = Value::Object(atomics_props);
+
+        for &name in &["Temporal", "TypedArrayConstructors", "NativeErrors"] {
             insert_stub_object(&mut g, name, &object_proto_map);
         }
+        g.properties.insert(
+            PKey::String("Atomics".to_string()),
+            PropertyDescriptor::data(atomics_obj),
+        );
 
         let throw_type_error_fn = builtin_object(
             Rc::new(|vm, _| Err(vm.throw_type_error("ThrowTypeError invoked"))),
