@@ -1723,7 +1723,6 @@ fn main() {
         (passed as f64) / (ran as f64) * 100.0
     };
 
-
     let exit_code = if failed.is_empty() { 0 } else { 1 };
 
     eprintln!(
