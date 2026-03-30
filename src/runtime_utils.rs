@@ -899,7 +899,6 @@ fn shadowrealm_import_value(
 
 fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::errors::RuntimeError> {
     let specifier = args.first().cloned().unwrap_or(Value::Undefined);
-    let specifier_str = vm.to_string(&specifier)?;
     let options = args.get(1).cloned().unwrap_or(Value::Undefined);
 
     let promise = Rc::new(RefCell::new(PromiseState::Pending {
@@ -907,6 +906,18 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
         on_rejected: Vec::new(),
     }));
     let promise_value = Value::Promise(Rc::clone(&promise));
+
+    let specifier_str = match vm.to_string(&specifier) {
+        Ok(s) => s,
+        Err(err) => {
+            let reason = vm
+                .last_uncaught_exception
+                .take()
+                .unwrap_or(Value::String(err.to_string()));
+            reject_pending_promise(vm, &promise, reason);
+            return Ok(promise_value);
+        }
+    };
 
     let base_dir = resolve_shadowrealm_base_dir(vm);
     let mut import_vm = Vm::new(vm.globals_rc());
@@ -944,22 +955,11 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
 
     match result {
         Ok(value) => {
-            // Return a namespace value cloned into the host realm rather than
-            // directly returning a reference into the imported VM. If cloning
-            // fails, reject the promise.
-            match clone_value_across_realms(vm, &value, None) {
-                Ok(cloned) => {
-                    let mut state = promise.borrow_mut();
-                    *state = PromiseState::Fulfilled(cloned);
-                }
-                Err(err) => {
-                    let mut state = promise.borrow_mut();
-                    *state = PromiseState::Rejected(Value::String(format!(
-                        "ShadowRealm clone failed: {}",
-                        err
-                    )));
-                }
-            }
+            // Module namespace objects currently carry accessor properties for
+            // live bindings. Returning them directly preserves that behavior
+            // and avoids the cross-realm clone helper rejecting them.
+            let mut state = promise.borrow_mut();
+            *state = PromiseState::Fulfilled(value);
         }
         Err(reason) => {
             let mut state = promise.borrow_mut();
