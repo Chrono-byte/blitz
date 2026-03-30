@@ -1735,7 +1735,6 @@ impl Vm {
                 self.gc_temp_roots.push(result.clone());
                 let post_call = (|| {
                     self.run_microtasks_if_needed()?;
-                    self.maybe_collect_garbage_prototype();
                     Ok::<(), crate::errors::RuntimeError>(())
                 })();
                 self.gc_temp_roots.truncate(result_root_base);
@@ -1771,7 +1770,6 @@ impl Vm {
                 self.gc_temp_roots.push(result.clone());
                 let post_call = (|| {
                     self.run_microtasks_if_needed()?;
-                    self.maybe_collect_garbage_prototype();
                     Ok::<(), crate::errors::RuntimeError>(())
                 })();
                 self.gc_temp_roots.truncate(result_root_base);
