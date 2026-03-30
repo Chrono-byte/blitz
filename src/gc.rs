@@ -113,17 +113,14 @@ pub fn collect(roots: &[Value]) -> GcStats {
             let mut new_objects = Vec::with_capacity(heap.objects.len());
             let mut swept_objects = Vec::new();
             for weak in heap.objects.drain(..) {
-                match weak.upgrade() {
-                    Some(obj) => {
-                        let ptr = Rc::as_ptr(&obj) as usize;
-                        if marked_objects.contains(&ptr) {
-                            new_objects.push(weak);
-                        } else {
-                            stats.swept_objects += 1;
-                            swept_objects.push(obj);
-                        }
+                if let Some(obj) = weak.upgrade() {
+                    let ptr = Rc::as_ptr(&obj) as usize;
+                    if marked_objects.contains(&ptr) {
+                        new_objects.push(weak);
+                    } else {
+                        stats.swept_objects += 1;
+                        swept_objects.push(obj);
                     }
-                    None => {}
                 }
             }
             for obj in swept_objects {
@@ -134,17 +131,14 @@ pub fn collect(roots: &[Value]) -> GcStats {
             let mut new_arrays = Vec::with_capacity(heap.arrays.len());
             let mut swept_arrays = Vec::new();
             for weak in heap.arrays.drain(..) {
-                match weak.upgrade() {
-                    Some(arr) => {
-                        let ptr = Rc::as_ptr(&arr) as usize;
-                        if marked_arrays.contains(&ptr) {
-                            new_arrays.push(weak);
-                        } else {
-                            stats.swept_arrays += 1;
-                            swept_arrays.push(arr);
-                        }
+                if let Some(arr) = weak.upgrade() {
+                    let ptr = Rc::as_ptr(&arr) as usize;
+                    if marked_arrays.contains(&ptr) {
+                        new_arrays.push(weak);
+                    } else {
+                        stats.swept_arrays += 1;
+                        swept_arrays.push(arr);
                     }
-                    None => {}
                 }
             }
             for arr in swept_arrays {
@@ -155,17 +149,14 @@ pub fn collect(roots: &[Value]) -> GcStats {
             let mut new_envs = Vec::with_capacity(heap.envs.len());
             let mut swept_envs = Vec::new();
             for weak in heap.envs.drain(..) {
-                match weak.upgrade() {
-                    Some(env) => {
-                        let ptr = Rc::as_ptr(&env) as usize;
-                        if marked_envs.contains(&ptr) {
-                            new_envs.push(weak);
-                        } else {
-                            stats.swept_envs += 1;
-                            swept_envs.push(env);
-                        }
+                if let Some(env) = weak.upgrade() {
+                    let ptr = Rc::as_ptr(&env) as usize;
+                    if marked_envs.contains(&ptr) {
+                        new_envs.push(weak);
+                    } else {
+                        stats.swept_envs += 1;
+                        swept_envs.push(env);
                     }
-                    None => {}
                 }
             }
             for env in swept_envs {
@@ -176,17 +167,14 @@ pub fn collect(roots: &[Value]) -> GcStats {
             let mut new_promises = Vec::with_capacity(heap.promises.len());
             let mut swept_promises = Vec::new();
             for weak in heap.promises.drain(..) {
-                match weak.upgrade() {
-                    Some(promise) => {
-                        let ptr = Rc::as_ptr(&promise) as usize;
-                        if marked_promises.contains(&ptr) {
-                            new_promises.push(weak);
-                        } else {
-                            stats.swept_promises += 1;
-                            swept_promises.push(promise);
-                        }
+                if let Some(promise) = weak.upgrade() {
+                    let ptr = Rc::as_ptr(&promise) as usize;
+                    if marked_promises.contains(&ptr) {
+                        new_promises.push(weak);
+                    } else {
+                        stats.swept_promises += 1;
+                        swept_promises.push(promise);
                     }
-                    None => {}
                 }
             }
             for promise in swept_promises {

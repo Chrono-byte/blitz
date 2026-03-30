@@ -165,7 +165,7 @@ fn run_selected_tests(
 }
 
 fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
-    const STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB stack for tests
+    const STACK_SIZE: usize = 1024 * 1024; // 1MB stack for tests
 
     let (tx, rx) = mpsc::channel();
 
@@ -678,7 +678,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
             }
             #[cfg(feature = "gc_mark_sweep_prototype")]
             {
-                return Ok(Value::Undefined);
+                Ok(Value::Undefined)
             }
             #[cfg(not(feature = "gc_mark_sweep_prototype"))]
             {
@@ -1181,7 +1181,7 @@ fn run_test_file(
                     .map_err(|e| e.to_string())?;
                 loader.instantiate_all().map_err(|e| e.to_string())?;
             }
-            match blitz::module::evaluate_entry_shared(&loader_handle, &path, &mut vm, false) {
+            match blitz::module::evaluate_entry_shared(&loader_handle, path, &mut vm, false) {
                 Ok(()) => Ok(Value::Undefined),
                 Err(e) => Err(e.to_string()),
             }
@@ -1606,7 +1606,9 @@ fn main() {
     let job_count = resolve_job_count(
         opts.jobs,
         files_to_run.len(),
-        thread::available_parallelism().ok().map(|n| n.get()),
+        thread::available_parallelism()
+            .ok()
+            .map(std::num::NonZero::get),
     );
     let mut test_results = run_selected_tests(files_to_run, test262_dir.clone(), job_count);
     sort_test_results(&mut test_results);
