@@ -12,6 +12,9 @@
       "rust-analyzer": {
         "initialization_options": {
           "checkOnSave": true,
+          "check": {
+            "command": "check"
+          }
         },
       },
     },

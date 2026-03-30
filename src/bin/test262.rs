@@ -15,7 +15,7 @@ CLI (preferred over env):
 - --limit number
 - --jobs number
 
-Segments may be labels like: annexB, language, built-ins, intl402, staging
+Segments may be labels like: language, built-ins, intl402, staging
 or paths relative to test262/test (e.g. built-ins/Array).
 APIs.
 */
@@ -349,6 +349,7 @@ fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
     result
 }
 
+/// Returns the bucket keys for a test file, based on its path relative to the test root.
 fn bucket_keys(test_root: &Path, file: &Path) -> (String, String) {
     let rel = file.strip_prefix(test_root).unwrap_or(file);
     let parts: Vec<String> = rel
@@ -446,6 +447,7 @@ struct RunnerOptions {
     harness_only: bool,
 }
 
+/// Parses a CSV environment variable into a vector of strings.
 fn parse_csv_env(name: &str) -> Vec<String> {
     env::var(name)
         .ok()
@@ -459,6 +461,7 @@ fn parse_csv_env(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Parses a usize environment variable.
 fn parse_usize_env(name: &str) -> Option<usize> {
     env::var(name).ok().and_then(|s| s.parse::<usize>().ok())
 }
@@ -490,28 +493,40 @@ fn parse_args() -> RunnerOptions {
 /// Minimal subset of metadata we care about.
 #[derive(Debug, Deserialize)]
 struct Negative {
+    /// The phase of the test (e.g., "early", "late", "async").
     phase: String,
+    /// The type of the test (e.g., "realm").
     #[serde(rename = "type")]
     ty: Option<String>,
 }
 
+/// Minimal subset of metadata we care about.
 #[derive(Debug, Deserialize)]
 struct Meta {
+    /// The flags associated with the test.
     flags: Option<Vec<String>>,
+    /// The includes associated with the test.
     includes: Option<Vec<String>>,
+    /// The negative metadata of the test.
     negative: Option<Negative>,
+    /// The locale associated with the test.
     #[allow(dead_code)]
     locale: Option<Vec<String>>,
 }
 
+/// A minimal subset of test262 error information.
 #[derive(Clone)]
 struct Test262Error<'a> {
+    /// The path to the test file.
     path: &'a Path,
+    /// The mode of the test (e.g., "early", "late", "async").
     mode: Option<&'a str>,
+    /// The error message.
     message: String,
 }
 
 impl<'a> Test262Error<'a> {
+    /// Create a new error with a mode (used for test-specific errors).
     fn new(path: &'a Path, mode: &'a str, message: String) -> Self {
         Self {
             path,
@@ -520,6 +535,7 @@ impl<'a> Test262Error<'a> {
         }
     }
 
+    /// Create a new error with an optional mode (used for test-specific errors or file-level errors).
     fn for_path(path: &'a Path, mode: Option<&'a str>, message: String) -> Self {
         Self {
             path,
@@ -528,10 +544,12 @@ impl<'a> Test262Error<'a> {
         }
     }
 
+    /// Create a new error without a mode (used for file-level errors).
     fn without_mode(path: &'a Path, message: String) -> Self {
         Self::for_path(path, None, message)
     }
 
+    /// Convert the error into a string representation.
     fn into_string(self) -> String {
         match self.mode {
             Some(mode) => format!("{} ({}): {}", self.path.display(), mode, self.message),
@@ -540,7 +558,7 @@ impl<'a> Test262Error<'a> {
     }
 }
 
-// Helper to extract the front-matter YAML between /*--- and ---*/
+/// Helper to extract the front-matter YAML between /*--- and ---*/
 fn extract_front_matter(src: &str) -> Option<String> {
     let start = src.find("/*---")?;
     let end = src.find("---*/")?;
@@ -1702,8 +1720,9 @@ fn main() {
     let pass_pct = if ran == 0 {
         0.0
     } else {
-        (passed as f64 / ran as f64) * 100.0
+        (passed as f64) / (ran as f64) * 100.0
     };
+
 
     let exit_code = if failed.is_empty() { 0 } else { 1 };
 
