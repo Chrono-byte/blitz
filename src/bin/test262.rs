@@ -1234,3 +1234,140 @@ fn main() {
 
     exit(exit_code);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock moved backwards")
+            .as_nanos();
+        let dir = env::temp_dir().join(format!("blitz-{prefix}-{unique}"));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    struct TempDirGuard(PathBuf);
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent dirs");
+        }
+        fs::write(path, contents).expect("write file");
+    }
+
+    #[test]
+    fn bucket_keys_groups_top_level_and_subsection() {
+        let root = PathBuf::from("/repo/test262/test");
+        let file = root.join("built-ins/Array/prototype/push.js");
+
+        let (top, subsection) = bucket_keys(&root, &file);
+
+        assert_eq!(top, "built-ins");
+        assert_eq!(subsection, "built-ins/Array");
+    }
+
+    #[test]
+    fn parse_csv_env_trims_and_discards_empty_values() {
+        let _guard = env_lock().lock().expect("env lock");
+        let name = "BLITZ_TEST_PARSE_CSV_ENV";
+
+        unsafe {
+            env::set_var(name, "  alpha, ,beta,, gamma  ");
+        }
+
+        let parsed = parse_csv_env(name);
+
+        unsafe {
+            env::remove_var(name);
+        }
+
+        assert_eq!(parsed, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn extract_front_matter_and_parse_meta_read_test262_metadata() {
+        let src = r#"/*---
+flags: [module, async]
+includes:
+  - harness/assert.js
+  - extra.js
+negative:
+  phase: runtime
+---*/
+const x = 1;
+"#;
+
+        let fm = extract_front_matter(src).expect("front matter");
+        assert!(fm.contains("flags: [module, async]"));
+        assert!(fm.contains("includes:"));
+
+        let meta = parse_meta(src).expect("metadata");
+        let flags = meta.flags.expect("flags");
+        assert_eq!(flags, vec!["module", "async"]);
+        let includes = meta.includes.expect("includes");
+        assert_eq!(includes, vec!["harness/assert.js", "extra.js"]);
+        let negative = meta.negative.expect("negative");
+        assert_eq!(negative.phase, "runtime");
+    }
+
+    #[test]
+    fn unsupported_reason_checks_module_flag_toggle() {
+        let _guard = env_lock().lock().expect("env lock");
+        let src = "/*---\nflags: [module]\n---*/\n";
+        let meta = parse_meta(src);
+        let path = Path::new("/tmp/test.js");
+
+        unsafe {
+            env::set_var("TSBLITZ_TEST262_ENABLE_MODULE", "0");
+        }
+        assert_eq!(
+            unsupported_reason(path, src, &meta),
+            Some("UNSUPPORTED: flags module".to_string())
+        );
+
+        unsafe {
+            env::set_var("TSBLITZ_TEST262_ENABLE_MODULE", "1");
+        }
+        assert_eq!(unsupported_reason(path, src, &meta), None);
+
+        unsafe {
+            env::remove_var("TSBLITZ_TEST262_ENABLE_MODULE");
+        }
+    }
+
+    #[test]
+    fn collect_tests_skips_fixture_files_and_excluded_roots() {
+        let root = temp_dir("collect-tests");
+        let _guard = TempDirGuard(root.clone());
+        let include_dir = root.join("language");
+        let excluded_dir = root.join("built-ins");
+
+        write_file(&include_dir.join("good.js"), "const ok = 1;\n");
+        write_file(&include_dir.join("skip_FIXTURE.js"), "const skip = 1;\n");
+        write_file(&excluded_dir.join("ignored.js"), "const nope = 1;\n");
+
+        let mut out = Vec::new();
+        collect_tests(&root, &mut out, &[excluded_dir.clone()]);
+        out.sort();
+
+        assert_eq!(out, vec![include_dir.join("good.js")]);
+    }
+}
