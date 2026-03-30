@@ -5333,6 +5333,16 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         "__native_call_spread",
         Value::Builtin(Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "");
+            // Diagnostic: print raw incoming argument vector and resolved builtin offset
+            eprintln!(
+                "__native_call_spread: called args.len={} off={}",
+                args.len(),
+                off
+            );
+            for (i, a) in args.iter().enumerate() {
+                eprintln!("__native_call_spread: raw_arg[{}] = {:?}", i, a);
+            }
+
             let callee = args.get(off).cloned().unwrap_or(Value::Undefined);
             let this_arg = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
             let values = args.get(off + 2).cloned().unwrap_or(Value::Undefined);
@@ -5346,6 +5356,22 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 Value::Array(arr, _) => arr.borrow().clone(),
                 _ => Vec::new(),
             };
+
+            // Diagnostic: print the input argument shapes and spread mask so we can
+            // verify the argument order before we transform them.
+            let values_len = values_vec.len();
+            let mask_len = mask_vec.len();
+            eprintln!(
+                "__native_call_spread: values_vec.len={} mask_vec.len={}",
+                values_len, mask_len
+            );
+            for idx in 0..values_len {
+                let spread = mask_vec
+                    .get(idx)
+                    .and_then(|v| v.as_ref())
+                    .is_some_and(|v| vm.to_boolean(v));
+                eprintln!("__native_call_spread: arg[{}] spread={}", idx, spread);
+            }
 
             let mut flat: Vec<Option<Value>> = Vec::new();
             for (i, value) in values_vec.into_iter().enumerate() {
@@ -5363,17 +5389,107 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         flat.extend(arr.borrow().iter().cloned());
                     }
                     other => {
-                        let len_val = vm.get_property_host(
-                            other.as_ref().unwrap_or(&Value::Undefined),
-                            &PropertyKey::String("length".to_string()),
+                        // Honor iterables: if the value has a @@iterator method, prefer it.
+                        // Otherwise fall back to array-like length/index access.
+                        let this_for_iter = other.as_ref().unwrap_or(&Value::Undefined).clone();
+                        let iterator_method = vm.get_property_host(
+                            &this_for_iter,
+                            &PropertyKey::Symbol(SymbolId::well_known_iterator()),
                         )?;
-                        let len = vm.to_number_value(&len_val)?.max(0.0) as usize;
-                        for idx in 0..len {
-                            let item = vm.get_property_host(
+
+                        // DEBUG: print iterator method lookup result
+                        eprintln!(
+                            "__native_call_spread: iterator_method at idx {} = {:?}",
+                            i, iterator_method
+                        );
+
+                        // Only attempt to call the iterator method if it's a callable value.
+                        let is_callable = matches!(
+                            iterator_method,
+                            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
+                        );
+
+                        if is_callable {
+                            // Call the iterator method to obtain an iterator object.
+                            let iter_obj =
+                                vm.call_value_with_this(&iterator_method, &this_for_iter, &[])?;
+
+                            // Repeatedly call `next` on the iterator and collect values until done.
+                            loop {
+                                let next_fn = vm.get_property_host(
+                                    &iter_obj,
+                                    &PropertyKey::String("next".to_string()),
+                                )?;
+                                let result = vm.call_value_with_this(&next_fn, &iter_obj, &[])?;
+                                let done_val = vm.get_property_host(
+                                    &result,
+                                    &PropertyKey::String("done".to_string()),
+                                )?;
+                                if vm.to_boolean(&done_val) {
+                                    break;
+                                }
+                                let val = vm.get_property_host(
+                                    &result,
+                                    &PropertyKey::String("value".to_string()),
+                                )?;
+                                flat.push(Some(val));
+                            }
+                        } else {
+                            // Iterator method missing or not callable: emit diagnostic showing the
+                            // receiver's own property keys to help debug why @@iterator wasn't found.
+                            match other.as_ref().unwrap_or(&Value::Undefined) {
+                                Value::Object(o_rc) => {
+                                    let keys: Vec<String> = o_rc
+                                        .borrow()
+                                        .properties
+                                        .keys()
+                                        .map(|k| match k {
+                                            PropertyKey::String(s) => format!("\"{}\"", s),
+                                            PropertyKey::Symbol(_) => "Symbol(...)".to_string(),
+                                        })
+                                        .collect();
+                                    eprintln!(
+                                        "__native_call_spread: arg[{}] is Object; own keys = {:?}",
+                                        i, keys
+                                    );
+                                }
+                                Value::Array(_arr_rc, props_rc) => {
+                                    let keys: Vec<String> = props_rc
+                                        .borrow()
+                                        .properties
+                                        .keys()
+                                        .map(|k| match k {
+                                            PropertyKey::String(s) => format!("\"{}\"", s),
+                                            PropertyKey::Symbol(_) => "Symbol(...)".to_string(),
+                                        })
+                                        .collect();
+                                    eprintln!(
+                                        "__native_call_spread: arg[{}] is Array-like; prop keys = {:?}",
+                                        i, keys
+                                    );
+                                }
+                                other_val => {
+                                    eprintln!(
+                                        "__native_call_spread: arg[{}] is not iterable and not object-like (type={})",
+                                        i,
+                                        other_val.type_name()
+                                    );
+                                }
+                            }
+
+                            // Fallback: treat as array-like
+                            let len_val = vm.get_property_host(
                                 other.as_ref().unwrap_or(&Value::Undefined),
-                                &PropertyKey::String(idx.to_string()),
+                                &PropertyKey::String("length".to_string()),
                             )?;
-                            flat.push(Some(item));
+                            let len = vm.to_number_value(&len_val)?.max(0.0) as usize;
+                            for idx in 0..len {
+                                let item = vm.get_property_host(
+                                    other.as_ref().unwrap_or(&Value::Undefined),
+                                    &PropertyKey::String(idx.to_string()),
+                                )?;
+                                flat.push(Some(item));
+                            }
                         }
                     }
                 }

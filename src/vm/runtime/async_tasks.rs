@@ -269,7 +269,11 @@ mod tests {
 
         assert_eq!(
             events.borrow().as_slice(),
-            ["first".to_string(), "second".to_string(), "third".to_string()]
+            [
+                "first".to_string(),
+                "second".to_string(),
+                "third".to_string()
+            ]
         );
         assert!(matches!(
             vm.last_uncaught_exception.as_ref(),

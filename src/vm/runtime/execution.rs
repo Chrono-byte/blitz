@@ -1204,6 +1204,17 @@ impl Vm {
                     Value::Closure { env, .. } => Rc::clone(env),
                     _ => unreachable!(),
                 };
+                // If the closure is a generator, create a generator object instead
+                // of pushing a new frame / invoking immediately.
+                if proto.is_generator {
+                    let generator = self.create_generator_object(
+                        proto,
+                        &closure_env,
+                        call_args,
+                        this_arg.clone(),
+                    )?;
+                    return Ok(generator);
+                }
                 if proto.is_async {
                     return self.invoke_async_closure(
                         proto,
