@@ -416,6 +416,7 @@ fn mark_env(
 fn clear_object(obj: &Rc<RefCell<ObjectData>>) {
     let mut obj = obj.borrow_mut();
     obj.properties.clear();
+    obj.strong_prototype = None;
     obj.weak_prototype = None;
     obj.extensible = true;
 }

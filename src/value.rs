@@ -240,6 +240,8 @@ impl PropertyDescriptor {
 pub struct ObjectData {
     /// Property table
     pub properties: HashMap<PropertyKey, PropertyDescriptor>,
+    /// Strongly stored prototype for non-object prototype values.
+    pub strong_prototype: Option<Value>,
     /// Prototype pointer (weak to prevent reference cycles)
     pub weak_prototype: Option<WeakObject>,
     /// Extensible flag
@@ -251,6 +253,7 @@ impl ObjectData {
     pub fn new() -> Self {
         Self {
             properties: HashMap::new(),
+            strong_prototype: None,
             weak_prototype: None,
             extensible: true,
         }
@@ -267,6 +270,7 @@ impl ObjectData {
     pub fn with_weak_prototype(prototype: &Rc<RefCell<ObjectData>>) -> Self {
         Self {
             properties: HashMap::new(),
+            strong_prototype: None,
             weak_prototype: Some(WeakObject::new(prototype)),
             extensible: true,
         }
@@ -275,6 +279,9 @@ impl ObjectData {
     /// Get the prototype, preferring weak reference if available.
     /// Returns Value::Null if the weak reference has expired.
     pub fn get_prototype(&self) -> Value {
+        if let Some(proto) = &self.strong_prototype {
+            return proto.clone();
+        }
         if let Some(weak) = &self.weak_prototype {
             weak.to_value()
         } else {
@@ -284,15 +291,17 @@ impl ObjectData {
 
     /// Set the prototype using a weak reference (prevents cycles).
     pub fn set_weak_prototype(&mut self, prototype: &Rc<RefCell<ObjectData>>) {
+        self.strong_prototype = None;
         self.weak_prototype = Some(WeakObject::new(prototype));
     }
 
     /// Set the prototype from a runtime value.
     pub fn set_prototype_value(&mut self, prototype: Value) {
+        self.strong_prototype = Some(prototype.clone());
         self.weak_prototype = match prototype {
             Value::Object(obj) => Some(WeakObject::new(&obj)),
             _ => None,
-        };
+        }
     }
 }
 

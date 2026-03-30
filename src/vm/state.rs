@@ -185,6 +185,9 @@ pub struct Vm {
     pub(super) module_table: Vec<HashMap<String, ValueSlot>>,
     /// Current [[NewTarget]] while evaluating a constructor call.
     pub(super) construct_new_target: Option<Value>,
+    /// Recently returned heap value, kept alive across the return boundary
+    /// until the caller has a chance to store it.
+    pub(super) recent_return_value: Option<Value>,
     /// Last uncaught thrown JS value observed during unwinding.
     pub(crate) last_uncaught_exception: Option<Value>,
     /// ECMAScript microtask queue.

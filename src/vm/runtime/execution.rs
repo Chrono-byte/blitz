@@ -57,6 +57,7 @@ impl Vm {
             module_loader,
             module_table: Vec::new(),
             construct_new_target: None,
+            recent_return_value: None,
             last_uncaught_exception: None,
             microtasks: VecDeque::new(),
             unhandled_rejection_hook: None,
@@ -175,6 +176,9 @@ impl Vm {
         roots.extend(self.locals.iter().map(|c| c.borrow().clone()));
         roots.push(self.this_value.clone());
         if let Some(value) = &self.construct_new_target {
+            roots.push(value.clone());
+        }
+        if let Some(value) = &self.recent_return_value {
             roots.push(value.clone());
         }
         if let Some(value) = &self.last_uncaught_exception {
@@ -1470,6 +1474,18 @@ impl Vm {
                     _ => instance,
                 };
                 let _ = set_constructor_property(&result, callee);
+                if matches!(
+                    result,
+                    Value::Object(_)
+                        | Value::Array(..)
+                        | Value::Closure { .. }
+                        | Value::BuiltinObject(_, _)
+                        | Value::Promise(_)
+                ) {
+                    self.recent_return_value = Some(result.clone());
+                } else {
+                    self.recent_return_value = None;
+                }
                 self.gc_temp_roots.truncate(temp_root_base);
                 Ok(result)
             }
@@ -1514,11 +1530,37 @@ impl Vm {
                     _ => instance,
                 };
                 let _ = set_constructor_property(&result, callee);
+                if matches!(
+                    result,
+                    Value::Object(_)
+                        | Value::Array(..)
+                        | Value::Closure { .. }
+                        | Value::BuiltinObject(_, _)
+                        | Value::Promise(_)
+                ) {
+                    self.recent_return_value = Some(result.clone());
+                } else {
+                    self.recent_return_value = None;
+                }
                 self.gc_temp_roots.truncate(temp_root_base);
                 Ok(result)
             }
             Value::Builtin(f) => {
                 let result = (f.as_ref())(self, args);
+                if let Ok(value) = &result {
+                    if matches!(
+                        value,
+                        Value::Object(_)
+                            | Value::Array(..)
+                            | Value::Closure { .. }
+                            | Value::BuiltinObject(_, _)
+                            | Value::Promise(_)
+                    ) {
+                        self.recent_return_value = Some(value.clone());
+                    } else {
+                        self.recent_return_value = None;
+                    }
+                }
                 self.gc_temp_roots.truncate(temp_root_base);
                 result
             }
@@ -1698,6 +1740,18 @@ impl Vm {
                 })();
                 self.gc_temp_roots.truncate(result_root_base);
                 post_call?;
+                if matches!(
+                    result,
+                    Value::Object(_)
+                        | Value::Array(..)
+                        | Value::Closure { .. }
+                        | Value::BuiltinObject(_, _)
+                        | Value::Promise(_)
+                ) {
+                    self.recent_return_value = Some(result.clone());
+                } else {
+                    self.recent_return_value = None;
+                }
                 Ok(result)
             }
             Value::BuiltinObject(f, _props) => {
@@ -1722,6 +1776,18 @@ impl Vm {
                 })();
                 self.gc_temp_roots.truncate(result_root_base);
                 post_call?;
+                if matches!(
+                    result,
+                    Value::Object(_)
+                        | Value::Array(..)
+                        | Value::Closure { .. }
+                        | Value::BuiltinObject(_, _)
+                        | Value::Promise(_)
+                ) {
+                    self.recent_return_value = Some(result.clone());
+                } else {
+                    self.recent_return_value = None;
+                }
                 Ok(result)
             }
             Value::Closure { proto, .. } => {
