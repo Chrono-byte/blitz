@@ -125,10 +125,10 @@ impl Vm {
         call_args: Vec<Value>,
         this_arg: Value,
     ) -> Result<Value, crate::errors::RuntimeError> {
-        let promise = Rc::new(RefCell::new(PromiseState::Pending {
+        let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
             on_fulfilled: Vec::new(),
             on_rejected: Vec::new(),
-        }));
+        })));
 
         let proto = Rc::clone(proto);
         let env = Rc::clone(env);

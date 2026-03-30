@@ -51,7 +51,6 @@ pub mod bytecode;
 pub mod compiler;
 pub mod environment;
 pub mod errors;
-#[cfg(feature = "gc_mark_sweep_prototype")]
 pub mod gc;
 pub mod lexer;
 pub mod module;

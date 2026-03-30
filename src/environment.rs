@@ -116,6 +116,19 @@ impl EnvironmentRecord {
         }
         Ok(false)
     }
+
+    /// Collect all currently stored binding values in this environment chain.
+    ///
+    /// This is used by the prototype GC as a conservative root walk for live
+    /// lexical environments.
+    pub fn collect_binding_values(&self, values: &mut Vec<Value>) {
+        for binding in self.bindings.values() {
+            values.push(binding.cell.borrow().clone());
+        }
+        if let Some(outer) = &self.outer {
+            outer.borrow().collect_binding_values(values);
+        }
+    }
 }
 
 #[cfg(test)]

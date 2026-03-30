@@ -755,10 +755,10 @@ fn shadowrealm_import_value(
         }
     };
 
-    let promise = Rc::new(RefCell::new(PromiseState::Pending {
+    let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
         on_fulfilled: Vec::new(),
         on_rejected: Vec::new(),
-    }));
+    })));
     let promise_value = Value::Promise(Rc::clone(&promise));
 
     // Parse transfer list argument (third argument) if present. For importValue
@@ -904,10 +904,10 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
     let specifier = args.first().cloned().unwrap_or(Value::Undefined);
     let options = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-    let promise = Rc::new(RefCell::new(PromiseState::Pending {
+    let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
         on_fulfilled: Vec::new(),
         on_rejected: Vec::new(),
-    }));
+    })));
     let promise_value = Value::Promise(Rc::clone(&promise));
 
     let specifier_str = match vm.to_string(&specifier) {
@@ -929,10 +929,18 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
         let entry = {
             let mut loader = loader_handle.borrow_mut();
             let entry = loader.construct(&base_dir, &specifier_str).map_err(|err| {
-                host_error_object(vm, "SyntaxError", &format!("dynamic import construct failed: {}", err))
+                host_error_object(
+                    vm,
+                    "SyntaxError",
+                    &format!("dynamic import construct failed: {}", err),
+                )
             })?;
             loader.instantiate_all().map_err(|err| {
-                host_error_object(vm, "SyntaxError", &format!("dynamic import instantiate failed: {}", err))
+                host_error_object(
+                    vm,
+                    "SyntaxError",
+                    &format!("dynamic import instantiate failed: {}", err),
+                )
             })?;
             entry
         };
@@ -1319,12 +1327,12 @@ fn atomics_waiters_array(buffer: &Rc<RefCell<ObjectData>>) -> Rc<RefCell<Vec<Opt
     {
         return Rc::clone(arr);
     }
-    let arr = Rc::new(RefCell::new(Vec::new()));
+    let arr = crate::gc::track_array(Rc::new(RefCell::new(Vec::new())));
     buffer_data.properties.insert(
         PropertyKey::String("[[AtomicsWaiters]]".to_string()),
         PropertyDescriptor::data(Value::Array(
             Rc::clone(&arr),
-            Rc::new(RefCell::new(ObjectData::new())),
+            crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
         )),
     );
     arr
@@ -1340,11 +1348,11 @@ fn atomics_make_waiter_record(index: usize, resolve: Option<Value>) -> Value {
         PropertyKey::String("resolve".to_string()),
         PropertyDescriptor::data(resolve.unwrap_or(Value::Undefined)),
     );
-    Value::Object(Rc::new(RefCell::new(data)))
+    Value::Object(crate::gc::track_object(Rc::new(RefCell::new(data))))
 }
 
 fn atomics_make_wait_result(async_flag: bool, value: Value) -> Value {
-    let result = Rc::new(RefCell::new(ObjectData::new()));
+    let result = crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     result.borrow_mut().properties.insert(
         PropertyKey::String("async".to_string()),
         PropertyDescriptor::data(Value::Bool(async_flag)),
@@ -3104,10 +3112,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
 
             // Create a new pending promise
             use crate::value::PromiseState;
-            let promise = Rc::new(RefCell::new(PromiseState::Pending {
+            let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
                 on_fulfilled: Vec::new(),
                 on_rejected: Vec::new(),
-            }));
+            })));
 
             // Create resolve function
             let promise_for_resolve = Rc::clone(&promise);
@@ -3198,10 +3206,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     use crate::value::PromiseState;
 
                     // Create a new promise for chaining
-                    let result_promise = Rc::new(RefCell::new(PromiseState::Pending {
-                        on_fulfilled: Vec::new(),
-                        on_rejected: Vec::new(),
-                    }));
+                    let result_promise =
+                        crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
+                            on_fulfilled: Vec::new(),
+                            on_rejected: Vec::new(),
+                        })));
                     let result_promise_value = Value::Promise(Rc::clone(&result_promise));
 
                     let mut state = promise_rc.borrow_mut();
@@ -6141,11 +6150,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(Value::String("Error".to_string())),
     );
 
-        let aggregate_error_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-            let ctor = vm
-                .current_new_target()
-                .or_else(|| vm.get_global("AggregateError"))
-                .unwrap_or(Value::Undefined);
+    let aggregate_error_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+        let ctor = vm
+            .current_new_target()
+            .or_else(|| vm.get_global("AggregateError"))
+            .unwrap_or(Value::Undefined);
         let proto = vm
             .get_property_host(&ctor, &PKey::String("prototype".to_string()))
             .unwrap_or(Value::Null);

@@ -144,8 +144,8 @@ impl Vm {
 
     /// Create a new Array object with the given elements and correct prototype.
     pub fn new_array(&self, elems: Vec<Option<Value>>) -> Value {
-        let arr_rc = Rc::new(RefCell::new(elems));
-        let props = Rc::new(RefCell::new(ObjectData::new()));
+        let arr_rc = crate::gc::track_array(Rc::new(RefCell::new(elems)));
+        let props = crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         let len = arr_rc.borrow().len();
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
@@ -166,6 +166,108 @@ impl Vm {
         roots.push(Value::Object(Rc::clone(&self.globals)));
         roots.extend(self.stack.iter().cloned());
         roots.extend(self.locals.iter().map(|c| c.borrow().clone()));
+        roots.push(self.this_value.clone());
+        if let Some(value) = &self.construct_new_target {
+            roots.push(value.clone());
+        }
+        if let Some(value) = &self.last_uncaught_exception {
+            roots.push(value.clone());
+        }
+        if let Some(queue) = &self.yield_star_queue {
+            roots.extend(queue.iter().cloned());
+        }
+        if let Some(env) = &self.current_closure_env {
+            roots.extend(env.borrow().iter().map(|cell| cell.borrow().clone()));
+        }
+        self.lexical_env.borrow().collect_binding_values(&mut roots);
+        self.global_env.borrow().collect_binding_values(&mut roots);
+        for module in &self.module_table {
+            roots.extend(module.values().map(|cell| cell.borrow().clone()));
+        }
+        if let Some(value) = self.realm.intrinsics.object_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.array_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.function_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.string_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.symbol_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.error_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.type_error_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.range_error_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.reference_error_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.syntax_error_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.promise_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.date_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.map_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.number_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.object_prototype.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.array_prototype.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.function_prototype.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.string_prototype.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.symbol_prototype.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.error_prototype.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.promise_prototype.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.date_prototype.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.map_prototype.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.boolean_prototype.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.number_prototype.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.bigint_prototype.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.eval_error_constructor.clone() {
+            roots.push(value);
+        }
+        if let Some(value) = self.realm.intrinsics.uri_error_constructor.clone() {
+            roots.push(value);
+        }
         crate::gc::collect(&roots)
     }
 
@@ -463,6 +565,10 @@ impl Vm {
                 }
                 Ok(StepOutcome::Return(result)) => {
                     self.run_microtasks_if_needed()?;
+                    #[cfg(feature = "gc_mark_sweep_prototype")]
+                    {
+                        let _ = self.collect_garbage_prototype();
+                    }
                     return Ok(result);
                 }
                 Ok(StepOutcome::Yield(_)) => {
@@ -472,6 +578,10 @@ impl Vm {
                     if self.pending_exception {
                         self.pending_exception = false;
                         continue;
+                    }
+                    #[cfg(feature = "gc_mark_sweep_prototype")]
+                    {
+                        let _ = self.collect_garbage_prototype();
                     }
                     return Err(err);
                 }
@@ -521,7 +631,7 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     fn make_iterator_result(value: Value, done: bool) -> Value {
-        let obj = Rc::new(RefCell::new(ObjectData::new()));
+        let obj = crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         obj.borrow_mut().properties.insert(
             PropertyKey::String("value".to_string()),
             PropertyDescriptor::data(value),
@@ -565,7 +675,7 @@ impl Vm {
         let next_runner = Rc::clone(&runner);
         let throw_runner = Rc::clone(&runner);
         let return_runner = Rc::clone(&runner);
-        let gen_obj = Rc::new(RefCell::new(ObjectData::new()));
+        let gen_obj = crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         gen_obj.borrow_mut().properties.insert(
             PropertyKey::String("next".to_string()),
             PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
@@ -1157,8 +1267,8 @@ impl Vm {
                     | Value::BuiltinObject(_, _) => proto,
                     _ => Value::Null,
                 };
-                let instance = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
-                    instance_proto,
+                let instance = Value::Object(crate::gc::track_object(Rc::new(RefCell::new(
+                    ObjectData::with_prototype(instance_proto),
                 ))));
                 let prev_new_target = self.construct_new_target.clone();
                 self.construct_new_target = Some(callee.clone());
@@ -1185,8 +1295,8 @@ impl Vm {
                     | Value::BuiltinObject(_, _) => proto,
                     _ => Value::Null,
                 };
-                let instance = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
-                    instance_proto,
+                let instance = Value::Object(crate::gc::track_object(Rc::new(RefCell::new(
+                    ObjectData::with_prototype(instance_proto),
                 ))));
                 // Builtin constructors receive:
                 // args[0] = new instance (via call_with_this)
@@ -2991,7 +3101,8 @@ impl Vm {
         };
 
         let arr_rc = Rc::new(RefCell::new(rest_slice));
-        let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+        let props: Rc<RefCell<ObjectData>> =
+            crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
             PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
@@ -3358,7 +3469,7 @@ impl Vm {
 
         let closure = Value::Closure {
             proto: Rc::clone(&closure_proto),
-            env: Rc::new(RefCell::new(env_cells)),
+            env: crate::gc::track_env(Rc::new(RefCell::new(env_cells))),
             lexical_this: None,
             props: Rc::clone(&props),
         };
@@ -3379,8 +3490,9 @@ impl Vm {
                 .object_prototype
                 .clone()
                 .unwrap_or(Value::Null);
-            let proto_obj_map: Rc<RefCell<ObjectData>> =
-                Rc::new(RefCell::new(ObjectData::with_prototype(object_proto)));
+            let proto_obj_map: Rc<RefCell<ObjectData>> = crate::gc::track_object(Rc::new(
+                RefCell::new(ObjectData::with_prototype(object_proto)),
+            ));
             let proto_obj = Value::Object(Rc::clone(&proto_obj_map));
 
             // Set F.prototype.constructor = F

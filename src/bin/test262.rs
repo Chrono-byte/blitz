@@ -26,7 +26,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -76,7 +76,7 @@ fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
 
     let (tx, rx) = mpsc::channel();
 
-    let _join_handle = thread::Builder::new()
+    let join_handle = thread::Builder::new()
         .name(format!("test-{}", file.display()))
         .stack_size(STACK_SIZE)
         .spawn(move || {
@@ -211,11 +211,14 @@ fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
                     }
                 }
             }
-        });
+        })
+        .expect("failed to spawn test thread");
 
-    rx.recv().unwrap_or(TestResult::Panic(
+    let result = rx.recv().unwrap_or(TestResult::Panic(
         "Thread failed to send result".to_string(),
-    ))
+    ));
+    let _ = join_handle.join();
+    result
 }
 
 fn bucket_keys(test_root: &Path, file: &Path) -> (String, String) {
@@ -307,6 +310,9 @@ struct RunnerOptions {
     /// Optional maximum number of tests to run.
     #[arg(long = "limit", value_name = "N")]
     limit: Option<usize>,
+    /// Number of tests to run in parallel.
+    #[arg(long = "jobs", short = 'j', value_name = "N")]
+    jobs: Option<usize>,
     /// Run only harness files.
     #[arg(long = "harness-only", alias = "harness", action)]
     harness_only: bool,
@@ -325,6 +331,10 @@ fn parse_csv_env(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn parse_usize_env(name: &str) -> Option<usize> {
+    env::var(name).ok().and_then(|s| s.parse::<usize>().ok())
+}
+
 /// Parses the command line arguments
 fn parse_args() -> RunnerOptions {
     let mut opts = RunnerOptions::parse();
@@ -340,9 +350,10 @@ fn parse_args() -> RunnerOptions {
         opts.filter = env::var("TEST262_FILTER").ok();
     }
     if opts.limit.is_none() {
-        opts.limit = env::var("TEST262_LIMIT")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok());
+        opts.limit = parse_usize_env("TEST262_LIMIT");
+    }
+    if opts.jobs.is_none() {
+        opts.jobs = parse_usize_env("TEST262_JOBS");
     }
 
     opts
@@ -568,7 +579,18 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     data.properties.insert(
         PropertyKey::String("gc".to_string()),
         PropertyDescriptor::data(host_builtin(Rc::new(|_vm, _args| {
-            Err("gc not supported".into())
+            #[cfg(feature = "gc_mark_sweep_prototype")]
+            {
+                let _ = _vm.collect_garbage_prototype();
+            }
+            #[cfg(feature = "gc_mark_sweep_prototype")]
+            {
+                return Ok(Value::Undefined);
+            }
+            #[cfg(not(feature = "gc_mark_sweep_prototype"))]
+            {
+                Err("gc not supported".into())
+            }
         }))),
     );
     data.properties.insert(
@@ -1487,22 +1509,67 @@ fn main() {
         }
     }
 
+    let mut files_to_run = Vec::new();
     for f in files {
-        if let Some(limit) = opts.limit
-            && ran >= limit
-        {
-            break;
-        }
         if let Some(ref flt) = opts.filter
             && !f.to_string_lossy().contains(flt)
         {
             continue;
         }
+        files_to_run.push(f);
+        if let Some(limit) = opts.limit
+            && files_to_run.len() >= limit
+        {
+            break;
+        }
+    }
 
+    let job_count = opts
+        .jobs
+        .or_else(|| thread::available_parallelism().ok().map(|n| n.get()))
+        .unwrap_or(1)
+        .max(1)
+        .min(files_to_run.len().max(1));
+    let total_jobs = files_to_run.len();
+
+    let (job_tx, job_rx) = mpsc::channel::<(usize, PathBuf)>();
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    let (result_tx, result_rx) = mpsc::channel::<(usize, PathBuf, TestResult)>();
+    let mut workers = Vec::with_capacity(job_count);
+
+    for _ in 0..job_count {
+        let job_rx = Arc::clone(&job_rx);
+        let result_tx = result_tx.clone();
+        let test262_dir = test262_dir.clone();
+        workers.push(thread::spawn(move || {
+            loop {
+                let job = {
+                    let rx = job_rx.lock().expect("job receiver poisoned");
+                    rx.recv().ok()
+                };
+                let Some((idx, file)) = job else {
+                    break;
+                };
+                let result = run_test_in_thread(file.clone(), test262_dir.clone());
+                if result_tx.send((idx, file, result)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    drop(result_tx);
+
+    for (idx, file) in files_to_run.into_iter().enumerate() {
+        job_tx.send((idx, file)).unwrap();
+    }
+    drop(job_tx);
+
+    let mut failed_cases = Vec::new();
+    for _ in 0..total_jobs {
+        let (idx, f, result) = result_rx
+            .recv()
+            .expect("worker threads failed to return a test result");
         let (top_key, subsection_key) = bucket_keys(&test_root, &f);
-
-        let result = run_test_in_thread(f.clone(), test262_dir.clone());
-
         match result {
             TestResult::Pass => {
                 ran += 1;
@@ -1513,32 +1580,45 @@ fn main() {
                 ran += 1;
                 top_level.entry(top_key).or_default().fail += 1;
                 subsections.entry(subsection_key).or_default().fail += 1;
-                eprintln!("FAIL: {}", e);
-                failed.push((f.clone(), e));
+                failed_cases.push((idx, f.clone(), e));
             }
             TestResult::StackOverflow => {
                 ran += 1;
                 top_level.entry(top_key).or_default().fail += 1;
                 subsections.entry(subsection_key).or_default().fail += 1;
-                if let Ok(rel) = f.strip_prefix(&test262_dir) {
-                    eprintln!("STACKOVERFLOW: {}", rel.display());
-                } else {
-                    eprintln!("STACKOVERFLOW: {}", f.display());
-                }
-                failed.push((f.clone(), "Stack overflow".into()));
+                failed_cases.push((idx, f.clone(), "Stack overflow".into()));
             }
             TestResult::Panic(msg) => {
                 ran += 1;
                 top_level.entry(top_key).or_default().fail += 1;
                 subsections.entry(subsection_key).or_default().fail += 1;
-                if let Ok(rel) = f.strip_prefix(&test262_dir) {
-                    eprintln!("PANIC: {}: {}", rel.display(), msg);
-                } else {
-                    eprintln!("PANIC: {}: {}", f.display(), msg);
-                }
-                failed.push((f.clone(), format!("Panic: {}", msg)));
+                failed_cases.push((idx, f.clone(), format!("Panic: {}", msg)));
             }
         }
+    }
+
+    for worker in workers {
+        let _ = worker.join();
+    }
+
+    failed_cases.sort_by_key(|(idx, _, _)| *idx);
+    for (_, f, msg) in failed_cases {
+        if msg == "Stack overflow" {
+            if let Ok(rel) = f.strip_prefix(&test262_dir) {
+                eprintln!("STACKOVERFLOW: {}", rel.display());
+            } else {
+                eprintln!("STACKOVERFLOW: {}", f.display());
+            }
+        } else if let Some(rest) = msg.strip_prefix("Panic: ") {
+            if let Ok(rel) = f.strip_prefix(&test262_dir) {
+                eprintln!("PANIC: {}: {}", rel.display(), rest);
+            } else {
+                eprintln!("PANIC: {}: {}", f.display(), rest);
+            }
+        } else {
+            eprintln!("FAIL: {}", msg);
+        }
+        failed.push((f, msg));
     }
 
     let passed = ran.saturating_sub(failed.len());
