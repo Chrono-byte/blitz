@@ -4,12 +4,17 @@ use clap::Parser as ClapParser;
 use std::fs;
 
 #[derive(ClapParser)]
+/// Parses a file and dumps the AST to stdout.
 struct Args {
+    /// The path to the file to parse.
     path: String,
 }
 
+/// Represents a file path, with the file name and directory path separated.
 struct Path {
+    /// The file name.
     file: String,
+    /// The directory path.
     dir: String,
 }
 

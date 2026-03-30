@@ -43,21 +43,28 @@ use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
 use blitz::{parser::Parser, runtime_utils, typecheck, value::Value, vm::Vm};
 
 #[derive(Clone, Copy, Default)]
+/// Result statistics for a test bucket (pass/fail/skip counts).
 struct BucketStats {
+    /// Number of tests that passed.
     pass: usize,
+    /// Number of tests that failed.
     fail: usize,
+    /// Number of tests that were skipped.
     skip: usize,
 }
 
 impl BucketStats {
+    /// Returns the total number of tests (pass + fail + skip).
     fn total(self) -> usize {
         self.pass + self.fail + self.skip
     }
 
+    /// Returns the number of tests that were attempted (pass + fail).
     fn attempted(self) -> usize {
         self.pass + self.fail
     }
 
+    /// Returns the percentage of tests that passed.
     fn pass_pct(self) -> f64 {
         let attempted = self.attempted();
         if attempted == 0 {
@@ -68,13 +75,19 @@ impl BucketStats {
     }
 }
 
+/// The result of a test run.
 enum TestResult {
+    /// The test passed.
     Pass,
+    /// The test failed.
     Fail(String),
+    /// The test encountered a stack overflow.
     StackOverflow,
+    /// The test panicked.
     Panic(String),
 }
 
+/// Selects the files to run based on the filter and limit.
 fn select_files_to_run(
     files: Vec<PathBuf>,
     filter: Option<&str>,
@@ -97,6 +110,7 @@ fn select_files_to_run(
     selected
 }
 
+/// Resolves the job count based on the requested count and selected count.
 fn resolve_job_count(
     requested_jobs: Option<usize>,
     selected_count: usize,
@@ -109,10 +123,12 @@ fn resolve_job_count(
         .min(selected_count.max(1))
 }
 
+/// Sorts the test results by their index.
 fn sort_test_results(results: &mut [(usize, PathBuf, TestResult)]) {
     results.sort_by_key(|(idx, _, _)| *idx);
 }
 
+/// Runs the selected tests and returns the results.
 fn run_selected_tests(
     files_to_run: Vec<PathBuf>,
     test262_dir: PathBuf,
@@ -164,12 +180,13 @@ fn run_selected_tests(
     })
 }
 
+/// Runs a single test in a separate thread, returning the result.
 fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
     const STACK_SIZE: usize = 8 * 1024 * 1024; // 3 MB stack for tests
 
     let (tx, rx) = mpsc::channel();
 
-    let join_handle = thread::Builder::new()
+    let join_handle = match thread::Builder::new()
         .name(format!("test-{}", file.display()))
         .stack_size(STACK_SIZE)
         .spawn(move || {
@@ -304,13 +321,31 @@ fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
                     }
                 }
             }
-        })
-        .expect("failed to spawn test thread");
+        }) {
+        Ok(handle) => handle,
+        Err(e) => {
+            // Failed to spawn the test thread; return an explicit failure result.
+            return TestResult::Panic(format!("Failed to spawn thread: {}", e));
+        }
+    };
 
-    let result = rx.recv().unwrap_or(TestResult::Panic(
-        "Thread failed to send result".to_string(),
-    ));
-    let _ = join_handle.join();
+    let result = match rx.recv() {
+        Ok(v) => v,
+        Err(_) => TestResult::Panic("Thread failed to send result".to_string()),
+    };
+
+    if let Err(join_err) = join_handle.join() {
+        // If join fails, log the panic payload for debugging. Do not panic the runner.
+        let join_msg = if let Some(s) = join_err.downcast_ref::<String>() {
+            s.clone()
+        } else if let Some(s) = join_err.downcast_ref::<&str>() {
+            s.to_string()
+        } else {
+            "Unknown panic during join".to_string()
+        };
+        eprintln!("Warning: test thread join reported a panic: {}", join_msg);
+    }
+
     result
 }
 

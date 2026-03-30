@@ -185,7 +185,7 @@ fn parse_float_prefix_len(s: &str) -> Option<usize> {
 }
 
 fn is_byte_offset_aligned(byte_offset: usize, element_count: usize) -> bool {
-    element_count == 1 || byte_offset % element_count == 0
+    element_count == 1 || byte_offset.is_multiple_of(element_count)
 }
 
 fn parse_special_float(s: &str) -> Option<f64> {
@@ -389,158 +389,159 @@ fn collect_iterable_values(
     }
 }
 
+/// Resolves a promise with a value, ensuring the promise is not already resolved.
+fn resolve_promise_with_value_inner(
+    vm: &mut Vm,
+    result_promise: &Rc<RefCell<PromiseState>>,
+    value: Value,
+    already_resolved: Rc<RefCell<bool>>,
+) -> Result<(), crate::errors::RuntimeError> {
+    if *already_resolved.borrow() {
+        return Ok(());
+    }
+
+    if let Value::Promise(ref p_rc) = value {
+        if Rc::ptr_eq(p_rc, result_promise) {
+            *already_resolved.borrow_mut() = true;
+            return Err(vm.throw_type_error("Chaining cycle detected"));
+        }
+
+        let mut state = p_rc.borrow_mut();
+        match &mut *state {
+            PromiseState::Pending {
+                on_fulfilled,
+                on_rejected,
+            } => {
+                let resolve_called = Rc::clone(&already_resolved);
+                let res_p = Rc::clone(result_promise);
+                on_fulfilled.push(Value::Builtin(Rc::new(move |vm, args| {
+                    if *resolve_called.borrow() {
+                        return Ok(Value::Undefined);
+                    }
+                    *resolve_called.borrow_mut() = true;
+                    let off = if args.len() > 1 { 1 } else { 0 };
+                    let v = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    resolve_promise_with_value(vm, &res_p, v)?;
+                    Ok(Value::Undefined)
+                })));
+
+                let reject_called = Rc::clone(&already_resolved);
+                let res_p2 = Rc::clone(result_promise);
+                on_rejected.push(Value::Builtin(Rc::new(move |vm, args| {
+                    if *reject_called.borrow() {
+                        return Ok(Value::Undefined);
+                    }
+                    *reject_called.borrow_mut() = true;
+                    let off = if args.len() > 1 { 1 } else { 0 };
+                    let r = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    reject_pending_promise(vm, &res_p2, r);
+                    Ok(Value::Undefined)
+                })));
+                return Ok(());
+            }
+            PromiseState::Fulfilled(v) => {
+                let v = v.clone();
+                let resolve_called = Rc::clone(&already_resolved);
+                let res_p = Rc::clone(result_promise);
+                vm.queue_microtask(move |vm| {
+                    if *resolve_called.borrow() {
+                        return Ok(());
+                    }
+                    *resolve_called.borrow_mut() = true;
+                    fulfill_pending_promise(vm, &res_p, v.clone());
+                    Ok(())
+                });
+                return Ok(());
+            }
+            PromiseState::Rejected(reason) => {
+                let reason = reason.clone();
+                let reject_called = Rc::clone(&already_resolved);
+                let res_p = Rc::clone(result_promise);
+                vm.queue_microtask(move |vm| {
+                    if *reject_called.borrow() {
+                        return Ok(());
+                    }
+                    *reject_called.borrow_mut() = true;
+                    reject_pending_promise(vm, &res_p, reason.clone());
+                    Ok(())
+                });
+                return Ok(());
+            }
+        }
+    }
+
+    if value.is_object() {
+        let then_val = vm.get_property_host(&value, &PropertyKey::String("then".to_string()))?;
+        if Vm::is_callable_value(&then_val) {
+            // Per-spec PromiseResolveThenableJob semantics: calling a thenable's
+            // `then` should not synchronously settle the outer promise. Instead
+            // schedule a microtask that will invoke `then` with resolve/reject
+            // callbacks. This preserves observable job ordering when a thenable
+            // calls back synchronously.
+            let resolve_called = Rc::clone(&already_resolved);
+            let res_p = Rc::clone(result_promise);
+            let thenable = value.clone();
+            let then_func = then_val;
+
+            vm.queue_microtask(move |vm| {
+                // Build resolve and reject callbacks that will settle res_p
+                let resolve_called_inner = Rc::clone(&resolve_called);
+                let res_p_inner = Rc::clone(&res_p);
+                let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
+                    if *resolve_called_inner.borrow() {
+                        return Ok(Value::Undefined);
+                    }
+                    *resolve_called_inner.borrow_mut() = true;
+                    let off = if args.len() > 1 { 1 } else { 0 };
+                    let v = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    resolve_promise_with_value(vm, &res_p_inner, v)?;
+                    Ok(Value::Undefined)
+                }));
+
+                let reject_called_inner = Rc::clone(&resolve_called);
+                let res_p2_inner = Rc::clone(&res_p);
+                let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
+                    if *reject_called_inner.borrow() {
+                        return Ok(Value::Undefined);
+                    }
+                    *reject_called_inner.borrow_mut() = true;
+                    let off = if args.len() > 1 { 1 } else { 0 };
+                    let r = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    reject_pending_promise(vm, &res_p2_inner, r);
+                    Ok(Value::Undefined)
+                }));
+
+                // Call the then function with the thenable as `this`.
+                // Errors thrown here should reject the promise.
+                match vm.call_value_with_this(&then_func, &thenable, &[resolve_cb, reject_cb]) {
+                    Ok(_) => Ok(()),
+                    Err(err) => {
+                        let reason = vm
+                            .last_uncaught_exception
+                            .take()
+                            .unwrap_or(Value::String(format!("{}", err)));
+                        reject_pending_promise(vm, &res_p, reason);
+                        Ok(())
+                    }
+                }
+            });
+            return Ok(());
+        }
+    }
+
+    if !*already_resolved.borrow() {
+        *already_resolved.borrow_mut() = true;
+        fulfill_pending_promise(vm, result_promise, value);
+    }
+    Ok(())
+}
+
+/// Resolves a promise with a value, ensuring the promise is not already resolved.
 pub(crate) fn resolve_promise_with_value(
     vm: &mut Vm,
     result_promise: &Rc<RefCell<PromiseState>>,
     value: Value,
 ) -> Result<(), crate::errors::RuntimeError> {
-    fn resolve_promise_with_value_inner(
-        vm: &mut Vm,
-        result_promise: &Rc<RefCell<PromiseState>>,
-        value: Value,
-        already_resolved: Rc<RefCell<bool>>,
-    ) -> Result<(), crate::errors::RuntimeError> {
-        if *already_resolved.borrow() {
-            return Ok(());
-        }
-
-        if let Value::Promise(ref p_rc) = value {
-            if Rc::ptr_eq(p_rc, result_promise) {
-                *already_resolved.borrow_mut() = true;
-                return Err(vm.throw_type_error("Chaining cycle detected"));
-            }
-
-            let mut state = p_rc.borrow_mut();
-            match &mut *state {
-                PromiseState::Pending {
-                    on_fulfilled,
-                    on_rejected,
-                } => {
-                    let resolve_called = Rc::clone(&already_resolved);
-                    let res_p = Rc::clone(result_promise);
-                    on_fulfilled.push(Value::Builtin(Rc::new(move |vm, args| {
-                        if *resolve_called.borrow() {
-                            return Ok(Value::Undefined);
-                        }
-                        *resolve_called.borrow_mut() = true;
-                        let off = if args.len() > 1 { 1 } else { 0 };
-                        let v = args.get(off).cloned().unwrap_or(Value::Undefined);
-                        resolve_promise_with_value(vm, &res_p, v)?;
-                        Ok(Value::Undefined)
-                    })));
-
-                    let reject_called = Rc::clone(&already_resolved);
-                    let res_p2 = Rc::clone(result_promise);
-                    on_rejected.push(Value::Builtin(Rc::new(move |vm, args| {
-                        if *reject_called.borrow() {
-                            return Ok(Value::Undefined);
-                        }
-                        *reject_called.borrow_mut() = true;
-                        let off = if args.len() > 1 { 1 } else { 0 };
-                        let r = args.get(off).cloned().unwrap_or(Value::Undefined);
-                        reject_pending_promise(vm, &res_p2, r);
-                        Ok(Value::Undefined)
-                    })));
-                    return Ok(());
-                }
-                PromiseState::Fulfilled(v) => {
-                    let v = v.clone();
-                    let resolve_called = Rc::clone(&already_resolved);
-                    let res_p = Rc::clone(result_promise);
-                    vm.queue_microtask(move |vm| {
-                        if *resolve_called.borrow() {
-                            return Ok(());
-                        }
-                        *resolve_called.borrow_mut() = true;
-                        fulfill_pending_promise(vm, &res_p, v.clone());
-                        Ok(())
-                    });
-                    return Ok(());
-                }
-                PromiseState::Rejected(reason) => {
-                    let reason = reason.clone();
-                    let reject_called = Rc::clone(&already_resolved);
-                    let res_p = Rc::clone(result_promise);
-                    vm.queue_microtask(move |vm| {
-                        if *reject_called.borrow() {
-                            return Ok(());
-                        }
-                        *reject_called.borrow_mut() = true;
-                        reject_pending_promise(vm, &res_p, reason.clone());
-                        Ok(())
-                    });
-                    return Ok(());
-                }
-            }
-        }
-
-        if value.is_object() {
-            let then_val =
-                vm.get_property_host(&value, &PropertyKey::String("then".to_string()))?;
-            if Vm::is_callable_value(&then_val) {
-                // Per-spec PromiseResolveThenableJob semantics: calling a thenable's
-                // `then` should not synchronously settle the outer promise. Instead
-                // schedule a microtask that will invoke `then` with resolve/reject
-                // callbacks. This preserves observable job ordering when a thenable
-                // calls back synchronously.
-                let resolve_called = Rc::clone(&already_resolved);
-                let res_p = Rc::clone(result_promise);
-                let thenable = value.clone();
-                let then_func = then_val;
-
-                vm.queue_microtask(move |vm| {
-                    // Build resolve and reject callbacks that will settle res_p
-                    let resolve_called_inner = Rc::clone(&resolve_called);
-                    let res_p_inner = Rc::clone(&res_p);
-                    let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
-                        if *resolve_called_inner.borrow() {
-                            return Ok(Value::Undefined);
-                        }
-                        *resolve_called_inner.borrow_mut() = true;
-                        let off = if args.len() > 1 { 1 } else { 0 };
-                        let v = args.get(off).cloned().unwrap_or(Value::Undefined);
-                        resolve_promise_with_value(vm, &res_p_inner, v)?;
-                        Ok(Value::Undefined)
-                    }));
-
-                    let reject_called_inner = Rc::clone(&resolve_called);
-                    let res_p2_inner = Rc::clone(&res_p);
-                    let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
-                        if *reject_called_inner.borrow() {
-                            return Ok(Value::Undefined);
-                        }
-                        *reject_called_inner.borrow_mut() = true;
-                        let off = if args.len() > 1 { 1 } else { 0 };
-                        let r = args.get(off).cloned().unwrap_or(Value::Undefined);
-                        reject_pending_promise(vm, &res_p2_inner, r);
-                        Ok(Value::Undefined)
-                    }));
-
-                    // Call the then function with the thenable as `this`.
-                    // Errors thrown here should reject the promise.
-                    match vm.call_value_with_this(&then_func, &thenable, &[resolve_cb, reject_cb]) {
-                        Ok(_) => Ok(()),
-                        Err(err) => {
-                            let reason = vm
-                                .last_uncaught_exception
-                                .take()
-                                .unwrap_or(Value::String(format!("{}", err)));
-                            reject_pending_promise(vm, &res_p, reason);
-                            Ok(())
-                        }
-                    }
-                });
-                return Ok(());
-            }
-        }
-
-        if !*already_resolved.borrow() {
-            *already_resolved.borrow_mut() = true;
-            fulfill_pending_promise(vm, result_promise, value);
-        }
-        Ok(())
-    }
-
     resolve_promise_with_value_inner(vm, result_promise, value, Rc::new(RefCell::new(false)))
 }
 
@@ -646,6 +647,7 @@ pub(crate) fn fulfill_pending_promise(
     }
 }
 
+/// Rejects a pending promise with a reason, ensuring the promise is not already resolved.
 pub(crate) fn reject_pending_promise(
     vm: &mut Vm,
     promise: &Rc<RefCell<PromiseState>>,
@@ -682,7 +684,7 @@ pub(crate) fn reject_pending_promise(
 fn shadowrealm_evaluate(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::errors::RuntimeError> {
     let target = args.first().cloned().unwrap_or(Value::Undefined);
     let record = require_shadow_realm_record(vm, &target)?;
-    let source = match args.first() {
+    let source = match args.get(1) {
         Some(Value::String(s)) => s.clone(),
         _ => {
             return Err(
@@ -708,31 +710,29 @@ fn shadowrealm_evaluate(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
     let mut transfer_set: Option<HashSet<usize>> = None;
     if let Some(Value::Array(arr_rc, _)) = args.get(2) {
         let mut set = HashSet::new();
-        for slot in arr_rc.borrow().iter().cloned() {
-            if let Some(v) = slot {
-                match v {
-                    Value::Object(obj_rc) => {
-                        // Look up [[ArrayBufferData]] slot and grab underlying
-                        // array backing Rc pointer address.
-                        if let Some(PropertyDescriptor::Data { value: ab_data, .. }) = obj_rc
-                            .borrow()
-                            .properties
-                            .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
-                            .cloned()
-                            && let Value::Array(backing_rc, _) = ab_data
-                        {
-                            set.insert(Rc::as_ptr(&backing_rc) as usize);
-                            continue;
-                        }
-                        return Err(vm.throw_type_error(
-                            "Transfer list entries must be ArrayBuffer objects",
-                        ));
+        for v in arr_rc.borrow().iter().flatten().cloned() {
+            match v {
+                Value::Object(obj_rc) => {
+                    // Look up [[ArrayBufferData]] slot and grab underlying
+                    // array backing Rc pointer address.
+                    if let Some(PropertyDescriptor::Data { value: ab_data, .. }) = obj_rc
+                        .borrow()
+                        .properties
+                        .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
+                        .cloned()
+                        && let Value::Array(backing_rc, _) = ab_data
+                    {
+                        set.insert(Rc::as_ptr(&backing_rc) as usize);
+                        continue;
                     }
-                    _ => {
-                        return Err(vm.throw_type_error(
-                            "Transfer list entries must be ArrayBuffer objects",
-                        ));
-                    }
+                    return Err(
+                        vm.throw_type_error("Transfer list entries must be ArrayBuffer objects")
+                    );
+                }
+                _ => {
+                    return Err(
+                        vm.throw_type_error("Transfer list entries must be ArrayBuffer objects")
+                    );
                 }
             }
         }
