@@ -22,14 +22,8 @@
 //! - Dead code elimination
 //! - Constant folding
 
-use crate::{
-    ObjectData, Vm,
-    bytecode::{Chunk, Op},
-    value::Value,
-};
+use crate::bytecode::{Chunk, Op};
 use oxc_ast::ast as oast;
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub mod core;
