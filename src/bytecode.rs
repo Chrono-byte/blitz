@@ -61,6 +61,12 @@ pub struct Chunk {
     pub lines: Vec<u32>,
     /// Original source text for this chunk
     pub source_text: Rc<String>,
+    /// Root script slot type annotations.
+    pub root_slot_types: Vec<Option<Type>>,
+    /// Root script binding names.
+    pub root_slot_names: Vec<Option<String>>,
+    /// Root script temporal dead zone flags.
+    pub root_lexical_tdz: Vec<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +127,9 @@ impl Chunk {
             functions: Vec::new(),
             lines: Vec::new(),
             source_text,
+            root_slot_types: Vec::new(),
+            root_slot_names: Vec::new(),
+            root_lexical_tdz: Vec::new(),
         }
     }
 

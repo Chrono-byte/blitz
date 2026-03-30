@@ -259,6 +259,9 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
         new_chunk.code = rc_chunk.code.clone();
         new_chunk.constants = rc_chunk.constants.clone();
         new_chunk.lines = rc_chunk.lines.clone();
+        new_chunk.root_slot_types = rc_chunk.root_slot_types.iter().map(|_| None).collect();
+        new_chunk.root_slot_names = rc_chunk.root_slot_names.clone();
+        new_chunk.root_lexical_tdz = rc_chunk.root_lexical_tdz.clone();
         // Slot/global type annotations removed in JS-first mode; nothing to do.
 
         // Process functions
@@ -978,17 +981,6 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
             *state = PromiseState::Fulfilled(value);
         }
         Err(reason) => {
-            let mut debug_vm = Vm::new(vm.globals_rc());
-            let reason_name = debug_vm
-                .get_property_host(&reason, &PropertyKey::String("name".to_string()))
-                .ok()
-                .map(|v| v.to_string());
-            eprintln!(
-                "[dynamic import debug] rejection type={}, name={:?}, value={}",
-                reason.type_name(),
-                reason_name,
-                reason
-            );
             let mut state = promise.borrow_mut();
             *state = PromiseState::Rejected(reason);
         }

@@ -155,6 +155,11 @@ impl Compiler {
         }
 
         self.emit(Op::Return, LINE);
+        if self.is_root {
+            self.chunk.root_slot_types = self.local_types.clone();
+            self.chunk.root_slot_names = self.locals.iter().cloned().map(Some).collect();
+            self.chunk.root_lexical_tdz = self.local_tdz.clone();
+        }
         Ok(std::mem::take(&mut self.chunk))
     }
 }

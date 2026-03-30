@@ -450,6 +450,7 @@ impl Vm {
                 _ => None,
             })
             .unwrap_or(Value::Undefined);
+        self.initialize_root_bindings();
 
         loop {
             match self.step(None) {
@@ -476,6 +477,43 @@ impl Vm {
                 }
             }
         }
+    }
+
+    fn initialize_root_bindings(&mut self) {
+        let slot_names = self.chunk.root_slot_names.clone();
+        let slot_tdz = self.chunk.root_lexical_tdz.clone();
+        let slot_types = self.chunk.root_slot_types.clone();
+        let slot_count = slot_names.len().max(slot_tdz.len()).max(slot_types.len());
+        if slot_count == 0 {
+            return;
+        }
+
+        self.locals = std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
+            .take(slot_count)
+            .collect();
+        for (idx, is_tdz) in slot_tdz.iter().copied().enumerate() {
+            if is_tdz && idx < self.locals.len() {
+                *self.locals[idx].borrow_mut() = Value::Uninitialized;
+            }
+        }
+
+        let root_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(Rc::clone(
+            &self.lexical_env,
+        )))));
+        for (idx, maybe_name) in slot_names.iter().enumerate() {
+            if let Some(name) = maybe_name
+                && idx < self.locals.len()
+            {
+                let initialized = !slot_tdz.get(idx).copied().unwrap_or(false);
+                root_env.borrow_mut().create_mutable_binding(
+                    name.clone(),
+                    Rc::clone(&self.locals[idx]),
+                    initialized,
+                );
+            }
+        }
+        self.lexical_env = root_env;
+        self.current_slot_types = Some(slot_types);
     }
 
     // -----------------------------------------------------------------------
@@ -4973,6 +5011,9 @@ mod tests {
             functions: vec![],
             lines: vec![1],
             source_text: Rc::new(String::new()),
+            root_slot_types: vec![],
+            root_slot_names: vec![],
+            root_lexical_tdz: vec![],
         });
         vm.ip = 0;
         vm.stack.push(obj.clone());
