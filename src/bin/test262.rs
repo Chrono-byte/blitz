@@ -28,6 +28,7 @@ use std::process::exit;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use clap::Parser as ClapParser;
 use oxc_span::SourceType;
@@ -458,10 +459,6 @@ fn builtin_eval_script(globals: &Rc<RefCell<ObjectData>>, args: &[Value]) -> Res
 /// fresh intrinsics (not a heap clone) and evalScript that shares globals.
 fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     let mut data = ObjectData::new();
-    let agent_reports: Rc<RefCell<std::collections::VecDeque<String>>> =
-        Rc::new(RefCell::new(std::collections::VecDeque::new()));
-    let agent_clock_start = std::time::Instant::now();
-    let mut agent_data = ObjectData::new();
     let function_proto = globals
         .borrow()
         .properties
@@ -498,60 +495,6 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
         Value::BuiltinObject(f, props)
     };
 
-    {
-        let agent_reports = Rc::clone(&agent_reports);
-        agent_data.properties.insert(
-            PropertyKey::String("getReport".to_string()),
-            PropertyDescriptor::data(host_builtin(Rc::new(move |_vm, _args| {
-                Ok(match agent_reports.borrow_mut().pop_front() {
-                    Some(msg) => Value::String(msg),
-                    None => Value::Null,
-                })
-            }))),
-        );
-    }
-    {
-        let agent_reports = Rc::clone(&agent_reports);
-        agent_data.properties.insert(
-            PropertyKey::String("report".to_string()),
-            PropertyDescriptor::data(host_builtin(Rc::new(move |vm, args| {
-                let msg = match args.first() {
-                    Some(v) => vm.to_string(v)?,
-                    None => String::new(),
-                };
-                agent_reports.borrow_mut().push_back(msg);
-                Ok(Value::Undefined)
-            }))),
-        );
-    }
-    agent_data.properties.insert(
-        PropertyKey::String("sleep".to_string()),
-        PropertyDescriptor::data(host_builtin(Rc::new(|vm, args| {
-            let ms = match args.first() {
-                Some(v) => vm.to_number_value(v)?,
-                None => 0.0,
-            };
-            if ms.is_finite() && ms > 0.0 {
-                thread::sleep(std::time::Duration::from_millis(ms as u64));
-            }
-            Ok(Value::Undefined)
-        }))),
-    );
-    agent_data.properties.insert(
-        PropertyKey::String("monotonicNow".to_string()),
-        PropertyDescriptor::data(host_builtin(Rc::new(move |_vm, _args| {
-            Ok(Value::Number(
-                agent_clock_start.elapsed().as_secs_f64() * 1000.0,
-            ))
-        }))),
-    );
-    for name in ["start", "broadcast", "leaving", "receiveBroadcast"] {
-        agent_data.properties.insert(
-            PropertyKey::String(name.to_string()),
-            PropertyDescriptor::data(host_builtin(Rc::new(|_vm, _args| Ok(Value::Undefined)))),
-        );
-    }
-
     // evalScript: shares globals via Rc::clone (not deep clone)
     let eval_globals = Rc::clone(globals);
     data.properties.insert(
@@ -586,10 +529,22 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
             Ok(Value::Undefined)
         }))),
     );
+    data.properties.insert(
+        PropertyKey::String("gc".to_string()),
+        PropertyDescriptor::data(host_builtin(Rc::new(|_vm, _args| {
+            Err("gc not supported".into())
+        }))),
+    );
+    data.properties.insert(
+        PropertyKey::String("AbstractModuleSource".to_string()),
+        PropertyDescriptor::data(Value::Undefined),
+    );
 
     data.properties.insert(
         PropertyKey::String("agent".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(agent_data)))),
+        PropertyDescriptor::data(host_builtin(Rc::new(|_vm, _args| {
+            Err("agent not supported".into())
+        }))),
     );
 
     // createRealm: builds a FRESH realm with fresh intrinsics, NOT a heap clone.
@@ -597,37 +552,25 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     data.properties.insert(
         PropertyKey::String("createRealm".to_string()),
         PropertyDescriptor::data(host_builtin(Rc::new(|_vm, _args| {
-            // Create a fresh global object for the new realm.
             let realm_global = Rc::new(RefCell::new(ObjectData::new()));
 
-            // Install builtins from scratch — gives each realm distinct
-            // constructor/prototype identities. This is correct per spec:
-            // Realm = fresh intrinsics, not a clone of the parent.
             runtime_utils::install_minimal_kernel_constructors(&realm_global);
 
-            // Copy the calling realm's $262 object structure into the new realm.
             let new_262 = make_test262_object(&realm_global);
 
-            // Wire the new realm's global to also have a $262 property.
             realm_global.borrow_mut().properties.insert(
                 PropertyKey::String("$262".to_string()),
                 PropertyDescriptor::data(new_262.clone()),
             );
 
-            // The $262 object also exposes `global` pointing to the realm's global.
-            let mut realm_wrapper = ObjectData::new();
-            realm_wrapper.properties.insert(
-                PropertyKey::String("global".to_string()),
-                PropertyDescriptor::data(Value::Object(Rc::clone(&realm_global))),
-            );
-            // Copy all properties from the $262 object
-            if let Value::Object(ref obj) = new_262 {
-                for (k, v) in &obj.borrow().properties {
-                    realm_wrapper.properties.insert(k.clone(), v.clone());
-                }
+            if let Value::Object(obj) = &new_262 {
+                obj.borrow_mut().properties.insert(
+                    PropertyKey::String("global".to_string()),
+                    PropertyDescriptor::data(Value::Object(Rc::clone(&realm_global))),
+                );
             }
 
-            Ok(Value::Object(Rc::new(RefCell::new(realm_wrapper))))
+            Ok(new_262)
         }))),
     );
 
@@ -1003,6 +946,17 @@ fn run_test_file(
             }
         }
 
+        if let Some(m) = &meta
+            && let Some(neg) = &m.negative
+            && neg.phase == "resolution"
+        {
+            return Err(format!(
+                "{} ({}): UNSUPPORTED resolution phase",
+                path.display(),
+                mode_name
+            ));
+        }
+
         // Otherwise, parse must succeed
         let session = match Parser::parse_source(&run_src) {
             Ok(s) => s,
@@ -1044,13 +998,26 @@ fn run_test_file(
                         Err(e)
                     } else {
                         // Now check if $DONE was called
-                        match done_state.borrow().as_ref() {
-                            Some(None) => Ok(v),
-                            Some(Some(done_err)) => {
-                                Err(format!("async test failed: {}", done_err).into())
+                        let start = Instant::now();
+                        let timeout = Duration::from_secs(2);
+
+                        let done_result = loop {
+                            if let Some(state) = done_state.borrow().as_ref() {
+                                let async_result = match state {
+                                    None => Ok(v),
+                                    Some(err) => Err(format!("async test failed: {}", err).into()),
+                                };
+                                break async_result;
                             }
-                            None => Err("async test did not call $DONE".into()),
-                        }
+
+                            if start.elapsed() > timeout {
+                                break Err("async test timeout".into());
+                            }
+
+                            thread::sleep(Duration::from_millis(10));
+                        };
+
+                        done_result
                     }
                 }
             }
@@ -1063,15 +1030,29 @@ fn run_test_file(
             && let Some(neg) = &m.negative
             && neg.phase == "runtime"
         {
-            if run_result.is_err() {
-                // ok - expected runtime error
-                continue;
-            } else {
-                return Err(format!(
-                    "{} ({}): expected runtime error but execution succeeded",
-                    path.display(),
-                    mode_name
-                ));
+            match &run_result {
+                Err(e) => {
+                    if let Some(expected) = &neg.ty {
+                        let err_str = e.to_string();
+                        if !err_str.contains(expected) {
+                            return Err(format!(
+                                "{} ({}): expected error type {}, got {}",
+                                path.display(),
+                                mode_name,
+                                expected,
+                                err_str
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                Ok(_) => {
+                    return Err(format!(
+                        "{} ({}): expected runtime error but execution succeeded",
+                        path.display(),
+                        mode_name
+                    ));
+                }
             }
         }
 
