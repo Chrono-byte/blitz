@@ -2217,7 +2217,7 @@ impl Compiler {
                 if y.delegate {
                     self.emit(Op::YieldStar, LINE);
                 } else {
-                    self.emit(Op::Undefined, LINE);
+                    self.emit(Op::Yield, LINE);
                 }
             }
             OExpr::BinaryExpression(b) => {
@@ -2534,11 +2534,12 @@ impl Compiler {
                 // class-expressions from lowering to `Undefined` which breaks
                 // usages like `var C = class {}` followed by `new C()`.
                 let name =
-                    c.id.as_ref().map_or_else(|| "<anonymous>".to_string(), |id| id.name.to_string());
+                    c.id.as_ref()
+                        .map_or_else(|| "<anonymous>".to_string(), |id| id.name.to_string());
                 let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
                 ctor_chunk.write(Op::Return as u8, LINE);
                 let proto = FunctionProto {
-                    name: name,
+                    name,
                     span: c.span,
                     arity: 0,
                     chunk: Rc::new(ctor_chunk),
