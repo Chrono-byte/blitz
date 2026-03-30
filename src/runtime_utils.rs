@@ -180,6 +180,10 @@ fn parse_float_prefix_len(s: &str) -> Option<usize> {
     Some(end_index)
 }
 
+fn is_byte_offset_aligned(byte_offset: usize, element_count: usize) -> bool {
+    element_count == 1 || byte_offset % element_count == 0
+}
+
 fn parse_special_float(s: &str) -> Option<f64> {
     if s.strip_prefix("+Infinity").is_some() {
         return Some(f64::INFINITY);
@@ -4130,7 +4134,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                             } else {
                                 to_index(vm, &byte_offset_arg)?
                             };
-                            if byte_offset % $element_count != 0 {
+                            if !is_byte_offset_aligned(byte_offset, $element_count) {
                                 return Err(vm.throw_range_error("Invalid typed array offset"));
                             }
                             let length_from_spec = if matches!(length_arg, Value::Undefined) {
