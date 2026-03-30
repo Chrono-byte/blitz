@@ -2,7 +2,9 @@ use crate::bytecode::{Chunk, FunctionProto, Op};
 use crate::environment::EnvironmentRecord;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
-use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value};
+use crate::value::{
+    BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
+};
 use crate::vm::state::*;
 use num_bigint::BigInt as BigIntValue;
 use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
@@ -695,7 +697,7 @@ impl Vm {
 
             match value {
                 Some(Value::Array(arr, _)) => {
-                    flat.extend(arr.borrow().iter().filter_map(|v| v.clone()));
+                    flat.extend(arr.borrow().iter().filter_map(Clone::clone));
                 }
                 other => {
                     let this_for_iter = other.as_ref().unwrap_or(&Value::Undefined).clone();
@@ -772,7 +774,8 @@ impl Vm {
             Value::Closure { ref proto, env, .. } => {
                 let call_args = self.prepare_call_args(&flat, proto)?;
                 if proto.is_async {
-                    let promise = self.invoke_async_closure(proto, &env, call_args, Value::Undefined)?;
+                    let promise =
+                        self.invoke_async_closure(proto, &env, call_args, Value::Undefined)?;
                     self.stack.push(promise);
                 } else {
                     self.push_call_frame(proto, &env, call_args, Value::Undefined)?;
@@ -780,10 +783,9 @@ impl Vm {
             }
             _ => {
                 self.dump_diag("Spread call failed: callee not callable", &callee);
-                return Err(self.throw_type_error(&format!(
-                    "{} is not a function",
-                    callee.type_name()
-                )));
+                return Err(
+                    self.throw_type_error(&format!("{} is not a function", callee.type_name()))
+                );
             }
         }
 
@@ -2121,8 +2123,7 @@ impl Vm {
                     crate::trace::value_string("[trace] to_primitive value", v);
                 }
                 // Try @@toPrimitive if present.
-                let to_prim_key =
-                    PropertyKey::Symbol(SymbolId::well_known_to_primitive());
+                let to_prim_key = PropertyKey::Symbol(SymbolId::well_known_to_primitive());
                 if let Ok(method) = get_property(v, &to_prim_key, 0)
                     && matches!(
                         method,
@@ -2344,9 +2345,7 @@ impl Vm {
                         d.properties.get(&PropertyKey::String("_id".to_string()))
                     && let Value::Number(n) = value
                 {
-                    return Ok(PropertyKey::Symbol(SymbolId::well_known(
-                        *n as u64,
-                    )));
+                    return Ok(PropertyKey::Symbol(SymbolId::well_known(*n as u64)));
                 }
                 let prim = self.to_primitive(v, Some("string"))?;
                 match prim {
@@ -4082,8 +4081,7 @@ impl Vm {
         constructor: &Value,
     ) -> Result<bool, crate::errors::RuntimeError> {
         // Per spec: if constructor has @@hasInstance, call it.
-        let has_instance_key =
-            PropertyKey::Symbol(SymbolId::well_known_has_instance());
+        let has_instance_key = PropertyKey::Symbol(SymbolId::well_known_has_instance());
         if let Ok(method) = get_property(constructor, &has_instance_key, 0)
             && matches!(
                 method,
