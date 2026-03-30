@@ -54,9 +54,13 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::rc::Weak;
+use std::sync::Mutex;
 
 use num_bigint::BigInt as BigIntValue;
 use num_traits::Zero;
+
+/// Shared mutable slot for live bindings and captured values.
+pub type ValueSlot = Rc<Mutex<Value>>;
 
 /// A weak reference to an ObjectData that can be upgraded when needed.
 /// This helps prevent reference cycles in prototype chains.
@@ -342,7 +346,7 @@ pub enum Value {
         /// Function prototype
         proto: Rc<FunctionProto>,
         /// Captured / closed-over binding cells
-        env: Rc<RefCell<Vec<Rc<RefCell<Value>>>>>,
+        env: Rc<Mutex<Vec<ValueSlot>>>,
         /// Lexically captured `this` value for arrow functions.
         lexical_this: Option<Box<Value>>,
         /// Mutable property bag for function object properties (e.g., `prototype`).

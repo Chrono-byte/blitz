@@ -10,13 +10,14 @@ use std::rc::Rc;
 use std::rc::Weak;
 
 use crate::errors::RuntimeError;
-use crate::value::Value;
+use crate::mutex_compat::MutexBorrowExt;
+use crate::value::{Value, ValueSlot};
 
 #[derive(Clone)]
 /// A single lexical binding entry inside an environment record.
 pub struct Binding {
     /// Shared storage cell for the binding value.
-    pub cell: Rc<RefCell<Value>>,
+    pub cell: ValueSlot,
     /// Whether assignment is permitted after initialization.
     pub mutable: bool,
     /// Whether the binding has been initialized.
@@ -45,12 +46,7 @@ impl EnvironmentRecord {
     }
 
     /// Create a mutable binding in this record.
-    pub fn create_mutable_binding(
-        &mut self,
-        name: String,
-        cell: Rc<RefCell<Value>>,
-        initialized: bool,
-    ) {
+    pub fn create_mutable_binding(&mut self, name: String, cell: ValueSlot, initialized: bool) {
         self.bindings.insert(
             name,
             Binding {
@@ -62,12 +58,7 @@ impl EnvironmentRecord {
     }
 
     /// Create an immutable binding in this record.
-    pub fn create_immutable_binding(
-        &mut self,
-        name: String,
-        cell: Rc<RefCell<Value>>,
-        initialized: bool,
-    ) {
+    pub fn create_immutable_binding(&mut self, name: String, cell: ValueSlot, initialized: bool) {
         self.bindings.insert(
             name,
             Binding {
@@ -93,10 +84,10 @@ impl EnvironmentRecord {
             }
             return Ok(Some(binding.cell.borrow().clone()));
         }
-        if let Some(outer) = &self.outer {
-            if let Some(outer) = outer.upgrade() {
-                return outer.borrow().get_binding_value(name);
-            }
+        if let Some(outer) = &self.outer
+            && let Some(outer) = outer.upgrade()
+        {
+            return outer.borrow().get_binding_value(name);
         }
         Ok(None)
     }
@@ -114,10 +105,10 @@ impl EnvironmentRecord {
             binding.initialized = true;
             return Ok(true);
         }
-        if let Some(outer) = &self.outer {
-            if let Some(outer) = outer.upgrade() {
-                return outer.borrow_mut().set_mutable_binding(name, value);
-            }
+        if let Some(outer) = &self.outer
+            && let Some(outer) = outer.upgrade()
+        {
+            return outer.borrow_mut().set_mutable_binding(name, value);
         }
         Ok(false)
     }
@@ -130,10 +121,10 @@ impl EnvironmentRecord {
         for binding in self.bindings.values() {
             values.push(binding.cell.borrow().clone());
         }
-        if let Some(outer) = &self.outer {
-            if let Some(outer) = outer.upgrade() {
-                outer.borrow().collect_binding_values(values);
-            }
+        if let Some(outer) = &self.outer
+            && let Some(outer) = outer.upgrade()
+        {
+            outer.borrow().collect_binding_values(values);
         }
     }
 }
@@ -141,11 +132,12 @@ impl EnvironmentRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn uninitialized_binding_read_throws() {
         let mut env = EnvironmentRecord::new(None);
-        let cell = Rc::new(RefCell::new(Value::Uninitialized));
+        let cell = Rc::new(Mutex::new(Value::Uninitialized));
         env.create_mutable_binding("x".to_string(), cell, false);
         let err = env
             .get_binding_value("x")
@@ -159,7 +151,7 @@ mod tests {
     #[test]
     fn immutable_binding_cannot_be_reassigned() {
         let mut env = EnvironmentRecord::new(None);
-        let cell = Rc::new(RefCell::new(Value::Number(1.0)));
+        let cell = Rc::new(Mutex::new(Value::Number(1.0)));
         env.create_immutable_binding("x".to_string(), Rc::clone(&cell), true);
         let err = env
             .set_mutable_binding("x", Value::Number(2.0))

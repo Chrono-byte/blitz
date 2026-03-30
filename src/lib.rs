@@ -54,6 +54,7 @@ pub mod errors;
 pub mod gc;
 pub mod lexer;
 pub mod module;
+pub mod mutex_compat;
 pub mod parser;
 pub mod realm;
 pub mod resolver;

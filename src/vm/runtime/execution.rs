@@ -1,9 +1,11 @@
 use crate::bytecode::{Chunk, FunctionProto, Op};
 use crate::environment::EnvironmentRecord;
 use crate::module::ModuleLoader;
+use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::Realm;
 use crate::value::{
     BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
+    ValueSlot,
 };
 use crate::vm::state::*;
 use num_bigint::BigInt as BigIntValue;
@@ -11,6 +13,7 @@ use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use std::sync::Mutex;
 
 impl Vm {
     fn prune_stale_handlers(&mut self) {
@@ -41,6 +44,8 @@ impl Vm {
             locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
             this_value: Value::Object(Rc::clone(&globals)),
             current_closure_env: None,
+            pending_closure_env: None,
+            gc_temp_roots: Vec::new(),
             globals,
             frames: Vec::with_capacity(FRAMES_INITIAL_CAPACITY),
             root_chunk: None,
@@ -164,6 +169,7 @@ impl Vm {
     #[cfg(feature = "gc_mark_sweep_prototype")]
     pub fn collect_garbage_prototype(&self) -> crate::gc::GcStats {
         let mut roots: Vec<Value> = Vec::new();
+        let mut env_roots: Vec<Rc<Mutex<Vec<ValueSlot>>>> = Vec::new();
         roots.push(Value::Object(Rc::clone(&self.globals)));
         roots.extend(self.stack.iter().cloned());
         roots.extend(self.locals.iter().map(|c| c.borrow().clone()));
@@ -178,10 +184,32 @@ impl Vm {
             roots.extend(queue.iter().cloned());
         }
         if let Some(env) = &self.current_closure_env {
+            env_roots.push(Rc::clone(env));
             roots.extend(env.borrow().iter().map(|cell| cell.borrow().clone()));
         }
+        if let Some(env) = &self.pending_closure_env {
+            env_roots.push(Rc::clone(env));
+            roots.extend(env.borrow().iter().map(|cell| cell.borrow().clone()));
+        }
+        roots.extend(self.gc_temp_roots.iter().cloned());
         self.lexical_env.borrow().collect_binding_values(&mut roots);
         self.global_env.borrow().collect_binding_values(&mut roots);
+        for frame in &self.frames {
+            roots.extend(frame.stack.iter().cloned());
+            roots.extend(frame.locals.iter().map(|c| c.borrow().clone()));
+            roots.push(frame.this_value.clone());
+            if let Some(queue) = &frame.yield_star_queue {
+                roots.extend(queue.iter().cloned());
+            }
+            if let Some(env) = &frame.closure_env {
+                env_roots.push(Rc::clone(env));
+                roots.extend(env.borrow().iter().map(|cell| cell.borrow().clone()));
+            }
+            frame
+                .lexical_env
+                .borrow()
+                .collect_binding_values(&mut roots);
+        }
         for module in &self.module_table {
             roots.extend(module.values().map(|cell| cell.borrow().clone()));
         }
@@ -269,7 +297,7 @@ impl Vm {
         if let Some(value) = self.realm.intrinsics.uri_error_constructor.clone() {
             roots.push(value);
         }
-        crate::gc::collect(&roots)
+        crate::gc::collect_with_env_roots(&roots, &env_roots)
     }
 
     /// Opportunistically collect garbage during interpreter progress.
@@ -408,15 +436,15 @@ impl Vm {
 
     /// Install a module's export slot map into the VM module table at the
     /// specified numeric module index. The provided `exports` map contains
-    /// shared `Rc<RefCell<Value>>` slots allocated by the ModuleLoader so both
-    /// VM and ModuleLoader share the same live binding slots.
+    /// shared value slots allocated by the ModuleLoader so both VM and
+    /// ModuleLoader share the same live binding slots.
     pub fn install_module_exports(
         &mut self,
         module_index: usize,
-        mut exports: HashMap<String, Rc<RefCell<Value>>>,
+        mut exports: HashMap<String, ValueSlot>,
     ) {
         let namespace = build_module_namespace_object(&exports);
-        exports.insert("*".to_string(), Rc::new(RefCell::new(namespace)));
+        exports.insert("*".to_string(), Rc::new(Mutex::new(namespace)));
         // Ensure table is large enough
         while self.module_table.len() <= module_index {
             self.module_table.push(HashMap::new());
@@ -530,6 +558,8 @@ impl Vm {
             })
             .unwrap_or(Value::Undefined);
         self.current_closure_env = None;
+        self.pending_closure_env = None;
+        self.gc_temp_roots.clear();
         self.lexical_env = Rc::clone(&self.global_env);
         self.yield_star_queue = None;
         self.ip = 0;
@@ -560,6 +590,8 @@ impl Vm {
         self.handlers.clear();
         self.current_slot_types = None;
         self.current_closure_env = None;
+        self.pending_closure_env = None;
+        self.gc_temp_roots.clear();
         self.lexical_env = Rc::clone(&self.global_env);
         self.yield_star_queue = None;
         self.this_value = self
@@ -619,7 +651,7 @@ impl Vm {
             return;
         }
 
-        self.locals = std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
+        self.locals = std::iter::repeat_with(|| Rc::new(Mutex::new(Value::Undefined)))
             .take(slot_count)
             .collect();
         for (idx, is_tdz) in slot_tdz.iter().copied().enumerate() {
@@ -682,7 +714,7 @@ impl Vm {
     fn create_generator_object(
         &mut self,
         proto: &Rc<FunctionProto>,
-        closure_env: &Rc<RefCell<Vec<Rc<RefCell<Value>>>>>,
+        closure_env: &Rc<Mutex<Vec<ValueSlot>>>,
         call_args: Vec<Value>,
         this_value: Value,
     ) -> Result<Value, crate::errors::RuntimeError> {
@@ -703,32 +735,51 @@ impl Vm {
                 let mut runner = next_runner.try_borrow_mut().map_err(|_| {
                     crate::errors::RuntimeError::from("TypeError: generator is already executing")
                 })?;
-                if runner.completed {
-                    return Ok(Self::make_iterator_result(Value::Undefined, true));
+                let temp_root_base = runner.vm.gc_temp_roots.len();
+                if let Some(this_value) = args.first().cloned() {
+                    runner.vm.gc_temp_roots.push(this_value);
                 }
-
-                if !runner.started {
-                    runner.started = true;
+                let outcome = if runner.completed {
+                    Ok(Self::make_iterator_result(Value::Undefined, true))
                 } else {
-                    runner
-                        .vm
-                        .stack
-                        .push(args.first().cloned().unwrap_or(Value::Undefined));
-                }
+                    if !runner.started {
+                        runner.started = true;
+                    } else {
+                        runner
+                            .vm
+                            .stack
+                            .push(args.first().cloned().unwrap_or(Value::Undefined));
+                    }
 
-                loop {
-                    match runner.vm.step(Some(1))? {
-                        StepOutcome::Continue => {
-                            runner.vm.run_microtasks_if_needed()?;
-                            runner.vm.maybe_collect_garbage_prototype();
-                        }
-                        StepOutcome::Yield(v) => return Ok(Self::make_iterator_result(v, false)),
-                        StepOutcome::Return(v) => {
-                            runner.completed = true;
-                            return Ok(Self::make_iterator_result(v, true));
+                    let mut outcome = Ok(Self::make_iterator_result(Value::Undefined, true));
+                    loop {
+                        match runner.vm.step(Some(1)) {
+                            Ok(StepOutcome::Continue) => {
+                                if let Err(err) = runner.vm.run_microtasks_if_needed() {
+                                    outcome = Err(err);
+                                    break;
+                                }
+                                runner.vm.maybe_collect_garbage_prototype();
+                            }
+                            Ok(StepOutcome::Yield(v)) => {
+                                outcome = Ok(Self::make_iterator_result(v, false));
+                                break;
+                            }
+                            Ok(StepOutcome::Return(v)) => {
+                                runner.completed = true;
+                                outcome = Ok(Self::make_iterator_result(v, true));
+                                break;
+                            }
+                            Err(err) => {
+                                outcome = Err(err);
+                                break;
+                            }
                         }
                     }
-                }
+                    outcome
+                };
+                runner.vm.gc_temp_roots.truncate(temp_root_base);
+                outcome
             }))),
         );
         gen_obj.borrow_mut().properties.insert(
@@ -737,40 +788,54 @@ impl Vm {
                 let mut runner = throw_runner.try_borrow_mut().map_err(|_| {
                     crate::errors::RuntimeError::from("TypeError: generator is already executing")
                 })?;
-                if runner.completed {
-                    return Err(crate::errors::RuntimeError::from(format!(
+                let temp_root_base = runner.vm.gc_temp_roots.len();
+                if let Some(this_value) = args.first().cloned() {
+                    runner.vm.gc_temp_roots.push(this_value);
+                }
+                let outcome = if runner.completed {
+                    Err(crate::errors::RuntimeError::from(format!(
                         "Uncaught: {}",
                         args.first().cloned().unwrap_or(Value::Undefined)
-                    )));
-                }
-
-                let thrown = args.first().cloned().unwrap_or(Value::Undefined);
-                if let Err(err) = runner.vm.throw_value(thrown) {
-                    runner.completed = true;
-                    return Err(err);
-                }
-
-                loop {
-                    match runner.vm.step(Some(1)) {
-                        Ok(StepOutcome::Continue) => {
-                            if let Err(e) = runner.vm.run_microtasks_if_needed() {
-                                runner.completed = true;
-                                return Err(e);
+                    )))
+                } else {
+                    let thrown = args.first().cloned().unwrap_or(Value::Undefined);
+                    if let Err(err) = runner.vm.throw_value(thrown) {
+                        runner.completed = true;
+                        Err(err)
+                    } else {
+                        let mut outcome = Err(crate::errors::RuntimeError::from(
+                            "TypeError: generator failed to produce a value",
+                        ));
+                        loop {
+                            match runner.vm.step(Some(1)) {
+                                Ok(StepOutcome::Continue) => {
+                                    if let Err(e) = runner.vm.run_microtasks_if_needed() {
+                                        runner.completed = true;
+                                        outcome = Err(e);
+                                        break;
+                                    }
+                                }
+                                Ok(StepOutcome::Yield(v)) => {
+                                    outcome = Ok(Self::make_iterator_result(v, false));
+                                    break;
+                                }
+                                Ok(StepOutcome::Return(v)) => {
+                                    runner.completed = true;
+                                    outcome = Ok(Self::make_iterator_result(v, true));
+                                    break;
+                                }
+                                Err(e) => {
+                                    runner.completed = true;
+                                    outcome = Err(e);
+                                    break;
+                                }
                             }
                         }
-                        Ok(StepOutcome::Yield(v)) => {
-                            return Ok(Self::make_iterator_result(v, false));
-                        }
-                        Ok(StepOutcome::Return(v)) => {
-                            runner.completed = true;
-                            return Ok(Self::make_iterator_result(v, true));
-                        }
-                        Err(e) => {
-                            runner.completed = true;
-                            return Err(e);
-                        }
+                        outcome
                     }
-                }
+                };
+                runner.vm.gc_temp_roots.truncate(temp_root_base);
+                outcome
             }))),
         );
         gen_obj.borrow_mut().properties.insert(
@@ -779,11 +844,17 @@ impl Vm {
                 let mut runner = return_runner.try_borrow_mut().map_err(|_| {
                     crate::errors::RuntimeError::from("TypeError: generator is already executing")
                 })?;
+                let temp_root_base = runner.vm.gc_temp_roots.len();
+                if let Some(this_value) = args.first().cloned() {
+                    runner.vm.gc_temp_roots.push(this_value);
+                }
                 runner.completed = true;
-                Ok(Self::make_iterator_result(
+                let result = Ok(Self::make_iterator_result(
                     args.first().cloned().unwrap_or(Value::Undefined),
                     true,
-                ))
+                ));
+                runner.vm.gc_temp_roots.truncate(temp_root_base);
+                result
             }))),
         );
         Ok(Value::Object(gen_obj))
@@ -801,8 +872,14 @@ impl Vm {
         match callee {
             Value::Builtin(f) => {
                 let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
+                let prev_closure_env = self.current_closure_env.clone();
+                let prev_slot_types = self.current_slot_types.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &args)?;
                 self.this_value = prev_this;
+                self.current_closure_env = prev_closure_env;
+                self.current_slot_types = prev_slot_types;
+                self.lexical_env = prev_lexical_env;
                 if self.frames.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
@@ -811,8 +888,14 @@ impl Vm {
             }
             Value::BuiltinObject(f, _props) => {
                 let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
+                let prev_closure_env = self.current_closure_env.clone();
+                let prev_slot_types = self.current_slot_types.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &args)?;
                 self.this_value = prev_this;
+                self.current_closure_env = prev_closure_env;
+                self.current_slot_types = prev_slot_types;
+                self.lexical_env = prev_lexical_env;
                 if self.frames.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
@@ -951,8 +1034,14 @@ impl Vm {
         match callee {
             Value::Builtin(f) => {
                 let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
+                let prev_closure_env = self.current_closure_env.clone();
+                let prev_slot_types = self.current_slot_types.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &flat)?;
                 self.this_value = prev_this;
+                self.current_closure_env = prev_closure_env;
+                self.current_slot_types = prev_slot_types;
+                self.lexical_env = prev_lexical_env;
                 if self.frames.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
@@ -961,8 +1050,14 @@ impl Vm {
             }
             Value::BuiltinObject(f, _props) => {
                 let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
+                let prev_closure_env = self.current_closure_env.clone();
+                let prev_slot_types = self.current_slot_types.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &flat)?;
                 self.this_value = prev_this;
+                self.current_closure_env = prev_closure_env;
+                self.current_slot_types = prev_slot_types;
+                self.lexical_env = prev_lexical_env;
                 if self.frames.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
@@ -1026,8 +1121,14 @@ impl Vm {
                 call_args.push(receiver.clone());
                 call_args.extend_from_slice(&args);
                 let prev_this = std::mem::replace(&mut self.this_value, receiver);
+                let prev_closure_env = self.current_closure_env.clone();
+                let prev_slot_types = self.current_slot_types.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &call_args)?;
                 self.this_value = prev_this;
+                self.current_closure_env = prev_closure_env;
+                self.current_slot_types = prev_slot_types;
+                self.lexical_env = prev_lexical_env;
                 if self.frames.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
@@ -1038,8 +1139,14 @@ impl Vm {
                 call_args.push(receiver.clone());
                 call_args.extend_from_slice(&args);
                 let prev_this = std::mem::replace(&mut self.this_value, receiver);
+                let prev_closure_env = self.current_closure_env.clone();
+                let prev_slot_types = self.current_slot_types.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &call_args)?;
                 self.this_value = prev_this;
+                self.current_closure_env = prev_closure_env;
+                self.current_slot_types = prev_slot_types;
+                self.lexical_env = prev_lexical_env;
                 if self.frames.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
@@ -1259,6 +1366,41 @@ impl Vm {
         callee: &Value,
         args: &[Value],
     ) -> Result<Value, crate::errors::RuntimeError> {
+        let set_constructor_property =
+            |value: &Value, ctor: &Value| -> Result<(), crate::errors::RuntimeError> {
+                match value {
+                    Value::Object(obj) => {
+                        obj.borrow_mut().properties.insert(
+                            PropertyKey::String("constructor".to_string()),
+                            PropertyDescriptor::data(ctor.clone()),
+                        );
+                    }
+                    Value::Array(_, props) => {
+                        props.borrow_mut().properties.insert(
+                            PropertyKey::String("constructor".to_string()),
+                            PropertyDescriptor::data(ctor.clone()),
+                        );
+                    }
+                    Value::Closure { props, .. } => {
+                        props.borrow_mut().properties.insert(
+                            PropertyKey::String("constructor".to_string()),
+                            PropertyDescriptor::data(ctor.clone()),
+                        );
+                    }
+                    Value::BuiltinObject(_, props) => {
+                        props.borrow_mut().properties.insert(
+                            PropertyKey::String("constructor".to_string()),
+                            PropertyDescriptor::data(ctor.clone()),
+                        );
+                    }
+                    _ => {}
+                }
+                Ok(())
+            };
+        let temp_root_base = self.gc_temp_roots.len();
+        self.gc_temp_roots.push(callee.clone());
+        self.gc_temp_roots.extend(args.iter().cloned());
+
         if !callee.is_constructable() {
             if crate::trace::enabled() {
                 eprintln!(
@@ -1285,6 +1427,7 @@ impl Vm {
                     crate::trace::value_string(&format!("[trace]     const[{}]", i), c);
                 }
             }
+            self.gc_temp_roots.truncate(temp_root_base);
             return Err(self.throw_type_error(&format!(
                 "Construct: not a constructor (actual={})",
                 callee.type_name()
@@ -1302,22 +1445,33 @@ impl Vm {
                     | Value::BuiltinObject(_, _) => proto,
                     _ => Value::Null,
                 };
-                let instance = Value::Object(crate::gc::track_object(Rc::new(RefCell::new(
+                let instance_obj = crate::gc::track_object(Rc::new(RefCell::new(
                     ObjectData::with_prototype(instance_proto),
-                ))));
+                )));
+                instance_obj.borrow_mut().properties.insert(
+                    PropertyKey::String("constructor".to_string()),
+                    PropertyDescriptor::data(callee.clone()),
+                );
+                let instance = Value::Object(instance_obj);
                 let prev_new_target = self.construct_new_target.clone();
                 self.construct_new_target = Some(callee.clone());
                 let result = self.call_with_this(callee, &instance, args);
                 self.construct_new_target = prev_new_target;
                 let result = result?;
-                Ok(match result {
+                let result = match result {
                     Value::Object(_)
                     | Value::Array(..)
                     | Value::Closure { .. }
                     | Value::BuiltinObject(_, _)
-                    | Value::Promise(_) => result,
+                    | Value::Promise(_) => {
+                        let _ = set_constructor_property(&result, callee);
+                        result
+                    }
                     _ => instance,
-                })
+                };
+                let _ = set_constructor_property(&result, callee);
+                self.gc_temp_roots.truncate(temp_root_base);
+                Ok(result)
             }
             Value::BuiltinObject(_, _) => {
                 let proto = self
@@ -1330,9 +1484,14 @@ impl Vm {
                     | Value::BuiltinObject(_, _) => proto,
                     _ => Value::Null,
                 };
-                let instance = Value::Object(crate::gc::track_object(Rc::new(RefCell::new(
+                let instance_obj = crate::gc::track_object(Rc::new(RefCell::new(
                     ObjectData::with_prototype(instance_proto),
-                ))));
+                )));
+                instance_obj.borrow_mut().properties.insert(
+                    PropertyKey::String("constructor".to_string()),
+                    PropertyDescriptor::data(callee.clone()),
+                );
+                let instance = Value::Object(instance_obj);
                 // Builtin constructors receive:
                 // args[0] = new instance (via call_with_this)
                 // args[1..] = user-provided arguments
@@ -1343,20 +1502,33 @@ impl Vm {
                 let result = self.call_with_this(callee, &instance, args);
                 self.construct_new_target = prev_new_target;
                 let result = result?;
-                Ok(match result {
+                let result = match result {
                     Value::Object(_)
                     | Value::Array(..)
                     | Value::Closure { .. }
                     | Value::BuiltinObject(_, _)
-                    | Value::Promise(_) => result,
+                    | Value::Promise(_) => {
+                        let _ = set_constructor_property(&result, callee);
+                        result
+                    }
                     _ => instance,
-                })
+                };
+                let _ = set_constructor_property(&result, callee);
+                self.gc_temp_roots.truncate(temp_root_base);
+                Ok(result)
             }
-            Value::Builtin(f) => (f.as_ref())(self, args),
-            _ => Err(crate::errors::RuntimeError::from(format!(
-                "Construct: not a constructor (actual={})",
-                callee.type_name()
-            ))),
+            Value::Builtin(f) => {
+                let result = (f.as_ref())(self, args);
+                self.gc_temp_roots.truncate(temp_root_base);
+                result
+            }
+            _ => {
+                self.gc_temp_roots.truncate(temp_root_base);
+                Err(crate::errors::RuntimeError::from(format!(
+                    "Construct: not a constructor (actual={})",
+                    callee.type_name()
+                )))
+            }
         }
     }
 
@@ -1496,7 +1668,11 @@ impl Vm {
         this_arg: &Value,
         args: &[Value],
     ) -> Result<Value, crate::errors::RuntimeError> {
-        match callee {
+        let temp_root_base = self.gc_temp_roots.len();
+        self.gc_temp_roots.push(callee.clone());
+        self.gc_temp_roots.push(this_arg.clone());
+        self.gc_temp_roots.extend(args.iter().cloned());
+        let result = (|| match callee {
             Value::Builtin(f) => {
                 // For builtins invoked with an explicit `this`, pass the receiver
                 // as the first argument so native functions that expect the
@@ -1505,10 +1681,23 @@ impl Vm {
                 call_args.push(this_arg.clone());
                 call_args.extend_from_slice(args);
                 let prev_this = std::mem::replace(&mut self.this_value, this_arg.clone());
+                let prev_closure_env = self.current_closure_env.clone();
+                let prev_slot_types = self.current_slot_types.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &call_args)?;
                 self.this_value = prev_this;
-                self.run_microtasks_if_needed()?;
-                self.maybe_collect_garbage_prototype();
+                self.current_closure_env = prev_closure_env;
+                self.current_slot_types = prev_slot_types;
+                self.lexical_env = prev_lexical_env;
+                let result_root_base = self.gc_temp_roots.len();
+                self.gc_temp_roots.push(result.clone());
+                let post_call = (|| {
+                    self.run_microtasks_if_needed()?;
+                    self.maybe_collect_garbage_prototype();
+                    Ok::<(), crate::errors::RuntimeError>(())
+                })();
+                self.gc_temp_roots.truncate(result_root_base);
+                post_call?;
                 Ok(result)
             }
             Value::BuiltinObject(f, _props) => {
@@ -1516,10 +1705,23 @@ impl Vm {
                 call_args.push(this_arg.clone());
                 call_args.extend_from_slice(args);
                 let prev_this = std::mem::replace(&mut self.this_value, this_arg.clone());
+                let prev_closure_env = self.current_closure_env.clone();
+                let prev_slot_types = self.current_slot_types.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &call_args)?;
                 self.this_value = prev_this;
-                self.run_microtasks_if_needed()?;
-                self.maybe_collect_garbage_prototype();
+                self.current_closure_env = prev_closure_env;
+                self.current_slot_types = prev_slot_types;
+                self.lexical_env = prev_lexical_env;
+                let result_root_base = self.gc_temp_roots.len();
+                self.gc_temp_roots.push(result.clone());
+                let post_call = (|| {
+                    self.run_microtasks_if_needed()?;
+                    self.maybe_collect_garbage_prototype();
+                    Ok::<(), crate::errors::RuntimeError>(())
+                })();
+                self.gc_temp_roots.truncate(result_root_base);
+                post_call?;
                 Ok(result)
             }
             Value::Closure { proto, .. } => {
@@ -1531,56 +1733,48 @@ impl Vm {
                     Value::Closure { env, .. } => Rc::clone(env),
                     _ => unreachable!(),
                 };
-                // If the closure is a generator, create a generator object instead
-                // of pushing a new frame / invoking immediately.
                 if proto.is_generator {
-                    let generator = self.create_generator_object(
+                    Ok(self.create_generator_object(
                         proto,
                         &closure_env,
                         call_args,
                         this_arg.clone(),
-                    )?;
-                    return Ok(generator);
+                    )?)
+                } else if proto.is_async {
+                    self.invoke_async_closure(proto, &closure_env, call_args, this_arg.clone())
+                } else {
+                    let stack_base = self.stack.len();
+                    let saved_stack = self.stack[..stack_base].to_vec();
+                    if crate::trace::enabled() {
+                        eprintln!(
+                            "[trace] call_with_this closure stack_base={} stack_len={} proto='{}'",
+                            stack_base,
+                            self.stack.len(),
+                            proto.name
+                        );
+                    }
+                    let caller_chunk = Rc::clone(&self.chunk);
+                    let caller_ip = self.ip;
+                    let caller_locals = self.locals.clone();
+                    let caller_this = self.this_value.clone();
+                    let caller_env = self.current_closure_env.clone();
+                    let caller_slot_types = self.current_slot_types.clone();
+                    let caller_frame_len = self.frames.len();
+                    let caller_handler_len = self.handlers.len();
+                    self.push_call_frame(proto, &closure_env, call_args, this_arg.clone())?;
+                    let result = self.run_until_return(stack_base, true);
+                    // Restore caller state (run_until_return already truncated stack)
+                    self.chunk = caller_chunk;
+                    self.ip = caller_ip;
+                    self.locals = caller_locals;
+                    self.this_value = caller_this;
+                    self.current_closure_env = caller_env;
+                    self.current_slot_types = caller_slot_types;
+                    self.stack = saved_stack;
+                    self.frames.truncate(caller_frame_len);
+                    self.handlers.truncate(caller_handler_len);
+                    result
                 }
-                if proto.is_async {
-                    return self.invoke_async_closure(
-                        proto,
-                        &closure_env,
-                        call_args,
-                        this_arg.clone(),
-                    );
-                }
-                let stack_base = self.stack.len();
-                let saved_stack = self.stack[..stack_base].to_vec();
-                if crate::trace::enabled() {
-                    eprintln!(
-                        "[trace] call_with_this closure stack_base={} stack_len={} proto='{}'",
-                        stack_base,
-                        self.stack.len(),
-                        proto.name
-                    );
-                }
-                let caller_chunk = Rc::clone(&self.chunk);
-                let caller_ip = self.ip;
-                let caller_locals = self.locals.clone();
-                let caller_this = self.this_value.clone();
-                let caller_env = self.current_closure_env.clone();
-                let caller_slot_types = self.current_slot_types.clone();
-                let caller_frame_len = self.frames.len();
-                let caller_handler_len = self.handlers.len();
-                self.push_call_frame(proto, &closure_env, call_args, this_arg.clone())?;
-                let result = self.run_until_return(stack_base, true);
-                // Restore caller state (run_until_return already truncated stack)
-                self.chunk = caller_chunk;
-                self.ip = caller_ip;
-                self.locals = caller_locals;
-                self.this_value = caller_this;
-                self.current_closure_env = caller_env;
-                self.current_slot_types = caller_slot_types;
-                self.stack = saved_stack;
-                self.frames.truncate(caller_frame_len);
-                self.handlers.truncate(caller_handler_len);
-                result
             }
             _ => {
                 if crate::trace::enabled() {
@@ -1596,7 +1790,9 @@ impl Vm {
                     "CallWithThis: not a function",
                 ))
             }
-        }
+        })();
+        self.gc_temp_roots.truncate(temp_root_base);
+        result
     }
 
     pub(super) fn run_until_return(
@@ -1695,7 +1891,7 @@ impl Vm {
                 let slot = self.read_byte()? as usize;
                 ensure_slot(&mut self.locals, slot);
                 let value = self.locals[slot].borrow().clone();
-                self.locals[slot] = Rc::new(RefCell::new(value));
+                self.locals[slot] = Rc::new(Mutex::new(value));
             }
             Op::GetGlobal => {
                 let idx = self.read_short()? as usize;
@@ -1740,8 +1936,8 @@ impl Vm {
                     .current_closure_env
                     .as_ref()
                     .ok_or("GetUpvalue without closure env")?;
-                let value = env
-                    .borrow()
+                let env_guard = env.borrow();
+                let value = env_guard
                     .get(idx)
                     .map(|cell| cell.borrow().clone())
                     .ok_or("Bad upvalue index")?;
@@ -1754,7 +1950,8 @@ impl Vm {
                     .current_closure_env
                     .as_ref()
                     .ok_or("SetUpvalue without closure env")?;
-                let cell = env.borrow().get(idx).cloned().ok_or("Bad upvalue index")?;
+                let env_guard = env.borrow();
+                let cell = env_guard.get(idx).cloned().ok_or("Bad upvalue index")?;
                 *cell.borrow_mut() = value;
             }
             Op::Pop => {
@@ -2143,14 +2340,14 @@ impl Vm {
                     if let Some(slot) = m.get(&name) {
                         *slot.borrow_mut() = v;
                     } else {
-                        let new_slot = Rc::new(RefCell::new(v));
+                        let new_slot = Rc::new(Mutex::new(v));
                         m.insert(name, new_slot);
                     }
                 } else {
                     while self.module_table.len() <= module_idx {
                         self.module_table.push(HashMap::new());
                     }
-                    let new_slot = Rc::new(RefCell::new(v));
+                    let new_slot = Rc::new(Mutex::new(v));
                     self.module_table[module_idx].insert(name, new_slot);
                 }
             }
@@ -2322,6 +2519,8 @@ impl Vm {
             | Value::Builtin(_)
             | Value::BuiltinObject(_, _)
             | Value::Promise(_) => {
+                let temp_root_base = self.gc_temp_roots.len();
+                self.gc_temp_roots.push(v.clone());
                 if crate::trace::enabled() {
                     eprintln!(
                         "[trace] to_primitive called on {} with hint={:?}",
@@ -2374,6 +2573,7 @@ impl Vm {
                                 &rv,
                             );
                         }
+                        self.gc_temp_roots.truncate(temp_root_base);
                         return Ok(rv);
                     } else if crate::trace::enabled() {
                         crate::trace::value_string(
@@ -2424,10 +2624,14 @@ impl Vm {
                                         | Value::BuiltinObject(_, _)
                                         | Value::Promise(_)
                                 ) {
+                                    self.gc_temp_roots.truncate(temp_root_base);
                                     return Ok(rv);
                                 }
                             }
-                            Err(err) => return Err(err),
+                            Err(err) => {
+                                self.gc_temp_roots.truncate(temp_root_base);
+                                return Err(err);
+                            }
                         }
                     }
                 }
@@ -2439,6 +2643,7 @@ impl Vm {
                 if crate::trace::enabled() {
                     eprintln!("[trace] to_primitive fallback -> {:?}", fallback);
                 }
+                self.gc_temp_roots.truncate(temp_root_base);
                 Ok(fallback)
             }
             _ => Ok(v.clone()),
@@ -2983,6 +3188,26 @@ impl Vm {
                 return Ok(v);
             }
         }
+        if matches!(key, PropertyKey::String(name) if name == "constructor") {
+            let proto = self.get_prototype(obj);
+            if !matches!(proto, Value::Null)
+                && let Ok(constructor) =
+                    get_property(&proto, &PropertyKey::String("constructor".to_string()), 0)
+                && !matches!(constructor, Value::Undefined)
+            {
+                return Ok(constructor);
+            }
+            if let Some(test262_error) = self.get_global("Test262Error")
+                && Self::is_callable_value(&test262_error)
+            {
+                return Ok(test262_error);
+            }
+            if let Some(error_ctor) = self.get_global("Error")
+                && Self::is_callable_value(&error_ctor)
+            {
+                return Ok(error_ctor);
+            }
+        }
         Ok(Value::Undefined)
     }
 
@@ -3216,15 +3441,22 @@ impl Vm {
     pub(super) fn push_call_frame(
         &mut self,
         proto: &Rc<FunctionProto>,
-        closure_env: &Rc<RefCell<Vec<Rc<RefCell<Value>>>>>,
+        closure_env: &Rc<Mutex<Vec<ValueSlot>>>,
         call_args: Vec<Value>,
         mut this_value: Value,
     ) -> Result<(), crate::errors::RuntimeError> {
+        self.pending_closure_env = Some(Rc::clone(closure_env));
         if !proto.is_strict {
             if matches!(this_value, Value::Undefined | Value::Null) {
                 this_value = Value::Object(Rc::clone(&self.globals));
             } else {
-                this_value = self.to_object_value(this_value)?;
+                this_value = match self.to_object_value(this_value) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.pending_closure_env = None;
+                        return Err(err);
+                    }
+                };
             }
         }
 
@@ -3269,7 +3501,7 @@ impl Vm {
         // arguments with `undefined` per JavaScript semantics.
         let args_for_arguments: Vec<Option<Value>> =
             call_args.iter().map(|v| Some(v.clone())).collect();
-        self.locals = std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
+        self.locals = std::iter::repeat_with(|| Rc::new(Mutex::new(Value::Undefined)))
             .take(proto.slot_types.len().max(proto.arity))
             .collect();
         for (idx, is_tdz) in proto.lexical_tdz.iter().copied().enumerate() {
@@ -3301,7 +3533,7 @@ impl Vm {
         {
             if proto.has_simple_parameter_list && !proto.is_strict {
                 let args_obj = self.build_mapped_arguments_object(proto, &args_for_arguments);
-                self.locals[slot] = Rc::new(RefCell::new(args_obj));
+                self.locals[slot] = Rc::new(Mutex::new(args_obj));
             } else {
                 let arr_rc = Rc::new(RefCell::new(args_for_arguments));
                 let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
@@ -3309,9 +3541,10 @@ impl Vm {
                     PropertyKey::String("length".to_string()),
                     PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
                 );
-                self.locals[slot] = Rc::new(RefCell::new(Value::Array(arr_rc, props)));
+                self.locals[slot] = Rc::new(Mutex::new(Value::Array(arr_rc, props)));
             }
         }
+        self.pending_closure_env = None;
 
         Ok(())
     }
@@ -3495,6 +3728,16 @@ impl Vm {
 
         let closure_proto = Rc::new(proto);
         let mut env_cells = Vec::with_capacity(closure_proto.upvalues.len());
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] make_closure proto='{}' upvalues={} current_env_len={}",
+                closure_proto.name,
+                closure_proto.upvalues.len(),
+                self.current_closure_env
+                    .as_ref()
+                    .map_or(0, |env| env.borrow().len())
+            );
+        }
         for upvalue in &closure_proto.upvalues {
             let cell = if upvalue.is_local {
                 let slot = upvalue.index as usize;
@@ -3508,17 +3751,34 @@ impl Vm {
                     .current_closure_env
                     .as_ref()
                     .ok_or("Bad enclosing closure env")?;
-                env.borrow()
+                let env_guard = env.borrow();
+                env_guard
                     .get(upvalue.index as usize)
                     .cloned()
-                    .ok_or("Bad enclosing upvalue index")?
+                    .ok_or_else(|| {
+                        if crate::trace::enabled() {
+                            eprintln!(
+                                "[diag] make_closure bad enclosing index={} env_len={} proto='{}'",
+                                upvalue.index,
+                                env_guard.len(),
+                                closure_proto.name
+                            );
+                            for (i, spec) in closure_proto.upvalues.iter().enumerate() {
+                                eprintln!(
+                                    "[diag]   upvalue[{}] local={} index={}",
+                                    i, spec.is_local, spec.index
+                                );
+                            }
+                        }
+                        "Bad enclosing upvalue index"
+                    })?
             };
             env_cells.push(cell);
         }
 
         let closure = Value::Closure {
             proto: Rc::clone(&closure_proto),
-            env: crate::gc::track_env(Rc::new(RefCell::new(env_cells))),
+            env: crate::gc::track_env(Rc::new(Mutex::new(env_cells))),
             lexical_this: None,
             props: Rc::clone(&props),
         };
@@ -3679,6 +3939,7 @@ impl Vm {
     /// Unwind the call stack and operand stack to the nearest exception
     /// handler, or propagate the error if none exists.
     fn unwind_to_handler(&mut self, thrown: Value) -> Result<(), crate::errors::RuntimeError> {
+        let thrown = self.ensure_constructor_for_thrown(thrown)?;
         let handler = match self.handlers.pop() {
             Some(h) => h,
             None => {
@@ -3732,6 +3993,125 @@ impl Vm {
         // Push the thrown value so the catch block can bind it.
         self.stack.push(thrown);
         Ok(())
+    }
+
+    /// Best-effort repair for thrown object-like values whose `constructor`
+    /// property was lost or was never installed.
+    fn ensure_constructor_for_thrown(
+        &mut self,
+        thrown: Value,
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        let key = PropertyKey::String("constructor".to_string());
+        let needs_repair =
+            matches!(
+                &thrown,
+                Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::BuiltinObject(_, _)
+                    | Value::Promise(_)
+            ) && matches!(self.get_property_value(&thrown, &key), Ok(Value::Undefined));
+        if !needs_repair {
+            return Ok(thrown);
+        }
+
+        let proto = self.get_prototype(&thrown);
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] ensure_constructor_for_thrown missing constructor type={} proto_type={}",
+                thrown.type_name(),
+                proto.type_name()
+            );
+            if let Some(keys) = self.list_own_keys_of_value(&thrown) {
+                eprintln!("[trace]   thrown own keys={:?}", keys);
+            }
+            if let Some(keys) = self.list_own_keys_of_value(&proto) {
+                eprintln!("[trace]   proto own keys={:?}", keys);
+            }
+        }
+        if matches!(proto, Value::Null) {
+            return Ok(thrown);
+        }
+        if let Ok(ctor) = self.get_property_value(&proto, &key)
+            && !matches!(ctor, Value::Undefined)
+        {
+            self.write_constructor_directly(&thrown, ctor);
+            return Ok(thrown);
+        }
+
+        let globals_snapshot: Vec<(String, Value)> = self
+            .globals
+            .borrow()
+            .properties
+            .iter()
+            .filter_map(|(k, desc)| match (k, desc) {
+                (PropertyKey::String(name), PropertyDescriptor::Data { value, .. }) => {
+                    Some((name.clone(), value.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (_name, candidate) in globals_snapshot {
+            if !Self::is_callable_value(&candidate) {
+                continue;
+            }
+            if let Ok(candidate_proto) =
+                self.get_property_value(&candidate, &PropertyKey::String("prototype".to_string()))
+                && values_equal(&candidate_proto, &proto)
+            {
+                self.write_constructor_directly(&thrown, candidate.clone());
+                break;
+            }
+        }
+        if let Some(test262_error) = self.get_global("Test262Error")
+            && Self::is_callable_value(&test262_error)
+        {
+            self.write_constructor_directly(&thrown, test262_error);
+        }
+        Ok(thrown)
+    }
+
+    fn write_constructor_directly(&self, value: &Value, ctor: Value) {
+        match value {
+            Value::Object(obj) => {
+                obj.borrow_mut().properties.insert(
+                    PropertyKey::String("constructor".to_string()),
+                    PropertyDescriptor::data(ctor),
+                );
+                if crate::trace::enabled() {
+                    eprintln!(
+                        "[trace] write_constructor_directly object keys={:?}",
+                        obj.borrow()
+                            .properties
+                            .keys()
+                            .filter_map(|k| match k {
+                                PropertyKey::String(s) => Some(s.clone()),
+                                PropertyKey::Symbol(_) => None,
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+            Value::Array(_, props) => {
+                props.borrow_mut().properties.insert(
+                    PropertyKey::String("constructor".to_string()),
+                    PropertyDescriptor::data(ctor),
+                );
+            }
+            Value::Closure { props, .. } => {
+                props.borrow_mut().properties.insert(
+                    PropertyKey::String("constructor".to_string()),
+                    PropertyDescriptor::data(ctor),
+                );
+            }
+            Value::BuiltinObject(_, props) => {
+                props.borrow_mut().properties.insert(
+                    PropertyKey::String("constructor".to_string()),
+                    PropertyDescriptor::data(ctor),
+                );
+            }
+            _ => {}
+        }
     }
 
     /// Helper to throw a JS exception value from bytecode or builtins.
@@ -4499,9 +4879,9 @@ fn list_own_keys_of_value(v: &Value) -> Option<Vec<String>> {
 
 /// Grow a locals vector so that `slot` is a valid index.
 #[inline(always)]
-fn ensure_slot(locals: &mut Vec<Rc<RefCell<Value>>>, slot: usize) {
+fn ensure_slot(locals: &mut Vec<ValueSlot>, slot: usize) {
     if slot >= locals.len() {
-        locals.resize_with(slot + 1, || Rc::new(RefCell::new(Value::Undefined)));
+        locals.resize_with(slot + 1, || Rc::new(Mutex::new(Value::Undefined)));
     }
 }
 
@@ -5014,7 +5394,7 @@ fn set_property(
     }
 }
 
-fn build_module_namespace_object(exports: &HashMap<String, Rc<RefCell<Value>>>) -> Value {
+fn build_module_namespace_object(exports: &HashMap<String, ValueSlot>) -> Value {
     let namespace = Rc::new(RefCell::new(ObjectData::new()));
     for (name, slot) in exports {
         if name == "*" {

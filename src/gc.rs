@@ -8,8 +8,10 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
+use std::sync::Mutex;
 
-use crate::value::{ObjectData, PromiseState, PropertyDescriptor, Value};
+use crate::mutex_compat::MutexBorrowExt;
+use crate::value::{ObjectData, PromiseState, PropertyDescriptor, Value, ValueSlot};
 
 /// Result of a prototype GC collection cycle.
 #[derive(Debug, Clone, Copy, Default)]
@@ -31,7 +33,7 @@ pub struct GcStats {
 struct HeapRegistry {
     objects: Vec<Weak<RefCell<ObjectData>>>,
     arrays: Vec<Weak<RefCell<Vec<Option<Value>>>>>,
-    envs: Vec<Weak<RefCell<Vec<Rc<RefCell<Value>>>>>>,
+    envs: Vec<Weak<Mutex<Vec<ValueSlot>>>>,
     promises: Vec<Weak<RefCell<PromiseState>>>,
 }
 
@@ -60,9 +62,7 @@ pub fn track_array(arr: Rc<RefCell<Vec<Option<Value>>>>) -> Rc<RefCell<Vec<Optio
 }
 
 /// Register a closure environment vector with the collector.
-pub fn track_env(
-    env: Rc<RefCell<Vec<Rc<RefCell<Value>>>>>,
-) -> Rc<RefCell<Vec<Rc<RefCell<Value>>>>> {
+pub fn track_env(env: Rc<Mutex<Vec<ValueSlot>>>) -> Rc<Mutex<Vec<ValueSlot>>> {
     #[cfg(feature = "gc_mark_sweep_prototype")]
     HEAP.with(|heap| push_weak(&mut heap.borrow_mut().envs, &env));
     env
@@ -77,9 +77,15 @@ pub fn track_promise(promise: Rc<RefCell<PromiseState>>) -> Rc<RefCell<PromiseSt
 
 /// Prototype collector entry point.
 pub fn collect(roots: &[Value]) -> GcStats {
+    collect_with_env_roots(roots, &[])
+}
+
+/// Prototype collector entry point with explicit closure-environment roots.
+pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSlot>>>]) -> GcStats {
     #[cfg(not(feature = "gc_mark_sweep_prototype"))]
     {
         let _ = roots;
+        let _ = env_roots;
         return GcStats::default();
     }
 
@@ -93,6 +99,15 @@ pub fn collect(roots: &[Value]) -> GcStats {
         for root in roots {
             mark_value(
                 root,
+                &mut marked_objects,
+                &mut marked_arrays,
+                &mut marked_envs,
+                &mut marked_promises,
+            );
+        }
+        for env in env_roots {
+            mark_env(
+                env,
                 &mut marked_objects,
                 &mut marked_arrays,
                 &mut marked_envs,
@@ -232,9 +247,14 @@ fn mark_value(
         } => {
             let env_ptr = Rc::as_ptr(env) as usize;
             if marked_envs.insert(env_ptr) {
-                for cell in env.borrow().iter() {
+                let cells: Vec<Value> = env
+                    .borrow()
+                    .iter()
+                    .map(|cell| cell.borrow().clone())
+                    .collect();
+                for cell in cells {
                     mark_value(
-                        &cell.borrow(),
+                        &cell,
                         marked_objects,
                         marked_arrays,
                         marked_envs,
@@ -271,14 +291,14 @@ fn mark_value(
             if !marked_promises.insert(ptr) {
                 return;
             }
-            match &*state.borrow() {
+            match state.borrow().clone() {
                 PromiseState::Pending {
                     on_fulfilled,
                     on_rejected,
                 } => {
                     for cb in on_fulfilled {
                         mark_value(
-                            cb,
+                            &cb,
                             marked_objects,
                             marked_arrays,
                             marked_envs,
@@ -287,7 +307,7 @@ fn mark_value(
                     }
                     for cb in on_rejected {
                         mark_value(
-                            cb,
+                            &cb,
                             marked_objects,
                             marked_arrays,
                             marked_envs,
@@ -296,7 +316,7 @@ fn mark_value(
                     }
                 }
                 PromiseState::Fulfilled(v) | PromiseState::Rejected(v) => mark_value(
-                    v,
+                    &v,
                     marked_objects,
                     marked_arrays,
                     marked_envs,
@@ -365,6 +385,34 @@ fn mark_object(
 }
 
 #[cfg(feature = "gc_mark_sweep_prototype")]
+fn mark_env(
+    env: &Rc<Mutex<Vec<ValueSlot>>>,
+    marked_objects: &mut HashSet<usize>,
+    marked_arrays: &mut HashSet<usize>,
+    marked_envs: &mut HashSet<usize>,
+    marked_promises: &mut HashSet<usize>,
+) {
+    let ptr = Rc::as_ptr(env) as usize;
+    if !marked_envs.insert(ptr) {
+        return;
+    }
+    let cells: Vec<Value> = env
+        .borrow()
+        .iter()
+        .map(|cell| cell.borrow().clone())
+        .collect();
+    for cell in cells {
+        mark_value(
+            &cell,
+            marked_objects,
+            marked_arrays,
+            marked_envs,
+            marked_promises,
+        );
+    }
+}
+
+#[cfg(feature = "gc_mark_sweep_prototype")]
 fn clear_object(obj: &Rc<RefCell<ObjectData>>) {
     let mut obj = obj.borrow_mut();
     obj.properties.clear();
@@ -378,8 +426,15 @@ fn clear_array(arr: &Rc<RefCell<Vec<Option<Value>>>>) {
 }
 
 #[cfg(feature = "gc_mark_sweep_prototype")]
-fn clear_env(env: &Rc<RefCell<Vec<Rc<RefCell<Value>>>>>) {
-    env.borrow_mut().clear();
+fn clear_env(env: &Rc<Mutex<Vec<ValueSlot>>>) {
+    let _ = env;
+    // Do not mutate live closure environments yet.
+    //
+    // The prototype collector currently relies on conservative reachability
+    // rooted from VM state. If that root walk misses a live closure, clearing
+    // the environment vector corrupts the closure's upvalues even though the
+    // closure object itself is still reachable. Keep the environment intact
+    // for now so we can preserve correctness while root coverage is expanded.
 }
 
 #[cfg(feature = "gc_mark_sweep_prototype")]

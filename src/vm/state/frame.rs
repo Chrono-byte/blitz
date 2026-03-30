@@ -1,19 +1,20 @@
 use crate::bytecode::Chunk;
 use crate::environment::EnvironmentRecord;
 use crate::typecheck::Type;
-use crate::value::Value;
+use crate::value::{Value, ValueSlot};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 /// Call frame.
 pub(crate) struct Frame {
     pub(crate) chunk: Rc<Chunk>,
     pub(crate) ip: usize,
     pub(crate) stack: Vec<Value>,
-    pub(crate) locals: Vec<Rc<RefCell<Value>>>,
+    pub(crate) locals: Vec<ValueSlot>,
     pub(crate) this_value: Value,
-    pub(crate) closure_env: Option<Rc<RefCell<Vec<Rc<RefCell<Value>>>>>>,
+    pub(crate) closure_env: Option<Rc<Mutex<Vec<ValueSlot>>>>,
     pub(crate) slot_types: Option<Vec<Option<Type>>>,
     /// Length of caller stack at call entry (diagnostic only).
     pub(crate) stack_base: usize,

@@ -25,7 +25,7 @@
 //!   exceptions through a host hook.
 use crate::bytecode::FunctionProto;
 use crate::runtime_utils::{reject_pending_promise, resolve_promise_with_value};
-use crate::value::{PromiseState, Value};
+use crate::value::{PromiseState, Value, ValueSlot};
 use crate::vm::state::*;
 use std::cell::RefCell;
 use std::future::Future;
@@ -122,7 +122,7 @@ impl Vm {
     pub(super) fn invoke_async_closure(
         &mut self,
         proto: &Rc<FunctionProto>,
-        env: &Rc<RefCell<Vec<Rc<RefCell<Value>>>>>,
+        env: &Rc<std::sync::Mutex<Vec<ValueSlot>>>,
         call_args: Vec<Value>,
         this_arg: Value,
     ) -> Result<Value, crate::errors::RuntimeError> {
@@ -170,9 +170,9 @@ impl Vm {
         match exec_result {
             Ok(result) => {
                 let promise_job = Rc::clone(&promise_for_job);
-                let result_cell = Rc::new(RefCell::new(Some(result)));
+                let mut result_cell = Some(result);
                 self.queue_microtask(move |vm| {
-                    let value = result_cell.borrow_mut().take().unwrap();
+                    let value = result_cell.take().unwrap();
                     resolve_promise_with_value(vm, &promise_job, value)?;
                     Ok(())
                 });
@@ -182,9 +182,9 @@ impl Vm {
                     .or_else(|| self.last_uncaught_exception.take())
                     .unwrap_or_else(|| Value::String(format!("{}", err)));
                 let promise_job = Rc::clone(&promise_for_job);
-                let reason_cell = Rc::new(RefCell::new(Some(reason)));
+                let mut reason_cell = Some(reason);
                 self.queue_microtask(move |vm| {
-                    let reason = reason_cell.borrow_mut().take().unwrap();
+                    let reason = reason_cell.take().unwrap();
                     reject_pending_promise(vm, &promise_job, reason);
                     Ok(())
                 });

@@ -165,7 +165,7 @@ fn run_selected_tests(
 }
 
 fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
-    const STACK_SIZE: usize = 3 * 1024 * 1024; // 3 MB stack for tests
+    const STACK_SIZE: usize = 8 * 1024 * 1024; // 3 MB stack for tests
 
     let (tx, rx) = mpsc::channel();
 

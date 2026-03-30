@@ -53,9 +53,10 @@
 //!   handles indirect and export-all semantics.
 use crate::compiler::ModuleContext;
 use crate::errors::BundlerError;
+use crate::mutex_compat::MutexBorrowExt;
 use crate::parser::ParserSession;
 use crate::resolver::resolve_specifier;
-use crate::value::Value;
+use crate::value::{Value, ValueSlot};
 use crate::vm::Vm;
 
 use oxc_span::SourceType;
@@ -64,6 +65,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Mutex;
 
 fn source_type_for_module_path(path: &Path) -> SourceType {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -95,10 +97,10 @@ pub struct ModuleRecord {
     state: ModuleState,
     /// Assigned numeric module index used by the VM module table. Set during instantiation.
     pub module_index: Option<usize>,
-    /// Export slots: mapping export name -> shared slot (`Rc<RefCell<Value>>`)
-    pub exports: HashMap<String, Rc<RefCell<Value>>>,
+    /// Export slots: mapping export name -> shared slot.
+    pub exports: HashMap<String, ValueSlot>,
     /// Import bindings: local name -> exporter slot
-    pub imports: HashMap<String, Rc<RefCell<Value>>>,
+    pub imports: HashMap<String, ValueSlot>,
     /// Import metadata: local name -> (module_index, exported_name)
     pub import_sources: HashMap<String, (usize, String)>,
     /// Indirect export metadata: exported name -> (imported name, source specifier)
@@ -196,8 +198,8 @@ impl ModuleLoader {
     }
 
     /// Instantiate modules by allocating export slots. This is a simple
-    /// implementation that creates shared `Rc<RefCell<Value>>` slots for
-    /// exported names so importers can hold live bindings to the same slot.
+    /// implementation that creates shared value slots for exported names so
+    /// importers can hold live bindings to the same slot.
     pub fn instantiate_all(&mut self) -> Result<(), BundlerError> {
         // For each module, examine its AST for exported names and allocate slots.
         for rec_rc in self.map.values() {
@@ -257,7 +259,7 @@ impl ModuleLoader {
                                         {
                                             rec.exports.insert(
                                                 exported.to_string(),
-                                                Rc::new(RefCell::new(Value::Undefined)),
+                                                Rc::new(Mutex::new(Value::Undefined)),
                                             );
                                         }
                                     }
@@ -275,7 +277,7 @@ impl ModuleLoader {
                                     {
                                         rec.exports.insert(
                                             id.to_string(),
-                                            Rc::new(RefCell::new(Value::Undefined)),
+                                            Rc::new(Mutex::new(Value::Undefined)),
                                         );
                                     } else if decl_type == "VariableDeclaration"
                                         && let Some(decls) =
@@ -289,7 +291,7 @@ impl ModuleLoader {
                                             {
                                                 rec.exports.insert(
                                                     name.to_string(),
-                                                    Rc::new(RefCell::new(Value::Undefined)),
+                                                    Rc::new(Mutex::new(Value::Undefined)),
                                                 );
                                             }
                                         }
@@ -299,7 +301,7 @@ impl ModuleLoader {
                             "ExportDefaultDeclaration" => {
                                 rec.exports.insert(
                                     "default".to_string(),
-                                    Rc::new(RefCell::new(Value::Undefined)),
+                                    Rc::new(Mutex::new(Value::Undefined)),
                                 );
                             }
                             "ExportAllDeclaration" => {
@@ -378,8 +380,7 @@ impl ModuleLoader {
                     let rec = rec_rc.borrow();
                     rec.path
                         .parent()
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(|| PathBuf::from("."))
+                        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
                 };
                 let dep_rec_rc = match self.construct(&base_dir, &spec) {
                     Ok(r) => r,
@@ -416,7 +417,7 @@ impl ModuleLoader {
                                             }
                                         }
                                     } else {
-                                        let new_slot = Rc::new(RefCell::new(Value::Undefined));
+                                        let new_slot = Rc::new(Mutex::new(Value::Undefined));
                                         {
                                             let mut dep_rec = dep_rec_rc.borrow_mut();
                                             dep_rec
@@ -455,7 +456,7 @@ impl ModuleLoader {
                                             }
                                         }
                                     } else {
-                                        let new_slot = Rc::new(RefCell::new(Value::Undefined));
+                                        let new_slot = Rc::new(Mutex::new(Value::Undefined));
                                         {
                                             let mut dep_rec = dep_rec_rc.borrow_mut();
                                             dep_rec.exports.insert(
@@ -517,7 +518,7 @@ impl ModuleLoader {
                                     // Namespace objects are not extensible per the spec.
                                     ns_map.borrow_mut().extensible = false;
 
-                                    let boxed = Rc::new(RefCell::new(Value::Object(ns_map)));
+                                    let boxed = Rc::new(Mutex::new(Value::Object(ns_map)));
                                     {
                                         let mut rec = rec_rc.borrow_mut();
                                         rec.imports.insert(local.clone(), boxed);
@@ -645,7 +646,7 @@ impl ModuleLoader {
         module_path: &Path,
         export_name: &str,
         resolve_set: &mut std::collections::HashSet<(PathBuf, String)>,
-    ) -> Result<Option<Rc<RefCell<Value>>>, BundlerError> {
+    ) -> Result<Option<ValueSlot>, BundlerError> {
         let module_path =
             std::fs::canonicalize(module_path).unwrap_or_else(|_| module_path.to_path_buf());
         let key = (module_path.clone(), export_name.to_string());
@@ -679,7 +680,7 @@ impl ModuleLoader {
             }
         }
 
-        let mut found: Option<Rc<RefCell<Value>>> = None;
+        let mut found: Option<ValueSlot> = None;
         for source_spec in star_exports {
             let dep_rec_rc = self.construct(&base_dir, &source_spec)?;
             let dep_path = dep_rec_rc.borrow().path.clone();
@@ -707,9 +708,9 @@ impl ModuleLoader {
     ) -> Result<(), crate::errors::RuntimeError> {
         // Populate vm.module_table with the export slot maps for each
         // instantiated module. ModuleRecord.module_index must have been set
-        // during instantiate_all(). We clone the HashMap of Rc slots so the
-        // VM receives ownership of the map structure but still shares the
-        // underlying Rc<RefCell<Value>> live binding slots.
+        // during instantiate_all(). We clone the HashMap of slots so the VM
+        // receives ownership of the map structure but still shares the live
+        // binding slots.
         for rec_rc in self.map.values() {
             let rec = rec_rc.borrow();
             if let Some(idx) = rec.module_index {

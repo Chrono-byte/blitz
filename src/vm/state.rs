@@ -36,11 +36,12 @@ use crate::environment::EnvironmentRecord;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
 use crate::typecheck::Type;
-use crate::value::{ObjectData, Value};
+use crate::value::{ObjectData, Value, ValueSlot};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::rc::{Rc, Weak};
+use std::sync::Mutex;
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 
@@ -149,11 +150,17 @@ pub struct Vm {
     /// offset so the stack is truncated correctly on return.
     pub(super) stack: Vec<Value>,
     /// Local variables for the current frame.
-    pub(super) locals: Vec<Rc<RefCell<Value>>>,
+    pub(super) locals: Vec<ValueSlot>,
     /// Current `this` binding.
     pub(super) this_value: Value,
     /// Upvalue environment for the currently executing closure, if any.
-    pub(super) current_closure_env: Option<Rc<RefCell<Vec<Rc<RefCell<Value>>>>>>,
+    pub(super) current_closure_env: Option<Rc<Mutex<Vec<ValueSlot>>>>,
+    /// Temporary root for a callee closure environment while a call frame is
+    /// being prepared.
+    pub(super) pending_closure_env: Option<Rc<Mutex<Vec<ValueSlot>>>>,
+    /// Temporary roots for values that are in flight through host helpers or
+    /// call setup and are not yet anchored in the VM state.
+    pub(super) gc_temp_roots: Vec<Value>,
     /// Global variables (derived from realm.global_object for convenience).
     pub(super) globals: Rc<RefCell<ObjectData>>,
     /// Call-frame stack.
@@ -175,7 +182,7 @@ pub struct Vm {
     /// Shared module loader for this realm, reused across VMs with the same globals.
     pub(super) module_loader: Rc<RefCell<ModuleLoader>>,
     /// Per-VM module table: vector indexed by module index, each mapping export name -> shared slot
-    pub(super) module_table: Vec<HashMap<String, Rc<RefCell<Value>>>>,
+    pub(super) module_table: Vec<HashMap<String, ValueSlot>>,
     /// Current [[NewTarget]] while evaluating a constructor call.
     pub(super) construct_new_target: Option<Value>,
     /// Last uncaught thrown JS value observed during unwinding.

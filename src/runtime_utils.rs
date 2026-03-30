@@ -57,10 +57,12 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 use crate::bytecode;
 use crate::compiler;
 use crate::compiler::ModuleContext;
+use crate::mutex_compat::MutexBorrowExt;
 use crate::parser::Parser;
 use crate::value::SymbolId;
 use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
@@ -2559,9 +2561,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
 
                 let arr_rc = Rc::new(RefCell::new(out));
                 let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
-                props.borrow_mut().set_prototype_value(Value::Object(Rc::clone(
-                    &array_proto_for_filter,
-                )));
+                props
+                    .borrow_mut()
+                    .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_filter)));
                 props.borrow_mut().properties.insert(
                     PKey::String("length".to_string()),
                     PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
@@ -2705,9 +2707,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
 
                 let arr_rc = Rc::new(RefCell::new(out));
                 let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
-                props.borrow_mut().set_prototype_value(Value::Object(Rc::clone(
-                    &array_proto_for_flat,
-                )));
+                props
+                    .borrow_mut()
+                    .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_flat)));
                 props.borrow_mut().properties.insert(
                     PKey::String("length".to_string()),
                     PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
@@ -3389,20 +3391,21 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     return Ok(value);
                 }
 
-                let resolve_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
-                let reject_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+                let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
+                let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let resolve_slot_capture = Rc::clone(&resolve_slot);
                 let reject_slot_capture = Rc::clone(&reject_slot);
                 let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                     let off = if executor_args.len() > 2 { 1 } else { 0 };
-                    *resolve_slot_capture.borrow_mut() = executor_args.get(off).cloned();
-                    *reject_slot_capture.borrow_mut() = executor_args.get(off + 1).cloned();
+                    *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();
+                    *reject_slot_capture.lock().unwrap() = executor_args.get(off + 1).cloned();
                     Ok(Value::Undefined)
                 }));
 
                 let promise = vm.construct_value(&this_val, &[executor])?;
                 let resolve_fn = resolve_slot
-                    .borrow()
+                    .lock()
+                    .unwrap()
                     .clone()
                     .ok_or_else(|| vm.throw_type_error("Promise capability resolve missing"))?;
                 if let Err(err) = vm.call_value_with_this(&resolve_fn, &Value::Undefined, &[value])
@@ -3433,24 +3436,26 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     return Err(vm.throw_type_error("Promise.all called on non-object"));
                 }
 
-                let resolve_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
-                let reject_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+                let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
+                let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let resolve_slot_capture = Rc::clone(&resolve_slot);
                 let reject_slot_capture = Rc::clone(&reject_slot);
                 let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                     let off = if executor_args.len() > 2 { 1 } else { 0 };
-                    *resolve_slot_capture.borrow_mut() = executor_args.get(off).cloned();
-                    *reject_slot_capture.borrow_mut() = executor_args.get(off + 1).cloned();
+                    *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();
+                    *reject_slot_capture.lock().unwrap() = executor_args.get(off + 1).cloned();
                     Ok(Value::Undefined)
                 }));
 
                 let promise = vm.construct_value(&this_val, &[executor])?;
                 let resolve_fn = resolve_slot
-                    .borrow()
+                    .lock()
+                    .unwrap()
                     .clone()
                     .ok_or_else(|| vm.throw_type_error("Promise capability resolve missing"))?;
                 let reject_fn = reject_slot
-                    .borrow()
+                    .lock()
+                    .unwrap()
                     .clone()
                     .ok_or_else(|| vm.throw_type_error("Promise capability reject missing"))?;
 
@@ -3474,10 +3479,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     return Ok(promise);
                 }
 
-                let results: Rc<RefCell<Vec<Option<Value>>>> =
-                    Rc::new(RefCell::new(vec![None; items.len()]));
-                let remaining = Rc::new(RefCell::new(items.len()));
-                let settled = Rc::new(RefCell::new(false));
+                let results: Rc<Mutex<Vec<Option<Value>>>> =
+                    Rc::new(Mutex::new(vec![None; items.len()]));
+                let remaining = Rc::new(Mutex::new(items.len()));
+                let settled = Rc::new(Mutex::new(false));
 
                 for (idx, item) in items.into_iter().enumerate() {
                     let then_val =
@@ -3488,25 +3493,27 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         let settled_rc = Rc::clone(&settled);
                         let resolve_fn_rc = resolve_fn.clone();
                         let reject_fn_rc = reject_fn.clone();
-                        let resolve_slot_resolved = Rc::new(RefCell::new(false));
-                        let reject_slot_resolved = Rc::new(RefCell::new(false));
+                        let resolve_slot_resolved = Rc::new(Mutex::new(false));
+                        let reject_slot_resolved = Rc::new(Mutex::new(false));
 
                         let resolve_slot_resolved_cb = Rc::clone(&resolve_slot_resolved);
                         let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
-                            if *settled_rc.borrow() || *resolve_slot_resolved_cb.borrow() {
+                            if *settled_rc.lock().unwrap()
+                                || *resolve_slot_resolved_cb.lock().unwrap()
+                            {
                                 return Ok(Value::Undefined);
                             }
-                            *resolve_slot_resolved_cb.borrow_mut() = true;
+                            *resolve_slot_resolved_cb.lock().unwrap() = true;
                             let off = if args.len() > 1 { 1 } else { 0 };
                             let value = args.get(off).cloned().unwrap_or(Value::Undefined);
-                            results_rc.borrow_mut()[idx] = Some(value);
-                            let mut remaining_ref = remaining_rc.borrow_mut();
+                            results_rc.lock().unwrap()[idx] = Some(value);
+                            let mut remaining_ref = remaining_rc.lock().unwrap();
                             if *remaining_ref > 0 {
                                 *remaining_ref -= 1;
                             }
-                            if *remaining_ref == 0 && !*settled_rc.borrow() {
-                                *settled_rc.borrow_mut() = true;
-                                let array = vm.new_array(results_rc.borrow().clone());
+                            if *remaining_ref == 0 && !*settled_rc.lock().unwrap() {
+                                *settled_rc.lock().unwrap() = true;
+                                let array = vm.new_array(results_rc.lock().unwrap().clone());
                                 let _ = vm.call_value_with_this(
                                     &resolve_fn_rc,
                                     &Value::Undefined,
@@ -3519,11 +3526,13 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         let reject_slot_resolved_cb = Rc::clone(&reject_slot_resolved);
                         let settled_rc = Rc::clone(&settled);
                         let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
-                            if *settled_rc.borrow() || *reject_slot_resolved_cb.borrow() {
+                            if *settled_rc.lock().unwrap()
+                                || *reject_slot_resolved_cb.lock().unwrap()
+                            {
                                 return Ok(Value::Undefined);
                             }
-                            *reject_slot_resolved_cb.borrow_mut() = true;
-                            *settled_rc.borrow_mut() = true;
+                            *reject_slot_resolved_cb.lock().unwrap() = true;
+                            *settled_rc.lock().unwrap() = true;
                             let off = if args.len() > 1 { 1 } else { 0 };
                             let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
                             let _ = vm.call_value_with_this(
@@ -3537,7 +3546,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         if let Err(err) =
                             vm.call_value_with_this(&then_val, &item, &[resolve_cb, reject_cb])
                         {
-                            *settled.borrow_mut() = true;
+                            *settled.lock().unwrap() = true;
                             let reason = vm
                                 .last_uncaught_exception
                                 .take()
@@ -3547,14 +3556,14 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                             return Ok(promise);
                         }
                     } else {
-                        results.borrow_mut()[idx] = Some(item);
-                        let mut remaining_ref = remaining.borrow_mut();
+                        results.lock().unwrap()[idx] = Some(item);
+                        let mut remaining_ref = remaining.lock().unwrap();
                         if *remaining_ref > 0 {
                             *remaining_ref -= 1;
                         }
-                        if *remaining_ref == 0 && !*settled.borrow() {
-                            *settled.borrow_mut() = true;
-                            let array = vm.new_array(results.borrow().clone());
+                        if *remaining_ref == 0 && !*settled.lock().unwrap() {
+                            *settled.lock().unwrap() = true;
+                            let array = vm.new_array(results.lock().unwrap().clone());
                             let _ =
                                 vm.call_value_with_this(&resolve_fn, &Value::Undefined, &[array]);
                         }
@@ -3579,20 +3588,21 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     return Err(vm.throw_type_error("Promise.reject called on non-object"));
                 }
 
-                let resolve_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
-                let reject_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+                let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
+                let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let resolve_slot_capture = Rc::clone(&resolve_slot);
                 let reject_slot_capture = Rc::clone(&reject_slot);
                 let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                     let off = if executor_args.len() > 2 { 1 } else { 0 };
-                    *resolve_slot_capture.borrow_mut() = executor_args.get(off).cloned();
-                    *reject_slot_capture.borrow_mut() = executor_args.get(off + 1).cloned();
+                    *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();
+                    *reject_slot_capture.lock().unwrap() = executor_args.get(off + 1).cloned();
                     Ok(Value::Undefined)
                 }));
 
                 let promise = vm.construct_value(&this_val, &[executor])?;
                 let reject_fn = reject_slot
-                    .borrow()
+                    .lock()
+                    .unwrap()
                     .clone()
                     .ok_or_else(|| vm.throw_type_error("Promise capability reject missing"))?;
                 if let Err(err) = vm.call_value_with_this(&reject_fn, &Value::Undefined, &[reason])
@@ -7475,19 +7485,20 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     ));
                 }
 
-                let resolve_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+                let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let resolve_slot_capture = Rc::clone(&resolve_slot);
                 let promise_ctor = vm
                     .get_global("Promise")
                     .ok_or_else(|| vm.throw_type_error("Promise constructor missing"))?;
                 let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                     let off = if executor_args.len() > 2 { 1 } else { 0 };
-                    *resolve_slot_capture.borrow_mut() = executor_args.get(off).cloned();
+                    *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();
                     Ok(Value::Undefined)
                 }));
                 let promise = vm.construct_value(&promise_ctor, &[executor])?;
                 let resolve_fn = resolve_slot
-                    .borrow()
+                    .lock()
+                    .unwrap()
                     .clone()
                     .ok_or_else(|| vm.throw_type_error("Atomics.waitAsync resolve missing"))?;
                 atomics_waiters_array(&info.buffer)
