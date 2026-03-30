@@ -664,10 +664,7 @@ pub fn evaluate_entry_shared(
                 let program = rec.session.program();
                 if enable_typecheck {
                     crate::typecheck::check_oxc(program).map_err(|e| {
-                        crate::errors::RuntimeError::from(format!(
-                            "Typecheck failed: {}",
-                            e
-                        ))
+                        crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
                     })?;
                 }
                 let module_idx = rec.module_index.expect("module_index should be set");
@@ -681,10 +678,11 @@ pub fn evaluate_entry_shared(
                     Some(&ctx),
                     rec.session.source(),
                 )
-                .map_err(|e| {
-                    crate::errors::RuntimeError::from(format!("Compile failed: {}", e))
-                })?;
-                Some((rec_rc_return, crate::runtime_utils::clear_slot_types_in_chunk(chunk)))
+                .map_err(|e| crate::errors::RuntimeError::from(format!("Compile failed: {}", e)))?;
+                Some((
+                    rec_rc_return,
+                    crate::runtime_utils::clear_slot_types_in_chunk(chunk),
+                ))
             } else {
                 None
             }

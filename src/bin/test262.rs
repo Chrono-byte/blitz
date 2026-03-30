@@ -1064,9 +1064,7 @@ fn run_test_file(
                         &format!("./{}", path.file_name().unwrap().to_string_lossy()),
                     )
                     .map_err(|e| e.to_string())?;
-                loader
-                    .instantiate_all()
-                    .map_err(|e| e.to_string())?;
+                loader.instantiate_all().map_err(|e| e.to_string())?;
             }
             match blitz::module::evaluate_entry_shared(&loader_handle, &path, &mut vm, false) {
                 Ok(()) => Ok(Value::Undefined),
@@ -1098,7 +1096,8 @@ fn run_test_file(
                         if let Err(e) = compiler::compile_oxc(prog, &run_src) {
                             let err_str = e.to_string();
                             // If the compiler caught a SyntaxError, treat this as the parser catching it
-                            if err_str.contains("SyntaxError") || err_str.contains("redeclaration") {
+                            if err_str.contains("SyntaxError") || err_str.contains("redeclaration")
+                            {
                                 continue;
                             }
                         }
@@ -1147,7 +1146,8 @@ fn run_test_file(
                 Ok(c) => c,
                 Err(e) => {
                     return Err(
-                        Test262Error::new(path, mode_name, format!("compile error: {e}")).into_string(),
+                        Test262Error::new(path, mode_name, format!("compile error: {e}"))
+                            .into_string(),
                     );
                 }
             };

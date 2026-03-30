@@ -344,23 +344,19 @@ fn collect_iterable_values(
 
             let is_callable = Vm::is_callable_value(&iterator_method);
             if is_callable {
-                let iter_obj =
-                    vm.call_value_with_this(&iterator_method, &this_for_iter, &[])?;
+                let iter_obj = vm.call_value_with_this(&iterator_method, &this_for_iter, &[])?;
                 let mut items = Vec::new();
                 loop {
-                    let next_fn = vm.get_property_host(
-                        &iter_obj,
-                        &PropertyKey::String("next".to_string()),
-                    )?;
+                    let next_fn =
+                        vm.get_property_host(&iter_obj, &PropertyKey::String("next".to_string()))?;
                     let result = vm.call_value_with_this(&next_fn, &iter_obj, &[])?;
-                    let done_val = vm.get_property_host(
-                        &result,
-                        &PropertyKey::String("done".to_string()),
-                    )?;
+                    let done_val =
+                        vm.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
                     if vm.to_boolean(&done_val) {
                         break;
                     }
-                    let val = vm.get_property_host(&result, &PropertyKey::String("value".to_string()))?;
+                    let val =
+                        vm.get_property_host(&result, &PropertyKey::String("value".to_string()))?;
                     items.push(val);
                 }
                 Ok(items)
@@ -3395,11 +3391,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                 &format!("Promise.all iterable error: {}", err),
                             )
                             .unwrap_or(Value::String(format!("{}", err)));
-                        let _ = vm.call_value_with_this(
-                            &reject_fn,
-                            &Value::Undefined,
-                            &[reason],
-                        );
+                        let _ = vm.call_value_with_this(&reject_fn, &Value::Undefined, &[reason]);
                         return Ok(promise);
                     }
                 };
@@ -3416,7 +3408,8 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let settled = Rc::new(RefCell::new(false));
 
                 for (idx, item) in items.into_iter().enumerate() {
-                    let then_val = vm.get_property_host(&item, &PropertyKey::String("then".to_string()))?;
+                    let then_val =
+                        vm.get_property_host(&item, &PropertyKey::String("then".to_string()))?;
                     if Vm::is_callable_value(&then_val) {
                         let results_rc = Rc::clone(&results);
                         let remaining_rc = Rc::clone(&remaining);
@@ -3477,11 +3470,8 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                 .last_uncaught_exception
                                 .take()
                                 .unwrap_or(Value::String(format!("{}", err)));
-                            let _ = vm.call_value_with_this(
-                                &reject_fn,
-                                &Value::Undefined,
-                                &[reason],
-                            );
+                            let _ =
+                                vm.call_value_with_this(&reject_fn, &Value::Undefined, &[reason]);
                             return Ok(promise);
                         }
                     } else {
@@ -3493,11 +3483,8 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         if *remaining_ref == 0 && !*settled.borrow() {
                             *settled.borrow_mut() = true;
                             let array = vm.new_array(results.borrow().clone());
-                            let _ = vm.call_value_with_this(
-                                &resolve_fn,
-                                &Value::Undefined,
-                                &[array],
-                            );
+                            let _ =
+                                vm.call_value_with_this(&resolve_fn, &Value::Undefined, &[array]);
                         }
                     }
                 }
@@ -5200,7 +5187,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let off = static_builtin_arg_offset(vm, args, "Object");
                 let target = args.get(off).cloned().unwrap_or(Value::Undefined);
                 if matches!(target, Value::Null | Value::Undefined) {
-                    return Err(vm.throw_type_error("Object.getPrototypeOf called on null/undefined"));
+                    return Err(
+                        vm.throw_type_error("Object.getPrototypeOf called on null/undefined")
+                    );
                 }
                 Ok(vm.get_prototype(&target))
             }),
