@@ -7,5 +7,12 @@
         "TypeScript": {
             "enable_language_server": false
         }
-    }
+    },
+    "lsp": {
+      "rust-analyzer": {
+        "initialization_options": {
+          "checkOnSave": true,
+        },
+      },
+    },
 }

@@ -101,7 +101,7 @@ fn parse_int_string(text: &str, radix_arg: Option<i32>) -> Option<f64> {
             if !(2..=36).contains(&r) {
                 return None;
             }
-            r as u32
+            u32::try_from(r).ok()?
         }
         _ => 0,
     };
@@ -1175,8 +1175,15 @@ fn atomics_value_to_integer(
     signed: bool,
 ) -> Result<Value, crate::errors::RuntimeError> {
     let n = vm.to_number_value(value)?;
-    let int = atomics_normalize_integer(n.trunc() as i128, bits, signed);
-    Ok(Value::Number(int as f64))
+    let int = n.trunc().to_i128().unwrap_or_else(|| {
+        if n.is_sign_negative() {
+            i128::MIN
+        } else {
+            i128::MAX
+        }
+    });
+    let int = atomics_normalize_integer(int, bits, signed);
+    Ok(Value::Number(int.to_f64().unwrap_or(f64::NAN)))
 }
 
 fn atomics_value_to_bigint(
@@ -1520,8 +1527,20 @@ fn atomics_binary_update(
             Value::Number(current_n),
             Value::Number(operand_n),
         ) => {
-            let lhs = current_n.trunc() as i128;
-            let rhs = operand_n.trunc() as i128;
+            let lhs = current_n.trunc().to_i128().unwrap_or_else(|| {
+                if current_n.is_sign_negative() {
+                    i128::MIN
+                } else {
+                    i128::MAX
+                }
+            });
+            let rhs = operand_n.trunc().to_i128().unwrap_or_else(|| {
+                if operand_n.is_sign_negative() {
+                    i128::MIN
+                } else {
+                    i128::MAX
+                }
+            });
             let raw = match op {
                 "add" => lhs + rhs,
                 "sub" => lhs - rhs,
@@ -1530,7 +1549,11 @@ fn atomics_binary_update(
                 "xor" => lhs ^ rhs,
                 _ => lhs,
             };
-            Value::Number(atomics_normalize_integer(raw, bits, signed) as f64)
+            Value::Number(
+                atomics_normalize_integer(raw, bits, signed)
+                    .to_f64()
+                    .unwrap_or(f64::NAN),
+            )
         }
         (
             AtomicsValueKind::BigInt { signed },
@@ -1575,7 +1598,8 @@ fn own_property_descriptor(obj: &Value, key: &PropertyKey) -> Option<PropertyDes
         Value::Array(arr, props) => {
             if let PropertyKey::String(s) = key
                 && let Some(idx) = canonical_index_key(s)
-                && let Some(Some(value)) = arr.borrow().get(idx as usize).cloned()
+                && let Some(idx) = idx.to_usize()
+                && let Some(Some(value)) = arr.borrow().get(idx).cloned()
             {
                 return Some(PropertyDescriptor::Data {
                     value,
@@ -3794,7 +3818,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 // Add days for complete months in this year
                 let days_in_month = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
                 for m in 1..month {
-                    let mut m_days = days_in_month[m.min(12) as usize] as i64;
+                    let mut m_days = days_in_month[m.min(12).to_usize().unwrap_or(12)] as i64;
                     if m == 2 && is_leap(year) {
                         m_days += 1;
                     }
@@ -3802,11 +3826,13 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 }
 
                 // Add days in this month (day is 1-indexed)
-                total_days += (day - 1) as i64;
+                total_days += i64::from(day - 1);
 
                 // Convert to milliseconds
-                let total_secs =
-                    total_days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64;
+                let total_secs = total_days * 86400
+                    + i64::from(hour) * 3600
+                    + i64::from(min) * 60
+                    + i64::from(sec);
                 total_secs.to_f64().unwrap_or(f64::NAN) * 1000.0 + f64::from(ms)
             }
 
@@ -3828,13 +3854,27 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 }
                 _ => {
                     // Multiple user arguments: year, month [, day, hour, minute, second, millisecond]
-                    let year = to_num(args.get(1).unwrap_or(&Value::Undefined)) as i32;
-                    let month = to_num(args.get(2).unwrap_or(&Value::Undefined)) as i32; // 0-indexed
-                    let day = to_num(args.get(3).unwrap_or(&Value::Number(1.0))) as i32;
-                    let hour = to_num(args.get(4).unwrap_or(&Value::Number(0.0))) as i32;
-                    let min = to_num(args.get(5).unwrap_or(&Value::Number(0.0))) as i32;
-                    let sec = to_num(args.get(6).unwrap_or(&Value::Number(0.0))) as i32;
-                    let ms = to_num(args.get(7).unwrap_or(&Value::Number(0.0))) as i32;
+                    let year = to_num(args.get(1).unwrap_or(&Value::Undefined))
+                        .to_i32()
+                        .unwrap_or(0);
+                    let month = to_num(args.get(2).unwrap_or(&Value::Undefined))
+                        .to_i32()
+                        .unwrap_or(0); // 0-indexed
+                    let day = to_num(args.get(3).unwrap_or(&Value::Number(1.0)))
+                        .to_i32()
+                        .unwrap_or(1);
+                    let hour = to_num(args.get(4).unwrap_or(&Value::Number(0.0)))
+                        .to_i32()
+                        .unwrap_or(0);
+                    let min = to_num(args.get(5).unwrap_or(&Value::Number(0.0)))
+                        .to_i32()
+                        .unwrap_or(0);
+                    let sec = to_num(args.get(6).unwrap_or(&Value::Number(0.0)))
+                        .to_i32()
+                        .unwrap_or(0);
+                    let ms = to_num(args.get(7).unwrap_or(&Value::Number(0.0)))
+                        .to_i32()
+                        .unwrap_or(0);
 
                     date_to_timestamp(year, month + 1, day, hour, min, sec, ms)
                 }
@@ -3920,16 +3960,23 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     && let Value::Number(n) = value
                 {
                     // Convert timestamp to ISO string (simplified)
-                    let millis = *n as i64;
+                    let millis = n.trunc().to_i64().unwrap_or_else(|| {
+                        if n.is_sign_negative() {
+                            i64::MIN
+                        } else {
+                            i64::MAX
+                        }
+                    });
                     let secs = millis / 1000;
                     let ms = millis % 1000;
 
                     // Calculate date components (simplified)
-                    let year = 1970 + (secs / (365 * 24 * 3600)) as i32;
-                    let day_of_year = ((secs % (365 * 24 * 3600)) / (24 * 3600)) as i32;
-                    let hour = ((secs % (24 * 3600)) / 3600) as i32;
-                    let minute = ((secs % 3600) / 60) as i32;
-                    let second = (secs % 60) as i32;
+                    let year = 1970 + i32::try_from(secs / (365 * 24 * 3600)).unwrap_or(0);
+                    let day_of_year =
+                        i32::try_from((secs % (365 * 24 * 3600)) / (24 * 3600)).unwrap_or(0);
+                    let hour = i32::try_from((secs % (24 * 3600)) / 3600).unwrap_or(0);
+                    let minute = i32::try_from((secs % 3600) / 60).unwrap_or(0);
+                    let second = i32::try_from(secs % 60).unwrap_or(0);
 
                     return Ok(Value::String(format!(
                         "{:04}-01-{:02}T{:02}:{:02}:{:02}.{:03}Z",
@@ -5474,15 +5521,15 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 if !len_num.is_finite() || len_num <= 0.0 {
                     return Ok(Value::Number(-1.0));
                 }
-                let len = len_num.floor() as i64;
+                let len = len_num.floor().to_i64().unwrap_or(i64::MAX);
                 let mut k = if let Some(from_index) = args.get(2) {
                     let n = vm.to_number_value(from_index)?;
                     if n.is_nan() {
                         len - 1
                     } else if n >= 0.0 {
-                        (n.floor() as i64).min(len - 1)
+                        n.floor().to_i64().unwrap_or(len - 1).min(len - 1)
                     } else {
-                        let idx = len + n.floor() as i64;
+                        let idx = len + n.floor().to_i64().unwrap_or(0);
                         if idx < 0 {
                             return Ok(Value::Number(-1.0));
                         }
@@ -5496,34 +5543,37 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     let mut candidates: Vec<u64> = Vec::new();
                     match &receiver {
                         Value::Object(obj) => {
+                            let k_u64 = k.to_u64().unwrap_or(u64::MAX);
                             for key in obj.borrow().properties.keys() {
                                 if let PKey::String(s) = key
                                     && let Some(idx) = canonical_index_key(s)
-                                    && idx <= k as u64
+                                    && idx <= k_u64
                                 {
                                     candidates.push(idx);
                                 }
                             }
                         }
                         Value::Array(arr, props) => {
-                            let dense_len = arr.borrow().len() as u64;
-                            for idx in 0..dense_len.min((k as u64).saturating_add(1)) {
+                            let k_u64 = k.to_u64().unwrap_or(u64::MAX);
+                            let dense_len = arr.borrow().len().to_u64().unwrap_or(u64::MAX);
+                            for idx in 0..dense_len.min(k_u64.saturating_add(1)) {
                                 candidates.push(idx);
                             }
                             for key in props.borrow().properties.keys() {
                                 if let PKey::String(s) = key
                                     && let Some(idx) = canonical_index_key(s)
-                                    && idx <= k as u64
+                                    && idx <= k_u64
                                 {
                                     candidates.push(idx);
                                 }
                             }
                         }
                         Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+                            let k_u64 = k.to_u64().unwrap_or(u64::MAX);
                             for key in props.borrow().properties.keys() {
                                 if let PKey::String(s) = key
                                     && let Some(idx) = canonical_index_key(s)
-                                    && idx <= k as u64
+                                    && idx <= k_u64
                                 {
                                     candidates.push(idx);
                                 }
@@ -5777,14 +5827,14 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         Rc::new(|vm, args| {
             let receiver = args.first().cloned().unwrap_or(Value::Undefined);
             let s = vm.to_string(&receiver)?;
-            let len = s.chars().count() as isize;
+            let len = s.chars().count().to_isize().unwrap_or(isize::MAX);
 
             let to_int = |vm: &mut Vm, v: &Value| -> Result<isize, crate::errors::RuntimeError> {
                 let n = vm.to_number_value(v)?;
                 if !n.is_finite() {
                     return Ok(0);
                 }
-                Ok(n.trunc() as isize)
+                Ok(n.trunc().to_isize().unwrap_or(0))
             };
 
             let start_raw = match args.get(1) {
