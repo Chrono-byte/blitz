@@ -1888,11 +1888,13 @@ impl Compiler {
                         // Duplicate the freshly-built object so SetProperty has an object operand.
                         self.emit(Op::Dup, LINE);
 
-                        // Print the full debug representation of the computed property key for inspection.
-                        // This emits the raw AST enum value so we can see exactly what variant/data is present.
-                        eprintln!("[debug] computed property key full: {:?}", p.key);
-                        // Continue by compiling the property value so code generation remains stable.
-                        self.compile_expr_oast(&p.value)?;
+                        // Compile the computed key expression (evaluates the expression, e.g. `sym`)
+                        // PropertyKey inherits Expression variants, so we can convert to get the expression
+                        let key_expr = p
+                            .key
+                            .as_expression()
+                            .expect("computed key must be an expression");
+                        self.compile_expr_oast(key_expr)?;
 
                         // For shorthand properties, the value is the binding referenced by the key name.
                         // Otherwise, compile the explicit value expression.

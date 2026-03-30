@@ -1919,9 +1919,8 @@ impl Vm {
                 let key = self.pop()?;
                 let obj = self.pop()?;
                 let k = self.to_property_key(&key)?;
-                let result = value.clone();
                 self.set_property_tracked(&obj, &k, value)?;
-                self.stack.push(result);
+                self.stack.push(obj);
             }
             Op::GetModuleExport => {
                 let module_idx = self.read_byte()? as usize;

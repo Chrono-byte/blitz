@@ -95,7 +95,7 @@ fn run_source(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> 
 
 /// Command line arguments for the Blitz executable.
 #[derive(Parser, Debug)]
-#[command(name = "blitz", about = "Blitz — TypeScript VM (Rust runtime)")]
+#[command(name = "blitz", about = "Blitz")]
 struct Cli {
     /// TypeScript file to execute. If omitted the REPL will be started.
     #[arg(value_name = "FILE")]
@@ -474,7 +474,7 @@ fn main() -> Result<(), blitz::errors::Error> {
     }
 
     // Start REPL (explicit flag or no file provided)
-    println!("Blitz — TypeScript VM (Rust runtime). Type exit to quit.");
+    println!("Blitz REPL. Type exit to quit.");
     let mut rl = rustyline::Editor::<(), rustyline::history::DefaultHistory>::new()
         .map_err(|e| blitz::errors::RuntimeError::from(format!("Readline init error: {}", e)))?;
     let history_path = env::temp_dir().join("blitz_repl_history");
@@ -492,7 +492,7 @@ fn main() -> Result<(), blitz::errors::Error> {
                     break;
                 }
                 match run_source(&mut repl_vm, line) {
-                    Ok(v) if !matches!(v, Value::Null) => println!("{}", v),
+                    Ok(v) if !matches!(v, Value::Null | Value::Undefined) => println!("{}", v),
                     Ok(_) => {}
                     Err(e) => eprintln!("Error: {}", e),
                 }
