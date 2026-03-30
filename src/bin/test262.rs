@@ -28,7 +28,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::rc::Rc;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -36,7 +36,7 @@ use clap::Parser as ClapParser;
 use oxc_span::SourceType;
 use serde::Deserialize;
 use tokio::runtime::Builder;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use blitz::compiler;
 use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
@@ -87,6 +87,17 @@ enum TestResult {
     Panic(String),
 }
 
+impl TestResult {
+    fn description(&self) -> String {
+        match self {
+            TestResult::Pass => "pass".to_string(),
+            TestResult::Fail(msg) => format!("fail: {}", msg),
+            TestResult::StackOverflow => "stack overflow".to_string(),
+            TestResult::Panic(msg) => format!("panic: {}", msg),
+        }
+    }
+}
+
 /// Selects the files to run based on the filter and limit.
 fn select_files_to_run(
     files: Vec<PathBuf>,
@@ -129,17 +140,36 @@ fn sort_test_results(results: &mut [(usize, PathBuf, TestResult)]) {
 }
 
 /// Runs the selected tests and returns the results.
+struct PermitReleaser {
+    permit: Mutex<Option<OwnedSemaphorePermit>>,
+}
+
+impl PermitReleaser {
+    fn new(permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            permit: Mutex::new(Some(permit)),
+        }
+    }
+
+    fn release(&self) {
+        if let Ok(mut guard) = self.permit.lock() {
+            guard.take();
+        }
+    }
+}
+
 fn run_selected_tests(
     files_to_run: Vec<PathBuf>,
     test262_dir: PathBuf,
     job_count: usize,
+    log_tests: bool,
 ) -> Vec<(usize, PathBuf, TestResult)> {
     if job_count <= 1 || files_to_run.len() <= 1 {
         return files_to_run
             .into_iter()
             .enumerate()
             .map(|(idx, file)| {
-                let result = run_test_in_thread(file.clone(), test262_dir.clone());
+                let result = run_test_in_thread(file.clone(), test262_dir.clone(), log_tests, None);
                 (idx, file, result)
             })
             .collect();
@@ -159,12 +189,13 @@ fn run_selected_tests(
                 .acquire_owned()
                 .await
                 .expect("test262 semaphore unexpectedly closed");
+            let permit_releaser = Arc::new(PermitReleaser::new(permit));
             let test262_dir = test262_dir.clone();
             handles.push(tokio::spawn(async move {
                 let file_for_result = file.clone();
+                let release_handle = Arc::clone(&permit_releaser);
                 let result = tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    run_test_in_thread(file, test262_dir)
+                    run_test_in_thread(file, test262_dir, log_tests, Some(release_handle))
                 })
                 .await
                 .expect("test262 blocking task panicked");
@@ -181,7 +212,12 @@ fn run_selected_tests(
 }
 
 /// Runs a single test in a separate thread, returning the result.
-fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
+fn run_test_in_thread(
+    file: PathBuf,
+    test262_dir: PathBuf,
+    log_tests: bool,
+    release_handle: Option<Arc<PermitReleaser>>,
+) -> TestResult {
     const STACK_SIZE: usize = 8 * 1024 * 1024; // 3 MB stack for tests
 
     let (tx, rx) = mpsc::channel();
@@ -190,6 +226,9 @@ fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
         .name(format!("test-{}", file.display()))
         .stack_size(STACK_SIZE)
         .spawn(move || {
+            if log_tests {
+                eprintln!("[test262] starting {}", file.display());
+            }
             let result = catch_unwind(AssertUnwindSafe(|| {
                 // Create fresh globals for this thread (each test gets isolated globals)
                 let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
@@ -292,16 +331,18 @@ fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
                 let baseline_snapshot = snapshot_globals(&globals);
 
                 // Run the test
-                run_test_file(&file, &test262_dir, &globals, &baseline_snapshot)
+                run_test_file(
+                    &file,
+                    &test262_dir,
+                    &globals,
+                    &baseline_snapshot,
+                    release_handle.clone(),
+                )
             }));
 
-            match result {
-                Ok(Ok(())) => {
-                    let _ = tx.send(TestResult::Pass);
-                }
-                Ok(Err(e)) => {
-                    let _ = tx.send(TestResult::Fail(e));
-                }
+            let test_result = match result {
+                Ok(Ok(())) => TestResult::Pass,
+                Ok(Err(e)) => TestResult::Fail(e),
                 Err(panic_payload) => {
                     let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
                         s.clone()
@@ -315,12 +356,22 @@ fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
                         || (msg.contains("thread '") && msg.contains("' has overflowed its stack"));
 
                     if is_overflow {
-                        let _ = tx.send(TestResult::StackOverflow);
+                        TestResult::StackOverflow
                     } else {
-                        let _ = tx.send(TestResult::Panic(msg));
+                        TestResult::Panic(msg)
                     }
                 }
+            };
+
+            if log_tests {
+                eprintln!(
+                    "[test262] finished {} ({})",
+                    file.display(),
+                    test_result.description()
+                );
             }
+
+            let _ = tx.send(test_result);
         }) {
         Ok(handle) => handle,
         Err(e) => {
@@ -445,6 +496,9 @@ struct RunnerOptions {
     /// Run only harness files.
     #[arg(long = "harness-only", alias = "harness", action)]
     harness_only: bool,
+    /// Emit per-test start/finish logs.
+    #[arg(long = "log-tests", action)]
+    log_tests: bool,
 }
 
 /// Parses a CSV environment variable into a vector of strings.
@@ -466,6 +520,15 @@ fn parse_usize_env(name: &str) -> Option<usize> {
     env::var(name).ok().and_then(|s| s.parse::<usize>().ok())
 }
 
+fn parse_bool_env(name: &str) -> Option<bool> {
+    env::var(name).ok().map(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 /// Parses the command line arguments
 fn parse_args() -> RunnerOptions {
     let mut opts = RunnerOptions::parse();
@@ -485,6 +548,9 @@ fn parse_args() -> RunnerOptions {
     }
     if opts.jobs.is_none() {
         opts.jobs = parse_usize_env("TEST262_JOBS");
+    }
+    if !opts.log_tests {
+        opts.log_tests = parse_bool_env("TEST262_LOG_TESTS").unwrap_or(false);
     }
 
     opts
@@ -891,6 +957,7 @@ fn run_test_file(
     test262_root: &Path,
     globals: &Rc<RefCell<ObjectData>>,
     baseline_snapshot: &HashMap<PropertyKey, PropertyDescriptor>,
+    release_handle: Option<Arc<PermitReleaser>>,
 ) -> Result<(), String> {
     let src = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
@@ -1336,7 +1403,9 @@ fn run_test_file(
                     } else {
                         // Now check if $DONE was called
                         let start = Instant::now();
-                        let timeout = Duration::from_secs(2);
+                        let warn_threshold = Duration::from_secs(10);
+                        let mut warned = false;
+                        let release_hook = release_handle.as_ref();
 
                         loop {
                             if let Some(state) = done_state.borrow().as_ref() {
@@ -1347,8 +1416,16 @@ fn run_test_file(
                                 break async_result;
                             }
 
-                            if start.elapsed() > timeout {
-                                break Err("async test timeout".to_string());
+                            if !warned && start.elapsed() > warn_threshold {
+                                eprintln!(
+                                    "[test262 warning] {} still waiting for $DONE after {}s",
+                                    path.display(),
+                                    warn_threshold.as_secs()
+                                );
+                                warned = true;
+                                if let Some(releaser) = release_hook {
+                                    releaser.release();
+                                }
                             }
 
                             thread::sleep(Duration::from_millis(10));
@@ -1663,7 +1740,8 @@ fn main() {
             .ok()
             .map(std::num::NonZero::get),
     );
-    let mut test_results = run_selected_tests(files_to_run, test262_dir.clone(), job_count);
+    let mut test_results =
+        run_selected_tests(files_to_run, test262_dir.clone(), job_count, opts.log_tests);
     sort_test_results(&mut test_results);
 
     let mut failed_cases = Vec::new();

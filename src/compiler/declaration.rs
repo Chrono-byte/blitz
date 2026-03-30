@@ -418,6 +418,60 @@ impl Compiler {
                 }
                 self.loop_depth = self.loop_depth.saturating_sub(1);
             }
+            OStmt::DoWhileStatement(d) => {
+                self.loop_depth += 1;
+                self.continue_patches.push(Vec::new());
+                self.break_patches.push(Vec::new());
+                let loop_start = self.chunk.code.len();
+                self.enter_block_scope();
+                self.compile_statement_oast(&d.body)?;
+                self.exit_scope();
+                let test_start = self.chunk.code.len();
+                self.compile_expr_oast(&d.test)?;
+                self.emit(Op::JumpIfFalse, LINE);
+                let exit_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                self.emit(Op::Jump, LINE);
+                let _back_jump_pos = self.chunk.code.len();
+                let back_offset = loop_start as isize - (self.chunk.code.len() + 2) as isize;
+                self.emit_short_signed(back_offset, LINE);
+                if let Some(patches) = self.continue_patches.pop() {
+                    for patch_pos in patches {
+                        let target = test_start as isize - (patch_pos as isize) - 2;
+                        let v = target as i16;
+                        self.chunk.code[patch_pos] = (v >> 8) as u8;
+                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                    }
+                }
+                self.patch_jump(exit_jump);
+                if let Some(patches) = self.break_patches.pop() {
+                    for patch_pos in patches {
+                        let target = self.chunk.code.len() - patch_pos - 2;
+                        let v = target as i16;
+                        self.chunk.code[patch_pos] = (v >> 8) as u8;
+                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                    }
+                }
+                let label_patches = if let Some(state) = self.label_patches.last_mut() {
+                    if state.can_continue && state.owner_loop_depth == self.loop_depth {
+                        Some((
+                            std::mem::take(&mut state.continue_patches),
+                            std::mem::take(&mut state.break_patches),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let loop_end = self.chunk.code.len();
+                if let Some((continue_patches, break_patches)) = label_patches {
+                    self.patch_jump_list(continue_patches, test_start);
+                    self.patch_jump_list(break_patches, loop_end);
+                }
+                self.loop_depth = self.loop_depth.saturating_sub(1);
+            }
             OStmt::ForStatement(f) => {
                 use oxc_ast::ast::ForStatementInit as OForInit;
                 self.loop_depth += 1;

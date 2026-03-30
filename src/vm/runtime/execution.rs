@@ -2086,7 +2086,29 @@ impl Vm {
                     }
                 }
             }
-            Op::Mod => self.binary_num_bigint(|a, b| a % b, |a, b| Ok(a % b))?,
+            Op::Mod => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                match (a, b) {
+                    (Value::BigInt(x), Value::BigInt(y)) => {
+                        if y.is_zero() {
+                            let ctor = self.get_global("RangeError").unwrap_or(Value::Undefined);
+                            let thrown = self
+                                .construct_value(&ctor, &[])
+                                .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                            match self.unwind_to_handler(thrown) {
+                                Ok(()) => return Ok(StepOutcome::Continue),
+                                Err(err) => return Err(err),
+                            }
+                        }
+                        self.stack.push(Value::BigInt(x % y));
+                    }
+                    (a, b) => {
+                        let (x, y) = (to_number(&a)?, to_number(&b)?);
+                        self.stack.push(Value::Number(x % y));
+                    }
+                }
+            }
             Op::Pow => {
                 // Exponentiation: handle BigInt**BigInt and Number**Number semantics.
                 // Pop right then left.

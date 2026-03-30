@@ -992,18 +992,13 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
         Ok(ns)
     })();
 
+    match &result {
+        Ok(value) => eprintln!("[dynamic import result] Ok({})", value),
+        Err(reason) => eprintln!("[dynamic import result] Err({})", reason),
+    }
     match result {
-        Ok(value) => {
-            // Module namespace objects currently carry accessor properties for
-            // live bindings. Returning them directly preserves that behavior
-            // and avoids the cross-realm clone helper rejecting them.
-            let mut state = promise.borrow_mut();
-            *state = PromiseState::Fulfilled(value);
-        }
-        Err(reason) => {
-            let mut state = promise.borrow_mut();
-            *state = PromiseState::Rejected(reason);
-        }
+        Ok(value) => fulfill_pending_promise(vm, &promise, value),
+        Err(reason) => reject_pending_promise(vm, &promise, reason),
     }
 
     Ok(promise_value)
