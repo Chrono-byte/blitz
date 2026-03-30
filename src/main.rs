@@ -38,7 +38,7 @@ use blitz::compiler;
 use blitz::{
     module::ModuleLoader, parser::Parser as TsParser, runtime_utils, value::Value, vm::Vm,
 };
-use num_traits::{Signed, ToPrimitive};
+use num_traits::{Signed, ToPrimitive, Zero};
 
 /// Minimal native hook: print to stdout. The TS soft layer wraps this as console.log.
 fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
@@ -255,7 +255,9 @@ fn main() -> Result<(), blitz::errors::Error> {
                     return Ok(Value::BigInt(x.clone() + y.clone()));
                 } else {
                     // Mixing BigInt and other types should throw a JS TypeError
-                    return Err(vm.throw_type_error("Cannot mix BigInt and other types"));
+                    return Err(blitz::errors::RuntimeError::from(
+                        "Cannot mix BigInt and other types",
+                    ));
                 }
             }
             // Ordinary addition: ToPrimitive default
@@ -310,11 +312,13 @@ fn main() -> Result<(), blitz::errors::Error> {
             if matches!(a, Value::BigInt(_)) || matches!(b, Value::BigInt(_)) {
                 if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
                     if y.is_zero() {
-                        return Err(vm.throw_range_error("Division by zero"));
+                        return Err(blitz::errors::RuntimeError::from("Division by zero"));
                     }
                     return Ok(Value::BigInt(x.clone() / y.clone()));
                 } else {
-                    return Err(vm.throw_type_error("Cannot mix BigInt and other types"));
+                    return Err(blitz::errors::RuntimeError::from(
+                        "Cannot mix BigInt and other types",
+                    ));
                 }
             }
             let na = vm.to_number_value(&a)?;
@@ -345,9 +349,9 @@ fn main() -> Result<(), blitz::errors::Error> {
             if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
                 // BigInt exponentiation: throw RangeError if exponent negative
                 if y.is_negative() {
-                    return Err(
-                        vm.throw_range_error("Exponentiation with negative BigInt not supported")
-                    );
+                    return Err(blitz::errors::RuntimeError::from(
+                        "Exponentiation with negative BigInt not supported",
+                    ));
                 }
                 let exp = y.to_u32().ok_or_else(|| {
                     blitz::errors::RuntimeError::from("Exponentiation with huge BigInt exponent")

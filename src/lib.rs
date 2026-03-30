@@ -73,7 +73,6 @@ pub use module::*;
 pub use oast as ast;
 pub use oxc_ast::ast as oast;
 pub use resolver::*;
-// `oxc_typecheck` removed — use `typecheck` module which now provides oxc integrations.
 pub use parser::*;
 pub use realm::*;
 pub use trace::*;

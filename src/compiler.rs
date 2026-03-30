@@ -90,7 +90,7 @@ pub fn compile_oxc_with_ctx(
 // operates directly on the oxc AST via `compile_oxc`/`compile_statement_oast`.
 
 /// Compiles AST to bytecode
-pub struct Compiler {
+    pub struct Compiler {
     /// Current chunk being compiled
     chunk: Chunk,
     /// Original source text for this compilation unit
@@ -136,6 +136,11 @@ pub struct Compiler {
     upvalue_indices: HashMap<String, u8>,
     /// Upvalue capture specs for the current function.
     captured_upvalues: Vec<UpvalueSpec>,
+    /// Synthetic private-name mapping: private identifier -> synthetic key string
+    /// The string is used as the constant value stored in each chunk that
+    /// represents the hidden private key. We store the string so inner
+    /// compilers can add the same constant into their own chunks.
+    private_names: HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -200,6 +205,7 @@ impl Compiler {
             outer_bindings: HashMap::new(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
+            private_names: HashMap::new(),
         }
     }
 
@@ -419,6 +425,19 @@ impl Compiler {
         let idx = self.chunk.add_constant(Value::String(name.to_string()));
         self.globals.insert(name.to_string(), idx);
         idx
+    }
+
+    /// Ensure a synthetic private key exists for `name` and return it as a
+    /// constant Value::String. The mapping is kept in `self.private_names` so
+    /// repeated references to the same private identifier use the same key.
+    fn ensure_private_name_constant(&mut self, name: &str) -> Value {
+        if let Some(s) = self.private_names.get(name) {
+            return Value::String(s.clone());
+        }
+        // Create a synthetic key that is unlikely to collide with public names.
+        let key = format!("\u{1F}private#{}", name);
+        self.private_names.insert(name.to_string(), key.clone());
+        Value::String(key)
     }
 
     fn emit_get_global_name(&mut self, name: &str) {
@@ -1594,6 +1613,85 @@ impl Compiler {
         if self.is_root {
             self.emit_set_global_name(&name);
         }
+        // Emit class elements (methods/fields). Minimal implementation:
+        // Create closures for methods and install them on the constructor
+        // (static) or constructor.prototype (instance). Private identifiers
+        // are lowered to synthetic string keys recorded in `private_names`.
+        for element in &c.body.body {
+            if let oast::ClassElement::MethodDefinition(md) = element {
+                // Only handle method definitions for now.
+                // Compile the method to a FunctionProto and create a closure.
+                let method_name = match &md.key {
+                    oast::PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
+                    oast::PropertyKey::Identifier(ident) => Some(ident.name.to_string()),
+                    oast::PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+                    oast::PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+                    oast::PropertyKey::PrivateIdentifier(pid) => Some(pid.name.to_string()),
+                    _ => None,
+                };
+                // Only support non-computed simple keys here.
+                let (proto, _env_len) = self.compile_function(
+                    method_name.as_deref().unwrap_or("<method>"),
+                    &md.value,
+                    None,
+                )?;
+                let fidx = self.chunk.add_function(proto);
+
+                if md.r#static {
+                    // static method: install on constructor object
+                    // push constructor
+                    self.emit(Op::GetLocal, LINE);
+                    self.emit_byte(slot as u8, LINE);
+
+                    // push key
+                    match &md.key {
+                        oast::PropertyKey::PrivateIdentifier(pid) => {
+                            let key = self.ensure_private_name_constant(&pid.name);
+                            self.emit_constant(key, LINE);
+                        }
+                        _ => {
+                            let key_str = method_name.unwrap_or_else(|| "".to_string());
+                            self.emit_constant(Value::String(key_str), LINE);
+                        }
+                    }
+
+                    // push closure
+                    self.emit(Op::MakeClosure, LINE);
+                    self.emit_byte(fidx as u8, LINE);
+
+                    // set property: expects [obj, key, value]
+                    self.emit(Op::SetProperty, LINE);
+                } else {
+                    // instance method: install on constructor.prototype
+                    // push constructor
+                    self.emit(Op::GetLocal, LINE);
+                    self.emit_byte(slot as u8, LINE);
+                    // push "prototype" key and getProperty
+                    self.emit_constant(Value::String("prototype".to_string()), LINE);
+                    self.emit(Op::GetProperty, LINE);
+
+                    // push key
+                    match &md.key {
+                        oast::PropertyKey::PrivateIdentifier(pid) => {
+                            let key = self.ensure_private_name_constant(&pid.name);
+                            self.emit_constant(key, LINE);
+                        }
+                        _ => {
+                            let key_str = method_name.unwrap_or_else(|| "".to_string());
+                            self.emit_constant(Value::String(key_str), LINE);
+                        }
+                    }
+
+                    // push closure
+                    self.emit(Op::MakeClosure, LINE);
+                    self.emit_byte(fidx as u8, LINE);
+
+                    // set property on prototype
+                    self.emit(Op::SetProperty, LINE);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -2317,6 +2415,33 @@ impl Compiler {
                     return Ok(());
                 }
 
+                if let OExpr::PrivateFieldExpression(m) = &c.callee {
+                    // Lower this.#private() style calls to preserve receiver.
+                    self.compile_expr_oast(&m.object)?;
+                    self.emit(Op::Dup, LINE);
+                    // private identifier -> synthetic constant
+                    if let oast::PrivateIdentifier { name, .. } = &m.field {
+                        let key = self.ensure_private_name_constant(name);
+                        self.emit_constant(key, LINE);
+                    } else {
+                        self.emit(Op::Undefined, LINE);
+                    }
+                    self.emit(Op::GetProperty, LINE);
+                    let mut arg_count = 0usize;
+                    for arg in &c.arguments {
+                        if let Some(expr) = arg.as_expression() {
+                            self.compile_expr_oast(expr)?;
+                            arg_count += 1;
+                        } else {
+                            self.emit(Op::Undefined, LINE);
+                            arg_count += 1;
+                        }
+                    }
+                    self.emit(Op::CallMethod, LINE);
+                    self.emit_byte(arg_count as u8, LINE);
+                    return Ok(());
+                }
+
                 let has_spread = c
                     .arguments
                     .iter()
@@ -2440,6 +2565,77 @@ impl Compiler {
                 let idx = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
                 self.emit_byte(idx as u8, LINE);
+                // To initialize class elements we need a local slot to hold the
+                // constructor while we install methods. Duplicate the ctor and
+                // store into a temp local so the original ctor remains on the
+                // stack as the expression result.
+                let temp_name = format!("__class_ctor_{}", self.locals.len());
+                let temp_slot = self.add_local_with_mirror(temp_name, None, false);
+                // dup ctor -> [ctor, ctor]
+                self.emit(Op::Dup, LINE);
+                // set local consumes one ctor -> [ctor]
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
+
+                // Emit class elements (methods) similar to declaration lowering.
+                for element in &c.body.body {
+                    if let oast::ClassElement::MethodDefinition(md) = element {
+                        let method_name = match &md.key {
+                            oast::PropertyKey::StaticIdentifier(ident) => {
+                                Some(ident.name.to_string())
+                            }
+                            oast::PropertyKey::Identifier(ident) => Some(ident.name.to_string()),
+                            oast::PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+                            oast::PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+                            oast::PropertyKey::PrivateIdentifier(pid) => Some(pid.name.to_string()),
+                            _ => None,
+                        };
+                        let (proto, _env_len) = self.compile_function(
+                            method_name.as_deref().unwrap_or("<method>"),
+                            &md.value,
+                            None,
+                        )?;
+                        let fidx = self.chunk.add_function(proto);
+
+                        if md.r#static {
+                            // static: install on constructor
+                            self.emit(Op::GetLocal, LINE);
+                            self.emit_byte(temp_slot as u8, LINE);
+                            match &md.key {
+                                oast::PropertyKey::PrivateIdentifier(pid) => {
+                                    let key = self.ensure_private_name_constant(&pid.name);
+                                    self.emit_constant(key, LINE);
+                                }
+                                _ => {
+                                    let key_str = method_name.unwrap_or_else(|| "".to_string());
+                                    self.emit_constant(Value::String(key_str), LINE);
+                                }
+                            }
+                            self.emit(Op::MakeClosure, LINE);
+                            self.emit_byte(fidx as u8, LINE);
+                            self.emit(Op::SetProperty, LINE);
+                        } else {
+                            // instance: install on constructor.prototype
+                            self.emit(Op::GetLocal, LINE);
+                            self.emit_byte(temp_slot as u8, LINE);
+                            self.emit_constant(Value::String("prototype".to_string()), LINE);
+                            self.emit(Op::GetProperty, LINE);
+                            match &md.key {
+                                oast::PropertyKey::PrivateIdentifier(pid) => {
+                                    let key = self.ensure_private_name_constant(&pid.name);
+                                    self.emit_constant(key, LINE);
+                                }
+                                _ => {
+                                    let key_str = method_name.unwrap_or_else(|| "".to_string());
+                                    self.emit_constant(Value::String(key_str), LINE);
+                                }
+                            }
+                            self.emit(Op::MakeClosure, LINE);
+                            self.emit_byte(fidx as u8, LINE);
+                            self.emit(Op::SetProperty, LINE);
+                        }
+                    }
+                }
             }
             OExpr::AwaitExpression(a) => {
                 self.compile_expr_oast(&a.argument)?;
@@ -2596,6 +2792,7 @@ impl Compiler {
             outer_bindings: self.visible_bindings_snapshot(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
+            private_names: self.private_names.clone(),
         };
 
         // Parameter placeholders (no type information available here).
@@ -2704,6 +2901,7 @@ impl Compiler {
             outer_bindings: self.visible_bindings_snapshot(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
+            private_names: self.private_names.clone(),
         };
 
         for p in &func.params.items {
