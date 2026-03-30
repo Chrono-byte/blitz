@@ -416,6 +416,8 @@ pub enum Op {
     Yield,
     /// Delegate iteration for `yield*` expressions.
     YieldStar,
+    /// Spread arguments and call a function. Operands: nargs (u8)
+    Spread,
     /// Push undefined value
     Undefined,
 }
@@ -534,7 +536,8 @@ impl TryFrom<u8> for Op {
             57 => Ok(Op::StrictNeq),
             58 => Ok(Op::Yield),
             59 => Ok(Op::YieldStar),
-            60 => Ok(Op::Undefined),
+            60 => Ok(Op::Spread),
+            61 => Ok(Op::Undefined),
             _ => Err(()),
         }
     }
@@ -552,7 +555,7 @@ mod tests {
 
     #[test]
     fn op_round_trip() {
-        for i in 0u8..=Op::YieldStar as u8 {
+        for i in 0u8..=Op::Spread as u8 {
             let op = Op::try_from(i).expect("valid op");
             let b = u8::from(op);
             assert_eq!(b, i);

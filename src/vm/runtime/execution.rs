@@ -2,7 +2,7 @@ use crate::bytecode::{Chunk, FunctionProto, Op};
 use crate::environment::EnvironmentRecord;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
-use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::state::*;
 use num_bigint::BigInt as BigIntValue;
 use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
@@ -659,6 +659,131 @@ impl Vm {
                 return Err(
                     self.throw_type_error(&format!("{} is not a function", callee.type_name()))
                 );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn execute_spread(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        self.read_byte()?; // nargs, consumed by VM dispatcher
+        let mask = self.pop()?;
+        let values = self.pop()?;
+        let callee = self.pop()?;
+
+        let values_vec = match values {
+            Value::Array(arr, _) => arr.borrow().clone(),
+            _ => Vec::new(),
+        };
+        let mask_vec = match mask {
+            Value::Array(arr, _) => arr.borrow().clone(),
+            _ => Vec::new(),
+        };
+
+        let mut flat: Vec<Value> = Vec::new();
+        for (i, value) in values_vec.into_iter().enumerate() {
+            let spread = mask_vec
+                .get(i)
+                .and_then(|v| v.as_ref())
+                .is_some_and(|v| self.to_boolean(v));
+            if !spread {
+                if let Some(v) = value {
+                    flat.push(v);
+                }
+                continue;
+            }
+
+            match value {
+                Some(Value::Array(arr, _)) => {
+                    flat.extend(arr.borrow().iter().filter_map(|v| v.clone()));
+                }
+                other => {
+                    let this_for_iter = other.as_ref().unwrap_or(&Value::Undefined).clone();
+                    let iterator_method = self.get_property_host(
+                        &this_for_iter,
+                        &PropertyKey::Symbol(SymbolId::well_known_iterator()),
+                    )?;
+
+                    let is_callable = matches!(
+                        iterator_method,
+                        Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
+                    );
+
+                    if is_callable {
+                        let iter_obj =
+                            self.call_value_with_this(&iterator_method, &this_for_iter, &[])?;
+
+                        loop {
+                            let next_fn = self.get_property_host(
+                                &iter_obj,
+                                &PropertyKey::String("next".to_string()),
+                            )?;
+                            let result = self.call_value_with_this(&next_fn, &iter_obj, &[])?;
+                            let done_val = self.get_property_host(
+                                &result,
+                                &PropertyKey::String("done".to_string()),
+                            )?;
+                            if self.to_boolean(&done_val) {
+                                break;
+                            }
+                            let val = self.get_property_host(
+                                &result,
+                                &PropertyKey::String("value".to_string()),
+                            )?;
+                            flat.push(val);
+                        }
+                    } else {
+                        let len_val = self.get_property_host(
+                            other.as_ref().unwrap_or(&Value::Undefined),
+                            &PropertyKey::String("length".to_string()),
+                        )?;
+                        let len = self.to_number_value(&len_val)?.max(0.0) as usize;
+                        for idx in 0..len {
+                            let item = self.get_property_host(
+                                other.as_ref().unwrap_or(&Value::Undefined),
+                                &PropertyKey::String(idx.to_string()),
+                            )?;
+                            flat.push(item);
+                        }
+                    }
+                }
+            }
+        }
+
+        match callee {
+            Value::Builtin(f) => {
+                let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
+                let result = (f.as_ref())(self, &flat)?;
+                self.this_value = prev_this;
+                if self.frames.is_empty() {
+                    self.run_microtasks_if_needed()?;
+                }
+                self.stack.push(result);
+            }
+            Value::BuiltinObject(f, _props) => {
+                let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
+                let result = (f.as_ref())(self, &flat)?;
+                self.this_value = prev_this;
+                if self.frames.is_empty() {
+                    self.run_microtasks_if_needed()?;
+                }
+                self.stack.push(result);
+            }
+            Value::Closure { ref proto, env, .. } => {
+                let call_args = self.prepare_call_args(&flat, proto)?;
+                if proto.is_async {
+                    let promise = self.invoke_async_closure(proto, &env, call_args, Value::Undefined)?;
+                    self.stack.push(promise);
+                } else {
+                    self.push_call_frame(proto, &env, call_args, Value::Undefined)?;
+                }
+            }
+            _ => {
+                self.dump_diag("Spread call failed: callee not callable", &callee);
+                return Err(self.throw_type_error(&format!(
+                    "{} is not a function",
+                    callee.type_name()
+                )));
             }
         }
 
@@ -1723,6 +1848,7 @@ impl Vm {
             }
             Op::Call => self.execute_call()?,
             Op::CallMethod => self.execute_call_method()?,
+            Op::Spread => self.execute_spread()?,
             Op::Return => {
                 if self.frames.is_empty() {
                     let result = self.stack.pop().unwrap_or(Value::Undefined);
@@ -1996,7 +2122,7 @@ impl Vm {
                 }
                 // Try @@toPrimitive if present.
                 let to_prim_key =
-                    PropertyKey::Symbol(crate::value::SymbolId::well_known_to_primitive());
+                    PropertyKey::Symbol(SymbolId::well_known_to_primitive());
                 if let Ok(method) = get_property(v, &to_prim_key, 0)
                     && matches!(
                         method,
@@ -2218,7 +2344,7 @@ impl Vm {
                         d.properties.get(&PropertyKey::String("_id".to_string()))
                     && let Value::Number(n) = value
                 {
-                    return Ok(PropertyKey::Symbol(crate::value::SymbolId::well_known(
+                    return Ok(PropertyKey::Symbol(SymbolId::well_known(
                         *n as u64,
                     )));
                 }
@@ -3957,7 +4083,7 @@ impl Vm {
     ) -> Result<bool, crate::errors::RuntimeError> {
         // Per spec: if constructor has @@hasInstance, call it.
         let has_instance_key =
-            PropertyKey::Symbol(crate::value::SymbolId::well_known_has_instance());
+            PropertyKey::Symbol(SymbolId::well_known_has_instance());
         if let Ok(method) = get_property(constructor, &has_instance_key, 0)
             && matches!(
                 method,

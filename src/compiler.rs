@@ -2448,9 +2448,7 @@ impl Compiler {
                     .iter()
                     .any(|arg| matches!(arg, oast::Argument::SpreadElement(_)));
                 if has_spread {
-                    self.emit_get_global_name("__native_call_spread");
                     self.compile_expr_oast(&c.callee)?;
-                    self.emit(Op::Undefined, LINE);
                     for arg in &c.arguments {
                         match arg {
                             oast::Argument::SpreadElement(s) => {
@@ -2476,8 +2474,8 @@ impl Compiler {
                     }
                     self.emit(Op::BuildArray, LINE);
                     self.emit_byte(c.arguments.len() as u8, LINE);
-                    self.emit(Op::Call, LINE);
-                    self.emit_byte(4, LINE);
+                    self.emit(Op::Spread, LINE);
+                    self.emit_byte(c.arguments.len() as u8, LINE);
                     return Ok(());
                 }
 
