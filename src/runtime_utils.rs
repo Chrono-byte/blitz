@@ -299,6 +299,7 @@ fn strict_equal(a: &Value, b: &Value) -> bool {
         (Value::Array(ax, _), Value::Array(bx, _)) => Rc::ptr_eq(ax, bx),
         (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
         (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
+        (Value::Promise(ap), Value::Promise(bp)) => Rc::ptr_eq(ap, bp),
         (Value::Builtin(af), Value::Builtin(bf)) => Rc::ptr_eq(af, bf),
         _ => false,
     }
@@ -322,6 +323,61 @@ fn promise_constructor_matches(
     let promise_constructor =
         vm.get_property_host(promise, &PropertyKey::String("constructor".to_string()))?;
     Ok(strict_equal(&promise_constructor, constructor))
+}
+
+fn collect_iterable_values(
+    vm: &mut Vm,
+    iterable: &Value,
+) -> Result<Vec<Value>, crate::errors::RuntimeError> {
+    match iterable {
+        Value::Array(arr, _) => Ok(arr
+            .borrow()
+            .iter()
+            .map(|v| v.clone().unwrap_or(Value::Undefined))
+            .collect()),
+        other => {
+            let this_for_iter = other.clone();
+            let iterator_method = vm.get_property_host(
+                &this_for_iter,
+                &PropertyKey::Symbol(SymbolId::well_known_iterator()),
+            )?;
+
+            let is_callable = Vm::is_callable_value(&iterator_method);
+            if is_callable {
+                let iter_obj =
+                    vm.call_value_with_this(&iterator_method, &this_for_iter, &[])?;
+                let mut items = Vec::new();
+                loop {
+                    let next_fn = vm.get_property_host(
+                        &iter_obj,
+                        &PropertyKey::String("next".to_string()),
+                    )?;
+                    let result = vm.call_value_with_this(&next_fn, &iter_obj, &[])?;
+                    let done_val = vm.get_property_host(
+                        &result,
+                        &PropertyKey::String("done".to_string()),
+                    )?;
+                    if vm.to_boolean(&done_val) {
+                        break;
+                    }
+                    let val = vm.get_property_host(&result, &PropertyKey::String("value".to_string()))?;
+                    items.push(val);
+                }
+                Ok(items)
+            } else {
+                let len_val =
+                    vm.get_property_host(other, &PropertyKey::String("length".to_string()))?;
+                let len = vm.to_number_value(&len_val)?.max(0.0) as usize;
+                let mut items = Vec::with_capacity(len);
+                for idx in 0..len {
+                    let item =
+                        vm.get_property_host(other, &PropertyKey::String(idx.to_string()))?;
+                    items.push(item);
+                }
+                Ok(items)
+            }
+        }
+    }
 }
 
 pub(crate) fn resolve_promise_with_value(
@@ -724,8 +780,8 @@ fn shadowrealm_import_value(
     vm.queue_microtask(move |vm| {
         let result = (|| -> Result<Value, String> {
             let entry = {
-                let mut inner_vm = record_handle.borrow_vm();
-                let loader = inner_vm.module_loader_mut();
+                let inner_vm = record_handle.borrow_vm();
+                let mut loader = inner_vm.module_loader_mut();
                 let entry = loader
                     .construct(&base_dir, &specifier_clone)
                     .map_err(|err| format!("module construct failed: {}", err))?;
@@ -858,17 +914,20 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
 
     let base_dir = resolve_shadowrealm_base_dir(vm);
     let mut import_vm = Vm::new(vm.globals_rc());
-    let mut loader = std::mem::take(import_vm.module_loader_mut());
+    let loader_handle = import_vm.module_loader_handle();
     let result = (|| -> Result<Value, String> {
-        let entry = loader
-            .construct(&base_dir, &specifier_str)
-            .map_err(|err| format!("dynamic import construct failed: {}", err))?;
-        loader
-            .instantiate_all()
-            .map_err(|err| format!("dynamic import instantiate failed: {}", err))?;
+        let entry = {
+            let mut loader = loader_handle.borrow_mut();
+            let entry = loader
+                .construct(&base_dir, &specifier_str)
+                .map_err(|err| format!("dynamic import construct failed: {}", err))?;
+            loader
+                .instantiate_all()
+                .map_err(|err| format!("dynamic import instantiate failed: {}", err))?;
+            entry
+        };
         let entry_path = entry.borrow().path.clone();
-        loader
-            .evaluate_entry(&entry_path, &mut import_vm, false)
+        crate::module::evaluate_entry_shared(&loader_handle, &entry_path, &mut import_vm, false)
             .map_err(|err| format!("dynamic import evaluate failed: {}", err))?;
 
         if !matches!(options, Value::Undefined) {
@@ -3294,6 +3353,161 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         )),
     );
 
+    // Promise.all() static method
+    promise_ctor_map.borrow_mut().properties.insert(
+        PKey::String("all".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let off = static_builtin_arg_offset(vm, args, "Promise");
+                let iterable = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let this_val = vm.this_value();
+                if !this_val.is_object() {
+                    return Err(vm.throw_type_error("Promise.all called on non-object"));
+                }
+
+                let resolve_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+                let reject_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+                let resolve_slot_capture = Rc::clone(&resolve_slot);
+                let reject_slot_capture = Rc::clone(&reject_slot);
+                let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
+                    let off = if executor_args.len() > 2 { 1 } else { 0 };
+                    *resolve_slot_capture.borrow_mut() = executor_args.get(off).cloned();
+                    *reject_slot_capture.borrow_mut() = executor_args.get(off + 1).cloned();
+                    Ok(Value::Undefined)
+                }));
+
+                let promise = vm.construct_value(&this_val, &[executor])?;
+                let resolve_fn = resolve_slot
+                    .borrow()
+                    .clone()
+                    .ok_or_else(|| vm.throw_type_error("Promise capability resolve missing"))?;
+                let reject_fn = reject_slot
+                    .borrow()
+                    .clone()
+                    .ok_or_else(|| vm.throw_type_error("Promise capability reject missing"))?;
+
+                let items = match collect_iterable_values(vm, &iterable) {
+                    Ok(items) => items,
+                    Err(err) => {
+                        let reason = vm
+                            .create_intrinsic_error(
+                                "TypeError",
+                                &format!("Promise.all iterable error: {}", err),
+                            )
+                            .unwrap_or(Value::String(format!("{}", err)));
+                        let _ = vm.call_value_with_this(
+                            &reject_fn,
+                            &Value::Undefined,
+                            &[reason],
+                        );
+                        return Ok(promise);
+                    }
+                };
+
+                if items.is_empty() {
+                    let array = vm.new_array(Vec::new());
+                    let _ = vm.call_value_with_this(&resolve_fn, &Value::Undefined, &[array]);
+                    return Ok(promise);
+                }
+
+                let results: Rc<RefCell<Vec<Option<Value>>>> =
+                    Rc::new(RefCell::new(vec![None; items.len()]));
+                let remaining = Rc::new(RefCell::new(items.len()));
+                let settled = Rc::new(RefCell::new(false));
+
+                for (idx, item) in items.into_iter().enumerate() {
+                    let then_val = vm.get_property_host(&item, &PropertyKey::String("then".to_string()))?;
+                    if Vm::is_callable_value(&then_val) {
+                        let results_rc = Rc::clone(&results);
+                        let remaining_rc = Rc::clone(&remaining);
+                        let settled_rc = Rc::clone(&settled);
+                        let resolve_fn_rc = resolve_fn.clone();
+                        let reject_fn_rc = reject_fn.clone();
+                        let resolve_slot_resolved = Rc::new(RefCell::new(false));
+                        let reject_slot_resolved = Rc::new(RefCell::new(false));
+
+                        let resolve_slot_resolved_cb = Rc::clone(&resolve_slot_resolved);
+                        let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
+                            if *settled_rc.borrow() || *resolve_slot_resolved_cb.borrow() {
+                                return Ok(Value::Undefined);
+                            }
+                            *resolve_slot_resolved_cb.borrow_mut() = true;
+                            let off = if args.len() > 1 { 1 } else { 0 };
+                            let value = args.get(off).cloned().unwrap_or(Value::Undefined);
+                            results_rc.borrow_mut()[idx] = Some(value);
+                            let mut remaining_ref = remaining_rc.borrow_mut();
+                            if *remaining_ref > 0 {
+                                *remaining_ref -= 1;
+                            }
+                            if *remaining_ref == 0 && !*settled_rc.borrow() {
+                                *settled_rc.borrow_mut() = true;
+                                let array = vm.new_array(results_rc.borrow().clone());
+                                let _ = vm.call_value_with_this(
+                                    &resolve_fn_rc,
+                                    &Value::Undefined,
+                                    &[array],
+                                );
+                            }
+                            Ok(Value::Undefined)
+                        }));
+
+                        let reject_slot_resolved_cb = Rc::clone(&reject_slot_resolved);
+                        let settled_rc = Rc::clone(&settled);
+                        let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
+                            if *settled_rc.borrow() || *reject_slot_resolved_cb.borrow() {
+                                return Ok(Value::Undefined);
+                            }
+                            *reject_slot_resolved_cb.borrow_mut() = true;
+                            *settled_rc.borrow_mut() = true;
+                            let off = if args.len() > 1 { 1 } else { 0 };
+                            let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
+                            let _ = vm.call_value_with_this(
+                                &reject_fn_rc,
+                                &Value::Undefined,
+                                &[reason],
+                            );
+                            Ok(Value::Undefined)
+                        }));
+
+                        if let Err(err) =
+                            vm.call_value_with_this(&then_val, &item, &[resolve_cb, reject_cb])
+                        {
+                            *settled.borrow_mut() = true;
+                            let reason = vm
+                                .last_uncaught_exception
+                                .take()
+                                .unwrap_or(Value::String(format!("{}", err)));
+                            let _ = vm.call_value_with_this(
+                                &reject_fn,
+                                &Value::Undefined,
+                                &[reason],
+                            );
+                            return Ok(promise);
+                        }
+                    } else {
+                        results.borrow_mut()[idx] = Some(item);
+                        let mut remaining_ref = remaining.borrow_mut();
+                        if *remaining_ref > 0 {
+                            *remaining_ref -= 1;
+                        }
+                        if *remaining_ref == 0 && !*settled.borrow() {
+                            *settled.borrow_mut() = true;
+                            let array = vm.new_array(results.borrow().clone());
+                            let _ = vm.call_value_with_this(
+                                &resolve_fn,
+                                &Value::Undefined,
+                                &[array],
+                            );
+                        }
+                    }
+                }
+
+                Ok(promise)
+            }),
+            &function_proto_map,
+        )),
+    );
+
     // Promise.reject() static method
     promise_ctor_map.borrow_mut().properties.insert(
         PKey::String("reject".to_string()),
@@ -4985,14 +5199,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             Rc::new(|vm, args| {
                 let off = static_builtin_arg_offset(vm, args, "Object");
                 let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-                let proto = match target {
-                    Value::Object(obj) => obj.borrow().prototype.clone(),
-                    Value::Array(_, props) => props.borrow().prototype.clone(),
-                    Value::Closure { props, .. } => props.borrow().prototype.clone(),
-                    Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
-                    _ => Value::Undefined,
-                };
-                Ok(proto)
+                if matches!(target, Value::Null | Value::Undefined) {
+                    return Err(vm.throw_type_error("Object.getPrototypeOf called on null/undefined"));
+                }
+                Ok(vm.get_prototype(&target))
             }),
             &function_proto_map,
         )),

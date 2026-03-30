@@ -40,7 +40,7 @@ use crate::value::{ObjectData, Value};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::env;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 
@@ -169,21 +169,46 @@ pub struct Vm {
     pub(super) handlers: Vec<HandlerRecord>,
     /// Flag set when a JS exception was unwound to a handler.
     pub(super) pending_exception: bool,
-    /// Per-VM module loader responsible for module construction/instantiation/eval
-    pub(super) module_loader: Option<ModuleLoader>,
+    /// Shared module loader for this realm, reused across VMs with the same globals.
+    pub(super) module_loader: Rc<RefCell<ModuleLoader>>,
     /// Per-VM module table: vector indexed by module index, each mapping export name -> shared slot
     pub(super) module_table: Vec<HashMap<String, Rc<RefCell<Value>>>>,
     /// Current [[NewTarget]] while evaluating a constructor call.
     pub(super) construct_new_target: Option<Value>,
     /// Last uncaught thrown JS value observed during unwinding.
     pub(crate) last_uncaught_exception: Option<Value>,
+    /// ECMAScript microtask queue.
     pub(super) microtasks: VecDeque<Microtask>,
     /// Optional hook invoked when an unhandled rejection or microtask exception
     /// is observed. The hook receives two Values: the first is the promise
     /// object (or Undefined for non-promise microtask exceptions) and the
     /// second is the rejection reason / exception value.
     pub(super) unhandled_rejection_hook: Option<Rc<RefCell<dyn FnMut(&mut Vm, Value, Value)>>>,
+    /// Store of lexical environment records for the current execution context.
     pub(super) lexical_env: Rc<RefCell<EnvironmentRecord>>,
+    /// Store of global environment records for the current execution context.
     pub(super) global_env: Rc<RefCell<EnvironmentRecord>>,
+    /// Queue of values for the current `yield*` expression, if any.
     pub(super) yield_star_queue: Option<VecDeque<Value>>,
+}
+
+thread_local! {
+    static SHARED_MODULE_LOADERS: RefCell<HashMap<usize, Weak<RefCell<ModuleLoader>>>> =
+        RefCell::new(HashMap::new());
+}
+
+pub(super) fn shared_module_loader_for(
+    globals: &Rc<RefCell<ObjectData>>,
+) -> Rc<RefCell<ModuleLoader>> {
+    let key = Rc::as_ptr(globals) as usize;
+    SHARED_MODULE_LOADERS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(loader) = cache.get(&key).and_then(Weak::upgrade) {
+            return loader;
+        }
+
+        let loader = Rc::new(RefCell::new(ModuleLoader::new()));
+        cache.insert(key, Rc::downgrade(&loader));
+        loader
+    })
 }

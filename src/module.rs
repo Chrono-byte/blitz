@@ -620,3 +620,81 @@ impl ModuleLoader {
         Ok(())
     }
 }
+
+/// Evaluate a module graph using a shared loader handle.
+///
+/// This helper borrows the loader only for short phases so nested dynamic
+/// imports can re-enter the same cache while module code is running.
+pub fn evaluate_entry_shared(
+    loader: &Rc<RefCell<ModuleLoader>>,
+    entry: &Path,
+    vm: &mut Vm,
+    enable_typecheck: bool,
+) -> Result<(), crate::errors::RuntimeError> {
+    {
+        let loader_ref = loader.borrow();
+        for rec_rc in loader_ref.map.values() {
+            let rec = rec_rc.borrow();
+            if let Some(idx) = rec.module_index {
+                let exports_clone = rec.exports.clone();
+                vm.install_module_exports(idx, exports_clone);
+            }
+        }
+    }
+
+    let order = {
+        let mut loader_ref = loader.borrow_mut();
+        loader_ref.evaluation_order_from(entry).map_err(|e| {
+            crate::errors::RuntimeError::from(format!("Module resolution failed: {}", e))
+        })?
+    };
+
+    for path in order {
+        let maybe_chunk = {
+            let loader_ref = loader.borrow_mut();
+            let Some(rec_rc) = loader_ref.map.get(&path).cloned() else {
+                continue;
+            };
+            let rec_rc_return = Rc::clone(&rec_rc);
+            let mut rec = rec_rc.borrow_mut();
+            if matches!(rec.state, ModuleState::Evaluating) {
+                None
+            } else if matches!(rec.state, ModuleState::Instantiated) {
+                rec.state = ModuleState::Evaluating;
+                let program = rec.session.program();
+                if enable_typecheck {
+                    crate::typecheck::check_oxc(program).map_err(|e| {
+                        crate::errors::RuntimeError::from(format!(
+                            "Typecheck failed: {}",
+                            e
+                        ))
+                    })?;
+                }
+                let module_idx = rec.module_index.expect("module_index should be set");
+                let ctx = ModuleContext {
+                    module_index: module_idx,
+                    imports: rec.import_sources.clone(),
+                    exports: rec.exports.keys().cloned().collect(),
+                };
+                let chunk = crate::compiler::compile_oxc_with_ctx(
+                    program,
+                    Some(&ctx),
+                    rec.session.source(),
+                )
+                .map_err(|e| {
+                    crate::errors::RuntimeError::from(format!("Compile failed: {}", e))
+                })?;
+                Some((rec_rc_return, crate::runtime_utils::clear_slot_types_in_chunk(chunk)))
+            } else {
+                None
+            }
+        };
+
+        if let Some((rec_rc, chunk)) = maybe_chunk {
+            vm.run(chunk)?;
+            rec_rc.borrow_mut().state = ModuleState::Evaluated;
+        }
+    }
+
+    Ok(())
+}

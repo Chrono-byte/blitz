@@ -32,6 +32,7 @@ impl Vm {
     pub fn new(globals: Rc<RefCell<ObjectData>>) -> Self {
         let realm = Realm::with_globals(Rc::clone(&globals));
         let global_env = Rc::new(RefCell::new(EnvironmentRecord::new(None)));
+        let module_loader = shared_module_loader_for(&globals);
         let mut vm = Self {
             realm,
             chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
@@ -48,8 +49,7 @@ impl Vm {
             bg_runtime: get_global_bg_runtime(),
             handlers: Vec::new(),
             pending_exception: false,
-            // Each VM gets its own module loader
-            module_loader: Some(ModuleLoader::new()),
+            module_loader,
             module_table: Vec::new(),
             construct_new_target: None,
             last_uncaught_exception: None,
@@ -82,12 +82,7 @@ impl Vm {
             | Value::Array(_, obj)
             | Value::Closure { props: obj, .. }
             | Value::BuiltinObject(_, obj) => obj.borrow().get_prototype(),
-            Value::Promise(_) => self
-                .realm
-                .intrinsics
-                .promise_prototype
-                .clone()
-                .unwrap_or(Value::Null),
+            Value::Promise(_) => self.promise_prototype_value(),
             Value::String(_) => self
                 .realm
                 .intrinsics
@@ -126,6 +121,25 @@ impl Vm {
                 .clone()
                 .unwrap_or(Value::Null),
         }
+    }
+
+    /// Resolve `Promise.prototype` from the realm's intrinsic table or from
+    /// the current global constructor as a fallback.
+    fn promise_prototype_value(&self) -> Value {
+        if let Some(proto) = self.realm.intrinsics.promise_prototype.clone()
+            && !matches!(proto, Value::Null | Value::Undefined)
+        {
+            return proto;
+        }
+
+        if let Some(ctor) = self.realm.get_global("Promise")
+            && let Ok(proto) = get_property(&ctor, &PropertyKey::String("prototype".to_string()), 0)
+            && !matches!(proto, Value::Null | Value::Undefined)
+        {
+            return proto;
+        }
+
+        Value::Null
     }
 
     /// Create a new Array object with the given elements and correct prototype.
@@ -245,13 +259,14 @@ impl Vm {
     ///
     /// # Panics
     ///
-    /// Panics if the module loader is unexpectedly `None` (should not happen).
-    pub fn module_loader_mut(&mut self) -> &mut ModuleLoader {
-        if self.module_loader.is_none() {
-            self.module_loader = Some(ModuleLoader::new());
-        }
-        // SAFETY: we just ensured module_loader is Some
-        self.module_loader.get_or_insert_with(ModuleLoader::new)
+    /// Panics if the module loader cannot be borrowed mutably.
+    pub fn module_loader_mut(&self) -> std::cell::RefMut<'_, ModuleLoader> {
+        self.module_loader.borrow_mut()
+    }
+
+    /// Return a shared handle to the module loader for this VM's realm.
+    pub fn module_loader_handle(&self) -> Rc<RefCell<ModuleLoader>> {
+        Rc::clone(&self.module_loader)
     }
 
     /// Enter a new declarative lexical environment whose outer is the current environment.
@@ -2118,7 +2133,8 @@ impl Vm {
             | Value::Array(..)
             | Value::Closure { .. }
             | Value::Builtin(_)
-            | Value::BuiltinObject(_, _) => {
+            | Value::BuiltinObject(_, _)
+            | Value::Promise(_) => {
                 if crate::trace::enabled() {
                     eprintln!(
                         "[trace] to_primitive called on {} with hint={:?}",
@@ -2163,6 +2179,7 @@ impl Vm {
                             | Value::Closure { .. }
                             | Value::Builtin(_)
                             | Value::BuiltinObject(_, _)
+                            | Value::Promise(_)
                     ) {
                         if crate::trace::enabled() {
                             crate::trace::value_string(
@@ -2217,6 +2234,7 @@ impl Vm {
                                     | Value::Closure { .. }
                                     | Value::Builtin(_)
                                     | Value::BuiltinObject(_, _)
+                                    | Value::Promise(_)
                             ) {
                                 return Ok(rv);
                             }
@@ -2836,7 +2854,8 @@ impl Vm {
                 }
             }
             Value::Promise(_) => {
-                if let Some(proto) = self.realm.intrinsics.promise_prototype.clone() {
+                let proto = self.promise_prototype_value();
+                if !matches!(proto, Value::Null) {
                     return self.lookup_property_descriptor(&proto, key, depth + 1);
                 }
             }
@@ -4127,12 +4146,7 @@ impl Vm {
             Value::Array(_, props) => props.borrow().prototype.clone(),
             Value::Closure { props, .. } => props.borrow().prototype.clone(),
             Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
-            Value::Promise(_) => self
-                .realm
-                .intrinsics
-                .promise_prototype
-                .clone()
-                .unwrap_or(Value::Null),
+            Value::Promise(_) => self.promise_prototype_value(),
             _ => Value::Null,
         };
         let mut seen: HashSet<usize> = HashSet::new();
@@ -4180,12 +4194,7 @@ impl Vm {
             Value::Array(_, props) => props.borrow().prototype.clone(),
             Value::Closure { props, .. } => props.borrow().prototype.clone(),
             Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
-            Value::Promise(_) => self
-                .realm
-                .intrinsics
-                .promise_prototype
-                .clone()
-                .unwrap_or(Value::Null),
+            Value::Promise(_) => self.promise_prototype_value(),
             _ => return Ok(false),
         };
 
@@ -4460,6 +4469,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Array(ar, _), Value::Array(br, _)) => Rc::ptr_eq(ar, br),
         (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
         (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
+        (Value::Promise(ap), Value::Promise(bp)) => Rc::ptr_eq(ap, bp),
         (Value::Builtin(af), Value::Builtin(bf)) => Rc::ptr_eq(af, bf),
         _ => false,
     }
@@ -4487,6 +4497,7 @@ pub fn same_value(a: &Value, b: &Value) -> bool {
         (Value::Array(ar, _), Value::Array(br, _)) => Rc::ptr_eq(ar, br),
         (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
         (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
+        (Value::Promise(ap), Value::Promise(bp)) => Rc::ptr_eq(ap, bp),
         _ => false,
     }
 }
@@ -4996,6 +5007,18 @@ mod tests {
 
         assert!(same_value(&a, &b));
         assert!(!same_value(&a, &c));
+    }
+
+    #[test]
+    fn to_string_handles_promise_values() {
+        let globals = test_globals();
+        let mut vm = Vm::new(globals);
+        let promise = Value::Promise(Rc::new(RefCell::new(PromiseState::Pending {
+            on_fulfilled: Vec::new(),
+            on_rejected: Vec::new(),
+        })));
+
+        assert_eq!(vm.to_string(&promise).unwrap(), "[object Promise]");
     }
 
     #[test]

@@ -35,9 +35,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use blitz::compiler;
-use blitz::{
-    module::ModuleLoader, parser::Parser as TsParser, runtime_utils, value::Value, vm::Vm,
-};
+use blitz::{parser::Parser as TsParser, runtime_utils, value::Value, vm::Vm};
 use num_traits::{Signed, ToPrimitive, Zero};
 
 /// Minimal native hook: print to stdout. The TS soft layer wraps this as console.log.
@@ -76,14 +74,13 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     Ok(Value::Null)
 }
 
-// Host bindings are published directly into the VM globals (`globalThis`) so
-// soft-layer code can access them as regular globals (e.g. `globalThis.__native_print`).
-
-/// Runs source code through the full compilation pipeline
+/// Runs source code in REPL mode (preserves expression results)
+/// Set as `#[cfg(test)]` to avoid the warning for it being unused.
 ///
 /// # Errors
 ///
 /// Returns an error string if any stage of compilation fails
+#[cfg(test)]
 fn run_source(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> {
     let session = TsParser::parse_source(source)?;
     let oast_prog = session.program();
@@ -472,16 +469,18 @@ fn main() -> Result<(), blitz::errors::Error> {
     // If a file was provided, run it and exit. Otherwise start REPL.
     if let Some(path) = cli.file {
         // Use ModuleLoader to load and run the entry file (and its deps)
-        let mut loader = ModuleLoader::new();
-        loader.construct(
-            path.parent().unwrap_or(Path::new(".")),
-            &format!("./{}", path.file_name().unwrap().to_string_lossy()),
-        )?;
-        loader
-            .instantiate_all()
-            .map_err(blitz::errors::Error::from)?;
-        loader
-            .evaluate_entry(&path, &mut repl_vm, cli.typecheck)
+        let loader_handle = repl_vm.module_loader_handle();
+        {
+            let mut loader = loader_handle.borrow_mut();
+            loader.construct(
+                path.parent().unwrap_or(Path::new(".")),
+                &format!("./{}", path.file_name().unwrap().to_string_lossy()),
+            )?;
+            loader
+                .instantiate_all()
+                .map_err(blitz::errors::Error::from)?;
+        }
+        blitz::module::evaluate_entry_shared(&loader_handle, &path, &mut repl_vm, cli.typecheck)
             .map_err(blitz::errors::Error::from)?;
         return Ok(());
     }

@@ -741,6 +741,10 @@ fn run_test_file(
         .as_ref()
         .and_then(|m| m.flags.as_ref())
         .is_some_and(|f| f.iter().any(|s| s == "async"));
+    let is_module = meta
+        .as_ref()
+        .and_then(|m| m.flags.as_ref())
+        .is_some_and(|f| f.iter().any(|s| s == "module"));
 
     // Determine the run modes (non-strict / strict) according to flags:
     // - onlyStrict -> run strict only
@@ -762,6 +766,10 @@ fn run_test_file(
     if raw_flag {
         run_non_strict = true;
         run_strict = false;
+    }
+    if is_module {
+        run_non_strict = false;
+        run_strict = true;
     }
 
     // Required harness files as per Test262 interpreting instructions.
@@ -937,90 +945,216 @@ fn run_test_file(
                 }
             }
         }
+
+        if is_module && !raw_flag {
+            for inc in &include_files {
+                let p = test262_root.join("harness").join(inc);
+                if !p.exists() {
+                    eprintln!(
+                        "[test262] optional include missing (continuing): {}",
+                        p.display()
+                    );
+                    continue;
+                }
+
+                let inc_src = fs::read_to_string(&p)
+                    .map_err(|e| format!("Failed to read include {}: {}", p.display(), e))?;
+                let session = match parse_source_for_path(&inc_src, &p) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!(
+                            "Unsupported {} because include {} parse failed: {}",
+                            path.display(),
+                            inc,
+                            e
+                        );
+                        return Err(format!(
+                            "{} (UNSUPPORTED: include {} parse failed: {})",
+                            path.display(),
+                            inc,
+                            e
+                        ));
+                    }
+                };
+                let prog = session.program();
+                let chunk = match compiler::compile_oxc(prog, &inc_src) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!(
+                            "Unsupported {} because include {} compile failed: {}",
+                            path.display(),
+                            inc,
+                            e
+                        );
+                        return Err(format!(
+                            "{} (UNSUPPORTED: include {} compile failed: {})",
+                            path.display(),
+                            inc,
+                            e
+                        ));
+                    }
+                };
+                if let Err(e) = vm.run(chunk) {
+                    eprintln!(
+                        "Unsupported {} because include {} failed at runtime: {}",
+                        path.display(),
+                        inc,
+                        e
+                    );
+                    return Err(format!(
+                        "{} (UNSUPPORTED: include {} runtime failed: {})",
+                        path.display(),
+                        inc,
+                        e
+                    ));
+                }
+            }
+        }
         // Apply strict override for the test source after harness setup.
         typecheck::set_strict_override(Some(is_strict));
 
-        // Prepare source for this run (includes + test, with optional strict directive)
-        let mut run_src = String::new();
-        if *mode_name == "strict" && !raw_flag {
-            // Per INTERPRETING.md: strict-mode run prefixes the entire source with "use strict".
-            run_src.push_str("\"use strict\";\n");
-        }
-        for inc_src in &include_sources {
-            run_src.push_str(inc_src);
-            run_src.push('\n');
-        }
-        run_src.push_str(&src);
-
-        // Handle parse-phase negative expectations first
-        if let Some(m) = &meta
-            && let Some(neg) = &m.negative
-            && neg.phase == "parse"
-        {
-            // Expect parse to fail
-            match Parser::parse_source(&run_src) {
-                Ok(session) => {
-                    // Parser succeeded, but check if compiler would catch this as a SyntaxError
-                    let prog = session.program();
-                    if let Err(e) = compiler::compile_oxc(prog, &run_src) {
-                        let err_str = e.to_string();
-                        // If the compiler caught a SyntaxError, treat this as the parser catching it
-                        if err_str.contains("SyntaxError") || err_str.contains("redeclaration") {
-                            continue;
+        let run_result = if is_module {
+            // Module tests are evaluated as modules, not as concatenated scripts.
+            if let Some(m) = &meta
+                && let Some(neg) = &m.negative
+                && neg.phase == "parse"
+            {
+                match Parser::parse_source(&src) {
+                    Ok(session) => {
+                        let prog = session.program();
+                        if let Err(e) = compiler::compile_oxc(prog, &src) {
+                            let err_str = e.to_string();
+                            if err_str.contains("SyntaxError") || err_str.contains("redeclaration")
+                            {
+                                continue;
+                            }
                         }
+                        return Err(Test262Error::new(
+                            path,
+                            mode_name,
+                            "expected parse error (phase=parse) but parse succeeded".to_string(),
+                        )
+                        .into_string());
                     }
-                    return Err(Test262Error::new(
-                        path,
-                        mode_name,
-                        "expected parse error (phase=parse) but parse succeeded".to_string(),
-                    )
-                    .into_string());
-                }
-                Err(_) => {
-                    // got parse error as expected for this mode; continue to next mode
-                    continue;
+                    Err(_) => {
+                        continue;
+                    }
                 }
             }
-        }
 
-        if let Some(m) = &meta
-            && let Some(neg) = &m.negative
-            && neg.phase == "resolution"
-        {
-            return Err(Test262Error::new(
-                path,
-                mode_name,
-                "UNSUPPORTED resolution phase".to_string(),
-            )
-            .into_string());
-        }
-
-        // Otherwise, parse must succeed
-        let session = match Parser::parse_source(&run_src) {
-            Ok(s) => s,
-            Err(e) => {
+            if let Some(m) = &meta
+                && let Some(neg) = &m.negative
+                && neg.phase == "resolution"
+            {
                 return Err(Test262Error::new(
                     path,
                     mode_name,
-                    format!("unexpected parse error: {e}"),
+                    "UNSUPPORTED resolution phase".to_string(),
                 )
                 .into_string());
             }
-        };
-        let prog = session.program();
 
-        // Compile the JS source directly; Test262 should not be gated on TS-only checks.
-        let chunk = match compiler::compile_oxc(prog, &run_src) {
-            Ok(c) => c,
-            Err(e) => {
-                return Err(
-                    Test262Error::new(path, mode_name, format!("compile error: {e}")).into_string(),
-                );
+            let loader_handle = vm.module_loader_handle();
+            {
+                let mut loader = loader_handle.borrow_mut();
+                let base_dir = path.parent().unwrap_or(Path::new("."));
+                loader
+                    .construct(
+                        base_dir,
+                        &format!("./{}", path.file_name().unwrap().to_string_lossy()),
+                    )
+                    .map_err(|e| e.to_string())?;
+                loader
+                    .instantiate_all()
+                    .map_err(|e| e.to_string())?;
             }
-        };
+            match blitz::module::evaluate_entry_shared(&loader_handle, &path, &mut vm, false) {
+                Ok(()) => Ok(Value::Undefined),
+                Err(e) => Err(e.to_string()),
+            }
+        } else {
+            // Prepare source for this run (includes + test, with optional strict directive)
+            let mut run_src = String::new();
+            if *mode_name == "strict" && !raw_flag {
+                // Per INTERPRETING.md: strict-mode run prefixes the entire source with "use strict".
+                run_src.push_str("\"use strict\";\n");
+            }
+            for inc_src in &include_sources {
+                run_src.push_str(inc_src);
+                run_src.push('\n');
+            }
+            run_src.push_str(&src);
 
-        // Execute using the provided persistent VM
-        let run_result = vm.run(chunk);
+            // Handle parse-phase negative expectations first
+            if let Some(m) = &meta
+                && let Some(neg) = &m.negative
+                && neg.phase == "parse"
+            {
+                // Expect parse to fail
+                match Parser::parse_source(&run_src) {
+                    Ok(session) => {
+                        // Parser succeeded, but check if compiler would catch this as a SyntaxError
+                        let prog = session.program();
+                        if let Err(e) = compiler::compile_oxc(prog, &run_src) {
+                            let err_str = e.to_string();
+                            // If the compiler caught a SyntaxError, treat this as the parser catching it
+                            if err_str.contains("SyntaxError") || err_str.contains("redeclaration") {
+                                continue;
+                            }
+                        }
+                        return Err(Test262Error::new(
+                            path,
+                            mode_name,
+                            "expected parse error (phase=parse) but parse succeeded".to_string(),
+                        )
+                        .into_string());
+                    }
+                    Err(_) => {
+                        // got parse error as expected for this mode; continue to next mode
+                        continue;
+                    }
+                }
+            }
+
+            if let Some(m) = &meta
+                && let Some(neg) = &m.negative
+                && neg.phase == "resolution"
+            {
+                return Err(Test262Error::new(
+                    path,
+                    mode_name,
+                    "UNSUPPORTED resolution phase".to_string(),
+                )
+                .into_string());
+            }
+
+            // Otherwise, parse must succeed
+            let session = match Parser::parse_source(&run_src) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err(Test262Error::new(
+                        path,
+                        mode_name,
+                        format!("unexpected parse error: {e}"),
+                    )
+                    .into_string());
+                }
+            };
+            let prog = session.program();
+
+            // Compile the JS source directly; Test262 should not be gated on TS-only checks.
+            let chunk = match compiler::compile_oxc(prog, &run_src) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Err(
+                        Test262Error::new(path, mode_name, format!("compile error: {e}")).into_string(),
+                    );
+                }
+            };
+
+            // Execute using the provided persistent VM
+            vm.run(chunk).map_err(|e| e.to_string())
+        };
 
         // For async tests, drain the microtask queue to ensure promise callbacks execute
         let run_result = if is_async {
@@ -1030,7 +1164,7 @@ fn run_test_file(
                 Ok(v) => {
                     // Drain microtasks to allow promise callbacks to run
                     if let Err(e) = vm.flush_microtasks() {
-                        Err(e)
+                        Err(e.to_string())
                     } else {
                         // Now check if $DONE was called
                         let start = Instant::now();
@@ -1040,13 +1174,13 @@ fn run_test_file(
                             if let Some(state) = done_state.borrow().as_ref() {
                                 let async_result = match state {
                                     None => Ok(v),
-                                    Some(err) => Err(format!("async test failed: {}", err).into()),
+                                    Some(err) => Err(format!("async test failed: {}", err)),
                                 };
                                 break async_result;
                             }
 
                             if start.elapsed() > timeout {
-                                break Err("async test timeout".into());
+                                break Err("async test timeout".to_string());
                             }
 
                             thread::sleep(Duration::from_millis(10));
