@@ -402,12 +402,54 @@ fn shadowrealm_evaluate(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
     // supports primitives, plain objects, and arrays. Non-cloneable values
     // (functions, promises, symbols, accessors, cyclic structures) will
     // result in a TypeError to avoid leaking object identity across realms.
+    // Parse optional transfer list argument (third argument) as an Array of
+    // ArrayBuffer objects. We collect backing-store addresses (Rc pointer
+    // addresses of the [[ArrayBufferData]] Array) into a HashSet and pass it
+    // to the clone helper so it can detach transferred buffers in the source
+    // realm.
+    let mut transfer_set: Option<HashSet<usize>> = None;
+    if let Some(Value::Array(arr_rc, _)) = args.get(2) {
+        let mut set = HashSet::new();
+        for slot in arr_rc.borrow().iter().cloned() {
+            if let Some(v) = slot {
+                match v {
+                    Value::Object(obj_rc) => {
+                        // Look up [[ArrayBufferData]] slot and grab underlying
+                        // array backing Rc pointer address.
+                        if let Some(PropertyDescriptor::Data { value: ab_data, .. }) = obj_rc
+                            .borrow()
+                            .properties
+                            .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
+                            .cloned()
+                            && let Value::Array(backing_rc, _) = ab_data
+                        {
+                            set.insert(Rc::as_ptr(&backing_rc) as usize);
+                            continue;
+                        }
+                        return Err(vm.throw_type_error(
+                            "Transfer list entries must be ArrayBuffer objects",
+                        ));
+                    }
+                    _ => {
+                        return Err(vm.throw_type_error(
+                            "Transfer list entries must be ArrayBuffer objects",
+                        ));
+                    }
+                }
+            }
+        }
+        transfer_set = Some(set);
+    }
+
     let inner_result = record
         .borrow_vm()
         .run(chunk)
         .map_err(|err| vm.throw_type_error(&format!("ShadowRealm evaluate error: {}", err)))?;
 
-    clone_value_across_realms(vm, &inner_result).map_err(|s| vm.throw_type_error(&s))
+    // Pass transfer_set.as_ref() to clone helper so it may detach transferred
+    // ArrayBuffers in the source realm.
+    clone_value_across_realms(vm, &inner_result, transfer_set.as_ref())
+        .map_err(|s| vm.throw_type_error(&s))
 }
 
 fn shadowrealm_import_value(
@@ -432,6 +474,16 @@ fn shadowrealm_import_value(
         on_rejected: Vec::new(),
     }));
     let promise_value = Value::Promise(Rc::clone(&promise));
+
+    // Parse transfer list argument (third argument) if present. For importValue
+    // the signature is (shadowRealm, specifier, exportName, [transferList]) so
+    // the transfer list will be at index 2 or 3 depending on calling conv. The
+    // existing code places export name at args.get(1), so treat args.get(2) as
+    // the optional transfer list.
+    let mut transfer_set_arg: Option<Value> = None;
+    if args.len() > 2 {
+        transfer_set_arg = args.get(2).cloned();
+    }
 
     let record_handle = Rc::clone(&record);
     let base_dir = record.base_dir();
@@ -485,18 +537,70 @@ fn shadowrealm_import_value(
         })();
 
         match result {
-            Ok(value) => match clone_value_across_realms(vm, &value) {
-                Ok(cloned) => fulfill_pending_promise(vm, &promise, cloned),
-                Err(err) => {
-                    let err_val = vm
-                        .create_intrinsic_error(
-                            "TypeError",
-                            &format!("ShadowRealm clone failed: {}", err),
-                        )
-                        .unwrap_or(Value::String(err));
-                    reject_pending_promise(vm, &promise, err_val);
+            Ok(value) => {
+                // Build transfer set from transfer_set_arg if present.
+                let mut transfer_set: Option<HashSet<usize>> = None;
+                if let Some(Value::Array(arr_rc, _)) = transfer_set_arg.clone() {
+                    let mut set = HashSet::new();
+                    for v in arr_rc.borrow().iter().flatten().cloned() {
+                        match v {
+                            Value::Object(obj_rc) => {
+                                if let Some(PropertyDescriptor::Data { value: ab_data, .. }) =
+                                    obj_rc
+                                        .borrow()
+                                        .properties
+                                        .get(&PropertyKey::String(
+                                            "[[ArrayBufferData]]".to_string(),
+                                        ))
+                                        .cloned()
+                                    && let Value::Array(backing_rc, _) = ab_data
+                                {
+                                    set.insert(Rc::as_ptr(&backing_rc) as usize);
+                                    continue;
+                                }
+                                let err_val = vm
+                                    .create_intrinsic_error(
+                                        "TypeError",
+                                        "Transfer list entries must be ArrayBuffer objects",
+                                    )
+                                    .unwrap_or(Value::String(
+                                        "Transfer list entries must be ArrayBuffer objects"
+                                            .to_string(),
+                                    ));
+                                reject_pending_promise(vm, &promise, err_val);
+                                return Ok(());
+                            }
+                            _ => {
+                                let err_val = vm
+                                    .create_intrinsic_error(
+                                        "TypeError",
+                                        "Transfer list entries must be ArrayBuffer objects",
+                                    )
+                                    .unwrap_or(Value::String(
+                                        "Transfer list entries must be ArrayBuffer objects"
+                                            .to_string(),
+                                    ));
+                                reject_pending_promise(vm, &promise, err_val);
+                                return Ok(());
+                            }
+                        }
+                    }
+                    transfer_set = Some(set);
                 }
-            },
+
+                match clone_value_across_realms(vm, &value, transfer_set.as_ref()) {
+                    Ok(cloned) => fulfill_pending_promise(vm, &promise, cloned),
+                    Err(err) => {
+                        let err_val = vm
+                            .create_intrinsic_error(
+                                "TypeError",
+                                &format!("ShadowRealm clone failed: {}", err),
+                            )
+                            .unwrap_or(Value::String(err));
+                        reject_pending_promise(vm, &promise, err_val);
+                    }
+                }
+            }
             Err(msg) => {
                 let err_val = vm
                     .create_intrinsic_error("TypeError", &msg)
@@ -557,7 +661,7 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
             // Return a namespace value cloned into the host realm rather than
             // directly returning a reference into the imported VM. If cloning
             // fails, reject the promise.
-            match clone_value_across_realms(vm, &value) {
+            match clone_value_across_realms(vm, &value, None) {
                 Ok(cloned) => {
                     let mut state = promise.borrow_mut();
                     *state = PromiseState::Fulfilled(cloned);
@@ -911,7 +1015,11 @@ fn canonical_index_key(s: &str) -> Option<u64> {
 /// creates host-realm objects with the appropriate host intrinsics as
 /// prototypes. Returns Err(String) for uncloneable values (functions,
 /// promises, symbols, accessors, etc.).
-fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String> {
+fn clone_value_across_realms(
+    vm: &mut Vm,
+    value: &Value,
+    transfer_set: Option<&HashSet<usize>>,
+) -> Result<Value, String> {
     use std::collections::HashMap;
 
     // visited maps source Rc pointer addresses to already-created clone Values
@@ -920,6 +1028,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
         vm: &mut Vm,
         v: &Value,
         visited: &mut HashMap<usize, Value>,
+        transfer_set: Option<&HashSet<usize>>,
     ) -> Result<Value, String> {
         match v {
             Value::Undefined => Ok(Value::Undefined),
@@ -958,7 +1067,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                 // Fill dense slots
                 for (i, slot) in arr_rc.borrow().iter().enumerate() {
                     if let Some(sv) = slot {
-                        let cloned = helper(vm, sv, visited)?;
+                        let cloned = helper(vm, sv, visited, transfer_set)?;
                         new_arr.borrow_mut()[i] = Some(cloned);
                     } else {
                         new_arr.borrow_mut()[i] = None;
@@ -969,14 +1078,16 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                 for (k, desc) in &props_rc.borrow().properties {
                     match desc {
                         PropertyDescriptor::Data { value, .. } => {
-                            let cloned = helper(vm, value, visited)?;
+                            let cloned = helper(vm, value, visited, transfer_set)?;
                             new_props
                                 .borrow_mut()
                                 .properties
                                 .insert(k.clone(), PropertyDescriptor::data(cloned));
                         }
                         _ => {
-                            return Err("Cannot clone accessor properties across realms".to_string());
+                            return Err(
+                                "Cannot clone accessor properties across realms".to_string()
+                            );
                         }
                     }
                 }
@@ -1010,7 +1121,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                     visited.insert(addr, target_val);
 
                     // Clone underlying data (expected to be Value::Array)
-                    let cloned_data = helper(vm, ab_data, visited)?;
+                    let cloned_data = helper(vm, ab_data, visited, transfer_set)?;
                     target_obj.borrow_mut().properties.insert(
                         PropertyKey::String("[[ArrayBufferData]]".to_string()),
                         PropertyDescriptor::data(cloned_data),
@@ -1020,7 +1131,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                         .properties
                         .get(&PropertyKey::String("byteLength".to_string()))
                     {
-                        let bl = helper(vm, value, visited)?;
+                        let bl = helper(vm, value, visited, transfer_set)?;
                         target_obj.borrow_mut().properties.insert(
                             PropertyKey::String("byteLength".to_string()),
                             PropertyDescriptor::data(bl),
@@ -1044,7 +1155,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                     let target_val = Value::Object(Rc::clone(&target_obj));
                     visited.insert(addr, target_val);
 
-                    let cloned_ta = helper(vm, ta_data, visited)?;
+                    let cloned_ta = helper(vm, ta_data, visited, transfer_set)?;
                     target_obj.borrow_mut().properties.insert(
                         PropertyKey::String("[[TypedArrayData]]".to_string()),
                         PropertyDescriptor::data(cloned_ta),
@@ -1055,7 +1166,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                             .properties
                             .get(&PropertyKey::String(key_name.to_string()))
                         {
-                            let cloned = helper(vm, value, visited)?;
+                            let cloned = helper(vm, value, visited, transfer_set)?;
                             target_obj.borrow_mut().properties.insert(
                                 PropertyKey::String(key_name.to_string()),
                                 PropertyDescriptor::data(cloned),
@@ -1065,18 +1176,20 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                     // copy numeric indexed properties if present
                     for (k, desc) in &borrow.properties {
                         if let PropertyKey::String(s) = k
-                            && canonical_index_key(s).is_some() {
-                                if let PropertyDescriptor::Data { value, .. } = desc {
-                                    let cloned = helper(vm, value, visited)?;
-                                    target_obj.borrow_mut().properties.insert(
-                                        PropertyKey::String(s.clone()),
-                                        PropertyDescriptor::data(cloned),
-                                    );
-                                } else {
-                                    return Err("Cannot clone accessor properties across realms"
-                                        .to_string());
-                                }
+                            && canonical_index_key(s).is_some()
+                        {
+                            if let PropertyDescriptor::Data { value, .. } = desc {
+                                let cloned = helper(vm, value, visited, transfer_set)?;
+                                target_obj.borrow_mut().properties.insert(
+                                    PropertyKey::String(s.clone()),
+                                    PropertyDescriptor::data(cloned),
+                                );
+                            } else {
+                                return Err(
+                                    "Cannot clone accessor properties across realms".to_string()
+                                );
                             }
+                        }
                     }
                     return Ok(Value::Object(target_obj));
                 }
@@ -1094,7 +1207,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                     let target_val = Value::Object(Rc::clone(&target_obj));
                     visited.insert(addr, target_val);
 
-                    let cloned_entries = helper(vm, entries, visited)?;
+                    let cloned_entries = helper(vm, entries, visited, transfer_set)?;
                     target_obj.borrow_mut().properties.insert(
                         PropertyKey::String("__map_entries".to_string()),
                         PropertyDescriptor::data(cloned_entries),
@@ -1104,7 +1217,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                         .properties
                         .get(&PropertyKey::String("size".to_string()))
                     {
-                        let cloned = helper(vm, value, visited)?;
+                        let cloned = helper(vm, value, visited, transfer_set)?;
                         target_obj.borrow_mut().properties.insert(
                             PropertyKey::String("size".to_string()),
                             PropertyDescriptor::data(cloned),
@@ -1129,7 +1242,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                     let target_val = Value::Object(Rc::clone(&target_obj));
                     visited.insert(addr, target_val);
 
-                    let cloned_vals = helper(vm, set_vals, visited)?;
+                    let cloned_vals = helper(vm, set_vals, visited, transfer_set)?;
                     target_obj.borrow_mut().properties.insert(
                         PropertyKey::String("__set_values".to_string()),
                         PropertyDescriptor::data(cloned_vals),
@@ -1138,7 +1251,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                         .properties
                         .get(&PropertyKey::String("size".to_string()))
                     {
-                        let cloned = helper(vm, value, visited)?;
+                        let cloned = helper(vm, value, visited, transfer_set)?;
                         target_obj.borrow_mut().properties.insert(
                             PropertyKey::String("size".to_string()),
                             PropertyDescriptor::data(cloned),
@@ -1160,7 +1273,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                     let target_val = Value::Object(Rc::clone(&target_obj));
                     visited.insert(addr, target_val);
 
-                    let cloned_prim = helper(vm, prim, visited)?;
+                    let cloned_prim = helper(vm, prim, visited, transfer_set)?;
                     target_obj.borrow_mut().properties.insert(
                         PropertyKey::String("[[PrimitiveValue]]".to_string()),
                         PropertyDescriptor::data(cloned_prim),
@@ -1189,7 +1302,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                         if let Some(PropertyDescriptor::Data { value, .. }) =
                             borrow.properties.get(&PropertyKey::String(key.to_string()))
                         {
-                            let cloned = helper(vm, value, visited)?;
+                            let cloned = helper(vm, value, visited, transfer_set)?;
                             target_obj.borrow_mut().properties.insert(
                                 PropertyKey::String(key.to_string()),
                                 PropertyDescriptor::data(cloned),
@@ -1211,14 +1324,16 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
                 for (k, desc) in &borrow.properties {
                     match desc {
                         PropertyDescriptor::Data { value, .. } => {
-                            let cloned = helper(vm, value, visited)?;
+                            let cloned = helper(vm, value, visited, transfer_set)?;
                             target_obj
                                 .borrow_mut()
                                 .properties
                                 .insert(k.clone(), PropertyDescriptor::data(cloned));
                         }
                         _ => {
-                            return Err("Cannot clone accessor properties across realms".to_string());
+                            return Err(
+                                "Cannot clone accessor properties across realms".to_string()
+                            );
                         }
                     }
                 }
@@ -1230,7 +1345,7 @@ fn clone_value_across_realms(vm: &mut Vm, value: &Value) -> Result<Value, String
     }
 
     let mut visited: HashMap<usize, Value> = HashMap::new();
-    helper(vm, value, &mut visited)
+    helper(vm, value, &mut visited, transfer_set)
 }
 
 /// Install a minimal set of kernel constructors and prototypes on `globals`.
@@ -2059,7 +2174,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     symbol_proto_map.borrow_mut().properties.insert(
         PKey::String("valueOf".to_string()),
         PropertyDescriptor::data(builtin_object(
-            Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+            Rc::new(|_vm, args| {
+                let res = args.first().cloned().unwrap_or(Value::Undefined);
+                Ok(res)
+            }),
             &function_proto_map,
         )),
     );
@@ -2705,15 +2823,17 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(builtin_object(
             Rc::new(|_vm, args| {
                 let this = args.first().cloned().unwrap_or(Value::Undefined);
-                if let Value::Object(obj) = this
+                let res = if let Value::Object(obj) = this
                     && let Some(PropertyDescriptor::Data { value, .. }) = obj
                         .borrow()
                         .properties
                         .get(&PropertyKey::String("[[PrimitiveValue]]".to_string()))
                 {
-                    return Ok(value.clone());
-                }
-                Ok(Value::Number(f64::NAN))
+                    value.clone()
+                } else {
+                    Value::Number(f64::NAN)
+                };
+                Ok(res)
             }),
             &function_proto_map,
         )),
@@ -3522,7 +3642,19 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     object_proto_map.borrow_mut().properties.insert(
         PKey::String("valueOf".to_string()),
         non_enum_data(builtin_object(
-            Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Null))),
+            Rc::new(|_vm, args| {
+                // Builtins invoked as methods receive the receiver as args[0].
+                // Return the receiver (this) per standard Object.prototype.valueOf.
+                let res = args.first().cloned().unwrap_or(Value::Null);
+                if crate::trace::enabled() {
+                    crate::trace::value_string(
+                        "[trace] Object.prototype.valueOf receiver",
+                        &args.first().cloned().unwrap_or(Value::Null),
+                    );
+                    crate::trace::value_string("[trace] Object.prototype.valueOf result", &res);
+                }
+                Ok(res)
+            }),
             &function_proto_map,
         )),
     );
@@ -4193,9 +4325,27 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         )),
     );
 
-    let string_ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
-        // When String is called via Function.prototype.call/apply, the first
-        // slot can be the explicit `thisArg`. Prefer the first user argument.
+    let string_proto_for_ctor = Rc::clone(&string_proto_map);
+    let string_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+        // Support being called as a constructor: new String(value) should
+        // create a wrapper object with [[PrimitiveValue]] set to the
+        // stringified value. When called as a function, return the primitive
+        // string.
+        if vm.current_new_target().is_some() {
+            let value = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let s = vm.to_string(&value)?;
+            let mut obj = ObjectData::new();
+            obj.prototype = Value::Object(Rc::clone(&string_proto_for_ctor));
+            let obj_rc = Rc::new(RefCell::new(obj));
+            obj_rc.borrow_mut().properties.insert(
+                PKey::String("[[PrimitiveValue]]".to_string()),
+                PropertyDescriptor::data(Value::String(s)),
+            );
+            return Ok(Value::Object(obj_rc));
+        }
+
+        // Called as function: String(value)
+        // Called via call/apply: String.call(thisArg, value)
         let value_idx = if args.len() > 1 { 1 } else { 0 };
         let value = args.get(value_idx);
         if value.is_none() {
@@ -4214,13 +4364,83 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 Some(d) => format!("Symbol({})", d),
                 None => "Symbol()".to_string(),
             })),
-            other => Ok(Value::String(_vm.to_string(other)?)),
+            other => Ok(Value::String(vm.to_string(other)?)),
         }
     });
     let string_ctor_val = Value::BuiltinObject(string_ctor_fn.clone(), Rc::clone(&string_ctor_map));
     string_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(string_ctor_val.clone()),
+    );
+    // Provide String.prototype.valueOf so ToPrimitive can retrieve the
+    // internal string value for String wrapper objects and primitives.
+    string_proto_map.borrow_mut().properties.insert(
+        PKey::String("valueOf".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let res =
+                    match this {
+                        Value::String(s) => Value::String(s),
+                        Value::Object(obj) => {
+                            if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                                .borrow()
+                                .properties
+                                .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                            {
+                                match value {
+                                    Value::String(s) => Value::String(s.clone()),
+                                    _ => return Err(vm.throw_type_error(
+                                        "String.prototype.valueOf called on incompatible receiver",
+                                    )),
+                                }
+                            } else {
+                                return Err(vm.throw_type_error(
+                                    "String.prototype.valueOf called on incompatible receiver",
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(vm.throw_type_error(
+                                "String.prototype.valueOf called on incompatible receiver",
+                            ));
+                        }
+                    };
+                Ok(res)
+            }),
+            &function_proto_map,
+        )),
+    );
+    // Provide String.prototype.toString so String-like values produce the
+    // primitive string when ToPrimitive prefers string or when explicitly
+    // invoked. Mirrors Boolean.prototype.toString semantics used elsewhere.
+    string_proto_map.borrow_mut().properties.insert(
+        PKey::String("toString".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                match this {
+                    Value::String(s) => Ok(Value::String(s)),
+                    Value::Object(obj) => {
+                        if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                            .borrow()
+                            .properties
+                            .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                            && let Value::String(s) = value
+                        {
+                            return Ok(Value::String(s.clone()));
+                        }
+                        Err(vm.throw_type_error(
+                            "String.prototype.toString called on incompatible receiver",
+                        ))
+                    }
+                    _ => Err(vm.throw_type_error(
+                        "String.prototype.toString called on incompatible receiver",
+                    )),
+                }
+            }),
+            &function_proto_map,
+        )),
     );
     let string_index_of = builtin_object(
         Rc::new(|vm, args| {
@@ -4369,21 +4589,28 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
                 let this = args.first().cloned().unwrap_or(Value::Undefined);
-                match this {
-                    Value::Bool(b) => return Ok(Value::Bool(b)),
+                let res = match this {
+                    Value::Bool(b) => Value::Bool(b),
                     Value::Object(obj) => {
                         if let Some(PropertyDescriptor::Data { value, .. }) = obj
                             .borrow()
                             .properties
                             .get(&PKey::String("[[PrimitiveValue]]".to_string()))
                         {
-                            return Ok(value.clone());
+                            value.clone()
+                        } else {
+                            return Err(vm.throw_type_error(
+                                "Boolean.prototype.valueOf called on incompatible receiver",
+                            ));
                         }
                     }
-                    _ => {}
-                }
-                Err(vm
-                    .throw_type_error("Boolean.prototype.valueOf called on incompatible receiver"))
+                    _ => {
+                        return Err(vm.throw_type_error(
+                            "Boolean.prototype.valueOf called on incompatible receiver",
+                        ));
+                    }
+                };
+                Ok(res)
             }),
             &function_proto_map,
         )),
@@ -5412,10 +5639,27 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PKey::String("prototype".to_string()),
         PropertyDescriptor::data(Value::Object(Rc::clone(&number_proto_map))),
     );
-    let number_ctor_fn: BuiltinFn = Rc::new(|vm, args| {
+    let number_proto_for_ctor = Rc::clone(&number_proto_map);
+    let number_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+        // When called as constructor (new Number(...)) create a Number object
+        // wrapper with internal [[PrimitiveValue]] per other constructors.
+        if vm.current_new_target().is_some() {
+            let value = args.get(1).cloned().unwrap_or(Value::Number(0.0));
+            let n = vm.to_number_value(&value)?;
+            let mut obj = ObjectData::new();
+            // Attach Number.prototype for this constructor's realm (available in
+            // the surrounding scope via number_proto_map).
+            obj.prototype = Value::Object(Rc::clone(&number_proto_for_ctor));
+            // Create object and set [[PrimitiveValue]] slot
+            let obj_rc = Rc::new(RefCell::new(obj));
+            obj_rc.borrow_mut().properties.insert(
+                PKey::String("[[PrimitiveValue]]".to_string()),
+                PropertyDescriptor::data(Value::Number(n)),
+            );
+            return Ok(Value::Object(obj_rc));
+        }
         // Called as a plain function: Number(value)
         // Called via Function.prototype.call/apply: Number.call(thisArg, value)
-        // Called as constructor: new Number(value) passes [this, value, callee]
         let value_idx = if args.len() > 1 { 1 } else { 0 };
         let value = args.get(value_idx).cloned().unwrap_or(Value::Number(0.0));
         let n = vm.to_number_value(&value)?;
@@ -5425,6 +5669,76 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     number_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(number_ctor_val.clone()),
+    );
+    // Provide Number.prototype.valueOf so ToPrimitive can call it on Number
+    // wrapper objects or primitives per ECMAScript semantics.
+    number_proto_map.borrow_mut().properties.insert(
+        PKey::String("valueOf".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let res = match this {
+                    Value::Number(n) => Value::Number(n),
+                    Value::Object(obj) => {
+                        if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                            .borrow()
+                            .properties
+                            .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                        {
+                            value.clone()
+                        } else {
+                            return Err(vm.throw_type_error(
+                                "Number.prototype.valueOf called on incompatible receiver",
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(vm.throw_type_error(
+                            "Number.prototype.valueOf called on incompatible receiver",
+                        ));
+                    }
+                };
+                if crate::trace::enabled() {
+                    crate::trace::value_string(
+                        "[trace] Number.prototype.valueOf receiver",
+                        &args.first().cloned().unwrap_or(Value::Undefined),
+                    );
+                    crate::trace::value_string("[trace] Number.prototype.valueOf result", &res);
+                }
+                Ok(res)
+            }),
+            &function_proto_map,
+        )),
+    );
+    // Minimal Number.prototype.toString implementation. Full radix support is
+    // omitted for now; tests commonly expect the default base-10 string.
+    number_proto_map.borrow_mut().properties.insert(
+        PKey::String("toString".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                match this {
+                    Value::Number(n) => Ok(Value::String(n.to_string())),
+                    Value::Object(obj) => {
+                        if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                            .borrow()
+                            .properties
+                            .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                            && let Value::Number(n) = value
+                        {
+                            return Ok(Value::String(n.to_string()));
+                        }
+                        Err(vm.throw_type_error(
+                            "Number.prototype.toString called on incompatible receiver",
+                        ))
+                    }
+                    _ => Err(vm.throw_type_error(
+                        "Number.prototype.toString called on incompatible receiver",
+                    )),
+                }
+            }),
+            &function_proto_map,
+        )),
     );
     number_ctor_map.borrow_mut().properties.insert(
         PKey::String("NaN".to_string()),

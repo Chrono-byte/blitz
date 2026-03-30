@@ -2405,6 +2405,42 @@ impl Compiler {
             OExpr::ParenthesizedExpression(p) => {
                 self.compile_expr_oast(&p.expression)?;
             }
+            OExpr::ClassExpression(c) => {
+                // Minimal class expression support: emit a trivial constructor
+                // function and push it on the stack. Full class element
+                // initialization is not implemented yet; this prevents
+                // class-expressions from lowering to `Undefined` which breaks
+                // usages like `var C = class {}` followed by `new C()`.
+                let name =
+                    c.id.as_ref()
+                        .map(|id| id.name.to_string())
+                        .unwrap_or_else(|| "<anonymous>".to_string());
+                let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
+                ctor_chunk.write(Op::Return as u8, LINE);
+                let proto = FunctionProto {
+                    name: name.clone(),
+                    span: c.span,
+                    arity: 0,
+                    chunk: Rc::new(ctor_chunk),
+                    slot_types: Vec::new(),
+                    slot_names: Vec::new(),
+                    lexical_tdz: Vec::new(),
+                    upvalues: Vec::new(),
+                    has_rest: false,
+                    has_prototype_property: true,
+                    captures_this: false,
+                    arguments_slot: None,
+                    has_simple_parameter_list: true,
+                    return_type: None,
+                    is_strict: true,
+                    is_constructor: true,
+                    is_async: false,
+                    is_generator: false,
+                };
+                let idx = self.chunk.add_function(proto);
+                self.emit(Op::MakeClosure, LINE);
+                self.emit_byte(idx as u8, LINE);
+            }
             OExpr::AwaitExpression(a) => {
                 self.compile_expr_oast(&a.argument)?;
                 self.emit(Op::AwaitPromise, LINE);

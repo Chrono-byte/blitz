@@ -5,7 +5,7 @@ use crate::realm::Realm;
 use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::state::*;
 use num_bigint::BigInt as BigIntValue;
-use num_traits::{FromPrimitive, Signed, ToPrimitive};
+use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -935,6 +935,31 @@ impl Vm {
         args: &[Value],
     ) -> Result<Value, crate::errors::RuntimeError> {
         if !callee.is_constructable() {
+            if crate::trace::enabled() {
+                eprintln!(
+                    "[trace] construct_value: callee not constructable ip={} actual={}",
+                    self.ip.saturating_sub(1),
+                    callee.type_name()
+                );
+                crate::trace::value_string("[trace]   callee", callee);
+                for (i, v) in self.stack.iter().rev().take(6).enumerate() {
+                    crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
+                }
+                // Dump a small window of bytecode around the current ip to help
+                // correlate the failing instruction with constants and nearby ops.
+                let cur_ip = self.ip.saturating_sub(1);
+                let start = cur_ip.saturating_sub(16);
+                let end = (cur_ip + 16).min(self.chunk.code.len());
+                eprintln!("[trace]   bytecode window ({}..{}):", start, end);
+                for i in start..end {
+                    eprintln!("[trace]     {:04} 0x{:02x}", i, self.chunk.code[i]);
+                }
+                // Print a short constant pool summary
+                eprintln!("[trace]   constants (len={}):", self.chunk.constants.len());
+                for (i, c) in self.chunk.constants.iter().enumerate().take(32) {
+                    crate::trace::value_string(&format!("[trace]     const[{}]", i), c);
+                }
+            }
             return Err(self.throw_type_error(&format!(
                 "Construct: not a constructor (actual={})",
                 callee.type_name()
@@ -1351,6 +1376,10 @@ impl Vm {
                         return Err(self.throw_reference_error(&format!("{name} is not defined")));
                     }
                 };
+                if crate::trace::enabled() {
+                    eprintln!("[trace] GetGlobal '{}' -> {}", name, v.type_name());
+                    crate::trace::value_string("[trace]   value", &v);
+                }
                 self.stack.push(v);
             }
             Op::SetGlobal => {
@@ -1418,9 +1447,15 @@ impl Vm {
                     if let (Value::BigInt(x), Value::BigInt(y)) = (a_prim, b_prim) {
                         self.stack.push(Value::BigInt(x + y));
                     } else {
-                        return Err(crate::errors::RuntimeError::from(
-                            "Add: cannot mix BigInt and other types",
-                        ));
+                        // Mixing BigInt and other numeric types should throw a JS TypeError
+                        let ctor = self.get_global("TypeError").unwrap_or(Value::Undefined);
+                        let thrown = self
+                            .construct_value(&ctor, &[])
+                            .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                        match self.unwind_to_handler(thrown) {
+                            Ok(()) => return Ok(StepOutcome::Continue),
+                            Err(err) => return Err(err),
+                        }
                     }
                 } else {
                     let na = self.to_number_value(&a_prim)?;
@@ -1439,14 +1474,34 @@ impl Vm {
             }
             Op::Sub => self.binary_num_bigint(|a, b| a - b, |a, b| Ok(a - b))?,
             Op::Mul => self.binary_num_bigint(|a, b| a * b, |a, b| Ok(a * b))?,
-            Op::Div => self.binary_num_bigint(
-                |a, b| a / b,
-                |_, _| {
-                    Err(crate::errors::RuntimeError::from(
-                        "Div: bigint not supported",
-                    ))
-                },
-            )?,
+            Op::Div => {
+                // Division supports BigInt/BigInt -> BigInt (trunc toward zero)
+                // and numeric division for other types.
+                let b = self.pop()?;
+                let a = self.pop()?;
+                match (a, b) {
+                    (Value::BigInt(x), Value::BigInt(y)) => {
+                        if y.is_zero() {
+                            // Division by zero for BigInt throws RangeError
+                            let ctor = self.get_global("RangeError").unwrap_or(Value::Undefined);
+                            let thrown = self
+                                .construct_value(&ctor, &[])
+                                .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                            match self.unwind_to_handler(thrown) {
+                                Ok(()) => return Ok(StepOutcome::Continue),
+                                Err(err) => return Err(err),
+                            }
+                        }
+                        // Use BigInt division (num_bigint division semantics align with trunc toward zero)
+                        let res = x / y;
+                        self.stack.push(Value::BigInt(res));
+                    }
+                    (a, b) => {
+                        let (x, y) = (to_number(&a)?, to_number(&b)?);
+                        self.stack.push(Value::Number(x / y));
+                    }
+                }
+            }
             Op::Mod => self.binary_num_bigint(|a, b| a % b, |a, b| Ok(a % b))?,
             Op::Pow => {
                 // Exponentiation: handle BigInt**BigInt and Number**Number semantics.
@@ -1690,6 +1745,23 @@ impl Vm {
                 let obj = self.pop()?;
                 let k = self.to_property_key(&key)?;
                 let v = self.get_property_value(&obj, &k)?;
+                if crate::trace::enabled() {
+                    if let PropertyKey::String(s) = k.clone() {
+                        eprintln!(
+                            "[trace] GetProperty receiver={} key='{}' -> {}",
+                            obj.type_name(),
+                            s,
+                            v.type_name()
+                        );
+                    } else {
+                        eprintln!(
+                            "[trace] GetProperty receiver={} key=symbol -> {}",
+                            obj.type_name(),
+                            v.type_name()
+                        );
+                    }
+                    crate::trace::value_string("[trace]   result", &v);
+                }
                 self.stack.push(v);
             }
             Op::GetPropertyIC => self.get_property_ic()?,
@@ -1901,6 +1973,16 @@ impl Vm {
             | Value::Closure { .. }
             | Value::Builtin(_)
             | Value::BuiltinObject(_, _) => {
+                if crate::trace::enabled() {
+                    eprintln!(
+                        "[trace] to_primitive called on {} with hint={:?}",
+                        v.type_name(),
+                        hint
+                    );
+                    // Print the full value being coerced to help debug which
+                    // object instance is visited during ToPrimitive calls.
+                    crate::trace::value_string("[trace] to_primitive value", v);
+                }
                 // Try @@toPrimitive if present.
                 let to_prim_key =
                     PropertyKey::Symbol(crate::value::SymbolId::well_known_to_primitive());
@@ -1909,21 +1991,47 @@ impl Vm {
                         method,
                         Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
                     )
-                    && let Ok(rv) = self.call_with_this(
+                {
+                    if crate::trace::enabled() {
+                        crate::trace::value_string(
+                            "[trace] @@toPrimitive candidate method",
+                            &method,
+                        );
+                        crate::trace::value_string("[trace] @@toPrimitive receiver", v);
+                        if let Some(id) = object_identity(v) {
+                            eprintln!("[trace] @@toPrimitive receiver identity ptr={:#x}", id);
+                        }
+                    }
+                    let rv = self.call_with_this(
                         &method,
                         v,
                         &[Value::String(hint.unwrap_or("default").to_string())],
-                    )
-                    && !matches!(
+                    )?;
+                    if crate::trace::enabled() {
+                        crate::trace::value_string("[trace] @@toPrimitive returned", &rv);
+                        eprintln!("[trace] @@toPrimitive return type = {}", rv.type_name());
+                    }
+                    if !matches!(
                         rv,
                         Value::Object(_)
                             | Value::Array(..)
                             | Value::Closure { .. }
                             | Value::Builtin(_)
                             | Value::BuiltinObject(_, _)
-                    )
-                {
-                    return Ok(rv);
+                    ) {
+                        if crate::trace::enabled() {
+                            crate::trace::value_string(
+                                "[trace] @@toPrimitive accepted primitive",
+                                &rv,
+                            );
+                        }
+                        return Ok(rv);
+                    } else if crate::trace::enabled() {
+                        crate::trace::value_string(
+                            "[trace] @@toPrimitive produced non-primitive",
+                            &rv,
+                        );
+                    }
                 }
 
                 let order = match hint {
@@ -1938,24 +2046,47 @@ impl Vm {
                             method,
                             Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
                         )
-                        && let Ok(rv) = self.call_with_this(&method, v, &[])
-                        && !matches!(
-                            rv,
-                            Value::Object(_)
-                                | Value::Array(..)
-                                | Value::Closure { .. }
-                                | Value::Builtin(_)
-                                | Value::BuiltinObject(_, _)
-                        )
                     {
-                        return Ok(rv);
+                        if crate::trace::enabled() {
+                            crate::trace::value_string(
+                                &format!("[trace] candidate method '{}':", name),
+                                &method,
+                            );
+                            crate::trace::value_string("[trace] candidate receiver", v);
+                            if let Some(id) = object_identity(v) {
+                                eprintln!("[trace] candidate receiver identity ptr={:#x}", id);
+                            }
+                        }
+                        if let Ok(rv) = self.call_with_this(&method, v, &[]) {
+                            if crate::trace::enabled() {
+                                crate::trace::value_string(
+                                    &format!("[trace] {} returned", name),
+                                    &rv,
+                                );
+                                eprintln!("[trace] {} return type = {}", name, rv.type_name());
+                            }
+                            if !matches!(
+                                rv,
+                                Value::Object(_)
+                                    | Value::Array(..)
+                                    | Value::Closure { .. }
+                                    | Value::Builtin(_)
+                                    | Value::BuiltinObject(_, _)
+                            ) {
+                                return Ok(rv);
+                            }
+                        }
                     }
                 }
                 // Pragmatic fallback for object formatting paths used heavily
                 // by the harness: if custom coercion hooks fail to produce a
                 // primitive, fall back to an Object-tag string instead of
                 // throwing.
-                Ok(Value::String(format!("[object {}]", v.object_tag())))
+                let fallback = Value::String(format!("[object {}]", v.object_tag()));
+                if crate::trace::enabled() {
+                    eprintln!("[trace] to_primitive fallback -> {:?}", fallback);
+                }
+                Ok(fallback)
             }
             _ => Ok(v.clone()),
         }
@@ -3114,6 +3245,26 @@ impl Vm {
         // across short-lived objects and descriptor churn in harness tests.
         // Keep opcode shape intact, but always do authoritative lookup.
         let v = self.get_property_value(&obj, &key)?;
+        if crate::trace::enabled() {
+            match &key {
+                PropertyKey::String(s) => {
+                    eprintln!(
+                        "[trace] GetPropertyIC receiver={} key='{}' -> {}",
+                        obj.type_name(),
+                        s,
+                        v.type_name()
+                    );
+                }
+                PropertyKey::Symbol(_) => {
+                    eprintln!(
+                        "[trace] GetPropertyIC receiver={} key=symbol -> {}",
+                        obj.type_name(),
+                        v.type_name()
+                    );
+                }
+            }
+            crate::trace::value_string("[trace]   result", &v);
+        }
         self.stack.push(v);
         Ok(())
     }

@@ -254,9 +254,8 @@ fn main() -> Result<(), blitz::errors::Error> {
                 if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
                     return Ok(Value::BigInt(x.clone() + y.clone()));
                 } else {
-                    return Err(blitz::errors::RuntimeError::from(
-                        "Add: cannot mix BigInt and other types",
-                    ));
+                    // Mixing BigInt and other types should throw a JS TypeError
+                    return Err(vm.throw_type_error("Cannot mix BigInt and other types"));
                 }
             }
             // Ordinary addition: ToPrimitive default
@@ -306,11 +305,17 @@ fn main() -> Result<(), blitz::errors::Error> {
         blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
-            // BigInt division is not supported
+            // BigInt division: support BigInt/BigInt -> BigInt and throw for
+            // mixing BigInt with other numeric types.
             if matches!(a, Value::BigInt(_)) || matches!(b, Value::BigInt(_)) {
-                return Err(blitz::errors::RuntimeError::from(
-                    "Div: bigint not supported",
-                ));
+                if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
+                    if y.is_zero() {
+                        return Err(vm.throw_range_error("Division by zero"));
+                    }
+                    return Ok(Value::BigInt(x.clone() / y.clone()));
+                } else {
+                    return Err(vm.throw_type_error("Cannot mix BigInt and other types"));
+                }
             }
             let na = vm.to_number_value(&a)?;
             let nb = vm.to_number_value(&b)?;
@@ -338,11 +343,11 @@ fn main() -> Result<(), blitz::errors::Error> {
             let a = args.first().cloned().unwrap_or(Value::Null);
             let b = args.get(1).cloned().unwrap_or(Value::Null);
             if let (Value::BigInt(x), Value::BigInt(y)) = (&a, &b) {
-                // BigInt exponentiation: use integer pow if y >= 0 and fits
+                // BigInt exponentiation: throw RangeError if exponent negative
                 if y.is_negative() {
-                    return Err(blitz::errors::RuntimeError::from(
-                        "Exponentiation with negative BigInt not supported",
-                    ));
+                    return Err(
+                        vm.throw_range_error("Exponentiation with negative BigInt not supported")
+                    );
                 }
                 let exp = y.to_u32().ok_or_else(|| {
                     blitz::errors::RuntimeError::from("Exponentiation with huge BigInt exponent")
