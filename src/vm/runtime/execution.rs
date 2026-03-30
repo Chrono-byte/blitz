@@ -2219,25 +2219,28 @@ impl Vm {
                                 eprintln!("[trace] candidate receiver identity ptr={:#x}", id);
                             }
                         }
-                        if let Ok(rv) = self.call_with_this(&method, v, &[]) {
-                            if crate::trace::enabled() {
-                                crate::trace::value_string(
-                                    &format!("[trace] {} returned", name),
-                                    &rv,
-                                );
-                                eprintln!("[trace] {} return type = {}", name, rv.type_name());
+                        match self.call_with_this(&method, v, &[]) {
+                            Ok(rv) => {
+                                if crate::trace::enabled() {
+                                    crate::trace::value_string(
+                                        &format!("[trace] {} returned", name),
+                                        &rv,
+                                    );
+                                    eprintln!("[trace] {} return type = {}", name, rv.type_name());
+                                }
+                                if !matches!(
+                                    rv,
+                                    Value::Object(_)
+                                        | Value::Array(..)
+                                        | Value::Closure { .. }
+                                        | Value::Builtin(_)
+                                        | Value::BuiltinObject(_, _)
+                                        | Value::Promise(_)
+                                ) {
+                                    return Ok(rv);
+                                }
                             }
-                            if !matches!(
-                                rv,
-                                Value::Object(_)
-                                    | Value::Array(..)
-                                    | Value::Closure { .. }
-                                    | Value::Builtin(_)
-                                    | Value::BuiltinObject(_, _)
-                                    | Value::Promise(_)
-                            ) {
-                                return Ok(rv);
-                            }
+                            Err(err) => return Err(err),
                         }
                     }
                 }

@@ -922,20 +922,35 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
     let base_dir = resolve_shadowrealm_base_dir(vm);
     let mut import_vm = Vm::new(vm.globals_rc());
     let loader_handle = import_vm.module_loader_handle();
-    let result = (|| -> Result<Value, String> {
+    let result = (|| -> Result<Value, Value> {
         let entry = {
             let mut loader = loader_handle.borrow_mut();
-            let entry = loader
-                .construct(&base_dir, &specifier_str)
-                .map_err(|err| format!("dynamic import construct failed: {}", err))?;
-            loader
-                .instantiate_all()
-                .map_err(|err| format!("dynamic import instantiate failed: {}", err))?;
+            let entry = loader.construct(&base_dir, &specifier_str).map_err(|err| {
+                host_error_object(vm, "SyntaxError", &format!("dynamic import construct failed: {}", err))
+            })?;
+            loader.instantiate_all().map_err(|err| {
+                host_error_object(vm, "SyntaxError", &format!("dynamic import instantiate failed: {}", err))
+            })?;
             entry
         };
         let entry_path = entry.borrow().path.clone();
         crate::module::evaluate_entry_shared(&loader_handle, &entry_path, &mut import_vm, false)
-            .map_err(|err| format!("dynamic import evaluate failed: {}", err))?;
+            .map_err(|err| {
+                import_vm
+                    .last_uncaught_exception
+                    .take()
+                    .or_else(|| {
+                        Some(host_error_object(
+                            vm,
+                            "TypeError",
+                            &format!("dynamic import evaluate failed: {}", err),
+                        ))
+                    })
+                    .unwrap_or(Value::String(format!(
+                        "dynamic import evaluate failed: {}",
+                        err
+                    )))
+            })?;
 
         if !matches!(options, Value::Undefined) {
             // The `options` argument is currently parsed for side effects only.
@@ -943,13 +958,14 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
             // source-only form, so we intentionally ignore it here.
         }
 
-        let module_index = entry
-            .borrow()
-            .module_index
-            .ok_or_else(|| "module missing index".to_string())?;
+        let module_index = entry.borrow().module_index.ok_or_else(|| {
+            Value::String("dynamic import failed: module missing index".to_string())
+        })?;
         let ns = import_vm
             .module_namespace_value(module_index)
-            .ok_or_else(|| "module namespace missing".to_string())?;
+            .ok_or_else(|| {
+                Value::String("dynamic import failed: module namespace missing".to_string())
+            })?;
         Ok(ns)
     })();
 
@@ -962,8 +978,19 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
             *state = PromiseState::Fulfilled(value);
         }
         Err(reason) => {
+            let mut debug_vm = Vm::new(vm.globals_rc());
+            let reason_name = debug_vm
+                .get_property_host(&reason, &PropertyKey::String("name".to_string()))
+                .ok()
+                .map(|v| v.to_string());
+            eprintln!(
+                "[dynamic import debug] rejection type={}, name={:?}, value={}",
+                reason.type_name(),
+                reason_name,
+                reason
+            );
             let mut state = promise.borrow_mut();
-            *state = PromiseState::Rejected(Value::String(reason));
+            *state = PromiseState::Rejected(reason);
         }
     }
 
@@ -1764,10 +1791,24 @@ fn array_from_values(values: Vec<Value>) -> Value {
 }
 
 fn syntax_error(vm: &mut Vm, message: String) -> crate::errors::RuntimeError {
-    let err_val = vm
-        .create_intrinsic_error("SyntaxError", &message)
-        .unwrap_or(Value::String(message.clone()));
+    let err_val = host_error_object(vm, "SyntaxError", &message);
     vm.throw_exception(err_val)
+}
+
+fn host_error_object(vm: &Vm, name: &str, message: &str) -> Value {
+    let mut obj = ObjectData::new();
+    if let Some(proto) = vm.realm().intrinsics.error_prototype.clone() {
+        obj.prototype = proto;
+    }
+    obj.properties.insert(
+        PropertyKey::String("name".to_string()),
+        PropertyDescriptor::data(Value::String(name.to_string())),
+    );
+    obj.properties.insert(
+        PropertyKey::String("message".to_string()),
+        PropertyDescriptor::data(Value::String(message.to_string())),
+    );
+    Value::Object(Rc::new(RefCell::new(obj)))
 }
 
 fn canonical_index_key(s: &str) -> Option<u64> {
@@ -3294,6 +3335,25 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     Ok(result_promise_value)
                 } else {
                     Err(vm.throw_type_error("Promise.prototype.then called on non-promise"))
+                }
+            }),
+            &function_proto_map,
+        )),
+    );
+
+    // Promise.prototype.catch()
+    promise_proto_map.borrow_mut().properties.insert(
+        PKey::String("catch".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let on_rejected = args.get(1).cloned().unwrap_or(Value::Undefined);
+                if let Value::Promise(_) = this {
+                    let then_method =
+                        vm.get_property_host(&this, &PropertyKey::String("then".to_string()))?;
+                    vm.call_value_with_this(&then_method, &this, &[Value::Undefined, on_rejected])
+                } else {
+                    Err(vm.throw_type_error("Promise.prototype.catch called on non-promise"))
                 }
             }),
             &function_proto_map,
@@ -6089,11 +6149,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(Value::String("Error".to_string())),
     );
 
-    let aggregate_error_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-        let ctor = vm
-            .current_new_target()
-            .or_else(|| vm.get_global("AggregateError"))
-            .unwrap_or(Value::Undefined);
+        let aggregate_error_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+            let ctor = vm
+                .current_new_target()
+                .or_else(|| vm.get_global("AggregateError"))
+                .unwrap_or(Value::Undefined);
         let proto = vm
             .get_property_host(&ctor, &PKey::String("prototype".to_string()))
             .unwrap_or(Value::Null);
@@ -6105,6 +6165,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 PropertyDescriptor::data(message),
             );
         }
+        inst.properties.insert(
+            PKey::String("name".to_string()),
+            PropertyDescriptor::data(Value::String("AggregateError".to_string())),
+        );
         inst.properties.insert(
             PKey::String("constructor".to_string()),
             PropertyDescriptor::data(ctor),
@@ -6137,6 +6201,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             PropertyDescriptor::data(Value::Object(Rc::clone(proto_map))),
         );
         let ctor_name = name.to_string();
+        let instance_name = name.to_string();
         let ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
             let ctor = vm
                 .current_new_target()
@@ -6153,6 +6218,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     PropertyDescriptor::data(message),
                 );
             }
+            inst.properties.insert(
+                PKey::String("name".to_string()),
+                PropertyDescriptor::data(Value::String(instance_name.clone())),
+            );
             Ok(Value::Object(Rc::new(RefCell::new(inst))))
         });
         let ctor_val = Value::BuiltinObject(ctor_fn, Rc::clone(&ctor_props));

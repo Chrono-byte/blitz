@@ -65,14 +65,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-fn source_type_for_path(path: &Path) -> SourceType {
+fn source_type_for_module_path(path: &Path) -> SourceType {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if name.ends_with(".tsx") {
         SourceType::tsx()
     } else if name.ends_with(".ts") || name.ends_with(".mts") || name.ends_with(".cts") {
         SourceType::ts()
     } else {
-        SourceType::unambiguous()
+        SourceType::mjs()
     }
 }
 
@@ -101,6 +101,10 @@ pub struct ModuleRecord {
     pub imports: HashMap<String, Rc<RefCell<Value>>>,
     /// Import metadata: local name -> (module_index, exported_name)
     pub import_sources: HashMap<String, (usize, String)>,
+    /// Indirect export metadata: exported name -> (imported name, source specifier)
+    pub indirect_exports: Vec<(String, String, String)>,
+    /// Star export sources.
+    pub star_exports: Vec<String>,
     // pub chunk: Option<crate::bytecode::Chunk>,
 }
 
@@ -114,6 +118,8 @@ impl ModuleRecord {
             exports: HashMap::new(),
             imports: HashMap::new(),
             import_sources: HashMap::new(),
+            indirect_exports: Vec::new(),
+            star_exports: Vec::new(),
         }
     }
 }
@@ -158,7 +164,7 @@ impl ModuleLoader {
                 e
             ))
         })?;
-        let source_type = source_type_for_path(&resolved_canon);
+        let source_type = source_type_for_module_path(&resolved_canon);
         let session =
             crate::parser::Parser::parse_source_with_type(&src, source_type).map_err(|e| {
                 BundlerError::from(format!("Parse error {}: {}", resolved_canon.display(), e))
@@ -210,6 +216,36 @@ impl ModuleLoader {
                     if let Some(typ) = item.get("type").and_then(|t| t.as_str()) {
                         match typ {
                             "ExportNamedDeclaration" => {
+                                if let Some(source) = item
+                                    .get("source")
+                                    .and_then(|s| s.get("value"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    if let Some(specs) =
+                                        item.get("specifiers").and_then(|s| s.as_array())
+                                    {
+                                        for sp in specs {
+                                            let exported = sp
+                                                .get("exported")
+                                                .and_then(|e| e.get("name"))
+                                                .and_then(|n| n.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            let imported = sp
+                                                .get("imported")
+                                                .and_then(|e| e.get("name"))
+                                                .and_then(|n| n.as_str())
+                                                .unwrap_or(&exported)
+                                                .to_string();
+                                            rec.indirect_exports.push((
+                                                exported,
+                                                imported,
+                                                source.to_string(),
+                                            ));
+                                        }
+                                    }
+                                    continue;
+                                }
                                 if let Some(specs) =
                                     item.get("specifiers").and_then(|s| s.as_array())
                                 {
@@ -267,7 +303,13 @@ impl ModuleLoader {
                                 );
                             }
                             "ExportAllDeclaration" => {
-                                // handled during linking/evaluation
+                                if let Some(source) = item
+                                    .get("source")
+                                    .and_then(|s| s.get("value"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    rec.star_exports.push(source.to_string());
+                                }
                             }
                             _ => {}
                         }
@@ -297,8 +339,8 @@ impl ModuleLoader {
                 }
             }
         }
-        for path in module_paths {
-            let rec_rc = match self.map.get(&path) {
+        for path in &module_paths {
+            let rec_rc = match self.map.get(path) {
                 Some(r) => Rc::clone(r),
                 None => continue,
             };
@@ -456,6 +498,42 @@ impl ModuleLoader {
                 }
             }
         }
+
+        // Validate indirect exports after all modules have been instantiated.
+        // This catches ambiguous and circular indirect-export graphs at link
+        // time instead of deferring them into runtime failures.
+        for path in &module_paths {
+            let rec_rc = match self.map.get(path) {
+                Some(r) => Rc::clone(r),
+                None => continue,
+            };
+            let (base_dir, indirect_exports) = {
+                let rec = rec_rc.borrow();
+                (
+                    rec.path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                    rec.indirect_exports.clone(),
+                )
+            };
+
+            for (exported_name, imported_name, source_spec) in indirect_exports {
+                let dep_rec_rc = self.construct(&base_dir, &source_spec)?;
+                let dep_path = dep_rec_rc.borrow().path.clone();
+                let mut resolve_set: std::collections::HashSet<(PathBuf, String)> =
+                    std::collections::HashSet::new();
+                match self.resolve_export(&dep_path, &imported_name, &mut resolve_set)? {
+                    Some(slot) => {
+                        rec_rc.borrow_mut().exports.insert(exported_name, slot);
+                    }
+                    None => {
+                        return Err(BundlerError::from(format!(
+                            "resolve error: module {} export {} is ambiguous or circular",
+                            path.display(),
+                            imported_name
+                        )));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -492,7 +570,7 @@ impl ModuleLoader {
             })?;
             let imports = crate::parser::Parser::extract_imports_from_source_with_type(
                 &src,
-                source_type_for_path(path),
+                source_type_for_module_path(path),
             )
             .map_err(|e| BundlerError::from(format!("Parse error {}: {}", path.display(), e)))?;
             for spec in imports {
@@ -520,6 +598,64 @@ impl ModuleLoader {
 
         visit(self, &resolved_canon, &mut temp, &mut perm, &mut order)?;
         Ok(order)
+    }
+
+    fn resolve_export(
+        &mut self,
+        module_path: &Path,
+        export_name: &str,
+        resolve_set: &mut std::collections::HashSet<(PathBuf, String)>,
+    ) -> Result<Option<Rc<RefCell<Value>>>, BundlerError> {
+        let module_path =
+            std::fs::canonicalize(module_path).unwrap_or_else(|_| module_path.to_path_buf());
+        let key = (module_path.clone(), export_name.to_string());
+        if !resolve_set.insert(key) {
+            return Ok(None);
+        }
+
+        let rec_rc = match self.map.get(&module_path) {
+            Some(r) => Rc::clone(r),
+            None => return Ok(None),
+        };
+        let (base_dir, direct_slot, indirect_exports, star_exports) = {
+            let rec = rec_rc.borrow();
+            (
+                rec.path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                rec.exports.get(export_name).cloned(),
+                rec.indirect_exports.clone(),
+                rec.star_exports.clone(),
+            )
+        };
+
+        if let Some(slot) = direct_slot {
+            return Ok(Some(slot));
+        }
+
+        for (exported_name, imported_name, source_spec) in indirect_exports {
+            if exported_name == export_name {
+                let dep_rec_rc = self.construct(&base_dir, &source_spec)?;
+                let dep_path = dep_rec_rc.borrow().path.clone();
+                return self.resolve_export(&dep_path, &imported_name, resolve_set);
+            }
+        }
+
+        let mut found: Option<Rc<RefCell<Value>>> = None;
+        for source_spec in star_exports {
+            let dep_rec_rc = self.construct(&base_dir, &source_spec)?;
+            let dep_path = dep_rec_rc.borrow().path.clone();
+            if let Some(slot) = self.resolve_export(&dep_path, export_name, resolve_set)? {
+                match &found {
+                    None => found = Some(slot),
+                    Some(existing) => {
+                        if !Rc::ptr_eq(existing, &slot) {
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(found)
     }
 
     /// Evaluate a module graph starting from entry in DFS post-order.
