@@ -68,10 +68,14 @@ use crate::value::SymbolId;
 use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 use num_bigint::{BigInt as BigIntValue, Sign};
-use num_traits::FromPrimitive;
+use num_traits::{FromPrimitive, ToPrimitive};
 use regex::RegexBuilder;
 
 const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
+
+fn usize_to_f64(value: usize) -> f64 {
+    value.to_f64().unwrap_or(f64::NAN)
+}
 
 fn char_digit_value(ch: char) -> Option<u32> {
     match ch {
@@ -372,7 +376,7 @@ fn collect_iterable_values(
             } else {
                 let len_val =
                     vm.get_property_host(other, &PropertyKey::String("length".to_string()))?;
-                let len = vm.to_number_value(&len_val)?.max(0.0) as usize;
+                let len = to_length(vm, &len_val)?;
                 let mut items = Vec::with_capacity(len);
                 for idx in 0..len {
                     let item =
@@ -1061,7 +1065,9 @@ fn to_length(vm: &mut Vm, value: &Value) -> Result<usize, crate::errors::Runtime
         return Err(vm.throw_range_error("Invalid array length"));
     }
 
-    Ok(int_len as usize)
+    int_len
+        .to_usize()
+        .ok_or_else(|| vm.throw_range_error("Invalid array length"))
 }
 
 fn to_index(vm: &mut Vm, value: &Value) -> Result<usize, crate::errors::RuntimeError> {
@@ -1076,7 +1082,9 @@ fn to_index(vm: &mut Vm, value: &Value) -> Result<usize, crate::errors::RuntimeE
     if int_val > MAX_ARRAY_LENGTH_F {
         return Err(vm.throw_range_error("Invalid array index"));
     }
-    Ok(int_val as usize)
+    int_val
+        .to_usize()
+        .ok_or_else(|| vm.throw_range_error("Invalid array index"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1238,7 +1246,7 @@ fn atomics_view_info(
             Some(PropertyDescriptor::Data {
                 value: Value::Number(n),
                 ..
-            }) if n.is_finite() && *n >= 0.0 => *n as usize,
+            }) if n.is_finite() && *n >= 0.0 => n.trunc().to_usize().unwrap_or(data.borrow().len()),
             _ => data.borrow().len(),
         };
         let buffer = match view_data
@@ -1315,7 +1323,7 @@ fn atomics_write_view_slot(
     index: usize,
     value: Value,
 ) -> Result<(), crate::errors::RuntimeError> {
-    let prop_key = Value::Number(index as f64);
+    let prop_key = Value::Number(usize_to_f64(index));
     let stored = value.clone();
     let _ = vm.set_property_host(&Value::Object(Rc::clone(&info.view)), &prop_key, value)?;
     if let Some(slot) = info.data.borrow_mut().get_mut(index) {
@@ -1350,7 +1358,7 @@ fn atomics_make_waiter_record(index: usize, resolve: Option<Value>) -> Value {
     let mut data = ObjectData::new();
     data.properties.insert(
         PropertyKey::String("index".to_string()),
-        PropertyDescriptor::data(Value::Number(index as f64)),
+        PropertyDescriptor::data(Value::Number(usize_to_f64(index))),
     );
     data.properties.insert(
         PropertyKey::String("resolve".to_string()),
@@ -1391,14 +1399,21 @@ fn atomics_wake_waiters(
             let Some(waiter) = entry else {
                 continue;
             };
-            let record_index =
-                match vm.get_property_host(&waiter, &PropertyKey::String("index".to_string())) {
-                    Ok(Value::Number(n)) if n.is_finite() && n >= 0.0 => n as usize,
-                    _ => {
+            let record_index = match vm
+                .get_property_host(&waiter, &PropertyKey::String("index".to_string()))
+            {
+                Ok(Value::Number(n)) if n.is_finite() && n >= 0.0 => match n.trunc().to_usize() {
+                    Some(index) => index,
+                    None => {
                         remaining.push(Some(waiter));
                         continue;
                     }
-                };
+                },
+                _ => {
+                    remaining.push(Some(waiter));
+                    continue;
+                }
+            };
             if record_index != index {
                 remaining.push(Some(waiter));
                 continue;
@@ -1793,7 +1808,7 @@ fn array_from_values(values: Vec<Value>) -> Value {
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
         PropertyKey::String("length".to_string()),
-        PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+        PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
     );
     Value::Array(arr_rc, props)
 }
@@ -1884,7 +1899,7 @@ fn clone_value_across_realms(
                 // insert length property placeholder
                 new_props.borrow_mut().properties.insert(
                     PropertyKey::String("length".to_string()),
-                    PropertyDescriptor::data(Value::Number(len as f64)),
+                    PropertyDescriptor::data(Value::Number(usize_to_f64(len))),
                 );
                 let new_val = Value::Array(Rc::clone(&new_arr), Rc::clone(&new_props));
                 visited.insert(addr, new_val);
@@ -2215,7 +2230,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 for i in 0..len {
                     let item = arr.borrow().get(i).cloned().flatten();
                     if let Some(item) = item {
-                        let idx = Value::Number(i as f64);
+                        let idx = Value::Number(usize_to_f64(i));
                         let _ = vm.call_value_with_this(
                             &callback,
                             &this_for_call,
@@ -2254,7 +2269,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         let mapped = vm.call_value_with_this(
                             &callback,
                             &this_arg,
-                            &[item, Value::Number(i as f64), receiver.clone()],
+                            &[item, Value::Number(usize_to_f64(i)), receiver.clone()],
                         )?;
                         out.push(Some(mapped));
                     } else {
@@ -2270,7 +2285,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_map)));
                 props.borrow_mut().properties.insert(
                     PKey::String("length".to_string()),
-                    PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+                    PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
                 );
                 Ok(Value::Array(arr_rc, props))
             }),
@@ -2367,7 +2382,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     *arr.borrow_mut() = next_slots;
                     props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(arr.borrow().len() as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(arr.borrow().len()))),
                     );
                 }
                 Ok(this)
@@ -2388,7 +2403,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 for v in args.iter().skip(1).cloned() {
                     vec.push(Some(v));
                 }
-                let new_len = vec.len() as f64;
+                let new_len = usize_to_f64(vec.len());
                 drop(vec);
                 props.borrow_mut().properties.insert(
                     PKey::String("length".to_string()),
@@ -2410,19 +2425,23 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         Value::Array(arr, props) => (arr, props),
                         _ => return Ok(array_from_values(Vec::new())),
                     };
-                    let len = arr.borrow().len() as i64;
-                    let start_raw = vm
-                        .to_number_value(args.get(1).unwrap_or(&Value::Number(0.0)))?
-                        .trunc() as i64;
-                    let start = if start_raw < 0 {
-                        (len + start_raw).max(0)
+                    let len = arr.borrow().len();
+                    let start_raw =
+                        vm.to_number_value(args.get(1).unwrap_or(&Value::Number(0.0)))?;
+                    let start = if start_raw < 0.0 {
+                        let back = start_raw.abs().trunc().to_usize().unwrap_or(len);
+                        len.saturating_sub(back)
                     } else {
-                        start_raw.min(len)
-                    } as usize;
+                        start_raw.trunc().to_usize().unwrap_or(len).min(len)
+                    };
                     let delete_count = if let Some(dc) = args.get(2) {
-                        vm.to_number_value(dc)?.max(0.0) as usize
+                        vm.to_number_value(dc)?
+                            .max(0.0)
+                            .trunc()
+                            .to_usize()
+                            .unwrap_or(0)
                     } else {
-                        len.saturating_sub(start as i64) as usize
+                        len.saturating_sub(start)
                     };
                     let mut vec = arr.borrow_mut();
                     let end = start.saturating_add(delete_count).min(vec.len());
@@ -2431,7 +2450,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     let insert_items: Vec<Option<Value>> =
                         args.iter().skip(3).cloned().map(Some).collect();
                     vec.splice(start..end, insert_items);
-                    let new_len = vec.len() as f64;
+                    let new_len = usize_to_f64(vec.len());
                     drop(vec);
                     props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
@@ -2446,7 +2465,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
                     removed_props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(removed_arr.borrow().len() as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(
+                            removed_arr.borrow().len(),
+                        ))),
                     );
                     Ok(Value::Array(removed_arr, removed_props))
                 }
@@ -2483,7 +2504,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
                     props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(
+                            arr_rc.borrow().len(),
+                        ))),
                     );
                     Ok(Value::Array(arr_rc, props))
                 }
@@ -2544,7 +2567,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
 
                 let len_val =
                     vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = vm.to_number_value(&len_val)?.max(0.0) as usize;
+                let len = to_length(vm, &len_val)?;
                 let mut out: Vec<Option<Value>> = Vec::new();
 
                 for i in 0..len {
@@ -2555,7 +2578,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         let keep = vm.call_value_with_this(
                             &callback,
                             &this_arg,
-                            &[item.clone(), Value::Number(i as f64), receiver.clone()],
+                            &[
+                                item.clone(),
+                                Value::Number(usize_to_f64(i)),
+                                receiver.clone(),
+                            ],
                         )?;
                         if keep.is_truthy() {
                             out.push(Some(item));
@@ -2570,7 +2597,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_filter)));
                 props.borrow_mut().properties.insert(
                     PKey::String("length".to_string()),
-                    PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+                    PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
                 );
                 Ok(Value::Array(arr_rc, props))
             }),
@@ -2588,7 +2615,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
 
                 let len_val =
                     vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = vm.to_number_value(&len_val)?.max(0.0) as usize;
+                let len = to_length(vm, &len_val)?;
 
                 for i in 0..len {
                     let key = PKey::String(i.to_string());
@@ -2598,7 +2625,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         let found = vm.call_value_with_this(
                             &callback,
                             &this_arg,
-                            &[item.clone(), Value::Number(i as f64), receiver.clone()],
+                            &[
+                                item.clone(),
+                                Value::Number(usize_to_f64(i)),
+                                receiver.clone(),
+                            ],
                         )?;
                         if found.is_truthy() {
                             return Ok(item);
@@ -2620,7 +2651,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
 
                 let len_val =
                     vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = vm.to_number_value(&len_val)?.max(0.0) as usize;
+                let len = to_length(vm, &len_val)?;
 
                 let mut i = 0;
                 let mut accumulator = if args.len() > 2 {
@@ -2646,7 +2677,12 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         accumulator = vm.call_value_with_this(
                             &callback,
                             &Value::Undefined,
-                            &[accumulator, item, Value::Number(i as f64), receiver.clone()],
+                            &[
+                                accumulator,
+                                item,
+                                Value::Number(usize_to_f64(i)),
+                                receiver.clone(),
+                            ],
                         )?;
                     }
                     i += 1;
@@ -2667,7 +2703,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     if matches!(d, Value::Undefined) {
                         1
                     } else {
-                        vm.to_number_value(d)?.max(0.0) as usize
+                        to_length(vm, d)?
                     }
                 } else {
                     1
@@ -2675,7 +2711,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
 
                 let len_val =
                     vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = vm.to_number_value(&len_val)?.max(0.0) as usize;
+                let len = to_length(vm, &len_val)?;
                 let mut out: Vec<Option<Value>> = Vec::new();
 
                 for i in 0..len {
@@ -2690,7 +2726,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                     &item,
                                     &PKey::String("length".to_string()),
                                 )?;
-                                let item_len = vm.to_number_value(&item_len_val)?.max(0.0) as usize;
+                                let item_len = to_length(vm, &item_len_val)?;
                                 for j in 0..item_len {
                                     let j_key = PKey::String(j.to_string());
                                     let has_j = vm.has_property_host(&item, &j_key)?;
@@ -2716,7 +2752,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_flat)));
                 props.borrow_mut().properties.insert(
                     PKey::String("length".to_string()),
-                    PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+                    PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
                 );
                 Ok(Value::Array(arr_rc, props))
             }),
@@ -3771,14 +3807,14 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 // Convert to milliseconds
                 let total_secs =
                     total_days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64;
-                total_secs as f64 * 1000.0 + ms as f64
+                total_secs.to_f64().unwrap_or(f64::NAN) * 1000.0 + f64::from(ms)
             }
 
             let timestamp = match args.len() {
                 1 => {
                     // Only receiver, no user arguments: current time
                     match SystemTime::now().duration_since(UNIX_EPOCH) {
-                        Ok(duration) => duration.as_millis() as f64,
+                        Ok(duration) => duration.as_millis().to_f64().unwrap_or(f64::NAN),
                         Err(_) => 0.0,
                     }
                 }
@@ -3940,7 +3976,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             );
             arraybuffer_obj_data.properties.insert(
                 PropertyKey::String("byteLength".to_string()),
-                PropertyDescriptor::data(Value::Number(length as f64)),
+                PropertyDescriptor::data(Value::Number(usize_to_f64(length))),
             );
             let arraybuffer_obj = Rc::new(RefCell::new(arraybuffer_obj_data));
             Ok(Value::Object(arraybuffer_obj))
@@ -3987,7 +4023,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             );
             arraybuffer_obj_data.properties.insert(
                 PropertyKey::String("byteLength".to_string()),
-                PropertyDescriptor::data(Value::Number(length as f64)),
+                PropertyDescriptor::data(Value::Number(usize_to_f64(length))),
             );
             let arraybuffer_obj = Rc::new(RefCell::new(arraybuffer_obj_data));
             Ok(Value::Object(arraybuffer_obj))
@@ -4040,7 +4076,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let fill_value = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let len = match vm.get_property_host(&receiver, &PKey::String("length".to_string()))
                 {
-                    Ok(Value::Number(n)) if n.is_finite() && n > 0.0 => n as usize,
+                    Ok(Value::Number(n)) if n.is_finite() && n > 0.0 => {
+                        n.trunc().to_usize().unwrap_or(0)
+                    }
                     _ => 0,
                 };
                 for i in 0..len {
@@ -4128,7 +4166,8 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                             if !buffer_byte_length.is_finite() || buffer_byte_length < 0.0 {
                                 return Err(vm.throw_range_error("Invalid typed array length"));
                             }
-                            let buffer_byte_length = buffer_byte_length as usize;
+                            let buffer_byte_length =
+                                buffer_byte_length.trunc().to_usize().unwrap_or(0);
                             let byte_offset = if matches!(byte_offset_arg, Value::Undefined) {
                                 0
                             } else {
@@ -4175,19 +4214,19 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     );
                     typed_array_data.properties.insert(
                         PropertyKey::String("[[TypedArrayBytesPerElement]]".to_string()),
-                        PropertyDescriptor::data(Value::Number($element_count as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64($element_count))),
                     );
                     typed_array_data.properties.insert(
                         PropertyKey::String("[[TypedArrayLength]]".to_string()),
-                        PropertyDescriptor::data(Value::Number(length as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(length))),
                     );
                     typed_array_data.properties.insert(
                         PropertyKey::String("[[TypedArrayByteLength]]".to_string()),
-                        PropertyDescriptor::data(Value::Number(view_byte_length as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(view_byte_length))),
                     );
                     typed_array_data.properties.insert(
                         PropertyKey::String("[[TypedArrayByteOffset]]".to_string()),
-                        PropertyDescriptor::data(Value::Number(byte_offset as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(byte_offset))),
                     );
                     typed_array_data.properties.insert(
                         PropertyKey::String("[[TypedArrayBuffer]]".to_string()),
@@ -4195,11 +4234,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     );
                     typed_array_data.properties.insert(
                         PropertyKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(length as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(length))),
                     );
                     typed_array_data.properties.insert(
                         PropertyKey::String("byteLength".to_string()),
-                        PropertyDescriptor::data(Value::Number(view_byte_length as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(view_byte_length))),
                     );
                     for (idx, value) in initial_values.into_iter().enumerate() {
                         typed_array_data.properties.insert(
@@ -4222,7 +4261,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             );
             ctor_map.borrow_mut().properties.insert(
                 PKey::String("BYTES_PER_ELEMENT".to_string()),
-                PropertyDescriptor::data(Value::Number($element_count as f64)),
+                PropertyDescriptor::data(Value::Number(usize_to_f64($element_count))),
             );
             proto_map.borrow_mut().properties.insert(
                 PKey::String("constructor".to_string()),
@@ -4281,7 +4320,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             if !buffer_byte_length.is_finite() || buffer_byte_length < 0.0 {
                 return Err(vm.throw_range_error("Invalid DataView length"));
             }
-            let buffer_byte_length = buffer_byte_length as usize;
+            let buffer_byte_length = buffer_byte_length.trunc().to_usize().unwrap_or(0);
             let byte_offset_arg = args.get(off + 2).cloned().unwrap_or(Value::Undefined);
             let byte_offset = if matches!(byte_offset_arg, Value::Undefined) {
                 0
@@ -4307,11 +4346,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             );
             dataview_data.properties.insert(
                 PropertyKey::String("[[DataViewByteOffset]]".to_string()),
-                PropertyDescriptor::data(Value::Number(byte_offset as f64)),
+                PropertyDescriptor::data(Value::Number(usize_to_f64(byte_offset))),
             );
             dataview_data.properties.insert(
                 PropertyKey::String("[[DataViewByteLength]]".to_string()),
-                PropertyDescriptor::data(Value::Number(byte_length as f64)),
+                PropertyDescriptor::data(Value::Number(usize_to_f64(byte_length))),
             );
             dataview_data.properties.insert(
                 PropertyKey::String("buffer".to_string()),
@@ -4319,11 +4358,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             );
             dataview_data.properties.insert(
                 PropertyKey::String("byteLength".to_string()),
-                PropertyDescriptor::data(Value::Number(byte_length as f64)),
+                PropertyDescriptor::data(Value::Number(usize_to_f64(byte_length))),
             );
             dataview_data.properties.insert(
                 PropertyKey::String("byteOffset".to_string()),
-                PropertyDescriptor::data(Value::Number(byte_offset as f64)),
+                PropertyDescriptor::data(Value::Number(usize_to_f64(byte_offset))),
             );
             let dataview_obj = Rc::new(RefCell::new(dataview_data));
             Ok(Value::Object(dataview_obj))
@@ -4416,7 +4455,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let _ = vm.set_property_host(
                     &receiver,
                     &Value::String("size".to_string()),
-                    Value::Number(arr_rc.borrow().len() as f64),
+                    Value::Number(usize_to_f64(arr_rc.borrow().len())),
                 )?;
             }
             return Ok(receiver);
@@ -4520,13 +4559,15 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                             .push(Some(Value::Array(pair_rc, pair_props)));
                         props.borrow_mut().properties.insert(
                             PropertyKey::String("length".to_string()),
-                            PropertyDescriptor::data(Value::Number(arr.borrow().len() as f64)),
+                            PropertyDescriptor::data(Value::Number(usize_to_f64(
+                                arr.borrow().len(),
+                            ))),
                         );
                     }
                     let _ = vm.set_property_host(
                         &this,
                         &Value::String("size".to_string()),
-                        Value::Number(arr.borrow().len() as f64),
+                        Value::Number(usize_to_f64(arr.borrow().len())),
                     )?;
                 }
                 Ok(this)
@@ -4567,7 +4608,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                 &PropertyKey::String("__iter_index".to_string()),
                             )
                             .unwrap_or(Value::Number(0.0));
-                        let mut idx = vm.to_number_value(&idx_val).unwrap_or(0.0) as usize;
+                        let mut idx = vm
+                            .to_number_value(&idx_val)
+                            .ok()
+                            .and_then(|n| n.trunc().to_usize())
+                            .unwrap_or(0);
                         let mut done = true;
                         let mut value = Value::Undefined;
                         if let Value::Array(arr, _) = entries
@@ -4583,7 +4628,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         let _ = vm.set_property_host(
                             &it,
                             &Value::String("__iter_index".to_string()),
-                            Value::Number(idx as f64),
+                            Value::Number(usize_to_f64(idx)),
                         )?;
                         let mut result = ObjectData::new();
                         result.properties.insert(
@@ -4656,7 +4701,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let _ = vm.set_property_host(
                     &receiver,
                     &Value::String("size".to_string()),
-                    Value::Number(arr_rc.borrow().len() as f64),
+                    Value::Number(usize_to_f64(arr_rc.borrow().len())),
                 )?;
             }
             return Ok(receiver);
@@ -4692,13 +4737,15 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         arr.borrow_mut().push(Some(value));
                         props.borrow_mut().properties.insert(
                             PropertyKey::String("length".to_string()),
-                            PropertyDescriptor::data(Value::Number(arr.borrow().len() as f64)),
+                            PropertyDescriptor::data(Value::Number(usize_to_f64(
+                                arr.borrow().len(),
+                            ))),
                         );
                     }
                     let _ = vm.set_property_host(
                         &this,
                         &Value::String("size".to_string()),
-                        Value::Number(arr.borrow().len() as f64),
+                        Value::Number(usize_to_f64(arr.borrow().len())),
                     )?;
                 }
                 Ok(this)
@@ -4759,7 +4806,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                 &PropertyKey::String("__iter_index".to_string()),
                             )
                             .unwrap_or(Value::Number(0.0));
-                        let mut idx = vm.to_number_value(&idx_val).unwrap_or(0.0) as usize;
+                        let mut idx = vm
+                            .to_number_value(&idx_val)
+                            .ok()
+                            .and_then(|n| n.trunc().to_usize())
+                            .unwrap_or(0);
                         let mut done = true;
                         let mut value = Value::Undefined;
                         if let Value::Array(arr, _) = values
@@ -4775,7 +4826,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         let _ = vm.set_property_host(
                             &it,
                             &Value::String("__iter_index".to_string()),
-                            Value::Number(idx as f64),
+                            Value::Number(usize_to_f64(idx)),
                         )?;
                         let mut result = ObjectData::new();
                         result.properties.insert(
@@ -4831,7 +4882,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let mut first = true;
                 let len =
                     match vm.get_property_host(&this, &PropertyKey::String("length".to_string())) {
-                        Ok(v) => vm.to_number_value(&v).unwrap_or(0.0).max(0.0) as usize,
+                        Ok(v) => to_length(vm, &v).unwrap_or(0),
                         Err(_) => 0usize,
                     };
                 for i in 0..len {
@@ -5133,7 +5184,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props.borrow_mut().properties.insert(
                         PropertyKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(
+                            arr_rc.borrow().len(),
+                        ))),
                     );
                     Ok(Value::Array(arr_rc, props))
                 }),
@@ -5307,7 +5360,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
         props.borrow_mut().properties.insert(
             PKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+            PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
         );
         if let Some(pval) = array_ctor_props
             .borrow()
@@ -5357,7 +5410,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         _ => {
                             let len_v =
                                 vm.get_property_host(&source, &PKey::String("length".to_string()))?;
-                            vm.to_number_value(&len_v)?.max(0.0) as usize
+                            to_length(vm, &len_v)?
                         }
                     };
 
@@ -5380,7 +5433,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                             v = vm.call_value_with_this(
                                 &map_fn,
                                 &Value::Undefined,
-                                &[v, Value::Number(i as f64)],
+                                &[v, Value::Number(usize_to_f64(i))],
                             )?;
                         }
                         out.push(Some(v));
@@ -5393,7 +5446,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_from)));
                     props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(
+                            arr_rc.borrow().len(),
+                        ))),
                     );
                     Ok(Value::Array(arr_rc, props))
                 }),
@@ -5483,7 +5538,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         let key = PKey::String(idx.to_string());
                         let element = vm.get_property_host(&receiver, &key)?;
                         if strict_equal(&element, &search) {
-                            return Ok(Value::Number(idx as f64));
+                            return Ok(Value::Number(idx.to_f64().unwrap_or(f64::NAN)));
                         }
                     }
                     return Ok(Value::Number(-1.0));
@@ -5500,7 +5555,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                             );
                         }
                         if strict_equal(&element, &search) {
-                            return Ok(Value::Number(k as f64));
+                            return Ok(Value::Number(k.to_f64().unwrap_or(f64::NAN)));
                         }
                     }
                     k -= 1;
@@ -5666,19 +5721,19 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 if n.is_nan() || n <= 0.0 {
                     0usize
                 } else {
-                    (n.floor() as usize).min(len_chars)
+                    n.floor().to_usize().unwrap_or(len_chars).min(len_chars)
                 }
             } else {
                 0usize
             };
             if needle.is_empty() {
-                return Ok(Value::Number(start as f64));
+                return Ok(Value::Number(usize_to_f64(start)));
             }
             let start_byte = char_index_to_byte_index(&haystack, start);
             if let Some(rel_byte) = haystack[start_byte..].find(&needle) {
                 let absolute_byte = start_byte + rel_byte;
                 let absolute_char = haystack[..absolute_byte].chars().count();
-                return Ok(Value::Number(absolute_char as f64));
+                return Ok(Value::Number(usize_to_f64(absolute_char)));
             }
             Ok(Value::Number(-1.0))
         }),
@@ -5703,10 +5758,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             } else if !pos.is_finite() {
                 return Ok(Value::Number(f64::NAN));
             } else {
-                pos.trunc() as usize
+                pos.trunc().to_usize().unwrap_or(0)
             };
             match char_code_at(&s, index) {
-                Some(code) => Ok(Value::Number(code as f64)),
+                Some(code) => Ok(Value::Number(f64::from(code))),
                 None => Ok(Value::Number(f64::NAN)),
             }
         }),
@@ -5757,8 +5812,8 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 return Ok(Value::String(String::new()));
             }
 
-            let start_byte = char_index_to_byte_index(&s, from as usize);
-            let end_byte = char_index_to_byte_index(&s, to as usize);
+            let start_byte = char_index_to_byte_index(&s, usize::try_from(from).unwrap_or(0));
+            let end_byte = char_index_to_byte_index(&s, usize::try_from(to).unwrap_or(0));
             Ok(Value::String(s[start_byte..end_byte].to_string()))
         }),
         &function_proto_map,
@@ -5999,7 +6054,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 if n.is_nan() || n <= 0.0 {
                     last_index = 0;
                 } else if n.is_finite() {
-                    last_index = n.trunc() as usize;
+                    last_index = n.trunc().to_usize().unwrap_or(0);
                 }
             }
             let start_byte = char_index_to_byte_index(&subject, last_index);
@@ -6051,7 +6106,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let _ = vm.set_property_host(
                     &this,
                     &Value::String("lastIndex".to_string()),
-                    Value::Number(end_char as f64),
+                    Value::Number(usize_to_f64(end_char)),
                 )?;
             }
 
@@ -6066,7 +6121,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             let _ = vm.set_property_host(
                 &result,
                 &Value::String("index".to_string()),
-                Value::Number(subject[..m.start()].chars().count() as f64),
+                Value::Number(usize_to_f64(subject[..m.start()].chars().count())),
             )?;
             let _ = vm.set_property_host(
                 &result,
@@ -6103,7 +6158,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 if n.is_nan() || n <= 0.0 {
                     last_index = 0;
                 } else if n.is_finite() {
-                    last_index = n.trunc() as usize;
+                    last_index = n.trunc().to_usize().unwrap_or(0);
                 }
             }
             let start_byte = char_index_to_byte_index(&subject, last_index);
@@ -6348,7 +6403,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     other => {
                         let len_val = vm
                             .get_property_host(other, &PropertyKey::String("length".to_string()))?;
-                        let len = vm.to_number_value(&len_val)?.max(0.0) as usize;
+                        let len = to_length(vm, &len_val)?;
                         for idx in 0..len {
                             let item =
                                 vm.get_property_host(other, &PropertyKey::String(idx.to_string()))?;
@@ -7118,7 +7173,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             let props = Rc::new(RefCell::new(ObjectData::new()));
             props.borrow_mut().properties.insert(
                 PropertyKey::String("length".to_string()),
-                PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+                PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
             );
             Ok(Value::Array(arr_rc, props))
         })),
@@ -7369,7 +7424,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             Rc::new(|vm, args| {
                 let size = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let n = match vm.to_number_value(&size) {
-                    Ok(n) if n.is_finite() && n >= 0.0 => n.trunc() as usize,
+                    Ok(n) if n.is_finite() && n >= 0.0 => n.trunc().to_usize().unwrap_or(0),
                     _ => 0,
                 };
                 Ok(Value::Bool(matches!(n, 1 | 2 | 4 | 8)))
@@ -7402,12 +7457,12 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         } else if n <= 0.0 {
                             0
                         } else {
-                            n.trunc() as usize
+                            n.trunc().to_usize().unwrap_or(usize::MAX)
                         }
                     }
                 };
                 let woke = atomics_wake_waiters(vm, &info, index, count)?;
-                Ok(Value::Number(woke as f64))
+                Ok(Value::Number(usize_to_f64(woke)))
             }),
         );
         insert_atomics_method(
