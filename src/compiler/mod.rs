@@ -1,0 +1,497 @@
+//! AST-to-bytecode compiler.
+//!
+//! The compiler transforms parsed TypeScript/JavaScript AST into executable
+//! bytecode for the VM. It performs:
+//! - Variable resolution (locals vs globals)
+//! - Type annotation tracking for runtime checks
+//! - Control flow compilation (if/else, while, try/catch, etc.)
+//! - Function compilation with closure support
+//!
+//! # Architecture
+//!
+//! Compilation is single-pass over the AST:
+//! 1. Pre-declare function names for hoisting support
+//! 2. Compile statements sequentially
+//! 3. Emit bytecode directly into a [`Chunk`]
+//! 4. Track local variables and their types for runtime enforcement
+//!
+//! # Future Work
+//!
+//! - JIT compilation with multiple optimization passes
+//! - Loop identification and optimization
+//! - Dead code elimination
+//! - Constant folding
+
+use crate::{
+    ObjectData, Vm,
+    bytecode::{Chunk, Op},
+    value::Value,
+};
+use oxc_ast::ast as oast;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+
+pub mod core;
+pub use core::{
+    CaptureSource, Compiler, FinallyPatchState, LabelPatchState, ModuleContext, Scope, ScopeKind,
+};
+mod binding;
+mod declaration;
+mod expression;
+mod pre_declare;
+
+const LINE: u32 = 1;
+
+/// Compile a parsed program to bytecode.
+///
+/// # Errors
+///
+/// Returns an error string if compilation fails.
+// Public API: compile an oxc AST Program directly.
+pub fn compile(
+    program: &oast::Program<'_>,
+    source: &str,
+) -> Result<Chunk, crate::errors::CompilerError> {
+    let source_text = Rc::new(source.to_string());
+    let mut c = Compiler::new(Rc::clone(&source_text));
+    c.compile_oxc(program, None)
+}
+
+/// Compile an oxc AST Program.
+///
+/// # Errors
+///
+/// Returns an error if compilation fails.
+pub fn compile_oxc(
+    program: &oast::Program<'_>,
+    source: &str,
+) -> Result<Chunk, crate::errors::CompilerError> {
+    let source_text = Rc::new(source.to_string());
+    let mut c = Compiler::new(Rc::clone(&source_text));
+    c.compile_oxc(program, None)
+}
+
+/// Compile an oxc AST Program with an optional ModuleContext.
+///
+/// # Errors
+///
+/// Returns an error if compilation fails.
+pub fn compile_oxc_with_ctx(
+    program: &oast::Program<'_>,
+    ctx: Option<&ModuleContext>,
+    source: &str,
+) -> Result<Chunk, crate::errors::CompilerError> {
+    let source_text = Rc::new(source.to_string());
+    let mut c = Compiler::new(Rc::clone(&source_text));
+    c.compile_oxc(program, ctx)
+}
+
+/// Compile an oxc AST Program in REPL mode.
+/// In REPL mode, the last expression statement does not emit Pop,
+/// allowing the result to be returned for printing.
+///
+/// # Errors
+///
+/// Returns an error if compilation fails.
+pub fn compile_oxc_repl(
+    program: &oast::Program<'_>,
+    source: &str,
+) -> Result<Chunk, crate::errors::CompilerError> {
+    let source_text = Rc::new(source.to_string());
+    let mut c = Compiler::new(Rc::clone(&source_text));
+    c.compile_oxc_with_mode(program, None, true)
+}
+
+impl Compiler {
+    /// Transitional compiler entry that accepts an `oast::Program` reference.
+    ///
+    /// Uses a direct walker over `oast`.
+    pub fn compile_oxc(
+        &mut self,
+        program: &oast::Program<'_>,
+        ctx: Option<&ModuleContext>,
+    ) -> Result<Chunk, crate::errors::CompilerError> {
+        self.compile_oxc_with_mode(program, ctx, false)
+    }
+
+    /// Compile with explicit mode control.
+    /// In REPL mode, the last expression statement does not emit Pop,
+    /// allowing the result to be returned.
+    pub fn compile_oxc_with_mode(
+        &mut self,
+        program: &oast::Program<'_>,
+        ctx: Option<&ModuleContext>,
+        repl_mode: bool,
+    ) -> Result<Chunk, crate::errors::CompilerError> {
+        self.pre_declare_functions_oast(program);
+        self.pre_declare_variables_oast(program);
+
+        if let Some(cctx) = ctx {
+            self.current_module = Some(cctx.clone());
+        } else {
+            self.current_module = None;
+        }
+        self.strict_context = program.source_type.is_strict()
+            || program
+                .directives
+                .iter()
+                .any(|directive| directive.directive.as_str() == "use strict");
+
+        self.emit_hoisted_function_decls_oast_stmts(&program.body)?;
+
+        let stmts: Vec<_> = program
+            .body
+            .iter()
+            .filter(|s| !matches!(s, oast::Statement::FunctionDeclaration(_)))
+            .collect();
+
+        for (i, stmt) in stmts.iter().enumerate() {
+            let is_last_expr_stmt = repl_mode
+                && i == stmts.len() - 1
+                && matches!(stmt, oast::Statement::ExpressionStatement(_));
+            self.compile_statement_oast_with_mode(stmt, is_last_expr_stmt)?;
+        }
+
+        self.emit(Op::Return, LINE);
+        Ok(std::mem::take(&mut self.chunk))
+    }
+}
+#[test]
+fn compile_simple_for_loop() {
+    let src = "for (var i = 0; i < 3; i = i + 1) { console.log(i); }";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    // Ensure we emitted a JumpIfFalse (test) and at least one Jump (back/jump-over)
+    let mut saw_jump_if_false = false;
+    let mut saw_jump = false;
+    let mut i = 0usize;
+    while i < chunk.code.len() {
+        if let Some(op) = Op::from_byte(chunk.code[i]) {
+            match op {
+                Op::JumpIfFalse => {
+                    saw_jump_if_false = true;
+                    i += 3;
+                }
+                Op::Jump => {
+                    saw_jump = true;
+                    i += 3;
+                }
+                Op::Const
+                | Op::MakeClosure
+                | Op::GetPropertyIC
+                | Op::CallMethod
+                | Op::Call
+                | Op::GetBuiltin
+                | Op::SetLocal
+                | Op::GetLocal
+                | Op::GetProperty
+                | Op::SetProperty => i += 2,
+                Op::SetGlobal | Op::GetGlobal => i += 3,
+                _ => i += 1,
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    assert!(
+        saw_jump_if_false,
+        "expected JumpIfFalse in compiled for-loop"
+    );
+    assert!(saw_jump, "expected Jump in compiled for-loop");
+}
+
+#[test]
+fn compile_for_with_continue() {
+    let src = "for (var i = 0; i < 3; i = i + 1) { if (i == 1) { continue; } console.log(i); }";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    // Expect multiple Jump opcodes: one for the test exit, one for the back-jump,
+    // and at least one emitted for 'continue' which should be patched to jump to update.
+    let mut jump_if_false = 0usize;
+    let mut jump = 0usize;
+    let mut i = 0usize;
+    while i < chunk.code.len() {
+        if let Some(op) = Op::from_byte(chunk.code[i]) {
+            match op {
+                Op::JumpIfFalse => {
+                    jump_if_false += 1;
+                    i += 3;
+                }
+                Op::Jump => {
+                    jump += 1;
+                    i += 3;
+                }
+                Op::Const
+                | Op::MakeClosure
+                | Op::GetPropertyIC
+                | Op::CallMethod
+                | Op::Call
+                | Op::GetBuiltin
+                | Op::SetLocal
+                | Op::GetLocal
+                | Op::GetProperty
+                | Op::SetProperty => i += 2,
+                Op::SetGlobal | Op::GetGlobal => i += 3,
+                _ => i += 1,
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    assert!(jump_if_false >= 1, "expected at least one JumpIfFalse");
+    assert!(
+        jump >= 2,
+        "expected at least two Jump opcodes (back-jump and continue)"
+    );
+}
+
+#[test]
+fn static_member_ic_slots_are_unique_per_site() {
+    let src = "a.x; a.y; a.x;";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let mut slots = Vec::new();
+    let mut i = 0usize;
+    while i < chunk.code.len() {
+        if let Some(op) = Op::from_byte(chunk.code[i]) {
+            match op {
+                Op::GetPropertyIC => {
+                    slots.push(chunk.code.get(i + 1).copied().expect("slot byte"));
+                    i += 2;
+                }
+                Op::Jump | Op::JumpIfFalse | Op::PushHandler => i += 3,
+                Op::Const
+                | Op::MakeClosure
+                | Op::CallMethod
+                | Op::Call
+                | Op::GetBuiltin
+                | Op::SetLocal
+                | Op::GetLocal
+                | Op::GetProperty
+                | Op::SetProperty
+                | Op::BuildArray
+                | Op::BuildObject => i += 2,
+                Op::SetGlobal | Op::GetGlobal => i += 3,
+                _ => i += 1,
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    assert_eq!(slots, vec![0, 1, 2]);
+}
+
+#[test]
+fn compile_less_than_uses_lt_opcode() {
+    let src = "for (var i = 0; i < 100; i = i + 1) {}";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let saw_lt = chunk
+        .code
+        .iter()
+        .filter_map(|b| Op::from_byte(*b))
+        .any(|op| matches!(op, Op::Lt));
+
+    assert!(
+        saw_lt,
+        "expected Lt opcode in compiled less-than expression"
+    );
+}
+
+#[test]
+fn compile_for_loop_back_jump_targets_loop_start() {
+    let src = "for (var i = 0; i < 3; i = i + 1) {}";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let mut i = 0usize;
+    let mut loop_start = None;
+    let mut back_target = None;
+    while i < chunk.code.len() {
+        if let Some(op) = Op::from_byte(chunk.code[i]) {
+            match op {
+                Op::GetLocal if loop_start.is_none() => {
+                    loop_start = Some(i);
+                    i += 2;
+                }
+                Op::Jump => {
+                    let hi = chunk.code.get(i + 1).copied().unwrap_or(0) as i16;
+                    let lo = chunk.code.get(i + 2).copied().unwrap_or(0) as i16;
+                    let offset = i16::from_be_bytes([hi as u8, lo as u8]) as isize;
+                    back_target = Some((i + 3) as isize + offset);
+                    i += 3;
+                }
+                Op::JumpIfFalse | Op::PushHandler => i += 3,
+                Op::Const
+                | Op::MakeClosure
+                | Op::GetPropertyIC
+                | Op::CallMethod
+                | Op::Call
+                | Op::GetBuiltin
+                | Op::SetLocal
+                | Op::GetLocal
+                | Op::GetProperty
+                | Op::SetProperty
+                | Op::BuildArray
+                | Op::BuildObject => i += 2,
+                Op::SetGlobal | Op::GetGlobal => i += 3,
+                _ => i += 1,
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    assert_eq!(back_target, loop_start.map(|v| v as isize));
+}
+
+#[test]
+fn compile_new_expression_lowers_to_call() {
+    let src = "new Array(1, 2, 3);";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let saw_call = chunk
+        .code
+        .iter()
+        .filter_map(|b| Op::from_byte(*b))
+        .any(|op| matches!(op, Op::Call));
+
+    assert!(saw_call, "expected Call opcode for lowered new expression");
+}
+
+#[test]
+fn compile_update_expression_emits_store() {
+    let src = "for (var i = 0; i < 3; i++) {}";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let saw_add = chunk
+        .code
+        .iter()
+        .filter_map(|b| Op::from_byte(*b))
+        .any(|op| matches!(op, Op::Add));
+    let saw_set_local = chunk
+        .code
+        .iter()
+        .filter_map(|b| Op::from_byte(*b))
+        .any(|op| matches!(op, Op::SetLocal));
+
+    assert!(saw_add, "expected i++ to emit Add");
+    assert!(saw_set_local, "expected i++ to emit SetLocal");
+}
+
+#[test]
+fn compile_member_call_uses_call_method() {
+    let src = "obj.method(1);";
+    let session = match crate::parser::Parser::parse_source(src) {
+        Ok(s) => s,
+        // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
+        #[allow(clippy::panic)]
+        Err(e) => panic!("parse_source failed: {:?}", e),
+    };
+    let program = session.program();
+    let chunk = match compile(program, session.source()) {
+        Ok(c) => c,
+        // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
+        #[allow(clippy::panic)]
+        Err(e) => panic!("compile failed: {:?}", e),
+    };
+
+    let saw_call_method = chunk
+        .code
+        .iter()
+        .filter_map(|b| Op::from_byte(*b))
+        .any(|op| matches!(op, Op::CallMethod));
+
+    assert!(saw_call_method, "expected member call to emit CallMethod");
+}
+
+#[test]
+fn compile_sequence_expression_keeps_last_value() {
+    let src = "var x = (a = 1, 2);";
+    let session = crate::parser::Parser::parse_source(src)
+        .unwrap_or_else(|e| panic!("parse_source failed: {:?}", e));
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let saw_pop = chunk
+        .code
+        .iter()
+        .filter_map(|b| Op::from_byte(*b))
+        .any(|op| matches!(op, Op::Pop));
+
+    assert!(
+        saw_pop,
+        "expected sequence expression to emit Pop for intermediate values"
+    );
+}
+
+#[test]
+fn imported_binding_assignment_is_rejected() {
+    let src = "a = 1;";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let ctx = ModuleContext {
+        module_index: 0,
+        imports: HashMap::from([(String::from("a"), (1usize, String::from("value")))]),
+        exports: HashSet::new(),
+    };
+
+    let err = compile_oxc_with_ctx(program, Some(&ctx), session.source())
+        .expect_err("compile should fail");
+    assert!(
+        err.to_string().contains("imported binding"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn nullish_coalescing_is_supported() {
+    let src = "1 ?? 2;";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+
+    let chunk = compile(program, session.source()).expect("compile ok");
+    let saw_coalesce = chunk
+        .code
+        .iter()
+        .filter_map(|b| Op::from_byte(*b))
+        .any(|op| matches!(op, Op::Eq | Op::JumpIfFalse));
+    assert!(
+        saw_coalesce,
+        "expected nullish coalescing lowering to emit Eq/JumpIfFalse"
+    );
+}
+
+#[test]
+fn block_scoped_let_does_not_escape_block() {
+    let src = "{ let x = 1; } x = 2;";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(Rc::clone(&globals));
+    vm.run(chunk).expect("run ok");
+
+    assert!(
+        matches!(vm.get_global("x"), Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON),
+        "block-local binding should not leak past its block"
+    );
+}
