@@ -20,6 +20,8 @@ APIs.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::fmt;
 use std::env;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -691,9 +693,14 @@ fn run_test_file(
     let src = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
     let meta = parse_meta(&src);
-
+ 
     if let Some(reason) = unsupported_reason(path, &src, &meta) {
-        return Err(format!("{} ({})", path.display(), reason));
+        return Err(Test262Error::new(
+            path,
+            mode_name,
+            reason,
+        )
+        .into_string());
     }
 
     // Unless the test is `raw`, harness files should be evaluated first in the test realm.
@@ -933,11 +940,12 @@ fn run_test_file(
                             continue;
                         }
                     }
-                    return Err(format!(
-                        "{} ({}): expected parse error (phase=parse) but parse succeeded",
-                        path.display(),
-                        mode_name
-                    ));
+                    return Err(Test262Error::new(
+                        path,
+                        mode_name,
+                        "expected parse error (phase=parse) but parse succeeded".to_string(),
+                    )
+                    .into_string());
                 }
                 Err(_) => {
                     // got parse error as expected for this mode; continue to next mode
@@ -950,23 +958,24 @@ fn run_test_file(
             && let Some(neg) = &m.negative
             && neg.phase == "resolution"
         {
-            return Err(format!(
-                "{} ({}): UNSUPPORTED resolution phase",
-                path.display(),
-                mode_name
-            ));
+            return Err(Test262Error::new(
+                path,
+                mode_name,
+                "UNSUPPORTED resolution phase".to_string(),
+            )
+            .into_string());
         }
 
         // Otherwise, parse must succeed
         let session = match Parser::parse_source(&run_src) {
             Ok(s) => s,
             Err(e) => {
-                return Err(format!(
-                    "{} ({}): unexpected parse error: {}",
-                    path.display(),
+                return Err(Test262Error::new(
+                    path,
                     mode_name,
-                    e
-                ));
+                    format!("unexpected parse error: {e}"),
+                )
+                .into_string());
             }
         };
         let prog = session.program();
@@ -975,12 +984,12 @@ fn run_test_file(
         let chunk = match compiler::compile_oxc(prog, &run_src) {
             Ok(c) => c,
             Err(e) => {
-                return Err(format!(
-                    "{} ({}): compile error: {}",
-                    path.display(),
+                return Err(Test262Error::new(
+                    path,
                     mode_name,
-                    e
-                ));
+                    format!("compile error: {e}"),
+                )
+                .into_string());
             }
         };
 
@@ -1035,35 +1044,35 @@ fn run_test_file(
                     if let Some(expected) = &neg.ty {
                         let err_str = e.to_string();
                         if !err_str.contains(expected) {
-                            return Err(format!(
-                                "{} ({}): expected error type {}, got {}",
-                                path.display(),
+                            return Err(Test262Error::new(
+                                path,
                                 mode_name,
-                                expected,
-                                err_str
-                            ));
+                                format!("expected error type {expected}, got {err_str}"),
+                            )
+                            .into_string());
                         }
                     }
                     continue;
                 }
                 Ok(_) => {
-                    return Err(format!(
-                        "{} ({}): expected runtime error but execution succeeded",
-                        path.display(),
-                        mode_name
-                    ));
+                    return Err(Test262Error::new(
+                        path,
+                        mode_name,
+                        "expected runtime error but execution succeeded".to_string(),
+                    )
+                    .into_string());
                 }
             }
         }
 
         // For non-negative tests, execution must succeed.
         if run_result.is_err() {
-            return Err(format!(
-                "{} ({}): unexpected runtime error: {}",
-                path.display(),
+            return Err(Test262Error::new(
+                path,
                 mode_name,
-                run_result.err().unwrap()
-            ));
+                format!("unexpected runtime error: {}", run_result.err().unwrap()),
+            )
+            .into_string());
         }
     }
 
@@ -1346,11 +1355,7 @@ fn main() {
                 ran += 1;
                 top_level.entry(top_key).or_default().fail += 1;
                 subsections.entry(subsection_key).or_default().fail += 1;
-                if let Ok(rel) = f.strip_prefix(&test262_dir) {
-                    eprintln!("FAIL: {}: {}", rel.display(), e);
-                } else {
-                    eprintln!("FAIL: {}: {}", f.display(), e);
-                }
+                eprintln!("FAIL: {}", e);
                 failed.push((f.clone(), e));
             }
             TestResult::StackOverflow => {

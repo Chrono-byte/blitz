@@ -160,19 +160,30 @@ impl Vm {
         self.frames.truncate(caller_frame_len);
         self.handlers.truncate(caller_handler_len);
 
+        self.run_microtasks_if_needed()?;
         match exec_result {
             Ok(result) => {
-                let _ = resolve_promise_with_value(self, &promise_for_job, result);
+                let promise_job = Rc::clone(&promise_for_job);
+                let result_cell = Rc::new(RefCell::new(Some(result)));
+                self.queue_microtask(move |vm| {
+                    let value = result_cell.borrow_mut().take().unwrap();
+                    resolve_promise_with_value(vm, &promise_job, value)?;
+                    Ok(())
+                });
             }
             Err(err) => {
                 let reason = thrown_value
                     .or_else(|| self.last_uncaught_exception.take())
                     .unwrap_or_else(|| Value::String(format!("{}", err)));
-                reject_pending_promise(self, &promise_for_job, reason);
+                let promise_job = Rc::clone(&promise_for_job);
+                let reason_cell = Rc::new(RefCell::new(Some(reason)));
+                self.queue_microtask(move |vm| {
+                    let reason = reason_cell.borrow_mut().take().unwrap();
+                    reject_pending_promise(vm, &promise_job, reason);
+                    Ok(())
+                });
             }
         }
-
-        self.run_microtasks_if_needed()?;
 
         Ok(Value::Promise(promise))
     }
