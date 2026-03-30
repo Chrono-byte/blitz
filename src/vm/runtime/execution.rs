@@ -58,6 +58,7 @@ impl Vm {
             lexical_env: Rc::clone(&global_env),
             global_env,
             yield_star_queue: None,
+            gc_step_counter: 0,
         };
         vm.populate_realm_intrinsics();
         vm
@@ -153,7 +154,7 @@ impl Vm {
         );
 
         if let Some(proto) = self.realm.intrinsics.array_prototype.clone() {
-            props.borrow_mut().prototype = proto;
+            props.borrow_mut().set_prototype_value(proto);
         }
 
         Value::Array(arr_rc, props)
@@ -269,6 +270,25 @@ impl Vm {
             roots.push(value);
         }
         crate::gc::collect(&roots)
+    }
+
+    /// Opportunistically collect garbage during interpreter progress.
+    ///
+    /// This keeps the prototype collector aggressive without collecting on
+    /// every single bytecode step.
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    pub(super) fn maybe_collect_garbage_prototype(&mut self) {
+        self.gc_step_counter = self.gc_step_counter.wrapping_add(1);
+        if self.gc_step_counter < GC_STEP_INTERVAL {
+            return;
+        }
+        self.gc_step_counter = 0;
+        let _ = self.collect_garbage_prototype();
+    }
+
+    #[cfg(not(feature = "gc_mark_sweep_prototype"))]
+    pub(super) fn maybe_collect_garbage_prototype(&mut self) {
+        let _ = self.gc_step_counter;
     }
 
     /// Install the minimal kernel helpers and populate intrinsics before use.
@@ -562,6 +582,7 @@ impl Vm {
                     // If execution continues normally, clear it so unrelated
                     // future runtime errors are not masked.
                     self.pending_exception = false;
+                    self.maybe_collect_garbage_prototype();
                 }
                 Ok(StepOutcome::Return(result)) => {
                     self.run_microtasks_if_needed()?;
@@ -679,7 +700,9 @@ impl Vm {
         gen_obj.borrow_mut().properties.insert(
             PropertyKey::String("next".to_string()),
             PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                let mut runner = next_runner.borrow_mut();
+                let mut runner = next_runner.try_borrow_mut().map_err(|_| {
+                    crate::errors::RuntimeError::from("TypeError: generator is already executing")
+                })?;
                 if runner.completed {
                     return Ok(Self::make_iterator_result(Value::Undefined, true));
                 }
@@ -695,7 +718,10 @@ impl Vm {
 
                 loop {
                     match runner.vm.step(Some(1))? {
-                        StepOutcome::Continue => runner.vm.run_microtasks_if_needed()?,
+                        StepOutcome::Continue => {
+                            runner.vm.run_microtasks_if_needed()?;
+                            runner.vm.maybe_collect_garbage_prototype();
+                        }
                         StepOutcome::Yield(v) => return Ok(Self::make_iterator_result(v, false)),
                         StepOutcome::Return(v) => {
                             runner.completed = true;
@@ -708,7 +734,9 @@ impl Vm {
         gen_obj.borrow_mut().properties.insert(
             PropertyKey::String("throw".to_string()),
             PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                let mut runner = throw_runner.borrow_mut();
+                let mut runner = throw_runner.try_borrow_mut().map_err(|_| {
+                    crate::errors::RuntimeError::from("TypeError: generator is already executing")
+                })?;
                 if runner.completed {
                     return Err(crate::errors::RuntimeError::from(format!(
                         "Uncaught: {}",
@@ -748,7 +776,10 @@ impl Vm {
         gen_obj.borrow_mut().properties.insert(
             PropertyKey::String("return".to_string()),
             PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                return_runner.borrow_mut().completed = true;
+                let mut runner = return_runner.try_borrow_mut().map_err(|_| {
+                    crate::errors::RuntimeError::from("TypeError: generator is already executing")
+                })?;
+                runner.completed = true;
                 Ok(Self::make_iterator_result(
                     args.first().cloned().unwrap_or(Value::Undefined),
                     true,
@@ -775,6 +806,7 @@ impl Vm {
                 if self.frames.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
+                self.maybe_collect_garbage_prototype();
                 self.stack.push(result);
             }
             Value::BuiltinObject(f, _props) => {
@@ -784,6 +816,7 @@ impl Vm {
                 if self.frames.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
+                self.maybe_collect_garbage_prototype();
                 self.stack.push(result);
             }
             Value::Closure { ref proto, env, .. } => {
@@ -923,6 +956,7 @@ impl Vm {
                 if self.frames.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
+                self.maybe_collect_garbage_prototype();
                 self.stack.push(result);
             }
             Value::BuiltinObject(f, _props) => {
@@ -932,6 +966,7 @@ impl Vm {
                 if self.frames.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
+                self.maybe_collect_garbage_prototype();
                 self.stack.push(result);
             }
             Value::Closure { ref proto, env, .. } => {
@@ -1163,7 +1198,7 @@ impl Vm {
                 }
                 // Try to find Symbol.prototype
                 if let Some(proto) = self.realm.intrinsics.symbol_prototype.clone() {
-                    data.prototype = proto;
+                    data.set_prototype_value(proto);
                 }
                 Ok(Value::Object(Rc::new(RefCell::new(data))))
             }
@@ -1473,6 +1508,7 @@ impl Vm {
                 let result = (f.as_ref())(self, &call_args)?;
                 self.this_value = prev_this;
                 self.run_microtasks_if_needed()?;
+                self.maybe_collect_garbage_prototype();
                 Ok(result)
             }
             Value::BuiltinObject(f, _props) => {
@@ -1483,6 +1519,7 @@ impl Vm {
                 let result = (f.as_ref())(self, &call_args)?;
                 self.this_value = prev_this;
                 self.run_microtasks_if_needed()?;
+                self.maybe_collect_garbage_prototype();
                 Ok(result)
             }
             Value::Closure { proto, .. } => {
@@ -1572,6 +1609,7 @@ impl Vm {
             match self.step(Some(target_frame_depth)) {
                 Ok(StepOutcome::Continue) => {
                     self.pending_exception = false;
+                    self.maybe_collect_garbage_prototype();
                 }
                 Ok(StepOutcome::Return(result)) => {
                     self.stack.truncate(stack_base);
@@ -2247,6 +2285,7 @@ impl Vm {
                                 None => {
                                     if !self.microtasks.is_empty() {
                                         self.run_microtasks_if_needed()?;
+                                        self.maybe_collect_garbage_prototype();
                                     }
                                 }
                             }
@@ -2512,16 +2551,22 @@ impl Vm {
         match v {
             Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym.clone())),
             Value::Object(data) => {
-                let d = data.borrow();
-                if let Some(PropertyDescriptor::Data { value, .. }) = d
-                    .properties
-                    .get(&PropertyKey::String("__isSymbol".to_string()))
-                    && matches!(value, Value::Bool(true))
-                    && let Some(PropertyDescriptor::Data { value, .. }) =
-                        d.properties.get(&PropertyKey::String("_id".to_string()))
-                    && let Value::Number(n) = value
-                {
-                    return Ok(PropertyKey::Symbol(SymbolId::well_known(*n as u64)));
+                if let Some(symbol_key) = {
+                    let d = data.borrow();
+                    if let Some(PropertyDescriptor::Data { value, .. }) = d
+                        .properties
+                        .get(&PropertyKey::String("__isSymbol".to_string()))
+                        && matches!(value, Value::Bool(true))
+                        && let Some(PropertyDescriptor::Data { value, .. }) =
+                            d.properties.get(&PropertyKey::String("_id".to_string()))
+                        && let Value::Number(n) = value
+                    {
+                        Some(PropertyKey::Symbol(SymbolId::well_known(*n as u64)))
+                    } else {
+                        None
+                    }
+                } {
+                    return Ok(symbol_key);
                 }
                 let prim = self.to_primitive(v, Some("string"))?;
                 match prim {
@@ -2959,8 +3004,9 @@ impl Vm {
                 if let Some(desc) = d.properties.get(key) {
                     return Ok(Some((desc.clone(), obj.clone())));
                 }
-                if !matches!(d.prototype, Value::Null) {
-                    return self.lookup_property_descriptor(&d.prototype, key, depth + 1);
+                let proto = d.get_prototype();
+                if !matches!(proto, Value::Null) {
+                    return self.lookup_property_descriptor(&proto, key, depth + 1);
                 }
             }
             Value::Array(arr, props) => {
@@ -2982,8 +3028,9 @@ impl Vm {
                 if let Some(desc) = p.properties.get(key) {
                     return Ok(Some((desc.clone(), obj.clone())));
                 }
-                if !matches!(p.prototype, Value::Null) {
-                    return self.lookup_property_descriptor(&p.prototype, key, depth + 1);
+                let proto = p.get_prototype();
+                if !matches!(proto, Value::Null) {
+                    return self.lookup_property_descriptor(&proto, key, depth + 1);
                 }
             }
             Value::Closure { props, .. } => {
@@ -2991,8 +3038,9 @@ impl Vm {
                 if let Some(desc) = p.properties.get(key) {
                     return Ok(Some((desc.clone(), obj.clone())));
                 }
-                if !matches!(p.prototype, Value::Null) {
-                    return self.lookup_property_descriptor(&p.prototype, key, depth + 1);
+                let proto = p.get_prototype();
+                if !matches!(proto, Value::Null) {
+                    return self.lookup_property_descriptor(&proto, key, depth + 1);
                 }
             }
             Value::BuiltinObject(_, props) => {
@@ -3000,8 +3048,9 @@ impl Vm {
                 if let Some(desc) = p.properties.get(key) {
                     return Ok(Some((desc.clone(), obj.clone())));
                 }
-                if !matches!(p.prototype, Value::Null) {
-                    return self.lookup_property_descriptor(&p.prototype, key, depth + 1);
+                let proto = p.get_prototype();
+                if !matches!(proto, Value::Null) {
+                    return self.lookup_property_descriptor(&proto, key, depth + 1);
                 }
             }
             Value::Promise(_) => {
@@ -3121,8 +3170,8 @@ impl Vm {
                 get_property(&array_val, &PropertyKey::String("prototype".to_string()), 0)
             && !matches!(proto_val, Value::Null)
         {
-            props.borrow_mut().prototype = proto_val;
-            let proto_for_lookup = props.borrow().prototype.clone();
+            props.borrow_mut().set_prototype_value(proto_val);
+            let proto_for_lookup = props.borrow().get_prototype();
             if let Ok(for_each_val) = get_property(
                 &proto_for_lookup,
                 &PropertyKey::String("forEach".to_string()),
@@ -3347,7 +3396,7 @@ impl Vm {
                 get_property(&array_val, &PropertyKey::String("prototype".to_string()), 0)
             && !matches!(proto_val, Value::Null)
         {
-            props.borrow_mut().prototype = proto_val;
+            props.borrow_mut().set_prototype_value(proto_val);
         }
 
         self.stack
@@ -3400,7 +3449,7 @@ impl Vm {
             )
             && !matches!(proto_val, Value::Null)
         {
-            data.prototype = proto_val;
+            data.set_prototype_value(proto_val);
         }
         let obj_rc = Rc::new(RefCell::new(data));
         self.stack.push(Value::Object(Rc::clone(&obj_rc)));
@@ -3441,7 +3490,7 @@ impl Vm {
             )
             && !matches!(function_proto, Value::Null)
         {
-            props.borrow_mut().prototype = function_proto;
+            props.borrow_mut().set_prototype_value(function_proto);
         }
 
         let closure_proto = Rc::new(proto);
@@ -4295,10 +4344,10 @@ impl Vm {
 
         // Walk value's prototype chain
         let mut current = match value {
-            Value::Object(d) => d.borrow().prototype.clone(),
-            Value::Array(_, props) => props.borrow().prototype.clone(),
-            Value::Closure { props, .. } => props.borrow().prototype.clone(),
-            Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
+            Value::Object(d) => d.borrow().get_prototype(),
+            Value::Array(_, props) => props.borrow().get_prototype(),
+            Value::Closure { props, .. } => props.borrow().get_prototype(),
+            Value::BuiltinObject(_, props) => props.borrow().get_prototype(),
             Value::Promise(_) => self.promise_prototype_value(),
             _ => Value::Null,
         };
@@ -4316,10 +4365,10 @@ impl Vm {
             }
             // advance
             current = match &current {
-                Value::Object(d) => d.borrow().prototype.clone(),
-                Value::Array(_, props) => props.borrow().prototype.clone(),
-                Value::Closure { props, .. } => props.borrow().prototype.clone(),
-                Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
+                Value::Object(d) => d.borrow().get_prototype(),
+                Value::Array(_, props) => props.borrow().get_prototype(),
+                Value::Closure { props, .. } => props.borrow().get_prototype(),
+                Value::BuiltinObject(_, props) => props.borrow().get_prototype(),
                 _ => Value::Null,
             };
         }
@@ -4343,10 +4392,10 @@ impl Vm {
         };
 
         let mut current = match value {
-            Value::Object(d) => d.borrow().prototype.clone(),
-            Value::Array(_, props) => props.borrow().prototype.clone(),
-            Value::Closure { props, .. } => props.borrow().prototype.clone(),
-            Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
+            Value::Object(d) => d.borrow().get_prototype(),
+            Value::Array(_, props) => props.borrow().get_prototype(),
+            Value::Closure { props, .. } => props.borrow().get_prototype(),
+            Value::BuiltinObject(_, props) => props.borrow().get_prototype(),
             Value::Promise(_) => self.promise_prototype_value(),
             _ => return Ok(false),
         };
@@ -4363,10 +4412,10 @@ impl Vm {
                 return Ok(false);
             }
             current = match &current {
-                Value::Object(d) => d.borrow().prototype.clone(),
-                Value::Array(_, props) => props.borrow().prototype.clone(),
-                Value::Closure { props, .. } => props.borrow().prototype.clone(),
-                Value::BuiltinObject(_, props) => props.borrow().prototype.clone(),
+                Value::Object(d) => d.borrow().get_prototype(),
+                Value::Array(_, props) => props.borrow().get_prototype(),
+                Value::Closure { props, .. } => props.borrow().get_prototype(),
+                Value::BuiltinObject(_, props) => props.borrow().get_prototype(),
                 _ => Value::Null,
             };
         }
@@ -4717,8 +4766,9 @@ fn get_property(
                     }
                 };
             }
-            if !matches!(d.prototype, Value::Null) {
-                return get_property(&d.prototype, key, depth + 1);
+            let proto = d.get_prototype();
+            if !matches!(proto, Value::Null) {
+                return get_property(&proto, key, depth + 1);
             }
             Ok(Value::Undefined)
         }
@@ -4742,8 +4792,9 @@ fn get_property(
                     }
                 };
             }
-            if !matches!(p.prototype, Value::Null) {
-                return get_property(&p.prototype, key, depth + 1);
+            let proto = p.get_prototype();
+            if !matches!(proto, Value::Null) {
+                return get_property(&proto, key, depth + 1);
             }
             Ok(Value::Undefined)
         }
@@ -4761,8 +4812,9 @@ fn get_property(
                     }
                 };
             }
-            if !matches!(p.prototype, Value::Null) {
-                return get_property(&p.prototype, key, depth + 1);
+            let proto = p.get_prototype();
+            if !matches!(proto, Value::Null) {
+                return get_property(&proto, key, depth + 1);
             }
             Ok(Value::Undefined)
         }
@@ -4780,8 +4832,9 @@ fn get_property(
                     }
                 };
             }
-            if !matches!(p.prototype, Value::Null) {
-                return get_property(&p.prototype, key, depth + 1);
+            let proto = p.get_prototype();
+            if !matches!(proto, Value::Null) {
+                return get_property(&proto, key, depth + 1);
             }
             Ok(Value::Undefined)
         }

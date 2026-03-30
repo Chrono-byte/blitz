@@ -344,9 +344,12 @@ impl ModuleLoader {
                 Some(r) => Rc::clone(r),
                 None => continue,
             };
-            let mut rec = rec_rc.borrow_mut();
-            // Walk ESTree JSON import declarations to wire live-binding slots
-            let estree = rec.session.program().to_pretty_estree_ts_json(false);
+            // Walk ESTree JSON import declarations to wire live-binding slots.
+            // Borrow the module record only long enough to extract the AST.
+            let estree = {
+                let rec = rec_rc.borrow();
+                rec.session.program().to_pretty_estree_ts_json(false)
+            };
             let root: JsonValue = serde_json::from_str(&estree)
                 .map_err(|e| BundlerError::from(format!("Failed to parse ESTree JSON: {}", e)))?;
             let body = root
@@ -371,8 +374,14 @@ impl ModuleLoader {
                 if spec.is_empty() {
                     continue;
                 }
-                let base_dir = rec.path.parent().unwrap_or(Path::new("."));
-                let dep_rec_rc = match self.construct(base_dir, &spec) {
+                let base_dir: PathBuf = {
+                    let rec = rec_rc.borrow();
+                    rec.path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| PathBuf::from("."))
+                };
+                let dep_rec_rc = match self.construct(&base_dir, &spec) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
@@ -396,20 +405,31 @@ impl ModuleLoader {
                                         .unwrap_or(local.clone());
                                     let slot_opt =
                                         { dep_rec_rc.borrow().exports.get(&imported).cloned() };
+                                    let dep_module_index = dep_rec_rc.borrow().module_index;
                                     if let Some(slot) = slot_opt {
-                                        rec.imports.insert(local.clone(), Rc::clone(&slot));
-                                        if let Some(src_idx) = dep_rec_rc.borrow().module_index {
-                                            rec.import_sources.insert(local, (src_idx, imported));
+                                        {
+                                            let mut rec = rec_rc.borrow_mut();
+                                            rec.imports.insert(local.clone(), Rc::clone(&slot));
+                                            if let Some(src_idx) = dep_module_index {
+                                                rec.import_sources
+                                                    .insert(local, (src_idx, imported));
+                                            }
                                         }
                                     } else {
                                         let new_slot = Rc::new(RefCell::new(Value::Undefined));
-                                        dep_rec_rc
-                                            .borrow_mut()
-                                            .exports
-                                            .insert(imported.clone(), Rc::clone(&new_slot));
-                                        rec.imports.insert(local.clone(), Rc::clone(&new_slot));
-                                        if let Some(src_idx) = dep_rec_rc.borrow().module_index {
-                                            rec.import_sources.insert(local, (src_idx, imported));
+                                        {
+                                            let mut dep_rec = dep_rec_rc.borrow_mut();
+                                            dep_rec
+                                                .exports
+                                                .insert(imported.clone(), Rc::clone(&new_slot));
+                                        }
+                                        {
+                                            let mut rec = rec_rc.borrow_mut();
+                                            rec.imports.insert(local.clone(), Rc::clone(&new_slot));
+                                            if let Some(src_idx) = dep_module_index {
+                                                rec.import_sources
+                                                    .insert(local, (src_idx, imported));
+                                            }
                                         }
                                     }
                                 }
@@ -422,22 +442,36 @@ impl ModuleLoader {
                                         .to_string();
                                     let slot_opt =
                                         { dep_rec_rc.borrow().exports.get("default").cloned() };
+                                    let dep_module_index = dep_rec_rc.borrow().module_index;
                                     if let Some(slot) = slot_opt {
-                                        rec.imports.insert(local.clone(), Rc::clone(&slot));
-                                        if let Some(src_idx) = dep_rec_rc.borrow().module_index {
-                                            rec.import_sources
-                                                .insert(local, (src_idx, "default".to_string()));
+                                        {
+                                            let mut rec = rec_rc.borrow_mut();
+                                            rec.imports.insert(local.clone(), Rc::clone(&slot));
+                                            if let Some(src_idx) = dep_module_index {
+                                                rec.import_sources.insert(
+                                                    local,
+                                                    (src_idx, "default".to_string()),
+                                                );
+                                            }
                                         }
                                     } else {
                                         let new_slot = Rc::new(RefCell::new(Value::Undefined));
-                                        dep_rec_rc
-                                            .borrow_mut()
-                                            .exports
-                                            .insert("default".to_string(), Rc::clone(&new_slot));
-                                        rec.imports.insert(local.clone(), Rc::clone(&new_slot));
-                                        if let Some(src_idx) = dep_rec_rc.borrow().module_index {
-                                            rec.import_sources
-                                                .insert(local, (src_idx, "default".to_string()));
+                                        {
+                                            let mut dep_rec = dep_rec_rc.borrow_mut();
+                                            dep_rec.exports.insert(
+                                                "default".to_string(),
+                                                Rc::clone(&new_slot),
+                                            );
+                                        }
+                                        {
+                                            let mut rec = rec_rc.borrow_mut();
+                                            rec.imports.insert(local.clone(), Rc::clone(&new_slot));
+                                            if let Some(src_idx) = dep_module_index {
+                                                rec.import_sources.insert(
+                                                    local,
+                                                    (src_idx, "default".to_string()),
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -462,6 +496,7 @@ impl ModuleLoader {
                                     // accessor has no setter (immutable from JS), and is
                                     // non-configurable to match namespace invariants.
                                     let exports_snapshot = { dep_rec_rc.borrow().exports.clone() };
+                                    let dep_module_index = dep_rec_rc.borrow().module_index;
                                     for (k, slot) in &exports_snapshot {
                                         let slot = Rc::clone(slot);
                                         let getter: crate::value::BuiltinFn =
@@ -483,11 +518,16 @@ impl ModuleLoader {
                                     ns_map.borrow_mut().extensible = false;
 
                                     let boxed = Rc::new(RefCell::new(Value::Object(ns_map)));
-                                    rec.imports.insert(local.clone(), boxed);
+                                    {
+                                        let mut rec = rec_rc.borrow_mut();
+                                        rec.imports.insert(local.clone(), boxed);
+                                    }
                                     // Namespace imports are represented as plain objects for now.
                                     // Record a synthetic import source with module index and special "*" name
-                                    if let Some(src_idx) = dep_rec_rc.borrow().module_index {
-                                        rec.import_sources
+                                    if let Some(src_idx) = dep_module_index {
+                                        rec_rc
+                                            .borrow_mut()
+                                            .import_sources
                                             .insert(local, (src_idx, "*".to_string()));
                                     }
                                 }

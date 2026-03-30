@@ -78,6 +78,7 @@ impl Vm {
             let caller_handlers = std::mem::take(&mut self.handlers);
             let result = job(self);
             self.handlers = caller_handlers;
+            self.maybe_collect_garbage_prototype();
             if let Err(err) = result {
                 // Record the last uncaught exception so callers or host hooks
                 // can inspect it. Convert the runtime error into a JS value
@@ -151,6 +152,7 @@ impl Vm {
             self.push_call_frame(&proto, &env, call_args, this_arg)?;
             self.run_until_return(stack_base, false)
         })();
+        self.maybe_collect_garbage_prototype();
 
         self.chunk = caller_chunk;
         self.ip = caller_ip;
@@ -164,6 +166,7 @@ impl Vm {
         self.handlers = caller_handlers;
 
         self.run_microtasks_if_needed()?;
+        self.maybe_collect_garbage_prototype();
         match exec_result {
             Ok(result) => {
                 let promise_job = Rc::clone(&promise_for_job);

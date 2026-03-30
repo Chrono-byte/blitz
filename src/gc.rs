@@ -352,9 +352,10 @@ fn mark_object(
             }
         }
     }
-    if !matches!(obj_ref.prototype, Value::Null) {
+    let prototype = obj_ref.get_prototype();
+    if !matches!(prototype, Value::Null) {
         mark_value(
-            &obj_ref.prototype,
+            &prototype,
             marked_objects,
             marked_arrays,
             marked_envs,
@@ -368,7 +369,6 @@ fn clear_object(obj: &Rc<RefCell<ObjectData>>) {
     let mut obj = obj.borrow_mut();
     obj.properties.clear();
     obj.weak_prototype = None;
-    obj.prototype = Value::Null;
     obj.extensible = true;
 }
 

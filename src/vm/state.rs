@@ -74,6 +74,9 @@ pub(super) const MAX_PROTOTYPE_DEPTH: usize = 128;
 /// array write as sparse and storing it on the property bag instead.
 pub(super) const MAX_DENSE_ARRAY_GROWTH: usize = 1024;
 
+/// Number of interpreter steps between opportunistic GC attempts.
+pub(super) const GC_STEP_INTERVAL: usize = 16;
+
 type Microtask = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 
 // ---------------------------------------------------------------------------
@@ -190,6 +193,8 @@ pub struct Vm {
     pub(super) global_env: Rc<RefCell<EnvironmentRecord>>,
     /// Queue of values for the current `yield*` expression, if any.
     pub(super) yield_star_queue: Option<VecDeque<Value>>,
+    /// Counter used to trigger opportunistic GC during interpreter progress.
+    pub(super) gc_step_counter: usize,
 }
 
 thread_local! {

@@ -25,13 +25,10 @@
 //!
 //! Conformance and implementation notes
 //!
-//! - Prototype representation: ObjectData currently stores both a `weak_prototype`
-//!   (an optional WeakObject) and a strong `prototype` Value. This is a
-//!   transitional implementation detail (see the TODO in the struct) introduced
-//!   to avoid reference cycles. Callers should prefer `get_prototype` which
-//!   prefers the weak prototype when present. When converting to a spec-faithful
-//!   implementation, unify the prototype representation and ensure prototype
-//!   chain traversal matches the ECMAScript semantics exactly.
+//! - Prototype representation: ObjectData stores its prototype as a weak
+//!   reference to avoid keeping prototype chains alive through ownership
+//!   alone. Callers should use `get_prototype` / `set_prototype_value` rather
+//!   than storing a strong `Value` reference.
 //!
 //! - SameValue vs Strict Equality: the runtime contains several equality
 //!   helpers. The semantics of `SameValue`, `SameValueZero`, and strict equality
@@ -241,9 +238,6 @@ pub struct ObjectData {
     pub properties: HashMap<PropertyKey, PropertyDescriptor>,
     /// Prototype pointer (weak to prevent reference cycles)
     pub weak_prototype: Option<WeakObject>,
-    /// Prototype pointer (strong reference - kept for compatibility during transition)
-    /// TODO: Remove this once all code is migrated to use weak_prototype
-    pub prototype: Value,
     /// Extensible flag
     pub extensible: bool,
 }
@@ -254,19 +248,15 @@ impl ObjectData {
         Self {
             properties: HashMap::new(),
             weak_prototype: None,
-            prototype: Value::Null,
             extensible: true,
         }
     }
 
     /// Create an empty object with a specific prototype.
     pub fn with_prototype(prototype: Value) -> Self {
-        Self {
-            properties: HashMap::new(),
-            weak_prototype: None,
-            prototype,
-            extensible: true,
-        }
+        let mut object = Self::new();
+        object.set_prototype_value(prototype);
+        object
     }
 
     /// Create an object with a weak prototype reference (prevents cycles).
@@ -274,7 +264,6 @@ impl ObjectData {
         Self {
             properties: HashMap::new(),
             weak_prototype: Some(WeakObject::new(prototype)),
-            prototype: Value::Object(Rc::clone(prototype)),
             extensible: true,
         }
     }
@@ -285,15 +274,21 @@ impl ObjectData {
         if let Some(weak) = &self.weak_prototype {
             weak.to_value()
         } else {
-            self.prototype.clone()
+            Value::Null
         }
     }
 
     /// Set the prototype using a weak reference (prevents cycles).
     pub fn set_weak_prototype(&mut self, prototype: &Rc<RefCell<ObjectData>>) {
         self.weak_prototype = Some(WeakObject::new(prototype));
-        // Keep strong ref for backward compatibility during transition
-        self.prototype = Value::Object(Rc::clone(prototype));
+    }
+
+    /// Set the prototype from a runtime value.
+    pub fn set_prototype_value(&mut self, prototype: Value) {
+        self.weak_prototype = match prototype {
+            Value::Object(obj) => Some(WeakObject::new(&obj)),
+            _ => None,
+        };
     }
 }
 

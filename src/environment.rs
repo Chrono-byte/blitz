@@ -7,6 +7,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::rc::Weak;
 
 use crate::errors::RuntimeError;
 use crate::value::Value;
@@ -25,7 +26,7 @@ pub struct Binding {
 #[derive(Clone)]
 /// Declarative environment record with an optional outer environment.
 pub struct EnvironmentRecord {
-    outer: Option<Rc<RefCell<EnvironmentRecord>>>,
+    outer: Option<Weak<RefCell<EnvironmentRecord>>>,
     bindings: HashMap<String, Binding>,
 }
 
@@ -33,14 +34,14 @@ impl EnvironmentRecord {
     /// Create a new declarative environment with an optional outer link.
     pub fn new(outer: Option<Rc<RefCell<EnvironmentRecord>>>) -> Self {
         Self {
-            outer,
+            outer: outer.map(|outer| Rc::downgrade(&outer)),
             bindings: HashMap::new(),
         }
     }
 
     /// Return the outer environment, if any.
     pub fn outer(&self) -> Option<Rc<RefCell<EnvironmentRecord>>> {
-        self.outer.clone()
+        self.outer.as_ref().and_then(Weak::upgrade)
     }
 
     /// Create a mutable binding in this record.
@@ -93,7 +94,9 @@ impl EnvironmentRecord {
             return Ok(Some(binding.cell.borrow().clone()));
         }
         if let Some(outer) = &self.outer {
-            return outer.borrow().get_binding_value(name);
+            if let Some(outer) = outer.upgrade() {
+                return outer.borrow().get_binding_value(name);
+            }
         }
         Ok(None)
     }
@@ -112,7 +115,9 @@ impl EnvironmentRecord {
             return Ok(true);
         }
         if let Some(outer) = &self.outer {
-            return outer.borrow_mut().set_mutable_binding(name, value);
+            if let Some(outer) = outer.upgrade() {
+                return outer.borrow_mut().set_mutable_binding(name, value);
+            }
         }
         Ok(false)
     }
@@ -126,7 +131,9 @@ impl EnvironmentRecord {
             values.push(binding.cell.borrow().clone());
         }
         if let Some(outer) = &self.outer {
-            outer.borrow().collect_binding_values(values);
+            if let Some(outer) = outer.upgrade() {
+                outer.borrow().collect_binding_values(values);
+            }
         }
     }
 }
