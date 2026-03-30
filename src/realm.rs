@@ -8,11 +8,11 @@
 //!
 //! ```text
 //! Realm Record:
-//!   [[Intrinsics]]        – canonical built-in objects
-//!   [[GlobalObject]]      – the global object
-//!   [[GlobalEnv]]         – the global environment record
-//!   [[TemplateMap]]       – (not yet implemented)
-//!   [[HostDefined]]       – (not yet implemented)
+//!   [[Intrinsics]]        - canonical built-in objects
+//!   [[GlobalObject]]      - the global object
+//!   [[GlobalEnv]]         - the global environment record
+//!   [[TemplateMap]]       - (not yet implemented)
+//!   [[HostDefined]]       - (not yet implemented)
 //! ```
 //!
 //! # Why this matters
@@ -23,7 +23,7 @@
 //!
 //! - Per-realm constructor identity (`Array !== otherRealm.Array`)
 //! - Canonical prototype objects for `instanceof`
-//! - Object → realm association (future)
+//! - Object -> realm association (future)
 
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use std::cell::RefCell;
