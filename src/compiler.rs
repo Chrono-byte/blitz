@@ -2420,12 +2420,9 @@ impl Compiler {
                     self.compile_expr_oast(&m.object)?;
                     self.emit(Op::Dup, LINE);
                     // private identifier -> synthetic constant
-                    if let oast::PrivateIdentifier { name, .. } = &m.field {
-                        let key = self.ensure_private_name_constant(name);
-                        self.emit_constant(key, LINE);
-                    } else {
-                        self.emit(Op::Undefined, LINE);
-                    }
+                    let oast::PrivateIdentifier { name, .. } = &m.field;
+                    let key = self.ensure_private_name_constant(name);
+                    self.emit_constant(key, LINE);
                     self.emit(Op::GetProperty, LINE);
                     let mut arg_count = 0usize;
                     for arg in &c.arguments {
