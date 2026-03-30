@@ -5333,12 +5333,6 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         "__native_call_spread",
         Value::Builtin(Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "");
-            // Diagnostic: print raw incoming argument vector and resolved builtin offset
-            eprintln!(
-                "__native_call_spread: called args.len={} off={}",
-                args.len(),
-                off
-            );
             for (i, a) in args.iter().enumerate() {
                 eprintln!("__native_call_spread: raw_arg[{}] = {:?}", i, a);
             }
@@ -5356,22 +5350,6 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 Value::Array(arr, _) => arr.borrow().clone(),
                 _ => Vec::new(),
             };
-
-            // Diagnostic: print the input argument shapes and spread mask so we can
-            // verify the argument order before we transform them.
-            let values_len = values_vec.len();
-            let mask_len = mask_vec.len();
-            eprintln!(
-                "__native_call_spread: values_vec.len={} mask_vec.len={}",
-                values_len, mask_len
-            );
-            for idx in 0..values_len {
-                let spread = mask_vec
-                    .get(idx)
-                    .and_then(|v| v.as_ref())
-                    .is_some_and(|v| vm.to_boolean(v));
-                eprintln!("__native_call_spread: arg[{}] spread={}", idx, spread);
-            }
 
             let mut flat: Vec<Option<Value>> = Vec::new();
             for (i, value) in values_vec.into_iter().enumerate() {
@@ -5396,12 +5374,6 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                             &this_for_iter,
                             &PropertyKey::Symbol(SymbolId::well_known_iterator()),
                         )?;
-
-                        // DEBUG: print iterator method lookup result
-                        eprintln!(
-                            "__native_call_spread: iterator_method at idx {} = {:?}",
-                            i, iterator_method
-                        );
 
                         // Only attempt to call the iterator method if it's a callable value.
                         let is_callable = matches!(
@@ -5439,7 +5411,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                             // receiver's own property keys to help debug why @@iterator wasn't found.
                             match other.as_ref().unwrap_or(&Value::Undefined) {
                                 Value::Object(o_rc) => {
-                                    let keys: Vec<String> = o_rc
+                                    let _keys: Vec<String> = o_rc
                                         .borrow()
                                         .properties
                                         .keys()
@@ -5448,13 +5420,9 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                             PropertyKey::Symbol(_) => "Symbol(...)".to_string(),
                                         })
                                         .collect();
-                                    eprintln!(
-                                        "__native_call_spread: arg[{}] is Object; own keys = {:?}",
-                                        i, keys
-                                    );
                                 }
                                 Value::Array(_arr_rc, props_rc) => {
-                                    let keys: Vec<String> = props_rc
+                                    let _keys: Vec<String> = props_rc
                                         .borrow()
                                         .properties
                                         .keys()
@@ -5463,10 +5431,6 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                             PropertyKey::Symbol(_) => "Symbol(...)".to_string(),
                                         })
                                         .collect();
-                                    eprintln!(
-                                        "__native_call_spread: arg[{}] is Array-like; prop keys = {:?}",
-                                        i, keys
-                                    );
                                 }
                                 other_val => {
                                     eprintln!(
@@ -6171,10 +6135,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             for name in &names {
                 let k = PropertyKey::String(name.to_string());
                 if !g.properties.contains_key(&k) {
-                    // Get the value from globals itself - but we need to avoid double-borrow
-                    // This is handled by cloning what we need first
-                    // Actually, since both keys are in the same map (g), we can just skip
-                    // if the key already exists (which we checked above)
+                    // Intentionally a no-op: when `globalThis` aliases `globals` we must avoid
+                    // additional borrows while holding the mutable borrow of `g`. We already checked
+                    // whether the property exists above, so do nothing here to prevent borrow
+                    // conflicts — the mutable borrow held on `g` allows safe insertion if needed later.
                 }
             }
         } else {
