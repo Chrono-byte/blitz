@@ -20,8 +20,6 @@ APIs.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::fmt;
 use std::env;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -367,6 +365,42 @@ struct Meta {
     locale: Option<Vec<String>>,
 }
 
+#[derive(Clone)]
+struct Test262Error<'a> {
+    path: &'a Path,
+    mode: Option<&'a str>,
+    message: String,
+}
+
+impl<'a> Test262Error<'a> {
+    fn new(path: &'a Path, mode: &'a str, message: String) -> Self {
+        Self {
+            path,
+            mode: Some(mode),
+            message,
+        }
+    }
+
+    fn for_path(path: &'a Path, mode: Option<&'a str>, message: String) -> Self {
+        Self {
+            path,
+            mode,
+            message,
+        }
+    }
+
+    fn without_mode(path: &'a Path, message: String) -> Self {
+        Self::for_path(path, None, message)
+    }
+
+    fn into_string(self) -> String {
+        match self.mode {
+            Some(mode) => format!("{} ({}): {}", self.path.display(), mode, self.message),
+            None => format!("{}: {}", self.path.display(), self.message),
+        }
+    }
+}
+
 // Helper to extract the front-matter YAML between /*--- and ---*/
 fn extract_front_matter(src: &str) -> Option<String> {
     let start = src.find("/*---")?;
@@ -693,14 +727,9 @@ fn run_test_file(
     let src = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
     let meta = parse_meta(&src);
- 
+
     if let Some(reason) = unsupported_reason(path, &src, &meta) {
-        return Err(Test262Error::new(
-            path,
-            mode_name,
-            reason,
-        )
-        .into_string());
+        return Err(Test262Error::without_mode(path, reason).into_string());
     }
 
     // Unless the test is `raw`, harness files should be evaluated first in the test realm.
@@ -984,12 +1013,9 @@ fn run_test_file(
         let chunk = match compiler::compile_oxc(prog, &run_src) {
             Ok(c) => c,
             Err(e) => {
-                return Err(Test262Error::new(
-                    path,
-                    mode_name,
-                    format!("compile error: {e}"),
-                )
-                .into_string());
+                return Err(
+                    Test262Error::new(path, mode_name, format!("compile error: {e}")).into_string(),
+                );
             }
         };
 
