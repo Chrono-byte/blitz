@@ -22,9 +22,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::thread;
 
 use clap::Parser as ClapParser;
 use oxc_span::SourceType;
@@ -32,7 +35,7 @@ use serde::Deserialize;
 
 use blitz::compiler;
 use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
-use blitz::{parser::Parser, typecheck, value::Value, vm::Vm};
+use blitz::{parser::Parser, runtime_utils, typecheck, value::Value, vm::Vm};
 
 #[derive(Clone, Copy, Default)]
 struct BucketStats {
@@ -58,6 +61,160 @@ impl BucketStats {
             (self.pass as f64 / attempted as f64) * 100.0
         }
     }
+}
+
+enum TestResult {
+    Pass,
+    Fail(String),
+    StackOverflow,
+    Panic(String),
+}
+
+fn run_test_in_thread(file: PathBuf, test262_dir: PathBuf) -> TestResult {
+    const STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB stack for tests
+
+    let (tx, rx) = mpsc::channel();
+
+    let _join_handle = thread::Builder::new()
+        .name(format!("test-{}", file.display()))
+        .stack_size(STACK_SIZE)
+        .spawn(move || {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                // Create fresh globals for this thread (each test gets isolated globals)
+                let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+
+                // Set up globals like main does
+                let global_this = Value::Object(Rc::clone(&globals));
+                globals.borrow_mut().properties.insert(
+                    PropertyKey::String("globalThis".to_string()),
+                    PropertyDescriptor::data(global_this),
+                );
+                globals.borrow_mut().properties.insert(
+                    PropertyKey::String("NaN".to_string()),
+                    PropertyDescriptor::data(Value::Number(f64::NAN)),
+                );
+                globals.borrow_mut().properties.insert(
+                    PropertyKey::String("Infinity".to_string()),
+                    PropertyDescriptor::data(Value::Number(f64::INFINITY)),
+                );
+                globals.borrow_mut().properties.insert(
+                    PropertyKey::String("__native_new_object".to_string()),
+                    PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| {
+                        Ok(Value::Object(Rc::new(RefCell::new(ObjectData::new()))))
+                    }))),
+                );
+                globals.borrow_mut().properties.insert(
+                    PropertyKey::String("__native_print".to_string()),
+                    PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+                        eprintln!(
+                            "{}",
+                            args.iter()
+                                .map(|v| format!("{}", v))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                        Ok(Value::Null)
+                    }))),
+                );
+                globals.borrow_mut().properties.insert(
+                    PropertyKey::String("print".to_string()),
+                    PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+                        eprintln!(
+                            "{}",
+                            args.iter()
+                                .map(|v| format!("{}", v))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                        Ok(Value::Null)
+                    }))),
+                );
+                globals.borrow_mut().properties.insert(
+                    PropertyKey::String("__define_property".to_string()),
+                    PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+                        vm.define_property_builtin(args)
+                    }))),
+                );
+                globals.borrow_mut().properties.insert(
+                    PropertyKey::String("__native_getOwnPropertyDescriptor".to_string()),
+                    PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+                        let target = args.first().cloned().unwrap_or(Value::Undefined);
+                        let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+                        let key = vm.to_property_key(&key_value).map_err(|e| e.to_string())?;
+                        Ok(runtime_utils::own_property_descriptor_value(&target, &key)
+                            .unwrap_or(Value::Undefined))
+                    }))),
+                );
+                globals.borrow_mut().properties.insert(
+                    PropertyKey::String("__native_toString".to_string()),
+                    PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+                        let v = args.first().cloned().unwrap_or(Value::Undefined);
+                        vm.to_string(&v).map(Value::String)
+                    }))),
+                );
+                globals.borrow_mut().properties.insert(
+                    PropertyKey::String("__native_toNumber".to_string()),
+                    PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+                        let v = args.first().cloned().unwrap_or(Value::Undefined);
+                        vm.to_number_value(&v).map(Value::Number)
+                    }))),
+                );
+                globals.borrow_mut().properties.insert(
+                    PropertyKey::String("__native_toBoolean".to_string()),
+                    PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+                        let v = args.first().cloned().unwrap_or(Value::Undefined);
+                        Ok(Value::Bool(vm.to_boolean(&v)))
+                    }))),
+                );
+
+                // Install kernel constructors (this adds Object, Function, Array, etc.)
+                runtime_utils::install_minimal_kernel_constructors(&globals);
+
+                // Wire $262 test harness object
+                let test262_obj = make_test262_object(&globals);
+                globals.borrow_mut().properties.insert(
+                    PropertyKey::String("$262".to_string()),
+                    PropertyDescriptor::data(test262_obj),
+                );
+
+                // Snapshot for test isolation (though we won't use restore since each test is fresh)
+                let baseline_snapshot = snapshot_globals(&globals);
+
+                // Run the test
+                run_test_file(&file, &test262_dir, &globals, &baseline_snapshot)
+            }));
+
+            match result {
+                Ok(Ok(())) => {
+                    let _ = tx.send(TestResult::Pass);
+                }
+                Ok(Err(e)) => {
+                    let _ = tx.send(TestResult::Fail(e.to_string()));
+                }
+                Err(panic_payload) => {
+                    let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "Unknown panic".to_string()
+                    };
+
+                    let is_overflow = msg.to_lowercase().contains("stack overflow")
+                        || (msg.contains("thread '") && msg.contains("' has overflowed its stack"));
+
+                    if is_overflow {
+                        let _ = tx.send(TestResult::StackOverflow);
+                    } else {
+                        let _ = tx.send(TestResult::Panic(msg));
+                    }
+                }
+            }
+        });
+
+    rx.recv().unwrap_or(TestResult::Panic(
+        "Thread failed to send result".to_string(),
+    ))
 }
 
 fn bucket_keys(test_root: &Path, file: &Path) -> (String, String) {
@@ -447,7 +604,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
             // Install builtins from scratch — gives each realm distinct
             // constructor/prototype identities. This is correct per spec:
             // Realm = fresh intrinsics, not a clone of the parent.
-            blitz::runtime_utils::install_minimal_kernel_constructors(&realm_global);
+            runtime_utils::install_minimal_kernel_constructors(&realm_global);
 
             // Copy the calling realm's $262 object structure into the new realm.
             let new_262 = make_test262_object(&realm_global);
@@ -828,7 +985,16 @@ fn run_test_file(
         {
             // Expect parse to fail
             match Parser::parse_source(&run_src) {
-                Ok(_) => {
+                Ok(session) => {
+                    // Parser succeeded, but check if compiler would catch this as a SyntaxError
+                    let prog = session.program();
+                    if let Err(e) = compiler::compile_oxc(prog, &run_src) {
+                        let err_str = e.to_string();
+                        // If the compiler caught a SyntaxError, treat this as the parser catching it
+                        if err_str.contains("SyntaxError") || err_str.contains("redeclaration") {
+                            continue;
+                        }
+                    }
                     return Err(format!(
                         "{} ({}): expected parse error (phase=parse) but parse succeeded",
                         path.display(),
@@ -1050,6 +1216,8 @@ fn run_harness_only(
 }
 
 fn main() {
+    let opts = parse_args();
+
     // Use the local `./test262` checkout only. This runner is intended to be
     // hermetic and operate against a repository checked out next to the project.
     // If `./test262` is missing we skip the connector rather than using a
@@ -1059,8 +1227,6 @@ fn main() {
         eprintln!("Local './test262' not found; skipping Test262 connector");
         exit(0);
     }
-
-    let opts = parse_args();
 
     let test_root = test262_dir.join("test");
     let mut files = Vec::new();
@@ -1143,15 +1309,13 @@ fn main() {
             let target = args.first().cloned().unwrap_or(Value::Undefined);
             let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
             let key = vm.to_property_key(&key_value)?;
-            Ok(
-                blitz::runtime_utils::own_property_descriptor_value(&target, &key)
-                    .unwrap_or(Value::Undefined),
-            )
+            Ok(runtime_utils::own_property_descriptor_value(&target, &key)
+                .unwrap_or(Value::Undefined))
         }))),
     );
 
     // Seed the realm with kernel constructors before running tests.
-    blitz::runtime_utils::install_minimal_kernel_constructors(&globals);
+    runtime_utils::install_minimal_kernel_constructors(&globals);
 
     // Wire $262 test harness object with proper createRealm (fresh intrinsics,
     // not heap clone) and evalScript (shares globals via Rc::clone).
@@ -1193,23 +1357,47 @@ fn main() {
         }
 
         let (top_key, subsection_key) = bucket_keys(&test_root, &f);
-        match run_test_file(&f, &test262_dir, &globals, &baseline_snapshot) {
-            Ok(()) => {
+
+        let result = run_test_in_thread(f.clone(), test262_dir.clone());
+
+        match result {
+            TestResult::Pass => {
                 ran += 1;
                 top_level.entry(top_key).or_default().pass += 1;
                 subsections.entry(subsection_key).or_default().pass += 1;
             }
-            Err(e) => {
+            TestResult::Fail(e) => {
                 ran += 1;
                 top_level.entry(top_key).or_default().fail += 1;
                 subsections.entry(subsection_key).or_default().fail += 1;
-                // Print failing test immediately to aid debugging during execution
                 if let Ok(rel) = f.strip_prefix(&test262_dir) {
                     eprintln!("FAIL: {}: {}", rel.display(), e);
                 } else {
                     eprintln!("FAIL: {}: {}", f.display(), e);
                 }
                 failed.push((f.clone(), e));
+            }
+            TestResult::StackOverflow => {
+                ran += 1;
+                top_level.entry(top_key).or_default().fail += 1;
+                subsections.entry(subsection_key).or_default().fail += 1;
+                if let Ok(rel) = f.strip_prefix(&test262_dir) {
+                    eprintln!("STACKOVERFLOW: {}", rel.display());
+                } else {
+                    eprintln!("STACKOVERFLOW: {}", f.display());
+                }
+                failed.push((f.clone(), "Stack overflow".into()));
+            }
+            TestResult::Panic(msg) => {
+                ran += 1;
+                top_level.entry(top_key).or_default().fail += 1;
+                subsections.entry(subsection_key).or_default().fail += 1;
+                if let Ok(rel) = f.strip_prefix(&test262_dir) {
+                    eprintln!("PANIC: {}: {}", rel.display(), msg);
+                } else {
+                    eprintln!("PANIC: {}: {}", f.display(), msg);
+                }
+                failed.push((f.clone(), format!("Panic: {}", msg)));
             }
         }
     }

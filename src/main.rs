@@ -88,8 +88,21 @@ fn run_source(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> 
     let session = TsParser::parse_source(source)?;
     let oast_prog = session.program();
 
-    // Use the temporary compile_oxc shim so we can avoid converting to local_ast here.
     let chunk = compiler::compile_oxc(oast_prog, source).map_err(blitz::errors::Error::from)?;
+    vm.run(chunk).map_err(blitz::errors::Error::from)
+}
+
+/// Runs source code in REPL mode (preserves expression results)
+///
+/// # Errors
+///
+/// Returns an error string if any stage of compilation fails
+fn run_source_repl(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> {
+    let session = TsParser::parse_source(source)?;
+    let oast_prog = session.program();
+
+    let chunk =
+        compiler::compile_oxc_repl(oast_prog, source).map_err(blitz::errors::Error::from)?;
     vm.run(chunk).map_err(blitz::errors::Error::from)
 }
 
@@ -491,7 +504,7 @@ fn main() -> Result<(), blitz::errors::Error> {
                 if line.eq_ignore_ascii_case("exit") || line.eq_ignore_ascii_case("quit") {
                     break;
                 }
-                match run_source(&mut repl_vm, line) {
+                match run_source_repl(&mut repl_vm, line) {
                     Ok(v) if !matches!(v, Value::Null | Value::Undefined) => println!("{}", v),
                     Ok(_) => {}
                     Err(e) => eprintln!("Error: {}", e),
@@ -549,5 +562,18 @@ mod tests {
         let mut vm = Vm::new(Rc::clone(&globals));
 
         run_source(&mut vm, "print(1, 2, 3);").expect("run");
+    }
+
+    #[test]
+    fn run_source_returns_expression_result() {
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+
+        let result = run_source_repl(&mut vm, "1 + 2").expect("run");
+        assert!(
+            matches!(result, Value::Number(n) if (n - 3.0).abs() < f64::EPSILON),
+            "expected 3, got {:?}",
+            result
+        );
     }
 }

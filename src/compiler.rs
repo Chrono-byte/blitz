@@ -26,7 +26,7 @@ use crate::bytecode::{Chunk, FunctionProto, Op, UpvalueSpec};
 use crate::typecheck::Type;
 use crate::value::Value;
 use oxc_ast::ast as oast;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// Module compilation context describing imports/exports for the module being compiled.
@@ -86,6 +86,22 @@ pub fn compile_oxc_with_ctx(
     c.compile_oxc(program, ctx)
 }
 
+/// Compile an oxc AST Program in REPL mode.
+/// In REPL mode, the last expression statement does not emit Pop,
+/// allowing the result to be returned for printing.
+///
+/// # Errors
+///
+/// Returns an error if compilation fails.
+pub fn compile_oxc_repl(
+    program: &oast::Program<'_>,
+    source: &str,
+) -> Result<Chunk, crate::errors::CompilerError> {
+    let source_text = Rc::new(source.to_string());
+    let mut c = Compiler::new(Rc::clone(&source_text));
+    c.compile_oxc_with_mode(program, None, true)
+}
+
 // Internal helpers for legacy owned AST were removed. The compiler now
 // operates directly on the oxc AST via `compile_oxc`/`compile_statement_oast`.
 
@@ -141,6 +157,9 @@ pub struct Compiler {
     /// represents the hidden private key. We store the string so inner
     /// compilers can add the same constant into their own chunks.
     private_names: HashMap<String, String>,
+    /// Tracks whether SetProperty was emitted in the current object literal.
+    /// Used to determine if we need to emit a Pop after variable declaration.
+    object_expr_had_set_property: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -159,6 +178,7 @@ enum ScopeKind {
 struct Scope {
     kind: ScopeKind,
     bindings: HashMap<String, usize>,
+    lexical_bindings: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -191,6 +211,7 @@ impl Compiler {
             scopes: vec![Scope {
                 kind: ScopeKind::Function,
                 bindings: HashMap::new(),
+                lexical_bindings: HashSet::new(),
             }],
             globals: HashMap::new(),
             is_root: true,
@@ -206,6 +227,7 @@ impl Compiler {
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
             private_names: HashMap::new(),
+            object_expr_had_set_property: false,
         }
     }
 
@@ -277,6 +299,13 @@ impl Compiler {
         }
     }
 
+    fn add_lexical_binding(&mut self, name: &str) {
+        let scope_index = self.scopes.len().saturating_sub(1);
+        self.scopes[scope_index]
+            .lexical_bindings
+            .insert(name.to_string());
+    }
+
     fn add_local_with_mirror(
         &mut self,
         name: String,
@@ -297,10 +326,26 @@ impl Compiler {
         self.add_local_in_scope(scope_index, name, type_ann, mirror_global)
     }
 
+    fn check_var_lexical_conflict(&self, name: &str) -> Option<String> {
+        for scope in self.scopes.iter().rev() {
+            if matches!(scope.kind, ScopeKind::Function) {
+                break;
+            }
+            if scope.lexical_bindings.contains(name) {
+                return Some(format!(
+                    "SyntaxError: redeclaration of lexical binding `{}`",
+                    name
+                ));
+            }
+        }
+        None
+    }
+
     fn enter_block_scope(&mut self) {
         self.scopes.push(Scope {
             kind: ScopeKind::Block,
             bindings: HashMap::new(),
+            lexical_bindings: HashSet::new(),
         });
     }
 
@@ -460,18 +505,21 @@ impl Compiler {
         program: &oast::Program<'_>,
         ctx: Option<&ModuleContext>,
     ) -> Result<Chunk, crate::errors::CompilerError> {
-        // Start direct walking of the oxc program body. This is a minimal but
-        // complete walker for the node kinds we need. Module declarations are
-        // treated as no-ops.
+        self.compile_oxc_with_mode(program, ctx, false)
+    }
 
-        // Pre-declare bindings before hoisted function compilation so function
-        // bodies can capture later lexical declarations.
+    /// Compile with explicit mode control.
+    /// In REPL mode, the last expression statement does not emit Pop,
+    /// allowing the result to be returned.
+    pub fn compile_oxc_with_mode(
+        &mut self,
+        program: &oast::Program<'_>,
+        ctx: Option<&ModuleContext>,
+        repl_mode: bool,
+    ) -> Result<Chunk, crate::errors::CompilerError> {
         self.pre_declare_functions_oast(program);
         self.pre_declare_variables_oast(program);
 
-        // Attach ModuleContext for compilation to consult when resolving
-        // imports/exports. We store a clone so the compiler can borrow it
-        // throughout the compile pass.
         if let Some(cctx) = ctx {
             self.current_module = Some(cctx.clone());
         } else {
@@ -485,14 +533,19 @@ impl Compiler {
 
         self.emit_hoisted_function_decls_oast_stmts(&program.body)?;
 
-        for stmt in &program.body {
-            if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-                continue;
-            }
-            self.compile_statement_oast(stmt)?;
+        let stmts: Vec<_> = program
+            .body
+            .iter()
+            .filter(|s| !matches!(s, oast::Statement::FunctionDeclaration(_)))
+            .collect();
+
+        for (i, stmt) in stmts.iter().enumerate() {
+            let is_last_expr_stmt = repl_mode
+                && i == stmts.len() - 1
+                && matches!(stmt, oast::Statement::ExpressionStatement(_));
+            self.compile_statement_oast_with_mode(stmt, is_last_expr_stmt)?;
         }
 
-        // After walking module, finish with Return
         self.emit(Op::Return, LINE);
         Ok(std::mem::take(&mut self.chunk))
     }
@@ -571,7 +624,15 @@ impl Compiler {
         kind: oxc_ast::ast::VariableDeclarationKind,
     ) -> Result<(), crate::errors::CompilerError> {
         let mirror_global = self.is_root;
-        let slot = if matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+
+        if matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+            if let Some(err) = self.check_var_lexical_conflict(name) {
+                return Err(crate::errors::CompilerError::from(err));
+            }
+        }
+
+        let is_var = matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var);
+        let slot = if is_var {
             self.resolve_local(name)
                 .unwrap_or_else(|| self.add_var_local(name.to_string(), None, mirror_global))
         } else if let Some(slot) = self.scopes[self.scopes.len() - 1]
@@ -579,10 +640,21 @@ impl Compiler {
             .get(name)
             .copied()
         {
+            // Check for duplicate lexical declaration (const/let with same name)
+            if self.scopes[self.scopes.len() - 1]
+                .lexical_bindings
+                .contains(name)
+            {
+                return Err(crate::errors::CompilerError::from(format!(
+                    "SyntaxError: redeclaration of lexical binding `{}`",
+                    name
+                )));
+            }
             slot
         } else {
             let slot = self.add_local_with_mirror(name.to_string(), None, mirror_global);
             self.mark_local_tdz(slot);
+            self.add_lexical_binding(name);
             slot
         };
         if self.is_root {
@@ -657,6 +729,11 @@ impl Compiler {
     ) -> Result<(), crate::errors::CompilerError> {
         if let Some(ident) = &f.id {
             let fname = ident.name.to_string();
+
+            if let Some(err) = self.check_var_lexical_conflict(&fname) {
+                return Err(crate::errors::CompilerError::from(err));
+            }
+
             let (proto, _env_len) = self.compile_function(&fname, f, None)?;
             let idx = self.chunk.add_function(proto);
             self.emit(Op::MakeClosure, LINE);
@@ -666,6 +743,11 @@ impl Compiler {
             } else {
                 self.add_local_with_mirror(fname.clone(), None, self.is_root)
             };
+
+            if slot == self.locals.len() - 1 {
+                self.add_lexical_binding(&fname);
+            }
+
             if self.is_root {
                 self.emit(Op::Dup, LINE);
             }
@@ -692,6 +774,14 @@ impl Compiler {
     fn compile_statement_oast(
         &mut self,
         stmt: &oast::Statement,
+    ) -> Result<(), crate::errors::CompilerError> {
+        self.compile_statement_oast_with_mode(stmt, false)
+    }
+
+    fn compile_statement_oast_with_mode(
+        &mut self,
+        stmt: &oast::Statement,
+        skip_pop: bool,
     ) -> Result<(), crate::errors::CompilerError> {
         use oxc_ast::ast::{
             BindingPattern as OPat, ForStatementLeft as OForLeft, Statement as OStmt,
@@ -809,7 +899,9 @@ impl Compiler {
             OStmt::ClassDeclaration(c) => self.compile_class_declaration_oast(c)?,
             OStmt::ExpressionStatement(e) => {
                 self.compile_expr_oast(&e.expression)?;
-                self.emit(Op::Pop, LINE);
+                if !skip_pop {
+                    self.emit(Op::Pop, LINE);
+                }
             }
             OStmt::LabeledStatement(l) => {
                 let can_continue = matches!(
@@ -1577,6 +1669,11 @@ impl Compiler {
             c.id.as_ref()
                 .map(|id| id.name.to_string())
                 .ok_or_else(|| crate::errors::CompilerError::from("anonymous class declaration"))?;
+
+        if let Some(err) = self.check_var_lexical_conflict(&name) {
+            return Err(crate::errors::CompilerError::from(err));
+        }
+
         let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
         ctor_chunk.write(Op::Return as u8, LINE);
         let proto = FunctionProto {
@@ -1605,6 +1702,11 @@ impl Compiler {
         let slot = self
             .resolve_local(&name)
             .unwrap_or_else(|| self.add_local_with_mirror(name.clone(), None, self.is_root));
+
+        if slot == self.locals.len() - 1 {
+            self.add_lexical_binding(&name);
+        }
+
         if self.is_root {
             self.emit(Op::Dup, LINE);
         }
@@ -1795,28 +1897,13 @@ impl Compiler {
             }
             OExpr::ObjectExpression(obj) => {
                 let mut count = 0usize;
-                // Collect indices of computed properties so we can defer emitting them
-                // until after the object literal's non-computed properties have been
-                // placed into the initial BuildObject fast path.
                 let mut computed_indices: Vec<usize> = Vec::new();
+                self.object_expr_had_set_property = false;
                 for (pi, prop) in obj.properties.iter().enumerate() {
                     if let oast::ObjectPropertyKind::ObjectProperty(p) = prop {
                         if p.computed {
-                            // Special-case: if the computed key is the well-known
-                            // `Symbol.iterator` (commonly written `Symbol.iterator`
-                            // as a static member expression), treat it as a non-computed
-                            // symbol key so object literal creation emits a symbol
-                            // property key directly. We detect this conservatively by
-                            // examining the debug representation of the key AST node;
-                            // this avoids relying on a non-present AST variant.
-                            //
-                            // (This is a targeted pragmatic change to ensure object
-                            // literals that use `[Symbol.iterator]` are lowered with a
-                            // symbol key in the constant pool instead of being left as
-                            // a computed key that the runtime would not find via string lookup.)
                             let key_debug = format!("{:?}", p.key);
                             if key_debug.contains("Symbol") && key_debug.contains("iterator") {
-                                // Emit the well-known iterator symbol into the constant pool.
                                 self.emit_constant(
                                     Value::Symbol(
                                         crate::value::SymbolId::well_known_iterator(),
@@ -1824,7 +1911,6 @@ impl Compiler {
                                     ),
                                     LINE,
                                 );
-                                // Emit the property value (or binding for shorthand).
                                 if p.shorthand {
                                     match &p.key {
                                         oast::PropertyKey::StaticIdentifier(ident) => {
@@ -1843,7 +1929,6 @@ impl Compiler {
                                 count += 1;
                                 continue;
                             }
-                            // Otherwise defer computed-key properties for post-processing.
                             computed_indices.push(pi);
                             continue;
                         }
@@ -1873,31 +1958,19 @@ impl Compiler {
                         count += 1;
                     }
                 }
-                // Build the object with the non-computed keys.
                 self.emit(Op::BuildObject, LINE);
                 self.emit_byte(count as u8, LINE);
 
-                // Emit assignments for deferred computed properties.
-                // For each computed property:
-                //   - Dup the object (so SetProperty will receive the object)
-                //   - Evaluate the computed key expression (pushes key)
-                //   - Evaluate the value (or binding for shorthand)
-                //   - Emit SetProperty
                 for idx in computed_indices {
                     if let oast::ObjectPropertyKind::ObjectProperty(p) = &obj.properties[idx] {
-                        // Duplicate the freshly-built object so SetProperty has an object operand.
                         self.emit(Op::Dup, LINE);
 
-                        // Compile the computed key expression (evaluates the expression, e.g. `sym`)
-                        // PropertyKey inherits Expression variants, so we can convert to get the expression
                         let key_expr = p
                             .key
                             .as_expression()
                             .expect("computed key must be an expression");
                         self.compile_expr_oast(key_expr)?;
 
-                        // For shorthand properties, the value is the binding referenced by the key name.
-                        // Otherwise, compile the explicit value expression.
                         if p.shorthand {
                             match &p.key {
                                 oast::PropertyKey::StaticIdentifier(ident) => {
@@ -1914,9 +1987,13 @@ impl Compiler {
                             self.compile_expr_oast(&p.value)?;
                         }
 
-                        // Set the property on the object.
                         self.emit(Op::SetProperty, LINE);
+                        self.object_expr_had_set_property = true;
                     }
+                }
+
+                if self.object_expr_had_set_property {
+                    self.emit(Op::Pop, LINE);
                 }
             }
             OExpr::ArrayExpression(arr) => {
@@ -2869,6 +2946,7 @@ impl Compiler {
             scopes: vec![Scope {
                 kind: ScopeKind::Function,
                 bindings: HashMap::new(),
+                lexical_bindings: HashSet::new(),
             }],
             globals: HashMap::new(),
             is_root: false,
@@ -2884,6 +2962,7 @@ impl Compiler {
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
             private_names: self.private_names.clone(),
+            object_expr_had_set_property: false,
         };
 
         // Parameter placeholders (no type information available here).
@@ -2978,6 +3057,7 @@ impl Compiler {
             scopes: vec![Scope {
                 kind: ScopeKind::Function,
                 bindings: HashMap::new(),
+                lexical_bindings: HashSet::new(),
             }],
             globals: HashMap::new(),
             is_root: false,
@@ -2993,6 +3073,7 @@ impl Compiler {
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
             private_names: self.private_names.clone(),
+            object_expr_had_set_property: false,
         };
 
         for p in &func.params.items {
