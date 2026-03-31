@@ -166,49 +166,15 @@ impl Compiler {
                             "unsupported export default declaration",
                         ));
                     }
-                    other => match other {
-                        oast::ExportDefaultDeclarationKind::NumericLiteral(n) => {
-                            self.emit_constant(Value::Number(n.value), LINE)
-                        }
-                        oast::ExportDefaultDeclarationKind::StringLiteral(s) => {
-                            self.emit_constant(Value::String(s.value.to_string()), LINE)
-                        }
-                        oast::ExportDefaultDeclarationKind::BooleanLiteral(b) => {
-                            if b.value {
-                                self.emit(Op::True, LINE);
-                            } else {
-                                self.emit(Op::False, LINE);
-                            }
-                        }
-                        oast::ExportDefaultDeclarationKind::NullLiteral(_) => {
-                            self.emit(Op::Null, LINE)
-                        }
-                        oast::ExportDefaultDeclarationKind::BigIntLiteral(n) => {
-                            let raw =
-                                n.raw.as_ref().map(oxc_span::Str::as_str).ok_or_else(|| {
-                                    crate::errors::CompilerError::from("invalid bigint literal")
-                                })?;
-                            let digits = raw.strip_suffix('n').unwrap_or(raw).replace('_', "");
-                            let parsed = if let Some(hex) = digits.strip_prefix("0x") {
-                                num_bigint::BigInt::parse_bytes(hex.as_bytes(), 16)
-                            } else if let Some(bin) = digits.strip_prefix("0b") {
-                                num_bigint::BigInt::parse_bytes(bin.as_bytes(), 2)
-                            } else if let Some(oct) = digits.strip_prefix("0o") {
-                                num_bigint::BigInt::parse_bytes(oct.as_bytes(), 8)
-                            } else {
-                                num_bigint::BigInt::parse_bytes(digits.as_bytes(), 10)
-                            }
-                            .ok_or_else(|| {
-                                crate::errors::CompilerError::from("invalid bigint literal")
-                            })?;
-                            self.emit_constant(Value::BigInt(parsed), LINE);
-                        }
-                        _ => {
+                    other => {
+                        if let Some(expr) = other.as_expression() {
+                            self.compile_expr_oast(expr)?;
+                        } else {
                             return Err(crate::errors::CompilerError::from(
                                 "unsupported export default declaration",
                             ));
                         }
-                    },
+                    }
                 }
                 self.emit_set_own_module_export("default")?;
             }

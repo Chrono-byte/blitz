@@ -79,6 +79,7 @@ pub(super) const MAX_DENSE_ARRAY_GROWTH: usize = 1024;
 pub(super) const GC_STEP_INTERVAL: usize = 16;
 
 type Microtask = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
+type DynamicImportJob = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 
 // ---------------------------------------------------------------------------
 // Global background Tokio runtime (lazy, shared across all Vm instances)

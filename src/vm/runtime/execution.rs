@@ -60,6 +60,7 @@ impl Vm {
             recent_return_value: None,
             last_uncaught_exception: None,
             microtasks: VecDeque::new(),
+            dynamic_import_jobs: VecDeque::new(),
             unhandled_rejection_hook: None,
             lexical_env: Rc::clone(&global_env),
             global_env,

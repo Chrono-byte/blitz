@@ -640,6 +640,10 @@ pub(crate) fn fulfill_pending_promise(
             let mut arg_value = Some(stored_value.clone());
             vm.queue_microtask(move |vm| {
                 let args = [arg_value.take().unwrap()];
+                eprintln!(
+                    "[debug] fulfill callback args[0] type={}",
+                    args[0].type_name()
+                );
                 let _ = vm.call_value_with_this(&callback, &Value::Undefined, &args);
                 Ok(())
             });
@@ -992,13 +996,27 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
         Ok(ns)
     })();
 
-    match &result {
-        Ok(value) => eprintln!("[dynamic import result] Ok({})", value),
-        Err(reason) => eprintln!("[dynamic import result] Err({})", reason),
-    }
     match result {
-        Ok(value) => fulfill_pending_promise(vm, &promise, value),
-        Err(reason) => reject_pending_promise(vm, &promise, reason),
+        Ok(value) => {
+            let promise_for_fulfill = Rc::clone(&promise);
+            let value_for_fulfill = value.clone();
+            vm.queue_microtask(move |vm| {
+                eprintln!(
+                    "[debug] dynamic import microtask value type={}",
+                    value_for_fulfill.type_name()
+                );
+                fulfill_pending_promise(vm, &promise_for_fulfill, value_for_fulfill.clone());
+                Ok(())
+            });
+        }
+        Err(reason) => {
+            let promise_for_reject = Rc::clone(&promise);
+            let reason_for_reject = reason.clone();
+            vm.queue_microtask(move |vm| {
+                reject_pending_promise(vm, &promise_for_reject, reason_for_reject.clone());
+                Ok(())
+            });
+        }
     }
 
     Ok(promise_value)
