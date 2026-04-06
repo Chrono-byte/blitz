@@ -5416,6 +5416,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     );
 
     let mut g = globals.borrow_mut();
+    builtins::text_and_symbols::install_string_boolean_symbol_builtins(
+        &mut g,
+        &object_proto_map,
+        &function_proto_map,
+    );
     // Ensure `globalThis` aliases the actual global object.
     let global_this_key = PKey::String("globalThis".to_string());
     g.properties.insert(
@@ -5563,10 +5568,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     set_builtin_name(&object_ctor_val, "Object");
     set_builtin_name(&function_ctor_val, "Function");
     set_builtin_name(&array_ctor_val, "Array");
-    set_builtin_name(&string_ctor_val, "String");
-    set_builtin_name(&boolean_ctor_val, "Boolean");
     set_builtin_name(&regexp_ctor_val, "RegExp");
-    set_builtin_name(&symbol_ctor_val, "Symbol");
     set_builtin_name(&promise_ctor_val, "Promise");
     set_builtin_name(&date_ctor_val, "Date");
     set_builtin_name(&error_ctor_val, "Error");
@@ -5585,20 +5587,8 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(array_ctor_val),
     );
     g.properties.insert(
-        PKey::String("String".to_string()),
-        PropertyDescriptor::data(string_ctor_val),
-    );
-    g.properties.insert(
-        PKey::String("Boolean".to_string()),
-        non_enum_data(boolean_ctor_val),
-    );
-    g.properties.insert(
         PKey::String("RegExp".to_string()),
         PropertyDescriptor::data(regexp_ctor_val),
-    );
-    g.properties.insert(
-        PKey::String("Symbol".to_string()),
-        PropertyDescriptor::data(symbol_ctor_val),
     );
     g.properties.insert(
         PKey::String("Promise".to_string()),
