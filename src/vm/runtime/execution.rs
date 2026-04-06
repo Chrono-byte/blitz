@@ -4403,6 +4403,7 @@ impl Vm {
         }
     }
 
+    /// Throws a `TypeError` with the given message.
     pub(crate) fn throw_type_error(&mut self, message: &str) -> crate::errors::RuntimeError {
         let err_val = self
             .create_intrinsic_error("TypeError", message)
@@ -4410,6 +4411,7 @@ impl Vm {
         self.throw_exception(err_val)
     }
 
+    /// Throws a `RangeError` with the given message.
     pub(crate) fn throw_range_error(&mut self, message: &str) -> crate::errors::RuntimeError {
         let err_val = self
             .create_intrinsic_error("RangeError", message)
@@ -4417,6 +4419,7 @@ impl Vm {
         self.throw_exception(err_val)
     }
 
+    /// Throws a `ReferenceError` with the given message.
     pub(crate) fn throw_reference_error(&mut self, message: &str) -> crate::errors::RuntimeError {
         let err_val = self
             .create_intrinsic_error("ReferenceError", message)
@@ -4424,6 +4427,7 @@ impl Vm {
         self.throw_exception(err_val)
     }
 
+    /// Returns `true` if the given value is a callable value.
     pub(crate) fn is_callable_value(value: &Value) -> bool {
         matches!(
             value,
@@ -4431,6 +4435,7 @@ impl Vm {
         )
     }
 
+    /// Creates an intrinsic error value with the given name and message.
     pub(crate) fn create_intrinsic_error(
         &mut self,
         name: &str,

@@ -345,7 +345,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         function_proto_map,
     );
     set_builtin_name(&string_index_of, "indexOf");
-    set_builtin_length(&string_index_of, 2.0);
+    set_builtin_length(&string_index_of, 1.0);
     string_proto_map.borrow_mut().properties.insert(
         PKey::String("indexOf".to_string()),
         non_enum_data(string_index_of),
