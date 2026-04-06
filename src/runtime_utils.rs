@@ -1847,9 +1847,17 @@ fn syntax_error(vm: &mut Vm, message: String) -> crate::errors::RuntimeError {
     vm.throw_exception(err_val)
 }
 
-fn host_error_object(vm: &Vm, name: &str, message: &str) -> Value {
+fn host_error_object(vm: &mut Vm, name: &str, message: &str) -> Value {
     let mut obj = ObjectData::new();
-    if let Some(proto) = vm.realm().intrinsics.error_prototype.clone() {
+    let proto = vm
+        .realm()
+        .get_intrinsic_constructor(name)
+        .and_then(|ctor| {
+            vm.get_property_host(&ctor, &PropertyKey::String("prototype".to_string()))
+                .ok()
+        })
+        .or_else(|| vm.realm().intrinsics.error_prototype.clone());
+    if let Some(proto) = proto {
         obj.set_prototype_value(proto);
     }
     obj.properties.insert(
@@ -6674,10 +6682,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 }
             }
             let session = Parser::parse_source(&src)
-                .map_err(|e| crate::errors::RuntimeError::from(format!("eval parse: {}", e)))?;
+                .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
             let prog = session.program();
             let chunk = compiler::compile_oxc(prog, &src)
-                .map_err(|e| crate::errors::RuntimeError::from(format!("eval compile: {}", e)))?;
+                .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
             let mut eval_vm = Vm::new(vm.globals_rc());
             eval_vm.run(chunk)
         }))),
