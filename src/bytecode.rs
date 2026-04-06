@@ -429,7 +429,34 @@ pub enum Op {
     Spread,
     /// Push undefined value
     Undefined,
+    /// Jump if top of stack is truthy.
+    JumpIfTrue,
+    /// Jump if top of stack is `null` or `undefined`.
+    JumpIfNullish,
+    /// Swap the top two stack values.
+    Swap,
+    /// Pop N values from the stack. Operand: count (u8).
+    PopN,
+    /// Get global variable with an inline-cache site operand.
+    GetGlobalIC,
+    /// Set property with a per-op inline cache slot (operand = cache slot index).
+    SetPropertyIC,
+    /// Construct a new instance. Operand: nargs (u8).
+    Construct,
+    /// Delete an object property.
+    DeleteProperty,
+    /// Test whether a property exists on an object or its prototype chain.
+    HasProperty,
+    /// Call an iterator's `next()` method and push the result object.
+    IteratorNext,
+    /// Perform IteratorClose on the iterator on the stack.
+    IteratorClose,
+    /// Function call opcode reserved for inline-cached dispatch. Operand: nargs (u8).
+    CallIC,
 }
+
+/// Total number of opcode variants.
+pub const OP_COUNT: usize = Op::CallIC as usize + 1;
 
 impl Op {
     /// Converts a byte to an Op if valid, returns None otherwise
@@ -442,15 +469,98 @@ impl Op {
         u8::from(*self)
     }
 
+    /// Returns a stable display name for the opcode. Full logical names like x86-64 instructions.
+    pub fn name(self) -> &'static str {
+        match self {
+            Op::Const => "Const",
+            Op::Null => "Null",
+            Op::True => "True",
+            Op::False => "False",
+            Op::GetLocal => "GetLocal",
+            Op::SetLocal => "SetLocal",
+            Op::CloneLocalCell => "CloneLocalCell",
+            Op::GetGlobal => "GetGlobal",
+            Op::SetGlobal => "SetGlobal",
+            Op::Pop => "Pop",
+            Op::Dup => "Dup",
+            Op::Add => "Add",
+            Op::AddNumber => "AddNumber",
+            Op::Sub => "Sub",
+            Op::Mul => "Mul",
+            Op::Pow => "Pow",
+            Op::Div => "Div",
+            Op::Mod => "Mod",
+            Op::Eq => "Eq",
+            Op::Neq => "Neq",
+            Op::Lt => "Lt",
+            Op::Le => "Le",
+            Op::Gt => "Gt",
+            Op::Ge => "Ge",
+            Op::And => "And",
+            Op::Or => "Or",
+            Op::Neg => "Neg",
+            Op::Not => "Not",
+            Op::Typeof => "Typeof",
+            Op::Call => "Call",
+            Op::CallMethod => "CallMethod",
+            Op::Return => "Return",
+            Op::Jump => "Jump",
+            Op::JumpIfFalse => "JumpIfFalse",
+            Op::BuildArray => "BuildArray",
+            Op::BuildObject => "BuildObject",
+            Op::GetProperty => "GetProperty",
+            Op::GetPropertyIC => "GetPropertyIC",
+            Op::SetProperty => "SetProperty",
+            Op::MakeClosure => "MakeClosure",
+            Op::GetThis => "GetThis",
+            Op::GetUpvalue => "GetUpvalue",
+            Op::SetUpvalue => "SetUpvalue",
+            Op::GetBuiltin => "GetBuiltin",
+            Op::Throw => "Throw",
+            Op::PushHandler => "PushHandler",
+            Op::PopHandler => "PopHandler",
+            Op::GetModuleExport => "GetModuleExport",
+            Op::SetModuleExport => "SetModuleExport",
+            Op::BitAnd => "BitAnd",
+            Op::BitOr => "BitOr",
+            Op::BitXor => "BitXor",
+            Op::Shl => "Shl",
+            Op::Shr => "Shr",
+            Op::Ushr => "Ushr",
+            Op::AwaitPromise => "AwaitPromise",
+            Op::StrictEq => "StrictEq",
+            Op::StrictNeq => "StrictNeq",
+            Op::Yield => "Yield",
+            Op::YieldStar => "YieldStar",
+            Op::Spread => "Spread",
+            Op::Undefined => "Undefined",
+            Op::JumpIfTrue => "JumpIfTrue",
+            Op::JumpIfNullish => "JumpIfNullish",
+            Op::Swap => "Swap",
+            Op::PopN => "PopN",
+            Op::GetGlobalIC => "GetGlobalIC",
+            Op::SetPropertyIC => "SetPropertyIC",
+            Op::Construct => "Construct",
+            Op::DeleteProperty => "DeleteProperty",
+            Op::HasProperty => "HasProperty",
+            Op::IteratorNext => "IteratorNext",
+            Op::IteratorClose => "IteratorClose",
+            Op::CallIC => "CallIC",
+        }
+    }
+
     /// Returns a static slice of jump opcodes (no allocation).
     pub fn jumps() -> &'static [Op] {
-        static JUMPS: [Op; 2] = [Op::Jump, Op::JumpIfFalse];
+        static JUMPS: [Op; 4] = [Op::Jump, Op::JumpIfFalse, Op::JumpIfTrue, Op::JumpIfNullish];
         &JUMPS
     }
 
     /// Returns whether this opcode is a jump (conditional or unconditional).
     pub fn is_jump(&self) -> bool {
-        matches!(self, Op::Jump | Op::JumpIfFalse)
+        matches!(
+            self,
+            Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish
+        )
     }
 
     /// Returns whether this opcode performs an arithmetic operation that
@@ -475,7 +585,7 @@ impl Op {
     /// Returns whether this opcode manipulates the value stack directly
     /// without invoking arithmetic or logical semantics.
     pub fn is_stack_operation(&self) -> bool {
-        matches!(self, Op::Pop | Op::Dup)
+        matches!(self, Op::Pop | Op::Dup | Op::Swap | Op::PopN)
     }
 }
 
@@ -547,6 +657,18 @@ impl TryFrom<u8> for Op {
             59 => Ok(Op::YieldStar),
             60 => Ok(Op::Spread),
             61 => Ok(Op::Undefined),
+            62 => Ok(Op::JumpIfTrue),
+            63 => Ok(Op::JumpIfNullish),
+            64 => Ok(Op::Swap),
+            65 => Ok(Op::PopN),
+            66 => Ok(Op::GetGlobalIC),
+            67 => Ok(Op::SetPropertyIC),
+            68 => Ok(Op::Construct),
+            69 => Ok(Op::DeleteProperty),
+            70 => Ok(Op::HasProperty),
+            71 => Ok(Op::IteratorNext),
+            72 => Ok(Op::IteratorClose),
+            73 => Ok(Op::CallIC),
             _ => Err(()),
         }
     }
@@ -564,7 +686,7 @@ mod tests {
 
     #[test]
     fn op_round_trip() {
-        for i in 0u8..=Op::Spread as u8 {
+        for i in 0u8..=Op::CallIC as u8 {
             let op = Op::try_from(i).expect("valid op");
             let b = u8::from(op);
             assert_eq!(b, i);

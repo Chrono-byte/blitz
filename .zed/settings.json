@@ -3,19 +3,23 @@
 // For a full list of overridable settings, and general information on folder-specific settings,
 // see the documentation: https://zed.dev/docs/configuring-zed#settings-files
 {
-    "languages": {
-        "TypeScript": {
-            "enable_language_server": false
+  "languages": {
+    "TypeScript": {
+      "enable_language_server": false
+    }
+  },
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "checkOnSave": true,
+        "check": {
+          "command": "clippy"
         }
-    },
-    "lsp": {
-      "rust-analyzer": {
-        "initialization_options": {
-          "checkOnSave": true,
-          "check": {
-            "command": "check"
-          }
-        },
       },
     },
+  },
+  "language_servers": [
+    "!tombi",
+    "..."
+  ]
 }

@@ -25,7 +25,7 @@
 //! cargo run -- --repl
 //!
 //! # Enable tracing
-//! TSBLITZ_TRACE=1 cargo run -- file.ts
+//! TSBLITZ_TRACE=1 cargo run -- file.js
 //! ```
 
 use clap::Parser;
@@ -35,10 +35,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use blitz::compiler;
-use blitz::{parser::Parser as TsParser, runtime_utils, value::Value, vm::Vm};
+use blitz::{parser::Parser as JsParser, runtime_utils, value::Value, vm::Vm};
 use num_traits::{Signed, ToPrimitive, Zero};
 
-/// Minimal native hook: print to stdout. The TS soft layer wraps this as console.log.
+/// Minimal native hook: print to stdout. The runtime wraps this as `console.log`.
 fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
     // Diagnostic wrapper: emit arg debug then print joined string
     if blitz::trace::enabled() {
@@ -82,7 +82,7 @@ fn native_print(_vm: &mut Vm, args: &[Value]) -> Result<Value, String> {
 /// Returns an error string if any stage of compilation fails
 #[cfg(test)]
 fn run_source(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> {
-    let session = TsParser::parse_source(source)?;
+    let session = JsParser::parse_source(source)?;
     let oast_prog = session.program();
 
     let chunk = compiler::compile_oxc(oast_prog, source).map_err(blitz::errors::Error::from)?;
@@ -95,7 +95,7 @@ fn run_source(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> 
 ///
 /// Returns an error string if any stage of compilation fails
 fn run_source_repl(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> {
-    let session = TsParser::parse_source(source)?;
+    let session = JsParser::parse_source(source)?;
     let oast_prog = session.program();
 
     let chunk =
@@ -107,17 +107,13 @@ fn run_source_repl(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Er
 #[derive(Parser, Debug)]
 #[command(name = "blitz", about = "Blitz")]
 struct Cli {
-    /// TypeScript file to execute. If omitted the REPL will be started.
+    /// JavaScript file to execute. If omitted the REPL will be started.
     #[arg(value_name = "FILE")]
     file: Option<PathBuf>,
 
     /// Start the REPL even when a file is not provided.
     #[arg(short, long, action)]
     repl: bool,
-
-    /// Run the TypeScript typechecker before execution.
-    #[arg(long, action)]
-    typecheck: bool,
 }
 
 fn main() -> Result<(), blitz::errors::Error> {
@@ -480,7 +476,7 @@ fn main() -> Result<(), blitz::errors::Error> {
                 .instantiate_all()
                 .map_err(blitz::errors::Error::from)?;
         }
-        blitz::module::evaluate_entry_shared(&loader_handle, &path, &mut repl_vm, cli.typecheck)
+        blitz::module::evaluate_entry_shared(&loader_handle, &path, &mut repl_vm, false)
             .map_err(blitz::errors::Error::from)?;
         return Ok(());
     }

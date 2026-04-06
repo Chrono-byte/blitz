@@ -579,6 +579,139 @@ impl Compiler {
                 }
                 self.loop_depth = self.loop_depth.saturating_sub(1);
             }
+            OStmt::ForOfStatement(f) => {
+                self.loop_depth += 1;
+                self.continue_patches.push(Vec::new());
+                self.break_patches.push(Vec::new());
+
+                // iterable -> iterator via iterable[Symbol.iterator]()
+                self.compile_expr_oast(&f.right)?;
+                self.emit(Op::Dup, LINE);
+                self.emit_get_global_name("Symbol");
+                self.emit_constant(Value::String("iterator".to_string()), LINE);
+                self.emit(Op::GetPropertyIC, LINE);
+                let symbol_iterator_slot = self.alloc_ic_slot()?;
+                self.emit_byte(symbol_iterator_slot, LINE);
+                self.emit(Op::GetProperty, LINE);
+                self.emit(Op::CallMethod, LINE);
+                self.emit_byte(0, LINE);
+
+                let iterator_slot = self.add_local_with_mirror(
+                    format!("__forof_iter_{}", self.locals.len()),
+                    None,
+                    false,
+                );
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(iterator_slot as u8, LINE);
+
+                let loop_start = self.chunk.code.len();
+
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(iterator_slot as u8, LINE);
+                self.emit(Op::IteratorNext, LINE);
+                self.emit(Op::Dup, LINE);
+                self.emit_constant(Value::String("done".to_string()), LINE);
+                self.emit(Op::GetPropertyIC, LINE);
+                let done_slot = self.alloc_ic_slot()?;
+                self.emit_byte(done_slot, LINE);
+                self.emit(Op::JumpIfTrue, LINE);
+                let exit_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                self.emit_constant(Value::String("value".to_string()), LINE);
+                self.emit(Op::GetPropertyIC, LINE);
+                let value_slot = self.alloc_ic_slot()?;
+                self.emit_byte(value_slot, LINE);
+
+                match &f.left {
+                    oast::ForStatementLeft::VariableDeclaration(v) => {
+                        let Some(dec) = v.declarations.first() else {
+                            return Err(crate::errors::CompilerError::from(
+                                "unsupported empty for-of declaration",
+                            ));
+                        };
+                        self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
+                    }
+                    oast::ForStatementLeft::AssignmentTargetIdentifier(id) => {
+                        let name = id.name.as_str();
+                        if let Some(slot) = self.resolve_local(name) {
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(slot as u8, LINE);
+                            if self.local_mirrors_global(slot) {
+                                self.emit(Op::GetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
+                                self.emit_set_global_name(name);
+                            }
+                        } else if let Some(upvalue) = self.resolve_upvalue(name) {
+                            self.emit(Op::SetUpvalue, LINE);
+                            self.emit_byte(upvalue, LINE);
+                        } else {
+                            self.emit_set_global_name(name);
+                        }
+                    }
+                    _ => {
+                        return Err(crate::errors::CompilerError::from(
+                            "unsupported for-of assignment target",
+                        ));
+                    }
+                }
+
+                self.enter_block_scope();
+                self.compile_statement_oast(&f.body)?;
+                self.exit_scope();
+
+                let update_start = loop_start;
+                if let Some(patches) = self.continue_patches.pop() {
+                    for patch_pos in patches {
+                        let target = update_start as isize - (patch_pos as isize) - 2;
+                        let v = target as i16;
+                        self.chunk.code[patch_pos] = (v >> 8) as u8;
+                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                    }
+                }
+
+                self.emit(Op::Jump, LINE);
+                let back_offset = loop_start as isize - (self.chunk.code.len() + 2) as isize;
+                self.emit_short_signed(back_offset, LINE);
+
+                self.patch_jump(exit_jump);
+                self.emit(Op::Jump, LINE);
+                let end_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+
+                let break_cleanup = self.chunk.code.len();
+                if let Some(patches) = self.break_patches.pop() {
+                    for patch_pos in patches {
+                        let target = break_cleanup as isize - (patch_pos as isize) - 2;
+                        let v = target as i16;
+                        self.chunk.code[patch_pos] = (v >> 8) as u8;
+                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                    }
+                }
+                let label_patches = if let Some(state) = self.label_patches.last_mut() {
+                    if state.can_continue && state.owner_loop_depth == self.loop_depth {
+                        Some((
+                            std::mem::take(&mut state.continue_patches),
+                            std::mem::take(&mut state.break_patches),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((continue_patches, break_patches)) = label_patches {
+                    self.patch_jump_list(continue_patches, update_start);
+                    self.patch_jump_list(break_patches, break_cleanup);
+                }
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(iterator_slot as u8, LINE);
+                self.emit(Op::IteratorClose, LINE);
+                self.emit(Op::Pop, LINE);
+                self.patch_jump(end_jump);
+                self.loop_depth = self.loop_depth.saturating_sub(1);
+            }
             OStmt::ForInStatement(f) => {
                 self.loop_depth += 1;
                 self.continue_patches.push(Vec::new());
@@ -586,7 +719,7 @@ impl Compiler {
 
                 self.emit_get_global_name("__native_forInKeys");
                 self.compile_expr_oast(&f.right)?;
-                self.emit(Op::Call, LINE);
+                self.emit(Op::CallIC, LINE);
                 self.emit_byte(1, LINE);
 
                 let keys_slot = self.add_local_with_mirror(
@@ -1107,7 +1240,9 @@ impl Compiler {
                     self.emit_byte(fidx as u8, LINE);
 
                     // set property: expects [obj, key, value]
-                    self.emit(Op::SetProperty, LINE);
+                    self.emit(Op::SetPropertyIC, LINE);
+                    let ic_slot = self.alloc_ic_slot()?;
+                    self.emit_byte(ic_slot, LINE);
                 } else {
                     // instance method: install on constructor.prototype
                     // push constructor
@@ -1134,7 +1269,9 @@ impl Compiler {
                     self.emit_byte(fidx as u8, LINE);
 
                     // set property on prototype
-                    self.emit(Op::SetProperty, LINE);
+                    self.emit(Op::SetPropertyIC, LINE);
+                    let ic_slot = self.alloc_ic_slot()?;
+                    self.emit_byte(ic_slot, LINE);
                 }
             }
         }

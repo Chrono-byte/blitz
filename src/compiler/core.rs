@@ -546,7 +546,7 @@ impl Compiler {
 
     pub(crate) fn emit_get_global_name(&mut self, name: &str) {
         let idx = self.global_name_index(name);
-        self.emit(Op::GetGlobal, LINE);
+        self.emit(Op::GetGlobalIC, LINE);
         self.emit_u16(idx as u16, LINE);
     }
 

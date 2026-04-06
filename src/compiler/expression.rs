@@ -24,6 +24,103 @@ use std::rc::Rc;
 const LINE: u32 = 1;
 
 impl super::Compiler {
+    fn alloc_temp_local(&mut self, prefix: &str) -> usize {
+        self.add_local_with_mirror(format!("__{}_{}", prefix, self.locals.len()), None, false)
+    }
+
+    fn compile_static_member_reference(
+        &mut self,
+        m: &oast::StaticMemberExpression<'_>,
+    ) -> Result<(usize, usize), crate::errors::CompilerError> {
+        self.compile_expr_oast(&m.object)?;
+        let object_slot = self.alloc_temp_local("ref_obj");
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(object_slot as u8, LINE);
+
+        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+        let key_slot = self.alloc_temp_local("ref_key");
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(key_slot as u8, LINE);
+        Ok((object_slot, key_slot))
+    }
+
+    fn compile_computed_member_reference(
+        &mut self,
+        m: &oast::ComputedMemberExpression<'_>,
+    ) -> Result<(usize, usize), crate::errors::CompilerError> {
+        self.compile_expr_oast(&m.object)?;
+        let object_slot = self.alloc_temp_local("ref_obj");
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(object_slot as u8, LINE);
+
+        self.compile_expr_oast(&m.expression)?;
+        let key_slot = self.alloc_temp_local("ref_key");
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(key_slot as u8, LINE);
+        Ok((object_slot, key_slot))
+    }
+
+    fn emit_reference_get(
+        &mut self,
+        object_slot: usize,
+        key_slot: usize,
+        use_ic: bool,
+    ) -> Result<(), crate::errors::CompilerError> {
+        self.emit(Op::GetLocal, LINE);
+        self.emit_byte(object_slot as u8, LINE);
+        self.emit(Op::GetLocal, LINE);
+        self.emit_byte(key_slot as u8, LINE);
+        if use_ic {
+            self.emit(Op::GetPropertyIC, LINE);
+            let slot = self.alloc_ic_slot()?;
+            self.emit_byte(slot, LINE);
+        } else {
+            self.emit(Op::GetProperty, LINE);
+        }
+        Ok(())
+    }
+
+    fn emit_reference_set_from_slot(
+        &mut self,
+        object_slot: usize,
+        key_slot: usize,
+        value_slot: usize,
+        use_ic: bool,
+    ) -> Result<(), crate::errors::CompilerError> {
+        self.emit(Op::GetLocal, LINE);
+        self.emit_byte(object_slot as u8, LINE);
+        self.emit(Op::GetLocal, LINE);
+        self.emit_byte(key_slot as u8, LINE);
+        self.emit(Op::GetLocal, LINE);
+        self.emit_byte(value_slot as u8, LINE);
+        if use_ic {
+            self.emit(Op::SetPropertyIC, LINE);
+            let slot = self.alloc_ic_slot()?;
+            self.emit_byte(slot, LINE);
+        } else {
+            self.emit(Op::SetProperty, LINE);
+        }
+        Ok(())
+    }
+
+    fn emit_compound_assignment_op(&mut self, op: oast::AssignmentOperator) {
+        match op {
+            oast::AssignmentOperator::Addition => self.emit(Op::Add, LINE),
+            oast::AssignmentOperator::Subtraction => self.emit(Op::Sub, LINE),
+            oast::AssignmentOperator::Multiplication => self.emit(Op::Mul, LINE),
+            oast::AssignmentOperator::Division => self.emit(Op::Div, LINE),
+            oast::AssignmentOperator::Remainder => self.emit(Op::Mod, LINE),
+            oast::AssignmentOperator::Exponential => self.emit(Op::Pow, LINE),
+            oast::AssignmentOperator::BitwiseAnd => self.emit(Op::BitAnd, LINE),
+            oast::AssignmentOperator::BitwiseOR => self.emit(Op::BitOr, LINE),
+            oast::AssignmentOperator::BitwiseXOR => self.emit(Op::BitXor, LINE),
+            oast::AssignmentOperator::ShiftLeft => self.emit(Op::Shl, LINE),
+            oast::AssignmentOperator::ShiftRight => self.emit(Op::Shr, LINE),
+            oast::AssignmentOperator::ShiftRightZeroFill => self.emit(Op::Ushr, LINE),
+            _ => {}
+        }
+    }
+
     /// Compile an expression from the AST into bytecode.
     ///
     /// This is the main entry point for expression compilation. It recursively
@@ -116,7 +213,7 @@ impl super::Compiler {
                     self.compile_expr_oast(sub)?;
                     arg_count += 1;
                 }
-                self.emit(Op::Call, LINE);
+                self.emit(Op::CallIC, LINE);
                 self.emit_byte(arg_count as u8, LINE);
             }
             OExpr::BooleanLiteral(b) => {
@@ -329,7 +426,9 @@ impl super::Compiler {
                             self.compile_expr_oast(&m.object)?;
                             self.emit_constant(Value::String(m.property.name.to_string()), LINE);
                             self.compile_expr_oast(&a.right)?;
-                            self.emit(Op::SetProperty, LINE);
+                            self.emit(Op::SetPropertyIC, LINE);
+                            let slot = self.alloc_ic_slot()?;
+                            self.emit_byte(slot, LINE);
                         }
                         oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
                             self.compile_expr_oast(&m.object)?;
@@ -411,52 +510,36 @@ impl super::Compiler {
                             }
                         }
                         oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
-                            self.emit_get_global_name("__native_compoundAssign");
-                            self.compile_expr_oast(&m.object)?;
-                            self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                            let (object_slot, key_slot) =
+                                self.compile_static_member_reference(m)?;
+                            self.emit_reference_get(object_slot, key_slot, true)?;
                             self.compile_expr_oast(&a.right)?;
-                            let op = match a.operator {
-                                oast::AssignmentOperator::Addition => "+",
-                                oast::AssignmentOperator::Subtraction => "-",
-                                oast::AssignmentOperator::Multiplication => "*",
-                                oast::AssignmentOperator::Division => "/",
-                                oast::AssignmentOperator::Remainder => "%",
-                                oast::AssignmentOperator::Exponential => "**",
-                                oast::AssignmentOperator::BitwiseAnd => "&",
-                                oast::AssignmentOperator::BitwiseOR => "|",
-                                oast::AssignmentOperator::BitwiseXOR => "^",
-                                oast::AssignmentOperator::ShiftLeft => "<<",
-                                oast::AssignmentOperator::ShiftRight => ">>",
-                                oast::AssignmentOperator::ShiftRightZeroFill => ">>>",
-                                _ => unreachable!(),
-                            };
-                            self.emit_constant(Value::String(op.to_string()), LINE);
-                            self.emit(Op::Call, LINE);
-                            self.emit_byte(4, LINE);
+                            self.emit_compound_assignment_op(a.operator);
+                            let value_slot = self.alloc_temp_local("ref_value");
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(value_slot as u8, LINE);
+                            self.emit_reference_set_from_slot(
+                                object_slot,
+                                key_slot,
+                                value_slot,
+                                true,
+                            )?;
                         }
                         oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
-                            self.emit_get_global_name("__native_compoundAssign");
-                            self.compile_expr_oast(&m.object)?;
-                            self.compile_expr_oast(&m.expression)?;
+                            let (object_slot, key_slot) =
+                                self.compile_computed_member_reference(m)?;
+                            self.emit_reference_get(object_slot, key_slot, false)?;
                             self.compile_expr_oast(&a.right)?;
-                            let op = match a.operator {
-                                oast::AssignmentOperator::Addition => "+",
-                                oast::AssignmentOperator::Subtraction => "-",
-                                oast::AssignmentOperator::Multiplication => "*",
-                                oast::AssignmentOperator::Division => "/",
-                                oast::AssignmentOperator::Remainder => "%",
-                                oast::AssignmentOperator::Exponential => "**",
-                                oast::AssignmentOperator::BitwiseAnd => "&",
-                                oast::AssignmentOperator::BitwiseOR => "|",
-                                oast::AssignmentOperator::BitwiseXOR => "^",
-                                oast::AssignmentOperator::ShiftLeft => "<<",
-                                oast::AssignmentOperator::ShiftRight => ">>",
-                                oast::AssignmentOperator::ShiftRightZeroFill => ">>>",
-                                _ => unreachable!(),
-                            };
-                            self.emit_constant(Value::String(op.to_string()), LINE);
-                            self.emit(Op::Call, LINE);
-                            self.emit_byte(4, LINE);
+                            self.emit_compound_assignment_op(a.operator);
+                            let value_slot = self.alloc_temp_local("ref_value");
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(value_slot as u8, LINE);
+                            self.emit_reference_set_from_slot(
+                                object_slot,
+                                key_slot,
+                                value_slot,
+                                false,
+                            )?;
                         }
                         _ => {
                             return Err(crate::errors::CompilerError::from(
@@ -484,34 +567,30 @@ impl super::Compiler {
                         {
                             self.emit_get_global_name("__native_typeof");
                             self.compile_expr_oast(&u.argument)?;
-                            self.emit(Op::Call, LINE);
+                            self.emit(Op::CallIC, LINE);
                             self.emit_byte(1, LINE);
                         } else {
                             self.emit_get_global_name("__native_typeof_name");
                             self.emit_constant(Value::String(name), LINE);
-                            self.emit(Op::Call, LINE);
+                            self.emit(Op::CallIC, LINE);
                             self.emit_byte(1, LINE);
                         }
                     } else {
                         self.emit_get_global_name("__native_typeof");
                         self.compile_expr_oast(&u.argument)?;
-                        self.emit(Op::Call, LINE);
+                        self.emit(Op::CallIC, LINE);
                         self.emit_byte(1, LINE);
                     }
                 }
                 oast::UnaryOperator::Delete => {
                     if let OExpr::StaticMemberExpression(m) = &u.argument {
-                        self.emit_get_global_name("__native_deleteProperty");
                         self.compile_expr_oast(&m.object)?;
                         self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                        self.emit(Op::Call, LINE);
-                        self.emit_byte(2, LINE);
+                        self.emit(Op::DeleteProperty, LINE);
                     } else if let OExpr::ComputedMemberExpression(m) = &u.argument {
-                        self.emit_get_global_name("__native_deleteProperty");
                         self.compile_expr_oast(&m.object)?;
                         self.compile_expr_oast(&m.expression)?;
-                        self.emit(Op::Call, LINE);
-                        self.emit_byte(2, LINE);
+                        self.emit(Op::DeleteProperty, LINE);
                     } else {
                         self.emit_constant(Value::Bool(true), LINE);
                     }
@@ -589,34 +668,50 @@ impl super::Compiler {
                         }
                     }
                     OTarget::StaticMemberExpression(m) => {
-                        self.emit_get_global_name("__native_updateProperty");
-                        self.compile_expr_oast(&m.object)?;
-                        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                        self.emit_constant(
-                            Value::Number(match u.operator {
-                                oast::UpdateOperator::Increment => 1.0,
-                                oast::UpdateOperator::Decrement => -1.0,
-                            }),
-                            LINE,
-                        );
-                        self.emit_constant(Value::Bool(u.prefix), LINE);
-                        self.emit(Op::Call, LINE);
-                        self.emit_byte(4, LINE);
+                        let (object_slot, key_slot) = self.compile_static_member_reference(m)?;
+                        self.emit_reference_get(object_slot, key_slot, true)?;
+                        let old_slot = self.alloc_temp_local("ref_old");
+                        self.emit(Op::SetLocal, LINE);
+                        self.emit_byte(old_slot as u8, LINE);
+                        self.emit(Op::GetLocal, LINE);
+                        self.emit_byte(old_slot as u8, LINE);
+                        self.emit_constant(Value::Number(1.0), LINE);
+                        match u.operator {
+                            oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
+                            oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
+                        }
+                        let new_slot = self.alloc_temp_local("ref_new");
+                        self.emit(Op::SetLocal, LINE);
+                        self.emit_byte(new_slot as u8, LINE);
+                        self.emit_reference_set_from_slot(object_slot, key_slot, new_slot, true)?;
+                        if !u.prefix {
+                            self.emit(Op::Pop, LINE);
+                            self.emit(Op::GetLocal, LINE);
+                            self.emit_byte(old_slot as u8, LINE);
+                        }
                     }
                     OTarget::ComputedMemberExpression(m) => {
-                        self.emit_get_global_name("__native_updateProperty");
-                        self.compile_expr_oast(&m.object)?;
-                        self.compile_expr_oast(&m.expression)?;
-                        self.emit_constant(
-                            Value::Number(match u.operator {
-                                oast::UpdateOperator::Increment => 1.0,
-                                oast::UpdateOperator::Decrement => -1.0,
-                            }),
-                            LINE,
-                        );
-                        self.emit_constant(Value::Bool(u.prefix), LINE);
-                        self.emit(Op::Call, LINE);
-                        self.emit_byte(4, LINE);
+                        let (object_slot, key_slot) = self.compile_computed_member_reference(m)?;
+                        self.emit_reference_get(object_slot, key_slot, false)?;
+                        let old_slot = self.alloc_temp_local("ref_old");
+                        self.emit(Op::SetLocal, LINE);
+                        self.emit_byte(old_slot as u8, LINE);
+                        self.emit(Op::GetLocal, LINE);
+                        self.emit_byte(old_slot as u8, LINE);
+                        self.emit_constant(Value::Number(1.0), LINE);
+                        match u.operator {
+                            oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
+                            oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
+                        }
+                        let new_slot = self.alloc_temp_local("ref_new");
+                        self.emit(Op::SetLocal, LINE);
+                        self.emit_byte(new_slot as u8, LINE);
+                        self.emit_reference_set_from_slot(object_slot, key_slot, new_slot, false)?;
+                        if !u.prefix {
+                            self.emit(Op::Pop, LINE);
+                            self.emit(Op::GetLocal, LINE);
+                            self.emit_byte(old_slot as u8, LINE);
+                        }
                     }
                     _ => {
                         return Err(crate::errors::CompilerError::from(
@@ -638,20 +733,18 @@ impl super::Compiler {
                 }
             }
             OExpr::BinaryExpression(b) => {
-                if matches!(
-                    b.operator,
-                    oast::BinaryOperator::Instanceof | oast::BinaryOperator::In
-                ) {
-                    let helper = if matches!(b.operator, oast::BinaryOperator::Instanceof) {
-                        "__native_instanceof"
-                    } else {
-                        "__native_in"
-                    };
-                    self.emit_get_global_name(helper);
+                if matches!(b.operator, oast::BinaryOperator::Instanceof) {
+                    self.emit_get_global_name("__native_instanceof");
                     self.compile_expr_oast(&b.left)?;
                     self.compile_expr_oast(&b.right)?;
-                    self.emit(Op::Call, LINE);
+                    self.emit(Op::CallIC, LINE);
                     self.emit_byte(2, LINE);
+                    return Ok(());
+                }
+                if matches!(b.operator, oast::BinaryOperator::In) {
+                    self.compile_expr_oast(&b.right)?;
+                    self.compile_expr_oast(&b.left)?;
+                    self.emit(Op::HasProperty, LINE);
                     return Ok(());
                 }
                 self.compile_expr_oast(&b.left)?;
@@ -702,7 +795,18 @@ impl super::Compiler {
                 oast::LogicalOperator::Or => {
                     self.compile_expr_oast(&l.left)?;
                     self.emit(Op::Dup, LINE);
-                    self.emit(Op::JumpIfFalse, LINE);
+                    self.emit(Op::JumpIfTrue, LINE);
+                    let jump_end = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.emit(Op::Pop, LINE);
+                    self.compile_expr_oast(&l.right)?;
+                    self.patch_jump(jump_end);
+                }
+                oast::LogicalOperator::Coalesce => {
+                    self.compile_expr_oast(&l.left)?;
+                    self.emit(Op::Dup, LINE);
+                    self.emit(Op::JumpIfNullish, LINE);
                     let jump_right = self.chunk.code.len();
                     self.emit_byte(0, LINE);
                     self.emit_byte(0, LINE);
@@ -711,19 +815,6 @@ impl super::Compiler {
                     self.emit_byte(0, LINE);
                     self.emit_byte(0, LINE);
                     self.patch_jump(jump_right);
-                    self.emit(Op::Pop, LINE);
-                    self.compile_expr_oast(&l.right)?;
-                    self.patch_jump(jump_end);
-                }
-                oast::LogicalOperator::Coalesce => {
-                    self.compile_expr_oast(&l.left)?;
-                    self.emit(Op::Dup, LINE);
-                    self.emit(Op::Undefined, LINE);
-                    self.emit(Op::Eq, LINE);
-                    self.emit(Op::JumpIfFalse, LINE);
-                    let jump_end = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
                     self.emit(Op::Pop, LINE);
                     self.compile_expr_oast(&l.right)?;
                     self.patch_jump(jump_end);
@@ -826,7 +917,7 @@ impl super::Compiler {
                             arg_count += 1;
                         }
                     }
-                    self.emit(Op::Call, LINE);
+                    self.emit(Op::CallIC, LINE);
                     self.emit_byte(arg_count as u8, LINE);
                     return Ok(());
                 }
@@ -909,11 +1000,10 @@ impl super::Compiler {
                         arg_count += 1;
                     }
                 }
-                self.emit(Op::Call, LINE);
+                self.emit(Op::CallIC, LINE);
                 self.emit_byte(arg_count as u8, LINE);
             }
             OExpr::NewExpression(n) => {
-                self.emit_get_global_name("__native_construct");
                 self.compile_expr_oast(&n.callee)?;
                 let mut arg_count = 0usize;
                 for arg in &n.arguments {
@@ -925,8 +1015,8 @@ impl super::Compiler {
                         arg_count += 1;
                     }
                 }
-                self.emit(Op::Call, LINE);
-                self.emit_byte((arg_count + 1) as u8, LINE);
+                self.emit(Op::Construct, LINE);
+                self.emit_byte(arg_count as u8, LINE);
             }
             OExpr::ImportExpression(i) => {
                 self.emit_get_global_name("__native_dynamic_import");
@@ -936,14 +1026,14 @@ impl super::Compiler {
                 } else {
                     self.emit(Op::Undefined, LINE);
                 }
-                self.emit(Op::Call, LINE);
+                self.emit(Op::CallIC, LINE);
                 self.emit_byte(2, LINE);
             }
             OExpr::RegExpLiteral(re) => {
                 self.emit_get_global_name("RegExp");
                 self.emit_constant(Value::String(re.regex.pattern.text.to_string()), LINE);
                 self.emit_constant(Value::String(re.regex.flags.to_string()), LINE);
-                self.emit(Op::Call, LINE);
+                self.emit(Op::CallIC, LINE);
                 self.emit_byte(2, LINE);
             }
             OExpr::ParenthesizedExpression(p) => {
@@ -1031,7 +1121,9 @@ impl super::Compiler {
                             }
                             self.emit(Op::MakeClosure, LINE);
                             self.emit_byte(fidx as u8, LINE);
-                            self.emit(Op::SetProperty, LINE);
+                            self.emit(Op::SetPropertyIC, LINE);
+                            let slot = self.alloc_ic_slot()?;
+                            self.emit_byte(slot, LINE);
                         } else {
                             // instance: install on constructor.prototype
                             self.emit(Op::GetLocal, LINE);
@@ -1050,7 +1142,9 @@ impl super::Compiler {
                             }
                             self.emit(Op::MakeClosure, LINE);
                             self.emit_byte(fidx as u8, LINE);
-                            self.emit(Op::SetProperty, LINE);
+                            self.emit(Op::SetPropertyIC, LINE);
+                            let slot = self.alloc_ic_slot()?;
+                            self.emit_byte(slot, LINE);
                         }
                     }
                 }

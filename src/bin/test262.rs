@@ -1089,6 +1089,17 @@ fn run_test_file(
         );
         let mut vm = Vm::new(Rc::clone(globals));
 
+        // The harness self-test `test/harness/detachArrayBuffer.js` verifies
+        // the fallback behavior when hosts do NOT provide `$262` at all.
+        // Our runner normally installs `$262`, so remove it only for this
+        // specific self-test.
+        if path.ends_with("test/harness/detachArrayBuffer.js") {
+            globals
+                .borrow_mut()
+                .properties
+                .remove(&PropertyKey::String("$262".to_string()));
+        }
+
         // Async tests must signal completion through $DONE(error?).
         let done_state: Rc<RefCell<Option<Option<String>>>> = Rc::new(RefCell::new(None));
         if is_async {
@@ -1582,6 +1593,26 @@ fn run_harness_only(
         if !p.exists() {
             return Err(format!("Harness file missing: {}", p.display()));
         }
+
+        let saved_detach = if h == "detachArrayBuffer.js" {
+            let mut globals_borrow = globals.borrow_mut();
+            match globals_borrow
+                .properties
+                .get_mut(&PropertyKey::String("$262".to_string()))
+            {
+                Some(PropertyDescriptor::Data {
+                    value: Value::Object(obj),
+                    ..
+                }) => obj
+                    .borrow_mut()
+                    .properties
+                    .remove(&PropertyKey::String("detachArrayBuffer".to_string())),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         let hsrc = fs::read_to_string(&p)
             .map_err(|e| format!("Failed to read harness {}: {}", p.display(), e))?;
         let session = parse_source_for_path(&hsrc, &p)
@@ -1589,7 +1620,25 @@ fn run_harness_only(
         let prog = session.program();
         let chunk = compiler::compile_oxc(prog, &hsrc)
             .map_err(|e| format!("Harness {} compile failed: {}", h, e))?;
-        match vm.run(chunk) {
+        let run_result = vm.run(chunk);
+
+        if let Some(saved_detach) = saved_detach {
+            let mut globals_borrow = globals.borrow_mut();
+            if let Some(PropertyDescriptor::Data {
+                value: Value::Object(obj),
+                ..
+            }) = globals_borrow
+                .properties
+                .get_mut(&PropertyKey::String("$262".to_string()))
+            {
+                obj.borrow_mut().properties.insert(
+                    PropertyKey::String("detachArrayBuffer".to_string()),
+                    saved_detach,
+                );
+            }
+        }
+
+        match run_result {
             Ok(_) => {
                 eprintln!("Harness ok: {}", h);
             }

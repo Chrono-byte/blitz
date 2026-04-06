@@ -640,10 +640,6 @@ pub(crate) fn fulfill_pending_promise(
             let mut arg_value = Some(stored_value.clone());
             vm.queue_microtask(move |vm| {
                 let args = [arg_value.take().unwrap()];
-                eprintln!(
-                    "[debug] fulfill callback args[0] type={}",
-                    args[0].type_name()
-                );
                 let _ = vm.call_value_with_this(&callback, &Value::Undefined, &args);
                 Ok(())
             });
@@ -1001,10 +997,6 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
             let promise_for_fulfill = Rc::clone(&promise);
             let value_for_fulfill = value;
             vm.queue_microtask(move |vm| {
-                eprintln!(
-                    "[debug] dynamic import microtask value type={}",
-                    value_for_fulfill.type_name()
-                );
                 fulfill_pending_promise(vm, &promise_for_fulfill, value_for_fulfill.clone());
                 Ok(())
             });
@@ -2557,16 +2549,82 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     array_iterator_proto.borrow_mut().properties.insert(
         PKey::String("next".to_string()),
         PropertyDescriptor::data(builtin_object(
-            Rc::new(|_vm, _args| {
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let iter_obj = match this {
+                    Value::Object(obj) => obj,
+                    _ => {
+                        let result = Rc::new(RefCell::new(ObjectData::new()));
+                        result.borrow_mut().properties.insert(
+                            PKey::String("done".to_string()),
+                            PropertyDescriptor::data(Value::Bool(true)),
+                        );
+                        result.borrow_mut().properties.insert(
+                            PKey::String("value".to_string()),
+                            PropertyDescriptor::data(Value::Undefined),
+                        );
+                        return Ok(Value::Object(result));
+                    }
+                };
+
+                let iterated = iter_obj
+                    .borrow()
+                    .properties
+                    .get(&PKey::String("[[IteratedObject]]".to_string()))
+                    .and_then(|d| match d {
+                        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or(Value::Undefined);
+                let index = iter_obj
+                    .borrow()
+                    .properties
+                    .get(&PKey::String("[[ArrayIteratorNextIndex]]".to_string()))
+                    .and_then(|d| match d {
+                        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                        _ => None,
+                    })
+                    .and_then(|v| match v {
+                        Value::Number(n) => Some(n.max(0.0) as usize),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+
+                let len = vm
+                    .get_property_host(&iterated, &PKey::String("length".to_string()))
+                    .ok()
+                    .and_then(|v| match v {
+                        Value::Number(n) => Some(n.max(0.0) as usize),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+
                 let result = Rc::new(RefCell::new(ObjectData::new()));
-                result.borrow_mut().properties.insert(
-                    PKey::String("done".to_string()),
-                    PropertyDescriptor::data(Value::Bool(true)),
-                );
-                result.borrow_mut().properties.insert(
-                    PKey::String("value".to_string()),
-                    PropertyDescriptor::data(Value::Undefined),
-                );
+                if index >= len {
+                    result.borrow_mut().properties.insert(
+                        PKey::String("done".to_string()),
+                        PropertyDescriptor::data(Value::Bool(true)),
+                    );
+                    result.borrow_mut().properties.insert(
+                        PKey::String("value".to_string()),
+                        PropertyDescriptor::data(Value::Undefined),
+                    );
+                } else {
+                    let value =
+                        vm.get_property_host(&iterated, &PKey::String(index.to_string()))?;
+                    iter_obj.borrow_mut().properties.insert(
+                        PKey::String("[[ArrayIteratorNextIndex]]".to_string()),
+                        PropertyDescriptor::data(Value::Number((index + 1) as f64)),
+                    );
+                    result.borrow_mut().properties.insert(
+                        PKey::String("done".to_string()),
+                        PropertyDescriptor::data(Value::Bool(false)),
+                    );
+                    result.borrow_mut().properties.insert(
+                        PKey::String("value".to_string()),
+                        PropertyDescriptor::data(value),
+                    );
+                }
                 Ok(Value::Object(result))
             }),
             &function_proto_map,
@@ -2585,6 +2643,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     iter.borrow_mut().properties.insert(
                         PKey::String("[[IteratedObject]]".to_string()),
                         PropertyDescriptor::data(this),
+                    );
+                    iter.borrow_mut().properties.insert(
+                        PKey::String("[[ArrayIteratorNextIndex]]".to_string()),
+                        PropertyDescriptor::data(Value::Number(0.0)),
                     );
                     Ok(Value::Object(iter))
                 }

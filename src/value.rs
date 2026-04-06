@@ -248,6 +248,12 @@ pub struct ObjectData {
     pub extensible: bool,
 }
 
+impl Default for ObjectData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ObjectData {
     /// Create an empty object data container with a null prototype.
     pub fn new() -> Self {

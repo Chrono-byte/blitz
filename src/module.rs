@@ -67,15 +67,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Mutex;
 
-fn source_type_for_module_path(path: &Path) -> SourceType {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if name.ends_with(".tsx") {
-        SourceType::tsx()
-    } else if name.ends_with(".ts") || name.ends_with(".mts") || name.ends_with(".cts") {
-        SourceType::ts()
-    } else {
-        SourceType::mjs()
-    }
+fn source_type_for_module_path(_path: &Path) -> SourceType {
+    SourceType::unambiguous()
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -31,7 +31,7 @@
 //! // vm.run(chunk)?;
 //! ```
 
-use crate::bytecode::Chunk;
+use crate::bytecode::{Chunk, OP_COUNT};
 use crate::environment::EnvironmentRecord;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
@@ -43,6 +43,7 @@ use std::env;
 use std::rc::{Rc, Weak};
 use std::sync::Mutex;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tokio::runtime::Runtime;
 
 mod frame;
@@ -208,6 +209,12 @@ pub struct Vm {
     pub(super) yield_star_queue: Option<VecDeque<Value>>,
     /// Counter used to trigger opportunistic GC during interpreter progress.
     pub(super) gc_step_counter: usize,
+    /// Whether runtime opcode profiling is enabled for this VM instance.
+    pub(super) opcode_profiling_enabled: bool,
+    /// Per-opcode execution counters for the current run.
+    pub(super) opcode_counts: [u64; OP_COUNT],
+    /// Run start timestamp for the current profiling window.
+    pub(super) run_started_at: Option<Instant>,
 }
 
 thread_local! {

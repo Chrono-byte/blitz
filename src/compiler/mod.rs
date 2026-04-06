@@ -28,7 +28,7 @@ use std::rc::Rc;
 
 #[cfg(test)]
 use {
-    crate::{ObjectData, Value, Vm},
+    crate::{ObjectData, Value, Vm, runtime_utils},
     std::cell::RefCell,
     std::collections::{HashMap, HashSet},
 };
@@ -163,6 +163,7 @@ impl Compiler {
         Ok(std::mem::take(&mut self.chunk))
     }
 }
+
 #[test]
 fn compile_simple_for_loop() {
     let src = "for (var i = 0; i < 3; i = i + 1) { console.log(i); }";
@@ -188,14 +189,17 @@ fn compile_simple_for_loop() {
                 Op::Const
                 | Op::MakeClosure
                 | Op::GetPropertyIC
+                | Op::SetPropertyIC
                 | Op::CallMethod
                 | Op::Call
+                | Op::CallIC
+                | Op::Construct
                 | Op::GetBuiltin
                 | Op::SetLocal
                 | Op::GetLocal
                 | Op::GetProperty
                 | Op::SetProperty => i += 2,
-                Op::SetGlobal | Op::GetGlobal => i += 3,
+                Op::SetGlobal | Op::GetGlobal | Op::GetGlobalIC => i += 3,
                 _ => i += 1,
             }
         } else {
@@ -236,14 +240,17 @@ fn compile_for_with_continue() {
                 Op::Const
                 | Op::MakeClosure
                 | Op::GetPropertyIC
+                | Op::SetPropertyIC
                 | Op::CallMethod
                 | Op::Call
+                | Op::CallIC
+                | Op::Construct
                 | Op::GetBuiltin
                 | Op::SetLocal
                 | Op::GetLocal
                 | Op::GetProperty
                 | Op::SetProperty => i += 2,
-                Op::SetGlobal | Op::GetGlobal => i += 3,
+                Op::SetGlobal | Op::GetGlobal | Op::GetGlobalIC => i += 3,
                 _ => i += 1,
             }
         } else {
@@ -274,19 +281,26 @@ fn static_member_ic_slots_are_unique_per_site() {
                     slots.push(chunk.code.get(i + 1).copied().expect("slot byte"));
                     i += 2;
                 }
-                Op::Jump | Op::JumpIfFalse | Op::PushHandler => i += 3,
+                Op::Jump
+                | Op::JumpIfFalse
+                | Op::JumpIfTrue
+                | Op::JumpIfNullish
+                | Op::PushHandler => i += 3,
                 Op::Const
                 | Op::MakeClosure
                 | Op::CallMethod
                 | Op::Call
+                | Op::CallIC
+                | Op::Construct
                 | Op::GetBuiltin
                 | Op::SetLocal
                 | Op::GetLocal
                 | Op::GetProperty
                 | Op::SetProperty
+                | Op::SetPropertyIC
                 | Op::BuildArray
                 | Op::BuildObject => i += 2,
-                Op::SetGlobal | Op::GetGlobal => i += 3,
+                Op::SetGlobal | Op::GetGlobal | Op::GetGlobalIC => i += 3,
                 _ => i += 1,
             }
         } else {
@@ -340,12 +354,15 @@ fn compile_for_loop_back_jump_targets_loop_start() {
                     back_target = Some((i + 3) as isize + offset);
                     i += 3;
                 }
-                Op::JumpIfFalse | Op::PushHandler => i += 3,
+                Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => i += 3,
                 Op::Const
                 | Op::MakeClosure
                 | Op::GetPropertyIC
+                | Op::SetPropertyIC
                 | Op::CallMethod
                 | Op::Call
+                | Op::CallIC
+                | Op::Construct
                 | Op::GetBuiltin
                 | Op::SetLocal
                 | Op::GetLocal
@@ -353,7 +370,7 @@ fn compile_for_loop_back_jump_targets_loop_start() {
                 | Op::SetProperty
                 | Op::BuildArray
                 | Op::BuildObject => i += 2,
-                Op::SetGlobal | Op::GetGlobal => i += 3,
+                Op::SetGlobal | Op::GetGlobal | Op::GetGlobalIC => i += 3,
                 _ => i += 1,
             }
         } else {
@@ -365,19 +382,22 @@ fn compile_for_loop_back_jump_targets_loop_start() {
 }
 
 #[test]
-fn compile_new_expression_lowers_to_call() {
+fn compile_new_expression_lowers_to_construct() {
     let src = "new Array(1, 2, 3);";
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
 
-    let saw_call = chunk
+    let saw_construct = chunk
         .code
         .iter()
         .filter_map(|b| Op::from_byte(*b))
-        .any(|op| matches!(op, Op::Call));
+        .any(|op| matches!(op, Op::Construct));
 
-    assert!(saw_call, "expected Call opcode for lowered new expression");
+    assert!(
+        saw_construct,
+        "expected Construct opcode for lowered new expression"
+    );
 }
 
 #[test]
@@ -476,10 +496,99 @@ fn nullish_coalescing_is_supported() {
         .code
         .iter()
         .filter_map(|b| Op::from_byte(*b))
-        .any(|op| matches!(op, Op::Eq | Op::JumpIfFalse));
+        .any(|op| matches!(op, Op::JumpIfNullish));
     assert!(
         saw_coalesce,
-        "expected nullish coalescing lowering to emit Eq/JumpIfFalse"
+        "expected nullish coalescing lowering to emit JumpIfNullish"
+    );
+}
+
+#[test]
+fn compile_for_of_emits_iterator_ops() {
+    let src = "for (var x of [1, 2, 3]) {}";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let ops: Vec<_> = chunk
+        .code
+        .iter()
+        .filter_map(|b| Op::from_byte(*b))
+        .collect();
+    assert!(ops.iter().any(|op| matches!(op, Op::IteratorNext)));
+    assert!(ops.iter().any(|op| matches!(op, Op::GetPropertyIC)));
+}
+
+#[test]
+fn for_of_over_array_executes() {
+    let src = "var sum = 0; for (var x of [1, 2, 3]) { sum = sum + x; } sum;";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    globals.borrow_mut().properties.insert(
+        crate::value::PropertyKey::String("globalThis".to_string()),
+        crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+    );
+    runtime_utils::install_minimal_kernel_constructors(&globals);
+    let mut vm = Vm::new(Rc::clone(&globals));
+    let _ = vm.run(chunk).expect("run ok");
+
+    assert!(
+        matches!(vm.get_global("sum"), Some(Value::Number(n)) if (n - 6.0).abs() < f64::EPSILON)
+    );
+}
+
+#[test]
+fn computed_member_compound_assignment_evaluates_reference_once() {
+    let src = r#"
+        globalThis.hits = 0;
+        var obj = { value: 1 };
+        function key() { globalThis.hits = globalThis.hits + 1; return "value"; }
+        obj[key()] += 2;
+    "#;
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    globals.borrow_mut().properties.insert(
+        crate::value::PropertyKey::String("globalThis".to_string()),
+        crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+    );
+    runtime_utils::install_minimal_kernel_constructors(&globals);
+    let mut vm = Vm::new(Rc::clone(&globals));
+    let _ = vm.run(chunk).expect("run ok");
+
+    assert!(
+        matches!(vm.get_global("hits"), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON),
+        "unexpected hits value: {:?}",
+        vm.get_global("hits")
+    );
+}
+
+#[test]
+fn member_postfix_update_returns_old_value_and_stores_new_value() {
+    let src = r#"
+        var obj = { value: 1 };
+        var old = obj.value++;
+    "#;
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    globals.borrow_mut().properties.insert(
+        crate::value::PropertyKey::String("globalThis".to_string()),
+        crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+    );
+    runtime_utils::install_minimal_kernel_constructors(&globals);
+    let mut vm = Vm::new(Rc::clone(&globals));
+    let _ = vm.run(chunk).expect("run ok");
+
+    assert!(
+        matches!(vm.get_global("old"), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON)
     );
 }
 

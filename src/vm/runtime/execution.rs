@@ -1,4 +1,4 @@
-use crate::bytecode::{Chunk, FunctionProto, Op};
+use crate::bytecode::{Chunk, FunctionProto, OP_COUNT, Op};
 use crate::environment::EnvironmentRecord;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
@@ -66,9 +66,66 @@ impl Vm {
             global_env,
             yield_star_queue: None,
             gc_step_counter: 0,
+            opcode_profiling_enabled: std::env::var("BLITZ_VM_PROFILE")
+                .ok()
+                .is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false")),
+            opcode_counts: [0; OP_COUNT],
+            run_started_at: None,
         };
         vm.populate_realm_intrinsics();
         vm
+    }
+
+    fn begin_opcode_profile_run(&mut self) {
+        if self.opcode_profiling_enabled {
+            self.opcode_counts = [0; OP_COUNT];
+            self.run_started_at = Some(std::time::Instant::now());
+        }
+    }
+
+    fn record_opcode(&mut self, op: Op) {
+        if self.opcode_profiling_enabled {
+            self.opcode_counts[op as usize] = self.opcode_counts[op as usize].saturating_add(1);
+        }
+    }
+
+    fn finish_opcode_profile_run(&mut self, outcome: &str) {
+        if !self.opcode_profiling_enabled {
+            return;
+        }
+
+        let elapsed = self
+            .run_started_at
+            .take()
+            .map(|t| t.elapsed())
+            .unwrap_or_default();
+        let total: u64 = self.opcode_counts.iter().sum();
+        eprintln!(
+            "[vm-profile] outcome={} elapsed={:?} total_ops={}",
+            outcome, elapsed, total
+        );
+        if total == 0 {
+            return;
+        }
+
+        let mut ranked: Vec<(Op, u64)> = self
+            .opcode_counts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &count)| {
+                if count == 0 {
+                    None
+                } else {
+                    Op::from_byte(index as u8).map(|op| (op, count))
+                }
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (op, count) in ranked.into_iter().take(16) {
+            let pct = (count as f64 / total as f64) * 100.0;
+            eprintln!("[vm-profile] {:>16} {:>12} {:>6.2}%", op.name(), count, pct);
+        }
     }
 
     /// Return the current `this` value.
@@ -610,6 +667,7 @@ impl Vm {
             })
             .unwrap_or(Value::Undefined);
         self.initialize_root_bindings();
+        self.begin_opcode_profile_run();
 
         loop {
             match self.step(None) {
@@ -627,6 +685,7 @@ impl Vm {
                     {
                         let _ = self.collect_garbage_prototype();
                     }
+                    self.finish_opcode_profile_run("return");
                     return Ok(result);
                 }
                 Ok(StepOutcome::Yield(_)) => {
@@ -641,6 +700,7 @@ impl Vm {
                     {
                         let _ = self.collect_garbage_prototype();
                     }
+                    self.finish_opcode_profile_run("error");
                     return Err(err);
                 }
             }
@@ -849,8 +909,11 @@ impl Vm {
         Ok(Value::Object(gen_obj))
     }
 
-    fn execute_call(&mut self) -> Result<(), crate::errors::RuntimeError> {
-        let nargs = self.read_byte()? as usize;
+    fn execute_call_with_nargs(
+        &mut self,
+        nargs_override: Option<usize>,
+    ) -> Result<(), crate::errors::RuntimeError> {
+        let nargs = nargs_override.unwrap_or(self.read_byte()? as usize);
         let mut args: Vec<Value> = Vec::with_capacity(nargs);
         for _ in 0..nargs {
             args.push(self.pop()?);
@@ -932,6 +995,23 @@ impl Vm {
             }
         }
 
+        Ok(())
+    }
+
+    fn execute_call(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        self.execute_call_with_nargs(None)
+    }
+
+    fn execute_construct(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        let nargs = self.read_byte()? as usize;
+        let mut args: Vec<Value> = Vec::with_capacity(nargs);
+        for _ in 0..nargs {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+        let callee = self.pop()?;
+        let result = self.construct_value(&callee, &args)?;
+        self.stack.push(result);
         Ok(())
     }
 
@@ -1072,6 +1152,10 @@ impl Vm {
         }
 
         Ok(())
+    }
+
+    fn execute_call_ic(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        self.execute_call_with_nargs(None)
     }
 
     fn execute_call_method(&mut self) -> Result<(), crate::errors::RuntimeError> {
@@ -1905,6 +1989,7 @@ impl Vm {
                 )));
             }
         };
+        self.record_opcode(op);
 
         match op {
             Op::Const => {
@@ -2318,8 +2403,10 @@ impl Vm {
                 self.stack.push(Value::String(v.type_name().to_string()));
             }
             Op::Call => self.execute_call()?,
+            Op::CallIC => self.execute_call_ic()?,
             Op::CallMethod => self.execute_call_method()?,
             Op::Spread => self.execute_spread()?,
+            Op::Construct => self.execute_construct()?,
             Op::Return => {
                 if self.frames.is_empty() {
                     let result = self.stack.pop().unwrap_or(Value::Undefined);
@@ -2343,6 +2430,20 @@ impl Vm {
                 let offset = self.read_short_signed()?;
                 let v = self.pop()?;
                 if !v.is_truthy() {
+                    self.jump(offset)?;
+                }
+            }
+            Op::JumpIfTrue => {
+                let offset = self.read_short_signed()?;
+                let v = self.pop()?;
+                if v.is_truthy() {
+                    self.jump(offset)?;
+                }
+            }
+            Op::JumpIfNullish => {
+                let offset = self.read_short_signed()?;
+                let v = self.pop()?;
+                if matches!(v, Value::Null | Value::Undefined) {
                     self.jump(offset)?;
                 }
             }
@@ -2373,6 +2474,9 @@ impl Vm {
                 self.stack.push(v);
             }
             Op::GetPropertyIC => self.get_property_ic()?,
+            Op::GetGlobalIC => self.get_global_ic()?,
+            Op::DeleteProperty => self.delete_property_op()?,
+            Op::HasProperty => self.has_property_op()?,
             Op::SetProperty => {
                 if crate::trace::enabled() {
                     eprintln!(
@@ -2390,6 +2494,23 @@ impl Vm {
                 let k = self.to_property_key(&key)?;
                 self.set_property_tracked(&obj, &k, value.clone())?;
                 self.stack.push(value);
+            }
+            Op::SetPropertyIC => self.set_property_ic()?,
+            Op::IteratorNext => self.iterator_next_op()?,
+            Op::IteratorClose => self.iterator_close_op()?,
+            Op::Swap => {
+                let len = self.stack.len();
+                if len < 2 {
+                    return Err(crate::errors::RuntimeError::from("Stack underflow"));
+                }
+                self.stack.swap(len - 1, len - 2);
+            }
+            Op::PopN => {
+                let count = self.read_byte()? as usize;
+                if count > self.stack.len() {
+                    return Err(crate::errors::RuntimeError::from("Stack underflow"));
+                }
+                self.stack.truncate(self.stack.len() - count);
             }
             Op::GetModuleExport => {
                 let module_idx = self.read_byte()? as usize;
@@ -3930,6 +4051,68 @@ impl Vm {
         Ok(())
     }
 
+    fn delete_property_op(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        let key = self.pop()?;
+        let obj = self.pop()?;
+        let prop = self.to_property_key(&key)?;
+        let deleted = self.delete_property_host(&obj, &prop)?;
+        self.stack.push(Value::Bool(deleted));
+        Ok(())
+    }
+
+    fn has_property_op(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        let key = self.pop()?;
+        let obj = self.pop()?;
+        let prop = self.to_property_key(&key)?;
+        let has = self.has_property_host(&obj, &prop)?;
+        self.stack.push(Value::Bool(has));
+        Ok(())
+    }
+
+    fn iterator_next_op(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        let iterator = self.pop()?;
+        let next_fn =
+            self.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
+        let result = self.call_value_with_this(&next_fn, &iterator, &[])?;
+        self.stack.push(result);
+        Ok(())
+    }
+
+    fn iterator_close_op(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        let iterator = self.pop()?;
+        let return_fn =
+            self.get_property_host(&iterator, &PropertyKey::String("return".to_string()))?;
+        let is_callable = matches!(
+            return_fn,
+            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
+        );
+        if is_callable {
+            let _ = self.call_value_with_this(&return_fn, &iterator, &[])?;
+        }
+        self.stack.push(iterator);
+        Ok(())
+    }
+
+    fn get_global_ic(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        let idx = self.read_short()? as usize;
+        let name = self.string_constant(idx)?;
+        let value = self
+            .globals
+            .borrow()
+            .properties
+            .get(&PropertyKey::String(name.clone()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            });
+        let value = match value {
+            Some(value) => value,
+            None => return Err(self.throw_reference_error(&format!("{name} is not defined"))),
+        };
+        self.stack.push(value);
+        Ok(())
+    }
+
     /// Inline-cached property access with generation-based invalidation.
     fn get_property_ic(&mut self) -> Result<(), crate::errors::RuntimeError> {
         let _slot = self.read_byte()? as usize;
@@ -3961,6 +4144,17 @@ impl Vm {
             crate::trace::value_string("[trace]   result", &v);
         }
         self.stack.push(v);
+        Ok(())
+    }
+
+    fn set_property_ic(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        let _slot = self.read_byte()? as usize;
+        let value = self.pop()?;
+        let key = self.pop()?;
+        let obj = self.pop()?;
+        let k = self.to_property_key(&key)?;
+        self.set_property_tracked(&obj, &k, value.clone())?;
+        self.stack.push(value);
         Ok(())
     }
 
@@ -4393,7 +4587,11 @@ impl Vm {
                                     eprintln!("[diag]   {}: {:?} {}", j, op, arg);
                                 }
                             }
-                            Op::Jump | Op::JumpIfFalse | Op::PushHandler => {
+                            Op::Jump
+                            | Op::JumpIfFalse
+                            | Op::JumpIfTrue
+                            | Op::JumpIfNullish
+                            | Op::PushHandler => {
                                 let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
                                 let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0);
                                 let offset = ((hi as i16) << 8) | (lo as i16);
@@ -4402,15 +4600,18 @@ impl Vm {
                             Op::SetLocal
                             | Op::GetLocal
                             | Op::Call
+                            | Op::Construct
+                            | Op::PopN
                             | Op::GetBuiltin
                             | Op::GetProperty
                             | Op::SetProperty
                             | Op::GetPropertyIC
+                            | Op::SetPropertyIC
                             | Op::MakeClosure => {
                                 let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
                                 eprintln!("[diag]   {}: {:?} {}", j, op, arg);
                             }
-                            Op::SetGlobal | Op::GetGlobal => {
+                            Op::SetGlobal | Op::GetGlobal | Op::GetGlobalIC => {
                                 let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
                                 let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
                                 let arg = ((hi << 8) | lo) as usize;
@@ -4568,7 +4769,11 @@ impl Vm {
                                 };
                                 eprintln!("[diag] {:#06}  {:12?} {} ({})", j, op, arg, name);
                             }
-                            Op::Jump | Op::JumpIfFalse | Op::PushHandler => {
+                            Op::Jump
+                            | Op::JumpIfFalse
+                            | Op::JumpIfTrue
+                            | Op::JumpIfNullish
+                            | Op::PushHandler => {
                                 let hi = proto.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
                                 let lo = proto.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
                                 let val = ((hi << 8) | lo) as i16;
@@ -4644,7 +4849,7 @@ impl Vm {
                             }
                         }
                     }
-                    Op::GetGlobal | Op::SetGlobal => {
+                    Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => {
                         let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
                         let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
                         let arg = ((hi << 8) | lo) as usize;
@@ -4654,7 +4859,11 @@ impl Vm {
                         };
                         eprintln!("[diag] {:#06}  {:12?} {} ({})", j, op, arg, name);
                     }
-                    Op::Jump | Op::JumpIfFalse | Op::PushHandler => {
+                    Op::Jump
+                    | Op::JumpIfFalse
+                    | Op::JumpIfTrue
+                    | Op::JumpIfNullish
+                    | Op::PushHandler => {
                         let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
                         let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
                         let val = ((hi << 8) | lo) as i16;
@@ -4710,7 +4919,7 @@ impl Vm {
                             };
                             eprintln!("[diag]    {:#06}  Const       {} ({})", k, arg, repr);
                         }
-                        Op::GetGlobal | Op::SetGlobal => {
+                        Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => {
                             let hi = frame.chunk.code.get(k + 1).cloned().unwrap_or(0) as u16;
                             let lo = frame.chunk.code.get(k + 2).cloned().unwrap_or(0) as u16;
                             let arg = ((hi << 8) | lo) as usize;
@@ -4902,20 +5111,24 @@ impl Vm {
 fn opcode_width(op: Op) -> usize {
     match op {
         Op::Const => 3,
-        Op::GetGlobal | Op::SetGlobal => 3,
+        Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => 3,
         Op::GetLocal
         | Op::SetLocal
         | Op::CloneLocalCell
         | Op::Call
         | Op::CallMethod
+        | Op::CallIC
+        | Op::Construct
+        | Op::PopN
         | Op::MakeClosure
         | Op::GetUpvalue
         | Op::SetUpvalue
         | Op::GetPropertyIC
+        | Op::SetPropertyIC
         | Op::GetBuiltin
         | Op::BuildArray
         | Op::BuildObject => 2,
-        Op::Jump | Op::JumpIfFalse | Op::PushHandler => 3,
+        Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
         _ => 1,
     }
 }
