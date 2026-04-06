@@ -194,7 +194,7 @@ pub struct Vm {
     pub(crate) last_uncaught_exception: Option<Value>,
     /// ECMAScript microtask queue.
     pub(super) microtasks: VecDeque<Microtask>,
-    /// Queue for pending dynamic import jobs that run after evaluation.
+    /// Queue for pending dynamic import jobs.
     pub(super) dynamic_import_jobs: VecDeque<DynamicImportJob>,
     /// Optional hook invoked when an unhandled rejection or microtask exception
     /// is observed. The hook receives two Values: the first is the promise

@@ -34,15 +34,19 @@ use std::sync::Arc;
 
 impl Vm {
     /// Queue a microtask to be executed after the current call stack completes.
-    ///
-    /// # Errors
-    ///
-    /// If the microtask queue is full, an error is returned.
     pub(crate) fn queue_microtask<F>(&mut self, job: F)
     where
         F: FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError> + 'static,
     {
         self.microtasks.push_back(Box::new(job));
+    }
+
+    /// Queue a dynamic import job to be executed by the host job loop.
+    pub(crate) fn queue_dynamic_import_job<F>(&mut self, job: F)
+    where
+        F: FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError> + 'static,
+    {
+        self.dynamic_import_jobs.push_back(Box::new(job));
     }
 
     /// Install a host hook which will be invoked for unhandled promise
@@ -73,6 +77,25 @@ impl Vm {
     /// draining the remaining microtasks. This mirrors the common host policy
     /// of running microtasks to completion while surfaceing exceptions via a
     /// host hook instead of aborting the queue on first error.
+    pub(crate) fn drain_dynamic_import_jobs(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        while let Some(mut job) = self.dynamic_import_jobs.pop_front() {
+            let caller_handlers = std::mem::take(&mut self.handlers);
+            let result = job(self);
+            self.handlers = caller_handlers;
+            self.maybe_collect_garbage_prototype();
+            if let Err(err) = result {
+                let exc_val = Value::String(format!("{}", err));
+                self.last_uncaught_exception = Some(exc_val.clone());
+                if let Some(hook_rc) = self.unhandled_rejection_hook.as_ref().map(Rc::clone) {
+                    let mut hook = hook_rc.borrow_mut();
+                    (hook)(self, Value::Undefined, exc_val.clone());
+                }
+                continue;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn drain_microtasks(&mut self) -> Result<(), crate::errors::RuntimeError> {
         while let Some(mut job) = self.microtasks.pop_front() {
             let caller_handlers = std::mem::take(&mut self.handlers);
@@ -99,6 +122,9 @@ impl Vm {
     }
 
     pub(super) fn run_microtasks_if_needed(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        if !self.dynamic_import_jobs.is_empty() {
+            self.drain_dynamic_import_jobs()?;
+        }
         if self.microtasks.is_empty() {
             return Ok(());
         }

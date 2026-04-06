@@ -996,7 +996,7 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
         Ok(value) => {
             let promise_for_fulfill = Rc::clone(&promise);
             let value_for_fulfill = value;
-            vm.queue_microtask(move |vm| {
+            vm.queue_dynamic_import_job(move |vm| {
                 fulfill_pending_promise(vm, &promise_for_fulfill, value_for_fulfill.clone());
                 Ok(())
             });
@@ -1004,7 +1004,7 @@ fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, crate::err
         Err(reason) => {
             let promise_for_reject = Rc::clone(&promise);
             let reason_for_reject = reason;
-            vm.queue_microtask(move |vm| {
+            vm.queue_dynamic_import_job(move |vm| {
                 reject_pending_promise(vm, &promise_for_reject, reason_for_reject.clone());
                 Ok(())
             });
