@@ -10,6 +10,7 @@ use crate::runtime_utils::{
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
 
+/// Installs the String, Boolean, and Symbol builtins into the globals object.
 pub(crate) fn install_string_boolean_symbol_builtins(
     globals: &mut ObjectData,
     object_proto_map: &Rc<RefCell<ObjectData>>,
