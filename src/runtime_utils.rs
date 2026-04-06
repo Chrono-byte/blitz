@@ -5601,6 +5601,18 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 Some(other) => return Ok(other.clone()),
                 None => return Ok(Value::Undefined),
             };
+            let trimmed = src.trim();
+            if !trimmed.is_empty()
+                && trimmed
+                    .chars()
+                    .all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
+                && matches!(trimmed.chars().next(), Some(c) if c == '_' || c == '$' || c.is_ascii_alphabetic())
+            {
+                if let Some(value) = vm.resolve_identifier_value(trimmed)? {
+                    return Ok(value);
+                }
+                return Err(vm.throw_reference_error(&format!("{trimmed} is not defined")));
+            }
             match vm.eval_expression_source(&src) {
                 Ok(value) => return Ok(value),
                 Err(err) => {
@@ -6023,55 +6035,19 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     insert_if_missing_global(
         "__native_forInKeys",
         Value::Builtin(Rc::new(|vm, args| {
-            let mut current = args.first().cloned().unwrap_or(Value::Undefined);
+            let current = args.first().cloned().unwrap_or(Value::Undefined);
             if matches!(current, Value::Undefined | Value::Null) {
                 return Err(vm.throw_type_error("Cannot convert undefined or null to object"));
             }
 
             let mut out: Vec<Option<Value>> = Vec::new();
             let mut seen: HashSet<String> = HashSet::new();
-            let mut depth = 0usize;
-            while depth < 128 {
-                for key in own_enumerable_keys(&current) {
-                    if let PropertyKey::String(name) = key
-                        && seen.insert(name.clone())
-                    {
-                        out.push(Some(Value::String(name)));
-                    }
+            for key in own_enumerable_keys(&current) {
+                if let PropertyKey::String(name) = key
+                    && seen.insert(name.clone())
+                {
+                    out.push(Some(Value::String(name)));
                 }
-
-                let next = match &current {
-                    Value::Object(obj) => obj.borrow().get_prototype(),
-                    Value::Array(_, props)
-                    | Value::Closure { props, .. }
-                    | Value::BuiltinObject(_, props) => props.borrow().get_prototype(),
-                    Value::String(_) => vm
-                        .get_global("String")
-                        .and_then(|ctor| {
-                            vm.get_property_host(
-                                &ctor,
-                                &PropertyKey::String("prototype".to_string()),
-                            )
-                            .ok()
-                        })
-                        .unwrap_or(Value::Null),
-                    Value::Symbol(_, _) => vm
-                        .get_global("Symbol")
-                        .and_then(|ctor| {
-                            vm.get_property_host(
-                                &ctor,
-                                &PropertyKey::String("prototype".to_string()),
-                            )
-                            .ok()
-                        })
-                        .unwrap_or(Value::Null),
-                    _ => Value::Null,
-                };
-                if matches!(next, Value::Null | Value::Undefined) {
-                    break;
-                }
-                current = next;
-                depth += 1;
             }
 
             let arr_rc = Rc::new(RefCell::new(out));

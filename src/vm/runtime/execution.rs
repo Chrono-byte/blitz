@@ -1429,6 +1429,17 @@ impl Vm {
             .unwrap_or(Value::Undefined))
     }
 
+    /// Resolve a bare identifier against the current lexical/global environment.
+    pub fn resolve_identifier_value(
+        &self,
+        name: &str,
+    ) -> Result<Option<Value>, crate::errors::RuntimeError> {
+        if let Some(value) = self.lexical_env.borrow().get_binding_value(name)? {
+            return Ok(Some(value));
+        }
+        Ok(self.get_global(name))
+    }
+
     /// Host hook: construct a callable with `new` semantics.
     ///
     /// # Errors

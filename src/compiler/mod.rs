@@ -24,13 +24,14 @@
 
 use crate::bytecode::{Chunk, Op};
 use oxc_ast::ast as oast;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 #[cfg(test)]
 use {
     crate::{ObjectData, Value, Vm, runtime_utils},
     std::cell::RefCell,
-    std::collections::{HashMap, HashSet},
+    std::collections::HashMap,
 };
 
 pub mod core;
@@ -105,6 +106,221 @@ pub fn compile_oxc_repl(
 }
 
 impl Compiler {
+    fn lexical_declared_names_of_statement(stmt: &oast::Statement<'_>, out: &mut HashSet<String>) {
+        match stmt {
+            oast::Statement::VariableDeclaration(v)
+                if !matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) =>
+            {
+                for decl in &v.declarations {
+                    Self::collect_binding_names(&decl.id, out);
+                }
+            }
+            oast::Statement::FunctionDeclaration(f) => {
+                if let Some(id) = &f.id {
+                    out.insert(id.name.to_string());
+                }
+            }
+            oast::Statement::ClassDeclaration(c) => {
+                if let Some(id) = &c.id {
+                    out.insert(id.name.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_binding_names(pattern: &oast::BindingPattern<'_>, out: &mut HashSet<String>) {
+        match pattern {
+            oast::BindingPattern::BindingIdentifier(i) => {
+                out.insert(i.name.to_string());
+            }
+            oast::BindingPattern::AssignmentPattern(a) => Self::collect_binding_names(&a.left, out),
+            oast::BindingPattern::ObjectPattern(o) => {
+                for prop in &o.properties {
+                    Self::collect_binding_names(&prop.value, out);
+                }
+                if let Some(rest) = &o.rest {
+                    Self::collect_binding_names(&rest.argument, out);
+                }
+            }
+            oast::BindingPattern::ArrayPattern(a) => {
+                for elem in a.elements.iter().flatten() {
+                    Self::collect_binding_names(elem, out);
+                }
+                if let Some(rest) = &a.rest {
+                    Self::collect_binding_names(&rest.argument, out);
+                }
+            }
+        }
+    }
+
+    fn var_declared_names_of_statement(
+        &self,
+        stmt: &oast::Statement<'_>,
+        out: &mut HashSet<String>,
+    ) {
+        match stmt {
+            oast::Statement::VariableDeclaration(v)
+                if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) =>
+            {
+                for decl in &v.declarations {
+                    Self::collect_binding_names(&decl.id, out);
+                }
+            }
+            oast::Statement::BlockStatement(b) => {
+                for stmt in &b.body {
+                    self.var_declared_names_of_statement(stmt, out);
+                }
+            }
+            oast::Statement::IfStatement(i) => {
+                self.var_declared_names_of_statement(&i.consequent, out);
+                if let Some(alt) = &i.alternate {
+                    self.var_declared_names_of_statement(alt, out);
+                }
+            }
+            oast::Statement::WhileStatement(w) => {
+                self.var_declared_names_of_statement(&w.body, out)
+            }
+            oast::Statement::DoWhileStatement(d) => {
+                self.var_declared_names_of_statement(&d.body, out)
+            }
+            oast::Statement::ForStatement(f) => {
+                if let Some(init) = &f.init
+                    && let oxc_ast::ast::ForStatementInit::VariableDeclaration(v) = init
+                    && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var)
+                {
+                    for decl in &v.declarations {
+                        Self::collect_binding_names(&decl.id, out);
+                    }
+                }
+                self.var_declared_names_of_statement(&f.body, out);
+            }
+            oast::Statement::ForInStatement(f) => {
+                if let oxc_ast::ast::ForStatementLeft::VariableDeclaration(v) = &f.left
+                    && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var)
+                {
+                    for decl in &v.declarations {
+                        Self::collect_binding_names(&decl.id, out);
+                    }
+                }
+                self.var_declared_names_of_statement(&f.body, out);
+            }
+            oast::Statement::ForOfStatement(f) => {
+                if let oxc_ast::ast::ForStatementLeft::VariableDeclaration(v) = &f.left
+                    && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var)
+                {
+                    for decl in &v.declarations {
+                        Self::collect_binding_names(&decl.id, out);
+                    }
+                }
+                self.var_declared_names_of_statement(&f.body, out);
+            }
+            oast::Statement::LabeledStatement(l) => {
+                self.var_declared_names_of_statement(&l.body, out)
+            }
+            oast::Statement::WithStatement(w) => self.var_declared_names_of_statement(&w.body, out),
+            oast::Statement::TryStatement(t) => {
+                for stmt in &t.block.body {
+                    self.var_declared_names_of_statement(stmt, out);
+                }
+                if let Some(handler) = &t.handler {
+                    for stmt in &handler.body.body {
+                        self.var_declared_names_of_statement(stmt, out);
+                    }
+                }
+                if let Some(finalizer) = &t.finalizer {
+                    for stmt in &finalizer.body {
+                        self.var_declared_names_of_statement(stmt, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn validate_statement_position_function(
+        &self,
+        stmt: &oast::Statement<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        if self.strict_context && matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+            return Err(crate::errors::CompilerError::from(
+                "SyntaxError: function declaration in statement position",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_early_errors_in_statements(
+        &self,
+        stmts: &[oast::Statement<'_>],
+    ) -> Result<(), crate::errors::CompilerError> {
+        let mut lexical = HashSet::new();
+        let mut vars = HashSet::new();
+        for stmt in stmts {
+            Self::lexical_declared_names_of_statement(stmt, &mut lexical);
+            self.var_declared_names_of_statement(stmt, &mut vars);
+        }
+        if let Some(name) = lexical.iter().find(|name| vars.contains(*name)) {
+            return Err(crate::errors::CompilerError::from(format!(
+                "SyntaxError: redeclaration of lexical binding `{}`",
+                name
+            )));
+        }
+
+        for stmt in stmts {
+            match stmt {
+                oast::Statement::BlockStatement(b) => {
+                    self.validate_early_errors_in_statements(&b.body)?
+                }
+                oast::Statement::IfStatement(i) => {
+                    self.validate_statement_position_function(&i.consequent)?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&i.consequent))?;
+                    if let Some(alt) = &i.alternate {
+                        self.validate_statement_position_function(alt)?;
+                        self.validate_early_errors_in_statements(std::slice::from_ref(alt))?;
+                    }
+                }
+                oast::Statement::WhileStatement(w) => {
+                    self.validate_statement_position_function(&w.body)?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&w.body))?;
+                }
+                oast::Statement::DoWhileStatement(d) => {
+                    self.validate_statement_position_function(&d.body)?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&d.body))?;
+                }
+                oast::Statement::ForStatement(f) => {
+                    self.validate_statement_position_function(&f.body)?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&f.body))?;
+                }
+                oast::Statement::ForInStatement(f) => {
+                    self.validate_statement_position_function(&f.body)?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&f.body))?;
+                }
+                oast::Statement::ForOfStatement(f) => {
+                    self.validate_statement_position_function(&f.body)?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&f.body))?;
+                }
+                oast::Statement::LabeledStatement(l) => {
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&l.body))?;
+                }
+                oast::Statement::WithStatement(w) => {
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&w.body))?;
+                }
+                oast::Statement::TryStatement(t) => {
+                    self.validate_early_errors_in_statements(&t.block.body)?;
+                    if let Some(handler) = &t.handler {
+                        self.validate_early_errors_in_statements(&handler.body.body)?;
+                    }
+                    if let Some(finalizer) = &t.finalizer {
+                        self.validate_early_errors_in_statements(&finalizer.body)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Transitional compiler entry that accepts an `oast::Program` reference.
     ///
     /// Uses a direct walker over `oast`.
@@ -125,9 +341,6 @@ impl Compiler {
         ctx: Option<&ModuleContext>,
         repl_mode: bool,
     ) -> Result<Chunk, crate::errors::CompilerError> {
-        self.pre_declare_functions_oast(program);
-        self.pre_declare_variables_oast(program);
-
         if let Some(cctx) = ctx {
             self.current_module = Some(cctx.clone());
         } else {
@@ -138,6 +351,11 @@ impl Compiler {
                 .directives
                 .iter()
                 .any(|directive| directive.directive.as_str() == "use strict");
+
+        self.validate_early_errors_in_statements(&program.body)?;
+
+        self.pre_declare_functions_oast(program);
+        self.pre_declare_variables_oast(program);
 
         self.emit_hoisted_function_decls_oast_stmts(&program.body)?;
 
