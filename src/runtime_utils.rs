@@ -62,6 +62,7 @@ use std::sync::Mutex;
 use crate::bytecode;
 use crate::compiler;
 use crate::compiler::ModuleContext;
+use crate::ecmascript::builtins;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::parser::Parser;
 use crate::value::SymbolId;
@@ -70,8 +71,6 @@ use crate::vm::Vm;
 use num_bigint::{BigInt as BigIntValue, Sign};
 use num_traits::{FromPrimitive, ToPrimitive};
 use regex::RegexBuilder;
-
-mod builtins;
 
 const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
 

@@ -49,6 +49,7 @@
 
 pub mod bytecode;
 pub mod compiler;
+pub mod ecmascript;
 pub mod environment;
 pub mod errors;
 pub mod gc;
