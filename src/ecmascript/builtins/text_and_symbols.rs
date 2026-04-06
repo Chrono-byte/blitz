@@ -69,32 +69,39 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         PropertyDescriptor::data(Value::Object(Rc::clone(&symbol_proto_map))),
     );
     let symbol_ctor_val = Value::BuiltinObject(symbol_ctor_fn.clone(), Rc::clone(&symbol_ctor_map));
+    set_builtin_length(&symbol_ctor_val, 0.0);
     symbol_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(symbol_ctor_val.clone()),
     );
+    let symbol_to_string = builtin_object(
+        Rc::new(|_vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            match this {
+                Value::Symbol(_, desc) => Ok(Value::String(match desc {
+                    Some(d) => format!("Symbol({})", d),
+                    None => "Symbol()".to_string(),
+                })),
+                _ => Ok(Value::String("[object Symbol]".to_string())),
+            }
+        }),
+        function_proto_map,
+    );
+    set_builtin_name(&symbol_to_string, "toString");
+    set_builtin_length(&symbol_to_string, 0.0);
     symbol_proto_map.borrow_mut().properties.insert(
         PKey::String("toString".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|_vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
-                match this {
-                    Value::Symbol(_, desc) => Ok(Value::String(match desc {
-                        Some(d) => format!("Symbol({})", d),
-                        None => "Symbol()".to_string(),
-                    })),
-                    _ => Ok(Value::String("[object Symbol]".to_string())),
-                }
-            }),
-            function_proto_map,
-        )),
+        PropertyDescriptor::data(symbol_to_string),
     );
+    let symbol_value_of = builtin_object(
+        Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+        function_proto_map,
+    );
+    set_builtin_name(&symbol_value_of, "valueOf");
+    set_builtin_length(&symbol_value_of, 0.0);
     symbol_proto_map.borrow_mut().properties.insert(
         PKey::String("valueOf".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
-            function_proto_map,
-        )),
+        PropertyDescriptor::data(symbol_value_of),
     );
     for (name, sym) in [
         (
@@ -232,74 +239,81 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         }
     });
     let string_ctor_val = Value::BuiltinObject(string_ctor_fn.clone(), Rc::clone(&string_ctor_map));
+    set_builtin_length(&string_ctor_val, 1.0);
     string_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(string_ctor_val.clone()),
     );
-    string_proto_map.borrow_mut().properties.insert(
-        PKey::String("valueOf".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
-                let res =
-                    match this {
-                        Value::String(s) => Value::String(s),
-                        Value::Object(obj) => {
-                            if let Some(PropertyDescriptor::Data { value, .. }) = obj
-                                .borrow()
-                                .properties
-                                .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                            {
-                                match value {
-                                    Value::String(s) => Value::String(s.clone()),
-                                    _ => return Err(vm.throw_type_error(
-                                        "String.prototype.valueOf called on incompatible receiver",
-                                    )),
-                                }
-                            } else {
+    let string_value_of = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            let res = match this {
+                Value::String(s) => Value::String(s),
+                Value::Object(obj) => {
+                    if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                        .borrow()
+                        .properties
+                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                    {
+                        match value {
+                            Value::String(s) => Value::String(s.clone()),
+                            _ => {
                                 return Err(vm.throw_type_error(
                                     "String.prototype.valueOf called on incompatible receiver",
                                 ));
                             }
                         }
-                        _ => {
-                            return Err(vm.throw_type_error(
-                                "String.prototype.valueOf called on incompatible receiver",
-                            ));
-                        }
-                    };
-                Ok(res)
-            }),
-            function_proto_map,
-        )),
+                    } else {
+                        return Err(vm.throw_type_error(
+                            "String.prototype.valueOf called on incompatible receiver",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(vm.throw_type_error(
+                        "String.prototype.valueOf called on incompatible receiver",
+                    ));
+                }
+            };
+            Ok(res)
+        }),
+        function_proto_map,
     );
+    set_builtin_name(&string_value_of, "valueOf");
+    set_builtin_length(&string_value_of, 0.0);
+    string_proto_map.borrow_mut().properties.insert(
+        PKey::String("valueOf".to_string()),
+        PropertyDescriptor::data(string_value_of),
+    );
+    let string_to_string = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            match this {
+                Value::String(s) => Ok(Value::String(s)),
+                Value::Object(obj) => {
+                    if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                        .borrow()
+                        .properties
+                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                        && let Value::String(s) = value
+                    {
+                        return Ok(Value::String(s.clone()));
+                    }
+                    Err(vm.throw_type_error(
+                        "String.prototype.toString called on incompatible receiver",
+                    ))
+                }
+                _ => Err(vm
+                    .throw_type_error("String.prototype.toString called on incompatible receiver")),
+            }
+        }),
+        function_proto_map,
+    );
+    set_builtin_name(&string_to_string, "toString");
+    set_builtin_length(&string_to_string, 0.0);
     string_proto_map.borrow_mut().properties.insert(
         PKey::String("toString".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
-                match this {
-                    Value::String(s) => Ok(Value::String(s)),
-                    Value::Object(obj) => {
-                        if let Some(PropertyDescriptor::Data { value, .. }) = obj
-                            .borrow()
-                            .properties
-                            .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                            && let Value::String(s) = value
-                        {
-                            return Ok(Value::String(s.clone()));
-                        }
-                        Err(vm.throw_type_error(
-                            "String.prototype.toString called on incompatible receiver",
-                        ))
-                    }
-                    _ => Err(vm.throw_type_error(
-                        "String.prototype.toString called on incompatible receiver",
-                    )),
-                }
-            }),
-            function_proto_map,
-        )),
+        PropertyDescriptor::data(string_to_string),
     );
     let string_index_of = builtin_object(
         Rc::new(|vm, args| {
@@ -439,67 +453,71 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(boolean_ctor_val.clone()),
     );
-    boolean_proto_map.borrow_mut().properties.insert(
-        PKey::String("valueOf".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
-                let res = match this {
-                    Value::Bool(b) => Value::Bool(b),
-                    Value::Object(obj) => {
-                        if let Some(PropertyDescriptor::Data { value, .. }) = obj
-                            .borrow()
-                            .properties
-                            .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                        {
-                            value.clone()
-                        } else {
-                            return Err(vm.throw_type_error(
-                                "Boolean.prototype.valueOf called on incompatible receiver",
-                            ));
-                        }
-                    }
-                    _ => {
+    let boolean_value_of = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            let res = match this {
+                Value::Bool(b) => Value::Bool(b),
+                Value::Object(obj) => {
+                    if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                        .borrow()
+                        .properties
+                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                    {
+                        value.clone()
+                    } else {
                         return Err(vm.throw_type_error(
                             "Boolean.prototype.valueOf called on incompatible receiver",
                         ));
                     }
-                };
-                Ok(res)
-            }),
-            function_proto_map,
-        )),
+                }
+                _ => {
+                    return Err(vm.throw_type_error(
+                        "Boolean.prototype.valueOf called on incompatible receiver",
+                    ));
+                }
+            };
+            Ok(res)
+        }),
+        function_proto_map,
     );
+    set_builtin_name(&boolean_value_of, "valueOf");
+    set_builtin_length(&boolean_value_of, 0.0);
+    boolean_proto_map.borrow_mut().properties.insert(
+        PKey::String("valueOf".to_string()),
+        PropertyDescriptor::data(boolean_value_of),
+    );
+    let boolean_to_string = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            match this {
+                Value::Bool(b) => Ok(Value::String(if b { "true" } else { "false" }.to_string())),
+                Value::Object(obj) => {
+                    if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                        .borrow()
+                        .properties
+                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                        && let Value::Bool(b) = value
+                    {
+                        Ok(Value::String(if *b { "true" } else { "false" }.to_string()))
+                    } else {
+                        Err(vm.throw_type_error(
+                            "Boolean.prototype.toString called on incompatible receiver",
+                        ))
+                    }
+                }
+                _ => Err(vm.throw_type_error(
+                    "Boolean.prototype.toString called on incompatible receiver",
+                )),
+            }
+        }),
+        function_proto_map,
+    );
+    set_builtin_name(&boolean_to_string, "toString");
+    set_builtin_length(&boolean_to_string, 0.0);
     boolean_proto_map.borrow_mut().properties.insert(
         PKey::String("toString".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
-                match this {
-                    Value::Bool(b) => {
-                        Ok(Value::String(if b { "true" } else { "false" }.to_string()))
-                    }
-                    Value::Object(obj) => {
-                        if let Some(PropertyDescriptor::Data { value, .. }) = obj
-                            .borrow()
-                            .properties
-                            .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                            && let Value::Bool(b) = value
-                        {
-                            Ok(Value::String(if *b { "true" } else { "false" }.to_string()))
-                        } else {
-                            Err(vm.throw_type_error(
-                                "Boolean.prototype.toString called on incompatible receiver",
-                            ))
-                        }
-                    }
-                    _ => Err(vm.throw_type_error(
-                        "Boolean.prototype.toString called on incompatible receiver",
-                    )),
-                }
-            }),
-            function_proto_map,
-        )),
+        PropertyDescriptor::data(boolean_to_string),
     );
 
     set_builtin_name(&string_ctor_val, "String");
