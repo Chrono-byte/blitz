@@ -6491,33 +6491,136 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             PropertyDescriptor::data(throw_type_error_fn),
         );
 
+        fn hex_value(b: u8) -> Option<u8> {
+            match b {
+                b'0'..=b'9' => Some(b - b'0'),
+                b'a'..=b'f' => Some(b - b'a' + 10),
+                b'A'..=b'F' => Some(b - b'A' + 10),
+                _ => None,
+            }
+        }
+
+        fn decode_uri_component_str(input: &str) -> Result<String, &'static str> {
+            let bytes = input.as_bytes();
+            let mut out = String::new();
+            let mut i = 0usize;
+            while i < bytes.len() {
+                if bytes[i] != b'%' {
+                    out.push(bytes[i] as char);
+                    i += 1;
+                    continue;
+                }
+                let mut seq = Vec::new();
+                while i < bytes.len() && bytes[i] == b'%' {
+                    if i + 2 >= bytes.len() {
+                        return Err("malformed escape");
+                    }
+                    let hi = hex_value(bytes[i + 1]).ok_or("malformed escape")?;
+                    let lo = hex_value(bytes[i + 2]).ok_or("malformed escape")?;
+                    seq.push((hi << 4) | lo);
+                    i += 3;
+                }
+                let decoded = std::str::from_utf8(&seq).map_err(|_| "invalid utf8")?;
+                out.push_str(decoded);
+            }
+            Ok(out)
+        }
+
+        fn encode_uri_component_str(input: &str) -> Result<String, &'static str> {
+            fn is_unescaped(b: u8) -> bool {
+                matches!(b,
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' |
+                    b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+                )
+            }
+            let units: Vec<u16> = input.encode_utf16().collect();
+            let mut out = String::new();
+            let mut i = 0usize;
+            while i < units.len() {
+                let u = units[i];
+                let cp = if (0xD800..=0xDBFF).contains(&u) {
+                    if i + 1 >= units.len() {
+                        return Err("unpaired surrogate");
+                    }
+                    let u2 = units[i + 1];
+                    if !(0xDC00..=0xDFFF).contains(&u2) {
+                        return Err("unpaired surrogate");
+                    }
+                    i += 2;
+                    0x10000 + ((((u - 0xD800) as u32) << 10) | ((u2 - 0xDC00) as u32))
+                } else if (0xDC00..=0xDFFF).contains(&u) {
+                    return Err("unpaired surrogate");
+                } else {
+                    i += 1;
+                    u as u32
+                };
+                let mut buf = [0u8; 4];
+                let s = char::from_u32(cp)
+                    .ok_or("invalid code point")?
+                    .encode_utf8(&mut buf);
+                for &b in s.as_bytes() {
+                    if is_unescaped(b) {
+                        out.push(b as char);
+                    } else {
+                        out.push('%');
+                        out.push_str(&format!("{:02X}", b));
+                    }
+                }
+            }
+            Ok(out)
+        }
+
         let helper_fns: [(&str, BuiltinFn); 4] = [
             (
                 "decodeURI",
                 Rc::new(|vm: &mut Vm, args: &[Value]| {
                     let arg = args.first().cloned().unwrap_or(Value::Undefined);
-                    Ok(Value::String(vm.to_string(&arg)?))
+                    let s = vm.to_string(&arg)?;
+                    decode_uri_component_str(&s)
+                        .map(Value::String)
+                        .map_err(|_| {
+                            let err = host_error_object(vm, "URIError", "Malformed URI sequence");
+                            vm.throw_exception(err)
+                        })
                 }),
             ),
             (
                 "decodeURIComponent",
                 Rc::new(|vm: &mut Vm, args: &[Value]| {
                     let arg = args.first().cloned().unwrap_or(Value::Undefined);
-                    Ok(Value::String(vm.to_string(&arg)?))
+                    let s = vm.to_string(&arg)?;
+                    decode_uri_component_str(&s)
+                        .map(Value::String)
+                        .map_err(|_| {
+                            let err = host_error_object(vm, "URIError", "Malformed URI sequence");
+                            vm.throw_exception(err)
+                        })
                 }),
             ),
             (
                 "encodeURI",
                 Rc::new(|vm: &mut Vm, args: &[Value]| {
                     let arg = args.first().cloned().unwrap_or(Value::Undefined);
-                    Ok(Value::String(vm.to_string(&arg)?))
+                    let s = vm.to_string(&arg)?;
+                    encode_uri_component_str(&s)
+                        .map(Value::String)
+                        .map_err(|_| {
+                            let err = host_error_object(vm, "URIError", "Malformed URI sequence");
+                            vm.throw_exception(err)
+                        })
                 }),
             ),
             (
                 "encodeURIComponent",
                 Rc::new(|vm: &mut Vm, args: &[Value]| {
                     let arg = args.first().cloned().unwrap_or(Value::Undefined);
-                    Ok(Value::String(vm.to_string(&arg)?))
+                    let s = vm.to_string(&arg)?;
+                    encode_uri_component_str(&s)
+                        .map(Value::String)
+                        .map_err(|_| {
+                            let err = host_error_object(vm, "URIError", "Malformed URI sequence");
+                            vm.throw_exception(err)
+                        })
                 }),
             ),
         ];
