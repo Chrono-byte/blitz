@@ -3,6 +3,8 @@ Test262 connector script for Blitz.
 
 Usage:
 - Optionally set `TEST262_FILTER` to a substring to limit which tests are run
+- Optionally set `TEST262_ANTI_FILTER` to skip tests whose path contains a substring
+- Optionally set `TEST262_ANTI_SEGMENT` to skip tests whose path contains an exact path segment
 - Optionally set `TEST262_LIMIT` to limit how many tests are executed (default: all)
 - Optionally set `TEST262_JOBS` to control parallelism (default: available parallelism)
 - Optionally set `TEST262_SEGMENTS` to a comma-separated list of segments
@@ -12,6 +14,8 @@ CLI (preferred over env):
 - --segment seg [,seg...] (repeatable)
 - --exclude seg [,seg...] (repeatable)
 - --filter substring
+- --anti-filter substring
+- --anti-segment seg [,seg...] (repeatable)
 - --limit number
 - --jobs number
 
@@ -99,16 +103,32 @@ impl TestResult {
 }
 
 /// Selects the files to run based on the filter and limit.
+fn path_has_segment(path: &Path, wanted: &str) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == wanted)
+}
+
 fn select_files_to_run(
     files: Vec<PathBuf>,
     filter: Option<&str>,
+    anti_filter: Option<&str>,
+    anti_segments: &[String],
     limit: Option<usize>,
 ) -> Vec<PathBuf> {
     let mut selected = Vec::new();
     for file in files {
+        let path = file.to_string_lossy();
         if let Some(flt) = filter
-            && !file.to_string_lossy().contains(flt)
+            && !path.contains(flt)
         {
+            continue;
+        }
+        if let Some(flt) = anti_filter
+            && path.contains(flt)
+        {
+            continue;
+        }
+        if anti_segments.iter().any(|seg| path_has_segment(&file, seg)) {
             continue;
         }
         selected.push(file);
@@ -487,6 +507,12 @@ struct RunnerOptions {
     /// Substring filter for test names.
     #[arg(long = "filter", value_name = "SUBSTRING")]
     filter: Option<String>,
+    /// Exclude tests whose path contains this substring.
+    #[arg(long = "anti-filter", value_name = "SUBSTRING")]
+    anti_filter: Option<String>,
+    /// Exclude tests whose path contains one of these exact path segments.
+    #[arg(long = "anti-segment", value_name = "SEGMENT", value_delimiter = ',')]
+    anti_segments: Vec<String>,
     /// Optional maximum number of tests to run.
     #[arg(long = "limit", value_name = "N")]
     limit: Option<usize>,
@@ -542,6 +568,12 @@ fn parse_args() -> RunnerOptions {
     }
     if opts.filter.is_none() {
         opts.filter = env::var("TEST262_FILTER").ok();
+    }
+    if opts.anti_filter.is_none() {
+        opts.anti_filter = env::var("TEST262_ANTI_FILTER").ok();
+    }
+    if opts.anti_segments.is_empty() {
+        opts.anti_segments = parse_csv_env("TEST262_ANTI_SEGMENT");
     }
     if opts.limit.is_none() {
         opts.limit = parse_usize_env("TEST262_LIMIT");
@@ -1781,7 +1813,13 @@ fn main() {
         }
     }
 
-    let files_to_run = select_files_to_run(files, opts.filter.as_deref(), opts.limit);
+    let files_to_run = select_files_to_run(
+        files,
+        opts.filter.as_deref(),
+        opts.anti_filter.as_deref(),
+        &opts.anti_segments,
+        opts.limit,
+    );
     let job_count = resolve_job_count(
         opts.jobs,
         files_to_run.len(),

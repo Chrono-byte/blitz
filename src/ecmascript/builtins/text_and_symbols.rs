@@ -4,8 +4,9 @@ use std::rc::Rc;
 use num_traits::ToPrimitive;
 
 use crate::runtime_utils::{
-    builtin_object, char_code_at, char_index_to_byte_index, non_enum_data, set_builtin_length,
-    set_builtin_name, this_boolean_value, this_string_value, require_object_coercible, usize_to_f64,
+    builtin_object, char_code_at, char_index_to_byte_index, non_enum_data,
+    require_object_coercible, set_builtin_length, set_builtin_name, this_boolean_value,
+    this_string_value, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
