@@ -6059,6 +6059,33 @@ mod tests {
     }
 
     #[test]
+    fn eval_array_spread_literal_expands_values() {
+        let src = r#"var evaluated = eval('[...[1, 2, 3], 4, 5]');"#;
+        let session = Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        runtime_utils::install_minimal_kernel_constructors(&globals);
+        let mut vm = Vm::new(Rc::clone(&globals));
+        let result = vm.run(chunk).expect("run ok");
+
+        assert!(matches!(result, Value::Undefined));
+        match vm.get_global("evaluated") {
+            Some(Value::Array(arr, _)) => {
+                let values: Vec<Value> = arr.borrow().iter().filter_map(Clone::clone).collect();
+                assert_eq!(values.len(), 5);
+                assert!(matches!(values[0], Value::Number(n) if (n - 1.0).abs() < f64::EPSILON));
+                assert!(matches!(values[1], Value::Number(n) if (n - 2.0).abs() < f64::EPSILON));
+                assert!(matches!(values[2], Value::Number(n) if (n - 3.0).abs() < f64::EPSILON));
+                assert!(matches!(values[3], Value::Number(n) if (n - 4.0).abs() < f64::EPSILON));
+                assert!(matches!(values[4], Value::Number(n) if (n - 5.0).abs() < f64::EPSILON));
+            }
+            other => panic!("expected evaluated array, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn void_operator_evaluates_to_undefined() {
         let session = Parser::parse_source("var x = void 0;").expect("parse ok");
         let program = session.program();

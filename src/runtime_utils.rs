@@ -5663,6 +5663,13 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     );
 
     insert_if_missing(
+        "__native_array_from_spread",
+        Value::Builtin(Rc::new(move |_vm, args| {
+            Ok(array_from_values(args.to_vec()))
+        })),
+    );
+
+    insert_if_missing(
         "__native_construct",
         Value::Builtin(Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "");

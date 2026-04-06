@@ -351,15 +351,54 @@ impl super::Compiler {
                 }
             }
             OExpr::ArrayExpression(arr) => {
-                for el in &arr.elements {
-                    if let Some(expr) = el.as_expression() {
-                        self.compile_expr_oast(expr)?;
-                    } else {
-                        self.emit(Op::Undefined, LINE);
+                let has_spread = arr
+                    .elements
+                    .iter()
+                    .any(|el| matches!(el, oast::ArrayExpressionElement::SpreadElement(_)));
+
+                if has_spread {
+                    self.emit_get_global_name("__native_array_from_spread");
+                    for el in &arr.elements {
+                        match el {
+                            oast::ArrayExpressionElement::SpreadElement(s) => {
+                                self.compile_expr_oast(&s.argument)?;
+                            }
+                            oast::ArrayExpressionElement::Elision(_) => {
+                                self.emit(Op::Undefined, LINE);
+                            }
+                            _ => {
+                                if let Some(expr) = el.as_expression() {
+                                    self.compile_expr_oast(expr)?;
+                                } else {
+                                    self.emit(Op::Undefined, LINE);
+                                }
+                            }
+                        }
                     }
+                    self.emit(Op::BuildArray, LINE);
+                    self.emit_byte(arr.elements.len() as u8, LINE);
+                    for el in &arr.elements {
+                        if matches!(el, oast::ArrayExpressionElement::SpreadElement(_)) {
+                            self.emit(Op::True, LINE);
+                        } else {
+                            self.emit(Op::False, LINE);
+                        }
+                    }
+                    self.emit(Op::BuildArray, LINE);
+                    self.emit_byte(arr.elements.len() as u8, LINE);
+                    self.emit(Op::Spread, LINE);
+                    self.emit_byte(arr.elements.len() as u8, LINE);
+                } else {
+                    for el in &arr.elements {
+                        if let Some(expr) = el.as_expression() {
+                            self.compile_expr_oast(expr)?;
+                        } else {
+                            self.emit(Op::Undefined, LINE);
+                        }
+                    }
+                    self.emit(Op::BuildArray, LINE);
+                    self.emit_byte(arr.elements.len() as u8, LINE);
                 }
-                self.emit(Op::BuildArray, LINE);
-                self.emit_byte(arr.elements.len() as u8, LINE);
             }
             OExpr::Identifier(id) => {
                 let name = id.name.as_str();
