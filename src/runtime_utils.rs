@@ -1742,6 +1742,62 @@ pub(crate) fn non_enum_data(value: Value) -> PropertyDescriptor {
     }
 }
 
+/// 22.1.3.34.1 ThisStringValue ( value )
+pub(crate) fn this_string_value(
+    vm: &mut Vm,
+    value: &Value,
+) -> Result<String, crate::errors::RuntimeError> {
+    match value {
+        Value::String(s) => Ok(s.clone()),
+        Value::Object(obj) => {
+            if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                .borrow()
+                .properties
+                .get(&PropertyKey::String("[[PrimitiveValue]]".to_string()))
+                && let Value::String(s) = value
+            {
+                return Ok(s.clone());
+            }
+            Err(vm.throw_type_error("String method called on incompatible receiver"))
+        }
+        _ => Err(vm.throw_type_error("String method called on incompatible receiver")),
+    }
+}
+
+/// 20.3.3.3.1 ThisBooleanValue ( value )
+pub(crate) fn this_boolean_value(
+    vm: &mut Vm,
+    value: &Value,
+) -> Result<bool, crate::errors::RuntimeError> {
+    match value {
+        Value::Bool(b) => Ok(*b),
+        Value::Object(obj) => {
+            if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                .borrow()
+                .properties
+                .get(&PropertyKey::String("[[PrimitiveValue]]".to_string()))
+                && let Value::Bool(b) = value
+            {
+                return Ok(*b);
+            }
+            Err(vm.throw_type_error("Boolean method called on incompatible receiver"))
+        }
+        _ => Err(vm.throw_type_error("Boolean method called on incompatible receiver")),
+    }
+}
+
+pub(crate) fn require_object_coercible(
+    vm: &mut Vm,
+    value: &Value,
+) -> Result<(), crate::errors::RuntimeError> {
+    match value {
+        Value::Undefined | Value::Null => {
+            Err(vm.throw_type_error("Cannot convert undefined or null to object"))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn descriptor_value_from_descriptor(
     object_proto: &Rc<RefCell<ObjectData>>,
     desc: &PropertyDescriptor,

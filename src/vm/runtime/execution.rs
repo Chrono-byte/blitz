@@ -5511,6 +5511,7 @@ fn get_property(
     }
 }
 
+/// Sets the property with the given key on the given object to the given value.
 fn set_property(
     obj: &Value,
     key: &PropertyKey,

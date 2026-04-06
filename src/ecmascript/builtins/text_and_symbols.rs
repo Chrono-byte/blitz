@@ -5,7 +5,7 @@ use num_traits::ToPrimitive;
 
 use crate::runtime_utils::{
     builtin_object, char_code_at, char_index_to_byte_index, non_enum_data, set_builtin_length,
-    set_builtin_name, usize_to_f64,
+    set_builtin_name, this_boolean_value, this_string_value, require_object_coercible, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
@@ -247,35 +247,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     let string_value_of = builtin_object(
         Rc::new(|vm, args| {
             let this = args.first().cloned().unwrap_or(Value::Undefined);
-            let res = match this {
-                Value::String(s) => Value::String(s),
-                Value::Object(obj) => {
-                    if let Some(PropertyDescriptor::Data { value, .. }) = obj
-                        .borrow()
-                        .properties
-                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                    {
-                        match value {
-                            Value::String(s) => Value::String(s.clone()),
-                            _ => {
-                                return Err(vm.throw_type_error(
-                                    "String.prototype.valueOf called on incompatible receiver",
-                                ));
-                            }
-                        }
-                    } else {
-                        return Err(vm.throw_type_error(
-                            "String.prototype.valueOf called on incompatible receiver",
-                        ));
-                    }
-                }
-                _ => {
-                    return Err(vm.throw_type_error(
-                        "String.prototype.valueOf called on incompatible receiver",
-                    ));
-                }
-            };
-            Ok(res)
+            Ok(Value::String(this_string_value(vm, &this)?))
         }),
         function_proto_map,
     );
@@ -288,24 +260,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     let string_to_string = builtin_object(
         Rc::new(|vm, args| {
             let this = args.first().cloned().unwrap_or(Value::Undefined);
-            match this {
-                Value::String(s) => Ok(Value::String(s)),
-                Value::Object(obj) => {
-                    if let Some(PropertyDescriptor::Data { value, .. }) = obj
-                        .borrow()
-                        .properties
-                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                        && let Value::String(s) = value
-                    {
-                        return Ok(Value::String(s.clone()));
-                    }
-                    Err(vm.throw_type_error(
-                        "String.prototype.toString called on incompatible receiver",
-                    ))
-                }
-                _ => Err(vm
-                    .throw_type_error("String.prototype.toString called on incompatible receiver")),
-            }
+            Ok(Value::String(this_string_value(vm, &this)?))
         }),
         function_proto_map,
     );
@@ -318,6 +273,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     let string_index_of = builtin_object(
         Rc::new(|vm, args| {
             let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+            require_object_coercible(vm, &receiver)?;
             let haystack = vm.to_string(&receiver)?;
             let needle = vm.to_string(args.get(1).unwrap_or(&Value::Undefined))?;
             let len_chars = haystack.chars().count();
@@ -354,6 +310,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     let string_char_code_at = builtin_object(
         Rc::new(|vm, args| {
             let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+            require_object_coercible(vm, &receiver)?;
             let s = vm.to_string(&receiver)?;
             let pos = match args.get(1) {
                 Some(v) => vm.to_number_value(v)?,
@@ -383,6 +340,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     let string_slice = builtin_object(
         Rc::new(|vm, args| {
             let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+            require_object_coercible(vm, &receiver)?;
             let s = vm.to_string(&receiver)?;
             let len = s.chars().count().to_isize().unwrap_or(isize::MAX);
             let to_int = |vm: &mut Vm, v: &Value| -> Result<isize, crate::errors::RuntimeError> {
@@ -456,28 +414,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     let boolean_value_of = builtin_object(
         Rc::new(|vm, args| {
             let this = args.first().cloned().unwrap_or(Value::Undefined);
-            let res = match this {
-                Value::Bool(b) => Value::Bool(b),
-                Value::Object(obj) => {
-                    if let Some(PropertyDescriptor::Data { value, .. }) = obj
-                        .borrow()
-                        .properties
-                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                    {
-                        value.clone()
-                    } else {
-                        return Err(vm.throw_type_error(
-                            "Boolean.prototype.valueOf called on incompatible receiver",
-                        ));
-                    }
-                }
-                _ => {
-                    return Err(vm.throw_type_error(
-                        "Boolean.prototype.valueOf called on incompatible receiver",
-                    ));
-                }
-            };
-            Ok(res)
+            Ok(Value::Bool(this_boolean_value(vm, &this)?))
         }),
         function_proto_map,
     );
@@ -490,26 +427,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     let boolean_to_string = builtin_object(
         Rc::new(|vm, args| {
             let this = args.first().cloned().unwrap_or(Value::Undefined);
-            match this {
-                Value::Bool(b) => Ok(Value::String(if b { "true" } else { "false" }.to_string())),
-                Value::Object(obj) => {
-                    if let Some(PropertyDescriptor::Data { value, .. }) = obj
-                        .borrow()
-                        .properties
-                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                        && let Value::Bool(b) = value
-                    {
-                        Ok(Value::String(if *b { "true" } else { "false" }.to_string()))
-                    } else {
-                        Err(vm.throw_type_error(
-                            "Boolean.prototype.toString called on incompatible receiver",
-                        ))
-                    }
-                }
-                _ => Err(vm.throw_type_error(
-                    "Boolean.prototype.toString called on incompatible receiver",
-                )),
-            }
+            let b = this_boolean_value(vm, &this)?;
+            Ok(Value::String(if b { "true" } else { "false" }.to_string()))
         }),
         function_proto_map,
     );
