@@ -1896,16 +1896,18 @@ impl Vm {
                     let caller_handler_len = self.handlers.len();
                     self.push_call_frame(proto, &closure_env, call_args, this_arg.clone())?;
                     let result = self.run_until_return(stack_base, true);
-                    // Restore caller state (run_until_return already truncated stack)
-                    self.chunk = caller_chunk;
-                    self.ip = caller_ip;
-                    self.locals = caller_locals;
-                    self.this_value = caller_this;
-                    self.current_closure_env = caller_env;
-                    self.current_slot_types = caller_slot_types;
-                    self.stack = saved_stack;
-                    self.frames.truncate(caller_frame_len);
-                    self.handlers.truncate(caller_handler_len);
+                    if result.is_ok() || !self.pending_exception {
+                        // Restore caller state (run_until_return already truncated stack)
+                        self.chunk = caller_chunk;
+                        self.ip = caller_ip;
+                        self.locals = caller_locals;
+                        self.this_value = caller_this;
+                        self.current_closure_env = caller_env;
+                        self.current_slot_types = caller_slot_types;
+                        self.stack = saved_stack;
+                        self.frames.truncate(caller_frame_len);
+                        self.handlers.truncate(caller_handler_len);
+                    }
                     result
                 }
             }
@@ -1937,7 +1939,12 @@ impl Vm {
         loop {
             match self.step(Some(target_frame_depth)) {
                 Ok(StepOutcome::Continue) => {
-                    self.pending_exception = false;
+                    if self.pending_exception {
+                        if self.frames.len() < target_frame_depth {
+                            return Err(crate::errors::RuntimeError::from("JS exception"));
+                        }
+                        self.pending_exception = false;
+                    }
                     self.maybe_collect_garbage_prototype();
                 }
                 Ok(StepOutcome::Return(result)) => {
@@ -1952,6 +1959,9 @@ impl Vm {
                 }
                 Err(err) => {
                     if self.pending_exception {
+                        if self.frames.len() < target_frame_depth {
+                            return Err(err);
+                        }
                         self.pending_exception = false;
                         continue;
                     }
@@ -2827,16 +2837,8 @@ impl Vm {
                         }
                     }
                 }
-                // Pragmatic fallback for object formatting paths used heavily
-                // by the harness: if custom coercion hooks fail to produce a
-                // primitive, fall back to an Object-tag string instead of
-                // throwing.
-                let fallback = Value::String(format!("[object {}]", v.object_tag()));
-                if crate::trace::enabled() {
-                    eprintln!("[trace] to_primitive fallback -> {:?}", fallback);
-                }
                 self.gc_temp_roots.truncate(temp_root_base);
-                Ok(fallback)
+                Err(self.throw_type_error("Cannot convert object to primitive value"))
             }
             _ => Ok(v.clone()),
         }
@@ -2848,9 +2850,43 @@ impl Vm {
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
     pub fn to_string(&mut self, v: &Value) -> Result<String, crate::errors::RuntimeError> {
+        fn format_js_number(n: f64) -> String {
+            if n.is_nan() {
+                return "NaN".to_string();
+            }
+            if n == 0.0 {
+                return "0".to_string();
+            }
+            if n == f64::INFINITY {
+                return "Infinity".to_string();
+            }
+            if n == f64::NEG_INFINITY {
+                return "-Infinity".to_string();
+            }
+            let abs = n.abs();
+            if abs >= 1e21 || abs < 1e-6 {
+                let s = format!("{:e}", n);
+                if let Some(e_idx) = s.find('e') {
+                    let mantissa = s[..e_idx].trim_end_matches('0').trim_end_matches('.');
+                    let exp = &s[e_idx + 1..];
+                    let (sign, digits) = if let Some(rest) = exp.strip_prefix('-') {
+                        ('-', rest)
+                    } else if let Some(rest) = exp.strip_prefix('+') {
+                        ('+', rest)
+                    } else {
+                        ('+', exp)
+                    };
+                    let digits = digits.trim_start_matches('0');
+                    let digits = if digits.is_empty() { "0" } else { digits };
+                    return format!("{}e{}{}", mantissa, sign, digits);
+                }
+                return s;
+            }
+            n.to_string()
+        }
         match v {
             Value::String(s) => Ok(s.clone()),
-            Value::Number(n) => Ok(n.to_string()),
+            Value::Number(n) => Ok(format_js_number(*n)),
             Value::Bool(b) => Ok(if *b {
                 "true".to_string()
             } else {

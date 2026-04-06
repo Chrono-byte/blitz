@@ -2421,6 +2421,17 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         )),
     );
     array_proto_map.borrow_mut().properties.insert(
+        PKey::String("toString".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let join = vm.get_property_host(&this, &PKey::String("join".to_string()))?;
+                vm.call_value_with_this(&join, &this, &[])
+            }),
+            &function_proto_map,
+        )),
+    );
+    array_proto_map.borrow_mut().properties.insert(
         PKey::String("sort".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
@@ -2959,17 +2970,19 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         PropertyDescriptor::data(Value::Object(Rc::clone(&aggregate_error_proto_map))),
     );
 
+    let function_ctor_globals = Rc::clone(globals);
     let function_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Function");
-        let body_src = if let Some(last) = args.last() {
+        let user_args = args.get(off..).unwrap_or(&[]);
+        let body_src = if let Some(last) = user_args.last() {
             vm.to_string(last)?
         } else {
-            "return undefined".to_string()
+            String::new()
         };
-        let param_count = args.len().saturating_sub(off + 1);
+        let param_count = user_args.len().saturating_sub(1);
         let mut params = Vec::with_capacity(param_count);
         for idx in 0..param_count {
-            params.push(vm.to_string(&args[off + idx])?);
+            params.push(vm.to_string(&user_args[idx])?);
         }
         let source = format!(
             "function __tsblitz_dynamic({}) {{\n{}\n}}\n__tsblitz_eval_result = __tsblitz_dynamic;",
@@ -2981,11 +2994,21 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         let prog = session.program();
         let chunk = compiler::compile_oxc(prog, &source)
             .map_err(|e| syntax_error(vm, format!("compile: {}", e)))?;
-        let mut child = Vm::new(vm.globals_rc());
+        let mut child = Vm::new(Rc::clone(&function_ctor_globals));
         child.run(chunk)?;
-        Ok(child
+        let result = child
             .get_global("__tsblitz_eval_result")
-            .unwrap_or(Value::Undefined))
+            .unwrap_or(Value::Undefined);
+        match &result {
+            Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+                props.borrow_mut().properties.insert(
+                    PKey::String("[[RealmGlobals]]".to_string()),
+                    PropertyDescriptor::data(Value::Object(Rc::clone(&function_ctor_globals))),
+                );
+            }
+            _ => {}
+        }
+        Ok(result)
     });
     let function_ctor_val =
         Value::BuiltinObject(function_ctor_fn.clone(), Rc::clone(&function_ctor_map));
@@ -3185,13 +3208,93 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let new_target_proto = vm
                     .get_property_host(&new_target, &PropertyKey::String("prototype".to_string()))
                     .unwrap_or(Value::Undefined);
-                let desired_proto = match new_target_proto {
+                let mut desired_proto = match new_target_proto {
                     Value::Object(_)
                     | Value::Array(..)
                     | Value::Closure { .. }
                     | Value::BuiltinObject(_, _) => Some(new_target_proto),
                     _ => None,
                 };
+
+                if desired_proto.is_none() {
+                    let ctor_name = vm
+                        .get_property_host(&target, &PropertyKey::String("name".to_string()))
+                        .ok()
+                        .and_then(|v| match v {
+                            Value::String(s) => Some(s),
+                            _ => None,
+                        })
+                        .or_else(|| {
+                            if vm
+                                .realm()
+                                .intrinsics
+                                .string_constructor
+                                .as_ref()
+                                .is_some_and(|v| strict_equal(v, &target))
+                            {
+                                Some("String".to_string())
+                            } else if vm
+                                .realm()
+                                .intrinsics
+                                .array_constructor
+                                .as_ref()
+                                .is_some_and(|v| strict_equal(v, &target))
+                            {
+                                Some("Array".to_string())
+                            } else if vm
+                                .realm()
+                                .intrinsics
+                                .object_constructor
+                                .as_ref()
+                                .is_some_and(|v| strict_equal(v, &target))
+                            {
+                                Some("Object".to_string())
+                            } else if vm
+                                .realm()
+                                .intrinsics
+                                .promise_constructor
+                                .as_ref()
+                                .is_some_and(|v| strict_equal(v, &target))
+                            {
+                                Some("Promise".to_string())
+                            } else {
+                                None
+                            }
+                        });
+                    let realm_globals = vm
+                        .get_property_host(
+                            &new_target,
+                            &PropertyKey::String("[[RealmGlobals]]".to_string()),
+                        )
+                        .ok();
+                    if let (Some(name), Some(Value::Object(globals))) = (ctor_name, realm_globals) {
+                        let ctor_in_realm = globals
+                            .borrow()
+                            .properties
+                            .get(&PropertyKey::String(name))
+                            .and_then(|d| match d {
+                                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                                _ => None,
+                            });
+                        if let Some(ctor_in_realm) = ctor_in_realm {
+                            let proto = vm
+                                .get_property_host(
+                                    &ctor_in_realm,
+                                    &PropertyKey::String("prototype".to_string()),
+                                )
+                                .unwrap_or(Value::Undefined);
+                            if matches!(
+                                proto,
+                                Value::Object(_)
+                                    | Value::Array(..)
+                                    | Value::Closure { .. }
+                                    | Value::BuiltinObject(_, _)
+                            ) {
+                                desired_proto = Some(proto);
+                            }
+                        }
+                    }
+                }
 
                 if let Some(proto_value) = desired_proto
                     && let Value::Object(obj) = &result
@@ -4363,9 +4466,8 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         .borrow()
                         .properties
                         .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                    && matches!(value, Value::Bool(_))
                 {
-                    return Ok(Value::String("[object Boolean]".to_string()));
+                    return Ok(Value::String(format!("[object {}]", value.object_tag())));
                 }
                 Ok(Value::String(format!("[object {}]", this.object_tag())))
             }),

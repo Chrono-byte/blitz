@@ -32,7 +32,11 @@ pub(crate) fn install_bigint_and_number_builtins(
     );
     let bigint_proto_for_ctor = Rc::clone(&bigint_proto_map);
     let bigint_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-        let value_idx = if args.len() > 1 { 1 } else { 0 };
+        let value_idx = if vm.current_new_target().is_some() || args.len() > 1 {
+            1
+        } else {
+            0
+        };
         let value = args
             .get(value_idx)
             .cloned()
@@ -167,7 +171,11 @@ pub(crate) fn install_bigint_and_number_builtins(
             );
             return Ok(Value::Object(obj_rc));
         }
-        let value_idx = if args.len() > 1 { 1 } else { 0 };
+        let value_idx = if vm.current_new_target().is_some() || args.len() > 1 {
+            1
+        } else {
+            0
+        };
         let value = args.get(value_idx).cloned().unwrap_or(Value::Number(0.0));
         let n = vm.to_number_value(&value)?;
         Ok(Value::Number(n))

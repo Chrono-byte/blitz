@@ -11,6 +11,39 @@ use crate::runtime_utils::{
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
 
+fn string_constructor_to_string(
+    vm: &mut Vm,
+    value: &Value,
+) -> Result<String, crate::errors::RuntimeError> {
+    match value {
+        Value::Symbol(_, _) if vm.current_new_target().is_some() => {
+            Err(vm.throw_type_error("Cannot convert a Symbol value to a string"))
+        }
+        Value::String(_)
+        | Value::Number(_)
+        | Value::Bool(_)
+        | Value::Null
+        | Value::Undefined
+        | Value::BigInt(_)
+        | Value::Symbol(_, _) => vm.to_string(value),
+        _ => {
+            let prim = vm.to_primitive(value, Some("string"))?;
+            if matches!(
+                prim,
+                Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::Builtin(_)
+                    | Value::BuiltinObject(_, _)
+                    | Value::Promise(_)
+            ) {
+                return Err(vm.throw_type_error("Cannot convert object to string"));
+            }
+            vm.to_string(&prim)
+        }
+    }
+}
+
 /// Installs the String, Boolean, and Symbol builtins into the globals object.
 pub(crate) fn install_string_boolean_symbol_builtins(
     globals: &mut ObjectData,
@@ -54,7 +87,11 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         ObjectData::with_prototype(Value::Object(Rc::clone(object_proto_map))),
     ));
     let symbol_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-        let value_idx = if args.len() > 1 { 1 } else { 0 };
+        let value_idx = if vm.current_new_target().is_some() || args.len() > 1 {
+            1
+        } else {
+            0
+        };
         let desc = match args.get(value_idx) {
             Some(Value::Undefined) | None => None,
             Some(Value::String(s)) => Some(s.clone()),
@@ -205,39 +242,47 @@ pub(crate) fn install_string_boolean_symbol_builtins(
 
     let string_proto_for_ctor = Rc::clone(&string_proto_map);
     let string_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+        let value_idx = if vm.current_new_target().is_some() || args.len() > 1 {
+            1
+        } else {
+            0
+        };
+        let s = match args.get(value_idx) {
+            None => String::new(),
+            Some(v) => string_constructor_to_string(vm, v)?,
+        };
         if vm.current_new_target().is_some() {
-            let value = args.get(1).cloned().unwrap_or(Value::Undefined);
-            let s = vm.to_string(&value)?;
-            let mut obj = ObjectData::new();
-            obj.set_prototype_value(Value::Object(Rc::clone(&string_proto_for_ctor)));
-            let obj_rc = Rc::new(RefCell::new(obj));
-            obj_rc.borrow_mut().properties.insert(
-                PKey::String("[[PrimitiveValue]]".to_string()),
-                PropertyDescriptor::data(Value::String(s)),
-            );
-            return Ok(Value::Object(obj_rc));
+            if let Some(Value::Object(obj_rc)) = args.first() {
+                let mut obj = obj_rc.borrow_mut();
+                obj.set_prototype_value(Value::Object(Rc::clone(&string_proto_for_ctor)));
+                obj.properties.insert(
+                    PKey::String("[[PrimitiveValue]]".to_string()),
+                    PropertyDescriptor::data(Value::String(s.clone())),
+                );
+                obj.properties.insert(
+                    PKey::String("length".to_string()),
+                    PropertyDescriptor::Data {
+                        value: Value::Number(usize_to_f64(s.chars().count())),
+                        writable: false,
+                        enumerable: false,
+                        configurable: false,
+                    },
+                );
+                for (idx, ch) in s.chars().enumerate() {
+                    obj.properties.insert(
+                        PKey::String(idx.to_string()),
+                        PropertyDescriptor::Data {
+                            value: Value::String(ch.to_string()),
+                            writable: false,
+                            enumerable: true,
+                            configurable: false,
+                        },
+                    );
+                }
+                return Ok(args.first().cloned().unwrap_or(Value::Undefined));
+            }
         }
-
-        let value_idx = if args.len() > 1 { 1 } else { 0 };
-        let value = args.get(value_idx);
-        if value.is_none() {
-            return Ok(Value::String(String::new()));
-        }
-        match value.expect("checked is_some") {
-            Value::String(s) => Ok(Value::String(s.clone())),
-            Value::Number(n) => Ok(Value::String(n.to_string())),
-            Value::Bool(b) => Ok(Value::String(
-                (if *b { "true" } else { "false" }).to_string(),
-            )),
-            Value::Null => Ok(Value::String("null".to_string())),
-            Value::Undefined => Ok(Value::String("undefined".to_string())),
-            Value::BigInt(n) => Ok(Value::String(n.to_string())),
-            Value::Symbol(_, desc) => Ok(Value::String(match desc {
-                Some(d) => format!("Symbol({})", d),
-                None => "Symbol()".to_string(),
-            })),
-            other => Ok(Value::String(vm.to_string(other)?)),
-        }
+        Ok(Value::String(s))
     });
     let string_ctor_val = Value::BuiltinObject(string_ctor_fn.clone(), Rc::clone(&string_ctor_map));
     set_builtin_length(&string_ctor_val, 1.0);
@@ -387,12 +432,12 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     );
 
     let boolean_ctor_fn: BuiltinFn = Rc::new(|vm, args| {
-        let value = if vm.current_new_target().is_some() {
-            args.get(1).cloned().unwrap_or(Value::Undefined)
+        let value_idx = if vm.current_new_target().is_some() || args.len() > 1 {
+            1
         } else {
-            let value_idx = if args.len() > 1 { 1 } else { 0 };
-            args.get(value_idx).cloned().unwrap_or(Value::Undefined)
+            0
         };
+        let value = args.get(value_idx).cloned().unwrap_or(Value::Undefined);
         let prim = Value::Bool(vm.to_boolean(&value));
         if vm.current_new_target().is_some()
             && let Some(Value::Object(obj)) = args.first()

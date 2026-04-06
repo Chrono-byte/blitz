@@ -20,8 +20,9 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     use PropertyKey as PKey;
 
     let array_ctor_props = Rc::clone(array_ctor_map);
-    let array_ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
-        let elems: Vec<Option<Value>> = args.iter().map(|v| Some(v.clone())).collect();
+    let array_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+        let off = static_builtin_arg_offset(vm, args, "Array");
+        let elems: Vec<Option<Value>> = args.iter().skip(off).map(|v| Some(v.clone())).collect();
         let arr_rc = Rc::new(RefCell::new(elems));
         let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
         props.borrow_mut().properties.insert(
