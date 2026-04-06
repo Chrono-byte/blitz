@@ -717,26 +717,26 @@ impl Compiler {
                 self.continue_patches.push(Vec::new());
                 self.break_patches.push(Vec::new());
 
-                if let OForLeft::VariableDeclaration(v) = &f.left {
-                    if matches!(
+                if let OForLeft::VariableDeclaration(v) = &f.left
+                    && matches!(
                         v.kind,
                         oxc_ast::ast::VariableDeclarationKind::Let
                             | oxc_ast::ast::VariableDeclarationKind::Const
-                    ) {
-                        if v.declarations.len() != 1 {
-                            return Err(crate::errors::CompilerError::from(
-                                "SyntaxError: for-in lexical declaration must have exactly one binding",
-                            ));
-                        }
-                        if v.declarations
-                            .first()
-                            .and_then(|dec| dec.init.as_ref())
-                            .is_some()
-                        {
-                            return Err(crate::errors::CompilerError::from(
-                                "SyntaxError: for-in lexical declaration may not have an initializer",
-                            ));
-                        }
+                    )
+                {
+                    if v.declarations.len() != 1 {
+                        return Err(crate::errors::CompilerError::from(
+                            "SyntaxError: for-in lexical declaration must have exactly one binding",
+                        ));
+                    }
+                    if v.declarations
+                        .first()
+                        .and_then(|dec| dec.init.as_ref())
+                        .is_some()
+                    {
+                        return Err(crate::errors::CompilerError::from(
+                            "SyntaxError: for-in lexical declaration may not have an initializer",
+                        ));
                     }
                 }
 
