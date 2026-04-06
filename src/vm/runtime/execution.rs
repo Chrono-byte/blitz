@@ -1363,17 +1363,17 @@ impl Vm {
                 // Wrap Symbol in an object.
                 let mut data = ObjectData::new();
                 data.properties.insert(
+                    PropertyKey::String("[[PrimitiveValue]]".to_string()),
+                    PropertyDescriptor::data(Value::Symbol(id.clone(), desc.clone())),
+                );
+                data.properties.insert(
                     PropertyKey::String("__isSymbol".to_string()),
                     PropertyDescriptor::data(Value::Bool(true)),
                 );
-                data.properties.insert(
-                    PropertyKey::String("_id".to_string()),
-                    PropertyDescriptor::data(Value::Number(id.as_u64() as f64)),
-                );
-                if let Some(d) = desc {
+                if let Some(d) = &desc {
                     data.properties.insert(
                         PropertyKey::String("description".to_string()),
-                        PropertyDescriptor::data(Value::String(d)),
+                        PropertyDescriptor::data(Value::String(d.clone())),
                     );
                 }
                 // Try to find Symbol.prototype
@@ -2977,15 +2977,14 @@ impl Vm {
             Value::Object(data) => {
                 if let Some(symbol_key) = {
                     let d = data.borrow();
-                    if let Some(PropertyDescriptor::Data { value, .. }) = d
+                    if let Some(PropertyDescriptor::Data {
+                        value: Value::Symbol(sym, _),
+                        ..
+                    }) = d
                         .properties
-                        .get(&PropertyKey::String("__isSymbol".to_string()))
-                        && matches!(value, Value::Bool(true))
-                        && let Some(PropertyDescriptor::Data { value, .. }) =
-                            d.properties.get(&PropertyKey::String("_id".to_string()))
-                        && let Value::Number(n) = value
+                        .get(&PropertyKey::String("[[PrimitiveValue]]".to_string()))
                     {
-                        Some(PropertyKey::Symbol(SymbolId::well_known(*n as u64)))
+                        Some(PropertyKey::Symbol(sym.clone()))
                     } else {
                         None
                     }

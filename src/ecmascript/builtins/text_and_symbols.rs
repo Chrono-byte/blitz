@@ -127,14 +127,55 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         PropertyDescriptor::data(symbol_ctor_val.clone()),
     );
     let symbol_to_string = builtin_object(
-        Rc::new(|_vm, args| {
+        Rc::new(|vm, args| {
             let this = args.first().cloned().unwrap_or(Value::Undefined);
-            match this {
-                Value::Symbol(_, desc) => Ok(Value::String(match desc {
+            let sym = match this {
+                Value::Symbol(id, desc) => Some((id, desc)),
+                Value::Object(obj) => {
+                    let borrowed = obj.borrow();
+                    if matches!(
+                        borrowed
+                            .properties
+                            .get(&PKey::String("__isSymbol".to_string())),
+                        Some(PropertyDescriptor::Data {
+                            value: Value::Bool(true),
+                            ..
+                        })
+                    ) {
+                        let id = borrowed
+                            .properties
+                            .get(&PKey::String("_id".to_string()))
+                            .and_then(|d| match d {
+                                PropertyDescriptor::Data {
+                                    value: Value::Number(n),
+                                    ..
+                                } => Some(SymbolId::well_known(*n as u64)),
+                                _ => None,
+                            });
+                        let desc = borrowed
+                            .properties
+                            .get(&PKey::String("description".to_string()))
+                            .and_then(|d| match d {
+                                PropertyDescriptor::Data {
+                                    value: Value::String(s),
+                                    ..
+                                } => Some(s.clone()),
+                                _ => None,
+                            });
+                        id.map(|id| (id, desc))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            match sym {
+                Some((_id, desc)) => Ok(Value::String(match desc {
                     Some(d) => format!("Symbol({})", d),
                     None => "Symbol()".to_string(),
                 })),
-                _ => Ok(Value::String("[object Symbol]".to_string())),
+                None => Err(vm
+                    .throw_type_error("Symbol.prototype.toString called on incompatible receiver")),
             }
         }),
         function_proto_map,
@@ -146,7 +187,48 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         PropertyDescriptor::data(symbol_to_string),
     );
     let symbol_value_of = builtin_object(
-        Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            match this {
+                Value::Symbol(_, _) => Ok(this),
+                Value::Object(obj) => {
+                    let borrowed = obj.borrow();
+                    if matches!(
+                        borrowed
+                            .properties
+                            .get(&PKey::String("__isSymbol".to_string())),
+                        Some(PropertyDescriptor::Data {
+                            value: Value::Bool(true),
+                            ..
+                        })
+                    ) {
+                        if let Some(PropertyDescriptor::Data {
+                            value: Value::Number(n),
+                            ..
+                        }) = borrowed.properties.get(&PKey::String("_id".to_string()))
+                        {
+                            let desc = borrowed
+                                .properties
+                                .get(&PKey::String("description".to_string()))
+                                .and_then(|d| match d {
+                                    PropertyDescriptor::Data {
+                                        value: Value::String(s),
+                                        ..
+                                    } => Some(s.clone()),
+                                    _ => None,
+                                });
+                            return Ok(Value::Symbol(SymbolId::well_known(*n as u64), desc));
+                        }
+                    }
+                    Err(vm.throw_type_error(
+                        "Symbol.prototype.valueOf called on incompatible receiver",
+                    ))
+                }
+                _ => Err(
+                    vm.throw_type_error("Symbol.prototype.valueOf called on incompatible receiver")
+                ),
+            }
+        }),
         function_proto_map,
     );
     set_builtin_name(&symbol_value_of, "valueOf");

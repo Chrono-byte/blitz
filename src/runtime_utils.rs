@@ -2326,11 +2326,11 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     let item = arr.borrow().get(i).cloned().flatten();
                     if let Some(item) = item {
                         let idx = Value::Number(usize_to_f64(i));
-                        let _ = vm.call_value_with_this(
+                        vm.call_value_with_this(
                             &callback,
                             &this_for_call,
                             &[item, idx, this_for_call.clone()],
-                        );
+                        )?;
                     }
                 }
             }
