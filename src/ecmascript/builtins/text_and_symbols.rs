@@ -361,9 +361,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
                     let off = static_builtin_arg_offset(vm, args, "String");
                     let template = args.get(off).cloned().unwrap_or(Value::Undefined);
                     let template_obj = vm.to_object_value(template)?;
-                    let raw = vm
-                        .get_property_host(&template_obj, &PKey::String("raw".to_string()))
-                        .unwrap_or(Value::Undefined);
+                    let raw =
+                        vm.get_property_host(&template_obj, &PKey::String("raw".to_string()))?;
                     let raw_obj = if matches!(raw, Value::Undefined)
                         && matches!(template_obj, Value::Array(..))
                     {

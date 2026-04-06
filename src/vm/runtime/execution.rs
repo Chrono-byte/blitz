@@ -5231,9 +5231,9 @@ fn to_number(v: &Value) -> Result<f64, crate::errors::RuntimeError> {
     }
 }
 
-fn to_int32(v: &Value) -> Result<i32, crate::errors::RuntimeError> {
+fn to_int32_with_vm(vm: &mut Vm, v: &Value) -> Result<i32, crate::errors::RuntimeError> {
     // Per ECMAScript ToInt32: compute ToUint32(n) then reinterpret as signed 32-bit
-    let u = to_uint32(v)?;
+    let u = to_uint32_with_vm(vm, v)?;
     if u & 0x8000_0000 != 0 {
         // negative in signed 32-bit space
         Ok(((u as i64) - 0x1_0000_0000) as i32)
@@ -5242,23 +5242,9 @@ fn to_int32(v: &Value) -> Result<i32, crate::errors::RuntimeError> {
     }
 }
 
-fn to_uint32(v: &Value) -> Result<u32, crate::errors::RuntimeError> {
+fn to_uint32_with_vm(vm: &mut Vm, v: &Value) -> Result<u32, crate::errors::RuntimeError> {
     // ToUint32 per ECMAScript: ToNumber(v), then take the integer part modulo 2^32
-    let n = match v {
-        Value::Number(x) => *x,
-        Value::BigInt(x) => x.to_f64().unwrap_or_else(|| {
-            if x.is_negative() {
-                f64::NEG_INFINITY
-            } else {
-                f64::INFINITY
-            }
-        }),
-        _ => {
-            return Err(crate::errors::RuntimeError::from(
-                "Expected number for bitwise operation",
-            ));
-        }
-    };
+    let n = vm.to_number_value(v)?;
 
     if n.is_nan() || n == 0.0 || n.is_infinite() {
         return Ok(0);
@@ -5338,13 +5324,13 @@ fn parse_js_bigint_string(s: &str) -> Option<BigIntValue> {
 // provide clearer naming when used in opcode handlers.
 impl Vm {
     /// Convert a runtime value with `ToInt32` semantics.
-    pub fn to_int32_value(&self, v: &Value) -> Result<i32, crate::errors::RuntimeError> {
-        to_int32(v)
+    pub fn to_int32_value(&mut self, v: &Value) -> Result<i32, crate::errors::RuntimeError> {
+        to_int32_with_vm(self, v)
     }
 
     /// Convert a runtime value with `ToUint32` semantics.
-    pub fn to_uint32_value(&self, v: &Value) -> Result<u32, crate::errors::RuntimeError> {
-        to_uint32(v)
+    pub fn to_uint32_value(&mut self, v: &Value) -> Result<u32, crate::errors::RuntimeError> {
+        to_uint32_with_vm(self, v)
     }
 }
 
