@@ -2096,15 +2096,22 @@ impl Vm {
             }
             Op::GetUpvalue => {
                 let idx = self.read_byte()? as usize;
-                let env = self
-                    .current_closure_env
-                    .as_ref()
-                    .ok_or("GetUpvalue without closure env")?;
-                let env_guard = env.borrow();
-                let value = env_guard
-                    .get(idx)
-                    .map(|cell| cell.borrow().clone())
-                    .ok_or("Bad upvalue index")?;
+                let value = {
+                    let env = self
+                        .current_closure_env
+                        .as_ref()
+                        .ok_or("GetUpvalue without closure env")?;
+                    let env_guard = env.borrow();
+                    env_guard
+                        .get(idx)
+                        .map(|cell| cell.borrow().clone())
+                        .ok_or("Bad upvalue index")?
+                };
+                if matches!(value, Value::Uninitialized) {
+                    return Err(self.throw_reference_error(
+                        "Cannot access lexical binding before initialization",
+                    ));
+                }
                 self.stack.push(value);
             }
             Op::SetUpvalue => {
@@ -2974,6 +2981,10 @@ impl Vm {
             Value::String(s) => Ok(parse_js_number_string(s)),
             Value::Undefined => Ok(f64::NAN),
             Value::Null => Ok(0.0),
+            Value::Uninitialized => {
+                Err(self
+                    .throw_reference_error("Cannot access lexical binding before initialization"))
+            }
             Value::BigInt(_) => Err(self.throw_type_error("Cannot convert BigInt to number")),
             Value::Symbol(_, _) => Err(self.throw_type_error("Cannot convert Symbol to number")),
             _ => {
@@ -6113,6 +6124,27 @@ mod tests {
         runtime_utils::install_minimal_kernel_constructors(&globals);
         let mut vm = Vm::new(globals);
         let err = vm.run(chunk).expect_err("run should fail for TDZ read");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Cannot access lexical binding before initialization"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn captured_lexical_binding_reads_before_init_throw_reference_error() {
+        let session = Parser::parse_source(
+            "function g(){ function f(){ return x + 1; } return f(); let x = 1; } g();",
+        )
+        .expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+        let globals = test_globals();
+        runtime_utils::install_minimal_kernel_constructors(&globals);
+        let mut vm = Vm::new(globals);
+        let err = vm
+            .run(chunk)
+            .expect_err("run should fail for captured TDZ read");
         let msg = err.to_string();
         assert!(
             msg.contains("Cannot access lexical binding before initialization"),

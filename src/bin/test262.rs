@@ -102,6 +102,19 @@ impl TestResult {
     }
 }
 
+/// Force a full prototype-GC cycle for the current runner thread.
+///
+/// The Test262 runner creates many short-lived realms and VMs. Most memory
+/// drops naturally with Rust ownership, but cyclic JS heaps tracked by the
+/// prototype collector benefit from an explicit sweep once a test is fully
+/// finished and all test-owned roots have gone out of scope.
+fn force_runner_gc() {
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    {
+        let _ = blitz::gc::collect_aggressive(&[]);
+    }
+}
+
 /// Selects the files to run based on the filter and limit.
 fn path_has_segment(path: &Path, wanted: &str) -> bool {
     path.components()
@@ -245,65 +258,73 @@ fn run_test_in_thread(
             if log_tests {
                 eprintln!("[test262] starting {}", file.display());
             }
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                let globals = make_test_globals();
-                globals.borrow_mut().properties.insert(
-                    PropertyKey::String("__native_toString".to_string()),
-                    PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-                        let v = args.first().cloned().unwrap_or(Value::Undefined);
-                        vm.to_string(&v).map(Value::String)
-                    }))),
-                );
-                globals.borrow_mut().properties.insert(
-                    PropertyKey::String("__native_toNumber".to_string()),
-                    PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-                        let v = args.first().cloned().unwrap_or(Value::Undefined);
-                        vm.to_number_value(&v).map(Value::Number)
-                    }))),
-                );
-                globals.borrow_mut().properties.insert(
-                    PropertyKey::String("__native_toBoolean".to_string()),
-                    PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-                        let v = args.first().cloned().unwrap_or(Value::Undefined);
-                        Ok(Value::Bool(vm.to_boolean(&v)))
-                    }))),
-                );
+            let test_result = {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    let globals = make_test_globals();
+                    globals.borrow_mut().properties.insert(
+                        PropertyKey::String("__native_toString".to_string()),
+                        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+                            let v = args.first().cloned().unwrap_or(Value::Undefined);
+                            vm.to_string(&v).map(Value::String)
+                        }))),
+                    );
+                    globals.borrow_mut().properties.insert(
+                        PropertyKey::String("__native_toNumber".to_string()),
+                        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+                            let v = args.first().cloned().unwrap_or(Value::Undefined);
+                            vm.to_number_value(&v).map(Value::Number)
+                        }))),
+                    );
+                    globals.borrow_mut().properties.insert(
+                        PropertyKey::String("__native_toBoolean".to_string()),
+                        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+                            let v = args.first().cloned().unwrap_or(Value::Undefined);
+                            Ok(Value::Bool(vm.to_boolean(&v)))
+                        }))),
+                    );
 
-                // Snapshot for test isolation (though we won't use restore since each test is fresh)
-                let baseline_snapshot = snapshot_globals(&globals);
+                    // Snapshot for test isolation (though we won't use restore since each test is fresh)
+                    let baseline_snapshot = snapshot_globals(&globals);
 
-                // Run the test
-                run_test_file(
-                    &file,
-                    &test262_dir,
-                    &globals,
-                    &baseline_snapshot,
-                    release_handle.clone(),
-                )
-            }));
+                    // Run the test
+                    run_test_file(
+                        &file,
+                        &test262_dir,
+                        &globals,
+                        &baseline_snapshot,
+                        release_handle.clone(),
+                    )
+                }));
 
-            let test_result = match result {
-                Ok(Ok(())) => TestResult::Pass,
-                Ok(Err(e)) => TestResult::Fail(e),
-                Err(panic_payload) => {
-                    let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "Unknown panic".to_string()
-                    };
+                match result {
+                    Ok(Ok(())) => TestResult::Pass,
+                    Ok(Err(e)) => TestResult::Fail(e),
+                    Err(panic_payload) => {
+                        let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else {
+                            "Unknown panic".to_string()
+                        };
 
-                    let is_overflow = msg.to_lowercase().contains("stack overflow")
-                        || (msg.contains("thread '") && msg.contains("' has overflowed its stack"));
+                        let is_overflow = msg.to_lowercase().contains("stack overflow")
+                            || (msg.contains("thread '")
+                                && msg.contains("' has overflowed its stack"));
 
-                    if is_overflow {
-                        TestResult::StackOverflow
-                    } else {
-                        TestResult::Panic(msg)
+                        if is_overflow {
+                            TestResult::StackOverflow
+                        } else {
+                            TestResult::Panic(msg)
+                        }
                     }
                 }
             };
+
+            // At this point the per-test VM/realm created inside `run_test_file`
+            // has gone out of scope. Run an explicit collector cycle so passed
+            // tests do not leave cyclic JS heaps hanging around until thread exit.
+            force_runner_gc();
 
             if log_tests {
                 eprintln!(

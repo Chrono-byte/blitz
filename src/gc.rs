@@ -80,12 +80,30 @@ pub fn collect(roots: &[Value]) -> GcStats {
     collect_with_env_roots(roots, &[])
 }
 
+/// Aggressive collector entry point intended for teardown-style cleanup.
+///
+/// Unlike the regular collector, this may clear swept closure environments.
+/// That is unsafe during normal execution if root discovery is incomplete, but
+/// it is exactly what we want once a whole test/realm has finished.
+pub fn collect_aggressive(roots: &[Value]) -> GcStats {
+    collect_with_env_roots_impl(roots, &[], true)
+}
+
 /// Prototype collector entry point with explicit closure-environment roots.
 pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSlot>>>]) -> GcStats {
+    collect_with_env_roots_impl(roots, env_roots, false)
+}
+
+fn collect_with_env_roots_impl(
+    roots: &[Value],
+    env_roots: &[Rc<Mutex<Vec<ValueSlot>>>],
+    clear_envs_aggressively: bool,
+) -> GcStats {
     #[cfg(not(feature = "gc_mark_sweep_prototype"))]
     {
         let _ = roots;
         let _ = env_roots;
+        let _ = clear_envs_aggressively;
         return GcStats::default();
     }
 
@@ -175,7 +193,11 @@ pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSl
                 }
             }
             for env in swept_envs {
-                clear_env(&env);
+                if clear_envs_aggressively {
+                    clear_env_aggressively(&env);
+                } else {
+                    clear_env(&env);
+                }
             }
             heap.envs = new_envs;
 
@@ -439,6 +461,11 @@ fn clear_env(env: &Rc<Mutex<Vec<ValueSlot>>>) {
 }
 
 #[cfg(feature = "gc_mark_sweep_prototype")]
+fn clear_env_aggressively(env: &Rc<Mutex<Vec<ValueSlot>>>) {
+    env.borrow().clear();
+}
+
+#[cfg(feature = "gc_mark_sweep_prototype")]
 fn clear_promise(state: &Rc<RefCell<PromiseState>>) {
     *state.borrow_mut() = PromiseState::Fulfilled(Value::Undefined);
 }
@@ -446,6 +473,46 @@ fn clear_promise(state: &Rc<RefCell<PromiseState>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    use crate::bytecode::{Chunk, FunctionProto};
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    use crate::value::ValueSlot;
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    use oxc_span::Span;
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    use std::sync::Mutex;
+
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    fn make_dummy_closure(env: Rc<Mutex<Vec<ValueSlot>>>) -> Value {
+        let proto = Rc::new(FunctionProto {
+            name: "gc_test".to_string(),
+            span: Span::new(0, 0),
+            arity: 0,
+            chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
+            slot_types: Vec::new(),
+            slot_names: Vec::new(),
+            lexical_tdz: Vec::new(),
+            upvalues: Vec::new(),
+            has_rest: false,
+            has_prototype_property: false,
+            captures_this: false,
+            arguments_slot: None,
+            has_simple_parameter_list: true,
+            return_type: None,
+            is_strict: false,
+            is_constructor: false,
+            is_async: false,
+            is_generator: false,
+        });
+        let props = track_object(Rc::new(RefCell::new(ObjectData::new())));
+        Value::Closure {
+            proto,
+            env,
+            lexical_this: None,
+            props,
+        }
+    }
 
     #[cfg(feature = "gc_mark_sweep_prototype")]
     #[test]
@@ -472,5 +539,79 @@ mod tests {
         assert_eq!(stats.swept_objects, 2);
         assert!(weak_a.upgrade().is_none());
         assert!(weak_b.upgrade().is_none());
+    }
+
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    #[test]
+    fn regular_collect_preserves_swept_closure_env_contents() {
+        let env = track_env(Rc::new(Mutex::new(Vec::new())));
+        let closure = make_dummy_closure(Rc::clone(&env));
+        let weak_props = match &closure {
+            Value::Closure { props, .. } => Rc::downgrade(props),
+            _ => unreachable!("dummy closure must be a closure"),
+        };
+
+        env.borrow().push(Rc::new(Mutex::new(closure.clone())));
+
+        let weak_env = Rc::downgrade(&env);
+
+        drop(closure);
+        drop(env);
+
+        let _stats = collect(&[]);
+
+        assert!(
+            weak_env.upgrade().is_some(),
+            "regular collection should not clear swept env contents yet"
+        );
+        assert!(
+            weak_props.upgrade().is_some(),
+            "closure remains reachable through uncleared closure env"
+        );
+    }
+
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    #[test]
+    fn aggressive_collect_breaks_closure_env_cycles() {
+        let env = track_env(Rc::new(Mutex::new(Vec::new())));
+        let closure = make_dummy_closure(Rc::clone(&env));
+        let weak_props = match &closure {
+            Value::Closure { props, .. } => Rc::downgrade(props),
+            _ => unreachable!("dummy closure must be a closure"),
+        };
+
+        env.borrow().push(Rc::new(Mutex::new(closure.clone())));
+
+        let weak_env = Rc::downgrade(&env);
+
+        drop(closure);
+        drop(env);
+
+        let stats = collect_aggressive(&[]);
+        assert!(stats.swept_envs >= 1);
+        assert!(weak_env.upgrade().is_none());
+        assert!(weak_props.upgrade().is_none());
+    }
+
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    #[test]
+    fn aggressive_collect_respects_roots() {
+        let env = track_env(Rc::new(Mutex::new(Vec::new())));
+        let closure = make_dummy_closure(Rc::clone(&env));
+        let weak_props = match &closure {
+            Value::Closure { props, .. } => Rc::downgrade(props),
+            _ => unreachable!("dummy closure must be a closure"),
+        };
+
+        env.borrow().push(Rc::new(Mutex::new(closure.clone())));
+
+        let weak_env = Rc::downgrade(&env);
+
+        drop(env);
+
+        let stats = collect_aggressive(std::slice::from_ref(&closure));
+        assert_eq!(stats.swept_envs, 0);
+        assert!(weak_env.upgrade().is_some());
+        assert!(weak_props.upgrade().is_some());
     }
 }
