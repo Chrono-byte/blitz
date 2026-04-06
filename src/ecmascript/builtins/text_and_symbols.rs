@@ -133,39 +133,16 @@ pub(crate) fn install_string_boolean_symbol_builtins(
                 Value::Symbol(id, desc) => Some((id, desc)),
                 Value::Object(obj) => {
                     let borrowed = obj.borrow();
-                    if matches!(
-                        borrowed
-                            .properties
-                            .get(&PKey::String("__isSymbol".to_string())),
-                        Some(PropertyDescriptor::Data {
-                            value: Value::Bool(true),
-                            ..
+                    borrowed
+                        .properties
+                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                        .and_then(|d| match d {
+                            PropertyDescriptor::Data {
+                                value: Value::Symbol(id, desc),
+                                ..
+                            } => Some((id.clone(), desc.clone())),
+                            _ => None,
                         })
-                    ) {
-                        let id = borrowed
-                            .properties
-                            .get(&PKey::String("_id".to_string()))
-                            .and_then(|d| match d {
-                                PropertyDescriptor::Data {
-                                    value: Value::Number(n),
-                                    ..
-                                } => Some(SymbolId::well_known(*n as u64)),
-                                _ => None,
-                            });
-                        let desc = borrowed
-                            .properties
-                            .get(&PKey::String("description".to_string()))
-                            .and_then(|d| match d {
-                                PropertyDescriptor::Data {
-                                    value: Value::String(s),
-                                    ..
-                                } => Some(s.clone()),
-                                _ => None,
-                            });
-                        id.map(|id| (id, desc))
-                    } else {
-                        None
-                    }
                 }
                 _ => None,
             };
@@ -193,32 +170,14 @@ pub(crate) fn install_string_boolean_symbol_builtins(
                 Value::Symbol(_, _) => Ok(this),
                 Value::Object(obj) => {
                     let borrowed = obj.borrow();
-                    if matches!(
-                        borrowed
-                            .properties
-                            .get(&PKey::String("__isSymbol".to_string())),
-                        Some(PropertyDescriptor::Data {
-                            value: Value::Bool(true),
-                            ..
-                        })
-                    ) {
-                        if let Some(PropertyDescriptor::Data {
-                            value: Value::Number(n),
-                            ..
-                        }) = borrowed.properties.get(&PKey::String("_id".to_string()))
-                        {
-                            let desc = borrowed
-                                .properties
-                                .get(&PKey::String("description".to_string()))
-                                .and_then(|d| match d {
-                                    PropertyDescriptor::Data {
-                                        value: Value::String(s),
-                                        ..
-                                    } => Some(s.clone()),
-                                    _ => None,
-                                });
-                            return Ok(Value::Symbol(SymbolId::well_known(*n as u64), desc));
-                        }
+                    if let Some(PropertyDescriptor::Data {
+                        value: Value::Symbol(id, desc),
+                        ..
+                    }) = borrowed
+                        .properties
+                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                    {
+                        return Ok(Value::Symbol(id.clone(), desc.clone()));
                     }
                     Err(vm.throw_type_error(
                         "Symbol.prototype.valueOf called on incompatible receiver",
