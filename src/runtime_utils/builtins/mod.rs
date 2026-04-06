@@ -5,3 +5,4 @@
 pub(crate) mod array;
 pub(crate) mod primitives;
 pub(crate) mod promise;
+pub(crate) mod text_and_symbols;

@@ -1,3 +1,9 @@
+//! Primitive wrapper builtins currently migrated from runtime_utils.
+//!
+//! Number
+//! BigInt
+//! Boolean
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
