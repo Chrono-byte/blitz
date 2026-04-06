@@ -72,6 +72,7 @@ use num_bigint::{BigInt as BigIntValue, Sign};
 use num_traits::{FromPrimitive, ToPrimitive};
 use regex::RegexBuilder;
 
+/// The maximum array length as a floating-point value.
 const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
 
 pub(crate) fn usize_to_f64(value: usize) -> f64 {
@@ -3052,18 +3053,10 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     );
 
     let object_ctor_props = Rc::clone(&object_ctor_map);
-    let object_ctor_fn: BuiltinFn = Rc::new(move |_vm, args| {
-        // Object(value): return value for object-like operands; otherwise for
-        // primitive operands return the primitive directly (minimal boxing
-        // behavior for harness compatibility).
+    let object_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
         let value_idx = if args.len() > 1 { 1 } else { 0 };
         let value = args.get(value_idx).cloned().unwrap_or(Value::Undefined);
         match value {
-            Value::Object(_)
-            | Value::Array(..)
-            | Value::Closure { .. }
-            | Value::BuiltinObject(_, _)
-            | Value::Promise(_) => Ok(value),
             Value::Null | Value::Undefined => {
                 let proto = object_ctor_props
                     .borrow()
@@ -3078,7 +3071,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 inst.set_prototype_value(proto);
                 Ok(Value::Object(Rc::new(RefCell::new(inst))))
             }
-            _ => Ok(value),
+            _ => vm.to_object_value(value),
         }
     });
     let object_ctor_val = Value::BuiltinObject(object_ctor_fn.clone(), Rc::clone(&object_ctor_map));
