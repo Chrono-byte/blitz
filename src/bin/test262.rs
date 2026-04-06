@@ -419,11 +419,10 @@ fn print_bucket_summary(
     eprintln!("{}", label);
     for (name, stats) in rows.into_iter().take(limit) {
         eprintln!(
-            "  {:<28} pass {:>6} fail {:>6} skip {:>6}  pass rate {:>6.2}%",
+            "  {:<28} pass {:>6} fail {:>6}  pass rate {:>6.2}%",
             name,
             stats.pass,
             stats.fail,
-            stats.skip,
             stats.pass_pct()
         );
     }

@@ -63,7 +63,8 @@ impl super::Compiler {
         name: &str,
         kind: oxc_ast::ast::VariableDeclarationKind,
     ) -> Result<(), crate::errors::CompilerError> {
-        let mirror_global = self.is_root;
+        let is_var = matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var);
+        let mirror_global = self.is_root && is_var;
 
         if matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var)
             && let Some(err) = self.check_var_lexical_conflict(name)
@@ -71,7 +72,6 @@ impl super::Compiler {
             return Err(crate::errors::CompilerError::from(err));
         }
 
-        let is_var = matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var);
         let slot = if is_var {
             self.resolve_local(name)
                 .unwrap_or_else(|| self.add_var_local(name.to_string(), None, mirror_global))

@@ -1681,34 +1681,43 @@ pub fn own_property_descriptor_value(obj: &Value, key: &PropertyKey) -> Option<V
 }
 
 fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
-    let mut keys = Vec::new();
-    match obj {
-        Value::Object(data) => {
-            for (key, desc) in &data.borrow().properties {
-                let enumerable = match desc {
-                    PropertyDescriptor::Data { enumerable, .. }
-                    | PropertyDescriptor::Accessor { enumerable, .. } => *enumerable,
-                };
-                if enumerable {
-                    keys.push(key.clone());
+    fn enumerable_prop_keys(props: &RefCell<ObjectData>, skip_length: bool) -> Vec<PropertyKey> {
+        let mut string_keys: Vec<String> = Vec::new();
+        let mut symbol_keys: Vec<PropertyKey> = Vec::new();
+        for (key, desc) in &props.borrow().properties {
+            let enumerable = match desc {
+                PropertyDescriptor::Data { enumerable, .. }
+                | PropertyDescriptor::Accessor { enumerable, .. } => *enumerable,
+            };
+            if !enumerable {
+                continue;
+            }
+            match key {
+                PropertyKey::String(name) => {
+                    if skip_length && name == "length" {
+                        continue;
+                    }
+                    string_keys.push(name.clone());
                 }
+                PropertyKey::Symbol(_) => symbol_keys.push(key.clone()),
             }
         }
+        string_keys.sort();
+        let mut out: Vec<PropertyKey> = string_keys.into_iter().map(PropertyKey::String).collect();
+        out.extend(symbol_keys);
+        out
+    }
+
+    let mut keys = Vec::new();
+    match obj {
+        Value::Object(data) => keys.extend(enumerable_prop_keys(data, false)),
         Value::Array(arr, props) => {
             for (idx, slot) in arr.borrow().iter().enumerate() {
                 if slot.is_some() {
                     keys.push(PropertyKey::String(idx.to_string()));
                 }
             }
-            for (key, desc) in &props.borrow().properties {
-                let enumerable = match desc {
-                    PropertyDescriptor::Data { enumerable, .. }
-                    | PropertyDescriptor::Accessor { enumerable, .. } => *enumerable,
-                };
-                if enumerable {
-                    keys.push(key.clone());
-                }
-            }
+            keys.extend(enumerable_prop_keys(props, true));
         }
         Value::Closure { .. } | Value::BuiltinObject(..) | Value::Builtin(_) => {
             let p = match obj {
@@ -1717,15 +1726,7 @@ fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
                 _ => None,
             };
             if let Some(props) = p {
-                for (key, desc) in &props.borrow().properties {
-                    let enumerable = match desc {
-                        PropertyDescriptor::Data { enumerable, .. }
-                        | PropertyDescriptor::Accessor { enumerable, .. } => *enumerable,
-                    };
-                    if enumerable {
-                        keys.push(key.clone());
-                    }
-                }
+                keys.extend(enumerable_prop_keys(props, false));
             }
         }
         _ => {}

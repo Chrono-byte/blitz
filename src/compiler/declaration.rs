@@ -604,6 +604,27 @@ impl Compiler {
                 self.emit(Op::SetLocal, LINE);
                 self.emit_byte(iterator_slot as u8, LINE);
 
+                if let oast::ForStatementLeft::VariableDeclaration(v) = &f.left
+                    && matches!(
+                        v.kind,
+                        oxc_ast::ast::VariableDeclarationKind::Let
+                            | oxc_ast::ast::VariableDeclarationKind::Const
+                    )
+                {
+                    let Some(dec) = v.declarations.first() else {
+                        return Err(crate::errors::CompilerError::from(
+                            "unsupported empty for-of declaration",
+                        ));
+                    };
+                    let mut names = HashSet::new();
+                    self.add_var_names_from_binding(&dec.id, &mut names);
+                    for name in names {
+                        if self.resolve_local(&name).is_none() {
+                            self.add_local_with_mirror(name.clone(), None, false);
+                        }
+                    }
+                }
+
                 let loop_start = self.chunk.code.len();
 
                 self.emit(Op::GetLocal, LINE);
@@ -630,6 +651,20 @@ impl Compiler {
                                 "unsupported empty for-of declaration",
                             ));
                         };
+                        if matches!(
+                            v.kind,
+                            oxc_ast::ast::VariableDeclarationKind::Let
+                                | oxc_ast::ast::VariableDeclarationKind::Const
+                        ) {
+                            let mut names = HashSet::new();
+                            self.add_var_names_from_binding(&dec.id, &mut names);
+                            for name in &names {
+                                if let Some(slot) = self.resolve_local(name) {
+                                    self.emit(Op::CloneLocalCell, LINE);
+                                    self.emit_byte(slot as u8, LINE);
+                                }
+                            }
+                        }
                         self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
                     }
                     oast::ForStatementLeft::AssignmentTargetIdentifier(id) => {
@@ -762,6 +797,27 @@ impl Compiler {
                 self.emit(Op::SetLocal, LINE);
                 self.emit_byte(index_slot as u8, LINE);
 
+                if let OForLeft::VariableDeclaration(v) = &f.left
+                    && matches!(
+                        v.kind,
+                        oxc_ast::ast::VariableDeclarationKind::Let
+                            | oxc_ast::ast::VariableDeclarationKind::Const
+                    )
+                {
+                    let Some(dec) = v.declarations.first() else {
+                        return Err(crate::errors::CompilerError::from(
+                            "unsupported empty for-in declaration",
+                        ));
+                    };
+                    let mut names = HashSet::new();
+                    self.add_var_names_from_binding(&dec.id, &mut names);
+                    for name in names {
+                        if self.resolve_local(&name).is_none() {
+                            self.add_local_with_mirror(name.clone(), None, false);
+                        }
+                    }
+                }
+
                 let loop_start = self.chunk.code.len();
 
                 self.emit(Op::GetLocal, LINE);
@@ -789,6 +845,20 @@ impl Compiler {
                                 "unsupported empty for-in declaration",
                             ));
                         };
+                        if matches!(
+                            v.kind,
+                            oxc_ast::ast::VariableDeclarationKind::Let
+                                | oxc_ast::ast::VariableDeclarationKind::Const
+                        ) {
+                            let mut names = HashSet::new();
+                            self.add_var_names_from_binding(&dec.id, &mut names);
+                            for name in &names {
+                                if let Some(slot) = self.resolve_local(name) {
+                                    self.emit(Op::CloneLocalCell, LINE);
+                                    self.emit_byte(slot as u8, LINE);
+                                }
+                            }
+                        }
                         self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
                     }
                     OForLeft::AssignmentTargetIdentifier(id) => {

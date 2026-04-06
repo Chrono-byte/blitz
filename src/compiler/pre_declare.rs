@@ -50,7 +50,8 @@ impl Compiler {
                         _ => continue,
                     };
                     if self.resolve_local(&name).is_none() {
-                        let mirror_global = self.is_root;
+                        let mirror_global = self.is_root
+                            && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
                         if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
                             self.add_var_local(name, None, mirror_global);
                         } else {
