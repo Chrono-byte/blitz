@@ -2225,7 +2225,7 @@ fn clone_value_across_realms(
     helper(vm, value, &mut visited, transfer_set)
 }
 
-/// Install a minimal set of kernel constructors and prototypes on `globals`.
+/// Install kernel constructors and prototypes on `globals`.
 ///
 /// This bootstraps host-visible `Object`, `Function`, and `Array` behavior
 /// required by the runtime prelude before the full standard library is loaded.
@@ -2638,29 +2638,34 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             &function_proto_map,
         )),
     );
+    let array_values_builtin = builtin_object(
+        Rc::new({
+            let array_iterator_proto = Rc::clone(&array_iterator_proto);
+            move |_vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let iter = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+                    Rc::clone(&array_iterator_proto),
+                ))));
+                iter.borrow_mut().properties.insert(
+                    PKey::String("[[IteratedObject]]".to_string()),
+                    PropertyDescriptor::data(this),
+                );
+                iter.borrow_mut().properties.insert(
+                    PKey::String("[[ArrayIteratorNextIndex]]".to_string()),
+                    PropertyDescriptor::data(Value::Number(0.0)),
+                );
+                Ok(Value::Object(iter))
+            }
+        }),
+        &function_proto_map,
+    );
+    array_proto_map.borrow_mut().properties.insert(
+        PKey::String("values".to_string()),
+        PropertyDescriptor::data(array_values_builtin.clone()),
+    );
     array_proto_map.borrow_mut().properties.insert(
         PKey::Symbol(SymbolId::well_known_iterator()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new({
-                let array_iterator_proto = Rc::clone(&array_iterator_proto);
-                move |_vm, args| {
-                    let this = args.first().cloned().unwrap_or(Value::Undefined);
-                    let iter = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-                        Rc::clone(&array_iterator_proto),
-                    ))));
-                    iter.borrow_mut().properties.insert(
-                        PKey::String("[[IteratedObject]]".to_string()),
-                        PropertyDescriptor::data(this),
-                    );
-                    iter.borrow_mut().properties.insert(
-                        PKey::String("[[ArrayIteratorNextIndex]]".to_string()),
-                        PropertyDescriptor::data(Value::Number(0.0)),
-                    );
-                    Ok(Value::Object(iter))
-                }
-            }),
-            &function_proto_map,
-        )),
+        PropertyDescriptor::data(array_values_builtin),
     );
     // Array.prototype.filter
     let array_proto_for_filter = Rc::clone(&array_proto_map);
@@ -5588,6 +5593,90 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             builtin
         }),
     );
+    array_ctor_map.borrow_mut().properties.insert(
+        PKey::String("fromAsync".to_string()),
+        PropertyDescriptor::data({
+            let array_proto_for_from_async = Rc::clone(&array_proto_map);
+            let builtin = builtin_object(
+                Rc::new(move |vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Array");
+                    let source = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let map_fn = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                    let this_arg = args.get(off + 2).cloned().unwrap_or(Value::Undefined);
+
+                    let promise_ctor = match vm.get_global("Promise") {
+                        Some(value) => value,
+                        None => return Err(vm.throw_type_error("Promise constructor missing")),
+                    };
+                    let promise_resolve = match vm
+                        .get_property_host(&promise_ctor, &PKey::String("resolve".to_string()))
+                    {
+                        Ok(value) => value,
+                        Err(err) => return Err(err),
+                    };
+                    let promise_reject = match vm
+                        .get_property_host(&promise_ctor, &PKey::String("reject".to_string()))
+                    {
+                        Ok(value) => value,
+                        Err(err) => return Err(err),
+                    };
+
+                    let outcome: Result<Value, crate::errors::RuntimeError> = (|| {
+                        if !matches!(map_fn, Value::Undefined) && !Vm::is_callable_value(&map_fn) {
+                            return Err(
+                                vm.throw_type_error("Array.fromAsync mapfn is not callable")
+                            );
+                        }
+
+                        let items = collect_iterable_values(vm, &source)?;
+                        let mut out: Vec<Option<Value>> = Vec::with_capacity(items.len());
+                        for (i, mut value) in items.into_iter().enumerate() {
+                            if !matches!(map_fn, Value::Undefined) {
+                                value = vm.call_value_with_this(
+                                    &map_fn,
+                                    &this_arg,
+                                    &[value, Value::Number(usize_to_f64(i))],
+                                )?;
+                            }
+                            out.push(Some(value));
+                        }
+
+                        let arr_rc = Rc::new(RefCell::new(out));
+                        let props = Rc::new(RefCell::new(ObjectData::new()));
+                        props
+                            .borrow_mut()
+                            .set_prototype_value(Value::Object(Rc::clone(
+                                &array_proto_for_from_async,
+                            )));
+                        props.borrow_mut().properties.insert(
+                            PKey::String("length".to_string()),
+                            PropertyDescriptor::data(Value::Number(usize_to_f64(
+                                arr_rc.borrow().len(),
+                            ))),
+                        );
+                        Ok(Value::Array(arr_rc, props))
+                    })(
+                    );
+
+                    match outcome {
+                        Ok(value) => {
+                            vm.call_value_with_this(&promise_resolve, &promise_ctor, &[value])
+                        }
+                        Err(err) => {
+                            let reason = vm
+                                .last_uncaught_exception
+                                .take()
+                                .unwrap_or_else(|| Value::String(format!("{}", err)));
+                            vm.call_value_with_this(&promise_reject, &promise_ctor, &[reason])
+                        }
+                    }
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 1.0);
+            builtin
+        }),
+    );
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(array_ctor_val.clone()),
@@ -6991,6 +7080,130 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     g.properties.insert(
         PKey::String("Math".to_string()),
         PropertyDescriptor::data(Value::Object(math)),
+    );
+
+    // BigInt constructor and prototype.
+    let bigint_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+        ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
+    ));
+    let bigint_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+        ObjectData::with_prototype(Value::Object(Rc::clone(&function_proto_map))),
+    ));
+    bigint_ctor_map.borrow_mut().properties.insert(
+        PKey::String("prototype".to_string()),
+        PropertyDescriptor::data(Value::Object(Rc::clone(&bigint_proto_map))),
+    );
+    let bigint_proto_for_ctor = Rc::clone(&bigint_proto_map);
+    let bigint_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+        let value_idx = if args.len() > 1 { 1 } else { 0 };
+        let value = args
+            .get(value_idx)
+            .cloned()
+            .unwrap_or(Value::BigInt(BigIntValue::from(0u8)));
+        let bigint = match value {
+            Value::BigInt(n) => n,
+            Value::Bool(b) => BigIntValue::from(if b { 1 } else { 0 }),
+            Value::Number(n) => {
+                if !n.is_finite() || n.fract() != 0.0 {
+                    return Err(vm.throw_range_error("Cannot convert Number to BigInt"));
+                }
+                BigIntValue::from(n as i64)
+            }
+            Value::String(s) => s
+                .parse::<BigIntValue>()
+                .map_err(|_| vm.throw_type_error("Cannot convert string to BigInt"))?,
+            Value::Object(obj) => {
+                if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                    .borrow()
+                    .properties
+                    .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                    && let Value::BigInt(n) = value
+                {
+                    n.clone()
+                } else {
+                    return Err(vm.throw_type_error("Cannot convert object to BigInt"));
+                }
+            }
+            _ => return Err(vm.throw_type_error("Cannot convert value to BigInt")),
+        };
+
+        if vm.current_new_target().is_some() {
+            let mut obj = ObjectData::new();
+            obj.set_prototype_value(Value::Object(Rc::clone(&bigint_proto_for_ctor)));
+            let obj_rc = Rc::new(RefCell::new(obj));
+            obj_rc.borrow_mut().properties.insert(
+                PKey::String("[[PrimitiveValue]]".to_string()),
+                PropertyDescriptor::data(Value::BigInt(bigint)),
+            );
+            Ok(Value::Object(obj_rc))
+        } else {
+            Ok(Value::BigInt(bigint))
+        }
+    });
+    let bigint_ctor_val = Value::BuiltinObject(bigint_ctor_fn, Rc::clone(&bigint_ctor_map));
+    bigint_proto_map.borrow_mut().properties.insert(
+        PKey::String("constructor".to_string()),
+        PropertyDescriptor::data(bigint_ctor_val.clone()),
+    );
+    bigint_proto_map.borrow_mut().properties.insert(
+        PKey::String("valueOf".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                match this {
+                    Value::BigInt(n) => Ok(Value::BigInt(n)),
+                    Value::Object(obj) => {
+                        if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                            .borrow()
+                            .properties
+                            .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                            && let Value::BigInt(n) = value
+                        {
+                            return Ok(Value::BigInt(n.clone()));
+                        }
+                        Err(vm.throw_type_error(
+                            "BigInt.prototype.valueOf called on incompatible receiver",
+                        ))
+                    }
+                    _ => Err(vm.throw_type_error(
+                        "BigInt.prototype.valueOf called on incompatible receiver",
+                    )),
+                }
+            }),
+            &function_proto_map,
+        )),
+    );
+    bigint_proto_map.borrow_mut().properties.insert(
+        PKey::String("toString".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                match this {
+                    Value::BigInt(n) => Ok(Value::String(n.to_string())),
+                    Value::Object(obj) => {
+                        if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                            .borrow()
+                            .properties
+                            .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                            && let Value::BigInt(n) = value
+                        {
+                            return Ok(Value::String(n.to_string()));
+                        }
+                        Err(vm.throw_type_error(
+                            "BigInt.prototype.toString called on incompatible receiver",
+                        ))
+                    }
+                    _ => Err(vm.throw_type_error(
+                        "BigInt.prototype.toString called on incompatible receiver",
+                    )),
+                }
+            }),
+            &function_proto_map,
+        )),
+    );
+    g.properties.insert(
+        PKey::String("BigInt".to_string()),
+        PropertyDescriptor::data(bigint_ctor_val),
     );
 
     // Number constructor with static properties.
