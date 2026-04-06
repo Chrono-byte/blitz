@@ -1,0 +1,65 @@
+use std::rc::Rc;
+
+use crate::compiler;
+use crate::parser::Parser;
+use crate::runtime_utils::{array_from_values, static_builtin_arg_offset, syntax_error};
+use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::vm::Vm;
+
+pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
+    use PropertyKey as PKey;
+
+    g.properties.insert(
+        PKey::String("eval".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
+            let off = static_builtin_arg_offset(vm, args, "eval");
+            let src = match args.get(off) {
+                Some(Value::String(s)) => s.clone(),
+                Some(other) => return Ok(other.clone()),
+                None => return Ok(Value::Undefined),
+            };
+            let trimmed = src.trim();
+            if !trimmed.is_empty()
+                && trimmed
+                    .chars()
+                    .all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
+                && matches!(trimmed.chars().next(), Some(c) if c == '_' || c == '$' || c.is_ascii_alphabetic())
+            {
+                if let Some(value) = vm.resolve_identifier_value(trimmed)? {
+                    return Ok(value);
+                }
+                return Err(vm.throw_reference_error(&format!("{trimmed} is not defined")));
+            }
+            match vm.eval_expression_source(&src) {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    let msg = err.to_string();
+                    if !msg.contains("parse:") && !msg.contains("compile:") {
+                        return Err(err);
+                    }
+                }
+            }
+            let session = Parser::parse_source(&src)
+                .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
+            let prog = session.program();
+            let chunk = compiler::compile_oxc(prog, &src)
+                .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
+            let mut eval_vm = Vm::new(vm.globals_rc());
+            eval_vm.run(chunk)
+        }))),
+    );
+
+    let mut insert_if_missing = |name: &str, val: Value| {
+        let k = PKey::String(name.to_string());
+        g.properties
+            .entry(k)
+            .or_insert_with(|| PropertyDescriptor::data(val));
+    };
+
+    insert_if_missing(
+        "__native_array_from_spread",
+        Value::Builtin(Rc::new(move |_vm, args| {
+            Ok(array_from_values(args.to_vec()))
+        })),
+    );
+}
