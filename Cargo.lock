@@ -107,6 +107,7 @@ dependencies = [
  "clap",
  "criterion",
  "fastrand",
+ "indexmap",
  "num-bigint",
  "num-traits",
  "ouroboros",

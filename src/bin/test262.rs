@@ -1135,7 +1135,7 @@ fn run_test_file(
             globals
                 .borrow_mut()
                 .properties
-                .remove(&PropertyKey::String("$262".to_string()));
+                .shift_remove(&PropertyKey::String("$262".to_string()));
         }
 
         // Async tests must signal completion through $DONE(error?).
@@ -1302,7 +1302,10 @@ fn run_test_file(
                 && let Some(neg) = &m.negative
                 && neg.phase == "parse"
             {
-                match Parser::parse_source(&src) {
+                match Parser::parse_source_with_type(
+                    &src,
+                    SourceType::unambiguous().with_module(true),
+                ) {
                     Ok(session) => {
                         let prog = session.program();
                         if let Err(e) = compiler::compile_oxc(prog, &src) {
@@ -1643,7 +1646,7 @@ fn run_harness_only(
                 }) => obj
                     .borrow_mut()
                     .properties
-                    .remove(&PropertyKey::String("detachArrayBuffer".to_string())),
+                    .shift_remove(&PropertyKey::String("detachArrayBuffer".to_string())),
                 _ => None,
             }
         } else {

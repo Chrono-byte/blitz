@@ -75,6 +75,7 @@ use regex::RegexBuilder;
 /// The maximum array length as a floating-point value.
 const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
 
+/// Converts a `usize` to a `f64`, returning `f64::NAN` if the value is too large.
 pub(crate) fn usize_to_f64(value: usize) -> f64 {
     value.to_f64().unwrap_or(f64::NAN)
 }
@@ -1709,7 +1710,6 @@ fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
         }
         index_keys.sort_unstable();
         index_keys.dedup();
-        string_keys.sort();
         let mut out: Vec<PropertyKey> = index_keys
             .into_iter()
             .map(|idx| PropertyKey::String(idx.to_string()))

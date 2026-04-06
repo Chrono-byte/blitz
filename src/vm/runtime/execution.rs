@@ -8,6 +8,7 @@ use crate::value::{
     ValueSlot,
 };
 use crate::vm::state::*;
+use indexmap::IndexMap;
 use num_bigint::BigInt as BigIntValue;
 use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
 use std::cell::RefCell;
@@ -1702,7 +1703,7 @@ impl Vm {
                     }
                     Some(_) => {
                         // Property exists and is configurable, delete it
-                        d.properties.remove(key);
+                        d.properties.shift_remove(key);
                         Ok(true)
                     }
                     None => {
@@ -1729,7 +1730,7 @@ impl Vm {
                     }
                     Some(_) => {
                         // Property exists and is configurable, delete it
-                        p.properties.remove(key);
+                        p.properties.shift_remove(key);
                         Ok(true)
                     }
                     None => {
@@ -1749,7 +1750,7 @@ impl Vm {
                     }
                     Some(_) => {
                         // Property exists and is configurable, delete it
-                        p.properties.remove(key);
+                        p.properties.shift_remove(key);
                         Ok(true)
                     }
                     None => {
@@ -3907,7 +3908,7 @@ impl Vm {
 
     fn build_object(&mut self) -> Result<(), crate::errors::RuntimeError> {
         let n = self.read_byte()? as usize;
-        let mut map: HashMap<PropertyKey, PropertyDescriptor> = HashMap::with_capacity(n);
+        let mut map: IndexMap<PropertyKey, PropertyDescriptor> = IndexMap::with_capacity(n);
         for _ in 0..n {
             let value = self.pop()?;
             let key_val = self.pop()?;
@@ -6369,7 +6370,7 @@ mod tests {
                         _ => None,
                     })
                     .collect();
-                assert_eq!(values, vec!["1", "2", "a", "b"]);
+                assert_eq!(values, vec!["1", "2", "b", "a"]);
             }
             other => panic!("expected keys array, got {:?}", other),
         }

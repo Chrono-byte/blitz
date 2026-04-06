@@ -50,8 +50,8 @@
 //! assert_eq!(num.type_name(), "number");
 //! ```
 
+use indexmap::IndexMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::rc::Weak;
 use std::sync::Mutex;
@@ -239,7 +239,7 @@ impl PropertyDescriptor {
 #[derive(Clone, Debug)]
 pub struct ObjectData {
     /// Property table
-    pub properties: HashMap<PropertyKey, PropertyDescriptor>,
+    pub properties: IndexMap<PropertyKey, PropertyDescriptor>,
     /// Strongly stored prototype for non-object prototype values.
     pub strong_prototype: Option<Value>,
     /// Prototype pointer (weak to prevent reference cycles)
@@ -258,7 +258,7 @@ impl ObjectData {
     /// Create an empty object data container with a null prototype.
     pub fn new() -> Self {
         Self {
-            properties: HashMap::new(),
+            properties: IndexMap::new(),
             strong_prototype: None,
             weak_prototype: None,
             extensible: true,
@@ -275,7 +275,7 @@ impl ObjectData {
     /// Create an object with a weak prototype reference (prevents cycles).
     pub fn with_weak_prototype(prototype: &Rc<RefCell<ObjectData>>) -> Self {
         Self {
-            properties: HashMap::new(),
+            properties: IndexMap::new(),
             strong_prototype: None,
             weak_prototype: Some(WeakObject::new(prototype)),
             extensible: true,

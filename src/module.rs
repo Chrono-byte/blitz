@@ -67,7 +67,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 
 fn source_type_for_module_path(_path: &Path) -> SourceType {
-    SourceType::unambiguous()
+    SourceType::unambiguous().with_module(true)
 }
 
 #[derive(Debug, PartialEq, Eq)]
