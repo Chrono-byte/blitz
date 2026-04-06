@@ -2864,7 +2864,7 @@ impl Vm {
                 return "-Infinity".to_string();
             }
             let abs = n.abs();
-            if abs >= 1e21 || abs < 1e-6 {
+            if !(1e-6..1e21).contains(&abs) {
                 let s = format!("{:e}", n);
                 if let Some(e_idx) = s.find('e') {
                     let mantissa = s[..e_idx].trim_end_matches('0').trim_end_matches('.');

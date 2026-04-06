@@ -265,36 +265,36 @@ pub(crate) fn install_string_boolean_symbol_builtins(
             None => String::new(),
             Some(v) => string_constructor_to_string(vm, v)?,
         };
-        if vm.current_new_target().is_some() {
-            if let Some(Value::Object(obj_rc)) = args.first() {
-                let mut obj = obj_rc.borrow_mut();
-                obj.set_prototype_value(Value::Object(Rc::clone(&string_proto_for_ctor)));
+        if vm.current_new_target().is_some()
+            && let Some(Value::Object(obj_rc)) = args.first()
+        {
+            let mut obj = obj_rc.borrow_mut();
+            obj.set_prototype_value(Value::Object(Rc::clone(&string_proto_for_ctor)));
+            obj.properties.insert(
+                PKey::String("[[PrimitiveValue]]".to_string()),
+                PropertyDescriptor::data(Value::String(s.clone())),
+            );
+            obj.properties.insert(
+                PKey::String("length".to_string()),
+                PropertyDescriptor::Data {
+                    value: Value::Number(usize_to_f64(s.encode_utf16().count())),
+                    writable: false,
+                    enumerable: false,
+                    configurable: false,
+                },
+            );
+            for (idx, ch) in s.chars().enumerate() {
                 obj.properties.insert(
-                    PKey::String("[[PrimitiveValue]]".to_string()),
-                    PropertyDescriptor::data(Value::String(s.clone())),
-                );
-                obj.properties.insert(
-                    PKey::String("length".to_string()),
+                    PKey::String(idx.to_string()),
                     PropertyDescriptor::Data {
-                        value: Value::Number(usize_to_f64(s.encode_utf16().count())),
+                        value: Value::String(ch.to_string()),
                         writable: false,
-                        enumerable: false,
+                        enumerable: true,
                         configurable: false,
                     },
                 );
-                for (idx, ch) in s.chars().enumerate() {
-                    obj.properties.insert(
-                        PKey::String(idx.to_string()),
-                        PropertyDescriptor::Data {
-                            value: Value::String(ch.to_string()),
-                            writable: false,
-                            enumerable: true,
-                            configurable: false,
-                        },
-                    );
-                }
-                return Ok(args.first().cloned().unwrap_or(Value::Undefined));
             }
+            return Ok(args.first().cloned().unwrap_or(Value::Undefined));
         }
         Ok(Value::String(s))
     });
