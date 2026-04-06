@@ -250,71 +250,7 @@ fn run_test_in_thread(
                 eprintln!("[test262] starting {}", file.display());
             }
             let result = catch_unwind(AssertUnwindSafe(|| {
-                // Create fresh globals for this thread (each test gets isolated globals)
-                let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
-
-                // Set up globals like main does
-                let global_this = Value::Object(Rc::clone(&globals));
-                globals.borrow_mut().properties.insert(
-                    PropertyKey::String("globalThis".to_string()),
-                    PropertyDescriptor::data(global_this),
-                );
-                globals.borrow_mut().properties.insert(
-                    PropertyKey::String("NaN".to_string()),
-                    PropertyDescriptor::data(Value::Number(f64::NAN)),
-                );
-                globals.borrow_mut().properties.insert(
-                    PropertyKey::String("Infinity".to_string()),
-                    PropertyDescriptor::data(Value::Number(f64::INFINITY)),
-                );
-                globals.borrow_mut().properties.insert(
-                    PropertyKey::String("__native_new_object".to_string()),
-                    PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| {
-                        Ok(Value::Object(Rc::new(RefCell::new(ObjectData::new()))))
-                    }))),
-                );
-                globals.borrow_mut().properties.insert(
-                    PropertyKey::String("__native_print".to_string()),
-                    PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
-                        eprintln!(
-                            "{}",
-                            args.iter()
-                                .map(|v| format!("{}", v))
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        );
-                        Ok(Value::Null)
-                    }))),
-                );
-                globals.borrow_mut().properties.insert(
-                    PropertyKey::String("print".to_string()),
-                    PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
-                        eprintln!(
-                            "{}",
-                            args.iter()
-                                .map(|v| format!("{}", v))
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        );
-                        Ok(Value::Null)
-                    }))),
-                );
-                globals.borrow_mut().properties.insert(
-                    PropertyKey::String("__define_property".to_string()),
-                    PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-                        vm.define_property_builtin(args)
-                    }))),
-                );
-                globals.borrow_mut().properties.insert(
-                    PropertyKey::String("__native_getOwnPropertyDescriptor".to_string()),
-                    PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-                        let target = args.first().cloned().unwrap_or(Value::Undefined);
-                        let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
-                        let key = vm.to_property_key(&key_value).map_err(|e| e.to_string())?;
-                        Ok(runtime_utils::own_property_descriptor_value(&target, &key)
-                            .unwrap_or(Value::Undefined))
-                    }))),
-                );
+                let globals = make_test_globals();
                 globals.borrow_mut().properties.insert(
                     PropertyKey::String("__native_toString".to_string()),
                     PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
@@ -335,16 +271,6 @@ fn run_test_in_thread(
                         let v = args.first().cloned().unwrap_or(Value::Undefined);
                         Ok(Value::Bool(vm.to_boolean(&v)))
                     }))),
-                );
-
-                // Install kernel constructors (this adds Object, Function, Array, etc.)
-                runtime_utils::install_minimal_kernel_constructors(&globals);
-
-                // Wire $262 test harness object
-                let test262_obj = make_test262_object(&globals);
-                globals.borrow_mut().properties.insert(
-                    PropertyKey::String("$262".to_string()),
-                    PropertyDescriptor::data(test262_obj),
                 );
 
                 // Snapshot for test isolation (though we won't use restore since each test is fresh)
@@ -746,6 +672,68 @@ fn builtin_eval_script(globals: &Rc<RefCell<ObjectData>>, args: &[Value]) -> Res
         .map_err(|e| format!("evalScript runtime: {}", e))
 }
 
+fn make_test_globals() -> Rc<RefCell<ObjectData>> {
+    let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+
+    let global_this = Value::Object(Rc::clone(&globals));
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("globalThis".to_string()),
+        PropertyDescriptor::data(global_this),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_print".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            builtin_print(vm, args).map_err(blitz::errors::RuntimeError::from)
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("print".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            builtin_print(vm, args).map_err(blitz::errors::RuntimeError::from)
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("NaN".to_string()),
+        PropertyDescriptor::data(Value::Number(f64::NAN)),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("Infinity".to_string()),
+        PropertyDescriptor::data(Value::Number(f64::INFINITY)),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_new_object".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, _args| {
+            Ok(Value::Object(Rc::new(RefCell::new(ObjectData::new()))))
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__define_property".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            vm.define_property_builtin(args)
+        }))),
+    );
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("__native_getOwnPropertyDescriptor".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            let target = args.first().cloned().unwrap_or(Value::Undefined);
+            let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let key = vm.to_property_key(&key_value)?;
+            Ok(runtime_utils::own_property_descriptor_value(&target, &key)
+                .unwrap_or(Value::Undefined))
+        }))),
+    );
+
+    runtime_utils::install_minimal_kernel_constructors(&globals);
+
+    let test262_obj = make_test262_object(&globals);
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String("$262".to_string()),
+        PropertyDescriptor::data(test262_obj),
+    );
+
+    globals
+}
+
 /// Create a `$262` object for a realm, with proper createRealm that builds
 /// fresh intrinsics (not a heap clone) and evalScript that shares globals.
 fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
@@ -987,8 +975,8 @@ fn snapshot_globals(globals: &Rc<RefCell<ObjectData>>) -> HashMap<PropertyKey, P
 fn run_test_file(
     path: &Path,
     test262_root: &Path,
-    globals: &Rc<RefCell<ObjectData>>,
-    baseline_snapshot: &HashMap<PropertyKey, PropertyDescriptor>,
+    _globals: &Rc<RefCell<ObjectData>>,
+    _baseline_snapshot: &HashMap<PropertyKey, PropertyDescriptor>,
     release_handle: Option<Arc<PermitReleaser>>,
 ) -> Result<(), String> {
     let src = fs::read_to_string(path)
@@ -1100,7 +1088,7 @@ fn run_test_file(
             typecheck::set_strict_override(None);
         }
     }
-    for (mode_name, do_run) in &[("non-strict", run_non_strict), ("strict", run_strict)] {
+    for (mode_name, do_run) in &[("strict", run_strict), ("non-strict", run_non_strict)] {
         if !do_run {
             continue;
         }
@@ -1112,14 +1100,12 @@ fn run_test_file(
         typecheck::set_strict_override(Some(false));
         let _reset_strict = ResetStrict;
 
-        // Restore globals from the baseline snapshot (test isolation).
-        // This undoes any mutations from the previous test without deep cloning.
-        restore_globals(globals, baseline_snapshot);
+        let globals = make_test_globals();
         globals.borrow_mut().properties.insert(
             PropertyKey::String("__TSBLITZ_TEST_PATH".to_string()),
             PropertyDescriptor::data(Value::String(path.to_string_lossy().to_string())),
         );
-        let mut vm = Vm::new(Rc::clone(globals));
+        let mut vm = Vm::new(Rc::clone(&globals));
 
         // The harness self-test `test/harness/detachArrayBuffer.js` verifies
         // the fallback behavior when hosts do NOT provide `$262` at all.

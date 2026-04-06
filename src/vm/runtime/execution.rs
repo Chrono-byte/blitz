@@ -2895,10 +2895,9 @@ impl Vm {
             Value::Undefined => Ok("undefined".to_string()),
             Value::Null => Ok("null".to_string()),
             Value::BigInt(n) => Ok(n.to_string()),
-            Value::Symbol(_, desc) => Ok(match desc {
-                Some(d) => format!("Symbol({})", d),
-                None => "Symbol()".to_string(),
-            }),
+            Value::Symbol(_, _) => {
+                Err(self.throw_type_error("Cannot convert a Symbol value to a string"))
+            }
             _ => {
                 let prim = self.to_primitive(v, Some("string"))?;
                 self.to_string(&prim)
@@ -2955,16 +2954,8 @@ impl Vm {
             Value::String(s) => Ok(parse_js_number_string(s)),
             Value::Undefined => Ok(f64::NAN),
             Value::Null => Ok(0.0),
-            Value::BigInt(n) => Ok(n.to_f64().unwrap_or_else(|| {
-                if n.is_negative() {
-                    f64::NEG_INFINITY
-                } else {
-                    f64::INFINITY
-                }
-            })),
-            Value::Symbol(_, _) => Err(crate::errors::RuntimeError::from(
-                "Cannot convert Symbol to number",
-            )),
+            Value::BigInt(_) => Err(self.throw_type_error("Cannot convert BigInt to number")),
+            Value::Symbol(_, _) => Err(self.throw_type_error("Cannot convert Symbol to number")),
             _ => {
                 let prim = self.to_primitive(v, Some("number"))?;
                 self.to_number_value(&prim)

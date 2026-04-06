@@ -192,10 +192,6 @@ impl super::Compiler {
                 }
             }
             OExpr::TaggedTemplateExpression(t) => {
-                // Minimal tagged template support: `tag` receives
-                // `(stringsArray, ...substitutions)`.
-                // We currently pass only cooked strings and omit template
-                // object caching/raw metadata.
                 self.compile_expr_oast(&t.tag)?;
                 for quasi in &t.quasi.quasis {
                     let cooked = quasi
@@ -208,6 +204,17 @@ impl super::Compiler {
                 }
                 self.emit(Op::BuildArray, LINE);
                 self.emit_byte(t.quasi.quasis.len() as u8, LINE);
+                self.emit(Op::Dup, LINE);
+                self.emit_constant(Value::String("raw".to_string()), LINE);
+                for quasi in &t.quasi.quasis {
+                    self.emit_constant(Value::String(quasi.value.raw.to_string()), LINE);
+                }
+                self.emit(Op::BuildArray, LINE);
+                self.emit_byte(t.quasi.quasis.len() as u8, LINE);
+                self.emit(Op::SetPropertyIC, LINE);
+                let slot = self.alloc_ic_slot()?;
+                self.emit_byte(slot, LINE);
+                self.emit(Op::Pop, LINE);
                 let mut arg_count = 1usize;
                 for sub in &t.quasi.expressions {
                     self.compile_expr_oast(sub)?;
