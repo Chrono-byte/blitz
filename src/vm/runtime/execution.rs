@@ -6153,6 +6153,31 @@ mod tests {
     }
 
     #[test]
+    fn try_block_lexical_shadow_does_not_escape_to_catch() {
+        let session = Parser::parse_source(
+            "var out = (function(x){ try { let x = 'inner'; throw 0; } catch(e) { return x; } })('outer');",
+        )
+        .expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+        let globals = test_globals();
+        runtime_utils::install_minimal_kernel_constructors(&globals);
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+        assert!(matches!(vm.get_global("out"), Some(Value::String(s)) if s == "outer"));
+    }
+
+    #[test]
+    fn for_in_lexical_declaration_with_initializer_is_syntax_error() {
+        let session = Parser::parse_source("for (let x = 3 in {}) {}")
+            .expect("parser currently accepts syntax");
+        let program = session.program();
+        let err = compiler::compile(program, session.source())
+            .expect_err("compile should reject lexical initializer in for-in");
+        assert!(err.to_string().contains("SyntaxError"));
+    }
+
+    #[test]
     fn var_binding_reads_before_init_return_undefined() {
         let session = Parser::parse_source("function f(){ return x; var x = 1; } var out = f();")
             .expect("parse ok");

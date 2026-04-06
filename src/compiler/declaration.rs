@@ -717,6 +717,29 @@ impl Compiler {
                 self.continue_patches.push(Vec::new());
                 self.break_patches.push(Vec::new());
 
+                if let OForLeft::VariableDeclaration(v) = &f.left {
+                    if matches!(
+                        v.kind,
+                        oxc_ast::ast::VariableDeclarationKind::Let
+                            | oxc_ast::ast::VariableDeclarationKind::Const
+                    ) {
+                        if v.declarations.len() != 1 {
+                            return Err(crate::errors::CompilerError::from(
+                                "SyntaxError: for-in lexical declaration must have exactly one binding",
+                            ));
+                        }
+                        if v.declarations
+                            .first()
+                            .and_then(|dec| dec.init.as_ref())
+                            .is_some()
+                        {
+                            return Err(crate::errors::CompilerError::from(
+                                "SyntaxError: for-in lexical declaration may not have an initializer",
+                            ));
+                        }
+                    }
+                }
+
                 self.emit_get_global_name("__native_forInKeys");
                 self.compile_expr_oast(&f.right)?;
                 self.emit(Op::CallIC, LINE);
@@ -979,9 +1002,11 @@ impl Compiler {
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
 
+                self.enter_block_scope_with_vars(&t.block.body);
                 for stmt in &t.block.body {
                     self.compile_statement_oast(stmt)?;
                 }
+                self.exit_scope();
 
                 self.emit(Op::PopHandler, LINE);
 
@@ -997,9 +1022,11 @@ impl Compiler {
                         state.in_finalizer = true;
                     }
                     let body_start = self.chunk.code.len();
+                    self.enter_block_scope_with_vars(&fin.body);
                     for stmt in &fin.body {
                         self.compile_statement_oast(stmt)?;
                     }
+                    self.exit_scope();
                     let (did_return_slot, return_slot) = {
                         let state = self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
                             crate::errors::CompilerError::from("finally state missing")
