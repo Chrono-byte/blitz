@@ -110,22 +110,18 @@ fn path_has_segment(path: &Path, wanted: &str) -> bool {
 
 fn select_files_to_run(
     files: Vec<PathBuf>,
-    filter: Option<&str>,
-    anti_filter: Option<&str>,
+    filters: &[String],
+    anti_filters: &[String],
     anti_segments: &[String],
     limit: Option<usize>,
 ) -> Vec<PathBuf> {
     let mut selected = Vec::new();
     for file in files {
         let path = file.to_string_lossy();
-        if let Some(flt) = filter
-            && !path.contains(flt)
-        {
+        if !filters.is_empty() && !filters.iter().any(|flt| path.contains(flt)) {
             continue;
         }
-        if let Some(flt) = anti_filter
-            && path.contains(flt)
-        {
+        if anti_filters.iter().any(|flt| path.contains(flt)) {
             continue;
         }
         if anti_segments.iter().any(|seg| path_has_segment(&file, seg)) {
@@ -430,12 +426,12 @@ struct RunnerOptions {
     /// List of test segments to exclude.
     #[arg(long = "exclude", value_name = "SEGMENT", value_delimiter = ',')]
     excludes: Vec<String>,
-    /// Substring filter for test names.
-    #[arg(long = "filter", value_name = "SUBSTRING")]
-    filter: Option<String>,
-    /// Exclude tests whose path contains this substring.
-    #[arg(long = "anti-filter", value_name = "SUBSTRING")]
-    anti_filter: Option<String>,
+    /// Substring filters for test names. Any match includes the test.
+    #[arg(long = "filter", value_name = "SUBSTRING", value_delimiter = ',')]
+    filters: Vec<String>,
+    /// Exclude tests whose path contains any of these substrings.
+    #[arg(long = "anti-filter", value_name = "SUBSTRING", value_delimiter = ',')]
+    anti_filters: Vec<String>,
     /// Exclude tests whose path contains one of these exact path segments.
     #[arg(long = "anti-segment", value_name = "SEGMENT", value_delimiter = ',')]
     anti_segments: Vec<String>,
@@ -492,11 +488,11 @@ fn parse_args() -> RunnerOptions {
     if opts.excludes.is_empty() {
         opts.excludes = parse_csv_env("TEST262_EXCLUDE");
     }
-    if opts.filter.is_none() {
-        opts.filter = env::var("TEST262_FILTER").ok();
+    if opts.filters.is_empty() {
+        opts.filters = parse_csv_env("TEST262_FILTER");
     }
-    if opts.anti_filter.is_none() {
-        opts.anti_filter = env::var("TEST262_ANTI_FILTER").ok();
+    if opts.anti_filters.is_empty() {
+        opts.anti_filters = parse_csv_env("TEST262_ANTI_FILTER");
     }
     if opts.anti_segments.is_empty() {
         opts.anti_segments = parse_csv_env("TEST262_ANTI_SEGMENT");
@@ -617,95 +613,6 @@ fn print_args(args: &[Value]) -> String {
 }
 
 fn read_harness_source(path: &Path) -> Result<String, String> {
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if file_name == "nativeFunctionMatcher.js" {
-        return Ok(r#"const validateNativeFunctionSource = function(source) {
-  let pos = 0;
-  const isNewline = (c) => /[\u000A\u000D\u2028\u2029]/.test(c);
-  const isWhitespace = (c) => /[\u0009\u000B\u000C\u0020\u00A0\uFEFF]/.test(c);
-  const eatWhitespace = () => {
-    while (pos < source.length) {
-      const c = source[pos];
-      if (isWhitespace(c) || isNewline(c)) { pos += 1; continue; }
-      if (c === '/') {
-        if (source[pos + 1] === '/') { while (pos < source.length && !isNewline(source[pos])) pos += 1; continue; }
-        if (source[pos + 1] === '*') { const end = source.indexOf('*/', pos); if (end === -1) throw new SyntaxError(); pos = end + 2; continue; }
-      }
-      break;
-    }
-  };
-  const getIdentifier = () => {
-    eatWhitespace();
-    const start = pos;
-    let end = pos;
-    switch (source[end]) {
-      case '_': case '$': end += 1; break;
-      default:
-        if (/[A-Za-z]/.test(source[end])) { end += 1; break; }
-        return null;
-    }
-    while (end < source.length) {
-      const c = source[end];
-      if (/[$_0-9A-Za-z]/.test(c)) { end += 1; continue; }
-      return source.slice(start, end);
-    }
-    return source.slice(start, end);
-  };
-  const test = (s) => {
-    eatWhitespace();
-    if (/\w/.test(s)) return getIdentifier() === s;
-    return source.slice(pos, pos + s.length) === s;
-  };
-  const eat = (s) => { if (test(s)) { pos += s.length; return true; } return false; };
-  const eatIdentifier = () => { const n = getIdentifier(); if (n !== null) { pos += n.length; return true; } return false; };
-  const expect = (s) => { if (!eat(s)) throw new SyntaxError(); };
-  const eatString = () => {
-    if (source[pos] === '\'' || source[pos] === '"') {
-      const match = source[pos++];
-      while (pos < source.length) {
-        if (source[pos] === match && source[pos - 1] !== '\\') return;
-        if (isNewline(source[pos])) throw new SyntaxError();
-        pos += 1;
-      }
-      throw new SyntaxError();
-    }
-  };
-  const stumbleUntil = (c) => {
-    const match = { ']': '[', ')': '(' }[c];
-    let nesting = 1;
-    while (pos < source.length) {
-      eatWhitespace();
-      eatString();
-      if (source[pos] === match) nesting += 1;
-      else if (source[pos] === c) nesting -= 1;
-      pos += 1;
-      if (nesting === 0) return;
-    }
-    throw new SyntaxError();
-  };
-  expect('function');
-  eat('get') || eat('set');
-  if (!eatIdentifier() && eat('[')) stumbleUntil(']');
-  expect('(');
-  stumbleUntil(')');
-  expect('{');
-  expect('['); expect('native'); expect('code'); expect(']');
-  expect('}');
-  eatWhitespace();
-  if (pos !== source.length) throw new SyntaxError();
-};
-const assertToStringOrNativeFunction = function(fn, expected) {
-  const actual = '' + fn;
-  try { assert.sameValue(actual, expected); } catch (unused) { assertNativeFunction(fn, expected); }
-};
-const assertNativeFunction = function(fn, special) {
-  const actual = '' + fn;
-  try { validateNativeFunctionSource(actual); } catch (unused) {
-    throw new Test262Error('Conforms to NativeFunction Syntax: ' + JSON.stringify(actual) + (special ? ' (' + special + ')' : ''));
-  }
-};
-"#.to_string());
-    }
     fs::read_to_string(path)
         .map_err(|e| format!("Failed to read harness {}: {}", path.display(), e))
 }
@@ -1893,8 +1800,8 @@ fn main() {
 
     let files_to_run = select_files_to_run(
         files,
-        opts.filter.as_deref(),
-        opts.anti_filter.as_deref(),
+        &opts.filters,
+        &opts.anti_filters,
         &opts.anti_segments,
         opts.limit,
     );

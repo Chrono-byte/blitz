@@ -5586,7 +5586,12 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         .or_insert(PropertyDescriptor::data(Value::Number(f64::INFINITY)));
     g.properties
         .entry(PKey::String("undefined".to_string()))
-        .or_insert(PropertyDescriptor::data(Value::Undefined));
+        .or_insert(PropertyDescriptor::Data {
+            value: Value::Undefined,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+        });
     g.properties.insert(
         PKey::String("eval".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {

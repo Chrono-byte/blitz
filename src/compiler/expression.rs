@@ -598,6 +598,16 @@ impl super::Compiler {
                         self.compile_expr_oast(&m.object)?;
                         self.compile_expr_oast(&m.expression)?;
                         self.emit(Op::DeleteProperty, LINE);
+                    } else if let OExpr::Identifier(id) = &u.argument {
+                        if self.resolve_local(id.name.as_str()).is_some()
+                            || self.resolve_upvalue(id.name.as_str()).is_some()
+                        {
+                            self.emit_constant(Value::Bool(false), LINE);
+                        } else {
+                            self.emit_get_global_name("globalThis");
+                            self.emit_constant(Value::String(id.name.to_string()), LINE);
+                            self.emit(Op::DeleteProperty, LINE);
+                        }
                     } else {
                         self.emit_constant(Value::Bool(true), LINE);
                     }

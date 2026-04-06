@@ -2065,10 +2065,30 @@ impl Vm {
                 let idx = self.read_short()? as usize;
                 let name = self.string_constant(idx)?;
                 let v = self.pop()?;
-                self.globals
-                    .borrow_mut()
-                    .properties
-                    .insert(PropertyKey::String(name), PropertyDescriptor::data(v));
+                let key = PropertyKey::String(name.clone());
+                let current = self.globals.borrow().properties.get(&key).cloned();
+                match current {
+                    Some(PropertyDescriptor::Data {
+                        writable: false, ..
+                    }) => {
+                        if self.is_strict_mode() {
+                            return Err(self.throw_type_error(&format!(
+                                "Cannot assign to read only global '{}'",
+                                name
+                            )));
+                        }
+                    }
+                    Some(PropertyDescriptor::Accessor { .. }) => {
+                        let global_obj = Value::Object(Rc::clone(&self.globals));
+                        self.set_property_tracked(&global_obj, &key, v)?;
+                    }
+                    _ => {
+                        self.globals
+                            .borrow_mut()
+                            .properties
+                            .insert(key, PropertyDescriptor::data(v));
+                    }
+                }
             }
             // New op: GetThis
             Op::GetThis => {
@@ -4199,14 +4219,28 @@ impl Vm {
                 obj.type_name()
             )));
         }
-        if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)?
-            && let PropertyDescriptor::Accessor { set, .. } = desc
-        {
-            if let Some(setter) = set {
-                let _ = self.call_with_this(&setter, obj, &[value])?;
-                return Ok(());
+        if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
+            match desc {
+                PropertyDescriptor::Accessor { set, .. } => {
+                    if let Some(setter) = set {
+                        let _ = self.call_with_this(&setter, obj, &[value])?;
+                        return Ok(());
+                    }
+                    if self.is_strict_mode() {
+                        return Err(self.throw_type_error("Cannot set property with no setter"));
+                    }
+                    return Ok(());
+                }
+                PropertyDescriptor::Data {
+                    writable: false, ..
+                } => {
+                    if self.is_strict_mode() {
+                        return Err(self.throw_type_error("Cannot assign to read only property"));
+                    }
+                    return Ok(());
+                }
+                PropertyDescriptor::Data { .. } => {}
             }
-            return Ok(());
         }
         set_property(obj, key, value)?;
         self.bump_object_generation(obj);
