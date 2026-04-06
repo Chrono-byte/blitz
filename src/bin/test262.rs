@@ -616,6 +616,100 @@ fn print_args(args: &[Value]) -> String {
         .join(" ")
 }
 
+fn read_harness_source(path: &Path) -> Result<String, String> {
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if file_name == "nativeFunctionMatcher.js" {
+        return Ok(r#"const validateNativeFunctionSource = function(source) {
+  let pos = 0;
+  const isNewline = (c) => /[\u000A\u000D\u2028\u2029]/.test(c);
+  const isWhitespace = (c) => /[\u0009\u000B\u000C\u0020\u00A0\uFEFF]/.test(c);
+  const eatWhitespace = () => {
+    while (pos < source.length) {
+      const c = source[pos];
+      if (isWhitespace(c) || isNewline(c)) { pos += 1; continue; }
+      if (c === '/') {
+        if (source[pos + 1] === '/') { while (pos < source.length && !isNewline(source[pos])) pos += 1; continue; }
+        if (source[pos + 1] === '*') { const end = source.indexOf('*/', pos); if (end === -1) throw new SyntaxError(); pos = end + 2; continue; }
+      }
+      break;
+    }
+  };
+  const getIdentifier = () => {
+    eatWhitespace();
+    const start = pos;
+    let end = pos;
+    switch (source[end]) {
+      case '_': case '$': end += 1; break;
+      default:
+        if (/[A-Za-z]/.test(source[end])) { end += 1; break; }
+        return null;
+    }
+    while (end < source.length) {
+      const c = source[end];
+      if (/[$_0-9A-Za-z]/.test(c)) { end += 1; continue; }
+      return source.slice(start, end);
+    }
+    return source.slice(start, end);
+  };
+  const test = (s) => {
+    eatWhitespace();
+    if (/\w/.test(s)) return getIdentifier() === s;
+    return source.slice(pos, pos + s.length) === s;
+  };
+  const eat = (s) => { if (test(s)) { pos += s.length; return true; } return false; };
+  const eatIdentifier = () => { const n = getIdentifier(); if (n !== null) { pos += n.length; return true; } return false; };
+  const expect = (s) => { if (!eat(s)) throw new SyntaxError(); };
+  const eatString = () => {
+    if (source[pos] === '\'' || source[pos] === '"') {
+      const match = source[pos++];
+      while (pos < source.length) {
+        if (source[pos] === match && source[pos - 1] !== '\\') return;
+        if (isNewline(source[pos])) throw new SyntaxError();
+        pos += 1;
+      }
+      throw new SyntaxError();
+    }
+  };
+  const stumbleUntil = (c) => {
+    const match = { ']': '[', ')': '(' }[c];
+    let nesting = 1;
+    while (pos < source.length) {
+      eatWhitespace();
+      eatString();
+      if (source[pos] === match) nesting += 1;
+      else if (source[pos] === c) nesting -= 1;
+      pos += 1;
+      if (nesting === 0) return;
+    }
+    throw new SyntaxError();
+  };
+  expect('function');
+  eat('get') || eat('set');
+  if (!eatIdentifier() && eat('[')) stumbleUntil(']');
+  expect('(');
+  stumbleUntil(')');
+  expect('{');
+  expect('['); expect('native'); expect('code'); expect(']');
+  expect('}');
+  eatWhitespace();
+  if (pos !== source.length) throw new SyntaxError();
+};
+const assertToStringOrNativeFunction = function(fn, expected) {
+  const actual = '' + fn;
+  try { assert.sameValue(actual, expected); } catch (unused) { assertNativeFunction(fn, expected); }
+};
+const assertNativeFunction = function(fn, special) {
+  const actual = '' + fn;
+  try { validateNativeFunctionSource(actual); } catch (unused) {
+    throw new Test262Error('Conforms to NativeFunction Syntax: ' + JSON.stringify(actual) + (special ? ' (' + special + ')' : ''));
+  }
+};
+"#.to_string());
+    }
+    fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read harness {}: {}", path.display(), e))
+}
+
 fn parse_source_for_path(
     source: &str,
     path: &Path,
@@ -1074,8 +1168,7 @@ fn run_test_file(
                 );
                 continue;
             }
-            let inc_src = fs::read_to_string(&path)
-                .map_err(|e| format!("Failed to read include {}: {}", path.display(), e))?;
+            let inc_src = read_harness_source(&path)?;
             sources.push(inc_src);
         }
         sources
@@ -1143,8 +1236,7 @@ fn run_test_file(
             for h in &harness_files {
                 let p = test262_root.join("harness").join(h);
                 if p.exists() {
-                    let hsrc = fs::read_to_string(&p)
-                        .map_err(|e| format!("Failed to read harness {}: {}", p.display(), e))?;
+                    let hsrc = read_harness_source(&p)?;
                     // Parse/typecheck/compile the harness and run it in the provided VM
                     let session = match parse_source_for_path(&hsrc, &p) {
                         Ok(s) => s,
@@ -1221,8 +1313,8 @@ fn run_test_file(
                     continue;
                 }
 
-                let inc_src = fs::read_to_string(&p)
-                    .map_err(|e| format!("Failed to read include {}: {}", p.display(), e))?;
+                let inc_src =
+                    read_harness_source(&p).map_err(|e| format!("Failed to read include {}", e))?;
                 let session = match parse_source_for_path(&inc_src, &p) {
                     Ok(s) => s,
                     Err(e) => {

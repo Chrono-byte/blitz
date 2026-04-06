@@ -1364,7 +1364,7 @@ impl Vm {
                 let mut data = ObjectData::new();
                 data.properties.insert(
                     PropertyKey::String("[[PrimitiveValue]]".to_string()),
-                    PropertyDescriptor::data(Value::Symbol(id.clone(), desc.clone())),
+                    PropertyDescriptor::data(Value::Symbol(id, desc.clone())),
                 );
                 data.properties.insert(
                     PropertyKey::String("__isSymbol".to_string()),
