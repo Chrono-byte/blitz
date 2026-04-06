@@ -3,8 +3,8 @@ use std::rc::Rc;
 use std::sync::Mutex;
 
 use crate::runtime_utils::{
-    builtin_object, collect_iterable_values, promise_constructor_matches,
-    reject_pending_promise, resolve_promise_with_value, static_builtin_arg_offset,
+    builtin_object, collect_iterable_values, promise_constructor_matches, reject_pending_promise,
+    resolve_promise_with_value, static_builtin_arg_offset,
 };
 use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
@@ -13,11 +13,7 @@ use crate::vm::Vm;
 pub(crate) fn create_promise_intrinsics(
     object_proto_map: &Rc<RefCell<ObjectData>>,
     function_proto_map: &Rc<RefCell<ObjectData>>,
-) -> (
-    Rc<RefCell<ObjectData>>,
-    Rc<RefCell<ObjectData>>,
-    Value,
-) {
+) -> (Rc<RefCell<ObjectData>>, Rc<RefCell<ObjectData>>, Value) {
     use PropertyKey as PKey;
 
     let promise_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
