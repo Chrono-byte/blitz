@@ -122,13 +122,14 @@ impl Vm {
     }
 
     pub(super) fn run_microtasks_if_needed(&mut self) -> Result<(), crate::errors::RuntimeError> {
-        if !self.dynamic_import_jobs.is_empty() {
+        while !self.microtasks.is_empty() || !self.dynamic_import_jobs.is_empty() {
+            if !self.microtasks.is_empty() {
+                self.drain_microtasks()?;
+                continue;
+            }
             self.drain_dynamic_import_jobs()?;
         }
-        if self.microtasks.is_empty() {
-            return Ok(());
-        }
-        self.drain_microtasks()
+        Ok(())
     }
 
     /// Drain any pending microtasks, ensuring async bootstrap work completes.

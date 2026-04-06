@@ -5752,16 +5752,21 @@ fn set_property(
     }
 }
 
-fn build_module_namespace_object(exports: &HashMap<String, ValueSlot>) -> Value {
+pub(crate) fn build_module_namespace_object(exports: &HashMap<String, ValueSlot>) -> Value {
     let namespace = Rc::new(RefCell::new(ObjectData::new()));
-    for (name, slot) in exports {
-        if name == "*" {
+    let mut names: Vec<String> = exports
+        .keys()
+        .filter(|name| name.as_str() != "*")
+        .cloned()
+        .collect();
+    names.sort();
+    for name in names {
+        let Some(slot) = exports.get(&name).cloned() else {
             continue;
-        }
-        let slot = Rc::clone(slot);
+        };
         let getter: BuiltinFn = Rc::new(move |_vm, _args| Ok(slot.borrow().clone()));
         namespace.borrow_mut().properties.insert(
-            PropertyKey::String(name.clone()),
+            PropertyKey::String(name),
             PropertyDescriptor::Accessor {
                 get: Some(Value::Builtin(getter)),
                 set: None,
@@ -5770,6 +5775,15 @@ fn build_module_namespace_object(exports: &HashMap<String, ValueSlot>) -> Value 
             },
         );
     }
+    namespace.borrow_mut().properties.insert(
+        PropertyKey::Symbol(SymbolId::well_known_to_string_tag()),
+        PropertyDescriptor::Data {
+            value: Value::String("Module".to_string()),
+            writable: false,
+            enumerable: false,
+            configurable: false,
+        },
+    );
     // Namespace objects are non-extensible per the ECMAScript specification.
     namespace.borrow_mut().extensible = false;
     Value::Object(namespace)
@@ -6287,5 +6301,77 @@ mod tests {
         let mut vm = Vm::new(Rc::clone(&globals));
         vm.run(chunk).expect("run ok");
         assert!(matches!(vm.get_global("A"), Some(Value::Closure { .. })));
+    }
+
+    #[test]
+    fn microtasks_run_before_dynamic_import_jobs() {
+        let globals = test_globals();
+        let mut vm = Vm::new(globals);
+        let order = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+
+        vm.queue_microtask({
+            let order = Rc::clone(&order);
+            move |_vm| {
+                order.borrow_mut().push("microtask");
+                Ok(())
+            }
+        });
+        vm.queue_dynamic_import_job({
+            let order = Rc::clone(&order);
+            move |_vm| {
+                order.borrow_mut().push("dynamic-import");
+                Ok(())
+            }
+        });
+
+        vm.flush_microtasks().expect("flush ok");
+        assert_eq!(&*order.borrow(), &["microtask", "dynamic-import"]);
+    }
+
+    #[test]
+    fn array_reduce_without_initial_value_throws_on_empty_array() {
+        let src = r#"[].reduce(function(acc, value) { return acc + value; });"#;
+        let session = Parser::parse_source(src).expect("parse ok");
+        let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+        let globals = test_globals();
+        runtime_utils::install_minimal_kernel_constructors(&globals);
+        let mut vm = Vm::new(globals);
+        let err = vm.run(chunk).expect_err("reduce should throw");
+        assert!(
+            err.to_string()
+                .contains("Reduce of empty array with no initial value")
+        );
+    }
+
+    #[test]
+    fn object_keys_orders_indices_before_strings() {
+        let src = r#"
+            var o = {};
+            o.b = 1;
+            o[2] = 2;
+            o.a = 3;
+            o[1] = 4;
+            var keys = Object.keys(o);
+        "#;
+        let session = Parser::parse_source(src).expect("parse ok");
+        let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+        let globals = test_globals();
+        runtime_utils::install_minimal_kernel_constructors(&globals);
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+        match vm.get_global("keys") {
+            Some(Value::Array(arr, _)) => {
+                let values: Vec<String> = arr
+                    .borrow()
+                    .iter()
+                    .filter_map(|v| match v {
+                        Some(Value::String(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(values, vec!["1", "2", "a", "b"]);
+            }
+            other => panic!("expected keys array, got {:?}", other),
+        }
     }
 }

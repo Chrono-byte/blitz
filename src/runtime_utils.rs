@@ -1682,6 +1682,7 @@ pub fn own_property_descriptor_value(obj: &Value, key: &PropertyKey) -> Option<V
 
 fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
     fn enumerable_prop_keys(props: &RefCell<ObjectData>, skip_length: bool) -> Vec<PropertyKey> {
+        let mut index_keys: Vec<u64> = Vec::new();
         let mut string_keys: Vec<String> = Vec::new();
         let mut symbol_keys: Vec<PropertyKey> = Vec::new();
         for (key, desc) in &props.borrow().properties {
@@ -1697,13 +1698,23 @@ fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
                     if skip_length && name == "length" {
                         continue;
                     }
-                    string_keys.push(name.clone());
+                    if let Some(idx) = canonical_index_key(name) {
+                        index_keys.push(idx);
+                    } else {
+                        string_keys.push(name.clone());
+                    }
                 }
                 PropertyKey::Symbol(_) => symbol_keys.push(key.clone()),
             }
         }
+        index_keys.sort_unstable();
+        index_keys.dedup();
         string_keys.sort();
-        let mut out: Vec<PropertyKey> = string_keys.into_iter().map(PropertyKey::String).collect();
+        let mut out: Vec<PropertyKey> = index_keys
+            .into_iter()
+            .map(|idx| PropertyKey::String(idx.to_string()))
+            .collect();
+        out.extend(string_keys.into_iter().map(PropertyKey::String));
         out.extend(symbol_keys);
         out
     }
@@ -2443,8 +2454,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. }
                 );
                 if let Value::Array(arr, props) = &this {
-                    // Minimal sort semantics: dense elements, holes/undefined retained at end.
-                    // This is sufficient for harness helpers that sort string key lists.
+                    // Dense-value sort with explicit `undefined` values and holes retained at the tail.
                     let snapshot = arr.borrow().clone();
                     let mut values: Vec<Value> = Vec::new();
                     let mut undefined_count = 0usize;
@@ -2466,7 +2476,8 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                                     &Value::Undefined,
                                     &[values[i].clone(), values[j].clone()],
                                 )?;
-                                vm.to_number_value(&cmp)?.is_sign_positive()
+                                let cmp_num = vm.to_number_value(&cmp)?;
+                                cmp_num.is_finite() && cmp_num > 0.0
                             } else {
                                 let ai = vm.to_string(&values[i])?;
                                 let aj = vm.to_string(&values[j])?;
@@ -2839,16 +2850,24 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                 let mut accumulator = if args.len() > 2 {
                     args[2].clone()
                 } else {
-                    // Find first defined element
+                    let mut first = None;
                     while i < len {
                         let key = PKey::String(i.to_string());
-                        let has_prop = vm.has_property_host(&receiver, &key)?;
-                        if has_prop {
-                            return Ok(Value::Undefined); // Need initial value
+                        if vm.has_property_host(&receiver, &key)? {
+                            first = Some(vm.get_property_host(&receiver, &key)?);
+                            i += 1;
+                            break;
                         }
                         i += 1;
                     }
-                    return Ok(Value::Undefined);
+                    match first {
+                        Some(value) => value,
+                        None => {
+                            return Err(
+                                vm.throw_type_error("Reduce of empty array with no initial value")
+                            );
+                        }
+                    }
                 };
 
                 while i < len {
@@ -5136,7 +5155,6 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             .entry(k)
             .or_insert_with(|| PropertyDescriptor::data(val));
     };
-
     insert_if_missing(
         "__native_in",
         Value::Builtin(Rc::new(move |vm, args| {
@@ -5434,6 +5452,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             .or_insert_with(|| PropertyDescriptor::data(v));
     };
 
+    // Returns the string representation of the given value.
     insert_if_missing_global(
         "__native_toString",
         Value::Builtin(Rc::new(|vm, args| {
@@ -6236,10 +6255,12 @@ fn insert_stub_object(
         .insert(key, PropertyDescriptor::data(Value::Object(stub_obj)));
 }
 
+/// Returns the UTF-16 code unit at the given index, if one exists.
 pub(crate) fn char_code_at(string: &str, index: usize) -> Option<u32> {
     string.encode_utf16().nth(index).map(u32::from)
 }
 
+/// Returns the byte index corresponding to the given character index in the string.
 pub(crate) fn char_index_to_byte_index(string: &str, index: usize) -> usize {
     if index == 0 {
         return 0;
