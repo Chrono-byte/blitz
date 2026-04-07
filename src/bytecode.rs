@@ -36,6 +36,7 @@ use crate::typecheck::Type;
 use crate::value::Value;
 use oxc_span::Span;
 use std::convert::TryFrom;
+use std::mem;
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
@@ -474,7 +475,7 @@ pub enum Op {
 }
 
 /// Total number of opcode variants.
-pub const OP_COUNT: usize = Op::PopEnv as usize + 1;
+pub const OP_COUNT: usize = Op::SetSuperProperty as usize + 1;
 
 impl Op {
     /// Converts a byte to an Op if valid, returns None otherwise
@@ -621,88 +622,11 @@ impl TryFrom<u8> for Op {
     type Error = ();
 
     fn try_from(b: u8) -> Result<Self, Self::Error> {
-        match b {
-            0 => Ok(Op::Const),
-            1 => Ok(Op::Null),
-            2 => Ok(Op::True),
-            3 => Ok(Op::False),
-            4 => Ok(Op::GetLocal),
-            5 => Ok(Op::SetLocal),
-            6 => Ok(Op::CloneLocalCell),
-            7 => Ok(Op::GetGlobal),
-            8 => Ok(Op::SetGlobal),
-            9 => Ok(Op::Pop),
-            10 => Ok(Op::Dup),
-            11 => Ok(Op::Add),
-            12 => Ok(Op::AddNumber),
-            13 => Ok(Op::Sub),
-            14 => Ok(Op::Mul),
-            15 => Ok(Op::Pow),
-            16 => Ok(Op::Div),
-            17 => Ok(Op::Mod),
-            18 => Ok(Op::Eq),
-            19 => Ok(Op::Neq),
-            20 => Ok(Op::Lt),
-            21 => Ok(Op::Le),
-            22 => Ok(Op::Gt),
-            23 => Ok(Op::Ge),
-            24 => Ok(Op::And),
-            25 => Ok(Op::Or),
-            26 => Ok(Op::Neg),
-            27 => Ok(Op::Not),
-            28 => Ok(Op::Typeof),
-            29 => Ok(Op::Call),
-            30 => Ok(Op::CallMethod),
-            31 => Ok(Op::Return),
-            32 => Ok(Op::Jump),
-            33 => Ok(Op::JumpIfFalse),
-            34 => Ok(Op::BuildArray),
-            35 => Ok(Op::BuildObject),
-            36 => Ok(Op::GetProperty),
-            37 => Ok(Op::GetPropertyIC),
-            38 => Ok(Op::SetProperty),
-            39 => Ok(Op::MakeClosure),
-            40 => Ok(Op::GetThis),
-            41 => Ok(Op::GetUpvalue),
-            42 => Ok(Op::SetUpvalue),
-            43 => Ok(Op::GetBuiltin),
-            44 => Ok(Op::Throw),
-            45 => Ok(Op::PushHandler),
-            46 => Ok(Op::PopHandler),
-            47 => Ok(Op::GetModuleExport),
-            48 => Ok(Op::SetModuleExport),
-            49 => Ok(Op::BitAnd),
-            50 => Ok(Op::BitOr),
-            51 => Ok(Op::BitXor),
-            52 => Ok(Op::Shl),
-            53 => Ok(Op::Shr),
-            54 => Ok(Op::Ushr),
-            55 => Ok(Op::AwaitPromise),
-            56 => Ok(Op::StrictEq),
-            57 => Ok(Op::StrictNeq),
-            58 => Ok(Op::Yield),
-            59 => Ok(Op::YieldStar),
-            60 => Ok(Op::Spread),
-            61 => Ok(Op::Undefined),
-            62 => Ok(Op::JumpIfTrue),
-            63 => Ok(Op::JumpIfNullish),
-            64 => Ok(Op::Swap),
-            65 => Ok(Op::PopN),
-            66 => Ok(Op::GetGlobalIC),
-            67 => Ok(Op::SetPropertyIC),
-            68 => Ok(Op::Construct),
-            69 => Ok(Op::DeleteProperty),
-            70 => Ok(Op::DeleteIdentifier),
-            71 => Ok(Op::HasProperty),
-            72 => Ok(Op::IteratorNext),
-            73 => Ok(Op::IteratorClose),
-            74 => Ok(Op::CallIC),
-            75 => Ok(Op::PushWithEnv),
-            76 => Ok(Op::PopEnv),
-            77 => Ok(Op::GetNewTarget),
-            78 => Ok(Op::GetSuperProperty),
-            79 => Ok(Op::SetSuperProperty),
-            _ => Err(()),
+        if b < OP_COUNT as u8 {
+            // Safety: `Op` is #[repr(u8)] and has contiguous discriminants from 0..=SetSuperProperty.
+            Ok(unsafe { mem::transmute(b) })
+        } else {
+            Err(())
         }
     }
 }

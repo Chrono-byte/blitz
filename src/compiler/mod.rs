@@ -541,6 +541,33 @@ fn compile_for_with_continue() {
     );
 }
 
+#[cfg(test)]
+fn opcode_width(op: Op) -> usize {
+    match op {
+        Op::Const => 3,
+        Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => 3,
+        Op::GetLocal
+        | Op::SetLocal
+        | Op::CloneLocalCell
+        | Op::Call
+        | Op::CallMethod
+        | Op::CallIC
+        | Op::Construct
+        | Op::PopN
+        | Op::MakeClosure
+        | Op::GetUpvalue
+        | Op::SetUpvalue
+        | Op::GetPropertyIC
+        | Op::SetPropertyIC
+        | Op::GetBuiltin
+        | Op::BuildArray
+        | Op::BuildObject
+        | Op::ArrayFromSpread => 2,
+        Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
+        _ => 1,
+    }
+}
+
 #[test]
 fn static_member_ic_slots_are_unique_per_site() {
     let src = "a.x; a.y; a.x;";
@@ -552,33 +579,10 @@ fn static_member_ic_slots_are_unique_per_site() {
     let mut i = 0usize;
     while i < chunk.code.len() {
         if let Some(op) = Op::from_byte(chunk.code[i]) {
-            match op {
-                Op::GetPropertyIC => {
-                    slots.push(chunk.code.get(i + 1).copied().expect("slot byte"));
-                    i += 2;
-                }
-                Op::Jump
-                | Op::JumpIfFalse
-                | Op::JumpIfTrue
-                | Op::JumpIfNullish
-                | Op::PushHandler => i += 3,
-                Op::Const
-                | Op::MakeClosure
-                | Op::CallMethod
-                | Op::Call
-                | Op::CallIC
-                | Op::Construct
-                | Op::GetBuiltin
-                | Op::SetLocal
-                | Op::GetLocal
-                | Op::GetProperty
-                | Op::SetProperty
-                | Op::SetPropertyIC
-                | Op::BuildArray
-                | Op::BuildObject => i += 2,
-                Op::SetGlobal | Op::GetGlobal | Op::GetGlobalIC => i += 3,
-                _ => i += 1,
+            if matches!(op, Op::GetPropertyIC) {
+                slots.push(chunk.code.get(i + 1).copied().expect("slot byte"));
             }
+            i += opcode_width(op);
         } else {
             i += 1;
         }
@@ -624,9 +628,9 @@ fn compile_for_loop_back_jump_targets_loop_start() {
                     i += 2;
                 }
                 Op::Jump => {
-                    let hi = chunk.code.get(i + 1).copied().unwrap_or(0) as i16;
-                    let lo = chunk.code.get(i + 2).copied().unwrap_or(0) as i16;
-                    let offset = i16::from_be_bytes([hi as u8, lo as u8]) as isize;
+                    let lo = chunk.code.get(i + 1).copied().unwrap_or(0) as i16;
+                    let hi = chunk.code.get(i + 2).copied().unwrap_or(0) as i16;
+                    let offset = i16::from_le_bytes([lo as u8, hi as u8]) as isize;
                     back_target = Some((i + 3) as isize + offset);
                     i += 3;
                 }

@@ -341,23 +341,20 @@ impl Compiler {
                 for (case_idx, jump_pos) in case_body_jumps {
                     let target = case_starts[case_idx] as isize - (jump_pos as isize) - 2;
                     let v = target as i16;
-                    self.chunk.code[jump_pos] = (v >> 8) as u8;
-                    self.chunk.code[jump_pos + 1] = (v & 0xff) as u8;
+                    self.chunk.write_i16_at(jump_pos, v);
                 }
 
                 // Patch no-match jump to default start or end.
                 let default_target = default_index.map_or(switch_end, |idx| case_starts[idx]);
                 let no_match_off = default_target as isize - (no_match_jump as isize) - 2;
                 let no_match_v = no_match_off as i16;
-                self.chunk.code[no_match_jump] = (no_match_v >> 8) as u8;
-                self.chunk.code[no_match_jump + 1] = (no_match_v & 0xff) as u8;
+                self.chunk.write_i16_at(no_match_jump, no_match_v);
 
                 // Patch `break` statements emitted within this switch.
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let target = switch_end - patch_pos - 2;
-                        self.chunk.code[patch_pos] = (target >> 8) as u8;
-                        self.chunk.code[patch_pos + 1] = (target & 0xff) as u8;
+                        self.chunk.write_i16_at(patch_pos, target as i16);
                     }
                 }
             }
@@ -382,16 +379,14 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = back_jump_pos as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
-                        self.chunk.code[patch_pos] = (v >> 8) as u8;
-                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                        self.chunk.write_i16_at(patch_pos, v);
                     }
                 }
                 self.patch_jump(exit_jump);
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let target = self.chunk.code.len() - patch_pos - 2;
-                        self.chunk.code[patch_pos] = (target >> 8) as u8;
-                        self.chunk.code[patch_pos + 1] = (target & 0xff) as u8;
+                        self.chunk.write_i16_at(patch_pos, target as i16);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -435,8 +430,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = test_start as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
-                        self.chunk.code[patch_pos] = (v >> 8) as u8;
-                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                        self.chunk.write_i16_at(patch_pos, v);
                     }
                 }
                 self.patch_jump(exit_jump);
@@ -444,8 +438,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = self.chunk.code.len() - patch_pos - 2;
                         let v = target as i16;
-                        self.chunk.code[patch_pos] = (v >> 8) as u8;
-                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                        self.chunk.write_i16_at(patch_pos, v);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -560,8 +553,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = update_start as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
-                        self.chunk.code[patch_pos] = (v >> 8) as u8;
-                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                        self.chunk.write_i16_at(patch_pos, v);
                     }
                 }
 
@@ -585,8 +577,7 @@ impl Compiler {
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let target = self.chunk.code.len() - patch_pos - 2;
-                        self.chunk.code[patch_pos] = (target >> 8) as u8;
-                        self.chunk.code[patch_pos + 1] = (target & 0xff) as u8;
+                        self.chunk.write_i16_at(patch_pos, target as i16);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -727,8 +718,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = update_start as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
-                        self.chunk.code[patch_pos] = (v >> 8) as u8;
-                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                        self.chunk.write_i16_at(patch_pos, v);
                     }
                 }
 
@@ -747,8 +737,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = break_cleanup as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
-                        self.chunk.code[patch_pos] = (v >> 8) as u8;
-                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                        self.chunk.write_i16_at(patch_pos, v);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -921,8 +910,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = update_start as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
-                        self.chunk.code[patch_pos] = (v >> 8) as u8;
-                        self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                        self.chunk.write_i16_at(patch_pos, v);
                     }
                 }
 
@@ -941,8 +929,7 @@ impl Compiler {
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let target = self.chunk.code.len() - patch_pos - 2;
-                        self.chunk.code[patch_pos] = (target >> 8) as u8;
-                        self.chunk.code[patch_pos + 1] = (target & 0xff) as u8;
+                        self.chunk.write_i16_at(patch_pos, target as i16);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -1133,8 +1120,7 @@ impl Compiler {
                         for patch_pos in return_jumps {
                             let target = body_start as isize - (patch_pos as isize) - 2;
                             let v = target as i16;
-                            self.chunk.code[patch_pos] = (v >> 8) as u8;
-                            self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+                            self.chunk.write_i16_at(patch_pos, v);
                         }
                         (state.did_return_slot, state.return_slot)
                     };

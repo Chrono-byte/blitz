@@ -183,8 +183,8 @@ impl Compiler {
     }
 
     pub(crate) fn emit_u16(&mut self, value: u16, line: u32) {
-        self.emit_byte((value >> 8) as u8, line);
         self.emit_byte((value & 0xff) as u8, line);
+        self.emit_byte((value >> 8) as u8, line);
     }
 
     pub(crate) fn emit_constant(&mut self, value: Value, line: u32) {
@@ -564,22 +564,22 @@ impl Compiler {
 
     pub(crate) fn patch_jump(&mut self, offset: usize) {
         let jump = self.chunk.code.len() - offset - 2;
-        self.chunk.code[offset] = (jump >> 8) as u8;
-        self.chunk.code[offset + 1] = (jump & 0xff) as u8;
+        let jump = i16::try_from(jump).expect("jump offset overflow");
+        self.chunk.write_i16_at(offset, jump);
     }
 
     pub(crate) fn emit_short_signed(&mut self, val: isize, line: u32) {
         let v = val as i16;
-        self.emit_byte((v >> 8) as u8, line);
-        self.emit_byte((v & 0xff) as u8, line);
+        let bytes = v.to_le_bytes();
+        self.emit_byte(bytes[0], line);
+        self.emit_byte(bytes[1], line);
     }
 
     pub(crate) fn patch_jump_list(&mut self, patches: Vec<usize>, target: usize) {
         for patch_pos in patches {
             let offset = target as isize - (patch_pos as isize) - 2;
             let v = offset as i16;
-            self.chunk.code[patch_pos] = (v >> 8) as u8;
-            self.chunk.code[patch_pos + 1] = (v & 0xff) as u8;
+            self.chunk.write_i16_at(patch_pos, v);
         }
     }
 }
