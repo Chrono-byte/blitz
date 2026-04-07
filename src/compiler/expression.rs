@@ -980,7 +980,7 @@ impl super::Compiler {
             OExpr::UnaryExpression(u) => match u.operator {
                 oast::UnaryOperator::Typeof => {
                     if let OExpr::Identifier(id) = &u.argument {
-                        let name = id.name.clone();
+                        let name = id.name;
                         if self.resolve_local(&name).is_some()
                             || self.resolve_upvalue(&name).is_some()
                         {
