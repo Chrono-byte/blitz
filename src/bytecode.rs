@@ -445,6 +445,8 @@ pub enum Op {
     Construct,
     /// Delete an object property.
     DeleteProperty,
+    /// Delete an identifier reference (handles `with` environments).
+    DeleteIdentifier,
     /// Test whether a property exists on an object or its prototype chain.
     HasProperty,
     /// Call an iterator's `next()` method and push the result object.
@@ -546,6 +548,7 @@ impl Op {
             Op::SetPropertyIC => "SetPropertyIC",
             Op::Construct => "Construct",
             Op::DeleteProperty => "DeleteProperty",
+            Op::DeleteIdentifier => "DeleteIdentifier",
             Op::HasProperty => "HasProperty",
             Op::IteratorNext => "IteratorNext",
             Op::IteratorClose => "IteratorClose",

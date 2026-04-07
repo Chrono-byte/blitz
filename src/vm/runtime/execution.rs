@@ -1468,7 +1468,9 @@ impl Vm {
             if let Some(binding_object) = binding_object {
                 let key = PropertyKey::String(name.to_string());
                 let found = self.has_property_host(&binding_object, &key)?;
-                if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
+                if found
+                    && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
+                {
                     return Ok(Some(self.get_property_host(&binding_object, &key)?));
                 }
             }
@@ -1494,21 +1496,35 @@ impl Vm {
                 )
             };
             if has_decl_binding {
-                return current.borrow_mut().set_mutable_binding(name, value);
+                let outer_env = outer.clone();
+                let result = current
+                    .borrow_mut()
+                    .set_mutable_binding(name, value.clone());
+                let should_sync_global = outer_env
+                    .as_ref()
+                    .map(|outer_rc| Rc::ptr_eq(outer_rc, &self.global_env))
+                    .unwrap_or(false);
+                if should_sync_global {
+                    let key = PropertyKey::String(name.to_string());
+                    self.globals
+                        .borrow_mut()
+                        .properties
+                        .insert(key, PropertyDescriptor::data(value));
+                }
+                return result;
             }
             if let Some(binding_object) = binding_object {
                 let key = PropertyKey::String(name.to_string());
                 let found = self.has_property_host(&binding_object, &key)?;
-                if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
-                    let found_again = self.has_property_host(&binding_object, &key)?;
-                    if found_again {
-                        let _ = self.set_property_host(
-                            &binding_object,
-                            &Value::String(name.to_string()),
-                            value,
-                        )?;
-                        return Ok(true);
-                    }
+                if found
+                    && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
+                {
+                    let _ = self.set_property_host(
+                        &binding_object,
+                        &Value::String(name.to_string()),
+                        value,
+                    )?;
+                    return Ok(true);
                 }
             }
             env = outer;
@@ -2153,7 +2169,9 @@ impl Vm {
                     match global_value {
                         Some(v) => v,
                         None => {
-                            return Err(self.throw_reference_error(&format!("{name} is not defined")));
+                            return Err(
+                                self.throw_reference_error(&format!("{name} is not defined"))
+                            );
                         }
                     }
                 };
@@ -2734,6 +2752,7 @@ impl Vm {
                     saved_stack_len: self.stack.len(),
                     saved_locals_len: self.locals.len(),
                     frame_count: self.frames.len(),
+                    saved_lexical_env: Rc::clone(&self.lexical_env),
                 });
                 if crate::trace::enabled() {
                     eprintln!(
@@ -4439,9 +4458,10 @@ impl Vm {
         // Drop handler records that belong to frames we just unwound.
         self.prune_stale_handlers();
 
-        // Restore chunk and instruction pointer from the handler record.
+        // Restore chunk, lexical environment, and instruction pointer from the handler record.
         self.chunk = handler.chunk;
         self.ip = handler.handler_ip;
+        self.lexical_env = handler.saved_lexical_env;
 
         // Truncate stacks to the snapshot saved when PushHandler ran.
         self.stack.truncate(handler.saved_stack_len);

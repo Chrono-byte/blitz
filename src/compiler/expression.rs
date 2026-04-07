@@ -643,9 +643,8 @@ impl super::Compiler {
                         {
                             self.emit_constant(Value::Bool(false), LINE);
                         } else {
-                            self.emit_get_global_name("globalThis");
                             self.emit_constant(Value::String(id.name.to_string()), LINE);
-                            self.emit(Op::DeleteProperty, LINE);
+                            self.emit(Op::DeleteIdentifier, LINE);
                         }
                     } else {
                         self.emit_constant(Value::Bool(true), LINE);

@@ -1227,6 +1227,26 @@ fn run_test_file(
                     ));
                 }
             }
+            if vm.get_global("Test262Error").is_none() {
+                const FIX_SCRIPT: &str = r#"
+                    if (typeof Test262Error !== "undefined"
+                        && typeof globalThis.Test262Error === "undefined") {
+                        globalThis.Test262Error = Test262Error;
+                    }
+                "#;
+                let fix_path = test262_root.join("test262Error-fix.js");
+                let session = parse_source_for_path(FIX_SCRIPT, &fix_path)
+                    .map_err(|e| format!("Failed to parse Test262Error fixer: {}", e))?;
+                let prog = session.program();
+                let chunk = compiler::compile_oxc(prog, FIX_SCRIPT)
+                    .map_err(|e| format!("Failed to compile Test262Error fixer: {}", e))?;
+                if let Err(e) = vm.run(chunk) {
+                    eprintln!(
+                        "[test262] warning: fixer script for Test262Error failed: {}",
+                        e
+                    );
+                }
+            }
         }
 
         if is_module && !raw_flag {
