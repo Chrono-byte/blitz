@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use blitz::compiler;
-use blitz::{parser::Parser as JsParser, runtime_utils, value::Value, vm::Vm};
+use blitz::{parser::Parser as JsParser, value::Value, vm::Vm};
 
 /// Runs source code in REPL mode (preserves expression results)
 /// Set as `#[cfg(test)]` to avoid the warning for it being unused.
