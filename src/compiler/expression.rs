@@ -150,11 +150,26 @@ impl super::Compiler {
         match expr {
             OExpr::NumericLiteral(n) => self.emit_constant(Value::Number(n.value), LINE),
             OExpr::BigIntLiteral(n) => {
-                let raw =
-                    n.raw.as_ref().map(oxc_span::Str::as_str).ok_or_else(|| {
-                        crate::errors::CompilerError::from("invalid bigint literal")
-                    })?;
-                let digits = raw.strip_suffix('n').unwrap_or(raw).replace('_', "");
+                let raw = n.raw.as_ref().map(oxc_span::Str::as_str);
+                let digits = if let Some(raw) = raw {
+                    raw.strip_suffix('n').unwrap_or(raw).replace('_', "")
+                } else {
+                    // Fallback: extract from source text using span
+                    let start = n.span.start;
+                    let end = n.span.end;
+                    let source = self.source_text.as_ref();
+                    if start < end && end <= source.len() {
+                        let mut s = source[start.0..end.0].to_string();
+                        // Remove trailing 'n' if present
+                        if let Some(stripped) = s.strip_suffix('n') {
+                            stripped.replace('_', "")
+                        } else {
+                            s.replace('_', "")
+                        }
+                    } else {
+                        return Err(crate::errors::CompilerError::from("invalid bigint literal"));
+                    }
+                };
                 let parsed: Option<num_bigint::BigInt> =
                     if let Some(hex) = digits.strip_prefix("0x") {
                         num_bigint::BigInt::parse_bytes(hex.as_bytes(), 16)
