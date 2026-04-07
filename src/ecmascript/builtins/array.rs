@@ -230,9 +230,9 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                             );
                             let desc = Value::Object(Rc::new(RefCell::new(desc_data)));
                             if !vm.define_property_value(&created, &key, &desc)? {
-                                return Err(vm.throw_type_error(
-                                    "Array.fromAsync failed to define element",
-                                ));
+                                return Err(
+                                    vm.throw_type_error("Array.fromAsync failed to define element")
+                                );
                             }
                         }
 
@@ -411,17 +411,12 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     array_ctor_val
 }
 
-fn is_iterable_source(
-    vm: &mut Vm,
-    source: &Value,
-) -> Result<bool, crate::errors::RuntimeError> {
+fn is_iterable_source(vm: &mut Vm, source: &Value) -> Result<bool, crate::errors::RuntimeError> {
     match source {
         Value::Array(..) => Ok(true),
         other => {
-            let iterator_method = vm.get_property_host(
-                other,
-                &PropertyKey::Symbol(SymbolId::well_known_iterator()),
-            )?;
+            let iterator_method =
+                vm.get_property_host(other, &PropertyKey::Symbol(SymbolId::well_known_iterator()))?;
             Ok(Vm::is_callable_value(&iterator_method))
         }
     }

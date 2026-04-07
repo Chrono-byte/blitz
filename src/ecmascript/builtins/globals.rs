@@ -2,7 +2,10 @@ use std::rc::Rc;
 
 use crate::compiler;
 use crate::parser::Parser;
-use crate::runtime_utils::{static_builtin_arg_offset, syntax_error};
+use crate::runtime_utils::{
+    global_decode_uri, global_decode_uri_component, global_encode_uri, global_encode_uri_component,
+    global_parse_float, global_parse_int, static_builtin_arg_offset, syntax_error,
+};
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 
@@ -46,6 +49,43 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
                 .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
             let mut eval_vm = Vm::new(vm.globals_rc());
             eval_vm.run(chunk)
+        }))),
+    );
+
+    g.properties.insert(
+        PKey::String("parseInt".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            global_parse_int(vm, args)
+        }))),
+    );
+    g.properties.insert(
+        PKey::String("parseFloat".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            global_parse_float(vm, args)
+        }))),
+    );
+    g.properties.insert(
+        PKey::String("encodeURI".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            global_encode_uri(vm, args)
+        }))),
+    );
+    g.properties.insert(
+        PKey::String("encodeURIComponent".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            global_encode_uri_component(vm, args)
+        }))),
+    );
+    g.properties.insert(
+        PKey::String("decodeURI".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            global_decode_uri(vm, args)
+        }))),
+    );
+    g.properties.insert(
+        PKey::String("decodeURIComponent".to_string()),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
+            global_decode_uri_component(vm, args)
         }))),
     );
 }

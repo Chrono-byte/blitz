@@ -580,6 +580,39 @@ impl Vm {
         list_own_keys_of_value(v)
     }
 
+    /// Return enumerable string keys for `for-in`, walking the prototype
+    /// chain and skipping duplicates.
+    pub fn for_in_keys_of_value(
+        &self,
+        v: &Value,
+    ) -> Result<Vec<String>, crate::errors::RuntimeError> {
+        let mut keys = Vec::new();
+        let mut seen = HashSet::new();
+        let mut current = v.clone();
+        let mut depth = 0usize;
+
+        while !matches!(current, Value::Null) {
+            if depth > MAX_PROTOTYPE_DEPTH {
+                return Err(crate::errors::RuntimeError::from(
+                    "Prototype chain cycle detected or too deep",
+                ));
+            }
+
+            for key in crate::runtime_utils::own_enumerable_keys(&current) {
+                if let PropertyKey::String(name) = key
+                    && seen.insert(name.clone())
+                {
+                    keys.push(name);
+                }
+            }
+
+            current = self.get_prototype(&current);
+            depth += 1;
+        }
+
+        Ok(keys)
+    }
+
     /// Shallow reference equality check for object-like runtime values.
     pub fn values_same_object(&self, a: &Value, b: &Value) -> bool {
         match (a, b) {
@@ -2871,20 +2904,9 @@ impl Vm {
             Op::GetBuiltin => {
                 let idx = self.read_byte()? as usize;
                 let name = self.string_constant(idx)?;
-                let g = self.globals.borrow();
-                let v = g
-                    .properties
-                    .get(&PropertyKey::String(name.clone()))
-                    .and_then(|d| match d {
-                        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                        _ => None,
-                    })
-                    .ok_or_else(|| {
-                        crate::errors::RuntimeError::from(format!(
-                            "GetBuiltin: '{}' not found",
-                            name
-                        ))
-                    })?;
+                let v = self.realm.get_hidden_builtin(&name).ok_or_else(|| {
+                    crate::errors::RuntimeError::from(format!("GetBuiltin: '{}' not found", name))
+                })?;
                 match v {
                     Value::Builtin(_) | Value::BuiltinObject(_, _) => self.stack.push(v),
                     _ => {
@@ -6722,6 +6744,116 @@ mod tests {
             }
             other => panic!("expected keys array, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn for_in_keys_walks_prototype_chain_without_duplicates() {
+        let globals = test_globals();
+        let vm = Vm::new(globals);
+
+        let mut proto = ObjectData::new();
+        proto.properties.insert(
+            PropertyKey::String("b".to_string()),
+            PropertyDescriptor::data(Value::Number(2.0)),
+        );
+        proto.properties.insert(
+            PropertyKey::String("1".to_string()),
+            PropertyDescriptor::data(Value::Number(1.0)),
+        );
+        let proto = Rc::new(RefCell::new(proto));
+
+        let mut obj = ObjectData::with_prototype(Value::Object(Rc::clone(&proto)));
+        obj.properties.insert(
+            PropertyKey::String("a".to_string()),
+            PropertyDescriptor::data(Value::Number(3.0)),
+        );
+        obj.properties.insert(
+            PropertyKey::String("1".to_string()),
+            PropertyDescriptor::data(Value::Number(4.0)),
+        );
+        let obj = Value::Object(Rc::new(RefCell::new(obj)));
+
+        let keys = vm.for_in_keys_of_value(&obj).expect("keys ok");
+        assert_eq!(keys, vec!["1", "a", "b"]);
+    }
+
+    #[test]
+    fn global_this_matches_ecmascript_public_surface() {
+        let globals = test_globals();
+        let vm = Vm::new(Rc::clone(&globals));
+
+        let mut actual = vm
+            .list_own_keys_of_value(&Value::Object(Rc::clone(&globals)))
+            .expect("globalThis keys");
+        actual.sort();
+
+        let mut expected = vec![
+            "Infinity",
+            "NaN",
+            "undefined",
+            "eval",
+            "isFinite",
+            "isNaN",
+            "parseFloat",
+            "parseInt",
+            "encodeURI",
+            "encodeURIComponent",
+            "decodeURI",
+            "decodeURIComponent",
+            "Object",
+            "Function",
+            "Boolean",
+            "Symbol",
+            "Error",
+            "AggregateError",
+            "EvalError",
+            "RangeError",
+            "ReferenceError",
+            "SyntaxError",
+            "TypeError",
+            "URIError",
+            "Number",
+            "BigInt",
+            "Math",
+            "Date",
+            "String",
+            "RegExp",
+            "Array",
+            "Int8Array",
+            "Uint8Array",
+            "Uint8ClampedArray",
+            "Int16Array",
+            "Uint16Array",
+            "Int32Array",
+            "Uint32Array",
+            "Float32Array",
+            "Float64Array",
+            "BigInt64Array",
+            "BigUint64Array",
+            "Map",
+            "Set",
+            "WeakMap",
+            "WeakSet",
+            "WeakRef",
+            "FinalizationRegistry",
+            "ShadowRealm",
+            "Temporal",
+            "ArrayBuffer",
+            "SharedArrayBuffer",
+            "DataView",
+            "Atomics",
+            "Promise",
+            "Reflect",
+            "Proxy",
+            "JSON",
+            "globalThis",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+        expected.sort();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

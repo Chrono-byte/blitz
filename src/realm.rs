@@ -27,6 +27,7 @@
 
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 /// Table of well-known intrinsic objects for a Realm.
@@ -153,6 +154,8 @@ pub struct Intrinsics {
     pub throw_type_error: Option<Value>,
     /// Typed array constructors for this realm.
     pub typed_array_constructors: Vec<Value>,
+    /// VM-internal builtins that should not be exposed as globals.
+    pub hidden_builtins: HashMap<String, Value>,
 }
 
 /// An ECMAScript Realm.
@@ -302,6 +305,18 @@ impl Realm {
     /// Replace the stored intrinsics with a fresh set constructed by the kernel prelude.
     pub fn set_intrinsics(&mut self, intrinsics: Intrinsics) {
         self.intrinsics = intrinsics;
+    }
+
+    /// Register a VM-internal builtin that is resolved by `GetBuiltin`.
+    pub fn set_hidden_builtin(&mut self, name: &str, value: Value) {
+        self.intrinsics
+            .hidden_builtins
+            .insert(name.to_string(), value);
+    }
+
+    /// Look up a VM-internal builtin by name.
+    pub fn get_hidden_builtin(&self, name: &str) -> Option<Value> {
+        self.intrinsics.hidden_builtins.get(name).cloned()
     }
 }
 

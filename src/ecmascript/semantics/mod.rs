@@ -2953,24 +2953,36 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         (name.to_string(), ctor_val)
     };
 
-    let _eval_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+    let eval_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
         Rc::clone(&error_proto_map),
     ))));
-    let _range_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+    let range_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
         Rc::clone(&error_proto_map),
     ))));
-    let _reference_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(
+    let reference_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(
         Value::Object(Rc::clone(&error_proto_map)),
     )));
-    let _syntax_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+    let syntax_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
         Rc::clone(&error_proto_map),
     ))));
-    let _type_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+    let type_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
         Rc::clone(&error_proto_map),
     ))));
-    let _uri_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+    let uri_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
         Rc::clone(&error_proto_map),
     ))));
+
+    let (_eval_error_name, eval_error_ctor_val) =
+        _make_error_ctor("EvalError", &eval_error_proto_map);
+    let (_range_error_name, range_error_ctor_val) =
+        _make_error_ctor("RangeError", &range_error_proto_map);
+    let (_reference_error_name, reference_error_ctor_val) =
+        _make_error_ctor("ReferenceError", &reference_error_proto_map);
+    let (_syntax_error_name, syntax_error_ctor_val) =
+        _make_error_ctor("SyntaxError", &syntax_error_proto_map);
+    let (_type_error_name, type_error_ctor_val) =
+        _make_error_ctor("TypeError", &type_error_proto_map);
+    let (_uri_error_name, uri_error_ctor_val) = _make_error_ctor("URIError", &uri_error_proto_map);
 
     let math = Rc::new(RefCell::new(ObjectData::new()));
     math.borrow_mut().properties.insert(
@@ -3210,10 +3222,6 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             PropertyDescriptor::data(dataview_ctor_val),
         );
         g.properties.insert(
-            PKey::String("TypedArray".to_string()),
-            PropertyDescriptor::data(typedarray_ctor_val),
-        );
-        g.properties.insert(
             PKey::String("Uint8Array".to_string()),
             PropertyDescriptor::data(uint8array_ctor_val),
         );
@@ -3266,6 +3274,30 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             PropertyDescriptor::data(aggregate_error_ctor_val.clone()),
         );
         g.properties.insert(
+            PKey::String("EvalError".to_string()),
+            PropertyDescriptor::data(eval_error_ctor_val.clone()),
+        );
+        g.properties.insert(
+            PKey::String("RangeError".to_string()),
+            PropertyDescriptor::data(range_error_ctor_val.clone()),
+        );
+        g.properties.insert(
+            PKey::String("ReferenceError".to_string()),
+            PropertyDescriptor::data(reference_error_ctor_val.clone()),
+        );
+        g.properties.insert(
+            PKey::String("SyntaxError".to_string()),
+            PropertyDescriptor::data(syntax_error_ctor_val.clone()),
+        );
+        g.properties.insert(
+            PKey::String("TypeError".to_string()),
+            PropertyDescriptor::data(type_error_ctor_val.clone()),
+        );
+        g.properties.insert(
+            PKey::String("URIError".to_string()),
+            PropertyDescriptor::data(uri_error_ctor_val.clone()),
+        );
+        g.properties.insert(
             PKey::String("Math".to_string()),
             PropertyDescriptor::data(Value::Object(math)),
         );
@@ -3289,6 +3321,77 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         g.properties.insert(
             PKey::String("Set".to_string()),
             PropertyDescriptor::data(set_ctor_val),
+        );
+
+        let make_placeholder_ctor =
+            |name: &'static str, returns_target_on_construct: bool| -> Value {
+                let proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+                    Rc::clone(&object_proto_map),
+                ))));
+                let ctor_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+                    Rc::clone(&function_proto_map),
+                ))));
+                ctor_map.borrow_mut().properties.insert(
+                    PKey::String("prototype".to_string()),
+                    PropertyDescriptor::data(Value::Object(Rc::clone(&proto_map))),
+                );
+                let name_owned = name.to_string();
+                let ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+                    if vm.current_new_target().is_some() {
+                        if returns_target_on_construct && name_owned == "Proxy" {
+                            return Ok(args.get(1).cloned().unwrap_or(Value::Undefined));
+                        }
+                        return Ok(args.first().cloned().unwrap_or(Value::Undefined));
+                    }
+                    if returns_target_on_construct && name_owned == "Proxy" {
+                        return Ok(args.first().cloned().unwrap_or(Value::Undefined));
+                    }
+                    Ok(Value::Undefined)
+                });
+                let ctor_val = Value::BuiltinObject(ctor_fn, Rc::clone(&ctor_map));
+                ctor_map.borrow_mut().properties.insert(
+                    PKey::String("name".to_string()),
+                    PropertyDescriptor::data(Value::String(name.to_string())),
+                );
+                proto_map.borrow_mut().properties.insert(
+                    PKey::String("constructor".to_string()),
+                    PropertyDescriptor::data(ctor_val.clone()),
+                );
+                ctor_val
+            };
+
+        let weakref_ctor_val = make_placeholder_ctor("WeakRef", false);
+        let finalization_registry_ctor_val = make_placeholder_ctor("FinalizationRegistry", false);
+        let temporal_namespace = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
+            Value::Object(Rc::clone(&object_proto_map)),
+        ))));
+        g.properties.insert(
+            PKey::String("WeakRef".to_string()),
+            PropertyDescriptor::data(weakref_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("FinalizationRegistry".to_string()),
+            PropertyDescriptor::data(finalization_registry_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Temporal".to_string()),
+            PropertyDescriptor::data(temporal_namespace),
+        );
+
+        let weakmap_ctor_val = make_placeholder_ctor("WeakMap", false);
+        let weakset_ctor_val = make_placeholder_ctor("WeakSet", false);
+        let proxy_ctor_val = make_placeholder_ctor("Proxy", true);
+        g.properties.insert(
+            PKey::String("WeakMap".to_string()),
+            PropertyDescriptor::data(weakmap_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("WeakSet".to_string()),
+            PropertyDescriptor::data(weakset_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Proxy".to_string()),
+            PropertyDescriptor::data(proxy_ctor_val),
         );
 
         let insert_math_builtin = |name: &'static str, length: f64, func: BuiltinFn| -> Value {
@@ -3367,7 +3470,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         .filter_map(|name| get_ctor(name))
         .collect();
 
-    let intrinsics = Intrinsics {
+    let mut intrinsics = Intrinsics {
         object_constructor: get_ctor("Object"),
         array_constructor: get_ctor("Array"),
         function_constructor: get_ctor("Function"),
@@ -3424,7 +3527,25 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         async_from_sync_iterator_prototype: None,
         throw_type_error: Some(throw_type_error_val.clone()),
         typed_array_constructors,
+        hidden_builtins: std::collections::HashMap::new(),
     };
+
+    intrinsics.hidden_builtins.insert(
+        "dynamicImport".to_string(),
+        Value::Builtin(Rc::new(|vm, args| {
+            crate::runtime_utils::dynamic_import_value(vm, args)
+        })),
+    );
+    intrinsics.hidden_builtins.insert(
+        "forInKeys".to_string(),
+        Value::Builtin(Rc::new(|vm, args| {
+            let target = args.first().cloned().unwrap_or(Value::Undefined);
+            let keys = vm.for_in_keys_of_value(&target)?;
+            Ok(array_from_values(
+                keys.into_iter().map(Value::String).collect(),
+            ))
+        })),
+    );
 
     intrinsics
 }

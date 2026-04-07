@@ -106,12 +106,11 @@ impl Compiler {
         };
         match stmt {
             OStmt::ImportDeclaration(_) => {}
-            OStmt::ExportAllDeclaration(export) => {
+            OStmt::ExportAllDeclaration(_) => {
                 // export * from "module"
-                self.emit_get_global_name("__native_reexport");
-                self.emit_constant(Value::String(export.source.value.to_string()), LINE);
-                self.emit(Op::CallIC, LINE);
-                self.emit_byte(1, LINE);
+                // Star exports are resolved by the module loader and export
+                // resolution table, so the declaration itself has no runtime
+                // side effects here.
             }
             OStmt::ExportNamedDeclaration(export) => {
                 // export {  } from "module"
@@ -791,7 +790,7 @@ impl Compiler {
                     }
                 }
 
-                self.emit_get_global_name("__native_forInKeys");
+                self.emit_get_builtin_name("forInKeys");
                 self.compile_expr_oast(&f.right)?;
                 self.emit(Op::CallIC, LINE);
                 self.emit_byte(1, LINE);

@@ -253,6 +253,135 @@ pub(crate) fn global_parse_float(
     Ok(Value::Number(parsed))
 }
 
+fn is_uri_component_safe(ch: char, component: bool) -> bool {
+    matches!(
+        ch,
+        'A'..='Z'
+            | 'a'..='z'
+            | '0'..='9'
+            | '-'
+            | '_'
+            | '.'
+            | '!'
+            | '~'
+            | '*'
+            | '\''
+            | '('
+            | ')'
+            | ';'
+            | ','
+            | '/'
+            | '?'
+            | ':'
+            | '@'
+            | '&'
+            | '='
+            | '+'
+            | '$'
+            | '#'
+    ) || (!component
+        && matches!(
+            ch,
+            ',' | ';' | '/' | '?' | ':' | '@' | '&' | '=' | '+' | '$' | '#'
+        ))
+}
+
+fn percent_encode(text: &str, component: bool) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        if is_uri_component_safe(ch, component) {
+            out.push(ch);
+        } else {
+            let mut buf = [0u8; 4];
+            for b in ch.encode_utf8(&mut buf).as_bytes() {
+                out.push('%');
+                out.push_str(&format!("{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
+fn uri_error(vm: &mut Vm) -> crate::errors::RuntimeError {
+    let err = vm
+        .create_intrinsic_error("URIError", "malformed URI sequence")
+        .unwrap_or(Value::String("URIError".to_string()));
+    vm.throw_exception(err)
+}
+
+fn percent_decode(
+    vm: &mut Vm,
+    text: &str,
+    component: bool,
+) -> Result<String, crate::errors::RuntimeError> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch != '%' {
+            if !component && matches!(ch, '#' | '?') {
+                bytes.extend_from_slice(ch.to_string().as_bytes());
+            } else {
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            }
+            i += 1;
+            continue;
+        }
+        if i + 2 >= chars.len() {
+            return Err(uri_error(vm));
+        }
+        let hex = [chars[i + 1], chars[i + 2]];
+        let mut byte = 0u8;
+        for (shift, h) in [4u8, 0u8].into_iter().zip(hex) {
+            let Some(v) = h.to_digit(16) else {
+                return Err(uri_error(vm));
+            };
+            byte |= (v as u8) << shift;
+        }
+        bytes.push(byte);
+        i += 3;
+    }
+    String::from_utf8(bytes).map_err(|_| uri_error(vm))
+}
+
+pub(crate) fn global_encode_uri(
+    vm: &mut Vm,
+    args: &[Value],
+) -> Result<Value, crate::errors::RuntimeError> {
+    let value = args.first().cloned().unwrap_or(Value::Undefined);
+    let s = vm.to_string(&value)?;
+    Ok(Value::String(percent_encode(&s, false)))
+}
+
+pub(crate) fn global_encode_uri_component(
+    vm: &mut Vm,
+    args: &[Value],
+) -> Result<Value, crate::errors::RuntimeError> {
+    let value = args.first().cloned().unwrap_or(Value::Undefined);
+    let s = vm.to_string(&value)?;
+    Ok(Value::String(percent_encode(&s, true)))
+}
+
+pub(crate) fn global_decode_uri(
+    vm: &mut Vm,
+    args: &[Value],
+) -> Result<Value, crate::errors::RuntimeError> {
+    let value = args.first().cloned().unwrap_or(Value::Undefined);
+    let s = vm.to_string(&value)?;
+    Ok(Value::String(percent_decode(vm, &s, false)?))
+}
+
+pub(crate) fn global_decode_uri_component(
+    vm: &mut Vm,
+    args: &[Value],
+) -> Result<Value, crate::errors::RuntimeError> {
+    let value = args.first().cloned().unwrap_or(Value::Undefined);
+    let s = vm.to_string(&value)?;
+    Ok(Value::String(percent_decode(vm, &s, true)?))
+}
+
 /// Clear slot type annotations recursively for a Chunk graph.
 ///
 /// The soft prelude is intentionally dynamic and may pass values that don't

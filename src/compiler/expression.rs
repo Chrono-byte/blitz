@@ -1490,32 +1490,7 @@ impl super::Compiler {
                     return Ok(());
                 }
 
-                // Handle optional call flag (may also be set with member expression)
-                let is_optional_call = c.optional;
-
-                // No spreads: perform the usual lowering for console.log and member calls.
-
-                if let OExpr::StaticMemberExpression(m) = &c.callee
-                    && let OExpr::Identifier(obj_ident) = &m.object
-                    && obj_ident.name.as_str() == "console"
-                    && m.property.name.as_str() == "log"
-                    && !is_optional_call
-                {
-                    self.emit_get_global_name("__native_print");
-                    let mut arg_count = 0usize;
-                    for arg in &c.arguments {
-                        if let Some(expr) = arg.as_expression() {
-                            self.compile_expr_oast(expr)?;
-                            arg_count += 1;
-                        } else {
-                            self.emit(Op::Undefined, LINE);
-                            arg_count += 1;
-                        }
-                    }
-                    self.emit(Op::CallIC, LINE);
-                    self.emit_byte(arg_count as u8, LINE);
-                    return Ok(());
-                }
+                // No spreads: perform the usual lowering for member calls.
 
                 if let OExpr::StaticMemberExpression(m) = &c.callee {
                     // Handle optional calls like obj.method?.()
@@ -1721,7 +1696,7 @@ impl super::Compiler {
                 self.emit_byte(arg_count as u8, LINE);
             }
             OExpr::ImportExpression(i) => {
-                self.emit_get_global_name("__native_dynamic_import");
+                self.emit_get_builtin_name("dynamicImport");
                 self.compile_expr_oast(&i.source)?;
                 if let Some(options) = &i.options {
                     self.compile_expr_oast(options)?;
