@@ -4,3 +4,4 @@
 //! ECMAScript-oriented folder structure.
 
 pub(crate) mod builtins;
+pub(crate) mod semantics;
