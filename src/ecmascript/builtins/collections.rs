@@ -156,6 +156,48 @@ pub(crate) fn install_map_set_constructors(
         )),
     );
     map_proto_map.borrow_mut().properties.insert(
+        PKey::String("delete".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let key = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let entries_key = PropertyKey::String("__map_entries".to_string());
+                let entries = vm.get_property_host(&this, &entries_key)?;
+                if let Value::Array(arr, props) = entries {
+                    let mut vec = arr.borrow_mut();
+                    let removed = if let Some(pos) = vec.iter().position(|item| {
+                        if let Some(Value::Array(pair, _)) = item {
+                            let p = pair.borrow();
+                            !p.is_empty()
+                                && strict_equal(p[0].as_ref().unwrap_or(&Value::Undefined), &key)
+                        } else {
+                            false
+                        }
+                    }) {
+                        vec.remove(pos);
+                        true
+                    } else {
+                        false
+                    };
+                    let new_len = usize_to_f64(vec.len());
+                    drop(vec);
+                    props.borrow_mut().properties.insert(
+                        PropertyKey::String("length".to_string()),
+                        PropertyDescriptor::data(Value::Number(new_len)),
+                    );
+                    let _ = vm.set_property_host(
+                        &this,
+                        &Value::String("size".to_string()),
+                        Value::Number(new_len),
+                    )?;
+                    return Ok(Value::Bool(removed));
+                }
+                Ok(Value::Bool(false))
+            }),
+            function_proto_map,
+        )),
+    );
+    map_proto_map.borrow_mut().properties.insert(
         PKey::String("set".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
@@ -280,6 +322,13 @@ pub(crate) fn install_map_set_constructors(
                 iter.properties.insert(
                     PropertyKey::String("next".to_string()),
                     PropertyDescriptor::data(next_fn),
+                );
+                iter.properties.insert(
+                    PropertyKey::Symbol(SymbolId::well_known_iterator()),
+                    PropertyDescriptor::data(builtin_object(
+                        Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+                        &function_proto_for_map_iter,
+                    )),
                 );
                 Ok(Value::Object(Rc::new(RefCell::new(iter))))
             }),
@@ -478,6 +527,13 @@ pub(crate) fn install_map_set_constructors(
                 iter.properties.insert(
                     PropertyKey::String("next".to_string()),
                     PropertyDescriptor::data(next_fn),
+                );
+                iter.properties.insert(
+                    PropertyKey::Symbol(SymbolId::well_known_iterator()),
+                    PropertyDescriptor::data(builtin_object(
+                        Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+                        &function_proto_for_set_iter,
+                    )),
                 );
                 Ok(Value::Object(Rc::new(RefCell::new(iter))))
             }),
