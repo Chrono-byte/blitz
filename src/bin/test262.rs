@@ -851,11 +851,24 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
         PropertyDescriptor::data(Value::Undefined),
     );
 
+    let noop_agent_method: blitz::value::BuiltinFn =
+        Rc::new(|_: &mut Vm, _: &[Value]| Ok(Value::Undefined));
+    let agent_obj = Rc::new(RefCell::new(ObjectData::new()));
+    for name in &[
+        "getReport",
+        "sleep",
+        "broadcast",
+        "receiveBroadcast",
+        "report",
+    ] {
+        agent_obj.borrow_mut().properties.insert(
+            PropertyKey::String(name.to_string()),
+            PropertyDescriptor::data(host_builtin(Rc::clone(&noop_agent_method))),
+        );
+    }
     data.properties.insert(
         PropertyKey::String("agent".to_string()),
-        PropertyDescriptor::data(host_builtin(Rc::new(|_vm, _args| {
-            Err("agent not supported".into())
-        }))),
+        PropertyDescriptor::data(Value::Object(Rc::clone(&agent_obj))),
     );
 
     // createRealm: builds a FRESH realm with fresh intrinsics, NOT a heap clone.
