@@ -58,7 +58,7 @@ use std::env;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use crate::bytecode;
+use crate::{RuntimeError, bytecode};
 use crate::compiler;
 use crate::compiler::ModuleContext;
 use crate::mutex_compat::MutexBorrowExt;
@@ -231,7 +231,7 @@ fn parse_float_string(text: &str) -> f64 {
 pub(crate) fn global_parse_int(
     vm: &mut Vm,
     args: &[Value],
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let value = args.first().cloned().unwrap_or(Value::Undefined);
     let s = vm.to_string(&value)?;
     let radix_arg = if let Some(radix_value) = args.get(1) {
@@ -246,7 +246,7 @@ pub(crate) fn global_parse_int(
 pub(crate) fn global_parse_float(
     vm: &mut Vm,
     args: &[Value],
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let value = args.first().cloned().unwrap_or(Value::Undefined);
     let s = vm.to_string(&value)?;
     let parsed = parse_float_string(&s);
@@ -302,7 +302,7 @@ fn percent_encode(text: &str, component: bool) -> String {
     out
 }
 
-fn uri_error(vm: &mut Vm) -> crate::errors::RuntimeError {
+fn uri_error(vm: &mut Vm) -> RuntimeError {
     let err = vm
         .create_intrinsic_error("URIError", "malformed URI sequence")
         .unwrap_or(Value::String("URIError".to_string()));
@@ -313,43 +313,81 @@ fn percent_decode(
     vm: &mut Vm,
     text: &str,
     component: bool,
-) -> Result<String, crate::errors::RuntimeError> {
-    let mut bytes = Vec::with_capacity(text.len());
-    let chars: Vec<char> = text.chars().collect();
+) -> Result<String, RuntimeError> {
+    let input = text.as_bytes();
+    let mut bytes = Vec::with_capacity(input.len());
     let mut i = 0usize;
-    while i < chars.len() {
-        let ch = chars[i];
-        if ch != '%' {
-            if !component && matches!(ch, '#' | '?') {
-                bytes.extend_from_slice(ch.to_string().as_bytes());
-            } else {
-                let mut buf = [0u8; 4];
-                bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-            }
+    while i < input.len() {
+        let byte = input[i];
+        if byte != b'%' {
+            bytes.push(byte);
             i += 1;
             continue;
         }
-        if i + 2 >= chars.len() {
+        if i + 2 >= input.len() {
             return Err(uri_error(vm));
         }
-        let hex = [chars[i + 1], chars[i + 2]];
-        let mut byte = 0u8;
-        for (shift, h) in [4u8, 0u8].into_iter().zip(hex) {
-            let Some(v) = h.to_digit(16) else {
-                return Err(uri_error(vm));
-            };
-            byte |= (v as u8) << shift;
+        let Some(hi) = hex_value(input[i + 1]) else {
+            return Err(uri_error(vm));
+        };
+        let Some(lo) = hex_value(input[i + 2]) else {
+            return Err(uri_error(vm));
+        };
+        let decoded = (hi << 4) | lo;
+        if !component && is_decode_uri_reserved_byte(decoded) {
+            bytes.extend_from_slice(&input[i..i + 3]);
+        } else {
+            bytes.push(decoded);
         }
-        bytes.push(byte);
         i += 3;
     }
-    String::from_utf8(bytes).map_err(|_| uri_error(vm))
+    Ok(unsafe { String::from_utf8_unchecked(bytes) })
 }
 
-pub(crate) fn global_encode_uri(
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn is_decode_uri_reserved_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b';' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' | b'#'
+    )
+}
+
+pub(crate) fn global_decode_uri(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
+    let value = args.first().cloned().unwrap_or(Value::Undefined);
+    let s = match &value {
+        Value::String(s) => s.as_str(),
+        _ => {
+            let s = vm.to_string(&value)?;
+            return Ok(Value::String(percent_decode(vm, &s, false)?));
+        }
+    };
+    Ok(Value::String(percent_decode(vm, s, false)?))
+}
+
+pub(crate) fn global_decode_uri_component(
     vm: &mut Vm,
     args: &[Value],
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
+    let value = args.first().cloned().unwrap_or(Value::Undefined);
+    let s = match &value {
+        Value::String(s) => s.as_str(),
+        _ => {
+            let s = vm.to_string(&value)?;
+            return Ok(Value::String(percent_decode(vm, &s, true)?));
+        }
+    };
+    Ok(Value::String(percent_decode(vm, s, true)?))
+}
+
+pub(crate) fn global_encode_uri(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let value = args.first().cloned().unwrap_or(Value::Undefined);
     let s = vm.to_string(&value)?;
     Ok(Value::String(percent_encode(&s, false)))
@@ -358,28 +396,43 @@ pub(crate) fn global_encode_uri(
 pub(crate) fn global_encode_uri_component(
     vm: &mut Vm,
     args: &[Value],
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let value = args.first().cloned().unwrap_or(Value::Undefined);
     let s = vm.to_string(&value)?;
     Ok(Value::String(percent_encode(&s, true)))
 }
 
-pub(crate) fn global_decode_uri(
-    vm: &mut Vm,
-    args: &[Value],
-) -> Result<Value, crate::errors::RuntimeError> {
-    let value = args.first().cloned().unwrap_or(Value::Undefined);
-    let s = vm.to_string(&value)?;
-    Ok(Value::String(percent_decode(vm, &s, false)?))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
-pub(crate) fn global_decode_uri_component(
-    vm: &mut Vm,
-    args: &[Value],
-) -> Result<Value, crate::errors::RuntimeError> {
-    let value = args.first().cloned().unwrap_or(Value::Undefined);
-    let s = vm.to_string(&value)?;
-    Ok(Value::String(percent_decode(vm, &s, true)?))
+    fn test_vm() -> Vm {
+        Vm::new(Rc::new(RefCell::new(ObjectData::new())))
+    }
+
+    #[test]
+    fn decode_uri_keeps_reserved_escapes() {
+        let mut vm = test_vm();
+
+        let preserved = global_decode_uri(&mut vm, &[Value::String("%3B%2F%3F".to_string())])
+            .expect("decodeURI should succeed");
+        assert_eq!(preserved, Value::String("%3B%2F%3F".to_string()));
+
+        let decoded =
+            global_decode_uri_component(&mut vm, &[Value::String("%3B%2F%3F".to_string())])
+                .expect("decodeURIComponent should succeed");
+        assert_eq!(decoded, Value::String(";/?".to_string()));
+    }
+
+    #[test]
+    fn decode_uri_streams_literal_utf8_bytes() {
+        let mut vm = test_vm();
+        let value = global_decode_uri(&mut vm, &[Value::String("héllo".to_string())])
+            .expect("decodeURI should accept raw utf8");
+        assert_eq!(value, Value::String("héllo".to_string()));
+    }
 }
 
 /// Clear slot type annotations recursively for a Chunk graph.
@@ -467,7 +520,7 @@ pub(crate) fn promise_constructor_matches(
     vm: &mut Vm,
     promise: &Value,
     constructor: &Value,
-) -> Result<bool, crate::errors::RuntimeError> {
+) -> Result<bool, RuntimeError> {
     let promise_constructor =
         vm.get_property_host(promise, &PropertyKey::String("constructor".to_string()))?;
     Ok(strict_equal(&promise_constructor, constructor))
@@ -476,7 +529,7 @@ pub(crate) fn promise_constructor_matches(
 pub(crate) fn collect_iterable_values(
     vm: &mut Vm,
     iterable: &Value,
-) -> Result<Vec<Value>, crate::errors::RuntimeError> {
+) -> Result<Vec<Value>, RuntimeError> {
     match iterable {
         Value::Array(arr, _) => Ok(arr
             .borrow()
@@ -530,7 +583,7 @@ fn resolve_promise_with_value_inner(
     result_promise: &Rc<RefCell<PromiseState>>,
     value: Value,
     already_resolved: Rc<RefCell<bool>>,
-) -> Result<(), crate::errors::RuntimeError> {
+) -> Result<(), RuntimeError> {
     if *already_resolved.borrow() {
         return Ok(());
     }
@@ -676,7 +729,7 @@ pub(crate) fn resolve_promise_with_value(
     vm: &mut Vm,
     result_promise: &Rc<RefCell<PromiseState>>,
     value: Value,
-) -> Result<(), crate::errors::RuntimeError> {
+) -> Result<(), RuntimeError> {
     resolve_promise_with_value_inner(vm, result_promise, value, Rc::new(RefCell::new(false)))
 }
 
@@ -740,7 +793,7 @@ fn get_shadow_realm_record(value: &Value) -> Option<Rc<ShadowRealmRecord>> {
 fn require_shadow_realm_record(
     vm: &mut Vm,
     value: &Value,
-) -> Result<Rc<ShadowRealmRecord>, crate::errors::RuntimeError> {
+) -> Result<Rc<ShadowRealmRecord>, RuntimeError> {
     get_shadow_realm_record(value)
         .ok_or_else(|| vm.throw_type_error("ShadowRealm method called on incompatible receiver"))
 }
@@ -823,7 +876,7 @@ pub(crate) fn reject_pending_promise(
 pub(crate) fn shadowrealm_evaluate(
     vm: &mut Vm,
     args: &[Value],
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let target = args.first().cloned().unwrap_or(Value::Undefined);
     let record = require_shadow_realm_record(vm, &target)?;
     let source = match args.get(1) {
@@ -895,7 +948,7 @@ pub(crate) fn shadowrealm_evaluate(
 pub(crate) fn shadowrealm_import_value(
     vm: &mut Vm,
     args: &[Value],
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let target = args.first().cloned().unwrap_or(Value::Undefined);
     let record = require_shadow_realm_record(vm, &target)?;
     let specifier = args.first().cloned().unwrap_or(Value::Undefined);
@@ -1057,7 +1110,7 @@ pub(crate) fn shadowrealm_import_value(
 pub(crate) fn dynamic_import_value(
     vm: &mut Vm,
     args: &[Value],
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let specifier = args.first().cloned().unwrap_or(Value::Undefined);
     let options = args.get(1).cloned().unwrap_or(Value::Undefined);
 
@@ -1202,7 +1255,7 @@ pub(crate) fn set_builtin_name(target: &Value, name: &str) {
 }
 
 /// Converts a value to a non-negative integer length suitable for array operations.
-pub(crate) fn to_length(vm: &mut Vm, value: &Value) -> Result<usize, crate::errors::RuntimeError> {
+pub(crate) fn to_length(vm: &mut Vm, value: &Value) -> Result<usize, RuntimeError> {
     let num = vm.to_number_value(value)?;
     if num.is_nan() || num <= 0.0_f64 {
         return Ok(0);
@@ -1220,7 +1273,7 @@ pub(crate) fn to_length(vm: &mut Vm, value: &Value) -> Result<usize, crate::erro
         .ok_or_else(|| vm.throw_range_error("Invalid array length"))
 }
 
-pub(crate) fn to_index(vm: &mut Vm, value: &Value) -> Result<usize, crate::errors::RuntimeError> {
+pub(crate) fn to_index(vm: &mut Vm, value: &Value) -> Result<usize, RuntimeError> {
     let num = vm.to_number_value(value)?;
     if num.is_nan() {
         return Ok(0);
@@ -1323,7 +1376,7 @@ fn atomics_value_to_integer(
     value: &Value,
     bits: u32,
     signed: bool,
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let n = vm.to_number_value(value)?;
     let int = n.trunc().to_i128().unwrap_or_else(|| {
         if n.is_sign_negative() {
@@ -1340,7 +1393,7 @@ fn atomics_value_to_bigint(
     vm: &mut Vm,
     value: &Value,
     signed: bool,
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let bigint = match value {
         Value::BigInt(n) => n.clone(),
         Value::Number(n) => BigIntValue::from_f64(n.trunc()).ok_or_else(|| {
@@ -1370,7 +1423,7 @@ fn atomics_value_to_bigint(
 pub(crate) fn atomics_view_info(
     vm: &mut Vm,
     view: &Value,
-) -> Result<AtomicsViewInfo, crate::errors::RuntimeError> {
+) -> Result<AtomicsViewInfo, RuntimeError> {
     let Value::Object(view_obj) = view else {
         return Err(vm.throw_type_error("Atomics requires a TypedArray"));
     };
@@ -1447,7 +1500,7 @@ pub(crate) fn atomics_view_index(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
     index_value: &Value,
-) -> Result<usize, crate::errors::RuntimeError> {
+) -> Result<usize, RuntimeError> {
     let index = to_index(vm, index_value)?;
     if index >= info.length {
         return Err(vm.throw_range_error("Atomics index out of range"));
@@ -1459,7 +1512,7 @@ fn atomics_read_view_slot(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
     index: usize,
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let prop_key = PropertyKey::String(index.to_string());
     let value = vm.get_property_host(&Value::Object(Rc::clone(&info.view)), &prop_key)?;
     if !matches!(value, Value::Undefined) {
@@ -1479,7 +1532,7 @@ fn atomics_write_view_slot(
     info: &AtomicsViewInfo,
     index: usize,
     value: Value,
-) -> Result<(), crate::errors::RuntimeError> {
+) -> Result<(), RuntimeError> {
     let prop_key = Value::Number(usize_to_f64(index));
     let stored = value.clone();
     let _ = vm.set_property_host(&Value::Object(Rc::clone(&info.view)), &prop_key, value)?;
@@ -1544,7 +1597,7 @@ pub(crate) fn atomics_wake_waiters(
     info: &AtomicsViewInfo,
     index: usize,
     count: usize,
-) -> Result<usize, crate::errors::RuntimeError> {
+) -> Result<usize, RuntimeError> {
     let waiters = atomics_waiters_array(&info.buffer);
     let mut to_wake: Vec<Value> = Vec::new();
     {
@@ -1603,7 +1656,7 @@ pub(crate) fn atomics_register_waiter(
     info: &AtomicsViewInfo,
     index: usize,
     resolve: Option<Value>,
-) -> Result<(), crate::errors::RuntimeError> {
+) -> Result<(), RuntimeError> {
     let waiters = atomics_waiters_array(&info.buffer);
     waiters
         .borrow_mut()
@@ -1615,7 +1668,7 @@ pub(crate) fn atomics_coerce_view_value(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
     value: &Value,
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     match info.value_kind {
         AtomicsValueKind::Number { bits, signed } => {
             atomics_value_to_integer(vm, value, bits, signed)
@@ -1628,7 +1681,7 @@ pub(crate) fn atomics_normalized_current(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
     index: usize,
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let current = atomics_read_view_slot(vm, info, index)?;
     atomics_coerce_view_value(vm, info, &current)
 }
@@ -1637,7 +1690,7 @@ pub(crate) fn atomics_load_current(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
     index: usize,
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     atomics_normalized_current(vm, info, index)
 }
 
@@ -1646,7 +1699,7 @@ pub(crate) fn atomics_store_current(
     info: &AtomicsViewInfo,
     index: usize,
     value: &Value,
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let stored = atomics_coerce_view_value(vm, info, value)?;
     atomics_write_view_slot(vm, info, index, stored.clone())?;
     Ok(stored)
@@ -1657,7 +1710,7 @@ pub(crate) fn atomics_exchange_current(
     info: &AtomicsViewInfo,
     index: usize,
     value: &Value,
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let current = atomics_normalized_current(vm, info, index)?;
     let stored = atomics_coerce_view_value(vm, info, value)?;
     atomics_write_view_slot(vm, info, index, stored)?;
@@ -1670,7 +1723,7 @@ pub(crate) fn atomics_binary_update(
     index: usize,
     value: &Value,
     op: &str,
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let current = atomics_normalized_current(vm, info, index)?;
     let operand = atomics_coerce_view_value(vm, info, value)?;
     let result = match (info.value_kind, current.clone(), operand) {
@@ -1734,7 +1787,7 @@ pub(crate) fn atomics_compare_exchange(
     index: usize,
     expected: &Value,
     replacement: &Value,
-) -> Result<Value, crate::errors::RuntimeError> {
+) -> Result<Value, RuntimeError> {
     let current = atomics_normalized_current(vm, info, index)?;
     let expected = atomics_coerce_view_value(vm, info, expected)?;
     if current == expected {
@@ -1905,7 +1958,7 @@ pub(crate) fn non_enum_data(value: Value) -> PropertyDescriptor {
 pub(crate) fn this_string_value(
     vm: &mut Vm,
     value: &Value,
-) -> Result<String, crate::errors::RuntimeError> {
+) -> Result<String, RuntimeError> {
     match value {
         Value::String(s) => Ok(s.clone()),
         Value::Object(obj) => {
@@ -1927,7 +1980,7 @@ pub(crate) fn this_string_value(
 pub(crate) fn this_boolean_value(
     vm: &mut Vm,
     value: &Value,
-) -> Result<bool, crate::errors::RuntimeError> {
+) -> Result<bool, RuntimeError> {
     match value {
         Value::Bool(b) => Ok(*b),
         Value::Object(obj) => {
@@ -1948,7 +2001,7 @@ pub(crate) fn this_boolean_value(
 pub(crate) fn require_object_coercible(
     vm: &mut Vm,
     value: &Value,
-) -> Result<(), crate::errors::RuntimeError> {
+) -> Result<(), RuntimeError> {
     match value {
         Value::Undefined | Value::Null => {
             Err(vm.throw_type_error("Cannot convert undefined or null to object"))
@@ -2059,7 +2112,7 @@ pub(crate) fn array_from_values(values: Vec<Value>) -> Value {
     Value::Array(arr_rc, props)
 }
 
-pub(crate) fn syntax_error(vm: &mut Vm, message: String) -> crate::errors::RuntimeError {
+pub(crate) fn syntax_error(vm: &mut Vm, message: String) -> RuntimeError {
     let err_val = host_error_object(vm, "SyntaxError", &message);
     vm.throw_exception(err_val)
 }

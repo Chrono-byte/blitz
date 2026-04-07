@@ -450,14 +450,9 @@ fn clear_array(arr: &Rc<RefCell<Vec<Option<Value>>>>) {
 
 #[cfg(feature = "gc_mark_sweep_prototype")]
 fn clear_env(env: &Rc<Mutex<Vec<ValueSlot>>>) {
-    let _ = env;
-    // Do not mutate live closure environments yet.
-    //
-    // The prototype collector currently relies on conservative reachability
-    // rooted from VM state. If that root walk misses a live closure, clearing
-    // the environment vector corrupts the closure's upvalues even though the
-    // closure object itself is still reachable. Keep the environment intact
-    // for now so we can preserve correctness while root coverage is expanded.
+    // Swept environments are unreachable from the current root set, so we can
+    // clear their captured slots and break closure cycles immediately.
+    clear_env_aggressively(env);
 }
 
 #[cfg(feature = "gc_mark_sweep_prototype")]
@@ -543,7 +538,7 @@ mod tests {
 
     #[cfg(feature = "gc_mark_sweep_prototype")]
     #[test]
-    fn regular_collect_preserves_swept_closure_env_contents() {
+    fn regular_collect_breaks_closure_env_cycles() {
         let env = track_env(Rc::new(Mutex::new(Vec::new())));
         let closure = make_dummy_closure(Rc::clone(&env));
         let weak_props = match &closure {
@@ -558,16 +553,11 @@ mod tests {
         drop(closure);
         drop(env);
 
-        let _stats = collect(&[]);
+        let stats = collect(&[]);
 
-        assert!(
-            weak_env.upgrade().is_some(),
-            "regular collection should not clear swept env contents yet"
-        );
-        assert!(
-            weak_props.upgrade().is_some(),
-            "closure remains reachable through uncleared closure env"
-        );
+        assert!(stats.swept_envs >= 1);
+        assert!(weak_env.upgrade().is_none());
+        assert!(weak_props.upgrade().is_none());
     }
 
     #[cfg(feature = "gc_mark_sweep_prototype")]

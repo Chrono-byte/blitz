@@ -3236,6 +3236,13 @@ impl Vm {
         }
     }
 
+    /// Return a string reference for a string value, or throw a type error if the value is not a string.
+    pub fn to_string_ref<'a>(&mut self, v: &'a Value) -> Result<&'a str, crate::errors::RuntimeError> {
+        match v {
+            Value::String(s) => Ok(s),
+            _ => Err(self.throw_type_error("Cannot convert to string reference")),
+        }
+    }
     /// Return the stored source or native template for a callable's `toString`.
     ///
     /// # Errors
@@ -6846,6 +6853,63 @@ mod tests {
         expected.sort();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn json_stringify_preserves_descriptor_fields() {
+        let src = r#"
+            var desc = Object.getOwnPropertyDescriptor(globalThis, "globalThis");
+            Object.defineProperty(globalThis, "keys", {
+                value: Object.keys(desc).join(","),
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            });
+            Object.defineProperty(globalThis, "enumerableValue", {
+                value: String(desc.enumerable),
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            });
+            Object.defineProperty(globalThis, "text", {
+                value: JSON.stringify(Object.defineProperties({}, {
+                    configurable: { value: true, writable: true, enumerable: true },
+                    enumerable: { value: false, writable: true, enumerable: true },
+                    writable: { value: true, writable: true, enumerable: true },
+                    value: { value: {}, writable: true, enumerable: true },
+                })),
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            });
+        "#;
+        let session = Parser::parse_source(src).expect("parse ok");
+        let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+        let globals = test_globals();
+        let mut vm = Vm::new(globals);
+        vm.run(chunk).expect("run ok");
+
+        match vm.get_global("keys") {
+            Some(Value::String(s)) => {
+                assert_eq!(s, "value,writable,enumerable,configurable");
+            }
+            other => panic!("expected descriptor keys string, got {:?}", other),
+        }
+        match vm.get_global("enumerableValue") {
+            Some(Value::String(s)) => {
+                assert_eq!(s, "false");
+            }
+            other => panic!("expected descriptor enumerable value, got {:?}", other),
+        }
+        match vm.get_global("text") {
+            Some(Value::String(s)) => {
+                assert_eq!(
+                    s,
+                    r#"{"value":{},"writable":true,"enumerable":false,"configurable":true}"#
+                );
+            }
+            other => panic!("expected serialized descriptor string, got {:?}", other),
+        }
     }
 
     #[test]
