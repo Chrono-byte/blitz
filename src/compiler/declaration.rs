@@ -114,6 +114,7 @@ impl Compiler {
                 self.emit_byte(1, LINE);
             }
             OStmt::ExportNamedDeclaration(export) => {
+                // export {  } from "module"
                 if let Some(decl) = &export.declaration {
                     match decl {
                         oast::Declaration::VariableDeclaration(v) => {

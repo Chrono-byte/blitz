@@ -414,7 +414,6 @@ impl super::Compiler {
                     .any(|el| matches!(el, oast::ArrayExpressionElement::SpreadElement(_)));
 
                 if has_spread {
-                    self.emit_get_global_name("__native_array_from_spread");
                     for el in &arr.elements {
                         match el {
                             oast::ArrayExpressionElement::SpreadElement(s) => {
@@ -443,7 +442,7 @@ impl super::Compiler {
                     }
                     self.emit(Op::BuildArray, LINE);
                     self.emit_byte(arr.elements.len() as u8, LINE);
-                    self.emit(Op::Spread, LINE);
+                    self.emit(Op::ArrayFromSpread, LINE);
                     self.emit_byte(arr.elements.len() as u8, LINE);
                 } else {
                     for el in &arr.elements {

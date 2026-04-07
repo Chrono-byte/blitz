@@ -9,16 +9,15 @@ use std::rc::Rc;
 use crate::ecmascript::builtins;
 use crate::runtime_utils::{
     array_from_values, builtin_object, char_index_to_byte_index, descriptor_value_from_descriptor,
-    host_error_object, is_byte_offset_aligned, non_enum_data, own_enumerable_keys,
-    own_property_descriptor, own_property_keys, property_key_to_value, set_builtin_length,
-    set_builtin_name, static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length,
-    usize_to_f64,
+    global_parse_float, global_parse_int, host_error_object, is_byte_offset_aligned, non_enum_data,
+    own_enumerable_keys, own_property_descriptor, own_property_keys, property_key_to_value,
+    set_builtin_length, set_builtin_name, static_builtin_arg_offset, strict_equal, syntax_error,
+    to_index, to_length, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{Parser, Vm, compiler};
 
 mod atomics;
-mod kernel_helpers;
 mod shadowrealm;
 
 pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
@@ -3078,8 +3077,6 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PKey::String("Reflect".to_string()),
         PropertyDescriptor::data(Value::Object(reflect_obj)),
     );
-    // Kernel helpers collect the soft-prelude __native stubs so this module can stay focused.
-    kernel_helpers::install_kernel_helpers(&mut g, &function_proto_map);
     set_builtin_name(&object_ctor_val, "Object");
     set_builtin_name(&function_ctor_val, "Function");
     set_builtin_name(&array_ctor_val, "Array");
@@ -3265,6 +3262,37 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     g.properties.insert(
         PKey::String("Math".to_string()),
         PropertyDescriptor::data(Value::Object(math)),
+    );
+
+    let insert_math_builtin = |name: &'static str, length: f64, func: BuiltinFn| -> Value {
+        let func_val = builtin_object(func, &function_proto_map);
+        set_builtin_name(&func_val, name);
+        set_builtin_length(&func_val, length);
+        func_val
+    };
+    g.properties.insert(
+        PKey::String("isNaN".to_string()),
+        PropertyDescriptor::data(insert_math_builtin(
+            "isNaN",
+            1.0,
+            Rc::new(|vm, args| {
+                let v = args.first().cloned().unwrap_or(Value::Undefined);
+                let n = vm.to_number_value(&v)?;
+                Ok(Value::Bool(n.is_nan()))
+            }),
+        )),
+    );
+    g.properties.insert(
+        PKey::String("isFinite".to_string()),
+        PropertyDescriptor::data(insert_math_builtin(
+            "isFinite",
+            1.0,
+            Rc::new(|vm, args| {
+                let v = args.first().cloned().unwrap_or(Value::Undefined);
+                let n = vm.to_number_value(&v)?;
+                Ok(Value::Bool(n.is_finite()))
+            }),
+        )),
     );
 
     builtins::primitives::install_bigint_and_number_builtins(
@@ -3501,60 +3529,6 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 PKey::String(name.to_string()),
                 PropertyDescriptor::data(func_value),
             );
-        }
-    }
-
-    // Mirror a selection of helpers onto globalThis if not present there.
-    // Special handling needed when globalThis is the same object as globals
-    let names = [
-        "__native_toString",
-        "__native_toNumber",
-        "__native_toBoolean",
-        "__native_abstractEquality",
-        "__native_in",
-        "__native_construct",
-    ];
-
-    // Get the globalThis value and check if it points back to globals
-    if let Some(PropertyDescriptor::Data { value: gv, .. }) =
-        g.properties.get(&global_this_key).cloned()
-        && let Value::Object(obj_rc) = gv
-    {
-        // Check if obj_rc is the same as globals by comparing Rc pointers
-        let is_globals = Rc::ptr_eq(&obj_rc, globals);
-
-        if is_globals {
-            // If globalThis IS globals, we need to be careful with borrows
-            // Drop the mutable borrow of g first
-            drop(g);
-
-            // Now borrow g mutably again to insert the missing properties
-            let g = globals.borrow_mut();
-            for name in &names {
-                let k = PropertyKey::String(name.to_string());
-                if !g.properties.contains_key(&k) {
-                    // Intentionally a no-op: when `globalThis` aliases `globals` we must avoid
-                    // additional borrows while holding the mutable borrow of `g`. We already checked
-                    // whether the property exists above, so do nothing here to prevent borrow
-                    // conflicts — the mutable borrow held on `g` allows safe insertion if needed later.
-                }
-            }
-        } else {
-            // obj_rc is a separate object, safe to borrow both
-            drop(g); // Drop mutable borrow
-
-            let g = globals.borrow(); // Borrow immutably
-            let mut obj = obj_rc.borrow_mut();
-            for name in &names {
-                let k = PropertyKey::String(name.to_string());
-                if !obj.properties.contains_key(&k)
-                    && let Some(PropertyDescriptor::Data { value, .. }) =
-                        g.properties.get(&PKey::String(name.to_string())).cloned()
-                {
-                    obj.properties.insert(k, PropertyDescriptor::data(value));
-                }
-            }
-            // g and obj borrows are dropped here
         }
     }
 }

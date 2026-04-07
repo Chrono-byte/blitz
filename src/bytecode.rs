@@ -429,6 +429,8 @@ pub enum Op {
     YieldStar,
     /// Spread arguments and call a function. Operands: nargs (u8)
     Spread,
+    /// Build an array literal from spread operands.
+    ArrayFromSpread,
     /// Push undefined value
     Undefined,
     /// Jump if top of stack is truthy.
@@ -550,6 +552,7 @@ impl Op {
             Op::Yield => "Yield",
             Op::YieldStar => "YieldStar",
             Op::Spread => "Spread",
+            Op::ArrayFromSpread => "ArrayFromSpread",
             Op::Undefined => "Undefined",
             Op::JumpIfTrue => "JumpIfTrue",
             Op::JumpIfNullish => "JumpIfNullish",

@@ -3,6 +3,7 @@ use crate::environment::EnvironmentRecord;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::Realm;
+use crate::runtime_utils::array_from_values;
 use crate::value::{
     BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
     ValueSlot,
@@ -1077,7 +1078,25 @@ impl Vm {
         let mask = self.pop()?;
         let values = self.pop()?;
         let callee = self.pop()?;
+        let flat = self.flatten_spread_values(values, mask)?;
+        self.call_with_flat_args(callee, flat)?;
+        Ok(())
+    }
 
+    fn execute_array_from_spread(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        self.read_byte()?; // nargs, consumed by VM dispatcher
+        let mask = self.pop()?;
+        let values = self.pop()?;
+        let flat = self.flatten_spread_values(values, mask)?;
+        self.stack.push(array_from_values(flat));
+        Ok(())
+    }
+
+    fn flatten_spread_values(
+        &mut self,
+        values: Value,
+        mask: Value,
+    ) -> Result<Vec<Value>, crate::errors::RuntimeError> {
         let values_vec = match values {
             Value::Array(arr, _) => arr.borrow().clone(),
             _ => Vec::new(),
@@ -1157,6 +1176,14 @@ impl Vm {
             }
         }
 
+        Ok(flat)
+    }
+
+    fn call_with_flat_args(
+        &mut self,
+        callee: Value,
+        flat: Vec<Value>,
+    ) -> Result<(), crate::errors::RuntimeError> {
         match callee {
             Value::Builtin(f) => {
                 let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
@@ -2743,6 +2770,7 @@ impl Vm {
             }
             Op::CallMethod => self.execute_call_method()?,
             Op::Spread => self.execute_spread()?,
+            Op::ArrayFromSpread => self.execute_array_from_spread()?,
             Op::Construct => self.execute_construct()?,
             Op::Return => {
                 if self.call_stack.is_empty() {
@@ -5601,7 +5629,8 @@ fn opcode_width(op: Op) -> usize {
         | Op::SetPropertyIC
         | Op::GetBuiltin
         | Op::BuildArray
-        | Op::BuildObject => 2,
+        | Op::BuildObject
+        | Op::ArrayFromSpread => 2,
         Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
         _ => 1,
     }

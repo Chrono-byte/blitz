@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::compiler;
 use crate::parser::Parser;
-use crate::runtime_utils::{array_from_values, static_builtin_arg_offset, syntax_error};
+use crate::runtime_utils::{static_builtin_arg_offset, syntax_error};
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 
@@ -47,19 +47,5 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
             let mut eval_vm = Vm::new(vm.globals_rc());
             eval_vm.run(chunk)
         }))),
-    );
-
-    let mut insert_if_missing = |name: &str, val: Value| {
-        let k = PKey::String(name.to_string());
-        g.properties
-            .entry(k)
-            .or_insert_with(|| PropertyDescriptor::data(val));
-    };
-
-    insert_if_missing(
-        "__native_array_from_spread",
-        Value::Builtin(Rc::new(move |_vm, args| {
-            Ok(array_from_values(args.to_vec()))
-        })),
     );
 }

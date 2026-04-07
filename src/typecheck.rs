@@ -153,16 +153,9 @@ pub fn check(program: &oast::Program<'_>) -> Result<(), TypeCheckerError> {
     };
 
     // Builtins
-    ctx.scope_mut().insert(
-        "__native_print".to_string(),
-        Type::Function(vec![Type::String], Box::new(Type::Void)),
-    );
-
     // Provide the host accessor used by blitzlib to capture host primitives.
     // The accessor takes a string name and returns any host value; use `Void`
     // as the return type in the typechecker to keep checks permissive.
-    // NOTE: __host_get indirection removed; runtime publishes native helpers
-    // directly (e.g. __native_print). Do not add __host_get to builtins.
 
     ctx.scope_mut().insert("undefined".to_string(), Type::Null);
     ctx.scope_mut().insert(
