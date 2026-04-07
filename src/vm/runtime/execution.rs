@@ -1471,9 +1471,6 @@ impl Vm {
                 if found
                     && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
                 {
-                    if name == "value" {
-                        eprintln!("[debug] property set via with for {}", name);
-                    }
                     return Ok(Some(self.get_property_host(&binding_object, &key)?));
                 }
             }
@@ -1500,9 +1497,6 @@ impl Vm {
             };
             if has_decl_binding {
                 let outer_env = outer.clone();
-                if name == "value" {
-                    eprintln!("[debug] setting lexical binding 'value'");
-                }
                 let result = current
                     .borrow_mut()
                     .set_mutable_binding(name, value.clone());
@@ -1530,6 +1524,67 @@ impl Vm {
                         &Value::String(name.to_string()),
                         value,
                     )?;
+                    return Ok(true);
+                }
+            }
+            env = outer;
+        }
+        Ok(false)
+    }
+
+    fn get_with_env_binding_value(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<Value>, crate::errors::RuntimeError> {
+        let mut env = Some(Rc::clone(&self.lexical_env));
+        while let Some(current) = env {
+            let (binding_object, with_environment, outer) = {
+                let borrowed = current.borrow();
+                (
+                    borrowed.binding_object(),
+                    borrowed.is_with_environment(),
+                    borrowed.outer(),
+                )
+            };
+            if let Some(binding_object) = binding_object {
+                let key = PropertyKey::String(name.to_string());
+                let found = self.has_property_host(&binding_object, &key)?;
+                if found
+                    && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
+                {
+                    return Ok(Some(self.get_property_host(&binding_object, &key)?));
+                }
+            }
+            env = outer;
+        }
+        Ok(None)
+    }
+
+    fn set_with_env_binding_value(
+        &mut self,
+        name: &str,
+        value: Value,
+    ) -> Result<bool, crate::errors::RuntimeError> {
+        let mut env = Some(Rc::clone(&self.lexical_env));
+        while let Some(current) = env {
+            let (binding_object, with_environment, outer) = {
+                let borrowed = current.borrow();
+                (
+                    borrowed.binding_object(),
+                    borrowed.is_with_environment(),
+                    borrowed.outer(),
+                )
+            };
+            if let Some(binding_object) = binding_object {
+                let name_str = name.to_string();
+                let key = PropertyKey::String(name_str.clone());
+                let found = self.has_property_host(&binding_object, &key)?;
+                if found
+                    && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
+                {
+                    let _ =
+                        self.set_property_host(&binding_object, &Value::String(name_str), value)?;
+                    self.bump_object_generation(&binding_object);
                     return Ok(true);
                 }
             }
@@ -2133,6 +2188,17 @@ impl Vm {
             Op::False => self.stack.push(Value::Bool(false)),
             Op::GetLocal => {
                 let slot = self.read_byte()? as usize;
+                if let Some(name) = self
+                    .chunk
+                    .root_slot_names
+                    .get(slot)
+                    .and_then(|opt| opt.clone())
+                {
+                    if let Some(v) = self.get_with_env_binding_value(&name)? {
+                        self.stack.push(v);
+                        return Ok(StepOutcome::Continue);
+                    }
+                }
                 let v = self
                     .locals
                     .get(slot)
@@ -2148,6 +2214,16 @@ impl Vm {
             Op::SetLocal => {
                 let slot = self.read_byte()? as usize;
                 let v = self.pop()?;
+                if let Some(name) = self
+                    .chunk
+                    .root_slot_names
+                    .get(slot)
+                    .and_then(|opt| opt.clone())
+                {
+                    if self.set_with_env_binding_value(&name, v.clone())? {
+                        return Ok(StepOutcome::Continue);
+                    }
+                }
                 ensure_slot(&mut self.locals, slot);
                 *self.locals[slot].borrow_mut() = v;
             }

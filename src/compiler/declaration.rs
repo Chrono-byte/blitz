@@ -240,12 +240,12 @@ impl Compiler {
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
 
-                let handler_start = self.chunk.code.len();
+                let _handler_start = self.chunk.code.len();
                 self.patch_jump(handler_jump);
 
                 self.emit(Op::PopEnv, LINE);
                 self.emit(Op::Throw, LINE);
-                let after_handler = self.chunk.code.len();
+                let _after_handler = self.chunk.code.len();
 
                 self.patch_jump(skip_handler_jump);
             }
