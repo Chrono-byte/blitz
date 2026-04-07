@@ -123,6 +123,7 @@ fn path_has_segment(path: &Path, wanted: &str) -> bool {
         .any(|component| component.as_os_str() == wanted)
 }
 
+/// Prints the arguments of a function call as a space-separated string.
 fn print_args(args: &[Value]) -> String {
     args.iter()
         .map(|v| format!("{}", v))
