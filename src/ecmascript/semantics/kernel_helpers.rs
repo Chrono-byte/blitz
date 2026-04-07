@@ -61,57 +61,6 @@ pub(crate) fn install_kernel_helpers(
     );
 
     insert_if_missing(
-        "__native_typeof",
-        Value::Builtin(Rc::new(move |vm, args| {
-            let off = static_builtin_arg_offset(vm, args, "");
-            let value = args.get(off).cloned().unwrap_or(Value::Undefined);
-            let ty = match value {
-                Value::Uninitialized | Value::Undefined => "undefined",
-                Value::Null => "object",
-                Value::Bool(_) => "boolean",
-                Value::Number(_) => "number",
-                Value::String(_) => "string",
-                Value::BigInt(_) => "bigint",
-                Value::Symbol(_, _) => "symbol",
-                Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. } => {
-                    "function"
-                }
-                Value::Object(_) | Value::Array(..) | Value::Promise(_) => "object",
-            };
-            Ok(Value::String(ty.to_string()))
-        })),
-    );
-
-    insert_if_missing(
-        "__native_typeof_name",
-        Value::Builtin(Rc::new(move |vm, args| {
-            let off = static_builtin_arg_offset(vm, args, "");
-            let name = args
-                .get(off)
-                .and_then(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            let value = vm.get_global(&name).unwrap_or(Value::Undefined);
-            let ty = match value {
-                Value::Uninitialized | Value::Undefined => "undefined",
-                Value::Null => "object",
-                Value::Bool(_) => "boolean",
-                Value::Number(_) => "number",
-                Value::String(_) => "string",
-                Value::BigInt(_) => "bigint",
-                Value::Symbol(_, _) => "symbol",
-                Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. } => {
-                    "function"
-                }
-                Value::Object(_) | Value::Array(..) | Value::Promise(_) => "object",
-            };
-            Ok(Value::String(ty.to_string()))
-        })),
-    );
-
-    insert_if_missing(
         "__native_toString",
         Value::Builtin(Rc::new(|vm, args| {
             let v = args.first().cloned().unwrap_or(Value::Undefined);

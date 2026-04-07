@@ -2698,6 +2698,18 @@ impl Vm {
                 let v = self.pop()?;
                 self.stack.push(Value::String(v.type_name().to_string()));
             }
+            Op::TypeofIdentifier => {
+                let name_idx = self.read_short()? as usize;
+                let name = self.string_constant(name_idx)?;
+                let value = if let Some(binding) = self.resolve_lexical_identifier_value(&name)? {
+                    binding
+                } else {
+                    let key = PropertyKey::String(name.clone());
+                    let global_obj = Value::Object(Rc::clone(&self.globals));
+                    self.get_property_host(&global_obj, &key)?
+                };
+                self.stack.push(Value::String(value.type_name().to_string()));
+            }
             Op::Call => self.execute_call()?,
             Op::CallIC => self.execute_call_ic()?,
             Op::PushWithEnv => {

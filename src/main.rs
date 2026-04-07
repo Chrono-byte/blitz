@@ -239,14 +239,6 @@ fn main() -> Result<(), blitz::errors::Error> {
         }))),
     );
 
-    globals.borrow_mut().properties.insert(
-        blitz::value::PropertyKey::String("__native_typeof".to_string()),
-        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let v = args.first().cloned().unwrap_or(Value::Undefined);
-            Ok(Value::String(vm.typeof_value(&v)))
-        }))),
-    );
-
     // Arithmetic and relational native helpers
     globals.borrow_mut().properties.insert(
         blitz::value::PropertyKey::String("__native_add".to_string()),
@@ -433,21 +425,6 @@ fn main() -> Result<(), blitz::errors::Error> {
             let nb = vm.to_number_value(&bp)?;
             Ok(Value::Bool(na >= nb))
         }))),
-    );
-
-    // Provide a minimal builtin console.log for early bootstrap and REPL use.
-    globals.borrow_mut().properties.insert(
-        blitz::value::PropertyKey::String("console".to_string()),
-        blitz::value::PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new({
-            let mut data = blitz::value::ObjectData::new();
-            data.properties.insert(
-                blitz::value::PropertyKey::String("log".to_string()),
-                blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-                    native_print(vm, args).map_err(blitz::errors::RuntimeError::from)
-                }))),
-            );
-            data
-        })))),
     );
 
     runtime_utils::install_minimal_kernel_constructors(&globals);

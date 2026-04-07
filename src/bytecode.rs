@@ -363,6 +363,8 @@ pub enum Op {
     Not,
     /// Typeof operator
     Typeof,
+    /// Typeof operator specialized for identifier references (avoids ReferenceError for unbound globals)
+    TypeofIdentifier,
     /// Function call
     Call,
     /// Function call preserving an explicit receiver (`this`)
@@ -513,6 +515,7 @@ impl Op {
             Op::Neg => "Neg",
             Op::Not => "Not",
             Op::Typeof => "Typeof",
+            Op::TypeofIdentifier => "TypeofIdentifier",
             Op::Call => "Call",
             Op::CallMethod => "CallMethod",
             Op::Return => "Return",

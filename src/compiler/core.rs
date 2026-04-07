@@ -550,6 +550,12 @@ impl Compiler {
         self.emit_u16(idx as u16, LINE);
     }
 
+    pub(crate) fn emit_typeof_identifier(&mut self, name: &str) {
+        let idx = self.global_name_index(name);
+        self.emit(Op::TypeofIdentifier, LINE);
+        self.emit_u16(idx as u16, LINE);
+    }
+
     pub(crate) fn emit_set_global_name(&mut self, name: &str) {
         let idx = self.global_name_index(name);
         self.emit(Op::SetGlobal, LINE);

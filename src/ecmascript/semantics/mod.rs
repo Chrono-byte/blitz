@@ -3507,7 +3507,6 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     // Mirror a selection of helpers onto globalThis if not present there.
     // Special handling needed when globalThis is the same object as globals
     let names = [
-        "__native_typeof",
         "__native_toString",
         "__native_toNumber",
         "__native_toBoolean",

@@ -164,16 +164,6 @@ pub fn check(program: &oast::Program<'_>) -> Result<(), TypeCheckerError> {
     // NOTE: __host_get indirection removed; runtime publishes native helpers
     // directly (e.g. __native_print). Do not add __host_get to builtins.
 
-    // Provide a builtin `console` object with `log: (...args: any[]) => void`.
-    // The typechecker will allow passing any arguments to `console.log` (they are coerced to strings by the prelude).
-    let mut console_props = HashMap::new();
-    // Use empty parameter list to indicate variadic function for console.log
-    console_props.insert(
-        "log".to_string(),
-        Type::Function(vec![], Box::new(Type::Void)),
-    ); // variadic
-    ctx.scope_mut()
-        .insert("console".to_string(), Type::Object(console_props));
     ctx.scope_mut().insert("undefined".to_string(), Type::Null);
     ctx.scope_mut().insert(
         "isNaN".to_string(),

@@ -977,34 +977,23 @@ impl super::Compiler {
                     },
                 }
             }
-            OExpr::UnaryExpression(u) => match u.operator {
-                oast::UnaryOperator::Typeof => {
-                    if let OExpr::Identifier(id) = &u.argument {
-                        // Preserve `typeof undeclaredIdentifier` semantics.
-                        // Normal global lookup now throws ReferenceError for
-                        // missing bindings, so use a name-based helper for the
-                        // identifier case.
-                        let name = id.name.to_string();
-                        if self.resolve_local(&name).is_some()
-                            || self.resolve_upvalue(&name).is_some()
-                        {
-                            self.emit_get_global_name("__native_typeof");
-                            self.compile_expr_oast(&u.argument)?;
-                            self.emit(Op::CallIC, LINE);
-                            self.emit_byte(1, LINE);
+                OExpr::UnaryExpression(u) => match u.operator {
+                    oast::UnaryOperator::Typeof => {
+                        if let OExpr::Identifier(id) = &u.argument {
+                            let name = id.name.clone();
+                            if self.resolve_local(&name).is_some()
+                                || self.resolve_upvalue(&name).is_some()
+                            {
+                                self.compile_expr_oast(&u.argument)?;
+                                self.emit(Op::Typeof, LINE);
+                            } else {
+                                self.emit_typeof_identifier(&name);
+                            }
                         } else {
-                            self.emit_get_global_name("__native_typeof_name");
-                            self.emit_constant(Value::String(name), LINE);
-                            self.emit(Op::CallIC, LINE);
-                            self.emit_byte(1, LINE);
+                            self.compile_expr_oast(&u.argument)?;
+                            self.emit(Op::Typeof, LINE);
                         }
-                    } else {
-                        self.emit_get_global_name("__native_typeof");
-                        self.compile_expr_oast(&u.argument)?;
-                        self.emit(Op::CallIC, LINE);
-                        self.emit_byte(1, LINE);
                     }
-                }
                 oast::UnaryOperator::Delete => {
                     if let OExpr::StaticMemberExpression(m) = &u.argument {
                         self.compile_expr_oast(&m.object)?;
