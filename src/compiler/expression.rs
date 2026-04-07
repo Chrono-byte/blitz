@@ -151,33 +151,71 @@ impl super::Compiler {
             OExpr::NumericLiteral(n) => self.emit_constant(Value::Number(n.value), LINE),
             OExpr::BigIntLiteral(n) => {
                 // Use n.raw if available, otherwise use source text directly
-                let digits = if let Some(raw) = &n.raw {
+                let parsed = if let Some(raw) = &n.raw {
                     let s = raw.as_str();
-                    s.strip_suffix('n').unwrap_or(s).replace('_', "")
+                    let digits_str = s.strip_suffix('n').unwrap_or(s).replace('_', "");
+                    eprintln!("DEBUG BigInt raw={:?} digits_str={:?} base={:?}", raw, digits_str, n.base);
+                    // Use the base field to determine radix
+                    let result = match n.base {
+                        oast::BigintBase::Binary => num_bigint::BigInt::parse_bytes(
+                            digits_str
+                                .strip_prefix("0b")
+                                .unwrap_or(&digits_str)
+                                .as_bytes(),
+                            2,
+                        ),
+                        oast::BigintBase::Octal => num_bigint::BigInt::parse_bytes(
+                            digits_str
+                                .strip_prefix("0o")
+                                .unwrap_or(&digits_str)
+                                .as_bytes(),
+                            8,
+                        ),
+                        oast::BigintBase::Hex => num_bigint::BigInt::parse_bytes(
+                            digits_str
+                                .strip_prefix("0x")
+                                .unwrap_or(&digits_str)
+                                .as_bytes(),
+                            16,
+                        ),
+                        oast::BigintBase::Decimal => {
+                            num_bigint::BigInt::parse_bytes(digits_str.as_bytes(), 10)
+                        }
+                    };
+                    eprintln!("DEBUG BigInt parse result={:?}", result);
+                    result
                 } else {
                     // Fallback to source text - span gives us byte offsets
                     let source = self.source_text.as_ref();
                     let start = n.span.start as usize;
                     let end = n.span.end as usize;
                     if start < end && end <= source.len() {
-                        source[start..end]
+                        let digits = source[start..end]
                             .strip_suffix('n')
                             .unwrap_or(&source[start..end])
-                            .replace('_', "")
+                            .replace('_', "");
+                        // Use base field to determine radix
+                        match n.base {
+                            oast::BigintBase::Binary => num_bigint::BigInt::parse_bytes(
+                                digits.strip_prefix("0b").unwrap_or(&digits).as_bytes(),
+                                2,
+                            ),
+                            oast::BigintBase::Octal => num_bigint::BigInt::parse_bytes(
+                                digits.strip_prefix("0o").unwrap_or(&digits).as_bytes(),
+                                8,
+                            ),
+                            oast::BigintBase::Hex => num_bigint::BigInt::parse_bytes(
+                                digits.strip_prefix("0x").unwrap_or(&digits).as_bytes(),
+                                16,
+                            ),
+                            oast::BigintBase::Decimal => {
+                                num_bigint::BigInt::parse_bytes(digits.as_bytes(), 10)
+                            }
+                        }
                     } else {
-                        return Err(crate::errors::CompilerError::from("invalid bigint literal"));
+                        None
                     }
                 };
-                let parsed: Option<num_bigint::BigInt> =
-                    if let Some(hex) = digits.strip_prefix("0x") {
-                        num_bigint::BigInt::parse_bytes(hex.as_bytes(), 16)
-                    } else if let Some(bin) = digits.strip_prefix("0b") {
-                        num_bigint::BigInt::parse_bytes(bin.as_bytes(), 2)
-                    } else if let Some(oct) = digits.strip_prefix("0o") {
-                        num_bigint::BigInt::parse_bytes(oct.as_bytes(), 8)
-                    } else {
-                        num_bigint::BigInt::parse_bytes(digits.as_bytes(), 10)
-                    };
                 let parsed = parsed
                     .ok_or_else(|| crate::errors::CompilerError::from("invalid bigint literal"))?;
                 self.emit_constant(Value::BigInt(parsed), LINE);
