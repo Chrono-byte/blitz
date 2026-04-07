@@ -2708,7 +2708,8 @@ impl Vm {
                     let global_obj = Value::Object(Rc::clone(&self.globals));
                     self.get_property_host(&global_obj, &key)?
                 };
-                self.stack.push(Value::String(value.type_name().to_string()));
+                self.stack
+                    .push(Value::String(value.type_name().to_string()));
             }
             Op::Call => self.execute_call()?,
             Op::CallIC => self.execute_call_ic()?,

@@ -977,23 +977,23 @@ impl super::Compiler {
                     },
                 }
             }
-                OExpr::UnaryExpression(u) => match u.operator {
-                    oast::UnaryOperator::Typeof => {
-                        if let OExpr::Identifier(id) = &u.argument {
-                            let name = id.name.clone();
-                            if self.resolve_local(&name).is_some()
-                                || self.resolve_upvalue(&name).is_some()
-                            {
-                                self.compile_expr_oast(&u.argument)?;
-                                self.emit(Op::Typeof, LINE);
-                            } else {
-                                self.emit_typeof_identifier(&name);
-                            }
-                        } else {
+            OExpr::UnaryExpression(u) => match u.operator {
+                oast::UnaryOperator::Typeof => {
+                    if let OExpr::Identifier(id) = &u.argument {
+                        let name = id.name.clone();
+                        if self.resolve_local(&name).is_some()
+                            || self.resolve_upvalue(&name).is_some()
+                        {
                             self.compile_expr_oast(&u.argument)?;
                             self.emit(Op::Typeof, LINE);
+                        } else {
+                            self.emit_typeof_identifier(&name);
                         }
+                    } else {
+                        self.compile_expr_oast(&u.argument)?;
+                        self.emit(Op::Typeof, LINE);
                     }
+                }
                 oast::UnaryOperator::Delete => {
                     if let OExpr::StaticMemberExpression(m) = &u.argument {
                         self.compile_expr_oast(&m.object)?;
