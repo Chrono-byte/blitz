@@ -684,6 +684,38 @@ impl Compiler {
                             self.emit_set_global_name(name);
                         }
                     }
+                    oast::ForStatementLeft::StaticMemberExpression(m) => {
+                        let temp_slot = self.add_local_with_mirror(
+                            format!("__forof_value_{}", self.locals.len()),
+                            None,
+                            false,
+                        );
+                        self.emit(Op::SetLocal, LINE);
+                        self.emit_byte(temp_slot as u8, LINE);
+                        self.compile_expr_oast(&m.object)?;
+                        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                        self.emit(Op::GetLocal, LINE);
+                        self.emit_byte(temp_slot as u8, LINE);
+                        self.emit(Op::SetPropertyIC, LINE);
+                        let slot = self.alloc_ic_slot()?;
+                        self.emit_byte(slot, LINE);
+                        self.emit(Op::Pop, LINE);
+                    }
+                    oast::ForStatementLeft::ComputedMemberExpression(m) => {
+                        let temp_slot = self.add_local_with_mirror(
+                            format!("__forof_value_{}", self.locals.len()),
+                            None,
+                            false,
+                        );
+                        self.emit(Op::SetLocal, LINE);
+                        self.emit_byte(temp_slot as u8, LINE);
+                        self.compile_expr_oast(&m.object)?;
+                        self.compile_expr_oast(&m.expression)?;
+                        self.emit(Op::GetLocal, LINE);
+                        self.emit_byte(temp_slot as u8, LINE);
+                        self.emit(Op::SetProperty, LINE);
+                        self.emit(Op::Pop, LINE);
+                    }
                     _ => {
                         return Err(crate::errors::CompilerError::from(
                             "unsupported for-of assignment target",

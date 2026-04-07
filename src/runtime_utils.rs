@@ -2509,6 +2509,168 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         )),
     );
     array_proto_map.borrow_mut().properties.insert(
+        PKey::String("toReversed".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new({
+                let array_proto_map = Rc::clone(&array_proto_map);
+                move |vm, args| {
+                    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                    let len_val =
+                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
+                    let len = to_length(vm, &len_val)?;
+                    let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
+                    for k in 0..len {
+                        let from = len - 1 - k;
+                        let key = PKey::String(from.to_string());
+                        if vm.has_property_host(&receiver, &key)? {
+                            out.push(Some(vm.get_property_host(&receiver, &key)?));
+                        } else {
+                            out.push(None);
+                        }
+                    }
+                    let arr_rc = Rc::new(RefCell::new(out));
+                    let props = Rc::new(RefCell::new(ObjectData::new()));
+                    props
+                        .borrow_mut()
+                        .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
+                    props.borrow_mut().properties.insert(
+                        PKey::String("length".to_string()),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(
+                            arr_rc.borrow().len(),
+                        ))),
+                    );
+                    Ok(Value::Array(arr_rc, props))
+                }
+            }),
+            &function_proto_map,
+        )),
+    );
+    array_proto_map.borrow_mut().properties.insert(
+        PKey::String("toSorted".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new({
+                let array_proto_map = Rc::clone(&array_proto_map);
+                move |vm, args| {
+                    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                    let compare_fn = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let has_compare = matches!(
+                        compare_fn,
+                        Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. }
+                    );
+                    let len_val =
+                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
+                    let len = to_length(vm, &len_val)?;
+                    let mut values: Vec<Value> = Vec::new();
+                    let mut undefined_count = 0usize;
+                    let mut hole_count = 0usize;
+                    for i in 0..len {
+                        let key = PKey::String(i.to_string());
+                        if vm.has_property_host(&receiver, &key)? {
+                            let item = vm.get_property_host(&receiver, &key)?;
+                            match item {
+                                Value::Undefined => undefined_count += 1,
+                                v => values.push(v),
+                            }
+                        } else {
+                            hole_count += 1;
+                        }
+                    }
+                    let n = values.len();
+                    for i in 0..n {
+                        for j in (i + 1)..n {
+                            let swap = if has_compare {
+                                let cmp = vm.call_value_with_this(
+                                    &compare_fn,
+                                    &Value::Undefined,
+                                    &[values[i].clone(), values[j].clone()],
+                                )?;
+                                let cmp_num = vm.to_number_value(&cmp)?;
+                                cmp_num.is_finite() && cmp_num > 0.0
+                            } else {
+                                let ai = vm.to_string(&values[i])?;
+                                let aj = vm.to_string(&values[j])?;
+                                ai > aj
+                            };
+                            if swap {
+                                values.swap(i, j);
+                            }
+                        }
+                    }
+                    while undefined_count > 0 {
+                        values.push(Value::Undefined);
+                        undefined_count -= 1;
+                    }
+                    let mut out: Vec<Option<Value>> = values.into_iter().map(Some).collect();
+                    out.extend((0..hole_count).map(|_| None));
+                    let arr_rc = Rc::new(RefCell::new(out));
+                    let props = Rc::new(RefCell::new(ObjectData::new()));
+                    props
+                        .borrow_mut()
+                        .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
+                    props.borrow_mut().properties.insert(
+                        PKey::String("length".to_string()),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(
+                            arr_rc.borrow().len(),
+                        ))),
+                    );
+                    Ok(Value::Array(arr_rc, props))
+                }
+            }),
+            &function_proto_map,
+        )),
+    );
+    array_proto_map.borrow_mut().properties.insert(
+        PKey::String("with".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new({
+                let array_proto_map = Rc::clone(&array_proto_map);
+                move |vm, args| {
+                    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                    let len_val =
+                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
+                    let len = to_length(vm, &len_val)?;
+                    let relative_index =
+                        vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+                    let actual_index = if relative_index < 0.0 {
+                        len as isize + relative_index.trunc() as isize
+                    } else {
+                        relative_index.trunc() as isize
+                    };
+                    if actual_index < 0 || actual_index as usize >= len {
+                        return Err(vm.throw_range_error("Array.prototype.with index out of range"));
+                    }
+                    let replacement = args.get(2).cloned().unwrap_or(Value::Undefined);
+                    let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
+                    for i in 0..len {
+                        if i == actual_index as usize {
+                            out.push(Some(replacement.clone()));
+                            continue;
+                        }
+                        let key = PKey::String(i.to_string());
+                        if vm.has_property_host(&receiver, &key)? {
+                            out.push(Some(vm.get_property_host(&receiver, &key)?));
+                        } else {
+                            out.push(None);
+                        }
+                    }
+                    let arr_rc = Rc::new(RefCell::new(out));
+                    let props = Rc::new(RefCell::new(ObjectData::new()));
+                    props
+                        .borrow_mut()
+                        .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
+                    props.borrow_mut().properties.insert(
+                        PKey::String("length".to_string()),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(
+                            arr_rc.borrow().len(),
+                        ))),
+                    );
+                    Ok(Value::Array(arr_rc, props))
+                }
+            }),
+            &function_proto_map,
+        )),
+    );
+    array_proto_map.borrow_mut().properties.insert(
         PKey::String("push".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|_vm, args| {
@@ -2588,6 +2750,69 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         ))),
                     );
                     Ok(Value::Array(removed_arr, removed_props))
+                }
+            }),
+            &function_proto_map,
+        )),
+    );
+    array_proto_map.borrow_mut().properties.insert(
+        PKey::String("toSpliced".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new({
+                let array_proto_map = Rc::clone(&array_proto_map);
+                move |vm, args| {
+                    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                    let len_val =
+                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
+                    let len = to_length(vm, &len_val)?;
+                    let start_raw =
+                        vm.to_number_value(args.get(1).unwrap_or(&Value::Number(0.0)))?;
+                    let start = if start_raw < 0.0 {
+                        let back = start_raw.abs().trunc().to_usize().unwrap_or(len);
+                        len.saturating_sub(back)
+                    } else {
+                        start_raw.trunc().to_usize().unwrap_or(len).min(len)
+                    };
+                    let delete_count = if let Some(dc) = args.get(2) {
+                        vm.to_number_value(dc)?
+                            .max(0.0)
+                            .trunc()
+                            .to_usize()
+                            .unwrap_or(0)
+                    } else {
+                        len.saturating_sub(start)
+                    };
+                    let actual_delete_count = delete_count.min(len.saturating_sub(start));
+                    let mut out: Vec<Option<Value>> = Vec::new();
+                    for i in 0..start {
+                        let key = PKey::String(i.to_string());
+                        if vm.has_property_host(&receiver, &key)? {
+                            out.push(Some(vm.get_property_host(&receiver, &key)?));
+                        } else {
+                            out.push(None);
+                        }
+                    }
+                    out.extend(args.iter().skip(3).cloned().map(Some));
+                    for i in start.saturating_add(actual_delete_count)..len {
+                        let key = PKey::String(i.to_string());
+                        if vm.has_property_host(&receiver, &key)? {
+                            out.push(Some(vm.get_property_host(&receiver, &key)?));
+                        } else {
+                            out.push(None);
+                        }
+                    }
+                    let arr_rc = Rc::new(RefCell::new(out));
+                    let props = Rc::new(RefCell::new(ObjectData::new()));
+                    props
+                        .borrow_mut()
+                        .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
+                    props.borrow_mut().properties.insert(
+                        PKey::String("length".to_string()),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(
+                            arr_rc.borrow().len(),
+                        ))),
+                    );
+                    Ok(Value::Array(arr_rc, props))
                 }
             }),
             &function_proto_map,
@@ -2688,6 +2913,16 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                     })
                     .unwrap_or(0);
 
+                let kind = iter_obj
+                    .borrow()
+                    .properties
+                    .get(&PKey::String("[[ArrayIteratorKind]]".to_string()))
+                    .and_then(|d| match d {
+                        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or(Value::String("value".to_string()));
+
                 let result = Rc::new(RefCell::new(ObjectData::new()));
                 if index >= len {
                     result.borrow_mut().properties.insert(
@@ -2699,8 +2934,15 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
                         PropertyDescriptor::data(Value::Undefined),
                     );
                 } else {
-                    let value =
+                    let element =
                         vm.get_property_host(&iterated, &PKey::String(index.to_string()))?;
+                    let value = match kind {
+                        Value::String(ref s) if s == "key" => Value::Number(usize_to_f64(index)),
+                        Value::String(ref s) if s == "key+value" => {
+                            array_from_values(vec![Value::Number(usize_to_f64(index)), element])
+                        }
+                        _ => element,
+                    };
                     iter_obj.borrow_mut().properties.insert(
                         PKey::String("[[ArrayIteratorNextIndex]]".to_string()),
                         PropertyDescriptor::data(Value::Number((index + 1) as f64)),
@@ -2719,34 +2961,51 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
             &function_proto_map,
         )),
     );
-    let array_values_builtin = builtin_object(
-        Rc::new({
-            let array_iterator_proto = Rc::clone(&array_iterator_proto);
-            move |_vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
-                let iter = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-                    Rc::clone(&array_iterator_proto),
-                ))));
-                iter.borrow_mut().properties.insert(
-                    PKey::String("[[IteratedObject]]".to_string()),
-                    PropertyDescriptor::data(this),
-                );
-                iter.borrow_mut().properties.insert(
-                    PKey::String("[[ArrayIteratorNextIndex]]".to_string()),
-                    PropertyDescriptor::data(Value::Number(0.0)),
-                );
-                Ok(Value::Object(iter))
-            }
-        }),
-        &function_proto_map,
-    );
+    let make_array_iterator_builtin = |kind: &'static str| {
+        builtin_object(
+            Rc::new({
+                let array_iterator_proto = Rc::clone(&array_iterator_proto);
+                move |_vm, args| {
+                    let this = args.first().cloned().unwrap_or(Value::Undefined);
+                    let iter = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+                        Rc::clone(&array_iterator_proto),
+                    ))));
+                    iter.borrow_mut().properties.insert(
+                        PKey::String("[[IteratedObject]]".to_string()),
+                        PropertyDescriptor::data(this),
+                    );
+                    iter.borrow_mut().properties.insert(
+                        PKey::String("[[ArrayIteratorNextIndex]]".to_string()),
+                        PropertyDescriptor::data(Value::Number(0.0)),
+                    );
+                    iter.borrow_mut().properties.insert(
+                        PKey::String("[[ArrayIteratorKind]]".to_string()),
+                        PropertyDescriptor::data(Value::String(kind.to_string())),
+                    );
+                    Ok(Value::Object(iter))
+                }
+            }),
+            &function_proto_map,
+        )
+    };
+    let array_values_builtin = make_array_iterator_builtin("value");
+    let array_keys_builtin = make_array_iterator_builtin("key");
+    let array_entries_builtin = make_array_iterator_builtin("key+value");
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("values".to_string()),
         PropertyDescriptor::data(array_values_builtin.clone()),
     );
     array_proto_map.borrow_mut().properties.insert(
+        PKey::String("keys".to_string()),
+        PropertyDescriptor::data(array_keys_builtin.clone()),
+    );
+    array_proto_map.borrow_mut().properties.insert(
+        PKey::String("entries".to_string()),
+        PropertyDescriptor::data(array_entries_builtin.clone()),
+    );
+    array_proto_map.borrow_mut().properties.insert(
         PKey::Symbol(SymbolId::well_known_iterator()),
-        PropertyDescriptor::data(array_values_builtin),
+        PropertyDescriptor::data(array_values_builtin.clone()),
     );
     // Array.prototype.filter
     let array_proto_for_filter = Rc::clone(&array_proto_map);
@@ -3693,6 +3952,22 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     typedarray_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(typedarray_ctor_val.clone()),
+    );
+    typedarray_proto_map.borrow_mut().properties.insert(
+        PKey::String("values".to_string()),
+        PropertyDescriptor::data(array_values_builtin.clone()),
+    );
+    typedarray_proto_map.borrow_mut().properties.insert(
+        PKey::String("keys".to_string()),
+        PropertyDescriptor::data(array_keys_builtin),
+    );
+    typedarray_proto_map.borrow_mut().properties.insert(
+        PKey::String("entries".to_string()),
+        PropertyDescriptor::data(array_entries_builtin),
+    );
+    typedarray_proto_map.borrow_mut().properties.insert(
+        PKey::Symbol(SymbolId::well_known_iterator()),
+        PropertyDescriptor::data(array_values_builtin),
     );
     typedarray_proto_map.borrow_mut().properties.insert(
         PKey::String("fill".to_string()),
