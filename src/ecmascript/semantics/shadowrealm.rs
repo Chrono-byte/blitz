@@ -20,7 +20,7 @@ pub(crate) fn build_shadowrealm_constructor(
     ));
     let shadowrealm_proto_val = Value::Object(Rc::clone(&shadowrealm_proto_map));
     let shadowrealm_ctor_fn: BuiltinFn = Rc::new({
-        let shadowrealm_proto_val = shadowrealm_proto_val.clone();
+        let shadowrealm_proto_val = shadowrealm_proto_val;
         move |vm, _args| {
             if vm.current_new_target().is_none() {
                 return Err(vm.throw_type_error("ShadowRealm must be called with new"));
