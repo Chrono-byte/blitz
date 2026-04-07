@@ -9,15 +9,16 @@ use std::rc::Rc;
 use crate::ecmascript::builtins;
 use crate::runtime_utils::{
     array_from_values, builtin_object, char_index_to_byte_index, descriptor_value_from_descriptor,
-    dynamic_import_value, global_parse_float, global_parse_int, host_error_object,
-    is_byte_offset_aligned, non_enum_data, own_enumerable_keys, own_property_descriptor,
-    own_property_keys, property_key_to_value, set_builtin_length, set_builtin_name,
-    static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length, usize_to_f64,
+    global_parse_float, global_parse_int, host_error_object, is_byte_offset_aligned, non_enum_data,
+    own_enumerable_keys, own_property_descriptor, own_property_keys, property_key_to_value,
+    set_builtin_length, set_builtin_name, static_builtin_arg_offset, strict_equal, syntax_error,
+    to_index, to_length, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{Parser, Vm, compiler};
 
 mod atomics;
+mod kernel_helpers;
 mod shadowrealm;
 
 pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
@@ -3077,102 +3078,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PKey::String("Reflect".to_string()),
         PropertyDescriptor::data(Value::Object(reflect_obj)),
     );
-    // Add kernel helpers if missing, prefer host-provided values when present.
-    let mut insert_if_missing = |name: &str, val: Value| {
-        let k = PKey::String(name.to_string());
-        g.properties
-            .entry(k)
-            .or_insert_with(|| PropertyDescriptor::data(val));
-    };
-    insert_if_missing(
-        "__native_in",
-        Value::Builtin(Rc::new(move |vm, args| {
-            let off = static_builtin_arg_offset(vm, args, "");
-            let key = args.get(off).cloned().unwrap_or(Value::Undefined);
-            let target = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
-            if !target.is_object() {
-                return Err(vm.throw_type_error(&format!(
-                    "Cannot use 'in' operator to search for '{:?}' in {}",
-                    key,
-                    target.type_name()
-                )));
-            }
-            let key = vm.to_property_key(&key)?;
-            Ok(Value::Bool(vm.has_property_host(&target, &key)?))
-        })),
-    );
-
-    insert_if_missing(
-        "__native_construct",
-        Value::Builtin(Rc::new(move |vm, args| {
-            let off = static_builtin_arg_offset(vm, args, "");
-            let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-            let ctor_args: Vec<Value> = args.iter().skip(off + 1).cloned().collect();
-            vm.construct_value(&target, &ctor_args)
-        })),
-    );
-
-    insert_if_missing(
-        "__native_dynamic_import",
-        Value::Builtin(Rc::new(move |vm, args| {
-            let off = static_builtin_arg_offset(vm, args, "");
-            let specifier = args.get(off).cloned().unwrap_or(Value::Undefined);
-            let options = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
-            dynamic_import_value(vm, &[specifier, options])
-        })),
-    );
-
-    insert_if_missing(
-        "__native_typeof",
-        Value::Builtin(Rc::new(move |vm, args| {
-            let off = static_builtin_arg_offset(vm, args, "");
-            let value = args.get(off).cloned().unwrap_or(Value::Undefined);
-            let ty = match value {
-                Value::Uninitialized => "undefined",
-                Value::Undefined => "undefined",
-                Value::Null => "object",
-                Value::Bool(_) => "boolean",
-                Value::Number(_) => "number",
-                Value::String(_) => "string",
-                Value::BigInt(_) => "bigint",
-                Value::Symbol(_, _) => "symbol",
-                Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. } => {
-                    "function"
-                }
-                Value::Object(_) | Value::Array(..) | Value::Promise(_) => "object",
-            };
-            Ok(Value::String(ty.to_string()))
-        })),
-    );
-    insert_if_missing(
-        "__native_typeof_name",
-        Value::Builtin(Rc::new(move |vm, args| {
-            let off = static_builtin_arg_offset(vm, args, "");
-            let name = args
-                .get(off)
-                .and_then(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            let value = vm.get_global(&name).unwrap_or(Value::Undefined);
-            let ty = match value {
-                Value::Uninitialized => "undefined",
-                Value::Undefined => "undefined",
-                Value::Null => "object",
-                Value::Bool(_) => "boolean",
-                Value::Number(_) => "number",
-                Value::String(_) => "string",
-                Value::BigInt(_) => "bigint",
-                Value::Symbol(_, _) => "symbol",
-                Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. } => {
-                    "function"
-                }
-                Value::Object(_) | Value::Array(..) | Value::Promise(_) => "object",
-            };
-            Ok(Value::String(ty.to_string()))
-        })),
-    );
+    kernel_helpers::install_kernel_helpers(&mut g, &function_proto_map);
     set_builtin_name(&object_ctor_val, "Object");
     set_builtin_name(&function_ctor_val, "Function");
     set_builtin_name(&array_ctor_val, "Array");
