@@ -24,7 +24,7 @@ use std::rc::Rc;
 const LINE: u32 = 1;
 
 impl super::Compiler {
-    fn alloc_temp_local(&mut self, prefix: &str) -> usize {
+    pub(super) fn alloc_temp_local(&mut self, prefix: &str) -> usize {
         self.add_local_with_mirror(format!("__{}_{}", prefix, self.locals.len()), None, false)
     }
 

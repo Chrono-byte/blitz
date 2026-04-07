@@ -668,53 +668,19 @@ impl Compiler {
                         self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
                     }
                     oast::ForStatementLeft::AssignmentTargetIdentifier(id) => {
-                        let name = id.name.as_str();
-                        if let Some(slot) = self.resolve_local(name) {
-                            self.emit(Op::SetLocal, LINE);
-                            self.emit_byte(slot as u8, LINE);
-                            if self.local_mirrors_global(slot) {
-                                self.emit(Op::GetLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
-                                self.emit_set_global_name(name);
-                            }
-                        } else if let Some(upvalue) = self.resolve_upvalue(name) {
-                            self.emit(Op::SetUpvalue, LINE);
-                            self.emit_byte(upvalue, LINE);
-                        } else {
-                            self.emit_set_global_name(name);
-                        }
+                        self.compile_assignment_identifier_reference(id)?;
                     }
                     oast::ForStatementLeft::StaticMemberExpression(m) => {
-                        let temp_slot = self.add_local_with_mirror(
-                            format!("__forof_value_{}", self.locals.len()),
-                            None,
-                            false,
-                        );
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(temp_slot as u8, LINE);
-                        self.compile_expr_oast(&m.object)?;
-                        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                        self.emit(Op::GetLocal, LINE);
-                        self.emit_byte(temp_slot as u8, LINE);
-                        self.emit(Op::SetPropertyIC, LINE);
-                        let slot = self.alloc_ic_slot()?;
-                        self.emit_byte(slot, LINE);
-                        self.emit(Op::Pop, LINE);
+                        self.compile_static_member_assignment_target(m)?;
                     }
                     oast::ForStatementLeft::ComputedMemberExpression(m) => {
-                        let temp_slot = self.add_local_with_mirror(
-                            format!("__forof_value_{}", self.locals.len()),
-                            None,
-                            false,
-                        );
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(temp_slot as u8, LINE);
-                        self.compile_expr_oast(&m.object)?;
-                        self.compile_expr_oast(&m.expression)?;
-                        self.emit(Op::GetLocal, LINE);
-                        self.emit_byte(temp_slot as u8, LINE);
-                        self.emit(Op::SetProperty, LINE);
-                        self.emit(Op::Pop, LINE);
+                        self.compile_computed_member_assignment_target(m)?;
+                    }
+                    oast::ForStatementLeft::ArrayAssignmentTarget(a) => {
+                        self.compile_array_assignment_target(a)?;
+                    }
+                    oast::ForStatementLeft::ObjectAssignmentTarget(o) => {
+                        self.compile_object_assignment_target(o)?;
                     }
                     _ => {
                         return Err(crate::errors::CompilerError::from(

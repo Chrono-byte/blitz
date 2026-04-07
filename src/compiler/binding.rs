@@ -127,6 +127,234 @@ impl super::Compiler {
     ///
     /// For destructuring patterns, this emits code to extract values from the
     /// stack and assign them to their respective bindings.
+    pub(super) fn store_assignment_identifier(
+        &mut self,
+        name: &str,
+    ) -> Result<(), crate::errors::CompilerError> {
+        if self
+            .current_module
+            .as_ref()
+            .is_some_and(|c| c.imports.contains_key(name))
+        {
+            return Err(crate::errors::CompilerError::from(
+                "cannot assign to imported binding",
+            ));
+        }
+        if let Some(slot) = self.resolve_local(name) {
+            self.emit(Op::SetLocal, LINE);
+            self.emit_byte(slot as u8, LINE);
+            if self.local_mirrors_global(slot) {
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(slot as u8, LINE);
+                self.emit_set_global_name(name);
+            }
+            let is_exported = self
+                .current_module
+                .as_ref()
+                .is_some_and(|c| c.exports.contains(name));
+            if is_exported {
+                let module_index = self
+                    .current_module
+                    .as_ref()
+                    .map(|c| c.module_index)
+                    .expect("module_index expected");
+                let cname_idx = self.chunk.add_constant(Value::String(name.to_string()));
+                self.emit(Op::SetModuleExport, LINE);
+                self.emit_byte(module_index as u8, LINE);
+                self.emit_byte(cname_idx as u8, LINE);
+            }
+        } else if let Some(upvalue) = self.resolve_upvalue(name) {
+            self.emit(Op::SetUpvalue, LINE);
+            self.emit_byte(upvalue, LINE);
+        } else {
+            self.emit_set_global_name(name);
+        }
+        Ok(())
+    }
+
+    pub(super) fn compile_assignment_identifier_reference(
+        &mut self,
+        id: &oast::IdentifierReference<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        self.store_assignment_identifier(id.name.as_str())
+    }
+
+    pub(super) fn compile_static_member_assignment_target(
+        &mut self,
+        m: &oast::StaticMemberExpression<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        let value_slot = self.alloc_temp_local("assign_member_value");
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(value_slot as u8, LINE);
+        self.compile_expr_oast(&m.object)?;
+        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+        self.emit(Op::GetLocal, LINE);
+        self.emit_byte(value_slot as u8, LINE);
+        self.emit(Op::SetPropertyIC, LINE);
+        let slot = self.alloc_ic_slot()?;
+        self.emit_byte(slot, LINE);
+        self.emit(Op::Pop, LINE);
+        Ok(())
+    }
+
+    pub(super) fn compile_computed_member_assignment_target(
+        &mut self,
+        m: &oast::ComputedMemberExpression<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        let value_slot = self.alloc_temp_local("assign_member_value");
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(value_slot as u8, LINE);
+        self.compile_expr_oast(&m.object)?;
+        self.compile_expr_oast(&m.expression)?;
+        self.emit(Op::GetLocal, LINE);
+        self.emit_byte(value_slot as u8, LINE);
+        self.emit(Op::SetProperty, LINE);
+        self.emit(Op::Pop, LINE);
+        Ok(())
+    }
+
+    pub(super) fn compile_assignment_target_maybe_default_oast(
+        &mut self,
+        target: &oast::AssignmentTargetMaybeDefault<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        match target {
+            oast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(a) => {
+                let temp_slot = self.alloc_temp_local("assign_default");
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::Undefined, LINE);
+                self.emit(Op::StrictEq, LINE);
+                self.emit(Op::JumpIfFalse, LINE);
+                let skip_default = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                self.compile_expr_oast(&a.init)?;
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
+                self.patch_jump(skip_default);
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
+                self.compile_assignment_target_oast(&a.binding)?;
+                Ok(())
+            }
+            oast::AssignmentTargetMaybeDefault::AssignmentTargetIdentifier(id) => {
+                self.compile_assignment_identifier_reference(id)
+            }
+            oast::AssignmentTargetMaybeDefault::StaticMemberExpression(m) => {
+                self.compile_static_member_assignment_target(m)
+            }
+            oast::AssignmentTargetMaybeDefault::ComputedMemberExpression(m) => {
+                self.compile_computed_member_assignment_target(m)
+            }
+            oast::AssignmentTargetMaybeDefault::ArrayAssignmentTarget(a) => {
+                self.compile_array_assignment_target(a)
+            }
+            oast::AssignmentTargetMaybeDefault::ObjectAssignmentTarget(o) => {
+                self.compile_object_assignment_target(o)
+            }
+            _ => Err(crate::errors::CompilerError::from(
+                "unsupported assignment target",
+            )),
+        }
+    }
+
+    pub(super) fn compile_array_assignment_target(
+        &mut self,
+        a: &oast::ArrayAssignmentTarget<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        for (idx, el) in a.elements.iter().enumerate() {
+            let Some(el) = el else { continue };
+            self.emit(Op::Dup, LINE);
+            self.emit_constant(Value::String(idx.to_string()), LINE);
+            self.emit(Op::GetProperty, LINE);
+            self.compile_assignment_target_maybe_default_oast(el)?;
+        }
+        if let Some(rest) = &a.rest {
+            self.emit(Op::Dup, LINE);
+            self.compile_assignment_target_oast(&rest.target)?;
+        }
+        self.emit(Op::Pop, LINE);
+        Ok(())
+    }
+
+    pub(super) fn compile_object_assignment_target(
+        &mut self,
+        o: &oast::ObjectAssignmentTarget<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        for prop in &o.properties {
+            match prop {
+                oast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(p) => {
+                    self.emit(Op::Dup, LINE);
+                    self.emit_constant(Value::String(p.binding.name.to_string()), LINE);
+                    self.emit(Op::GetProperty, LINE);
+                    if let Some(init) = &p.init {
+                        let temp_slot = self.alloc_temp_local("assign_prop_default");
+                        self.emit(Op::SetLocal, LINE);
+                        self.emit_byte(temp_slot as u8, LINE);
+                        self.emit(Op::GetLocal, LINE);
+                        self.emit_byte(temp_slot as u8, LINE);
+                        self.emit(Op::Undefined, LINE);
+                        self.emit(Op::StrictEq, LINE);
+                        self.emit(Op::JumpIfFalse, LINE);
+                        let skip_default = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.compile_expr_oast(init)?;
+                        self.emit(Op::SetLocal, LINE);
+                        self.emit_byte(temp_slot as u8, LINE);
+                        self.patch_jump(skip_default);
+                        self.emit(Op::GetLocal, LINE);
+                        self.emit_byte(temp_slot as u8, LINE);
+                    }
+                    self.store_assignment_identifier(p.binding.name.as_str())?;
+                }
+                oast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
+                    let key = Self::binding_property_key_to_value(&p.name).ok_or_else(|| {
+                        crate::errors::CompilerError::from("unsupported object assignment key")
+                    })?;
+                    self.emit(Op::Dup, LINE);
+                    self.emit_constant(key, LINE);
+                    self.emit(Op::GetProperty, LINE);
+                    self.compile_assignment_target_maybe_default_oast(&p.binding)?;
+                }
+            }
+        }
+        if let Some(rest) = &o.rest {
+            self.emit(Op::Dup, LINE);
+            self.compile_assignment_target_oast(&rest.target)?;
+        }
+        self.emit(Op::Pop, LINE);
+        Ok(())
+    }
+
+    pub(super) fn compile_assignment_target_oast(
+        &mut self,
+        target: &oast::AssignmentTarget<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        match target {
+            oast::AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                self.compile_assignment_identifier_reference(id)
+            }
+            oast::AssignmentTarget::StaticMemberExpression(m) => {
+                self.compile_static_member_assignment_target(m)
+            }
+            oast::AssignmentTarget::ComputedMemberExpression(m) => {
+                self.compile_computed_member_assignment_target(m)
+            }
+            oast::AssignmentTarget::ArrayAssignmentTarget(a) => {
+                self.compile_array_assignment_target(a)
+            }
+            oast::AssignmentTarget::ObjectAssignmentTarget(o) => {
+                self.compile_object_assignment_target(o)
+            }
+            _ => Err(crate::errors::CompilerError::from(
+                "unsupported assignment target",
+            )),
+        }
+    }
+
     pub(super) fn compile_binding_pattern_assignment_oast(
         &mut self,
         pattern: &oast::BindingPattern<'_>,
