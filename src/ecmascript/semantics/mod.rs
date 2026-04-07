@@ -1,29 +1,24 @@
 //! Language-semantic bootstrapping routines extracted from `runtime_utils`.
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
-use std::sync::Mutex;
-
 use num_bigint::BigInt as BigIntValue;
 use num_traits::ToPrimitive;
 use regex::RegexBuilder;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::ecmascript::builtins;
 use crate::runtime_utils::{
-    ShadowRealmRecord, array_from_values, atomics_binary_update, atomics_coerce_view_value,
-    atomics_compare_exchange, atomics_exchange_current, atomics_load_current,
-    atomics_make_wait_result, atomics_make_waiter_record, atomics_normalized_current,
-    atomics_register_waiter, atomics_store_current, atomics_view_index, atomics_view_info,
-    atomics_wait_kind, atomics_waiters_array, atomics_wake_waiters, builtin_object,
-    char_index_to_byte_index, descriptor_value_from_descriptor, dynamic_import_value,
-    global_parse_float, global_parse_int, host_error_object, is_byte_offset_aligned, non_enum_data,
-    own_enumerable_keys, own_property_descriptor, own_property_keys, property_key_to_value,
-    register_shadow_realm, resolve_shadowrealm_base_dir, set_builtin_length, set_builtin_name,
-    shadowrealm_evaluate, shadowrealm_import_value, static_builtin_arg_offset, strict_equal,
-    syntax_error, to_index, to_length, usize_to_f64,
+    array_from_values, builtin_object, char_index_to_byte_index, descriptor_value_from_descriptor,
+    dynamic_import_value, global_parse_float, global_parse_int, host_error_object,
+    is_byte_offset_aligned, non_enum_data, own_enumerable_keys, own_property_descriptor,
+    own_property_keys, property_key_to_value, set_builtin_length, set_builtin_name,
+    static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{Parser, Vm, compiler};
+
+mod atomics;
+mod shadowrealm;
 
 pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
     use PropertyKey as PKey;
@@ -3047,82 +3042,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         )),
     );
 
-    let shadowrealm_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
-        ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
-    ));
-    let shadowrealm_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
-        ObjectData::with_prototype(Value::Object(Rc::clone(&function_proto_map))),
-    ));
-    let shadowrealm_proto_val = Value::Object(Rc::clone(&shadowrealm_proto_map));
-    let shadowrealm_ctor_fn: BuiltinFn = Rc::new({
-        let shadowrealm_proto_val = shadowrealm_proto_val;
-        move |vm, _args| {
-            if vm.current_new_target().is_none() {
-                return Err(vm.throw_type_error("ShadowRealm must be called with new"));
-            }
-            let obj = ObjectData::with_prototype(shadowrealm_proto_val.clone());
-            let obj_rc = Rc::new(RefCell::new(obj));
-            let record = Rc::new(ShadowRealmRecord::new(resolve_shadowrealm_base_dir(vm)));
-            register_shadow_realm(&obj_rc, record);
-            Ok(Value::Object(obj_rc))
-        }
-    });
     let shadowrealm_ctor_val =
-        Value::BuiltinObject(shadowrealm_ctor_fn, Rc::clone(&shadowrealm_ctor_map));
-    shadowrealm_ctor_map.borrow_mut().properties.insert(
-        PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&shadowrealm_proto_map))),
-    );
-    shadowrealm_proto_map.borrow_mut().properties.insert(
-        PKey::String("constructor".to_string()),
-        non_enum_data(shadowrealm_ctor_val.clone()),
-    );
-    set_builtin_length(&shadowrealm_ctor_val, 0.0);
-    shadowrealm_ctor_map.borrow_mut().properties.insert(
-        PKey::String("name".to_string()),
-        PropertyDescriptor::data(Value::String("ShadowRealm".to_string())),
-    );
-
-    let shadowrealm_evaluate_val =
-        builtin_object(Rc::new(shadowrealm_evaluate), &function_proto_map);
-    {
-        set_builtin_length(&shadowrealm_evaluate_val, 1.0);
-        if let Value::BuiltinObject(_, props) = &shadowrealm_evaluate_val {
-            props.borrow_mut().properties.insert(
-                PKey::String("name".to_string()),
-                PropertyDescriptor::data(Value::String("evaluate".to_string())),
-            );
-        }
-    }
-    shadowrealm_proto_map.borrow_mut().properties.insert(
-        PKey::String("evaluate".to_string()),
-        non_enum_data(shadowrealm_evaluate_val),
-    );
-
-    let shadowrealm_import_val =
-        builtin_object(Rc::new(shadowrealm_import_value), &function_proto_map);
-    {
-        set_builtin_length(&shadowrealm_import_val, 2.0);
-        if let Value::BuiltinObject(_, props) = &shadowrealm_import_val {
-            props.borrow_mut().properties.insert(
-                PKey::String("name".to_string()),
-                PropertyDescriptor::data(Value::String("importValue".to_string())),
-            );
-        }
-    }
-    shadowrealm_proto_map.borrow_mut().properties.insert(
-        PKey::String("importValue".to_string()),
-        non_enum_data(shadowrealm_import_val),
-    );
-    shadowrealm_proto_map.borrow_mut().properties.insert(
-        PropertyKey::Symbol(SymbolId::well_known_to_string_tag()),
-        PropertyDescriptor::Data {
-            value: Value::String("ShadowRealm".to_string()),
-            writable: false,
-            enumerable: false,
-            configurable: true,
-        },
-    );
+        shadowrealm::build_shadowrealm_constructor(&object_proto_map, &function_proto_map);
 
     let mut g = globals.borrow_mut();
     builtins::text_and_symbols::install_string_boolean_symbol_builtins(
@@ -3740,235 +3661,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             );
         }
 
-        let atomics_props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
-            ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
-        ));
-        let insert_atomics_method = |name: &str, length: f64, f: BuiltinFn| {
-            let func_val = builtin_object(f, &function_proto_map);
-            set_builtin_name(&func_val, name);
-            set_builtin_length(&func_val, length);
-            atomics_props.borrow_mut().properties.insert(
-                PKey::String(name.to_string()),
-                PropertyDescriptor::data(func_val),
-            );
-        };
-        insert_atomics_method(
-            "load",
-            2.0,
-            Rc::new(|vm, args| {
-                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let info = atomics_view_info(vm, &receiver)?;
-                let index =
-                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
-                atomics_load_current(vm, &info, index)
-            }),
-        );
-        insert_atomics_method(
-            "store",
-            3.0,
-            Rc::new(|vm, args| {
-                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let info = atomics_view_info(vm, &receiver)?;
-                let index =
-                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
-                let value = args.get(2).cloned().unwrap_or(Value::Undefined);
-                atomics_store_current(vm, &info, index, &value)
-            }),
-        );
-        for (name, op) in [
-            ("add", "add"),
-            ("sub", "sub"),
-            ("and", "and"),
-            ("or", "or"),
-            ("xor", "xor"),
-        ] {
-            insert_atomics_method(
-                name,
-                3.0,
-                Rc::new(move |vm, args| {
-                    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                    let info = atomics_view_info(vm, &receiver)?;
-                    let index =
-                        atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
-                    let value = args.get(2).cloned().unwrap_or(Value::Undefined);
-                    atomics_binary_update(vm, &info, index, &value, op)
-                }),
-            );
-        }
-        insert_atomics_method(
-            "exchange",
-            3.0,
-            Rc::new(|vm, args| {
-                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let info = atomics_view_info(vm, &receiver)?;
-                let index =
-                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
-                let value = args.get(2).cloned().unwrap_or(Value::Undefined);
-                atomics_exchange_current(vm, &info, index, &value)
-            }),
-        );
-        insert_atomics_method(
-            "compareExchange",
-            4.0,
-            Rc::new(|vm, args| {
-                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let info = atomics_view_info(vm, &receiver)?;
-                let index =
-                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
-                let expected = args.get(2).cloned().unwrap_or(Value::Undefined);
-                let replacement = args.get(3).cloned().unwrap_or(Value::Undefined);
-                atomics_compare_exchange(vm, &info, index, &expected, &replacement)
-            }),
-        );
-        insert_atomics_method(
-            "isLockFree",
-            1.0,
-            Rc::new(|vm, args| {
-                let size = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let n = match vm.to_number_value(&size) {
-                    Ok(n) if n.is_finite() && n >= 0.0 => n.trunc().to_usize().unwrap_or(0),
-                    _ => 0,
-                };
-                Ok(Value::Bool(matches!(n, 1 | 2 | 4 | 8)))
-            }),
-        );
-        insert_atomics_method(
-            "notify",
-            3.0,
-            Rc::new(|vm, args| {
-                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let info = atomics_view_info(vm, &receiver)?;
-                if !info.is_shared {
-                    return Err(vm.throw_type_error(
-                        "Atomics.notify requires a SharedArrayBuffer-backed typed array",
-                    ));
-                }
-                if !atomics_wait_kind(&info.kind_name) {
-                    return Err(vm.throw_type_error(
-                        "Atomics.notify requires an Int32Array or BigInt64Array",
-                    ));
-                }
-                let index =
-                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
-                let count = match args.get(2) {
-                    None | Some(Value::Undefined) => usize::MAX,
-                    Some(value) => {
-                        let n = vm.to_number_value(value)?;
-                        if !n.is_finite() {
-                            usize::MAX
-                        } else if n <= 0.0 {
-                            0
-                        } else {
-                            n.trunc().to_usize().unwrap_or(usize::MAX)
-                        }
-                    }
-                };
-                let woke = atomics_wake_waiters(vm, &info, index, count)?;
-                Ok(Value::Number(usize_to_f64(woke)))
-            }),
-        );
-        insert_atomics_method(
-            "wait",
-            4.0,
-            Rc::new(|vm, args| {
-                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let info = atomics_view_info(vm, &receiver)?;
-                if !info.is_shared {
-                    return Err(vm.throw_type_error(
-                        "Atomics.wait requires a SharedArrayBuffer-backed typed array",
-                    ));
-                }
-                if !atomics_wait_kind(&info.kind_name) {
-                    return Err(
-                        vm.throw_type_error("Atomics.wait requires an Int32Array or BigInt64Array")
-                    );
-                }
-                let index =
-                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
-                let expected = args.get(2).cloned().unwrap_or(Value::Undefined);
-                let timeout = match args.get(3) {
-                    None | Some(Value::Undefined) => f64::INFINITY,
-                    Some(value) => {
-                        let n = vm.to_number_value(value)?;
-                        if n.is_nan() || n < 0.0 { 0.0 } else { n }
-                    }
-                };
-                let current = atomics_normalized_current(vm, &info, index)?;
-                let expected = atomics_coerce_view_value(vm, &info, &expected)?;
-                if current != expected {
-                    return Ok(Value::String("not-equal".to_string()));
-                }
-                if timeout == 0.0 {
-                    return Ok(Value::String("timed-out".to_string()));
-                }
-                atomics_register_waiter(vm, &info, index, None)?;
-                Ok(Value::String("ok".to_string()))
-            }),
-        );
-        insert_atomics_method(
-            "waitAsync",
-            4.0,
-            Rc::new(|vm, args| {
-                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let info = atomics_view_info(vm, &receiver)?;
-                if !info.is_shared {
-                    return Err(vm.throw_type_error(
-                        "Atomics.waitAsync requires a SharedArrayBuffer-backed typed array",
-                    ));
-                }
-                if !atomics_wait_kind(&info.kind_name) {
-                    return Err(vm.throw_type_error(
-                        "Atomics.waitAsync requires an Int32Array or BigInt64Array",
-                    ));
-                }
-                let index =
-                    atomics_view_index(vm, &info, args.get(1).unwrap_or(&Value::Undefined))?;
-                let expected = args.get(2).cloned().unwrap_or(Value::Undefined);
-                let timeout = match args.get(3) {
-                    None | Some(Value::Undefined) => f64::INFINITY,
-                    Some(value) => {
-                        let n = vm.to_number_value(value)?;
-                        if n.is_nan() || n < 0.0 { 0.0 } else { n }
-                    }
-                };
-                let current = atomics_normalized_current(vm, &info, index)?;
-                let expected = atomics_coerce_view_value(vm, &info, &expected)?;
-                if current != expected {
-                    return Ok(atomics_make_wait_result(
-                        false,
-                        Value::String("not-equal".to_string()),
-                    ));
-                }
-                if timeout == 0.0 {
-                    return Ok(atomics_make_wait_result(
-                        false,
-                        Value::String("timed-out".to_string()),
-                    ));
-                }
-
-                let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
-                let resolve_slot_capture = Rc::clone(&resolve_slot);
-                let promise_ctor = vm
-                    .get_global("Promise")
-                    .ok_or_else(|| vm.throw_type_error("Promise constructor missing"))?;
-                let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
-                    let off = if executor_args.len() > 2 { 1 } else { 0 };
-                    *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();
-                    Ok(Value::Undefined)
-                }));
-                let promise = vm.construct_value(&promise_ctor, &[executor])?;
-                let resolve_fn = resolve_slot
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .ok_or_else(|| vm.throw_type_error("Atomics.waitAsync resolve missing"))?;
-                atomics_waiters_array(&info.buffer)
-                    .borrow_mut()
-                    .push(Some(atomics_make_waiter_record(index, Some(resolve_fn))));
-                Ok(atomics_make_wait_result(true, promise))
-            }),
-        );
-        let atomics_obj = Value::Object(atomics_props);
+        let atomics_obj = atomics::build_atomics_object(&object_proto_map, &function_proto_map);
 
         for &name in &["Temporal", "TypedArrayConstructors", "NativeErrors"] {
             insert_stub_object(&mut g, name, &object_proto_map);
