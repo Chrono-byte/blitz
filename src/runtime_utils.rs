@@ -58,7 +58,6 @@ use std::env;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use crate::{RuntimeError, bytecode};
 use crate::compiler;
 use crate::compiler::ModuleContext;
 use crate::mutex_compat::MutexBorrowExt;
@@ -67,6 +66,7 @@ use crate::realm::Intrinsics;
 use crate::value::SymbolId;
 use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
+use crate::{RuntimeError, bytecode};
 use num_bigint::{BigInt as BigIntValue, Sign};
 use num_traits::{FromPrimitive, ToPrimitive};
 /// The maximum array length as a floating-point value.
@@ -228,10 +228,7 @@ fn parse_float_string(text: &str) -> f64 {
     }
 }
 
-pub(crate) fn global_parse_int(
-    vm: &mut Vm,
-    args: &[Value],
-) -> Result<Value, RuntimeError> {
+pub(crate) fn global_parse_int(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let value = args.first().cloned().unwrap_or(Value::Undefined);
     let s = vm.to_string(&value)?;
     let radix_arg = if let Some(radix_value) = args.get(1) {
@@ -243,10 +240,7 @@ pub(crate) fn global_parse_int(
     Ok(Value::Number(parsed))
 }
 
-pub(crate) fn global_parse_float(
-    vm: &mut Vm,
-    args: &[Value],
-) -> Result<Value, RuntimeError> {
+pub(crate) fn global_parse_float(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let value = args.first().cloned().unwrap_or(Value::Undefined);
     let s = vm.to_string(&value)?;
     let parsed = parse_float_string(&s);
@@ -309,11 +303,7 @@ fn uri_error(vm: &mut Vm) -> RuntimeError {
     vm.throw_exception(err)
 }
 
-fn percent_decode(
-    vm: &mut Vm,
-    text: &str,
-    component: bool,
-) -> Result<String, RuntimeError> {
+fn percent_decode(vm: &mut Vm, text: &str, component: bool) -> Result<String, RuntimeError> {
     let input = text.as_bytes();
     let mut bytes = Vec::with_capacity(input.len());
     let mut i = 0usize;
@@ -873,10 +863,7 @@ pub(crate) fn reject_pending_promise(
     }
 }
 
-pub(crate) fn shadowrealm_evaluate(
-    vm: &mut Vm,
-    args: &[Value],
-) -> Result<Value, RuntimeError> {
+pub(crate) fn shadowrealm_evaluate(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let target = args.first().cloned().unwrap_or(Value::Undefined);
     let record = require_shadow_realm_record(vm, &target)?;
     let source = match args.get(1) {
@@ -945,10 +932,7 @@ pub(crate) fn shadowrealm_evaluate(
         .map_err(|s| vm.throw_type_error(&s))
 }
 
-pub(crate) fn shadowrealm_import_value(
-    vm: &mut Vm,
-    args: &[Value],
-) -> Result<Value, RuntimeError> {
+pub(crate) fn shadowrealm_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let target = args.first().cloned().unwrap_or(Value::Undefined);
     let record = require_shadow_realm_record(vm, &target)?;
     let specifier = args.first().cloned().unwrap_or(Value::Undefined);
@@ -1107,10 +1091,7 @@ pub(crate) fn shadowrealm_import_value(
     Ok(promise_value)
 }
 
-pub(crate) fn dynamic_import_value(
-    vm: &mut Vm,
-    args: &[Value],
-) -> Result<Value, RuntimeError> {
+pub(crate) fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let specifier = args.first().cloned().unwrap_or(Value::Undefined);
     let options = args.get(1).cloned().unwrap_or(Value::Undefined);
 
@@ -1955,10 +1936,7 @@ pub(crate) fn non_enum_data(value: Value) -> PropertyDescriptor {
 }
 
 /// 22.1.3.34.1 ThisStringValue ( value )
-pub(crate) fn this_string_value(
-    vm: &mut Vm,
-    value: &Value,
-) -> Result<String, RuntimeError> {
+pub(crate) fn this_string_value(vm: &mut Vm, value: &Value) -> Result<String, RuntimeError> {
     match value {
         Value::String(s) => Ok(s.clone()),
         Value::Object(obj) => {
@@ -1977,10 +1955,7 @@ pub(crate) fn this_string_value(
 }
 
 /// 20.3.3.3.1 ThisBooleanValue ( value )
-pub(crate) fn this_boolean_value(
-    vm: &mut Vm,
-    value: &Value,
-) -> Result<bool, RuntimeError> {
+pub(crate) fn this_boolean_value(vm: &mut Vm, value: &Value) -> Result<bool, RuntimeError> {
     match value {
         Value::Bool(b) => Ok(*b),
         Value::Object(obj) => {
@@ -1998,10 +1973,7 @@ pub(crate) fn this_boolean_value(
     }
 }
 
-pub(crate) fn require_object_coercible(
-    vm: &mut Vm,
-    value: &Value,
-) -> Result<(), RuntimeError> {
+pub(crate) fn require_object_coercible(vm: &mut Vm, value: &Value) -> Result<(), RuntimeError> {
     match value {
         Value::Undefined | Value::Null => {
             Err(vm.throw_type_error("Cannot convert undefined or null to object"))

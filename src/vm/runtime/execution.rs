@@ -1,5 +1,6 @@
 use crate::bytecode::{Chunk, FunctionProto, OP_COUNT, Op};
 use crate::environment::EnvironmentRecord;
+use crate::errors::RuntimeError;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
@@ -152,11 +153,7 @@ impl Vm {
         self.this_value.clone()
     }
 
-    fn get_super_property(
-        &mut self,
-        this: &Value,
-        key: &Value,
-    ) -> Result<(), crate::errors::RuntimeError> {
+    fn get_super_property(&mut self, this: &Value, key: &Value) -> Result<(), RuntimeError> {
         let super_obj = self.get_prototype(this);
         match super_obj {
             Value::Object(obj) => {
@@ -179,7 +176,7 @@ impl Vm {
         this: &Value,
         key: &Value,
         value: Value,
-    ) -> Result<(), crate::errors::RuntimeError> {
+    ) -> Result<(), RuntimeError> {
         let super_obj = self.get_prototype(this);
         match super_obj {
             Value::Object(obj) => {
@@ -582,10 +579,7 @@ impl Vm {
 
     /// Return enumerable string keys for `for-in`, walking the prototype
     /// chain and skipping duplicates.
-    pub fn for_in_keys_of_value(
-        &self,
-        v: &Value,
-    ) -> Result<Vec<String>, crate::errors::RuntimeError> {
+    pub fn for_in_keys_of_value(&self, v: &Value) -> Result<Vec<String>, RuntimeError> {
         let mut keys = Vec::new();
         let mut seen = HashSet::new();
         let mut current = v.clone();
@@ -593,7 +587,7 @@ impl Vm {
 
         while !matches!(current, Value::Null) {
             if depth > MAX_PROTOTYPE_DEPTH {
-                return Err(crate::errors::RuntimeError::from(
+                return Err(RuntimeError::from(
                     "Prototype chain cycle detected or too deep",
                 ));
             }
@@ -665,7 +659,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the chunk execution fails.
-    pub fn run(&mut self, chunk: Chunk) -> Result<Value, crate::errors::RuntimeError> {
+    pub fn run(&mut self, chunk: Chunk) -> Result<Value, RuntimeError> {
         let chunk_rc = Rc::new(chunk);
         self.root_chunk = Some(Rc::clone(&chunk_rc));
         self.chunk = chunk_rc;
@@ -806,7 +800,7 @@ impl Vm {
         closure_env: &Rc<Mutex<Vec<ValueSlot>>>,
         call_args: Vec<Value>,
         this_value: Value,
-    ) -> Result<Value, crate::errors::RuntimeError> {
+    ) -> Result<Value, RuntimeError> {
         let mut child = Vm::new(Rc::clone(&self.globals));
         child.push_call_frame(proto, closure_env, call_args, this_value)?;
         let runner = Rc::new(RefCell::new(GeneratorRunner {
@@ -821,9 +815,9 @@ impl Vm {
         gen_obj.borrow_mut().properties.insert(
             PropertyKey::String("next".to_string()),
             PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                let mut runner = next_runner.try_borrow_mut().map_err(|_| {
-                    crate::errors::RuntimeError::from("TypeError: generator is already executing")
-                })?;
+                let mut runner = next_runner
+                    .try_borrow_mut()
+                    .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
                 let temp_root_base = runner.vm.gc_temp_roots.len();
                 if let Some(this_value) = args.first().cloned() {
                     runner.vm.gc_temp_roots.push(this_value);
@@ -866,15 +860,15 @@ impl Vm {
         gen_obj.borrow_mut().properties.insert(
             PropertyKey::String("throw".to_string()),
             PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                let mut runner = throw_runner.try_borrow_mut().map_err(|_| {
-                    crate::errors::RuntimeError::from("TypeError: generator is already executing")
-                })?;
+                let mut runner = throw_runner
+                    .try_borrow_mut()
+                    .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
                 let temp_root_base = runner.vm.gc_temp_roots.len();
                 if let Some(this_value) = args.first().cloned() {
                     runner.vm.gc_temp_roots.push(this_value);
                 }
                 let outcome = if runner.completed {
-                    Err(crate::errors::RuntimeError::from(format!(
+                    Err(RuntimeError::from(format!(
                         "Uncaught: {}",
                         args.first().cloned().unwrap_or(Value::Undefined)
                     )))
@@ -914,9 +908,9 @@ impl Vm {
         gen_obj.borrow_mut().properties.insert(
             PropertyKey::String("return".to_string()),
             PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                let mut runner = return_runner.try_borrow_mut().map_err(|_| {
-                    crate::errors::RuntimeError::from("TypeError: generator is already executing")
-                })?;
+                let mut runner = return_runner
+                    .try_borrow_mut()
+                    .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
                 let temp_root_base = runner.vm.gc_temp_roots.len();
                 if let Some(this_value) = args.first().cloned() {
                     runner.vm.gc_temp_roots.push(this_value);
@@ -936,7 +930,7 @@ impl Vm {
     fn execute_call_with_nargs(
         &mut self,
         nargs_override: Option<usize>,
-    ) -> Result<(), crate::errors::RuntimeError> {
+    ) -> Result<(), RuntimeError> {
         let nargs = nargs_override.unwrap_or(self.read_byte()? as usize);
         let mut args: Vec<Value> = Vec::with_capacity(nargs);
         for _ in 0..nargs {
@@ -1022,11 +1016,11 @@ impl Vm {
         Ok(())
     }
 
-    fn execute_call(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn execute_call(&mut self) -> Result<(), RuntimeError> {
         self.execute_call_with_nargs(None)
     }
 
-    fn execute_construct(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn execute_construct(&mut self) -> Result<(), RuntimeError> {
         let nargs = self.read_byte()? as usize;
         let mut args: Vec<Value> = Vec::with_capacity(nargs);
         for _ in 0..nargs {
@@ -1039,7 +1033,7 @@ impl Vm {
         Ok(())
     }
 
-    fn execute_spread(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn execute_spread(&mut self) -> Result<(), RuntimeError> {
         self.read_byte()?; // nargs, consumed by VM dispatcher
         let mask = self.pop()?;
         let values = self.pop()?;
@@ -1049,7 +1043,7 @@ impl Vm {
         Ok(())
     }
 
-    fn execute_array_from_spread(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn execute_array_from_spread(&mut self) -> Result<(), RuntimeError> {
         self.read_byte()?; // nargs, consumed by VM dispatcher
         let mask = self.pop()?;
         let values = self.pop()?;
@@ -1062,7 +1056,7 @@ impl Vm {
         &mut self,
         values: Value,
         mask: Value,
-    ) -> Result<Vec<Value>, crate::errors::RuntimeError> {
+    ) -> Result<Vec<Value>, RuntimeError> {
         let values_vec = match values {
             Value::Array(arr, _) => arr.borrow().clone(),
             _ => Vec::new(),
@@ -1145,11 +1139,7 @@ impl Vm {
         Ok(flat)
     }
 
-    fn call_with_flat_args(
-        &mut self,
-        callee: Value,
-        flat: Vec<Value>,
-    ) -> Result<(), crate::errors::RuntimeError> {
+    fn call_with_flat_args(&mut self, callee: Value, flat: Vec<Value>) -> Result<(), RuntimeError> {
         match callee {
             Value::Builtin(f) => {
                 let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
@@ -1204,11 +1194,11 @@ impl Vm {
         Ok(())
     }
 
-    fn execute_call_ic(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn execute_call_ic(&mut self) -> Result<(), RuntimeError> {
         self.execute_call_with_nargs(None)
     }
 
-    fn execute_call_method(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn execute_call_method(&mut self) -> Result<(), RuntimeError> {
         let nargs = self.read_byte()? as usize;
         if crate::trace::enabled() {
             eprintln!(
@@ -1333,10 +1323,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the property definition fails.
-    pub fn define_property_builtin(
-        &mut self,
-        args: &[Value],
-    ) -> Result<Value, crate::errors::RuntimeError> {
+    pub fn define_property_builtin(&mut self, args: &[Value]) -> Result<Value, RuntimeError> {
         if args.len() < 3 {
             return Ok(Value::Undefined);
         }
@@ -1358,7 +1345,7 @@ impl Vm {
         target: &Value,
         key: &Value,
         descriptor: &Value,
-    ) -> Result<bool, crate::errors::RuntimeError> {
+    ) -> Result<bool, RuntimeError> {
         if !matches!(
             target,
             Value::Object(..)
@@ -1383,7 +1370,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
-    pub fn to_object_value(&mut self, v: Value) -> Result<Value, crate::errors::RuntimeError> {
+    pub fn to_object_value(&mut self, v: Value) -> Result<Value, RuntimeError> {
         match v {
             Value::Object(_)
             | Value::Array(..)
@@ -1451,7 +1438,7 @@ impl Vm {
         callee: &Value,
         this_arg: &Value,
         args: &[Value],
-    ) -> Result<Value, crate::errors::RuntimeError> {
+    ) -> Result<Value, RuntimeError> {
         self.call_with_this(callee, this_arg, args)
     }
 
@@ -1462,16 +1449,13 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the evaluation fails.
-    pub fn eval_expression_source(
-        &mut self,
-        source: &str,
-    ) -> Result<Value, crate::errors::RuntimeError> {
+    pub fn eval_expression_source(&mut self, source: &str) -> Result<Value, RuntimeError> {
         let wrapped = format!("__tsblitz_eval_result = ({});", source);
         let session = crate::parser::Parser::parse_source(&wrapped)
-            .map_err(|e| crate::errors::RuntimeError::from(format!("parse: {}", e)))?;
+            .map_err(|e| RuntimeError::from(format!("parse: {}", e)))?;
         let prog = session.program();
         let chunk = crate::compiler::compile_oxc(prog, &wrapped)
-            .map_err(|e| crate::errors::RuntimeError::from(format!("compile: {}", e)))?;
+            .map_err(|e| RuntimeError::from(format!("compile: {}", e)))?;
         let mut child = Vm::new(Rc::clone(&self.globals));
         let _ = child.run(chunk)?;
         Ok(child
@@ -1483,7 +1467,7 @@ impl Vm {
         &mut self,
         binding_object: &Value,
         name: &str,
-    ) -> Result<bool, crate::errors::RuntimeError> {
+    ) -> Result<bool, RuntimeError> {
         let unscopables = self.get_property_host(
             binding_object,
             &PropertyKey::Symbol(SymbolId::well_known_unscopables()),
@@ -1499,7 +1483,7 @@ impl Vm {
     fn resolve_lexical_identifier_value(
         &mut self,
         name: &str,
-    ) -> Result<Option<Value>, crate::errors::RuntimeError> {
+    ) -> Result<Option<Value>, RuntimeError> {
         let mut env = Some(Rc::clone(&self.lexical_env));
         while let Some(current) = env {
             let (binding_value, binding_object, with_environment, outer) = {
@@ -1532,7 +1516,7 @@ impl Vm {
         &mut self,
         name: &str,
         value: Value,
-    ) -> Result<bool, crate::errors::RuntimeError> {
+    ) -> Result<bool, RuntimeError> {
         let mut env = Some(Rc::clone(&self.lexical_env));
         while let Some(current) = env {
             let (has_decl_binding, binding_object, with_environment, outer) = {
@@ -1584,10 +1568,7 @@ impl Vm {
         Ok(false)
     }
 
-    fn get_with_env_binding_value(
-        &mut self,
-        name: &str,
-    ) -> Result<Option<Value>, crate::errors::RuntimeError> {
+    fn get_with_env_binding_value(&mut self, name: &str) -> Result<Option<Value>, RuntimeError> {
         let mut env = Some(Rc::clone(&self.lexical_env));
         while let Some(current) = env {
             let (binding_object, with_environment, outer) = {
@@ -1616,7 +1597,7 @@ impl Vm {
         &mut self,
         name: &str,
         value: Value,
-    ) -> Result<bool, crate::errors::RuntimeError> {
+    ) -> Result<bool, RuntimeError> {
         let mut env = Some(Rc::clone(&self.lexical_env));
         while let Some(current) = env {
             let (binding_object, with_environment, outer) = {
@@ -1652,10 +1633,7 @@ impl Vm {
     }
 
     /// Resolve a bare identifier against the current lexical/global environment.
-    pub fn resolve_identifier_value(
-        &mut self,
-        name: &str,
-    ) -> Result<Option<Value>, crate::errors::RuntimeError> {
+    pub fn resolve_identifier_value(&mut self, name: &str) -> Result<Option<Value>, RuntimeError> {
         if let Some(value) = self.resolve_lexical_identifier_value(name)? {
             return Ok(Some(value));
         }
@@ -1671,38 +1649,37 @@ impl Vm {
         &mut self,
         callee: &Value,
         args: &[Value],
-    ) -> Result<Value, crate::errors::RuntimeError> {
-        let set_constructor_property =
-            |value: &Value, ctor: &Value| -> Result<(), crate::errors::RuntimeError> {
-                match value {
-                    Value::Object(obj) => {
-                        obj.borrow_mut().properties.insert(
-                            PropertyKey::String("constructor".to_string()),
-                            PropertyDescriptor::data(ctor.clone()),
-                        );
-                    }
-                    Value::Array(_, props) => {
-                        props.borrow_mut().properties.insert(
-                            PropertyKey::String("constructor".to_string()),
-                            PropertyDescriptor::data(ctor.clone()),
-                        );
-                    }
-                    Value::Closure { props, .. } => {
-                        props.borrow_mut().properties.insert(
-                            PropertyKey::String("constructor".to_string()),
-                            PropertyDescriptor::data(ctor.clone()),
-                        );
-                    }
-                    Value::BuiltinObject(_, props) => {
-                        props.borrow_mut().properties.insert(
-                            PropertyKey::String("constructor".to_string()),
-                            PropertyDescriptor::data(ctor.clone()),
-                        );
-                    }
-                    _ => {}
+    ) -> Result<Value, RuntimeError> {
+        let set_constructor_property = |value: &Value, ctor: &Value| -> Result<(), RuntimeError> {
+            match value {
+                Value::Object(obj) => {
+                    obj.borrow_mut().properties.insert(
+                        PropertyKey::String("constructor".to_string()),
+                        PropertyDescriptor::data(ctor.clone()),
+                    );
                 }
-                Ok(())
-            };
+                Value::Array(_, props) => {
+                    props.borrow_mut().properties.insert(
+                        PropertyKey::String("constructor".to_string()),
+                        PropertyDescriptor::data(ctor.clone()),
+                    );
+                }
+                Value::Closure { props, .. } => {
+                    props.borrow_mut().properties.insert(
+                        PropertyKey::String("constructor".to_string()),
+                        PropertyDescriptor::data(ctor.clone()),
+                    );
+                }
+                Value::BuiltinObject(_, props) => {
+                    props.borrow_mut().properties.insert(
+                        PropertyKey::String("constructor".to_string()),
+                        PropertyDescriptor::data(ctor.clone()),
+                    );
+                }
+                _ => {}
+            }
+            Ok(())
+        };
         let temp_root_base = self.gc_temp_roots.len();
         self.gc_temp_roots.push(callee.clone());
         self.gc_temp_roots.extend(args.iter().cloned());
@@ -1868,7 +1845,7 @@ impl Vm {
             }
             _ => {
                 self.gc_temp_roots.truncate(temp_root_base);
-                Err(crate::errors::RuntimeError::from(format!(
+                Err(RuntimeError::from(format!(
                     "Construct: not a constructor (actual={})",
                     callee.type_name()
                 )))
@@ -1885,7 +1862,7 @@ impl Vm {
         &mut self,
         obj: &Value,
         key: &PropertyKey,
-    ) -> Result<Value, crate::errors::RuntimeError> {
+    ) -> Result<Value, RuntimeError> {
         self.get_property_value(obj, key)
     }
 
@@ -1894,11 +1871,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the property lookup fails.
-    pub fn has_property_host(
-        &self,
-        obj: &Value,
-        key: &PropertyKey,
-    ) -> Result<bool, crate::errors::RuntimeError> {
+    pub fn has_property_host(&self, obj: &Value, key: &PropertyKey) -> Result<bool, RuntimeError> {
         Ok(self.lookup_property_descriptor(obj, key, 0)?.is_some())
     }
 
@@ -1911,8 +1884,8 @@ impl Vm {
         &mut self,
         obj: &Value,
         key: &PropertyKey,
-    ) -> Result<bool, crate::errors::RuntimeError> {
-        let deleted_res: Result<bool, crate::errors::RuntimeError> = match obj {
+    ) -> Result<bool, RuntimeError> {
+        let deleted_res: Result<bool, RuntimeError> = match obj {
             Value::Object(data) => {
                 let mut d = data.borrow_mut();
                 match d.properties.get(key) {
@@ -1999,7 +1972,7 @@ impl Vm {
         obj: &Value,
         key: &Value,
         value: Value,
-    ) -> Result<Value, crate::errors::RuntimeError> {
+    ) -> Result<Value, RuntimeError> {
         let prop = self.to_property_key(key)?;
         let result = value.clone();
         self.set_property_tracked(obj, &prop, value)?;
@@ -2011,7 +1984,7 @@ impl Vm {
         callee: &Value,
         this_arg: &Value,
         args: &[Value],
-    ) -> Result<Value, crate::errors::RuntimeError> {
+    ) -> Result<Value, RuntimeError> {
         let temp_root_base = self.gc_temp_roots.len();
         self.gc_temp_roots.push(callee.clone());
         self.gc_temp_roots.push(this_arg.clone());
@@ -2037,7 +2010,7 @@ impl Vm {
                 self.gc_temp_roots.push(result.clone());
                 let post_call = (|| {
                     self.run_microtasks_if_needed()?;
-                    Ok::<(), crate::errors::RuntimeError>(())
+                    Ok::<(), RuntimeError>(())
                 })();
                 self.gc_temp_roots.truncate(result_root_base);
                 post_call?;
@@ -2072,7 +2045,7 @@ impl Vm {
                 self.gc_temp_roots.push(result.clone());
                 let post_call = (|| {
                     self.run_microtasks_if_needed()?;
-                    Ok::<(), crate::errors::RuntimeError>(())
+                    Ok::<(), RuntimeError>(())
                 })();
                 self.gc_temp_roots.truncate(result_root_base);
                 post_call?;
@@ -2154,9 +2127,7 @@ impl Vm {
                     }
                 }
                 self.dump_diag("CallWithThis failed: callee not callable", callee);
-                Err(crate::errors::RuntimeError::from(
-                    "CallWithThis: not a function",
-                ))
+                Err(RuntimeError::from("CallWithThis: not a function"))
             }
         })();
         self.gc_temp_roots.truncate(temp_root_base);
@@ -2167,14 +2138,14 @@ impl Vm {
         &mut self,
         stack_base: usize,
         drain_microtasks: bool,
-    ) -> Result<Value, crate::errors::RuntimeError> {
+    ) -> Result<Value, RuntimeError> {
         let target_frame_depth = self.call_stack.len();
         loop {
             match self.step(Some(target_frame_depth)) {
                 Ok(StepOutcome::Continue) => {
                     if self.pending_exception {
                         if self.call_stack.len() < target_frame_depth {
-                            return Err(crate::errors::RuntimeError::from("JS exception"));
+                            return Err(RuntimeError::from("JS exception"));
                         }
                         self.pending_exception = false;
                     }
@@ -2209,10 +2180,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the instruction fails.
-    fn step(
-        &mut self,
-        stop_at_frame_depth: Option<usize>,
-    ) -> Result<StepOutcome, crate::errors::RuntimeError> {
+    fn step(&mut self, stop_at_frame_depth: Option<usize>) -> Result<StepOutcome, RuntimeError> {
         let op_byte = self.read_byte()?;
         if crate::trace::enabled() {
             eprintln!(
@@ -2225,7 +2193,7 @@ impl Vm {
         let op = match Op::from_byte(op_byte) {
             Some(o) => o,
             None => {
-                return Err(crate::errors::RuntimeError::from(format!(
+                return Err(RuntimeError::from(format!(
                     "Invalid opcode 0x{:02x} at ip {}",
                     op_byte,
                     self.ip.saturating_sub(1)
@@ -2495,9 +2463,7 @@ impl Vm {
                     BigInt(BigIntValue),
                 }
 
-                let to_numeric = |vm: &mut Vm,
-                                  v: Value|
-                 -> Result<Numeric, crate::errors::RuntimeError> {
+                let to_numeric = |vm: &mut Vm, v: Value| -> Result<Numeric, RuntimeError> {
                     match v {
                         Value::BigInt(n) => Ok(Numeric::BigInt(n)),
                         Value::Number(n) => Ok(Numeric::Number(n)),
@@ -2563,9 +2529,9 @@ impl Vm {
                                 Err(err) => return Err(err),
                             }
                         }
-                        let exp_u32 = exp.to_u32().ok_or_else(|| {
-                            crate::errors::RuntimeError::from("Pow: bigint exponent too large")
-                        })?;
+                        let exp_u32 = exp
+                            .to_u32()
+                            .ok_or_else(|| RuntimeError::from("Pow: bigint exponent too large"))?;
                         self.stack.push(Value::BigInt(x.pow(exp_u32)));
                     }
                     (Numeric::Number(x), Numeric::Number(y)) => {
@@ -2858,14 +2824,14 @@ impl Vm {
             Op::Swap => {
                 let len = self.stack.len();
                 if len < 2 {
-                    return Err(crate::errors::RuntimeError::from("Stack underflow"));
+                    return Err(RuntimeError::from("Stack underflow"));
                 }
                 self.stack.swap(len - 1, len - 2);
             }
             Op::PopN => {
                 let count = self.read_byte()? as usize;
                 if count > self.stack.len() {
-                    return Err(crate::errors::RuntimeError::from("Stack underflow"));
+                    return Err(RuntimeError::from("Stack underflow"));
                 }
                 self.stack.truncate(self.stack.len() - count);
             }
@@ -2905,12 +2871,12 @@ impl Vm {
                 let idx = self.read_byte()? as usize;
                 let name = self.string_constant(idx)?;
                 let v = self.realm.get_hidden_builtin(&name).ok_or_else(|| {
-                    crate::errors::RuntimeError::from(format!("GetBuiltin: '{}' not found", name))
+                    RuntimeError::from(format!("GetBuiltin: '{}' not found", name))
                 })?;
                 match v {
                     Value::Builtin(_) | Value::BuiltinObject(_, _) => self.stack.push(v),
                     _ => {
-                        return Err(crate::errors::RuntimeError::from(format!(
+                        return Err(RuntimeError::from(format!(
                             "GetBuiltin: '{}' is not a builtin",
                             name
                         )));
@@ -3046,11 +3012,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
-    pub fn to_primitive(
-        &mut self,
-        v: &Value,
-        hint: Option<&str>,
-    ) -> Result<Value, crate::errors::RuntimeError> {
+    pub fn to_primitive(&mut self, v: &Value, hint: Option<&str>) -> Result<Value, RuntimeError> {
         match v {
             Value::Object(_)
             | Value::Array(..)
@@ -3179,7 +3141,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
-    pub fn to_string(&mut self, v: &Value) -> Result<String, crate::errors::RuntimeError> {
+    pub fn to_string(&mut self, v: &Value) -> Result<String, RuntimeError> {
         fn format_js_number(n: f64) -> String {
             if n.is_nan() {
                 return "NaN".to_string();
@@ -3237,7 +3199,7 @@ impl Vm {
     }
 
     /// Return a string reference for a string value, or throw a type error if the value is not a string.
-    pub fn to_string_ref<'a>(&mut self, v: &'a Value) -> Result<&'a str, crate::errors::RuntimeError> {
+    pub fn to_string_ref<'a>(&mut self, v: &'a Value) -> Result<&'a str, RuntimeError> {
         match v {
             Value::String(s) => Ok(s),
             _ => Err(self.throw_type_error("Cannot convert to string reference")),
@@ -3248,10 +3210,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the value is not a callable.
-    pub fn function_to_string(
-        &mut self,
-        value: &Value,
-    ) -> Result<String, crate::errors::RuntimeError> {
+    pub fn function_to_string(&mut self, value: &Value) -> Result<String, RuntimeError> {
         if !Self::is_callable_value(value) {
             return Err(self.throw_type_error("Function.prototype.toString called on non-callable"));
         }
@@ -3285,7 +3244,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
-    pub fn to_number_value(&mut self, v: &Value) -> Result<f64, crate::errors::RuntimeError> {
+    pub fn to_number_value(&mut self, v: &Value) -> Result<f64, RuntimeError> {
         match v {
             Value::Number(n) => Ok(*n),
             Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
@@ -3310,10 +3269,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
-    pub fn to_property_key(
-        &mut self,
-        v: &Value,
-    ) -> Result<PropertyKey, crate::errors::RuntimeError> {
+    pub fn to_property_key(&mut self, v: &Value) -> Result<PropertyKey, RuntimeError> {
         match v {
             Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym.clone())),
             Value::Object(data) => {
@@ -3361,11 +3317,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
-    pub fn abstract_equality(
-        &mut self,
-        x: &Value,
-        y: &Value,
-    ) -> Result<bool, crate::errors::RuntimeError> {
+    pub fn abstract_equality(&mut self, x: &Value, y: &Value) -> Result<bool, RuntimeError> {
         // Same-value for identical discriminants
         if std::mem::discriminant(x) == std::mem::discriminant(y) {
             return Ok(values_equal(x, y));
@@ -3484,10 +3436,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the operation fails.
-    fn read_descriptor_from_value(
-        &mut self,
-        v: &Value,
-    ) -> Result<PartialDescriptor, crate::errors::RuntimeError> {
+    fn read_descriptor_from_value(&mut self, v: &Value) -> Result<PartialDescriptor, RuntimeError> {
         let mut desc = PartialDescriptor::default();
         let data = match v {
             Value::Object(obj) => obj.borrow(),
@@ -3556,7 +3505,7 @@ impl Vm {
         obj: &Value,
         key: PropertyKey,
         desc: PartialDescriptor,
-    ) -> Result<bool, crate::errors::RuntimeError> {
+    ) -> Result<bool, RuntimeError> {
         let target = match obj {
             Value::Object(data) => data,
             Value::Array(_, props) => props,
@@ -3657,7 +3606,7 @@ impl Vm {
         &mut self,
         obj: &Value,
         key: &PropertyKey,
-    ) -> Result<Value, crate::errors::RuntimeError> {
+    ) -> Result<Value, RuntimeError> {
         if matches!(obj, Value::Undefined | Value::Null) {
             return Err(self.throw_type_error(&format!(
                 "Cannot read property '{:?}' of {}",
@@ -3777,9 +3726,9 @@ impl Vm {
         obj: &Value,
         key: &PropertyKey,
         depth: usize,
-    ) -> Result<Option<(PropertyDescriptor, Value)>, crate::errors::RuntimeError> {
+    ) -> Result<Option<(PropertyDescriptor, Value)>, RuntimeError> {
         if depth > MAX_PROTOTYPE_DEPTH {
-            return Err(crate::errors::RuntimeError::from(
+            return Err(RuntimeError::from(
                 "Prototype chain cycle detected or too deep",
             ));
         }
@@ -3865,7 +3814,7 @@ impl Vm {
     }
 
     /// Pop the return value, restore the caller's frame, and push the result.
-    fn execute_return(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn execute_return(&mut self) -> Result<(), RuntimeError> {
         let frame = self.call_stack.pop().ok_or("Return without call frame")?;
         let result = self.stack.pop().unwrap_or(Value::Undefined);
 
@@ -3912,7 +3861,7 @@ impl Vm {
         &self,
         args: &[Value],
         proto: &FunctionProto,
-    ) -> Result<Vec<Value>, crate::errors::RuntimeError> {
+    ) -> Result<Vec<Value>, RuntimeError> {
         if !proto.has_rest {
             return Ok(args.to_vec());
         }
@@ -3989,7 +3938,7 @@ impl Vm {
         &self,
         _call_args: &[Value],
         _proto: &FunctionProto,
-    ) -> Result<(), crate::errors::RuntimeError> {
+    ) -> Result<(), RuntimeError> {
         // Argument type validation is intentionally disabled in JS-first mode.
         // TypeScript annotations are treated as comments and should not affect
         // runtime behaviour. Keep this function for tooling and future opt-in
@@ -4004,7 +3953,7 @@ impl Vm {
         closure_env: &Rc<Mutex<Vec<ValueSlot>>>,
         call_args: Vec<Value>,
         mut this_value: Value,
-    ) -> Result<(), crate::errors::RuntimeError> {
+    ) -> Result<(), RuntimeError> {
         self.pending_closure_env = Some(Rc::clone(closure_env));
         if !proto.is_strict {
             if matches!(this_value, Value::Undefined | Value::Null) {
@@ -4161,7 +4110,7 @@ impl Vm {
         Value::Object(obj_rc)
     }
 
-    fn build_array(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn build_array(&mut self) -> Result<(), RuntimeError> {
         let n = self.read_byte()? as usize;
         let mut elems: Vec<Option<Value>> = Vec::with_capacity(n);
         for _ in 0..n {
@@ -4205,7 +4154,7 @@ impl Vm {
         Ok(())
     }
 
-    fn build_object(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn build_object(&mut self) -> Result<(), RuntimeError> {
         let n = self.read_byte()? as usize;
         let mut map: IndexMap<PropertyKey, PropertyDescriptor> = IndexMap::with_capacity(n);
         for _ in 0..n {
@@ -4216,7 +4165,7 @@ impl Vm {
                 Value::Symbol(sym, _) => PropertyKey::Symbol(sym),
                 other => {
                     self.dump_diag("BuildObject: key must be string", &other);
-                    return Err(crate::errors::RuntimeError::from(format!(
+                    return Err(RuntimeError::from(format!(
                         "BuildObject: key must be string (actual={})",
                         other.type_name()
                     )));
@@ -4256,7 +4205,7 @@ impl Vm {
         Ok(())
     }
 
-    fn make_closure(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn make_closure(&mut self) -> Result<(), RuntimeError> {
         let idx = self.read_byte()? as usize;
         let proto = self
             .chunk
@@ -4419,7 +4368,7 @@ impl Vm {
         Ok(())
     }
 
-    fn delete_property_op(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn delete_property_op(&mut self) -> Result<(), RuntimeError> {
         let key = self.pop()?;
         let obj = self.pop()?;
         let prop = self.to_property_key(&key)?;
@@ -4428,7 +4377,7 @@ impl Vm {
         Ok(())
     }
 
-    fn delete_identifier_op(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn delete_identifier_op(&mut self) -> Result<(), RuntimeError> {
         let name_val = self.pop()?;
         let name = if let Value::String(s) = name_val {
             s
@@ -4473,7 +4422,7 @@ impl Vm {
         Ok(())
     }
 
-    fn has_property_op(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn has_property_op(&mut self) -> Result<(), RuntimeError> {
         let key = self.pop()?;
         let obj = self.pop()?;
         let prop = self.to_property_key(&key)?;
@@ -4482,7 +4431,7 @@ impl Vm {
         Ok(())
     }
 
-    fn iterator_next_op(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn iterator_next_op(&mut self) -> Result<(), RuntimeError> {
         let iterator = self.pop()?;
         let next_fn =
             self.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
@@ -4491,7 +4440,7 @@ impl Vm {
         Ok(())
     }
 
-    fn iterator_close_op(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn iterator_close_op(&mut self) -> Result<(), RuntimeError> {
         let iterator = self.pop()?;
         let return_fn =
             self.get_property_host(&iterator, &PropertyKey::String("return".to_string()))?;
@@ -4506,7 +4455,7 @@ impl Vm {
         Ok(())
     }
 
-    fn get_global_ic(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn get_global_ic(&mut self) -> Result<(), RuntimeError> {
         let idx = self.read_short()? as usize;
         let name = self.string_constant(idx)?;
         let value = if let Some(value) = self.resolve_lexical_identifier_value(&name)? {
@@ -4531,7 +4480,7 @@ impl Vm {
     }
 
     /// Inline-cached property access with generation-based invalidation.
-    fn get_property_ic(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn get_property_ic(&mut self) -> Result<(), RuntimeError> {
         let _slot = self.read_byte()? as usize;
         let key_val = self.pop()?;
         let obj = self.pop()?;
@@ -4564,7 +4513,7 @@ impl Vm {
         Ok(())
     }
 
-    fn set_property_ic(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    fn set_property_ic(&mut self) -> Result<(), RuntimeError> {
         let _slot = self.read_byte()? as usize;
         let value = self.pop()?;
         let key = self.pop()?;
@@ -4603,7 +4552,7 @@ impl Vm {
         obj: &Value,
         key: &PropertyKey,
         value: Value,
-    ) -> Result<(), crate::errors::RuntimeError> {
+    ) -> Result<(), RuntimeError> {
         if matches!(obj, Value::Undefined | Value::Null) {
             return Err(self.throw_type_error(&format!(
                 "Cannot set property '{:?}' of {}",
@@ -4655,7 +4604,7 @@ impl Vm {
 
     /// Unwind the call stack and operand stack to the nearest exception
     /// handler, or propagate the error if none exists.
-    fn unwind_to_handler(&mut self, thrown: Value) -> Result<(), crate::errors::RuntimeError> {
+    fn unwind_to_handler(&mut self, thrown: Value) -> Result<(), RuntimeError> {
         let thrown = self.ensure_constructor_for_thrown(thrown)?;
         let handler = match self.handlers.pop() {
             Some(h) => h,
@@ -4667,16 +4616,14 @@ impl Vm {
                 self.last_uncaught_exception = Some(thrown.clone());
                 self.stack.push(thrown.clone());
                 return Err(match thrown {
-                    Value::String(s) => {
-                        crate::errors::RuntimeError::from(format!("Uncaught: {}", s))
-                    }
+                    Value::String(s) => RuntimeError::from(format!("Uncaught: {}", s)),
                     other => {
                         if let Ok(Value::String(msg)) = self
                             .get_property_value(&other, &PropertyKey::String("message".to_string()))
                         {
-                            crate::errors::RuntimeError::from(format!("Uncaught: {}", msg))
+                            RuntimeError::from(format!("Uncaught: {}", msg))
                         } else {
-                            crate::errors::RuntimeError::from("Uncaught exception")
+                            RuntimeError::from("Uncaught exception")
                         }
                     }
                 });
@@ -4715,10 +4662,7 @@ impl Vm {
 
     /// Best-effort repair for thrown object-like values whose `constructor`
     /// property was lost or was never installed.
-    fn ensure_constructor_for_thrown(
-        &mut self,
-        thrown: Value,
-    ) -> Result<Value, crate::errors::RuntimeError> {
+    fn ensure_constructor_for_thrown(&mut self, thrown: Value) -> Result<Value, RuntimeError> {
         let key = PropertyKey::String("constructor".to_string());
         let needs_repair =
             matches!(
@@ -4833,7 +4777,7 @@ impl Vm {
     }
 
     /// Helper to throw a JS exception value from bytecode or builtins.
-    pub(crate) fn throw_value(&mut self, thrown: Value) -> Result<(), crate::errors::RuntimeError> {
+    pub(crate) fn throw_value(&mut self, thrown: Value) -> Result<(), RuntimeError> {
         match self.unwind_to_handler(thrown) {
             Ok(()) => {
                 self.pending_exception = true;
@@ -4849,15 +4793,15 @@ impl Vm {
     }
 
     /// Helper used by host code to interrupt execution via a JS exception.
-    pub(crate) fn throw_exception(&mut self, thrown: Value) -> crate::errors::RuntimeError {
+    pub(crate) fn throw_exception(&mut self, thrown: Value) -> RuntimeError {
         match self.throw_value(thrown) {
-            Ok(()) => crate::errors::RuntimeError::from("JS exception"),
+            Ok(()) => RuntimeError::from("JS exception"),
             Err(err) => err,
         }
     }
 
     /// Throws a `TypeError` with the given message.
-    pub(crate) fn throw_type_error(&mut self, message: &str) -> crate::errors::RuntimeError {
+    pub(crate) fn throw_type_error(&mut self, message: &str) -> RuntimeError {
         let err_val = self
             .create_intrinsic_error("TypeError", message)
             .unwrap_or(Value::String(message.to_string()));
@@ -4865,7 +4809,7 @@ impl Vm {
     }
 
     /// Throws a `RangeError` with the given message.
-    pub(crate) fn throw_range_error(&mut self, message: &str) -> crate::errors::RuntimeError {
+    pub(crate) fn throw_range_error(&mut self, message: &str) -> RuntimeError {
         let err_val = self
             .create_intrinsic_error("RangeError", message)
             .unwrap_or(Value::String(message.to_string()));
@@ -4873,7 +4817,7 @@ impl Vm {
     }
 
     /// Throws a `ReferenceError` with the given message.
-    pub(crate) fn throw_reference_error(&mut self, message: &str) -> crate::errors::RuntimeError {
+    pub(crate) fn throw_reference_error(&mut self, message: &str) -> RuntimeError {
         let err_val = self
             .create_intrinsic_error("ReferenceError", message)
             .unwrap_or(Value::String(message.to_string()));
@@ -4893,7 +4837,7 @@ impl Vm {
         &mut self,
         name: &str,
         message: &str,
-    ) -> Result<Value, crate::errors::RuntimeError> {
+    ) -> Result<Value, RuntimeError> {
         let ctor = self
             .realm
             .get_intrinsic_constructor(name)
@@ -4915,10 +4859,10 @@ impl Vm {
     // Control flow
     // -----------------------------------------------------------------------
 
-    fn jump(&mut self, offset: isize) -> Result<(), crate::errors::RuntimeError> {
+    fn jump(&mut self, offset: isize) -> Result<(), RuntimeError> {
         let new_ip = (self.ip as isize) + offset;
         if new_ip < 0 || (new_ip as usize) > self.chunk.code.len() {
-            return Err(crate::errors::RuntimeError::from(format!(
+            return Err(RuntimeError::from(format!(
                 "Jump target out of bounds (ip={} offset={})",
                 self.ip, offset
             )));
@@ -4932,9 +4876,9 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     #[inline(always)]
-    fn read_byte(&mut self) -> Result<u8, crate::errors::RuntimeError> {
+    fn read_byte(&mut self) -> Result<u8, RuntimeError> {
         if self.ip >= self.chunk.code.len() {
-            return Err(crate::errors::RuntimeError::from(format!(
+            return Err(RuntimeError::from(format!(
                 "Unexpected end of bytecode at ip {}",
                 self.ip
             )));
@@ -4945,7 +4889,7 @@ impl Vm {
     }
 
     #[inline(always)]
-    fn read_short_signed(&mut self) -> Result<isize, crate::errors::RuntimeError> {
+    fn read_short_signed(&mut self) -> Result<isize, RuntimeError> {
         let lo = self.read_byte()? as u16;
         let hi = self.read_byte()? as u16;
         let u = (hi << 8) | lo;
@@ -4953,7 +4897,7 @@ impl Vm {
     }
 
     #[inline(always)]
-    fn read_short(&mut self) -> Result<u16, crate::errors::RuntimeError> {
+    fn read_short(&mut self) -> Result<u16, RuntimeError> {
         let lo = self.read_byte()? as u16;
         let hi = self.read_byte()? as u16;
         Ok((hi << 8) | lo)
@@ -4964,19 +4908,19 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     #[inline(always)]
-    fn constant(&self, idx: usize) -> Result<Value, crate::errors::RuntimeError> {
+    fn constant(&self, idx: usize) -> Result<Value, RuntimeError> {
         self.chunk
             .constants
             .get(idx)
             .cloned()
-            .ok_or_else(|| crate::errors::RuntimeError::from("Bad constant index"))
+            .ok_or_else(|| RuntimeError::from("Bad constant index"))
     }
 
     #[inline(always)]
-    fn string_constant(&self, idx: usize) -> Result<String, crate::errors::RuntimeError> {
+    fn string_constant(&self, idx: usize) -> Result<String, RuntimeError> {
         match self.chunk.constants.get(idx) {
             Some(Value::String(s)) => Ok(s.clone()),
-            _ => Err(crate::errors::RuntimeError::from("Constant not a string")),
+            _ => Err(RuntimeError::from("Constant not a string")),
         }
     }
 
@@ -4985,7 +4929,7 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     #[inline(always)]
-    fn pop(&mut self) -> Result<Value, crate::errors::RuntimeError> {
+    fn pop(&mut self) -> Result<Value, RuntimeError> {
         self.stack.pop().ok_or_else(|| {
             if crate::trace::enabled() {
                 eprintln!("[diag] Stack underflow");
@@ -5085,7 +5029,7 @@ impl Vm {
                 }
                 eprintln!("[diag] Stack size: {}", self.stack.len());
             }
-            crate::errors::RuntimeError::from("Stack underflow")
+            RuntimeError::from("Stack underflow")
         })
     }
 
@@ -5094,10 +5038,10 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     #[inline(always)]
-    fn binary_num_bigint<F, G>(&mut self, f: F, g: G) -> Result<(), crate::errors::RuntimeError>
+    fn binary_num_bigint<F, G>(&mut self, f: F, g: G) -> Result<(), RuntimeError>
     where
         F: FnOnce(f64, f64) -> f64,
-        G: FnOnce(BigIntValue, BigIntValue) -> Result<BigIntValue, crate::errors::RuntimeError>,
+        G: FnOnce(BigIntValue, BigIntValue) -> Result<BigIntValue, RuntimeError>,
     {
         let b = self.pop()?;
         let a = self.pop()?;
@@ -5425,7 +5369,7 @@ impl Vm {
         &mut self,
         value: &Value,
         constructor: &Value,
-    ) -> Result<bool, crate::errors::RuntimeError> {
+    ) -> Result<bool, RuntimeError> {
         // Per spec: if constructor has @@hasInstance, call it.
         let has_instance_key = PropertyKey::Symbol(SymbolId::well_known_has_instance());
         if let Ok(method) = get_property(constructor, &has_instance_key, 0)
@@ -5495,11 +5439,7 @@ impl Vm {
     }
 
     /// ECMAScript `Object.prototype.isPrototypeOf` semantics.
-    pub fn is_prototype_of(
-        &mut self,
-        proto: &Value,
-        value: &Value,
-    ) -> Result<bool, crate::errors::RuntimeError> {
+    pub fn is_prototype_of(&mut self, proto: &Value, value: &Value) -> Result<bool, RuntimeError> {
         let target_proto = match proto {
             Value::Object(_)
             | Value::Array(..)
@@ -5545,11 +5485,7 @@ impl Vm {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the operation fails.
-    pub fn in_property(
-        &mut self,
-        property: &Value,
-        object: &Value,
-    ) -> Result<bool, crate::errors::RuntimeError> {
+    pub fn in_property(&mut self, property: &Value, object: &Value) -> Result<bool, RuntimeError> {
         let key = self.to_property_key(property)?;
         Ok(self.lookup_property_descriptor(object, &key, 0)?.is_some())
     }
@@ -5640,7 +5576,7 @@ fn object_identity(obj: &Value) -> Option<usize> {
     }
 }
 
-fn to_number(v: &Value) -> Result<f64, crate::errors::RuntimeError> {
+fn to_number(v: &Value) -> Result<f64, RuntimeError> {
     match v {
         Value::Number(n) => Ok(*n),
         Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
@@ -5654,11 +5590,11 @@ fn to_number(v: &Value) -> Result<f64, crate::errors::RuntimeError> {
                 f64::INFINITY
             }
         })),
-        _ => Err(crate::errors::RuntimeError::from("Expected number")),
+        _ => Err(RuntimeError::from("Expected number")),
     }
 }
 
-fn to_int32_with_vm(vm: &mut Vm, v: &Value) -> Result<i32, crate::errors::RuntimeError> {
+fn to_int32_with_vm(vm: &mut Vm, v: &Value) -> Result<i32, RuntimeError> {
     // Per ECMAScript ToInt32: compute ToUint32(n) then reinterpret as signed 32-bit
     let u = to_uint32_with_vm(vm, v)?;
     if u & 0x8000_0000 != 0 {
@@ -5669,7 +5605,7 @@ fn to_int32_with_vm(vm: &mut Vm, v: &Value) -> Result<i32, crate::errors::Runtim
     }
 }
 
-fn to_uint32_with_vm(vm: &mut Vm, v: &Value) -> Result<u32, crate::errors::RuntimeError> {
+fn to_uint32_with_vm(vm: &mut Vm, v: &Value) -> Result<u32, RuntimeError> {
     // ToUint32 per ECMAScript: ToNumber(v), then take the integer part modulo 2^32
     let n = vm.to_number_value(v)?;
 
@@ -5751,12 +5687,12 @@ fn parse_js_bigint_string(s: &str) -> Option<BigIntValue> {
 // provide clearer naming when used in opcode handlers.
 impl Vm {
     /// Convert a runtime value with `ToInt32` semantics.
-    pub fn to_int32_value(&mut self, v: &Value) -> Result<i32, crate::errors::RuntimeError> {
+    pub fn to_int32_value(&mut self, v: &Value) -> Result<i32, RuntimeError> {
         to_int32_with_vm(self, v)
     }
 
     /// Convert a runtime value with `ToUint32` semantics.
-    pub fn to_uint32_value(&mut self, v: &Value) -> Result<u32, crate::errors::RuntimeError> {
+    pub fn to_uint32_value(&mut self, v: &Value) -> Result<u32, RuntimeError> {
         to_uint32_with_vm(self, v)
     }
 }
@@ -5848,13 +5784,9 @@ fn array_length(props: &ObjectData) -> usize {
 }
 
 /// Walk the prototype chain with cycle detection.
-fn get_property(
-    obj: &Value,
-    key: &PropertyKey,
-    depth: usize,
-) -> Result<Value, crate::errors::RuntimeError> {
+fn get_property(obj: &Value, key: &PropertyKey, depth: usize) -> Result<Value, RuntimeError> {
     if depth > MAX_PROTOTYPE_DEPTH {
-        return Err(crate::errors::RuntimeError::from(
+        return Err(RuntimeError::from(
             "Prototype chain cycle detected or too deep",
         ));
     }
@@ -5952,11 +5884,7 @@ fn get_property(
 }
 
 /// Sets the property with the given key on the given object to the given value.
-fn set_property(
-    obj: &Value,
-    key: &PropertyKey,
-    value: Value,
-) -> Result<(), crate::errors::RuntimeError> {
+fn set_property(obj: &Value, key: &PropertyKey, value: Value) -> Result<(), RuntimeError> {
     match obj {
         Value::Object(map) => {
             let mut m = map.borrow_mut();
