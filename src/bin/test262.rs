@@ -1488,6 +1488,7 @@ fn run_test_file(
                         // Now check if $DONE was called
                         let start = Instant::now();
                         let warn_threshold = Duration::from_secs(10);
+                        let hard_timeout = Duration::from_secs(30);
                         let mut warned = false;
                         let release_hook = release_handle.as_ref();
 
@@ -1498,6 +1499,13 @@ fn run_test_file(
                                     Some(err) => Err(format!("async test failed: {}", err)),
                                 };
                                 break async_result;
+                            }
+
+                            if start.elapsed() > hard_timeout {
+                                break Err(format!(
+                                    "async test timed out after {}s",
+                                    hard_timeout.as_secs()
+                                ));
                             }
 
                             if !warned && start.elapsed() > warn_threshold {
