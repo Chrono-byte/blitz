@@ -18,7 +18,7 @@ use std::sync::Mutex;
 
 impl Vm {
     fn prune_stale_handlers(&mut self) {
-        let active_frames = self.frames.len();
+        let active_frames = self.call_stack.len();
         while self
             .handlers
             .last()
@@ -48,12 +48,12 @@ impl Vm {
             pending_closure_env: None,
             gc_temp_roots: Vec::new(),
             globals,
-            frames: Vec::with_capacity(FRAMES_INITIAL_CAPACITY),
+            call_stack: CallStack::with_capacity(FRAMES_INITIAL_CAPACITY),
             root_chunk: None,
             current_slot_types: None,
             obj_generations: HashMap::new(),
             bg_runtime: get_global_bg_runtime(),
-            handlers: Vec::new(),
+            handlers: HandlerStack::with_capacity(32),
             pending_exception: false,
             module_loader,
             module_table: Vec::new(),
@@ -63,6 +63,7 @@ impl Vm {
             microtasks: VecDeque::new(),
             dynamic_import_jobs: VecDeque::new(),
             unhandled_rejection_hook: None,
+            reference_stack: ReferenceStack::new(),
             lexical_env: Rc::clone(&global_env),
             global_env,
             yield_star_queue: None,
@@ -312,7 +313,7 @@ impl Vm {
         roots.extend(self.gc_temp_roots.iter().cloned());
         self.lexical_env.borrow().collect_binding_values(&mut roots);
         self.global_env.borrow().collect_binding_values(&mut roots);
-        for frame in &self.frames {
+        for frame in self.call_stack.iter() {
             roots.extend(frame.stack.iter().cloned());
             roots.extend(frame.locals.iter().map(|c| c.borrow().clone()));
             roots.push(frame.this_value.clone());
@@ -608,7 +609,7 @@ impl Vm {
     /// Returns whether the current execution frame is in strict mode.
     /// If there are no frames (root-level execution), returns false.
     pub fn is_strict_mode(&self) -> bool {
-        self.frames.last().is_some_and(|f| f.is_strict)
+        self.call_stack.last().is_some_and(|f| f.is_strict)
     }
 
     /// Return own keys for a global value if it is an object or closure.
@@ -661,7 +662,7 @@ impl Vm {
     pub fn reset(&mut self, keep_globals: &HashSet<String>) {
         self.stack.clear();
         self.locals.clear();
-        self.frames.clear();
+        self.call_stack.clear();
         self.handlers.clear();
         self.root_chunk = None;
         self.current_slot_types = None;
@@ -704,7 +705,7 @@ impl Vm {
         self.ip = 0;
         self.stack.clear();
         self.locals.clear();
-        self.frames.clear();
+        self.call_stack.clear();
         self.handlers.clear();
         self.current_slot_types = None;
         self.current_closure_env = None;
@@ -988,7 +989,7 @@ impl Vm {
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
-                if self.frames.is_empty() {
+                if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
                 self.maybe_collect_garbage_prototype();
@@ -1004,7 +1005,7 @@ impl Vm {
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
-                if self.frames.is_empty() {
+                if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
                 self.maybe_collect_garbage_prototype();
@@ -1167,7 +1168,7 @@ impl Vm {
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
-                if self.frames.is_empty() {
+                if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
                 self.maybe_collect_garbage_prototype();
@@ -1183,7 +1184,7 @@ impl Vm {
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
-                if self.frames.is_empty() {
+                if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
                 self.maybe_collect_garbage_prototype();
@@ -1258,7 +1259,7 @@ impl Vm {
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
-                if self.frames.is_empty() {
+                if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
                 self.stack.push(result);
@@ -1276,7 +1277,7 @@ impl Vm {
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
-                if self.frames.is_empty() {
+                if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
                 self.stack.push(result);
@@ -2132,7 +2133,7 @@ impl Vm {
                     let caller_this = self.this_value.clone();
                     let caller_env = self.current_closure_env.clone();
                     let caller_slot_types = self.current_slot_types.clone();
-                    let caller_frame_len = self.frames.len();
+                    let caller_frame_len = self.call_stack.len();
                     let caller_handler_len = self.handlers.len();
                     self.push_call_frame(proto, &closure_env, call_args, this_arg.clone())?;
                     let result = self.run_until_return(stack_base, true);
@@ -2145,7 +2146,7 @@ impl Vm {
                         self.current_closure_env = caller_env;
                         self.current_slot_types = caller_slot_types;
                         self.stack.restore_from(saved_stack);
-                        self.frames.truncate(caller_frame_len);
+                        self.call_stack.truncate(caller_frame_len);
                         self.handlers.truncate(caller_handler_len);
                     }
                     result
@@ -2175,12 +2176,12 @@ impl Vm {
         stack_base: usize,
         drain_microtasks: bool,
     ) -> Result<Value, crate::errors::RuntimeError> {
-        let target_frame_depth = self.frames.len();
+        let target_frame_depth = self.call_stack.len();
         loop {
             match self.step(Some(target_frame_depth)) {
                 Ok(StepOutcome::Continue) => {
                     if self.pending_exception {
-                        if self.frames.len() < target_frame_depth {
+                        if self.call_stack.len() < target_frame_depth {
                             return Err(crate::errors::RuntimeError::from("JS exception"));
                         }
                         self.pending_exception = false;
@@ -2199,7 +2200,7 @@ impl Vm {
                 }
                 Err(err) => {
                     if self.pending_exception {
-                        if self.frames.len() < target_frame_depth {
+                        if self.call_stack.len() < target_frame_depth {
                             return Err(err);
                         }
                         self.pending_exception = false;
@@ -2742,7 +2743,7 @@ impl Vm {
             Op::Spread => self.execute_spread()?,
             Op::Construct => self.execute_construct()?,
             Op::Return => {
-                if self.frames.is_empty() {
+                if self.call_stack.is_empty() {
                     let result = self.stack.pop().unwrap_or(Value::Undefined);
                     return Ok(StepOutcome::Return(result));
                 }
@@ -2750,7 +2751,7 @@ impl Vm {
                 // Only stop if we've returned PAST the target frame depth
                 // (i.e., we've returned from the function we were waiting for)
                 if let Some(target_depth) = stop_at_frame_depth
-                    && self.frames.len() < target_depth
+                    && self.call_stack.len() < target_depth
                 {
                     let result = self.pop().unwrap_or(Value::Undefined);
                     return Ok(StepOutcome::Return(result));
@@ -2827,7 +2828,26 @@ impl Vm {
                 let key = self.pop()?;
                 let obj = self.pop()?;
                 let k = self.to_property_key(&key)?;
-                self.set_property_tracked(&obj, &k, value.clone())?;
+                let strict = self.is_strict_mode();
+                self.reference_stack
+                    .push(ReferenceRecord::new(obj.clone(), k.clone(), strict));
+                let result = self.set_property_tracked(&obj, &k, value.clone());
+                if crate::trace::enabled() {
+                    if let Some(reference) = self.reference_stack.last() {
+                        crate::trace::value_string("[trace]   reference base", &reference.base);
+                        match &reference.referenced_name {
+                            PropertyKey::String(name) => {
+                                eprintln!("[trace]   reference key='{}'", name);
+                            }
+                            PropertyKey::Symbol(_) => {
+                                eprintln!("[trace]   reference key=symbol");
+                            }
+                        }
+                        eprintln!("[trace]   reference strict={}", reference.strict);
+                    }
+                }
+                let _ = self.reference_stack.pop();
+                result?;
                 self.stack.push(value);
             }
             Op::SetPropertyIC => self.set_property_ic()?,
@@ -2914,7 +2934,7 @@ impl Vm {
                     handler_ip,
                     saved_stack_len: self.stack.len(),
                     saved_locals_len: self.locals.len(),
-                    frame_count: self.frames.len(),
+                    frame_count: self.call_stack.len(),
                     saved_lexical_env: Rc::clone(&self.lexical_env),
                 });
                 if crate::trace::enabled() {
@@ -3854,7 +3874,7 @@ impl Vm {
 
     /// Pop the return value, restore the caller's frame, and push the result.
     fn execute_return(&mut self) -> Result<(), crate::errors::RuntimeError> {
-        let frame = self.frames.pop().ok_or("Return without call frame")?;
+        let frame = self.call_stack.pop().ok_or("Return without call frame")?;
         let result = self.stack.pop().unwrap_or(Value::Undefined);
 
         if crate::trace::enabled() {
@@ -4021,7 +4041,7 @@ impl Vm {
             );
         }
 
-        self.frames.push(Frame {
+        self.call_stack.push(Frame {
             chunk: Rc::clone(&self.chunk),
             ip: self.ip,
             stack: caller_stack,
@@ -4558,7 +4578,28 @@ impl Vm {
         let key = self.pop()?;
         let obj = self.pop()?;
         let k = self.to_property_key(&key)?;
-        self.set_property_tracked(&obj, &k, value.clone())?;
+        self.reference_stack.push(ReferenceRecord::new(
+            obj.clone(),
+            k.clone(),
+            self.is_strict_mode(),
+        ));
+        if crate::trace::enabled() {
+            if let Some(reference) = self.reference_stack.last() {
+                crate::trace::value_string("[trace]   reference base", &reference.base);
+                match &reference.referenced_name {
+                    PropertyKey::String(name) => {
+                        eprintln!("[trace]   reference key='{}'", name);
+                    }
+                    PropertyKey::Symbol(_) => {
+                        eprintln!("[trace]   reference key=symbol");
+                    }
+                }
+                eprintln!("[trace]   reference strict={}", reference.strict);
+            }
+        }
+        let result = self.set_property_tracked(&obj, &k, value.clone());
+        let _ = self.reference_stack.pop();
+        result?;
         self.stack.push(value);
         Ok(())
     }
@@ -4652,8 +4693,8 @@ impl Vm {
 
         // Pop frames back to the handler's level, restoring caller state
         // at each step so closure env/this/chunk stay consistent.
-        while self.frames.len() > handler.frame_count {
-            if let Some(frame) = self.frames.pop() {
+        while self.call_stack.len() > handler.frame_count {
+            if let Some(frame) = self.call_stack.pop() {
                 self.chunk = frame.chunk;
                 self.ip = frame.ip;
                 self.stack.restore_from(frame.stack);
@@ -4962,10 +5003,10 @@ impl Vm {
                     "[diag] chunk_ptr={:p} chunk_len={} frames={} handlers={}",
                     Rc::as_ptr(&self.chunk),
                     self.chunk.code.len(),
-                    self.frames.len(),
+                    self.call_stack.len(),
                     self.handlers.len()
                 );
-                if let Some(f) = self.frames.last() {
+                if let Some(f) = self.call_stack.last() {
                     eprintln!("[diag] top_frame.stack_base={} top_frame.ip={} ", f.stack_base, f.ip);
                     // Print the owning chunk for the top frame and a summary of
                     // any function prototypes referenced by the current chunk.
@@ -5311,8 +5352,8 @@ impl Vm {
 
         // Print active call frames to help map which chunk/ip belongs to which
         // JavaScript function. Limit to first 8 frames for brevity.
-        eprintln!("[diag] Frames (count={}):", self.frames.len());
-        for (fi, frame) in self.frames.iter().enumerate().take(8) {
+        eprintln!("[diag] Frames (count={}):", self.call_stack.len());
+        for (fi, frame) in self.call_stack.iter().enumerate().take(8) {
             eprintln!(
                 "[diag]  frame[{}] chunk_ptr={:p} chunk_len={} ip={} stack_base={} is_strict={}",
                 fi,
@@ -5373,7 +5414,7 @@ impl Vm {
     /// Returns a vector of (frame_index, const_index) matches.
     fn find_constants_containing_value(&self, v: &Value) -> Vec<(usize, usize)> {
         let mut found = Vec::new();
-        for (fi, frame) in self.frames.iter().enumerate().take(12) {
+        for (fi, frame) in self.call_stack.iter().enumerate().take(12) {
             for (ci, c) in frame.chunk.constants.iter().enumerate() {
                 if values_equal(c, v) {
                     found.push((fi, ci));

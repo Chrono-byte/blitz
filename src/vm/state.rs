@@ -50,11 +50,14 @@ mod frame;
 mod generator_runner;
 mod handler;
 mod partial_descriptor;
+mod stack;
 
 pub(crate) use frame::Frame;
 pub(crate) use generator_runner::GeneratorRunner;
 pub(crate) use handler::{HandlerRecord, StepOutcome};
 pub(crate) use partial_descriptor::PartialDescriptor;
+#[allow(unused_imports)]
+pub(crate) use stack::{CallStack, HandlerStack, ReferenceRecord, ReferenceStack};
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -318,8 +321,8 @@ pub struct Vm {
     pub(super) gc_temp_roots: Vec<Value>,
     /// Global variables (derived from realm.global_object for convenience).
     pub(super) globals: Rc<RefCell<ObjectData>>,
-    /// Call-frame stack.
-    pub(super) frames: Vec<Frame>,
+    /// Call-frame stack component.
+    pub(super) call_stack: CallStack,
     /// Root chunk (kept alive for global type metadata).
     pub(super) root_chunk: Option<Rc<Chunk>>,
     /// Slot-type annotations for the current function (formerly used by TS checks).
@@ -331,7 +334,7 @@ pub struct Vm {
     /// Background Tokio runtime handle.
     pub(super) bg_runtime: Arc<Runtime>,
     /// Exception-handler stack.
-    pub(super) handlers: Vec<HandlerRecord>,
+    pub(super) handlers: HandlerStack,
     /// Flag set when a JS exception was unwound to a handler.
     pub(super) pending_exception: bool,
     /// Shared module loader for this realm, reused across VMs with the same globals.
@@ -349,6 +352,9 @@ pub struct Vm {
     pub(super) microtasks: VecDeque<Microtask>,
     /// Queue for pending dynamic import jobs.
     pub(super) dynamic_import_jobs: VecDeque<DynamicImportJob>,
+    /// Optional reference stack for future reference record handling.
+    #[allow(dead_code)]
+    pub(super) reference_stack: ReferenceStack,
     /// Optional hook invoked when an unhandled rejection or microtask exception
     /// is observed. The hook receives two Values: the first is the promise
     /// object (or Undefined for non-promise microtask exceptions) and the

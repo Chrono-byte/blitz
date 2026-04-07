@@ -170,7 +170,7 @@ impl Vm {
         let caller_env = self.current_closure_env.clone();
         let caller_lexical_env = self.lexical_env.clone();
         let caller_slot_types = self.current_slot_types.clone();
-        let caller_frame_len = self.frames.len();
+        let caller_frame_len = self.call_stack.len();
         let caller_handlers = std::mem::take(&mut self.handlers);
         let thrown_value = self.stack.last().cloned();
 
@@ -189,7 +189,7 @@ impl Vm {
         self.lexical_env = caller_lexical_env;
         self.current_slot_types = caller_slot_types;
         self.stack.restore_from(saved_stack);
-        self.frames.truncate(caller_frame_len);
+        self.call_stack.truncate(caller_frame_len);
         self.handlers = caller_handlers;
 
         self.run_microtasks_if_needed()?;
