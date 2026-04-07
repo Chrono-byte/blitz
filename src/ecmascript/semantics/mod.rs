@@ -3,16 +3,16 @@ use num_bigint::BigInt as BigIntValue;
 use num_traits::ToPrimitive;
 use regex::RegexBuilder;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ecmascript::builtins;
 use crate::runtime_utils::{
     array_from_values, builtin_object, char_index_to_byte_index, descriptor_value_from_descriptor,
-    global_parse_float, global_parse_int, host_error_object, is_byte_offset_aligned, non_enum_data,
-    own_enumerable_keys, own_property_descriptor, own_property_keys, property_key_to_value,
-    set_builtin_length, set_builtin_name, static_builtin_arg_offset, strict_equal, syntax_error,
-    to_index, to_length, usize_to_f64,
+    host_error_object, is_byte_offset_aligned, non_enum_data, own_enumerable_keys,
+    own_property_descriptor, own_property_keys, property_key_to_value, set_builtin_length,
+    set_builtin_name, static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length,
+    usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{Parser, Vm, compiler};
@@ -3078,6 +3078,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PKey::String("Reflect".to_string()),
         PropertyDescriptor::data(Value::Object(reflect_obj)),
     );
+    // Kernel helpers collect the soft-prelude __native stubs so this module can stay focused.
     kernel_helpers::install_kernel_helpers(&mut g, &function_proto_map);
     set_builtin_name(&object_ctor_val, "Object");
     set_builtin_name(&function_ctor_val, "Function");
@@ -3274,233 +3275,6 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     g.properties.insert(
         PKey::String("ShadowRealm".to_string()),
         PropertyDescriptor::data(shadowrealm_ctor_val),
-    );
-
-    let _reflect = Rc::new(RefCell::new(ObjectData::new()));
-
-    // Ensure a few additional helpers the soft prelude expects. Do not
-    // override host-provided values.
-    let mut insert_if_missing_global = |name: &str, v: Value| {
-        let k = PKey::String(name.to_string());
-        g.properties
-            .entry(k)
-            .or_insert_with(|| PropertyDescriptor::data(v));
-    };
-
-    // Returns the string representation of the given value.
-    insert_if_missing_global(
-        "__native_toString",
-        Value::Builtin(Rc::new(|vm, args| {
-            let v = args.first().cloned().unwrap_or(Value::Undefined);
-            let s = vm.to_string(&v)?;
-            Ok(Value::String(s))
-        })),
-    );
-    insert_if_missing_global(
-        "__native_toNumber",
-        Value::Builtin(Rc::new(|vm, args| {
-            let v = args.first().cloned().unwrap_or(Value::Undefined);
-            let n = vm.to_number_value(&v)?;
-            Ok(Value::Number(n))
-        })),
-    );
-    insert_if_missing_global(
-        "isNaN",
-        Value::Builtin(Rc::new(|vm, args| {
-            let v = args.first().cloned().unwrap_or(Value::Undefined);
-            let n = vm.to_number_value(&v)?;
-            Ok(Value::Bool(n.is_nan()))
-        })),
-    );
-    insert_if_missing_global(
-        "isFinite",
-        Value::Builtin(Rc::new(|vm, args| {
-            let v = args.first().cloned().unwrap_or(Value::Undefined);
-            let n = vm.to_number_value(&v)?;
-            Ok(Value::Bool(n.is_finite()))
-        })),
-    );
-    insert_if_missing_global("parseInt", Value::Builtin(Rc::new(global_parse_int)));
-    insert_if_missing_global("parseFloat", Value::Builtin(Rc::new(global_parse_float)));
-    insert_if_missing_global(
-        "__native_toBoolean",
-        Value::Builtin(Rc::new(|vm, args| {
-            let v = args.first().cloned().unwrap_or(Value::Undefined);
-            Ok(Value::Bool(vm.to_boolean(&v)))
-        })),
-    );
-    insert_if_missing_global(
-        "__native_abstractEquality",
-        Value::Builtin(Rc::new(|vm, args| {
-            let a = args.first().cloned().unwrap_or(Value::Undefined);
-            let b = args.get(1).cloned().unwrap_or(Value::Undefined);
-            Ok(Value::Bool(vm.abstract_equality(&a, &b)?))
-        })),
-    );
-    insert_if_missing_global(
-        "__native_instanceof",
-        Value::Builtin(Rc::new(|vm, args| {
-            let off = static_builtin_arg_offset(vm, args, "");
-            let value = args.get(off).cloned().unwrap_or(Value::Undefined);
-            let ctor = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
-            Ok(Value::Bool(vm.instance_of(&value, &ctor)?))
-        })),
-    );
-    insert_if_missing_global(
-        "__native_inProperty",
-        Value::Builtin(Rc::new(|vm, args| {
-            let prop = args.first().cloned().unwrap_or(Value::Undefined);
-            let obj = args.get(1).cloned().unwrap_or(Value::Undefined);
-            Ok(Value::Bool(vm.in_property(&prop, &obj)?))
-        })),
-    );
-
-    insert_if_missing_global(
-        "__native_deleteProperty",
-        Value::Builtin(Rc::new(|vm, args| {
-            let (target, key) = if args.len() >= 3 {
-                (
-                    args.get(1).cloned().unwrap_or(Value::Undefined),
-                    args.get(2).cloned().unwrap_or(Value::Undefined),
-                )
-            } else {
-                (
-                    args.first().cloned().unwrap_or(Value::Undefined),
-                    args.get(1).cloned().unwrap_or(Value::Undefined),
-                )
-            };
-            if crate::trace::enabled() {
-                eprintln!(
-                    "[trace] __native_deleteProperty target={:?} key={:?}",
-                    target, key
-                );
-            }
-            let key = vm.to_property_key(&key)?;
-            Ok(Value::Bool(vm.delete_property_host(&target, &key)?))
-        })),
-    );
-
-    insert_if_missing_global(
-        "__native_forInKeys",
-        Value::Builtin(Rc::new(|vm, args| {
-            let current = args.first().cloned().unwrap_or(Value::Undefined);
-            if matches!(current, Value::Undefined | Value::Null) {
-                return Err(vm.throw_type_error("Cannot convert undefined or null to object"));
-            }
-
-            let mut out: Vec<Option<Value>> = Vec::new();
-            let mut seen: HashSet<String> = HashSet::new();
-            for key in own_enumerable_keys(&current) {
-                if let PropertyKey::String(name) = key
-                    && seen.insert(name.clone())
-                {
-                    out.push(Some(Value::String(name)));
-                }
-            }
-
-            let arr_rc = Rc::new(RefCell::new(out));
-            let props = Rc::new(RefCell::new(ObjectData::new()));
-            props.borrow_mut().properties.insert(
-                PropertyKey::String("length".to_string()),
-                PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
-            );
-            Ok(Value::Array(arr_rc, props))
-        })),
-    );
-
-    insert_if_missing_global(
-        "__native_updateProperty",
-        Value::Builtin(Rc::new(|vm, args| {
-            let off = if args.len() >= 5 { 1 } else { 0 };
-            let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-            let key_value = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
-            let delta =
-                vm.to_number_value(&args.get(off + 2).cloned().unwrap_or(Value::Number(1.0)))?;
-            let prefix = vm.to_boolean(&args.get(off + 3).cloned().unwrap_or(Value::Bool(true)));
-
-            let key = vm.to_property_key(&key_value)?;
-            let current = vm.get_property_host(&target, &key)?;
-            let n = vm.to_number_value(&current)?;
-            let updated = Value::Number(n + delta);
-            let _ = vm.set_property_host(&target, &key_value, updated.clone())?;
-            if prefix { Ok(updated) } else { Ok(current) }
-        })),
-    );
-
-    insert_if_missing_global(
-        "__native_compoundAssign",
-        Value::Builtin(Rc::new(|vm, args| {
-            let off = if args.len() >= 6 { 1 } else { 0 };
-            let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-            let key_value = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
-            let rhs = args.get(off + 2).cloned().unwrap_or(Value::Undefined);
-            let op = vm.to_string(
-                &args
-                    .get(off + 3)
-                    .cloned()
-                    .unwrap_or(Value::String("+".to_string())),
-            )?;
-
-            let key = vm.to_property_key(&key_value)?;
-            let lhs = vm.get_property_host(&target, &key)?;
-
-            let out = match op.as_str() {
-                "+" => {
-                    if matches!(lhs, Value::String(_))
-                        || matches!(rhs, Value::String(_))
-                        || matches!(lhs, Value::Symbol(_, _))
-                        || matches!(rhs, Value::Symbol(_, _))
-                    {
-                        Value::String(format!("{}{}", vm.to_string(&lhs)?, vm.to_string(&rhs)?))
-                    } else {
-                        Value::Number(vm.to_number_value(&lhs)? + vm.to_number_value(&rhs)?)
-                    }
-                }
-                "-" => Value::Number(vm.to_number_value(&lhs)? - vm.to_number_value(&rhs)?),
-                "*" => Value::Number(vm.to_number_value(&lhs)? * vm.to_number_value(&rhs)?),
-                "/" => Value::Number(vm.to_number_value(&lhs)? / vm.to_number_value(&rhs)?),
-                "%" => Value::Number(vm.to_number_value(&lhs)? % vm.to_number_value(&rhs)?),
-                "**" => Value::Number(vm.to_number_value(&lhs)?.powf(vm.to_number_value(&rhs)?)),
-                "&" => {
-                    let l = vm.to_int32_value(&lhs)?;
-                    let r = vm.to_int32_value(&rhs)?;
-                    Value::Number((l & r) as f64)
-                }
-                "|" => {
-                    let l = vm.to_int32_value(&lhs)?;
-                    let r = vm.to_int32_value(&rhs)?;
-                    Value::Number((l | r) as f64)
-                }
-                "^" => {
-                    let l = vm.to_int32_value(&lhs)?;
-                    let r = vm.to_int32_value(&rhs)?;
-                    Value::Number((l ^ r) as f64)
-                }
-                "<<" => {
-                    let l = vm.to_int32_value(&lhs)?;
-                    let r = vm.to_uint32_value(&rhs)? & 0x1f;
-                    Value::Number(l.wrapping_shl(r) as f64)
-                }
-                ">>" => {
-                    let l = vm.to_int32_value(&lhs)?;
-                    let r = vm.to_uint32_value(&rhs)? & 0x1f;
-                    Value::Number(l.wrapping_shr(r) as f64)
-                }
-                ">>>" => {
-                    let l = vm.to_uint32_value(&lhs)?;
-                    let r = vm.to_uint32_value(&rhs)? & 0x1f;
-                    Value::Number(l.wrapping_shr(r) as f64)
-                }
-                _ => {
-                    return Err(crate::errors::RuntimeError::from(
-                        "unsupported compound assignment operator",
-                    ));
-                }
-            };
-
-            let _ = vm.set_property_host(&target, &key_value, out.clone())?;
-            Ok(out)
-        })),
     );
 
     // Provide lightweight hosts for built-ins that Test262 expects.
