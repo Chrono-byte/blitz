@@ -1552,14 +1552,13 @@ impl Vm {
                 )
             };
             if has_decl_binding {
-                let outer_env = outer.clone();
+                let outer_env = outer;
                 let result = current
                     .borrow_mut()
                     .set_mutable_binding(name, value.clone());
                 let should_sync_global = outer_env
                     .as_ref()
-                    .map(|outer_rc| Rc::ptr_eq(outer_rc, &self.global_env))
-                    .unwrap_or(false);
+                    .is_some_and(|outer_rc| Rc::ptr_eq(outer_rc, &self.global_env));
                 if should_sync_global {
                     let key = PropertyKey::String(name.to_string());
                     self.globals
@@ -2254,16 +2253,11 @@ impl Vm {
             Op::False => self.stack.push(Value::Bool(false)),
             Op::GetLocal => {
                 let slot = self.read_byte()? as usize;
-                if let Some(name) = self
-                    .chunk
-                    .root_slot_names
-                    .get(slot)
-                    .and_then(|opt| opt.clone())
+                if let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone)
+                    && let Some(v) = self.get_with_env_binding_value(&name)?
                 {
-                    if let Some(v) = self.get_with_env_binding_value(&name)? {
-                        self.stack.push(v);
-                        return Ok(StepOutcome::Continue);
-                    }
+                    self.stack.push(v);
+                    return Ok(StepOutcome::Continue);
                 }
                 let v = self
                     .locals
@@ -2280,15 +2274,10 @@ impl Vm {
             Op::SetLocal => {
                 let slot = self.read_byte()? as usize;
                 let v = self.pop()?;
-                if let Some(name) = self
-                    .chunk
-                    .root_slot_names
-                    .get(slot)
-                    .and_then(|opt| opt.clone())
+                if let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone)
+                    && self.set_with_env_binding_value(&name, v.clone())?
                 {
-                    if self.set_with_env_binding_value(&name, v.clone())? {
-                        return Ok(StepOutcome::Continue);
-                    }
+                    return Ok(StepOutcome::Continue);
                 }
                 ensure_slot(&mut self.locals, slot);
                 *self.locals[slot].borrow_mut() = v;
@@ -2832,19 +2821,19 @@ impl Vm {
                 self.reference_stack
                     .push(ReferenceRecord::new(obj.clone(), k.clone(), strict));
                 let result = self.set_property_tracked(&obj, &k, value.clone());
-                if crate::trace::enabled() {
-                    if let Some(reference) = self.reference_stack.last() {
-                        crate::trace::value_string("[trace]   reference base", &reference.base);
-                        match &reference.referenced_name {
-                            PropertyKey::String(name) => {
-                                eprintln!("[trace]   reference key='{}'", name);
-                            }
-                            PropertyKey::Symbol(_) => {
-                                eprintln!("[trace]   reference key=symbol");
-                            }
+                if crate::trace::enabled()
+                    && let Some(reference) = self.reference_stack.last()
+                {
+                    crate::trace::value_string("[trace]   reference base", &reference.base);
+                    match &reference.referenced_name {
+                        PropertyKey::String(name) => {
+                            eprintln!("[trace]   reference key='{}'", name);
                         }
-                        eprintln!("[trace]   reference strict={}", reference.strict);
+                        PropertyKey::Symbol(_) => {
+                            eprintln!("[trace]   reference key=symbol");
+                        }
                     }
+                    eprintln!("[trace]   reference strict={}", reference.strict);
                 }
                 let _ = self.reference_stack.pop();
                 result?;
@@ -4583,19 +4572,19 @@ impl Vm {
             k.clone(),
             self.is_strict_mode(),
         ));
-        if crate::trace::enabled() {
-            if let Some(reference) = self.reference_stack.last() {
-                crate::trace::value_string("[trace]   reference base", &reference.base);
-                match &reference.referenced_name {
-                    PropertyKey::String(name) => {
-                        eprintln!("[trace]   reference key='{}'", name);
-                    }
-                    PropertyKey::Symbol(_) => {
-                        eprintln!("[trace]   reference key=symbol");
-                    }
+        if crate::trace::enabled()
+            && let Some(reference) = self.reference_stack.last()
+        {
+            crate::trace::value_string("[trace]   reference base", &reference.base);
+            match &reference.referenced_name {
+                PropertyKey::String(name) => {
+                    eprintln!("[trace]   reference key='{}'", name);
                 }
-                eprintln!("[trace]   reference strict={}", reference.strict);
+                PropertyKey::Symbol(_) => {
+                    eprintln!("[trace]   reference key=symbol");
+                }
             }
+            eprintln!("[trace]   reference strict={}", reference.strict);
         }
         let result = self.set_property_tracked(&obj, &k, value.clone());
         let _ = self.reference_stack.pop();
