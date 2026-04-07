@@ -3074,55 +3074,53 @@ impl Vm {
                 let to_prim_key = PropertyKey::Symbol(SymbolId::well_known_to_primitive());
                 if let Some((desc, _holder)) =
                     self.lookup_property_descriptor(v, &to_prim_key, 0)?
+                    && let PropertyDescriptor::Data { value: method, .. } = desc
+                    && matches!(
+                        method,
+                        Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
+                    )
                 {
-                    if let PropertyDescriptor::Data { value: method, .. } = desc
-                        && matches!(
-                            method,
-                            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
-                        )
-                    {
-                        if crate::trace::enabled() {
-                            crate::trace::value_string(
-                                "[trace] @@toPrimitive candidate method",
-                                &method,
-                            );
-                            crate::trace::value_string("[trace] @@toPrimitive receiver", v);
-                            if let Some(id) = object_identity(v) {
-                                eprintln!("[trace] @@toPrimitive receiver identity ptr={:#x}", id);
-                            }
-                        }
-                        let rv = self.call_with_this(
+                    if crate::trace::enabled() {
+                        crate::trace::value_string(
+                            "[trace] @@toPrimitive candidate method",
                             &method,
-                            v,
-                            &[Value::String(hint.unwrap_or("default").to_string())],
-                        )?;
-                        if crate::trace::enabled() {
-                            crate::trace::value_string("[trace] @@toPrimitive returned", &rv);
-                            eprintln!("[trace] @@toPrimitive return type = {}", rv.type_name());
+                        );
+                        crate::trace::value_string("[trace] @@toPrimitive receiver", v);
+                        if let Some(id) = object_identity(v) {
+                            eprintln!("[trace] @@toPrimitive receiver identity ptr={:#x}", id);
                         }
-                        if !matches!(
-                            rv,
-                            Value::Object(_)
-                                | Value::Array(..)
-                                | Value::Closure { .. }
-                                | Value::Builtin(_)
-                                | Value::BuiltinObject(_, _)
-                                | Value::Promise(_)
-                        ) {
-                            if crate::trace::enabled() {
-                                crate::trace::value_string(
-                                    "[trace] @@toPrimitive accepted primitive",
-                                    &rv,
-                                );
-                            }
-                            self.gc_temp_roots.truncate(temp_root_base);
-                            return Ok(rv);
-                        } else if crate::trace::enabled() {
+                    }
+                    let rv = self.call_with_this(
+                        &method,
+                        v,
+                        &[Value::String(hint.unwrap_or("default").to_string())],
+                    )?;
+                    if crate::trace::enabled() {
+                        crate::trace::value_string("[trace] @@toPrimitive returned", &rv);
+                        eprintln!("[trace] @@toPrimitive return type = {}", rv.type_name());
+                    }
+                    if !matches!(
+                        rv,
+                        Value::Object(_)
+                            | Value::Array(..)
+                            | Value::Closure { .. }
+                            | Value::Builtin(_)
+                            | Value::BuiltinObject(_, _)
+                            | Value::Promise(_)
+                    ) {
+                        if crate::trace::enabled() {
                             crate::trace::value_string(
-                                "[trace] @@toPrimitive produced non-primitive",
+                                "[trace] @@toPrimitive accepted primitive",
                                 &rv,
                             );
                         }
+                        self.gc_temp_roots.truncate(temp_root_base);
+                        return Ok(rv);
+                    } else if crate::trace::enabled() {
+                        crate::trace::value_string(
+                            "[trace] @@toPrimitive produced non-primitive",
+                            &rv,
+                        );
                     }
                 }
 
@@ -3133,45 +3131,39 @@ impl Vm {
                 };
                 for name in order {
                     let key = PropertyKey::String(name.to_string());
-                    if let Some((desc, _holder)) = self.lookup_property_descriptor(v, &key, 0)? {
-                        if let PropertyDescriptor::Data { value: method, .. } = desc
-                            && matches!(
-                                method,
-                                Value::Closure { .. }
-                                    | Value::Builtin(_)
-                                    | Value::BuiltinObject(_, _)
-                            )
-                        {
-                            if crate::trace::enabled() {
-                                crate::trace::value_string(
-                                    &format!("[trace] candidate method '{}':", name),
-                                    &method,
-                                );
-                                crate::trace::value_string("[trace] candidate receiver", v);
-                                if let Some(id) = object_identity(v) {
-                                    eprintln!("[trace] candidate receiver identity ptr={:#x}", id);
-                                }
+                    if let Some((desc, _holder)) = self.lookup_property_descriptor(v, &key, 0)?
+                        && let PropertyDescriptor::Data { value: method, .. } = desc
+                        && matches!(
+                            method,
+                            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
+                        )
+                    {
+                        if crate::trace::enabled() {
+                            crate::trace::value_string(
+                                &format!("[trace] candidate method '{}':", name),
+                                &method,
+                            );
+                            crate::trace::value_string("[trace] candidate receiver", v);
+                            if let Some(id) = object_identity(v) {
+                                eprintln!("[trace] candidate receiver identity ptr={:#x}", id);
                             }
-                            let rv = self.call_with_this(&method, v, &[])?;
-                            if crate::trace::enabled() {
-                                crate::trace::value_string(
-                                    &format!("[trace] {} returned", name),
-                                    &rv,
-                                );
-                                eprintln!("[trace] {} return type = {}", name, rv.type_name());
-                            }
-                            if !matches!(
-                                rv,
-                                Value::Object(_)
-                                    | Value::Array(..)
-                                    | Value::Closure { .. }
-                                    | Value::Builtin(_)
-                                    | Value::BuiltinObject(_, _)
-                                    | Value::Promise(_)
-                            ) {
-                                self.gc_temp_roots.truncate(temp_root_base);
-                                return Ok(rv);
-                            }
+                        }
+                        let rv = self.call_with_this(&method, v, &[])?;
+                        if crate::trace::enabled() {
+                            crate::trace::value_string(&format!("[trace] {} returned", name), &rv);
+                            eprintln!("[trace] {} return type = {}", name, rv.type_name());
+                        }
+                        if !matches!(
+                            rv,
+                            Value::Object(_)
+                                | Value::Array(..)
+                                | Value::Closure { .. }
+                                | Value::Builtin(_)
+                                | Value::BuiltinObject(_, _)
+                                | Value::Promise(_)
+                        ) {
+                            self.gc_temp_roots.truncate(temp_root_base);
+                            return Ok(rv);
                         }
                     }
                 }

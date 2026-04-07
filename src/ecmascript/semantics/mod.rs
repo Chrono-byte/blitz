@@ -3267,35 +3267,35 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         );
         g.properties.insert(
             PKey::String("Error".to_string()),
-            PropertyDescriptor::data(error_ctor_val.clone()),
+            PropertyDescriptor::data(error_ctor_val),
         );
         g.properties.insert(
             PKey::String("AggregateError".to_string()),
-            PropertyDescriptor::data(aggregate_error_ctor_val.clone()),
+            PropertyDescriptor::data(aggregate_error_ctor_val),
         );
         g.properties.insert(
             PKey::String("EvalError".to_string()),
-            PropertyDescriptor::data(eval_error_ctor_val.clone()),
+            PropertyDescriptor::data(eval_error_ctor_val),
         );
         g.properties.insert(
             PKey::String("RangeError".to_string()),
-            PropertyDescriptor::data(range_error_ctor_val.clone()),
+            PropertyDescriptor::data(range_error_ctor_val),
         );
         g.properties.insert(
             PKey::String("ReferenceError".to_string()),
-            PropertyDescriptor::data(reference_error_ctor_val.clone()),
+            PropertyDescriptor::data(reference_error_ctor_val),
         );
         g.properties.insert(
             PKey::String("SyntaxError".to_string()),
-            PropertyDescriptor::data(syntax_error_ctor_val.clone()),
+            PropertyDescriptor::data(syntax_error_ctor_val),
         );
         g.properties.insert(
             PKey::String("TypeError".to_string()),
-            PropertyDescriptor::data(type_error_ctor_val.clone()),
+            PropertyDescriptor::data(type_error_ctor_val),
         );
         g.properties.insert(
             PKey::String("URIError".to_string()),
-            PropertyDescriptor::data(uri_error_ctor_val.clone()),
+            PropertyDescriptor::data(uri_error_ctor_val),
         );
         g.properties.insert(
             PKey::String("Math".to_string()),
@@ -3525,7 +3525,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         generator_prototype: None,
         async_generator_prototype: None,
         async_from_sync_iterator_prototype: None,
-        throw_type_error: Some(throw_type_error_val.clone()),
+        throw_type_error: Some(throw_type_error_val),
         typed_array_constructors,
         hidden_builtins: std::collections::HashMap::new(),
     };
