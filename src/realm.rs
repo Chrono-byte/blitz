@@ -37,66 +37,124 @@ use std::rc::Rc;
 #[derive(Clone, Debug, Default)]
 pub struct Intrinsics {
     // --- Constructors (callable objects) ---
+
+    /// Object constructor for this realm.
     pub object_constructor: Option<Value>,
+    /// Array constructor for this realm.
     pub array_constructor: Option<Value>,
+    /// Function constructor for this realm.
     pub function_constructor: Option<Value>,
+    /// String constructor for this realm.
     pub string_constructor: Option<Value>,
+    /// Symbol constructor for this realm.
     pub symbol_constructor: Option<Value>,
+    /// Boolean constructor for this realm.
     pub boolean_constructor: Option<Value>,
+    /// BigInt constructor for this realm.
     pub bigint_constructor: Option<Value>,
+    /// Number constructor for this realm.
     pub number_constructor: Option<Value>,
+    /// Error constructor for this realm.
     pub error_constructor: Option<Value>,
+    /// AggregateError constructor for this realm.
     pub aggregate_error_constructor: Option<Value>,
+    /// TypeError constructor for this realm.
     pub type_error_constructor: Option<Value>,
+    /// RangeError constructor for this realm.
     pub range_error_constructor: Option<Value>,
+    /// ReferenceError constructor for this realm.
     pub reference_error_constructor: Option<Value>,
+    /// SyntaxError constructor for this realm.
     pub syntax_error_constructor: Option<Value>,
+    /// EvalError constructor for this realm.
     pub eval_error_constructor: Option<Value>,
+    /// URIError constructor for this realm.
     pub uri_error_constructor: Option<Value>,
+    /// Promise constructor for this realm.
     pub promise_constructor: Option<Value>,
+    /// Date constructor for this realm.
     pub date_constructor: Option<Value>,
+    /// RegExp constructor for this realm.
     pub regexp_constructor: Option<Value>,
+    /// Map constructor for this realm.
     pub map_constructor: Option<Value>,
+    /// Set constructor for this realm.
     pub set_constructor: Option<Value>,
+    /// ArrayBuffer constructor for this realm.
     pub arraybuffer_constructor: Option<Value>,
+    /// SharedArrayBuffer constructor for this realm.
     pub shared_array_buffer_constructor: Option<Value>,
+    /// DataView constructor for this realm.
     pub data_view_constructor: Option<Value>,
+    /// TypedArray constructor for this realm.
     pub typed_array_constructor: Option<Value>,
 
     // --- Prototypes ---
+
+    /// Object prototype for this realm.
     pub object_prototype: Option<Value>,
+    /// Array prototype for this realm.
     pub array_prototype: Option<Value>,
+    /// Function prototype for this realm.
     pub function_prototype: Option<Value>,
+    /// String prototype for this realm.
     pub string_prototype: Option<Value>,
+    /// Symbol prototype for this realm.
     pub symbol_prototype: Option<Value>,
+    /// Boolean prototype for this realm.
     pub boolean_prototype: Option<Value>,
+    /// BigInt prototype for this realm.
     pub bigint_prototype: Option<Value>,
+    /// Number prototype for this realm.
     pub number_prototype: Option<Value>,
+    /// Error prototype for this realm.
     pub error_prototype: Option<Value>,
+    /// Promise prototype for this realm.
     pub promise_prototype: Option<Value>,
+    /// Date prototype for this realm.
     pub date_prototype: Option<Value>,
+    /// RegExp prototype for this realm.
     pub regexp_prototype: Option<Value>,
+    /// Map prototype for this realm.
     pub map_prototype: Option<Value>,
+    /// Set prototype for this realm.
     pub set_prototype: Option<Value>,
+    /// TypedArray prototype for this realm.
     pub typed_array_prototype: Option<Value>,
+    /// ArrayBuffer prototype for this realm.
     pub arraybuffer_prototype: Option<Value>,
+    /// SharedArrayBuffer prototype for this realm.
     pub shared_array_buffer_prototype: Option<Value>,
+    /// DataView prototype for this realm.
     pub data_view_prototype: Option<Value>,
 
     // --- Iterators & generators ---
+
+    /// Iterator prototype for this realm.
     pub iterator_prototype: Option<Value>,
+    /// AsyncIterator prototype for this realm.
     pub async_iterator_prototype: Option<Value>,
+    /// ArrayIterator prototype for this realm.
     pub array_iterator_prototype: Option<Value>,
+    /// MapIterator prototype for this realm.
     pub map_iterator_prototype: Option<Value>,
+    /// SetIterator prototype for this realm.
     pub set_iterator_prototype: Option<Value>,
+    /// StringIterator prototype for this realm.
     pub string_iterator_prototype: Option<Value>,
+    /// RegExpStringIterator prototype for this realm.
     pub regexp_string_iterator_prototype: Option<Value>,
+    /// Generator prototype for this realm.
     pub generator_prototype: Option<Value>,
+    /// AsyncGenerator prototype for this realm.
     pub async_generator_prototype: Option<Value>,
+    /// AsyncFromSyncIterator prototype for this realm.
     pub async_from_sync_iterator_prototype: Option<Value>,
 
     // --- Special helpers ---
+    /// Helper for throwing a TypeError.
     pub throw_type_error: Option<Value>,
+    /// Typed array constructors for this realm.
     pub typed_array_constructors: Vec<Value>,
 }
 

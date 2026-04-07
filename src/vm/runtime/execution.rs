@@ -35,6 +35,7 @@ impl Vm {
 
     /// Create a new virtual machine.
     pub fn new(globals: Rc<RefCell<ObjectData>>) -> Self {
+        let intrinsics = crate::runtime_utils::install_minimal_kernel_constructors(&globals);
         let realm = Realm::with_globals(Rc::clone(&globals));
         let global_env = Rc::new(RefCell::new(EnvironmentRecord::new(None)));
         let module_loader = shared_module_loader_for(&globals);
@@ -75,7 +76,6 @@ impl Vm {
             opcode_counts: [0; OP_COUNT],
             run_started_at: None,
         };
-        let intrinsics = crate::runtime_utils::install_minimal_kernel_constructors(&globals);
         vm.populate_realm_intrinsics(intrinsics);
         vm
     }
@@ -444,7 +444,7 @@ impl Vm {
     ///
     /// This ensures every VM starts with a fully populated global object and
     /// intrinsic constructors before any bytecode executes.
-    pub fn with_runtime(mut self) -> Self {
+    pub fn with_runtime(self) -> Self {
         self
     }
 
@@ -6722,5 +6722,16 @@ mod tests {
             }
             other => panic!("expected keys array, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn vm_new_populates_intrinsics_table() {
+        let globals = test_globals();
+        let vm = Vm::new(Rc::clone(&globals));
+        let intrinsics = &vm.realm().intrinsics;
+        assert!(intrinsics.object_constructor.is_some());
+        assert!(intrinsics.throw_type_error.is_some());
+        assert!(intrinsics.array_iterator_prototype.is_some());
+        assert!(!intrinsics.typed_array_constructors.is_empty());
     }
 }
