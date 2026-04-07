@@ -157,15 +157,24 @@ impl super::Compiler {
                     // Use the base field to determine radix, handle both lowercase and uppercase prefixes
                     match n.base {
                         oast::BigintBase::Binary => {
-                            let after = digits_str.strip_prefix("0b").or_else(|| digits_str.strip_prefix("0B")).unwrap_or(&digits_str);
+                            let after = digits_str
+                                .strip_prefix("0b")
+                                .or_else(|| digits_str.strip_prefix("0B"))
+                                .unwrap_or(&digits_str);
                             num_bigint::BigInt::parse_bytes(after.as_bytes(), 2)
                         }
                         oast::BigintBase::Octal => {
-                            let after = digits_str.strip_prefix("0o").or_else(|| digits_str.strip_prefix("0O")).unwrap_or(&digits_str);
+                            let after = digits_str
+                                .strip_prefix("0o")
+                                .or_else(|| digits_str.strip_prefix("0O"))
+                                .unwrap_or(&digits_str);
                             num_bigint::BigInt::parse_bytes(after.as_bytes(), 8)
                         }
                         oast::BigintBase::Hex => {
-                            let after = digits_str.strip_prefix("0x").or_else(|| digits_str.strip_prefix("0X")).unwrap_or(&digits_str);
+                            let after = digits_str
+                                .strip_prefix("0x")
+                                .or_else(|| digits_str.strip_prefix("0X"))
+                                .unwrap_or(&digits_str);
                             num_bigint::BigInt::parse_bytes(after.as_bytes(), 16)
                         }
                         oast::BigintBase::Decimal => {
@@ -185,15 +194,24 @@ impl super::Compiler {
                         // Use base field to determine radix, handle both lowercase and uppercase prefixes
                         match n.base {
                             oast::BigintBase::Binary => {
-                                let after = digits.strip_prefix("0b").or_else(|| digits.strip_prefix("0B")).unwrap_or(&digits);
+                                let after = digits
+                                    .strip_prefix("0b")
+                                    .or_else(|| digits.strip_prefix("0B"))
+                                    .unwrap_or(&digits);
                                 num_bigint::BigInt::parse_bytes(after.as_bytes(), 2)
                             }
                             oast::BigintBase::Octal => {
-                                let after = digits.strip_prefix("0o").or_else(|| digits.strip_prefix("0O")).unwrap_or(&digits);
+                                let after = digits
+                                    .strip_prefix("0o")
+                                    .or_else(|| digits.strip_prefix("0O"))
+                                    .unwrap_or(&digits);
                                 num_bigint::BigInt::parse_bytes(after.as_bytes(), 8)
                             }
                             oast::BigintBase::Hex => {
-                                let after = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")).unwrap_or(&digits);
+                                let after = digits
+                                    .strip_prefix("0x")
+                                    .or_else(|| digits.strip_prefix("0X"))
+                                    .unwrap_or(&digits);
                                 num_bigint::BigInt::parse_bytes(after.as_bytes(), 16)
                             }
                             oast::BigintBase::Decimal => {
