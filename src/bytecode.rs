@@ -459,6 +459,12 @@ pub enum Op {
     PushWithEnv,
     /// Pop the current lexical environment.
     PopEnv,
+    /// Get new.target from the current constructor scope.
+    GetNewTarget,
+    /// Get super property (compiles to Object.getPrototypeOf(this).property).
+    GetSuperProperty,
+    /// Set super property (compiles to Object.getPrototypeOf(this).property = value).
+    SetSuperProperty,
 }
 
 /// Total number of opcode variants.
@@ -555,6 +561,9 @@ impl Op {
             Op::CallIC => "CallIC",
             Op::PushWithEnv => "PushWithEnv",
             Op::PopEnv => "PopEnv",
+            Op::GetNewTarget => "GetNewTarget",
+            Op::GetSuperProperty => "GetSuperProperty",
+            Op::SetSuperProperty => "SetSuperProperty",
         }
     }
 
@@ -681,6 +690,9 @@ impl TryFrom<u8> for Op {
             74 => Ok(Op::CallIC),
             75 => Ok(Op::PushWithEnv),
             76 => Ok(Op::PopEnv),
+            77 => Ok(Op::GetNewTarget),
+            78 => Ok(Op::GetSuperProperty),
+            79 => Ok(Op::SetSuperProperty),
             _ => Err(()),
         }
     }

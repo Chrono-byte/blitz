@@ -139,6 +139,61 @@ impl Vm {
         self.construct_new_target.clone()
     }
 
+    fn get_new_target(&self) -> Value {
+        self.construct_new_target
+            .clone()
+            .unwrap_or(Value::Undefined)
+    }
+
+    fn get_this(&self) -> Value {
+        self.this_value.clone()
+    }
+
+    fn get_super_property(
+        &mut self,
+        this: &Value,
+        key: &Value,
+    ) -> Result<(), crate::errors::RuntimeError> {
+        let super_obj = self.get_prototype(this);
+        match super_obj {
+            Value::Object(obj) => {
+                let k = self.to_property_key(key)?;
+                let val = self.get_property_value(&Value::Object(obj), &k)?;
+                self.stack.push(val);
+            }
+            Value::Null => {
+                self.stack.push(Value::Undefined);
+            }
+            _ => {
+                self.stack.push(Value::Undefined);
+            }
+        }
+        Ok(())
+    }
+
+    fn set_super_property(
+        &mut self,
+        this: &Value,
+        key: &Value,
+        value: Value,
+    ) -> Result<(), crate::errors::RuntimeError> {
+        let super_obj = self.get_prototype(this);
+        match super_obj {
+            Value::Object(obj) => {
+                let k = self.to_property_key(key)?;
+                self.set_property_tracked(&Value::Object(obj), &k, value.clone())?;
+                self.stack.push(value);
+            }
+            Value::Null => {
+                self.stack.push(Value::Undefined);
+            }
+            _ => {
+                self.stack.push(Value::Undefined);
+            }
+        }
+        Ok(())
+    }
+
     /// Return the prototype of a value.
     ///
     /// Returns `Value::Null` if the value has no prototype (e.g. `Object.prototype`).
@@ -2657,6 +2712,21 @@ impl Vm {
             Op::PopEnv => {
                 let outer = self.lexical_env.borrow().outer();
                 self.lexical_env = outer.unwrap_or_else(|| Rc::clone(&self.global_env));
+            }
+            Op::GetNewTarget => {
+                let new_target = self.get_new_target();
+                self.stack.push(new_target);
+            }
+            Op::GetSuperProperty => {
+                let key = self.pop()?;
+                let this = self.get_this();
+                self.get_super_property(&this, &key)?;
+            }
+            Op::SetSuperProperty => {
+                let value = self.pop()?;
+                let key = self.pop()?;
+                let this = self.get_this();
+                self.set_super_property(&this, &key, value)?;
             }
             Op::CallMethod => self.execute_call_method()?,
             Op::Spread => self.execute_spread()?,

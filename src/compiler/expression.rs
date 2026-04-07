@@ -593,6 +593,331 @@ impl super::Compiler {
                             ));
                         }
                     },
+                    oast::AssignmentOperator::LogicalAnd => match target {
+                        oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                            let name = id.name.as_str();
+                            if let Some(slot) = self.resolve_local(name) {
+                                self.emit(Op::GetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::JumpIfFalse, LINE);
+                                let jump_end = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.emit(Op::Pop, LINE);
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::SetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
+                                if self.local_mirrors_global(slot) {
+                                    self.emit(Op::GetLocal, LINE);
+                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit_set_global_name(name);
+                                }
+                                self.patch_jump(jump_end);
+                            } else if let Some(upvalue) = self.resolve_upvalue(name) {
+                                self.emit(Op::GetUpvalue, LINE);
+                                self.emit_byte(upvalue, LINE);
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::JumpIfFalse, LINE);
+                                let jump_end = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.emit(Op::Pop, LINE);
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::SetUpvalue, LINE);
+                                self.emit_byte(upvalue, LINE);
+                                self.patch_jump(jump_end);
+                            } else {
+                                self.emit_get_global_name(name);
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::JumpIfFalse, LINE);
+                                let jump_end = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.emit(Op::Pop, LINE);
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit(Op::Dup, LINE);
+                                self.emit_set_global_name(name);
+                                self.patch_jump(jump_end);
+                            }
+                        }
+                        oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
+                            let (object_slot, key_slot) =
+                                self.compile_static_member_reference(m)?;
+                            self.emit_reference_get(object_slot, key_slot, true)?;
+                            self.emit(Op::Dup, LINE);
+                            self.emit(Op::JumpIfFalse, LINE);
+                            let jump_end = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.emit(Op::Pop, LINE);
+                            self.compile_expr_oast(&a.right)?;
+                            let value_slot = self.alloc_temp_local("ref_value");
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(value_slot as u8, LINE);
+                            self.emit_reference_set_from_slot(
+                                object_slot,
+                                key_slot,
+                                value_slot,
+                                true,
+                            )?;
+                            self.patch_jump(jump_end);
+                        }
+                        oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
+                            let (object_slot, key_slot) =
+                                self.compile_computed_member_reference(m)?;
+                            self.emit_reference_get(object_slot, key_slot, false)?;
+                            self.emit(Op::Dup, LINE);
+                            self.emit(Op::JumpIfFalse, LINE);
+                            let jump_end = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.emit(Op::Pop, LINE);
+                            self.compile_expr_oast(&a.right)?;
+                            let value_slot = self.alloc_temp_local("ref_value");
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(value_slot as u8, LINE);
+                            self.emit_reference_set_from_slot(
+                                object_slot,
+                                key_slot,
+                                value_slot,
+                                false,
+                            )?;
+                            self.patch_jump(jump_end);
+                        }
+                        _ => {
+                            return Err(crate::errors::CompilerError::from(
+                                "unsupported assignment target",
+                            ));
+                        }
+                    },
+                    oast::AssignmentOperator::LogicalOr => match target {
+                        oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                            let name = id.name.as_str();
+                            if let Some(slot) = self.resolve_local(name) {
+                                self.emit(Op::GetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::JumpIfTrue, LINE);
+                                let jump_end = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.emit(Op::Pop, LINE);
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::SetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
+                                if self.local_mirrors_global(slot) {
+                                    self.emit(Op::GetLocal, LINE);
+                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit_set_global_name(name);
+                                }
+                                self.patch_jump(jump_end);
+                            } else if let Some(upvalue) = self.resolve_upvalue(name) {
+                                self.emit(Op::GetUpvalue, LINE);
+                                self.emit_byte(upvalue, LINE);
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::JumpIfTrue, LINE);
+                                let jump_end = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.emit(Op::Pop, LINE);
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::SetUpvalue, LINE);
+                                self.emit_byte(upvalue, LINE);
+                                self.patch_jump(jump_end);
+                            } else {
+                                self.emit_get_global_name(name);
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::JumpIfTrue, LINE);
+                                let jump_end = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.emit(Op::Pop, LINE);
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit(Op::Dup, LINE);
+                                self.emit_set_global_name(name);
+                                self.patch_jump(jump_end);
+                            }
+                        }
+                        oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
+                            let (object_slot, key_slot) =
+                                self.compile_static_member_reference(m)?;
+                            self.emit_reference_get(object_slot, key_slot, true)?;
+                            self.emit(Op::Dup, LINE);
+                            self.emit(Op::JumpIfTrue, LINE);
+                            let jump_end = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.emit(Op::Pop, LINE);
+                            self.compile_expr_oast(&a.right)?;
+                            let value_slot = self.alloc_temp_local("ref_value");
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(value_slot as u8, LINE);
+                            self.emit_reference_set_from_slot(
+                                object_slot,
+                                key_slot,
+                                value_slot,
+                                true,
+                            )?;
+                            self.patch_jump(jump_end);
+                        }
+                        oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
+                            let (object_slot, key_slot) =
+                                self.compile_computed_member_reference(m)?;
+                            self.emit_reference_get(object_slot, key_slot, false)?;
+                            self.emit(Op::Dup, LINE);
+                            self.emit(Op::JumpIfTrue, LINE);
+                            let jump_end = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.emit(Op::Pop, LINE);
+                            self.compile_expr_oast(&a.right)?;
+                            let value_slot = self.alloc_temp_local("ref_value");
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(value_slot as u8, LINE);
+                            self.emit_reference_set_from_slot(
+                                object_slot,
+                                key_slot,
+                                value_slot,
+                                false,
+                            )?;
+                            self.patch_jump(jump_end);
+                        }
+                        _ => {
+                            return Err(crate::errors::CompilerError::from(
+                                "unsupported assignment target",
+                            ));
+                        }
+                    },
+                    oast::AssignmentOperator::LogicalNullish => match target {
+                        oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                            let name = id.name.as_str();
+                            if let Some(slot) = self.resolve_local(name) {
+                                self.emit(Op::GetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::JumpIfNullish, LINE);
+                                let jump_end = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.emit(Op::Jump, LINE);
+                                let after_store = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.patch_jump(jump_end);
+                                self.emit(Op::Pop, LINE);
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::SetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
+                                if self.local_mirrors_global(slot) {
+                                    self.emit(Op::GetLocal, LINE);
+                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit_set_global_name(name);
+                                }
+                                self.patch_jump(after_store);
+                            } else if let Some(upvalue) = self.resolve_upvalue(name) {
+                                self.emit(Op::GetUpvalue, LINE);
+                                self.emit_byte(upvalue, LINE);
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::JumpIfNullish, LINE);
+                                let jump_end = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.emit(Op::Jump, LINE);
+                                let after_store = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.patch_jump(jump_end);
+                                self.emit(Op::Pop, LINE);
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::SetUpvalue, LINE);
+                                self.emit_byte(upvalue, LINE);
+                                self.patch_jump(after_store);
+                            } else {
+                                self.emit_get_global_name(name);
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::JumpIfNullish, LINE);
+                                let jump_end = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.emit(Op::Jump, LINE);
+                                let after_store = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.patch_jump(jump_end);
+                                self.emit(Op::Pop, LINE);
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit(Op::Dup, LINE);
+                                self.emit_set_global_name(name);
+                                self.patch_jump(after_store);
+                            }
+                        }
+                        oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
+                            let (object_slot, key_slot) =
+                                self.compile_static_member_reference(m)?;
+                            self.emit_reference_get(object_slot, key_slot, true)?;
+                            self.emit(Op::Dup, LINE);
+                            self.emit(Op::JumpIfNullish, LINE);
+                            let jump_end = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.emit(Op::Jump, LINE);
+                            let after_store = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.patch_jump(jump_end);
+                            self.emit(Op::Pop, LINE);
+                            self.compile_expr_oast(&a.right)?;
+                            let value_slot = self.alloc_temp_local("ref_value");
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(value_slot as u8, LINE);
+                            self.emit_reference_set_from_slot(
+                                object_slot,
+                                key_slot,
+                                value_slot,
+                                true,
+                            )?;
+                            self.patch_jump(after_store);
+                        }
+                        oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
+                            let (object_slot, key_slot) =
+                                self.compile_computed_member_reference(m)?;
+                            self.emit_reference_get(object_slot, key_slot, false)?;
+                            self.emit(Op::Dup, LINE);
+                            self.emit(Op::JumpIfNullish, LINE);
+                            let jump_end = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.emit(Op::Jump, LINE);
+                            let after_store = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.patch_jump(jump_end);
+                            self.emit(Op::Pop, LINE);
+                            self.compile_expr_oast(&a.right)?;
+                            let value_slot = self.alloc_temp_local("ref_value");
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(value_slot as u8, LINE);
+                            self.emit_reference_set_from_slot(
+                                object_slot,
+                                key_slot,
+                                value_slot,
+                                false,
+                            )?;
+                            self.patch_jump(after_store);
+                        }
+                        _ => {
+                            return Err(crate::errors::CompilerError::from(
+                                "unsupported assignment target",
+                            ));
+                        }
+                    },
                     _ => {
                         return Err(crate::errors::CompilerError::from(
                             "unsupported assignment operator",
@@ -905,14 +1230,188 @@ impl super::Compiler {
             OExpr::StaticMemberExpression(m) => {
                 self.compile_expr_oast(&m.object)?;
                 self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                self.emit(Op::GetPropertyIC, LINE);
-                let slot = self.alloc_ic_slot()?;
-                self.emit_byte(slot, LINE);
+                if m.optional {
+                    self.emit(Op::Dup, LINE);
+                    self.emit(Op::JumpIfNullish, LINE);
+                    let skip_nullish = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.emit(Op::Pop, LINE);
+                    self.emit(Op::Null, LINE);
+                    self.emit(Op::Jump, LINE);
+                    let end = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.patch_jump(skip_nullish);
+                    self.emit(Op::GetPropertyIC, LINE);
+                    let slot = self.alloc_ic_slot()?;
+                    self.emit_byte(slot, LINE);
+                    self.patch_jump(end);
+                } else {
+                    self.emit(Op::GetPropertyIC, LINE);
+                    let slot = self.alloc_ic_slot()?;
+                    self.emit_byte(slot, LINE);
+                }
             }
             OExpr::ComputedMemberExpression(m) => {
                 self.compile_expr_oast(&m.object)?;
                 self.compile_expr_oast(&m.expression)?;
+                if m.optional {
+                    self.emit(Op::Dup, LINE);
+                    self.emit(Op::JumpIfNullish, LINE);
+                    let skip_nullish = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.emit(Op::Pop, LINE);
+                    self.emit(Op::Null, LINE);
+                    self.emit(Op::Jump, LINE);
+                    let end = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.patch_jump(skip_nullish);
+                    self.emit(Op::GetProperty, LINE);
+                    self.patch_jump(end);
+                } else {
+                    self.emit(Op::GetProperty, LINE);
+                }
+            }
+            OExpr::ChainExpression(c) => {
+                use oast::ChainElement as CE;
+                match &c.expression {
+                    CE::StaticMemberExpression(m) => {
+                        self.compile_expr_oast(&m.object)?;
+                        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                        if m.optional {
+                            self.emit(Op::Dup, LINE);
+                            self.emit(Op::JumpIfNullish, LINE);
+                            let skip_nullish = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.emit(Op::Pop, LINE);
+                            self.emit(Op::Null, LINE);
+                            self.emit(Op::Jump, LINE);
+                            let end = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.patch_jump(skip_nullish);
+                            self.emit(Op::GetPropertyIC, LINE);
+                            let slot = self.alloc_ic_slot()?;
+                            self.emit_byte(slot, LINE);
+                            self.patch_jump(end);
+                        } else {
+                            self.emit(Op::GetPropertyIC, LINE);
+                            let slot = self.alloc_ic_slot()?;
+                            self.emit_byte(slot, LINE);
+                        }
+                    }
+                    CE::ComputedMemberExpression(m) => {
+                        self.compile_expr_oast(&m.object)?;
+                        self.compile_expr_oast(&m.expression)?;
+                        if m.optional {
+                            self.emit(Op::Dup, LINE);
+                            self.emit(Op::JumpIfNullish, LINE);
+                            let skip_nullish = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.emit(Op::Pop, LINE);
+                            self.emit(Op::Null, LINE);
+                            self.emit(Op::Jump, LINE);
+                            let end = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.patch_jump(skip_nullish);
+                            self.emit(Op::GetProperty, LINE);
+                            self.patch_jump(end);
+                        } else {
+                            self.emit(Op::GetProperty, LINE);
+                        }
+                    }
+                    CE::CallExpression(c) => {
+                        let is_optional_call = c.optional;
+                        // Recursively compile the callee (which may be a member expression)
+                        self.compile_expr_oast(&c.callee)?;
+                        let end = if is_optional_call {
+                            self.emit(Op::Dup, LINE);
+                            self.emit(Op::JumpIfNullish, LINE);
+                            let skip_nullish = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.emit(Op::Pop, LINE);
+                            self.emit(Op::Null, LINE);
+                            self.emit(Op::Jump, LINE);
+                            let end = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.patch_jump(skip_nullish);
+                            Some(end)
+                        } else {
+                            None
+                        };
+                        let mut arg_count = 0usize;
+                        for arg in &c.arguments {
+                            if let Some(expr) = arg.as_expression() {
+                                self.compile_expr_oast(expr)?;
+                                arg_count += 1;
+                            } else {
+                                self.emit(Op::Undefined, LINE);
+                                arg_count += 1;
+                            }
+                        }
+                        if is_optional_call {
+                            self.emit(Op::Call, LINE);
+                            self.emit_byte(arg_count as u8, LINE);
+                            if let Some(end) = end {
+                                self.patch_jump(end);
+                            }
+                        } else {
+                            self.emit(Op::CallMethod, LINE);
+                            self.emit_byte(arg_count as u8, LINE);
+                        }
+                    }
+                    CE::PrivateFieldExpression(m) => {
+                        self.compile_expr_oast(&m.object)?;
+                        if m.optional {
+                            self.emit(Op::Dup, LINE);
+                            self.emit(Op::JumpIfNullish, LINE);
+                            let skip_nullish = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.emit(Op::Pop, LINE);
+                            self.emit(Op::Null, LINE);
+                            self.emit(Op::Jump, LINE);
+                            let end_jump = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.patch_jump(skip_nullish);
+                            let key = self.ensure_private_name_constant(&m.field.name);
+                            self.emit_constant(key, LINE);
+                            self.emit(Op::GetProperty, LINE);
+                            self.patch_jump(end_jump);
+                        } else {
+                            let key = self.ensure_private_name_constant(&m.field.name);
+                            self.emit_constant(key, LINE);
+                            self.emit(Op::GetProperty, LINE);
+                        }
+                    }
+                    CE::TSNonNullExpression(n) => {
+                        // Just compile the inner expression, as we don't have non-null assertions
+                        self.compile_expr_oast(&n.expression)?;
+                    }
+                    _ => self.emit(Op::Undefined, LINE),
+                }
+            }
+            OExpr::Super(s) => {
+                self.emit(Op::GetThis, LINE);
+                self.emit_get_global_name("super");
                 self.emit(Op::GetProperty, LINE);
+                self.emit_constant(Value::String("[[Target]]".to_string()), LINE);
+            }
+            OExpr::MetaProperty(m) => {
+                if m.meta.name.as_str() == "new" && m.property.name.as_str() == "target" {
+                    self.emit(Op::GetNewTarget, LINE);
+                } else {
+                    self.emit(Op::Undefined, LINE);
+                }
             }
             OExpr::CallExpression(c) => {
                 // Handle spread-containing calls first so we don't prematurely lower
@@ -954,12 +1453,16 @@ impl super::Compiler {
                     return Ok(());
                 }
 
+                // Handle optional call flag (may also be set with member expression)
+                let is_optional_call = c.optional;
+
                 // No spreads: perform the usual lowering for console.log and member calls.
 
                 if let OExpr::StaticMemberExpression(m) = &c.callee
                     && let OExpr::Identifier(obj_ident) = &m.object
                     && obj_ident.name.as_str() == "console"
                     && m.property.name.as_str() == "log"
+                    && !is_optional_call
                 {
                     self.emit_get_global_name("__native_print");
                     let mut arg_count = 0usize;
@@ -978,12 +1481,36 @@ impl super::Compiler {
                 }
 
                 if let OExpr::StaticMemberExpression(m) = &c.callee {
+                    // Handle optional calls like obj.method?.()
+                    let is_optional_call = c.optional;
+
                     self.compile_expr_oast(&m.object)?;
-                    self.emit(Op::Dup, LINE);
-                    self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                    self.emit(Op::GetPropertyIC, LINE);
-                    let slot = self.alloc_ic_slot()?;
-                    self.emit_byte(slot, LINE);
+                    if m.optional {
+                        self.emit(Op::Dup, LINE);
+                        self.emit(Op::JumpIfNullish, LINE);
+                        let skip_nullish = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.emit(Op::Pop, LINE);
+                        self.emit(Op::Null, LINE);
+                        self.emit(Op::Jump, LINE);
+                        let after_null_check = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.patch_jump(skip_nullish);
+                        self.emit(Op::Dup, LINE);
+                        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                        self.emit(Op::GetPropertyIC, LINE);
+                        let slot = self.alloc_ic_slot()?;
+                        self.emit_byte(slot, LINE);
+                        self.patch_jump(after_null_check);
+                    } else {
+                        self.emit(Op::Dup, LINE);
+                        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                        self.emit(Op::GetPropertyIC, LINE);
+                        let slot = self.alloc_ic_slot()?;
+                        self.emit_byte(slot, LINE);
+                    }
                     let mut arg_count = 0usize;
                     for arg in &c.arguments {
                         if let Some(expr) = arg.as_expression() {
@@ -994,16 +1521,40 @@ impl super::Compiler {
                             arg_count += 1;
                         }
                     }
-                    self.emit(Op::CallMethod, LINE);
+                    if is_optional_call {
+                        self.emit(Op::Call, LINE);
+                    } else {
+                        self.emit(Op::CallMethod, LINE);
+                    }
                     self.emit_byte(arg_count as u8, LINE);
                     return Ok(());
                 }
 
                 if let OExpr::ComputedMemberExpression(m) = &c.callee {
+                    let is_optional_call = c.optional;
+
                     self.compile_expr_oast(&m.object)?;
-                    self.emit(Op::Dup, LINE);
-                    self.compile_expr_oast(&m.expression)?;
-                    self.emit(Op::GetProperty, LINE);
+                    if m.optional {
+                        self.emit(Op::Dup, LINE);
+                        self.emit(Op::JumpIfNullish, LINE);
+                        let skip_nullish = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.emit(Op::Pop, LINE);
+                        self.emit(Op::Null, LINE);
+                        self.emit(Op::Jump, LINE);
+                        let after_null_check = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.patch_jump(skip_nullish);
+                        self.compile_expr_oast(&m.expression)?;
+                        self.emit(Op::GetProperty, LINE);
+                        self.patch_jump(after_null_check);
+                    } else {
+                        self.emit(Op::Dup, LINE);
+                        self.compile_expr_oast(&m.expression)?;
+                        self.emit(Op::GetProperty, LINE);
+                    }
                     let mut arg_count = 0usize;
                     for arg in &c.arguments {
                         if let Some(expr) = arg.as_expression() {
@@ -1014,20 +1565,44 @@ impl super::Compiler {
                             arg_count += 1;
                         }
                     }
-                    self.emit(Op::CallMethod, LINE);
+                    if is_optional_call {
+                        self.emit(Op::Call, LINE);
+                    } else {
+                        self.emit(Op::CallMethod, LINE);
+                    }
                     self.emit_byte(arg_count as u8, LINE);
                     return Ok(());
                 }
 
                 if let OExpr::PrivateFieldExpression(m) = &c.callee {
+                    // Handle optional private field calls like obj.#method?.()
+                    let is_optional_call = c.optional;
+
                     // Lower this.#private() style calls to preserve receiver.
                     self.compile_expr_oast(&m.object)?;
-                    self.emit(Op::Dup, LINE);
-                    // private identifier -> synthetic constant
-                    let oast::PrivateIdentifier { name, .. } = &m.field;
-                    let key = self.ensure_private_name_constant(name);
-                    self.emit_constant(key, LINE);
-                    self.emit(Op::GetProperty, LINE);
+                    if m.optional {
+                        self.emit(Op::Dup, LINE);
+                        self.emit(Op::JumpIfNullish, LINE);
+                        let skip_nullish = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.emit(Op::Pop, LINE);
+                        self.emit(Op::Null, LINE);
+                        self.emit(Op::Jump, LINE);
+                        let after_null_check = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.patch_jump(skip_nullish);
+                        let key = self.ensure_private_name_constant(&m.field.name);
+                        self.emit_constant(key, LINE);
+                        self.emit(Op::GetProperty, LINE);
+                        self.patch_jump(after_null_check);
+                    } else {
+                        self.emit(Op::Dup, LINE);
+                        let key = self.ensure_private_name_constant(&m.field.name);
+                        self.emit_constant(key, LINE);
+                        self.emit(Op::GetProperty, LINE);
+                    }
                     let mut arg_count = 0usize;
                     for arg in &c.arguments {
                         if let Some(expr) = arg.as_expression() {
@@ -1038,8 +1613,43 @@ impl super::Compiler {
                             arg_count += 1;
                         }
                     }
-                    self.emit(Op::CallMethod, LINE);
+                    if is_optional_call {
+                        self.emit(Op::Call, LINE);
+                    } else {
+                        self.emit(Op::CallMethod, LINE);
+                    }
                     self.emit_byte(arg_count as u8, LINE);
+                    return Ok(());
+                }
+
+                // Handle optional call on simple identifier like fn?.()
+                if c.optional {
+                    self.compile_expr_oast(&c.callee)?;
+                    self.emit(Op::Dup, LINE);
+                    self.emit(Op::JumpIfNullish, LINE);
+                    let skip_nullish = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.emit(Op::Pop, LINE);
+                    self.emit(Op::Null, LINE);
+                    self.emit(Op::Jump, LINE);
+                    let end = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.patch_jump(skip_nullish);
+                    let mut arg_count = 0usize;
+                    for arg in &c.arguments {
+                        if let Some(expr) = arg.as_expression() {
+                            self.compile_expr_oast(expr)?;
+                            arg_count += 1;
+                        } else {
+                            self.emit(Op::Undefined, LINE);
+                            arg_count += 1;
+                        }
+                    }
+                    self.emit(Op::Call, LINE);
+                    self.emit_byte(arg_count as u8, LINE);
+                    self.patch_jump(end);
                     return Ok(());
                 }
 

@@ -106,7 +106,13 @@ impl Compiler {
         };
         match stmt {
             OStmt::ImportDeclaration(_) => {}
-            OStmt::ExportAllDeclaration(_) => {}
+            OStmt::ExportAllDeclaration(export) => {
+                // export * from "module"
+                self.emit_get_global_name("__native_reexport");
+                self.emit_constant(Value::String(export.source.value.to_string()), LINE);
+                self.emit(Op::CallIC, LINE);
+                self.emit_byte(1, LINE);
+            }
             OStmt::ExportNamedDeclaration(export) => {
                 if let Some(decl) = &export.declaration {
                     match decl {
