@@ -693,6 +693,8 @@ fn make_test_globals() -> Rc<RefCell<ObjectData>> {
         PropertyDescriptor::data(Value::Number(f64::INFINITY)),
     );
 
+    runtime_utils::install_minimal_kernel_constructors(&globals);
+
     let test262_obj = make_test262_object(&globals);
     globals.borrow_mut().properties.insert(
         PropertyKey::String("$262".to_string()),
@@ -1610,6 +1612,7 @@ fn run_harness_only(
         .collect();
 
     restore_globals(globals, baseline_snapshot);
+    let _ = runtime_utils::install_minimal_kernel_constructors(globals);
     let mut vm = Vm::new(Rc::clone(globals));
     for h in &harness_files {
         let p = test262_root.join("harness").join(h);

@@ -1,4 +1,5 @@
 //! Language-semantic bootstrapping routines extracted from `runtime_utils`.
+use num_bigint::BigInt as BigIntValue;
 use num_traits::ToPrimitive;
 use regex::RegexBuilder;
 use std::cell::RefCell;
@@ -7,10 +8,10 @@ use std::rc::Rc;
 use crate::ecmascript::builtins;
 use crate::realm::Intrinsics;
 use crate::runtime_utils::{
-    array_from_values, builtin_object, char_index_to_byte_index, descriptor_value_from_descriptor, non_enum_data, own_enumerable_keys,
-    own_property_descriptor, own_property_keys, property_key_to_value, set_builtin_length,
-    set_builtin_name, static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length,
-    usize_to_f64,
+    array_from_values, builtin_object, char_index_to_byte_index, descriptor_value_from_descriptor,
+    is_byte_offset_aligned, non_enum_data, own_enumerable_keys, own_property_descriptor,
+    own_property_keys, property_key_to_value, set_builtin_length, set_builtin_name,
+    static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{Parser, Vm, compiler};
@@ -1171,7 +1172,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     );
 
     // 27.2 Promise Objects
-    let (_promise_proto_map, _promise_ctor_map, _promise_ctor_val) =
+    let (_promise_proto_map, _promise_ctor_map, promise_ctor_val) =
         builtins::promise::create_promise_intrinsics(&object_proto_map, &function_proto_map);
 
     // Reflect.construct
@@ -1723,6 +1724,209 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         )),
     );
 
+    macro_rules! create_typed_array_ctor {
+        ($name:expr, $element_count:expr, $zero_value:expr) => {{
+            let proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+                ObjectData::with_prototype(Value::Object(Rc::clone(&typedarray_proto_map))),
+            ));
+            let ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+                ObjectData::with_prototype(typedarray_ctor_val.clone()),
+            ));
+            let ctor_fn: BuiltinFn = {
+                let proto_map_rc = Rc::clone(&proto_map);
+                let ctor_name = $name.to_string();
+                Rc::new(move |vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, $name);
+                    let init = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let byte_offset_arg = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                    let length_arg = args.get(off + 2).cloned().unwrap_or(Value::Undefined);
+                    let (length, initial_values, byte_offset, view_byte_length, buffer_slot): (
+                        usize,
+                        Vec<Value>,
+                        usize,
+                        usize,
+                        Value,
+                    ) = match &init {
+                        Value::Number(_) => {
+                            let length = to_length(vm, &init)?;
+                            let view_byte_length = length * $element_count;
+                            (
+                                length,
+                                Vec::<Value>::new(),
+                                0usize,
+                                view_byte_length,
+                                Value::Undefined,
+                            )
+                        }
+                        Value::String(s) => {
+                            let length = s.parse::<usize>().unwrap_or(0);
+                            let view_byte_length = length * $element_count;
+                            (
+                                length,
+                                Vec::<Value>::new(),
+                                0usize,
+                                view_byte_length,
+                                Value::Undefined,
+                            )
+                        }
+                        Value::Array(arr, _) => {
+                            let initial_values = arr
+                                .borrow()
+                                .iter()
+                                .map(|slot| slot.clone().unwrap_or(Value::Undefined))
+                                .collect::<Vec<Value>>();
+                            let length = initial_values.len();
+                            let view_byte_length = length * $element_count;
+                            (
+                                length,
+                                initial_values,
+                                0usize,
+                                view_byte_length,
+                                Value::Undefined,
+                            )
+                        }
+                        Value::Object(_) => {
+                            let buffer_value = init.clone();
+                            vm.get_property_host(
+                                &buffer_value,
+                                &PropertyKey::String("[[ArrayBufferData]]".to_string()),
+                            )?;
+                            let byte_length_value = vm.get_property_host(
+                                &buffer_value,
+                                &PropertyKey::String("byteLength".to_string()),
+                            )?;
+                            let buffer_byte_length = vm.to_number_value(&byte_length_value)?;
+                            if !buffer_byte_length.is_finite() || buffer_byte_length < 0.0 {
+                                return Err(vm.throw_range_error("Invalid typed array length"));
+                            }
+                            let buffer_byte_length =
+                                buffer_byte_length.trunc().to_usize().unwrap_or(0);
+                            let byte_offset = if matches!(byte_offset_arg, Value::Undefined) {
+                                0
+                            } else {
+                                to_index(vm, &byte_offset_arg)?
+                            };
+                            if !is_byte_offset_aligned(byte_offset, $element_count) {
+                                return Err(vm.throw_range_error("Invalid typed array offset"));
+                            }
+                            let length_from_spec = if matches!(length_arg, Value::Undefined) {
+                                if buffer_byte_length < byte_offset {
+                                    return Err(vm.throw_range_error("Invalid typed array length"));
+                                }
+                                (buffer_byte_length - byte_offset) / $element_count
+                            } else {
+                                to_index(vm, &length_arg)?
+                            };
+                            let expected_byte_length = length_from_spec * $element_count;
+                            if byte_offset + expected_byte_length > buffer_byte_length {
+                                return Err(vm.throw_range_error("Invalid typed array length"));
+                            }
+                            (
+                                length_from_spec,
+                                Vec::<Value>::new(),
+                                byte_offset,
+                                expected_byte_length,
+                                buffer_value,
+                            )
+                        }
+                        _ => (0, Vec::<Value>::new(), 0usize, 0usize, Value::Undefined),
+                    };
+
+                    let mut typed_array_data =
+                        ObjectData::with_prototype(Value::Object(Rc::clone(&proto_map_rc)));
+                    typed_array_data.properties.insert(
+                        PropertyKey::String("[[TypedArrayData]]".to_string()),
+                        PropertyDescriptor::data(Value::Array(
+                            Rc::new(RefCell::new(vec![Some($zero_value.clone()); length])),
+                            Rc::new(RefCell::new(ObjectData::new())),
+                        )),
+                    );
+                    typed_array_data.properties.insert(
+                        PropertyKey::String("[[TypedArrayKind]]".to_string()),
+                        PropertyDescriptor::data(Value::String(ctor_name.clone())),
+                    );
+                    typed_array_data.properties.insert(
+                        PropertyKey::String("[[TypedArrayBytesPerElement]]".to_string()),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64($element_count))),
+                    );
+                    typed_array_data.properties.insert(
+                        PropertyKey::String("[[TypedArrayLength]]".to_string()),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(length))),
+                    );
+                    typed_array_data.properties.insert(
+                        PropertyKey::String("[[TypedArrayByteLength]]".to_string()),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(view_byte_length))),
+                    );
+                    typed_array_data.properties.insert(
+                        PropertyKey::String("[[TypedArrayByteOffset]]".to_string()),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(byte_offset))),
+                    );
+                    typed_array_data.properties.insert(
+                        PropertyKey::String("[[TypedArrayBuffer]]".to_string()),
+                        PropertyDescriptor::data(buffer_slot),
+                    );
+                    typed_array_data.properties.insert(
+                        PropertyKey::String("length".to_string()),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(length))),
+                    );
+                    typed_array_data.properties.insert(
+                        PropertyKey::String("byteLength".to_string()),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(view_byte_length))),
+                    );
+                    for (idx, value) in initial_values.into_iter().enumerate() {
+                        typed_array_data.properties.insert(
+                            PropertyKey::String(idx.to_string()),
+                            PropertyDescriptor::data(value),
+                        );
+                    }
+                    let typed_array_obj = Rc::new(RefCell::new(typed_array_data));
+                    Ok(Value::Object(typed_array_obj))
+                })
+            };
+            let ctor_val = Value::BuiltinObject(ctor_fn.clone(), Rc::clone(&ctor_map));
+            ctor_map.borrow_mut().properties.insert(
+                PKey::String("prototype".to_string()),
+                PropertyDescriptor::data(Value::Object(Rc::clone(&proto_map))),
+            );
+            ctor_map.borrow_mut().properties.insert(
+                PKey::String("name".to_string()),
+                PropertyDescriptor::data(Value::String($name.to_string())),
+            );
+            ctor_map.borrow_mut().properties.insert(
+                PKey::String("BYTES_PER_ELEMENT".to_string()),
+                PropertyDescriptor::data(Value::Number(usize_to_f64($element_count))),
+            );
+            proto_map.borrow_mut().properties.insert(
+                PKey::String("constructor".to_string()),
+                PropertyDescriptor::data(ctor_val.clone()),
+            );
+            (ctor_val, ctor_map)
+        }};
+    }
+
+    let (uint8array_ctor_val, _uint8array_ctor_map) =
+        create_typed_array_ctor!("Uint8Array", 1, Value::Number(0.0));
+    let (int8array_ctor_val, _int8array_ctor_map) =
+        create_typed_array_ctor!("Int8Array", 1, Value::Number(0.0));
+    let (uint16array_ctor_val, _uint16array_ctor_map) =
+        create_typed_array_ctor!("Uint16Array", 2, Value::Number(0.0));
+    let (int16array_ctor_val, _int16array_ctor_map) =
+        create_typed_array_ctor!("Int16Array", 2, Value::Number(0.0));
+    let (uint32array_ctor_val, _uint32array_ctor_map) =
+        create_typed_array_ctor!("Uint32Array", 4, Value::Number(0.0));
+    let (int32array_ctor_val, _int32array_ctor_map) =
+        create_typed_array_ctor!("Int32Array", 4, Value::Number(0.0));
+    let (float32array_ctor_val, _float32array_ctor_map) =
+        create_typed_array_ctor!("Float32Array", 4, Value::Number(0.0));
+    let (float64array_ctor_val, _float64array_ctor_map) =
+        create_typed_array_ctor!("Float64Array", 8, Value::Number(0.0));
+    let (bigint64array_ctor_val, _bigint64array_ctor_map) =
+        create_typed_array_ctor!("BigInt64Array", 8, Value::BigInt(BigIntValue::from(0u8)));
+    let (biguint64array_ctor_val, _biguint64array_ctor_map) =
+        create_typed_array_ctor!("BigUint64Array", 8, Value::BigInt(BigIntValue::from(0u8)));
+    let (uint8clampedarray_ctor_val, _uint8clampedarray_ctor_map) =
+        create_typed_array_ctor!("Uint8ClampedArray", 1, Value::Number(0.0));
+
     let dataview_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
         ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
     ));
@@ -1808,6 +2012,26 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PropertyDescriptor::data(dataview_ctor_val.clone()),
     );
 
+    let (map_ctor_val, set_ctor_val) =
+        builtins::collections::install_map_set_constructors(&object_proto_map, &function_proto_map);
+    object_proto_map.borrow_mut().properties.insert(
+        PKey::String("toString".to_string()),
+        non_enum_data(builtin_object(
+            Rc::new(|_vm, args| {
+                let this = args.first().cloned().unwrap_or(Value::Null);
+                if let Value::Object(obj) = &this
+                    && let Some(PropertyDescriptor::Data { value, .. }) = obj
+                        .borrow()
+                        .properties
+                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                {
+                    return Ok(Value::String(format!("[object {}]", value.object_tag())));
+                }
+                Ok(Value::String(format!("[object {}]", this.object_tag())))
+            }),
+            &function_proto_map,
+        )),
+    );
     object_proto_map.borrow_mut().properties.insert(
         PKey::String("toString".to_string()),
         non_enum_data(builtin_object(
@@ -2310,7 +2534,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         )),
     );
 
-    let _array_ctor_val = builtins::array::install_array_constructor_and_late_prototype_methods(
+    let array_ctor_val = builtins::array::install_array_constructor_and_late_prototype_methods(
         &array_ctor_map,
         &array_proto_map,
         &function_proto_map,
@@ -2830,6 +3054,273 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             )))),
         )),
     );
+
+    let shadowrealm_ctor_val =
+        shadowrealm::build_shadowrealm_constructor(&object_proto_map, &function_proto_map);
+
+    let json_obj = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+        Rc::clone(&object_proto_map),
+    ))));
+    json_obj.borrow_mut().properties.insert(
+        PKey::String("stringify".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new({
+                fn escape_json_string(s: &str) -> String {
+                    let mut out = String::with_capacity(s.len() + 2);
+                    out.push('"');
+                    for ch in s.chars() {
+                        match ch {
+                            '"' => out.push_str("\\\""),
+                            '\\' => out.push_str("\\\\"),
+                            '\n' => out.push_str("\\n"),
+                            '\r' => out.push_str("\\r"),
+                            '\t' => out.push_str("\\t"),
+                            '\u{08}' => out.push_str("\\b"),
+                            '\u{0c}' => out.push_str("\\f"),
+                            c if c < ' ' => out.push_str(&format!("\\u{:04x}", c as u32)),
+                            c => out.push(c),
+                        }
+                    }
+                    out.push('"');
+                    out
+                }
+
+                move |_vm, args| {
+                    let off = if args.len() > 1 { 1 } else { 0 };
+                    let value = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let out = match value {
+                        Value::Uninitialized => Value::Undefined,
+                        Value::Undefined | Value::Builtin(_) | Value::BuiltinObject(_, _) => {
+                            Value::Undefined
+                        }
+                        Value::Null => Value::String("null".to_string()),
+                        Value::Bool(b) => {
+                            Value::String(if b { "true" } else { "false" }.to_string())
+                        }
+                        Value::Number(n) => {
+                            if n.is_finite() {
+                                Value::String(n.to_string())
+                            } else {
+                                Value::String("null".to_string())
+                            }
+                        }
+                        Value::String(s) => Value::String(escape_json_string(&s)),
+                        Value::BigInt(_) => {
+                            return Err(crate::errors::RuntimeError::from(
+                                "Do not know how to serialize a BigInt",
+                            ));
+                        }
+                        Value::Array(_, _) => Value::String("[]".to_string()),
+                        Value::Object(_) | Value::Closure { .. } | Value::Promise(_) => {
+                            Value::String("{}".to_string())
+                        }
+                        Value::Symbol(_, _) => Value::Undefined,
+                    };
+                    Ok(out)
+                }
+            }),
+            &function_proto_map,
+        )),
+    );
+
+    let atomics_obj = atomics::build_atomics_object(&object_proto_map, &function_proto_map);
+
+    {
+        let mut g = globals.borrow_mut();
+        builtins::text_and_symbols::install_string_boolean_symbol_builtins(
+            &mut g,
+            &object_proto_map,
+            &function_proto_map,
+        );
+        builtins::primitives::install_bigint_and_number_builtins(
+            &mut g,
+            &object_proto_map,
+            &function_proto_map,
+        );
+        let global_this_key = PKey::String("globalThis".to_string());
+        g.properties.insert(
+            global_this_key,
+            PropertyDescriptor::data(Value::Object(Rc::clone(globals))),
+        );
+        g.properties
+            .entry(PKey::String("NaN".to_string()))
+            .or_insert(PropertyDescriptor::data(Value::Number(f64::NAN)));
+        g.properties
+            .entry(PKey::String("Infinity".to_string()))
+            .or_insert(PropertyDescriptor::data(Value::Number(f64::INFINITY)));
+        g.properties
+            .entry(PKey::String("undefined".to_string()))
+            .or_insert(PropertyDescriptor::Data {
+                value: Value::Undefined,
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            });
+        builtins::globals::install_global_function_builtins(&mut g);
+        g.properties.insert(
+            PKey::String("Reflect".to_string()),
+            PropertyDescriptor::data(Value::Object(reflect_obj)),
+        );
+        set_builtin_name(&object_ctor_val, "Object");
+        set_builtin_name(&function_ctor_val, "Function");
+        set_builtin_name(&array_ctor_val, "Array");
+        set_builtin_name(&regexp_ctor_val, "RegExp");
+        set_builtin_name(&promise_ctor_val, "Promise");
+        set_builtin_name(&date_ctor_val, "Date");
+        set_builtin_name(&error_ctor_val, "Error");
+        set_builtin_name(&aggregate_error_ctor_val, "AggregateError");
+        set_builtin_name(&map_ctor_val, "Map");
+        set_builtin_name(&set_ctor_val, "Set");
+
+        g.properties.insert(
+            PKey::String("Function".to_string()),
+            PropertyDescriptor::data(function_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Object".to_string()),
+            PropertyDescriptor::data(object_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Array".to_string()),
+            PropertyDescriptor::data(array_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("RegExp".to_string()),
+            PropertyDescriptor::data(regexp_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Promise".to_string()),
+            PropertyDescriptor::data(promise_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Date".to_string()),
+            PropertyDescriptor::data(date_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("ArrayBuffer".to_string()),
+            PropertyDescriptor::data(arraybuffer_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("SharedArrayBuffer".to_string()),
+            PropertyDescriptor::data(sharedarraybuffer_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("DataView".to_string()),
+            PropertyDescriptor::data(dataview_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("TypedArray".to_string()),
+            PropertyDescriptor::data(typedarray_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Uint8Array".to_string()),
+            PropertyDescriptor::data(uint8array_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Int8Array".to_string()),
+            PropertyDescriptor::data(int8array_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Uint16Array".to_string()),
+            PropertyDescriptor::data(uint16array_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Int16Array".to_string()),
+            PropertyDescriptor::data(int16array_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Uint32Array".to_string()),
+            PropertyDescriptor::data(uint32array_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Int32Array".to_string()),
+            PropertyDescriptor::data(int32array_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Float32Array".to_string()),
+            PropertyDescriptor::data(float32array_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Float64Array".to_string()),
+            PropertyDescriptor::data(float64array_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Uint8ClampedArray".to_string()),
+            PropertyDescriptor::data(uint8clampedarray_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("BigInt64Array".to_string()),
+            PropertyDescriptor::data(bigint64array_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("BigUint64Array".to_string()),
+            PropertyDescriptor::data(biguint64array_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Error".to_string()),
+            PropertyDescriptor::data(error_ctor_val.clone()),
+        );
+        g.properties.insert(
+            PKey::String("AggregateError".to_string()),
+            PropertyDescriptor::data(aggregate_error_ctor_val.clone()),
+        );
+        g.properties.insert(
+            PKey::String("Math".to_string()),
+            PropertyDescriptor::data(Value::Object(math)),
+        );
+
+        g.properties.insert(
+            PKey::String("JSON".to_string()),
+            PropertyDescriptor::data(Value::Object(json_obj)),
+        );
+        g.properties.insert(
+            PKey::String("Atomics".to_string()),
+            PropertyDescriptor::data(atomics_obj),
+        );
+        g.properties.insert(
+            PKey::String("ShadowRealm".to_string()),
+            PropertyDescriptor::data(shadowrealm_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Map".to_string()),
+            PropertyDescriptor::data(map_ctor_val),
+        );
+        g.properties.insert(
+            PKey::String("Set".to_string()),
+            PropertyDescriptor::data(set_ctor_val),
+        );
+
+        let insert_math_builtin = |name: &'static str, length: f64, func: BuiltinFn| -> Value {
+            let func_val = builtin_object(func, &function_proto_map);
+            set_builtin_name(&func_val, name);
+            set_builtin_length(&func_val, length);
+            func_val
+        };
+        g.properties.insert(
+            PKey::String("isNaN".to_string()),
+            PropertyDescriptor::data(insert_math_builtin(
+                "isNaN",
+                1.0,
+                Rc::new(|vm, args| {
+                    let v = args.first().cloned().unwrap_or(Value::Undefined);
+                    let n = vm.to_number_value(&v)?;
+                    Ok(Value::Bool(n.is_nan()))
+                }),
+            )),
+        );
+        g.properties.insert(
+            PKey::String("isFinite".to_string()),
+            PropertyDescriptor::data(insert_math_builtin(
+                "isFinite",
+                1.0,
+                Rc::new(|vm, args| {
+                    let v = args.first().cloned().unwrap_or(Value::Undefined);
+                    let n = vm.to_number_value(&v)?;
+                    Ok(Value::Bool(n.is_finite()))
+                }),
+            )),
+        );
+    }
 
     let get_ctor = |name: &str| -> Option<Value> {
         globals

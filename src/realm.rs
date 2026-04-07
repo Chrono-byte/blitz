@@ -37,7 +37,6 @@ use std::rc::Rc;
 #[derive(Clone, Debug, Default)]
 pub struct Intrinsics {
     // --- Constructors (callable objects) ---
-
     /// Object constructor for this realm.
     pub object_constructor: Option<Value>,
     /// Array constructor for this realm.
@@ -90,7 +89,6 @@ pub struct Intrinsics {
     pub typed_array_constructor: Option<Value>,
 
     // --- Prototypes ---
-
     /// Object prototype for this realm.
     pub object_prototype: Option<Value>,
     /// Array prototype for this realm.
@@ -129,7 +127,6 @@ pub struct Intrinsics {
     pub data_view_prototype: Option<Value>,
 
     // --- Iterators & generators ---
-
     /// Iterator prototype for this realm.
     pub iterator_prototype: Option<Value>,
     /// AsyncIterator prototype for this realm.

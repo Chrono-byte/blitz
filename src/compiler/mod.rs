@@ -29,7 +29,7 @@ use std::rc::Rc;
 
 #[cfg(test)]
 use {
-    crate::{ObjectData, Value, Vm, runtime_utils},
+    crate::{ObjectData, Value, Vm},
     std::cell::RefCell,
     std::collections::HashMap,
 };
