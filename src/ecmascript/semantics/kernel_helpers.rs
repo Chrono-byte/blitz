@@ -296,17 +296,17 @@ pub(crate) fn install_kernel_helpers(
                 "&" => {
                     let l = vm.to_int32_value(&lhs)?;
                     let r = vm.to_int32_value(&rhs)?;
-                    Value::Number(((l & r) as i32) as f64)
+                    Value::Number((l & r) as f64)
                 }
                 "|" => {
                     let l = vm.to_int32_value(&lhs)?;
                     let r = vm.to_int32_value(&rhs)?;
-                    Value::Number(((l | r) as i32) as f64)
+                    Value::Number((l | r) as f64)
                 }
                 "^" => {
                     let l = vm.to_int32_value(&lhs)?;
                     let r = vm.to_int32_value(&rhs)?;
-                    Value::Number(((l ^ r) as i32) as f64)
+                    Value::Number((l ^ r) as f64)
                 }
                 _ => Value::Undefined,
             };
