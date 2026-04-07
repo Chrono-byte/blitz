@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -6,7 +7,7 @@ use num_traits::ToPrimitive;
 use crate::runtime_utils::{
     builtin_object, char_code_at, char_index_to_byte_index, non_enum_data,
     require_object_coercible, set_builtin_length, set_builtin_name, static_builtin_arg_offset,
-    this_boolean_value, this_string_value, to_length, usize_to_f64,
+    this_boolean_value, this_string_value, this_string_value_ref, to_length, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
@@ -471,10 +472,17 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     );
     let string_index_of = builtin_object(
         Rc::new(|vm, args| {
-            let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-            require_object_coercible(vm, &receiver)?;
-            let haystack = vm.to_string(&receiver)?;
-            let needle = vm.to_string(args.get(1).unwrap_or(&Value::Undefined))?;
+            let undefined = Value::Undefined;
+            let receiver = args.first().unwrap_or(&undefined);
+            require_object_coercible(vm, receiver)?;
+            let haystack = this_string_value_ref(vm, receiver)?;
+            let haystack = haystack.as_ref();
+            let needle_undefined = Value::Undefined;
+            let needle_value = args.get(1).unwrap_or(&needle_undefined);
+            let needle = match needle_value {
+                Value::String(s) => Cow::Borrowed(s.as_str()),
+                _ => Cow::Owned(vm.to_string(needle_value)?),
+            };
             let len_chars = haystack.chars().count();
             let start = if let Some(pos) = args.get(2) {
                 let n = vm.to_number_value(pos)?;
@@ -489,8 +497,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
             if needle.is_empty() {
                 return Ok(Value::Number(usize_to_f64(start)));
             }
-            let start_byte = char_index_to_byte_index(&haystack, start);
-            if let Some(rel_byte) = haystack[start_byte..].find(&needle) {
+            let start_byte = char_index_to_byte_index(haystack, start);
+            if let Some(rel_byte) = haystack[start_byte..].find(needle.as_ref()) {
                 let absolute_byte = start_byte + rel_byte;
                 let absolute_char = haystack[..absolute_byte].chars().count();
                 return Ok(Value::Number(usize_to_f64(absolute_char)));
@@ -508,9 +516,11 @@ pub(crate) fn install_string_boolean_symbol_builtins(
 
     let string_char_code_at = builtin_object(
         Rc::new(|vm, args| {
-            let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-            require_object_coercible(vm, &receiver)?;
-            let s = vm.to_string(&receiver)?;
+            let undefined = Value::Undefined;
+            let receiver = args.first().unwrap_or(&undefined);
+            require_object_coercible(vm, receiver)?;
+            let s = this_string_value_ref(vm, receiver)?;
+            let s = s.as_ref();
             let pos = match args.get(1) {
                 Some(v) => vm.to_number_value(v)?,
                 None => 0.0,
@@ -522,7 +532,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
             } else {
                 pos.trunc().to_usize().unwrap_or(0)
             };
-            match char_code_at(&s, index) {
+            match char_code_at(s, index) {
                 Some(code) => Ok(Value::Number(f64::from(code))),
                 None => Ok(Value::Number(f64::NAN)),
             }
@@ -538,9 +548,11 @@ pub(crate) fn install_string_boolean_symbol_builtins(
 
     let string_slice = builtin_object(
         Rc::new(|vm, args| {
-            let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-            require_object_coercible(vm, &receiver)?;
-            let s = vm.to_string(&receiver)?;
+            let undefined = Value::Undefined;
+            let receiver = args.first().unwrap_or(&undefined);
+            require_object_coercible(vm, receiver)?;
+            let s = this_string_value_ref(vm, receiver)?;
+            let s = s.as_ref();
             let len = s.chars().count().to_isize().unwrap_or(isize::MAX);
             let to_int = |vm: &mut Vm, v: &Value| -> Result<isize, crate::errors::RuntimeError> {
                 let n = vm.to_number_value(v)?;
@@ -571,8 +583,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
             if to <= from {
                 return Ok(Value::String(String::new()));
             }
-            let start_byte = char_index_to_byte_index(&s, usize::try_from(from).unwrap_or(0));
-            let end_byte = char_index_to_byte_index(&s, usize::try_from(to).unwrap_or(0));
+            let start_byte = char_index_to_byte_index(s, usize::try_from(from).unwrap_or(0));
+            let end_byte = char_index_to_byte_index(s, usize::try_from(to).unwrap_or(0));
             Ok(Value::String(s[start_byte..end_byte].to_string()))
         }),
         function_proto_map,

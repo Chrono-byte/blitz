@@ -17,7 +17,7 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
         PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "eval");
             let src = match args.get(off) {
-                Some(Value::String(s)) => s.clone(),
+                Some(Value::String(s)) => s.as_str(),
                 Some(other) => return Ok(other.clone()),
                 None => return Ok(Value::Undefined),
             };
@@ -33,7 +33,7 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
                 }
                 return Err(vm.throw_reference_error(&format!("{trimmed} is not defined")));
             }
-            match vm.eval_expression_source(&src) {
+            match vm.eval_expression_source(src) {
                 Ok(value) => return Ok(value),
                 Err(err) => {
                     let msg = err.to_string();
@@ -42,10 +42,10 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
                     }
                 }
             }
-            let session = Parser::parse_source(&src)
+            let session = Parser::parse_source(src)
                 .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
             let prog = session.program();
-            let chunk = compiler::compile_oxc(prog, &src)
+            let chunk = compiler::compile_oxc(prog, src)
                 .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
             let mut eval_vm = Vm::new(vm.globals_rc());
             eval_vm.run(chunk)

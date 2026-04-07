@@ -52,6 +52,7 @@
 //! module-level comments in `src/module.rs`, `src/vm/runtime/async_tasks.rs`,
 //! and `src/vm/state.rs` for targeted recommendations.
 
+use std::borrow::Cow;
 use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -229,21 +230,37 @@ fn parse_float_string(text: &str) -> f64 {
 }
 
 pub(crate) fn global_parse_int(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
-    let value = args.first().cloned().unwrap_or(Value::Undefined);
-    let s = vm.to_string(&value)?;
+    let undefined = Value::Undefined;
+    let value = args.first().unwrap_or(&undefined);
     let radix_arg = if let Some(radix_value) = args.get(1) {
         Some(vm.to_int32_value(radix_value)?)
     } else {
         None
+    };
+    let s = match value {
+        Value::String(s) => s.as_str(),
+        _ => {
+            let s = vm.to_string(value)?;
+            return Ok(Value::Number(
+                parse_int_string(s.trim_start(), radix_arg).unwrap_or(f64::NAN),
+            ));
+        }
     };
     let parsed = parse_int_string(s.trim_start(), radix_arg).unwrap_or(f64::NAN);
     Ok(Value::Number(parsed))
 }
 
 pub(crate) fn global_parse_float(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
-    let value = args.first().cloned().unwrap_or(Value::Undefined);
-    let s = vm.to_string(&value)?;
-    let parsed = parse_float_string(&s);
+    let undefined = Value::Undefined;
+    let value = args.first().unwrap_or(&undefined);
+    let s = match value {
+        Value::String(s) => s.as_str(),
+        _ => {
+            let s = vm.to_string(value)?;
+            return Ok(Value::Number(parse_float_string(&s)));
+        }
+    };
+    let parsed = parse_float_string(s);
     Ok(Value::Number(parsed))
 }
 
@@ -281,7 +298,8 @@ fn is_uri_component_safe(ch: char, component: bool) -> bool {
 }
 
 fn percent_encode(text: &str, component: bool) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(text.len() * 3);
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for ch in text.chars() {
         if is_uri_component_safe(ch, component) {
             out.push(ch);
@@ -289,7 +307,8 @@ fn percent_encode(text: &str, component: bool) -> String {
             let mut buf = [0u8; 4];
             for b in ch.encode_utf8(&mut buf).as_bytes() {
                 out.push('%');
-                out.push_str(&format!("{:02X}", b));
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0x0F) as usize] as char);
             }
         }
     }
@@ -351,11 +370,12 @@ fn is_decode_uri_reserved_byte(byte: u8) -> bool {
 }
 
 pub(crate) fn global_decode_uri(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
-    let value = args.first().cloned().unwrap_or(Value::Undefined);
-    let s = match &value {
+    let undefined = Value::Undefined;
+    let value = args.first().unwrap_or(&undefined);
+    let s = match value {
         Value::String(s) => s.as_str(),
         _ => {
-            let s = vm.to_string(&value)?;
+            let s = vm.to_string(value)?;
             return Ok(Value::String(percent_decode(vm, &s, false)?));
         }
     };
@@ -366,11 +386,12 @@ pub(crate) fn global_decode_uri_component(
     vm: &mut Vm,
     args: &[Value],
 ) -> Result<Value, RuntimeError> {
-    let value = args.first().cloned().unwrap_or(Value::Undefined);
-    let s = match &value {
+    let undefined = Value::Undefined;
+    let value = args.first().unwrap_or(&undefined);
+    let s = match value {
         Value::String(s) => s.as_str(),
         _ => {
-            let s = vm.to_string(&value)?;
+            let s = vm.to_string(value)?;
             return Ok(Value::String(percent_decode(vm, &s, true)?));
         }
     };
@@ -378,18 +399,53 @@ pub(crate) fn global_decode_uri_component(
 }
 
 pub(crate) fn global_encode_uri(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
-    let value = args.first().cloned().unwrap_or(Value::Undefined);
-    let s = vm.to_string(&value)?;
-    Ok(Value::String(percent_encode(&s, false)))
+    let undefined = Value::Undefined;
+    let value = args.first().unwrap_or(&undefined);
+    let s = match value {
+        Value::String(s) => s.as_str(),
+        _ => {
+            let s = vm.to_string(value)?;
+            return Ok(Value::String(percent_encode(&s, false)));
+        }
+    };
+    Ok(Value::String(percent_encode(s, false)))
 }
 
 pub(crate) fn global_encode_uri_component(
     vm: &mut Vm,
     args: &[Value],
 ) -> Result<Value, RuntimeError> {
-    let value = args.first().cloned().unwrap_or(Value::Undefined);
-    let s = vm.to_string(&value)?;
-    Ok(Value::String(percent_encode(&s, true)))
+    let undefined = Value::Undefined;
+    let value = args.first().unwrap_or(&undefined);
+    let s = match value {
+        Value::String(s) => s.as_str(),
+        _ => {
+            let s = vm.to_string(value)?;
+            return Ok(Value::String(percent_encode(&s, true)));
+        }
+    };
+    Ok(Value::String(percent_encode(s, true)))
+}
+
+pub(crate) fn this_string_value_ref<'a>(
+    vm: &mut Vm,
+    value: &'a Value,
+) -> Result<Cow<'a, str>, RuntimeError> {
+    match value {
+        Value::String(s) => Ok(Cow::Borrowed(s)),
+        Value::Object(obj) => {
+            if let Some(PropertyDescriptor::Data { value, .. }) = obj
+                .borrow()
+                .properties
+                .get(&PropertyKey::String("[[PrimitiveValue]]".to_string()))
+                && let Value::String(s) = value
+            {
+                return Ok(Cow::Owned(s.clone()));
+            }
+            Err(vm.throw_type_error("String method called on incompatible receiver"))
+        }
+        _ => Err(vm.throw_type_error("String method called on incompatible receiver")),
+    }
 }
 
 #[cfg(test)]
@@ -527,15 +583,12 @@ pub(crate) fn collect_iterable_values(
             .map(|v| v.clone().unwrap_or(Value::Undefined))
             .collect()),
         other => {
-            let this_for_iter = other.clone();
-            let iterator_method = vm.get_property_host(
-                &this_for_iter,
-                &PropertyKey::Symbol(SymbolId::well_known_iterator()),
-            )?;
+            let iterator_method =
+                vm.get_property_host(other, &PropertyKey::Symbol(SymbolId::well_known_iterator()))?;
 
             let is_callable = Vm::is_callable_value(&iterator_method);
             if is_callable {
-                let iter_obj = vm.call_value_with_this(&iterator_method, &this_for_iter, &[])?;
+                let iter_obj = vm.call_value_with_this(&iterator_method, other, &[])?;
                 let mut items = Vec::new();
                 loop {
                     let next_fn =
@@ -558,7 +611,10 @@ pub(crate) fn collect_iterable_values(
                 let mut items = Vec::with_capacity(len);
                 for idx in 0..len {
                     let item =
-                        vm.get_property_host(other, &PropertyKey::String(idx.to_string()))?;
+                        vm.get_property_host(
+                            other,
+                            &PropertyKey::String(usize_to_decimal_string(idx)),
+                        )?;
                     items.push(item);
                 }
                 Ok(items)
@@ -864,19 +920,20 @@ pub(crate) fn reject_pending_promise(
 }
 
 pub(crate) fn shadowrealm_evaluate(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
-    let target = args.first().cloned().unwrap_or(Value::Undefined);
-    let record = require_shadow_realm_record(vm, &target)?;
+    let undefined = Value::Undefined;
+    let target = args.first().unwrap_or(&undefined);
+    let record = require_shadow_realm_record(vm, target)?;
     let source = match args.get(1) {
-        Some(Value::String(s)) => s.clone(),
+        Some(Value::String(s)) => s.as_str(),
         _ => {
             return Err(
                 vm.throw_type_error("ShadowRealm.prototype.evaluate requires a string argument")
             );
         }
     };
-    let session = Parser::parse_source(&source)
+    let session = Parser::parse_source(source)
         .map_err(|e| syntax_error(vm, format!("ShadowRealm evaluate parse: {}", e)))?;
-    let chunk = compiler::compile_oxc(session.program(), &source)
+    let chunk = compiler::compile_oxc(session.program(), source)
         .map_err(|e| syntax_error(vm, format!("ShadowRealm evaluate compile: {}", e)))?;
 
     // Run the code inside the ShadowRealm VM and clone the resulting value
@@ -933,10 +990,11 @@ pub(crate) fn shadowrealm_evaluate(vm: &mut Vm, args: &[Value]) -> Result<Value,
 }
 
 pub(crate) fn shadowrealm_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
-    let target = args.first().cloned().unwrap_or(Value::Undefined);
-    let record = require_shadow_realm_record(vm, &target)?;
-    let specifier = args.first().cloned().unwrap_or(Value::Undefined);
-    let specifier_str = vm.to_string(&specifier)?;
+    let undefined = Value::Undefined;
+    let target = args.first().unwrap_or(&undefined);
+    let record = require_shadow_realm_record(vm, target)?;
+    let specifier = args.first().unwrap_or(&undefined);
+    let specifier_str = vm.to_string(specifier)?;
     let export_name = match args.get(1) {
         Some(Value::String(s)) => s.clone(),
         _ => {
@@ -1092,8 +1150,9 @@ pub(crate) fn shadowrealm_import_value(vm: &mut Vm, args: &[Value]) -> Result<Va
 }
 
 pub(crate) fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
-    let specifier = args.first().cloned().unwrap_or(Value::Undefined);
-    let options = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let undefined = Value::Undefined;
+    let specifier = args.first().unwrap_or(&undefined);
+    let options = args.get(1).unwrap_or(&undefined);
 
     let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
         on_fulfilled: Vec::new(),
@@ -1101,7 +1160,7 @@ pub(crate) fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value,
     })));
     let promise_value = Value::Promise(Rc::clone(&promise));
 
-    let specifier_str = match vm.to_string(&specifier) {
+    let specifier_str = match vm.to_string(specifier) {
         Ok(s) => s,
         Err(err) => {
             let reason = vm
@@ -1893,7 +1952,7 @@ pub(crate) fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
         index_keys.dedup();
         let mut out: Vec<PropertyKey> = index_keys
             .into_iter()
-            .map(|idx| PropertyKey::String(idx.to_string()))
+            .map(|idx| PropertyKey::String(decimal_u64_string(idx)))
             .collect();
         out.extend(string_keys.into_iter().map(PropertyKey::String));
         out.extend(symbol_keys);
@@ -2049,7 +2108,7 @@ pub(crate) fn own_property_keys(obj: &Value) -> Vec<PropertyKey> {
         }
         Value::Array(arr, props) => {
             for idx in 0..arr.borrow().len() {
-                keys.push(PropertyKey::String(idx.to_string()));
+                keys.push(PropertyKey::String(usize_to_decimal_string(idx)));
             }
             for key in props.borrow().properties.keys() {
                 keys.push(key.clone());
@@ -2070,6 +2129,43 @@ pub(crate) fn property_key_to_value(key: &PropertyKey) -> Value {
         PropertyKey::String(name) => Value::String(name.clone()),
         PropertyKey::Symbol(id) => Value::Symbol(id.clone(), None),
     }
+}
+
+fn decimal_u64_string(value: u64) -> String {
+    let mut buf = [0u8; 20];
+    let mut n = value;
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let mut out = String::with_capacity(buf.len() - i);
+    out.extend(buf[i..].iter().map(|b| char::from(*b)));
+    out
+}
+
+fn decimal_u64_eq_str(value: u64, s: &str) -> bool {
+    let mut buf = [0u8; 20];
+    let mut n = value;
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    let digits = &buf[i..];
+    digits.len() == s.len() && digits.iter().zip(s.as_bytes()).all(|(a, b)| a == b)
+}
+
+pub(crate) fn usize_to_decimal_string(value: usize) -> String {
+    decimal_u64_string(value as u64)
 }
 
 pub(crate) fn array_from_values(values: Vec<Value>) -> Value {
@@ -2121,7 +2217,7 @@ pub(crate) fn canonical_index_key(s: &str) -> Option<u64> {
         return None;
     }
     let idx = s.parse::<u64>().ok()?;
-    if idx.to_string() != s {
+    if !decimal_u64_eq_str(idx, s) {
         return None;
     }
     Some(idx)
