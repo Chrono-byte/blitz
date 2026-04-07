@@ -43,8 +43,10 @@ use tokio::runtime::Builder;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use blitz::compiler;
-use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
-use blitz::{parser::Parser, runtime_utils, typecheck, value::Value, vm::Vm};
+use blitz::value::{
+    NativeFn, ObjectData, PropertyDescriptor, PropertyKey, Value, define_native_global,
+};
+use blitz::{parser::Parser, runtime_utils, typecheck, vm::Vm};
 
 #[derive(Clone, Copy, Default)]
 /// Result statistics for a test bucket (pass/fail/skip counts).
@@ -119,6 +121,13 @@ fn force_runner_gc() {
 fn path_has_segment(path: &Path, wanted: &str) -> bool {
     path.components()
         .any(|component| component.as_os_str() == wanted)
+}
+
+fn print_args(args: &[Value]) -> String {
+    args.iter()
+        .map(|v| format!("{}", v))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn select_files_to_run(
@@ -666,6 +675,11 @@ fn make_test_globals() -> Rc<RefCell<ObjectData>> {
         PropertyKey::String("globalThis".to_string()),
         PropertyDescriptor::data(global_this),
     );
+    let default_print: NativeFn = Rc::new(|_vm, _this, args| {
+        eprintln!("[test262 print] {}", print_args(args));
+        Ok(Value::Null)
+    });
+    define_native_global(&globals, "print", default_print);
     globals.borrow_mut().properties.insert(
         PropertyKey::String("NaN".to_string()),
         PropertyDescriptor::data(Value::Number(f64::NAN)),
@@ -1086,20 +1100,18 @@ fn run_test_file(
         let done_state: Rc<RefCell<Option<Option<String>>>> = Rc::new(RefCell::new(None));
         if is_async {
             let done_state_for_print = Rc::clone(&done_state);
-            vm.globals_rc().borrow_mut().properties.insert(
-                PropertyKey::String("print".to_string()),
-                PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
-                    let s = print_args(args);
-                    if done_state_for_print.borrow().is_none()
-                        && let Some(marker) = is_async_done_marker(&s)
-                    {
-                        *done_state_for_print.borrow_mut() = Some(marker);
-                        return Ok(Value::Null);
-                    }
-                    eprintln!("[test262 print] {}", s);
-                    Ok(Value::Null)
-                }))),
-            );
+            let async_print: NativeFn = Rc::new(move |_vm, _this, args| {
+                let s = print_args(args);
+                if done_state_for_print.borrow().is_none()
+                    && let Some(marker) = is_async_done_marker(&s)
+                {
+                    *done_state_for_print.borrow_mut() = Some(marker);
+                    return Ok(Value::Null);
+                }
+                eprintln!("[test262 print] {}", s);
+                Ok(Value::Null)
+            });
+            define_native_global(&vm.globals_rc(), "print", async_print);
         }
 
         // Evaluate harness files unless `raw`: compile & run them into the provided VM.

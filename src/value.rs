@@ -375,13 +375,21 @@ pub enum Value {
     Promise(Rc<RefCell<PromiseState>>),
 }
 
+/// Host-provided native function signature.
+///
+/// The extra `Value` argument is the current receiver (`this`) and mirrors the
+/// signature used by ECMAScript when calling host-defined functions.
+pub type NativeFn =
+    Rc<dyn Fn(&mut crate::vm::Vm, Value, &[Value]) -> Result<Value, crate::errors::RuntimeError>>;
+
 /// Built-in function type.
 ///
 /// Builtins are invoked by the VM and receive a mutable reference to the
 /// running `Vm` so they can perform VM-level operations (for example, to
 /// call closures or manipulate frames). They return `Result<Value, RuntimeError>`
 /// so they can signal runtime errors back to the VM using the structured
-/// error type defined in `crate::errors`.
+/// error type defined in `crate::errors`. The argument slice already has the
+/// receiver (`this`) as the first element when invoked via `Vm::call_with_this`.
 pub type BuiltinFn =
     Rc<dyn Fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, crate::errors::RuntimeError>>;
 
@@ -490,6 +498,24 @@ impl Value {
             _ => false,
         }
     }
+}
+
+/// Wrap a host `NativeFn` so it can be called as a builtin by the VM.
+pub fn native_to_builtin(native: NativeFn) -> BuiltinFn {
+    Rc::new(move |vm, args| {
+        let mut iter = args.iter();
+        let receiver = iter.next().cloned().unwrap_or(Value::Undefined);
+        let rest: Vec<Value> = iter.cloned().collect();
+        native(vm, receiver, &rest)
+    })
+}
+
+/// Install a host-provided native function onto the specified global object.
+pub fn define_native_global(globals: &Rc<RefCell<ObjectData>>, name: &str, native: NativeFn) {
+    globals.borrow_mut().properties.insert(
+        PropertyKey::String(name.to_string()),
+        PropertyDescriptor::data(Value::Builtin(native_to_builtin(native))),
+    );
 }
 
 impl std::fmt::Display for Value {

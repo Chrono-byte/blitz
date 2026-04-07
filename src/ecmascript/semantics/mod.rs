@@ -9,10 +9,10 @@ use std::rc::Rc;
 use crate::ecmascript::builtins;
 use crate::runtime_utils::{
     array_from_values, builtin_object, char_index_to_byte_index, descriptor_value_from_descriptor,
-    global_parse_float, global_parse_int, host_error_object, is_byte_offset_aligned, non_enum_data,
-    own_enumerable_keys, own_property_descriptor, own_property_keys, property_key_to_value,
-    set_builtin_length, set_builtin_name, static_builtin_arg_offset, strict_equal, syntax_error,
-    to_index, to_length, usize_to_f64,
+    host_error_object, is_byte_offset_aligned, non_enum_data, own_enumerable_keys,
+    own_property_descriptor, own_property_keys, property_key_to_value, set_builtin_length,
+    set_builtin_name, static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length,
+    usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{Parser, Vm, compiler};
@@ -3054,7 +3054,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     // Ensure `globalThis` aliases the actual global object.
     let global_this_key = PKey::String("globalThis".to_string());
     g.properties.insert(
-        global_this_key.clone(),
+        global_this_key,
         PropertyDescriptor::data(Value::Object(Rc::clone(globals))),
     );
     // ECMAScript global constants (only insert if not already present)
