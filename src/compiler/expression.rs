@@ -975,11 +975,6 @@ impl super::Compiler {
                             ));
                         }
                     },
-                    _ => {
-                        return Err(crate::errors::CompilerError::from(
-                            "unsupported assignment operator",
-                        ));
-                    }
                 }
             }
             OExpr::UnaryExpression(u) => match u.operator {
@@ -1454,10 +1449,9 @@ impl super::Compiler {
                         // Just compile the inner expression, as we don't have non-null assertions
                         self.compile_expr_oast(&n.expression)?;
                     }
-                    _ => self.emit(Op::Undefined, LINE),
                 }
             }
-            OExpr::Super(s) => {
+            OExpr::Super(_s) => {
                 self.emit(Op::GetThis, LINE);
                 self.emit_get_global_name("super");
                 self.emit(Op::GetProperty, LINE);

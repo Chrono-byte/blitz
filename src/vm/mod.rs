@@ -16,6 +16,8 @@
 /// Runtime helpers split into structured submodules.
 pub mod runtime;
 pub mod state;
+pub mod stack;
 
 pub use runtime::same_value;
 pub use state::Vm;
+pub use stack::{CallStack, HandlerStack, ReferenceRecord, ReferenceStack};
