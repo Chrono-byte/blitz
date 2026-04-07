@@ -2,7 +2,7 @@ use crate::bytecode::{Chunk, FunctionProto, OP_COUNT, Op};
 use crate::environment::EnvironmentRecord;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
-use crate::realm::Realm;
+use crate::realm::{Intrinsics, Realm};
 use crate::runtime_utils::array_from_values;
 use crate::value::{
     BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
@@ -75,7 +75,8 @@ impl Vm {
             opcode_counts: [0; OP_COUNT],
             run_started_at: None,
         };
-        vm.populate_realm_intrinsics();
+        let intrinsics = crate::runtime_utils::install_minimal_kernel_constructors(&globals);
+        vm.populate_realm_intrinsics(intrinsics);
         vm
     }
 
@@ -444,85 +445,17 @@ impl Vm {
     /// This ensures every VM starts with a fully populated global object and
     /// intrinsic constructors before any bytecode executes.
     pub fn with_runtime(mut self) -> Self {
-        // Install minimal kernel constructors/helpers onto the globals map.
-        // This is defensive: the installer will only populate missing keys
-        // and will not override host-provided helpers.
-        crate::runtime_utils::install_minimal_kernel_constructors(&self.globals);
-        // Populate realm intrinsics from the globals that were just installed.
-        self.populate_realm_intrinsics();
         self
     }
 
     /// Populate the Realm's intrinsics table from the globals.
     ///
     /// This extracts canonical constructor/prototype references from the
-    /// globals map and stores them in the Realm's intrinsics table. Called
-    /// after `install_minimal_kernel_constructors` to wire up the Realm.
-    fn populate_realm_intrinsics(&mut self) {
-        // Helper: look up a constructor from globals
-        let get_ctor = |globals: &Rc<RefCell<ObjectData>>, name: &str| -> Option<Value> {
-            globals
-                .borrow()
-                .properties
-                .get(&PropertyKey::String(name.to_string()))
-                .and_then(|d| match d {
-                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                    _ => None,
-                })
-        };
-
-        // Helper: extract prototype from a constructor via free-function get_property
-        let get_proto = |ctor: &Value| -> Option<Value> {
-            get_property(ctor, &PropertyKey::String("prototype".to_string()), 0)
-                .ok()
-                .filter(|v| !matches!(v, Value::Null | Value::Undefined))
-        };
-
-        let g = &self.globals;
-
-        let obj_ctor = get_ctor(g, "Object");
-        let arr_ctor = get_ctor(g, "Array");
-        let fn_ctor = get_ctor(g, "Function");
-        let str_ctor = get_ctor(g, "String");
-        let sym_ctor = get_ctor(g, "Symbol");
-        let err_ctor = get_ctor(g, "Error");
-        let te_ctor = get_ctor(g, "TypeError");
-        let re_ctor = get_ctor(g, "RangeError");
-        let refe_ctor = get_ctor(g, "ReferenceError");
-        let se_ctor = get_ctor(g, "SyntaxError");
-        let prom_ctor = get_ctor(g, "Promise");
-        let date_ctor = get_ctor(g, "Date");
-        let map_ctor = get_ctor(g, "Map");
-        let num_ctor = get_ctor(g, "Number");
-        let bool_ctor = get_ctor(g, "Boolean");
-        let bigint_ctor = get_ctor(g, "BigInt");
-
-        self.realm.intrinsics.object_constructor = obj_ctor.clone();
-        self.realm.intrinsics.object_prototype = obj_ctor.as_ref().and_then(get_proto);
-        self.realm.intrinsics.array_constructor = arr_ctor.clone();
-        self.realm.intrinsics.array_prototype = arr_ctor.as_ref().and_then(get_proto);
-        self.realm.intrinsics.function_constructor = fn_ctor.clone();
-        self.realm.intrinsics.function_prototype = fn_ctor.as_ref().and_then(get_proto);
-        self.realm.intrinsics.string_constructor = str_ctor.clone();
-        self.realm.intrinsics.string_prototype = str_ctor.as_ref().and_then(get_proto);
-        self.realm.intrinsics.symbol_constructor = sym_ctor.clone();
-        self.realm.intrinsics.symbol_prototype = sym_ctor.as_ref().and_then(get_proto);
-        self.realm.intrinsics.error_constructor = err_ctor.clone();
-        self.realm.intrinsics.error_prototype = err_ctor.as_ref().and_then(get_proto);
-        self.realm.intrinsics.type_error_constructor = te_ctor;
-        self.realm.intrinsics.range_error_constructor = re_ctor;
-        self.realm.intrinsics.reference_error_constructor = refe_ctor;
-        self.realm.intrinsics.syntax_error_constructor = se_ctor;
-        self.realm.intrinsics.promise_constructor = prom_ctor.clone();
-        self.realm.intrinsics.promise_prototype = prom_ctor.as_ref().and_then(get_proto);
-        self.realm.intrinsics.date_constructor = date_ctor.clone();
-        self.realm.intrinsics.date_prototype = date_ctor.as_ref().and_then(get_proto);
-        self.realm.intrinsics.map_constructor = map_ctor.clone();
-        self.realm.intrinsics.map_prototype = map_ctor.as_ref().and_then(get_proto);
-        self.realm.intrinsics.number_constructor = num_ctor.clone();
-        self.realm.intrinsics.number_prototype = num_ctor.as_ref().and_then(get_proto);
-        self.realm.intrinsics.boolean_prototype = bool_ctor.as_ref().and_then(get_proto);
-        self.realm.intrinsics.bigint_prototype = bigint_ctor.as_ref().and_then(get_proto);
+    /// Populate the Realm's intrinsics table.
+    ///
+    /// This records the kernel-provided intrinsics on the realm record.
+    fn populate_realm_intrinsics(&mut self, intrinsics: Intrinsics) {
+        self.realm.set_intrinsics(intrinsics);
     }
 
     /// Provide mutable access to the per-VM module loader, creating it if missing.
@@ -6265,7 +6198,13 @@ mod tests {
     use std::rc::Rc;
 
     fn test_globals() -> Rc<RefCell<ObjectData>> {
-        Rc::new(RefCell::new(ObjectData::new()))
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        globals.borrow_mut().properties.insert(
+            PropertyKey::String("globalThis".to_string()),
+            PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+        );
+        runtime_utils::install_minimal_kernel_constructors(&globals);
+        globals
     }
 
     #[test]
@@ -6476,7 +6415,6 @@ mod tests {
         let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
         let globals = test_globals();
-        runtime_utils::install_minimal_kernel_constructors(&globals);
         let mut vm = Vm::new(Rc::clone(&globals));
         let result = vm.run(chunk).expect("run ok");
 
@@ -6498,7 +6436,6 @@ mod tests {
         let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
         let globals = test_globals();
-        runtime_utils::install_minimal_kernel_constructors(&globals);
         let mut vm = Vm::new(Rc::clone(&globals));
         let result = vm.run(chunk).expect("run ok");
 
@@ -6591,7 +6528,6 @@ mod tests {
         let program = session.program();
         let chunk = compiler::compile(program, session.source()).expect("compile ok");
         let globals = test_globals();
-        runtime_utils::install_minimal_kernel_constructors(&globals);
         let mut vm = Vm::new(globals);
         let err = vm.run(chunk).expect_err("run should fail for TDZ read");
         let msg = err.to_string();
@@ -6610,7 +6546,6 @@ mod tests {
         let program = session.program();
         let chunk = compiler::compile(program, session.source()).expect("compile ok");
         let globals = test_globals();
-        runtime_utils::install_minimal_kernel_constructors(&globals);
         let mut vm = Vm::new(globals);
         let err = vm
             .run(chunk)
@@ -6631,7 +6566,6 @@ mod tests {
         let program = session.program();
         let chunk = compiler::compile(program, session.source()).expect("compile ok");
         let globals = test_globals();
-        runtime_utils::install_minimal_kernel_constructors(&globals);
         let mut vm = Vm::new(Rc::clone(&globals));
         vm.run(chunk).expect("run ok");
         assert!(matches!(vm.get_global("out"), Some(Value::String(s)) if s == "outer"));
@@ -6654,7 +6588,6 @@ mod tests {
         let program = session.program();
         let chunk = compiler::compile(program, session.source()).expect("compile ok");
         let globals = test_globals();
-        runtime_utils::install_minimal_kernel_constructors(&globals);
         let mut vm = Vm::new(Rc::clone(&globals));
         vm.run(chunk).expect("run ok");
         assert!(matches!(vm.get_global("out"), Some(Value::Undefined)));
@@ -6752,7 +6685,6 @@ mod tests {
         let session = Parser::parse_source(src).expect("parse ok");
         let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
         let globals = test_globals();
-        runtime_utils::install_minimal_kernel_constructors(&globals);
         let mut vm = Vm::new(globals);
         let err = vm.run(chunk).expect_err("reduce should throw");
         assert!(
@@ -6774,7 +6706,6 @@ mod tests {
         let session = Parser::parse_source(src).expect("parse ok");
         let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
         let globals = test_globals();
-        runtime_utils::install_minimal_kernel_constructors(&globals);
         let mut vm = Vm::new(Rc::clone(&globals));
         vm.run(chunk).expect("run ok");
         match vm.get_global("keys") {

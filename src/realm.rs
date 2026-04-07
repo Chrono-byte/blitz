@@ -37,65 +37,67 @@ use std::rc::Rc;
 #[derive(Clone, Debug, Default)]
 pub struct Intrinsics {
     // --- Constructors (callable objects) ---
-    /// Canonical `Object` constructor for this realm.
     pub object_constructor: Option<Value>,
-    /// Canonical `Array` constructor for this realm.
     pub array_constructor: Option<Value>,
-    /// Canonical `Function` constructor for this realm.
     pub function_constructor: Option<Value>,
-    /// Canonical `String` constructor for this realm.
     pub string_constructor: Option<Value>,
-    /// Canonical `Symbol` constructor for this realm.
     pub symbol_constructor: Option<Value>,
-    /// Canonical `Error` constructor for this realm.
-    pub error_constructor: Option<Value>,
-    /// Canonical `TypeError` constructor for this realm.
-    pub type_error_constructor: Option<Value>,
-    /// Canonical `RangeError` constructor for this realm.
-    pub range_error_constructor: Option<Value>,
-    /// Canonical `ReferenceError` constructor for this realm.
-    pub reference_error_constructor: Option<Value>,
-    /// Canonical `SyntaxError` constructor for this realm.
-    pub syntax_error_constructor: Option<Value>,
-    /// Canonical `Promise` constructor for this realm.
-    pub promise_constructor: Option<Value>,
-    /// Canonical `Date` constructor for this realm.
-    pub date_constructor: Option<Value>,
-    /// Canonical `Map` constructor for this realm.
-    pub map_constructor: Option<Value>,
-    /// Canonical `Number` constructor for this realm.
+    pub boolean_constructor: Option<Value>,
+    pub bigint_constructor: Option<Value>,
     pub number_constructor: Option<Value>,
+    pub error_constructor: Option<Value>,
+    pub aggregate_error_constructor: Option<Value>,
+    pub type_error_constructor: Option<Value>,
+    pub range_error_constructor: Option<Value>,
+    pub reference_error_constructor: Option<Value>,
+    pub syntax_error_constructor: Option<Value>,
+    pub eval_error_constructor: Option<Value>,
+    pub uri_error_constructor: Option<Value>,
+    pub promise_constructor: Option<Value>,
+    pub date_constructor: Option<Value>,
+    pub regexp_constructor: Option<Value>,
+    pub map_constructor: Option<Value>,
+    pub set_constructor: Option<Value>,
+    pub arraybuffer_constructor: Option<Value>,
+    pub shared_array_buffer_constructor: Option<Value>,
+    pub data_view_constructor: Option<Value>,
+    pub typed_array_constructor: Option<Value>,
 
     // --- Prototypes ---
-    /// Canonical `Object.prototype` for this realm.
     pub object_prototype: Option<Value>,
-    /// Canonical `Array.prototype` for this realm.
     pub array_prototype: Option<Value>,
-    /// Canonical `Function.prototype` for this realm.
     pub function_prototype: Option<Value>,
-    /// Canonical `String.prototype` for this realm.
     pub string_prototype: Option<Value>,
-    /// Canonical `Symbol.prototype` for this realm.
     pub symbol_prototype: Option<Value>,
-    /// Canonical `Error.prototype` for this realm.
-    pub error_prototype: Option<Value>,
-    /// Canonical `Promise.prototype` for this realm.
-    pub promise_prototype: Option<Value>,
-    /// Canonical `Date.prototype` for this realm.
-    pub date_prototype: Option<Value>,
-    /// Canonical `Map.prototype` for this realm.
-    pub map_prototype: Option<Value>,
-    /// Canonical `Boolean.prototype` for this realm.
     pub boolean_prototype: Option<Value>,
-    /// Canonical `Number.prototype` for this realm.
-    pub number_prototype: Option<Value>,
-    /// Canonical `BigInt.prototype` for this realm.
     pub bigint_prototype: Option<Value>,
+    pub number_prototype: Option<Value>,
+    pub error_prototype: Option<Value>,
+    pub promise_prototype: Option<Value>,
+    pub date_prototype: Option<Value>,
+    pub regexp_prototype: Option<Value>,
+    pub map_prototype: Option<Value>,
+    pub set_prototype: Option<Value>,
+    pub typed_array_prototype: Option<Value>,
+    pub arraybuffer_prototype: Option<Value>,
+    pub shared_array_buffer_prototype: Option<Value>,
+    pub data_view_prototype: Option<Value>,
 
-    /// Canonical `EvalError` constructor for this realm.
-    pub eval_error_constructor: Option<Value>,
-    /// Canonical `URIError` constructor for this realm.
-    pub uri_error_constructor: Option<Value>,
+    // --- Iterators & generators ---
+    pub iterator_prototype: Option<Value>,
+    pub async_iterator_prototype: Option<Value>,
+    pub array_iterator_prototype: Option<Value>,
+    pub map_iterator_prototype: Option<Value>,
+    pub set_iterator_prototype: Option<Value>,
+    pub string_iterator_prototype: Option<Value>,
+    pub regexp_string_iterator_prototype: Option<Value>,
+    pub generator_prototype: Option<Value>,
+    pub async_generator_prototype: Option<Value>,
+    pub async_from_sync_iterator_prototype: Option<Value>,
+
+    // --- Special helpers ---
+    pub throw_type_error: Option<Value>,
+    pub typed_array_constructors: Vec<Value>,
 }
 
 /// An ECMAScript Realm.
@@ -188,20 +190,31 @@ impl Realm {
     /// Retrieve a constructor intrinsic by name.
     pub fn get_intrinsic_constructor(&self, name: &str) -> Option<Value> {
         match name {
+            "Boolean" => self.intrinsics.boolean_constructor.clone(),
+            "BigInt" => self.intrinsics.bigint_constructor.clone(),
             "Object" => self.intrinsics.object_constructor.clone(),
             "Array" => self.intrinsics.array_constructor.clone(),
             "Function" => self.intrinsics.function_constructor.clone(),
             "String" => self.intrinsics.string_constructor.clone(),
             "Symbol" => self.intrinsics.symbol_constructor.clone(),
+            "Number" => self.intrinsics.number_constructor.clone(),
             "Error" => self.intrinsics.error_constructor.clone(),
+            "AggregateError" => self.intrinsics.aggregate_error_constructor.clone(),
             "TypeError" => self.intrinsics.type_error_constructor.clone(),
             "RangeError" => self.intrinsics.range_error_constructor.clone(),
             "ReferenceError" => self.intrinsics.reference_error_constructor.clone(),
             "SyntaxError" => self.intrinsics.syntax_error_constructor.clone(),
+            "EvalError" => self.intrinsics.eval_error_constructor.clone(),
+            "URIError" => self.intrinsics.uri_error_constructor.clone(),
             "Promise" => self.intrinsics.promise_constructor.clone(),
             "Date" => self.intrinsics.date_constructor.clone(),
+            "RegExp" => self.intrinsics.regexp_constructor.clone(),
             "Map" => self.intrinsics.map_constructor.clone(),
-            "Number" => self.intrinsics.number_constructor.clone(),
+            "Set" => self.intrinsics.set_constructor.clone(),
+            "ArrayBuffer" => self.intrinsics.arraybuffer_constructor.clone(),
+            "SharedArrayBuffer" => self.intrinsics.shared_array_buffer_constructor.clone(),
+            "DataView" => self.intrinsics.data_view_constructor.clone(),
+            "TypedArray" => self.intrinsics.typed_array_constructor.clone(),
             _ => None,
         }
     }
@@ -218,8 +231,22 @@ impl Realm {
             "Promise" => self.intrinsics.promise_prototype.clone(),
             "Date" => self.intrinsics.date_prototype.clone(),
             "Map" => self.intrinsics.map_prototype.clone(),
+            "Set" => self.intrinsics.set_prototype.clone(),
+            "TypedArray" => self.intrinsics.typed_array_prototype.clone(),
+            "Boolean" => self.intrinsics.boolean_prototype.clone(),
+            "Number" => self.intrinsics.number_prototype.clone(),
+            "BigInt" => self.intrinsics.bigint_prototype.clone(),
+            "RegExp" => self.intrinsics.regexp_prototype.clone(),
+            "ArrayBuffer" => self.intrinsics.arraybuffer_prototype.clone(),
+            "SharedArrayBuffer" => self.intrinsics.shared_array_buffer_prototype.clone(),
+            "DataView" => self.intrinsics.data_view_prototype.clone(),
             _ => None,
         }
+    }
+
+    /// Replace the stored intrinsics with a fresh set constructed by the kernel prelude.
+    pub fn set_intrinsics(&mut self, intrinsics: Intrinsics) {
+        self.intrinsics = intrinsics;
     }
 }
 

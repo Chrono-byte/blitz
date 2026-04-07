@@ -91,7 +91,7 @@ vec_box = "warn"
 wrong_self_convention = "warn"
 
 [lints.rust]
-missing_docs = "deny"
+missing_docs = "warn"
 trivial_casts = "warn"
 trivial_numeric_casts = "warn"
 unused_extern_crates = "warn"

@@ -63,6 +63,7 @@ use crate::compiler;
 use crate::compiler::ModuleContext;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::parser::Parser;
+use crate::realm::Intrinsics;
 use crate::value::SymbolId;
 use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
@@ -559,8 +560,8 @@ pub(crate) fn builtin_object(f: BuiltinFn, function_proto: &Rc<RefCell<ObjectDat
 }
 
 /// Delegate to the ECMAScript semantics module for builtin wiring.
-pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
-    crate::ecmascript::semantics::install_minimal_kernel_constructors(globals);
+pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) -> Intrinsics {
+    crate::ecmascript::semantics::install_minimal_kernel_constructors(globals)
 }
 
 thread_local! {
@@ -576,7 +577,6 @@ pub(crate) struct ShadowRealmRecord {
 impl ShadowRealmRecord {
     pub(crate) fn new(base_dir: PathBuf) -> Self {
         let globals = Rc::new(RefCell::new(ObjectData::new()));
-        install_minimal_kernel_constructors(&globals);
         Self {
             vm: RefCell::new(Vm::new(Rc::clone(&globals))),
             base_dir,

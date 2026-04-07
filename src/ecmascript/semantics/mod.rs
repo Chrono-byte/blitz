@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ecmascript::builtins;
+use crate::realm::Intrinsics;
 use crate::runtime_utils::{
     array_from_values, builtin_object, char_index_to_byte_index, descriptor_value_from_descriptor,
     host_error_object, is_byte_offset_aligned, non_enum_data, own_enumerable_keys,
@@ -20,7 +21,7 @@ use crate::{Parser, Vm, compiler};
 mod atomics;
 mod shadowrealm;
 
-pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
+pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) -> Intrinsics {
     use PropertyKey as PKey;
 
     let object_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
@@ -33,6 +34,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     function_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
         PropertyDescriptor::data(Value::Object(Rc::clone(&function_proto_map))),
+    );
+
+    let throw_type_error_val = builtin_object(
+        Rc::new(|vm, _args| Err(vm.throw_type_error("ThrowTypeError"))),
+        &function_proto_map,
     );
 
     let object_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
@@ -3313,81 +3319,113 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             PropertyDescriptor::data(atomics_obj),
         );
     }
-}
 
-fn ensure_stub_prototype(
-    name: &'static str,
-    globals: &mut ObjectData,
-    object_proto: &Rc<RefCell<ObjectData>>,
-    cache: &mut HashMap<&'static str, Value>,
-) -> Value {
-    if let Some(PropertyDescriptor::Data { value, .. }) = globals
-        .properties
-        .get(&PropertyKey::String(name.to_string()))
-    {
-        cache.insert(name, value.clone());
-        return value.clone();
-    }
+    drop(g);
 
-    let proto_obj = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-        Rc::clone(object_proto),
-    ))));
-    let proto_val = Value::Object(Rc::clone(&proto_obj));
-    globals.properties.insert(
-        PropertyKey::String(name.to_string()),
-        PropertyDescriptor::data(proto_val.clone()),
-    );
-    cache.insert(name, proto_val.clone());
-    proto_val
-}
+    let get_ctor = |name: &str| -> Option<Value> {
+        globals
+            .borrow()
+            .properties
+            .get(&PropertyKey::String(name.to_string()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+    };
 
-fn insert_stub_constructor(
-    globals: &mut ObjectData,
-    name: &'static str,
-    prototype: Option<Value>,
-    function_proto: &Rc<RefCell<ObjectData>>,
-    object_proto: &Rc<RefCell<ObjectData>>,
-    stub_fn: BuiltinFn,
-) {
-    let key = PropertyKey::String(name.to_string());
-    if globals.properties.contains_key(&key) {
-        return;
-    }
+    let get_proto = |ctor: &Value| -> Option<Value> {
+        match ctor {
+            Value::BuiltinObject(_, props) => props
+                .borrow()
+                .properties
+                .get(&PropertyKey::String("prototype".to_string()))
+                .and_then(|d| match d {
+                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                    _ => None,
+                }),
+            _ => None,
+        }
+    };
 
-    let ctor_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-        Rc::clone(function_proto),
-    ))));
-    let proto_val = prototype.unwrap_or_else(|| {
-        Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
-            Value::Object(Rc::clone(object_proto)),
-        ))))
-    });
-    ctor_map.borrow_mut().properties.insert(
-        PropertyKey::String("prototype".to_string()),
-        PropertyDescriptor::data(proto_val),
-    );
-    let ctor = Value::BuiltinObject(stub_fn, Rc::clone(&ctor_map));
-    globals
-        .properties
-        .insert(key, PropertyDescriptor::data(ctor));
-}
+    let typed_array_names = [
+        "Uint8Array",
+        "Int8Array",
+        "Uint16Array",
+        "Int16Array",
+        "Uint32Array",
+        "Int32Array",
+        "Float32Array",
+        "Float64Array",
+        "Uint8ClampedArray",
+        "BigInt64Array",
+        "BigUint64Array",
+    ];
 
-fn insert_stub_object(
-    globals: &mut ObjectData,
-    name: &'static str,
-    object_proto: &Rc<RefCell<ObjectData>>,
-) {
-    let key = PropertyKey::String(name.to_string());
-    if globals.properties.contains_key(&key) {
-        return;
-    }
+    let typed_array_constructors: Vec<Value> = typed_array_names
+        .iter()
+        .filter_map(|name| get_ctor(name))
+        .collect();
 
-    let stub_obj = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-        Rc::clone(object_proto),
-    ))));
-    globals
-        .properties
-        .insert(key, PropertyDescriptor::data(Value::Object(stub_obj)));
+    let intrinsics = Intrinsics {
+        object_constructor: get_ctor("Object"),
+        array_constructor: get_ctor("Array"),
+        function_constructor: get_ctor("Function"),
+        string_constructor: get_ctor("String"),
+        symbol_constructor: get_ctor("Symbol"),
+        boolean_constructor: get_ctor("Boolean"),
+        bigint_constructor: get_ctor("BigInt"),
+        number_constructor: get_ctor("Number"),
+        error_constructor: get_ctor("Error"),
+        aggregate_error_constructor: get_ctor("AggregateError"),
+        type_error_constructor: get_ctor("TypeError"),
+        range_error_constructor: get_ctor("RangeError"),
+        reference_error_constructor: get_ctor("ReferenceError"),
+        syntax_error_constructor: get_ctor("SyntaxError"),
+        eval_error_constructor: get_ctor("EvalError"),
+        uri_error_constructor: get_ctor("URIError"),
+        promise_constructor: get_ctor("Promise"),
+        date_constructor: get_ctor("Date"),
+        regexp_constructor: get_ctor("RegExp"),
+        map_constructor: get_ctor("Map"),
+        set_constructor: get_ctor("Set"),
+        arraybuffer_constructor: get_ctor("ArrayBuffer"),
+        shared_array_buffer_constructor: get_ctor("SharedArrayBuffer"),
+        data_view_constructor: get_ctor("DataView"),
+        typed_array_constructor: get_ctor("TypedArray"),
+        object_prototype: Some(Value::Object(Rc::clone(&object_proto_map))),
+        array_prototype: Some(Value::Object(Rc::clone(&array_proto_map))),
+        function_prototype: Some(Value::Object(Rc::clone(&function_proto_map))),
+        string_prototype: get_ctor("String").and_then(|ctor| get_proto(&ctor)),
+        symbol_prototype: get_ctor("Symbol").and_then(|ctor| get_proto(&ctor)),
+        boolean_prototype: get_ctor("Boolean").and_then(|ctor| get_proto(&ctor)),
+        bigint_prototype: get_ctor("BigInt").and_then(|ctor| get_proto(&ctor)),
+        number_prototype: get_ctor("Number").and_then(|ctor| get_proto(&ctor)),
+        error_prototype: get_ctor("Error").and_then(|ctor| get_proto(&ctor)),
+        promise_prototype: get_ctor("Promise").and_then(|ctor| get_proto(&ctor)),
+        date_prototype: get_ctor("Date").and_then(|ctor| get_proto(&ctor)),
+        regexp_prototype: get_ctor("RegExp").and_then(|ctor| get_proto(&ctor)),
+        map_prototype: get_ctor("Map").and_then(|ctor| get_proto(&ctor)),
+        set_prototype: get_ctor("Set").and_then(|ctor| get_proto(&ctor)),
+        typed_array_prototype: Some(Value::Object(Rc::clone(&typedarray_proto_map))),
+        arraybuffer_prototype: get_ctor("ArrayBuffer").and_then(|ctor| get_proto(&ctor)),
+        shared_array_buffer_prototype: get_ctor("SharedArrayBuffer")
+            .and_then(|ctor| get_proto(&ctor)),
+        data_view_prototype: get_ctor("DataView").and_then(|ctor| get_proto(&ctor)),
+        iterator_prototype: None,
+        async_iterator_prototype: None,
+        array_iterator_prototype: Some(Value::Object(Rc::clone(&array_iterator_proto))),
+        map_iterator_prototype: None,
+        set_iterator_prototype: None,
+        string_iterator_prototype: None,
+        regexp_string_iterator_prototype: None,
+        generator_prototype: None,
+        async_generator_prototype: None,
+        async_from_sync_iterator_prototype: None,
+        throw_type_error: Some(throw_type_error_val.clone()),
+        typed_array_constructors,
+    };
+
+    intrinsics
 }
 
 /// Returns the UTF-16 code unit at the given index, if one exists.

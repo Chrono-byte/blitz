@@ -91,8 +91,6 @@ fn main() -> Result<(), blitz::errors::Error> {
         );
     }
 
-    runtime_utils::install_minimal_kernel_constructors(&globals);
-
     // Parse CLI early so clap can handle --help/--version before doing work.
     let cli = Cli::parse();
 
@@ -170,7 +168,6 @@ mod tests {
             PropertyKey::String("globalThis".to_string()),
             PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
         );
-        runtime_utils::install_minimal_kernel_constructors(&globals);
         globals
     }
 

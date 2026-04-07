@@ -811,7 +811,6 @@ fn for_of_over_array_executes() {
         crate::value::PropertyKey::String("globalThis".to_string()),
         crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
     );
-    runtime_utils::install_minimal_kernel_constructors(&globals);
     let mut vm = Vm::new(Rc::clone(&globals));
     let _ = vm.run(chunk).expect("run ok");
 
@@ -837,7 +836,6 @@ fn computed_member_compound_assignment_evaluates_reference_once() {
         crate::value::PropertyKey::String("globalThis".to_string()),
         crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
     );
-    runtime_utils::install_minimal_kernel_constructors(&globals);
     let mut vm = Vm::new(Rc::clone(&globals));
     let _ = vm.run(chunk).expect("run ok");
 
@@ -863,7 +861,6 @@ fn member_postfix_update_returns_old_value_and_stores_new_value() {
         crate::value::PropertyKey::String("globalThis".to_string()),
         crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
     );
-    runtime_utils::install_minimal_kernel_constructors(&globals);
     let mut vm = Vm::new(Rc::clone(&globals));
     let _ = vm.run(chunk).expect("run ok");
 
