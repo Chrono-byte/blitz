@@ -12,7 +12,8 @@ use crate::runtime_utils::{
     array_from_values, builtin_object, char_index_to_byte_index, descriptor_value_from_descriptor,
     is_byte_offset_aligned, non_enum_data, own_enumerable_keys, own_property_descriptor,
     own_property_keys, property_key_to_value, set_builtin_length, set_builtin_name,
-    static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length, usize_to_f64,
+    static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length,
+    usize_to_decimal_string, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{Parser, Vm, compiler};
@@ -1979,7 +1980,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     );
                     for (idx, value) in initial_values.into_iter().enumerate() {
                         typed_array_data.properties.insert(
-                            PropertyKey::String(idx.to_string()),
+                            PropertyKey::String(usize_to_decimal_string(idx)),
                             PropertyDescriptor::data(value),
                         );
                     }
@@ -2441,7 +2442,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         }
                         Value::Array(arr, props) => {
                             for idx in 0..arr.borrow().len() {
-                                names.push(idx.to_string());
+                                names.push(usize_to_decimal_string(idx));
                             }
                             for key in props.borrow().properties.keys() {
                                 if let PropertyKey::String(name) = key {
@@ -3140,8 +3141,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             .get_property_host(other, &PropertyKey::String("length".to_string()))?;
                         let len = to_length(vm, &len_val)?;
                         for idx in 0..len {
-                            let item =
-                                vm.get_property_host(other, &PropertyKey::String(idx.to_string()))?;
+                            let item = vm.get_property_host(
+                                other,
+                                &PropertyKey::String(usize_to_decimal_string(idx)),
+                            )?;
                             args_vec.push(item);
                         }
                     }

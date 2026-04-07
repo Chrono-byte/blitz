@@ -610,11 +610,10 @@ pub(crate) fn collect_iterable_values(
                 let len = to_length(vm, &len_val)?;
                 let mut items = Vec::with_capacity(len);
                 for idx in 0..len {
-                    let item =
-                        vm.get_property_host(
-                            other,
-                            &PropertyKey::String(usize_to_decimal_string(idx)),
-                        )?;
+                    let item = vm.get_property_host(
+                        other,
+                        &PropertyKey::String(usize_to_decimal_string(idx)),
+                    )?;
                     items.push(item);
                 }
                 Ok(items)
@@ -1965,7 +1964,7 @@ pub(crate) fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
         Value::Array(arr, props) => {
             for (idx, slot) in arr.borrow().iter().enumerate() {
                 if slot.is_some() {
-                    keys.push(PropertyKey::String(idx.to_string()));
+                    keys.push(PropertyKey::String(usize_to_decimal_string(idx)));
                 }
             }
             keys.extend(enumerable_prop_keys(props, true));
@@ -2148,7 +2147,11 @@ fn decimal_u64_string(value: u64) -> String {
     out
 }
 
-fn decimal_u64_eq_str(value: u64, s: &str) -> bool {
+pub(crate) fn u64_to_decimal_string(value: u64) -> String {
+    decimal_u64_string(value)
+}
+
+pub(crate) fn decimal_u64_eq_str(value: u64, s: &str) -> bool {
     let mut buf = [0u8; 20];
     let mut n = value;
     let mut i = buf.len();

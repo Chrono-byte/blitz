@@ -7,7 +7,8 @@ use num_traits::ToPrimitive;
 use crate::runtime_utils::{
     builtin_object, char_code_at, char_index_to_byte_index, non_enum_data,
     require_object_coercible, set_builtin_length, set_builtin_name, static_builtin_arg_offset,
-    this_boolean_value, this_string_value, this_string_value_ref, to_length, usize_to_f64,
+    this_boolean_value, this_string_value, this_string_value_ref, to_length,
+    usize_to_decimal_string, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
@@ -129,30 +130,33 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     );
     let symbol_to_string = builtin_object(
         Rc::new(|vm, args| {
-            let this = args.first().cloned().unwrap_or(Value::Undefined);
-            let sym = match this {
-                Value::Symbol(id, desc) => Some((id, desc)),
-                Value::Object(obj) => {
-                    let borrowed = obj.borrow();
-                    borrowed
-                        .properties
-                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                        .and_then(|d| match d {
-                            PropertyDescriptor::Data {
-                                value: Value::Symbol(id, desc),
-                                ..
-                            } => Some((id.clone(), desc.clone())),
-                            _ => None,
-                        })
-                }
-                _ => None,
-            };
-            match sym {
-                Some((_id, desc)) => Ok(Value::String(match desc {
+            let undefined = Value::Undefined;
+            let this = args.first().unwrap_or(&undefined);
+            match this {
+                Value::Symbol(_, desc) => Ok(Value::String(match desc {
                     Some(d) => format!("Symbol({})", d),
                     None => "Symbol()".to_string(),
                 })),
-                None => Err(vm
+                Value::Object(obj) => {
+                    let borrowed = obj.borrow();
+                    if let Some(PropertyDescriptor::Data {
+                        value: Value::Symbol(_, desc),
+                        ..
+                    }) = borrowed
+                        .properties
+                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+                    {
+                        Ok(Value::String(match desc {
+                            Some(d) => format!("Symbol({})", d),
+                            None => "Symbol()".to_string(),
+                        }))
+                    } else {
+                        Err(vm.throw_type_error(
+                            "Symbol.prototype.toString called on incompatible receiver",
+                        ))
+                    }
+                }
+                _ => Err(vm
                     .throw_type_error("Symbol.prototype.toString called on incompatible receiver")),
             }
         }),
@@ -166,9 +170,10 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     );
     let symbol_value_of = builtin_object(
         Rc::new(|vm, args| {
-            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            let undefined = Value::Undefined;
+            let this = args.first().unwrap_or(&undefined);
             match this {
-                Value::Symbol(_, _) => Ok(this),
+                Value::Symbol(_, _) => Ok(this.clone()),
                 Value::Object(obj) => {
                     let borrowed = obj.borrow();
                     if let Some(PropertyDescriptor::Data {
@@ -327,7 +332,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
             );
             for (idx, ch) in s.chars().enumerate() {
                 obj.properties.insert(
-                    PKey::String(idx.to_string()),
+                    PKey::String(usize_to_decimal_string(idx)),
                     PropertyDescriptor::Data {
                         value: Value::String(ch.to_string()),
                         writable: false,
@@ -421,7 +426,10 @@ pub(crate) fn install_string_boolean_symbol_builtins(
                     let substitutions = args.get(off + 1..).unwrap_or(&[]);
                     let mut out = String::new();
                     for i in 0..literal_count {
-                        let next = vm.get_property_host(&raw_obj, &PKey::String(i.to_string()))?;
+                        let next = vm.get_property_host(
+                            &raw_obj,
+                            &PKey::String(usize_to_decimal_string(i)),
+                        )?;
                         out.push_str(&vm.to_string(&next)?);
                         if i + 1 == literal_count {
                             break;
@@ -446,8 +454,9 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     );
     let string_value_of = builtin_object(
         Rc::new(|vm, args| {
-            let this = args.first().cloned().unwrap_or(Value::Undefined);
-            Ok(Value::String(this_string_value(vm, &this)?))
+            let undefined = Value::Undefined;
+            let this = args.first().unwrap_or(&undefined);
+            Ok(Value::String(this_string_value(vm, this)?))
         }),
         function_proto_map,
     );
@@ -459,8 +468,9 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     );
     let string_to_string = builtin_object(
         Rc::new(|vm, args| {
-            let this = args.first().cloned().unwrap_or(Value::Undefined);
-            Ok(Value::String(this_string_value(vm, &this)?))
+            let undefined = Value::Undefined;
+            let this = args.first().unwrap_or(&undefined);
+            Ok(Value::String(this_string_value(vm, this)?))
         }),
         function_proto_map,
     );
@@ -624,8 +634,9 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     );
     let boolean_value_of = builtin_object(
         Rc::new(|vm, args| {
-            let this = args.first().cloned().unwrap_or(Value::Undefined);
-            Ok(Value::Bool(this_boolean_value(vm, &this)?))
+            let undefined = Value::Undefined;
+            let this = args.first().unwrap_or(&undefined);
+            Ok(Value::Bool(this_boolean_value(vm, this)?))
         }),
         function_proto_map,
     );
@@ -637,8 +648,9 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     );
     let boolean_to_string = builtin_object(
         Rc::new(|vm, args| {
-            let this = args.first().cloned().unwrap_or(Value::Undefined);
-            let b = this_boolean_value(vm, &this)?;
+            let undefined = Value::Undefined;
+            let this = args.first().unwrap_or(&undefined);
+            let b = this_boolean_value(vm, this)?;
             Ok(Value::String(if b { "true" } else { "false" }.to_string()))
         }),
         function_proto_map,

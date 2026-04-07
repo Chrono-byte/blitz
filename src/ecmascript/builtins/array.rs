@@ -6,7 +6,7 @@ use num_traits::ToPrimitive;
 
 use crate::runtime_utils::{
     builtin_object, canonical_index_key, collect_iterable_values, set_builtin_length,
-    static_builtin_arg_offset, strict_equal, to_length, usize_to_f64,
+    static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
@@ -350,7 +350,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                     candidates.sort_unstable();
                     candidates.dedup();
                     for idx in candidates.into_iter().rev() {
-                        let key = PKey::String(idx.to_string());
+                        let key = PKey::String(u64_to_decimal_string(idx));
                         let element = vm.get_property_host(&receiver, &key)?;
                         if strict_equal(&element, &search) {
                             return Ok(Value::Number(idx.to_f64().unwrap_or(f64::NAN)));
@@ -360,7 +360,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                 }
 
                 while k >= 0 {
-                    let key = PKey::String(k.to_string());
+                    let key = PKey::String(u64_to_decimal_string(k as u64));
                     if vm.has_property_host(&receiver, &key)? {
                         let element = vm.get_property_host(&receiver, &key)?;
                         if env::var("TSBLITZ_TRACE").ok().as_deref() == Some("1") {

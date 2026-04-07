@@ -4,7 +4,7 @@ use crate::errors::RuntimeError;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
-use crate::runtime_utils::array_from_values;
+use crate::runtime_utils::{array_from_values, usize_to_decimal_string};
 use crate::value::{
     BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
     ValueSlot,
@@ -1127,7 +1127,7 @@ impl Vm {
                         for idx in 0..len {
                             let item = self.get_property_host(
                                 other.as_ref().unwrap_or(&Value::Undefined),
-                                &PropertyKey::String(idx.to_string()),
+                                &PropertyKey::String(usize_to_decimal_string(idx)),
                             )?;
                             flat.push(item);
                         }
@@ -3217,7 +3217,7 @@ impl Vm {
         if let Value::Closure { proto, .. } = value
             && let Some(src) = proto.source_text()
         {
-            return Ok(src);
+            return Ok(src.to_string());
         }
         Ok(self.format_native_function_source(value))
     }
@@ -4067,7 +4067,7 @@ impl Vm {
         let arg_count = args_for_arguments.len();
         let mapped_count = proto.arity.min(self.locals.len());
         for idx in 0..arg_count {
-            let key = PropertyKey::String(idx.to_string());
+            let key = PropertyKey::String(usize_to_decimal_string(idx));
             if idx < mapped_count {
                 let getter_cell = Rc::clone(&self.locals[idx]);
                 let setter_cell = Rc::clone(&self.locals[idx]);
@@ -5763,7 +5763,7 @@ fn array_index_from_key(key: &PropertyKey) -> Option<usize> {
     if idx == u32::MAX {
         return None;
     }
-    if idx.to_string() != *s {
+    if !crate::runtime_utils::decimal_u64_eq_str(idx as u64, s) {
         return None;
     }
     Some(idx as usize)

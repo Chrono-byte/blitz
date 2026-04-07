@@ -280,12 +280,12 @@ impl Chunk {
 
 impl FunctionProto {
     /// Return the exact source substring used to define this function, if tracked.
-    pub fn source_text(&self) -> Option<String> {
+    pub fn source_text(&self) -> Option<&str> {
         let text = &self.chunk.source_text;
         let start = self.span.start as usize;
         let end = self.span.end as usize;
         if start <= end && end <= text.len() {
-            Some(text[start..end].to_string())
+            Some(&text[start..end])
         } else {
             None
         }
