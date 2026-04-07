@@ -453,10 +453,14 @@ pub enum Op {
     IteratorClose,
     /// Function call opcode reserved for inline-cached dispatch. Operand: nargs (u8).
     CallIC,
+    /// Push a `with` object environment using the top-of-stack value.
+    PushWithEnv,
+    /// Pop the current lexical environment.
+    PopEnv,
 }
 
 /// Total number of opcode variants.
-pub const OP_COUNT: usize = Op::CallIC as usize + 1;
+pub const OP_COUNT: usize = Op::PopEnv as usize + 1;
 
 impl Op {
     /// Converts a byte to an Op if valid, returns None otherwise
@@ -546,6 +550,8 @@ impl Op {
             Op::IteratorNext => "IteratorNext",
             Op::IteratorClose => "IteratorClose",
             Op::CallIC => "CallIC",
+            Op::PushWithEnv => "PushWithEnv",
+            Op::PopEnv => "PopEnv",
         }
     }
 
@@ -669,6 +675,8 @@ impl TryFrom<u8> for Op {
             71 => Ok(Op::IteratorNext),
             72 => Ok(Op::IteratorClose),
             73 => Ok(Op::CallIC),
+            74 => Ok(Op::PushWithEnv),
+            75 => Ok(Op::PopEnv),
             _ => Err(()),
         }
     }
@@ -686,7 +694,7 @@ mod tests {
 
     #[test]
     fn op_round_trip() {
-        for i in 0u8..=Op::CallIC as u8 {
+        for i in 0u8..=Op::PopEnv as u8 {
             let op = Op::try_from(i).expect("valid op");
             let b = u8::from(op);
             assert_eq!(b, i);

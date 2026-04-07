@@ -1430,12 +1430,98 @@ impl Vm {
             .unwrap_or(Value::Undefined))
     }
 
-    /// Resolve a bare identifier against the current lexical/global environment.
-    pub fn resolve_identifier_value(
-        &self,
+    fn is_unscopable_binding(
+        &mut self,
+        binding_object: &Value,
+        name: &str,
+    ) -> Result<bool, crate::errors::RuntimeError> {
+        let unscopables = self.get_property_host(
+            binding_object,
+            &PropertyKey::Symbol(SymbolId::well_known_unscopables()),
+        )?;
+        if matches!(unscopables, Value::Undefined | Value::Null) {
+            return Ok(false);
+        }
+        Ok(self
+            .get_property_host(&unscopables, &PropertyKey::String(name.to_string()))?
+            .is_truthy())
+    }
+
+    fn resolve_lexical_identifier_value(
+        &mut self,
         name: &str,
     ) -> Result<Option<Value>, crate::errors::RuntimeError> {
-        if let Some(value) = self.lexical_env.borrow().get_binding_value(name)? {
+        let mut env = Some(Rc::clone(&self.lexical_env));
+        while let Some(current) = env {
+            let (binding_value, binding_object, with_environment, outer) = {
+                let borrowed = current.borrow();
+                (
+                    borrowed.get_binding_value(name)?,
+                    borrowed.binding_object(),
+                    borrowed.is_with_environment(),
+                    borrowed.outer(),
+                )
+            };
+            if let Some(value) = binding_value {
+                return Ok(Some(value));
+            }
+            if let Some(binding_object) = binding_object {
+                let key = PropertyKey::String(name.to_string());
+                let found = self.has_property_host(&binding_object, &key)?;
+                if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
+                    return Ok(Some(self.get_property_host(&binding_object, &key)?));
+                }
+            }
+            env = outer;
+        }
+        Ok(None)
+    }
+
+    fn set_lexical_identifier_value(
+        &mut self,
+        name: &str,
+        value: Value,
+    ) -> Result<bool, crate::errors::RuntimeError> {
+        let mut env = Some(Rc::clone(&self.lexical_env));
+        while let Some(current) = env {
+            let (has_decl_binding, binding_object, with_environment, outer) = {
+                let borrowed = current.borrow();
+                (
+                    borrowed.has_binding(name),
+                    borrowed.binding_object(),
+                    borrowed.is_with_environment(),
+                    borrowed.outer(),
+                )
+            };
+            if has_decl_binding {
+                return current.borrow_mut().set_mutable_binding(name, value);
+            }
+            if let Some(binding_object) = binding_object {
+                let key = PropertyKey::String(name.to_string());
+                let found = self.has_property_host(&binding_object, &key)?;
+                if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
+                    let found_again = self.has_property_host(&binding_object, &key)?;
+                    if found_again {
+                        let _ = self.set_property_host(
+                            &binding_object,
+                            &Value::String(name.to_string()),
+                            value,
+                        )?;
+                        return Ok(true);
+                    }
+                }
+            }
+            env = outer;
+        }
+        Ok(false)
+    }
+
+    /// Resolve a bare identifier against the current lexical/global environment.
+    pub fn resolve_identifier_value(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<Value>, crate::errors::RuntimeError> {
+        if let Some(value) = self.resolve_lexical_identifier_value(name)? {
             return Ok(Some(value));
         }
         Ok(self.get_global(name))
@@ -2052,19 +2138,23 @@ impl Vm {
             Op::GetGlobal => {
                 let idx = self.read_short()? as usize;
                 let name = self.string_constant(idx)?;
-                let v = self
-                    .globals
-                    .borrow()
-                    .properties
-                    .get(&PropertyKey::String(name.clone()))
-                    .and_then(|d| match d {
-                        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                        _ => None,
-                    });
-                let v = match v {
-                    Some(v) => v,
-                    None => {
-                        return Err(self.throw_reference_error(&format!("{name} is not defined")));
+                let v = if let Some(v) = self.resolve_lexical_identifier_value(&name)? {
+                    v
+                } else {
+                    let global_value = self
+                        .globals
+                        .borrow()
+                        .properties
+                        .get(&PropertyKey::String(name.clone()))
+                        .and_then(|d| match d {
+                            PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                            _ => None,
+                        });
+                    match global_value {
+                        Some(v) => v,
+                        None => {
+                            return Err(self.throw_reference_error(&format!("{name} is not defined")));
+                        }
                     }
                 };
                 if crate::trace::enabled() {
@@ -2077,28 +2167,30 @@ impl Vm {
                 let idx = self.read_short()? as usize;
                 let name = self.string_constant(idx)?;
                 let v = self.pop()?;
-                let key = PropertyKey::String(name.clone());
-                let current = self.globals.borrow().properties.get(&key).cloned();
-                match current {
-                    Some(PropertyDescriptor::Data {
-                        writable: false, ..
-                    }) => {
-                        if self.is_strict_mode() {
-                            return Err(self.throw_type_error(&format!(
-                                "Cannot assign to read only global '{}'",
-                                name
-                            )));
+                if !self.set_lexical_identifier_value(&name, v.clone())? {
+                    let key = PropertyKey::String(name.clone());
+                    let current = self.globals.borrow().properties.get(&key).cloned();
+                    match current {
+                        Some(PropertyDescriptor::Data {
+                            writable: false, ..
+                        }) => {
+                            if self.is_strict_mode() {
+                                return Err(self.throw_type_error(&format!(
+                                    "Cannot assign to read only global '{}'",
+                                    name
+                                )));
+                            }
                         }
-                    }
-                    Some(PropertyDescriptor::Accessor { .. }) => {
-                        let global_obj = Value::Object(Rc::clone(&self.globals));
-                        self.set_property_tracked(&global_obj, &key, v)?;
-                    }
-                    _ => {
-                        self.globals
-                            .borrow_mut()
-                            .properties
-                            .insert(key, PropertyDescriptor::data(v));
+                        Some(PropertyDescriptor::Accessor { .. }) => {
+                            let global_obj = Value::Object(Rc::clone(&self.globals));
+                            self.set_property_tracked(&global_obj, &key, v)?;
+                        }
+                        _ => {
+                            self.globals
+                                .borrow_mut()
+                                .properties
+                                .insert(key, PropertyDescriptor::data(v));
+                        }
                     }
                 }
             }
@@ -2453,6 +2545,19 @@ impl Vm {
             }
             Op::Call => self.execute_call()?,
             Op::CallIC => self.execute_call_ic()?,
+            Op::PushWithEnv => {
+                let obj = self.pop()?;
+                let env = Rc::new(RefCell::new(EnvironmentRecord::new_object(
+                    Some(Rc::clone(&self.lexical_env)),
+                    obj,
+                    true,
+                )));
+                self.lexical_env = env;
+            }
+            Op::PopEnv => {
+                let outer = self.lexical_env.borrow().outer();
+                self.lexical_env = outer.unwrap_or_else(|| Rc::clone(&self.global_env));
+            }
             Op::CallMethod => self.execute_call_method()?,
             Op::Spread => self.execute_spread()?,
             Op::Construct => self.execute_construct()?,
@@ -4165,18 +4270,22 @@ impl Vm {
     fn get_global_ic(&mut self) -> Result<(), crate::errors::RuntimeError> {
         let idx = self.read_short()? as usize;
         let name = self.string_constant(idx)?;
-        let value = self
-            .globals
-            .borrow()
-            .properties
-            .get(&PropertyKey::String(name.clone()))
-            .and_then(|d| match d {
-                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                _ => None,
-            });
-        let value = match value {
-            Some(value) => value,
-            None => return Err(self.throw_reference_error(&format!("{name} is not defined"))),
+        let value = if let Some(value) = self.resolve_lexical_identifier_value(&name)? {
+            value
+        } else {
+            let global_value = self
+                .globals
+                .borrow()
+                .properties
+                .get(&PropertyKey::String(name.clone()))
+                .and_then(|d| match d {
+                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                    _ => None,
+                });
+            match global_value {
+                Some(value) => value,
+                None => return Err(self.throw_reference_error(&format!("{name} is not defined"))),
+            }
         };
         self.stack.push(value);
         Ok(())

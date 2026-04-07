@@ -219,13 +219,15 @@ impl Compiler {
                 }
             }
             OStmt::WithStatement(w) => {
-                // The VM currently models `with` as a normal scoped block after
-                // evaluating the object expression for side effects.
+                if self.strict_context {
+                    return Err(crate::errors::CompilerError::from(
+                        "SyntaxError: Strict mode code may not include a with statement",
+                    ));
+                }
                 self.compile_expr_oast(&w.object)?;
-                self.emit(Op::Pop, LINE);
-                self.enter_block_scope();
+                self.emit(Op::PushWithEnv, LINE);
                 self.compile_statement_oast(&w.body)?;
-                self.exit_scope();
+                self.emit(Op::PopEnv, LINE);
             }
             OStmt::BlockStatement(b) => {
                 self.enter_block_scope_with_vars(&b.body);

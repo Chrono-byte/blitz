@@ -29,6 +29,8 @@ pub struct Binding {
 pub struct EnvironmentRecord {
     outer: Option<Weak<RefCell<EnvironmentRecord>>>,
     bindings: HashMap<String, Binding>,
+    binding_object: Option<Value>,
+    with_environment: bool,
 }
 
 impl EnvironmentRecord {
@@ -37,12 +39,38 @@ impl EnvironmentRecord {
         Self {
             outer: outer.map(|outer| Rc::downgrade(&outer)),
             bindings: HashMap::new(),
+            binding_object: None,
+            with_environment: false,
+        }
+    }
+
+    /// Create an object-backed environment, used by `with`.
+    pub fn new_object(
+        outer: Option<Rc<RefCell<EnvironmentRecord>>>,
+        binding_object: Value,
+        with_environment: bool,
+    ) -> Self {
+        Self {
+            outer: outer.map(|outer| Rc::downgrade(&outer)),
+            bindings: HashMap::new(),
+            binding_object: Some(binding_object),
+            with_environment,
         }
     }
 
     /// Return the outer environment, if any.
     pub fn outer(&self) -> Option<Rc<RefCell<EnvironmentRecord>>> {
         self.outer.as_ref().and_then(Weak::upgrade)
+    }
+
+    /// Return the object used for object-environment binding resolution, if any.
+    pub fn binding_object(&self) -> Option<Value> {
+        self.binding_object.clone()
+    }
+
+    /// Return whether this object environment applies `with` / @@unscopables rules.
+    pub fn is_with_environment(&self) -> bool {
+        self.with_environment
     }
 
     /// Create a mutable binding in this record.
