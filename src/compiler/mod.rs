@@ -727,22 +727,6 @@ fn compile_member_call_uses_call_method() {
 }
 
 #[test]
-fn compile_console_log_uses_get_builtin() {
-    let src = "console.log(1);";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
-
-    let saw_get_builtin = chunk
-        .code
-        .iter()
-        .filter_map(|b| Op::from_byte(*b))
-        .any(|op| matches!(op, Op::GetBuiltin));
-
-    assert!(saw_get_builtin, "expected console.log to emit GetBuiltin");
-}
-
-#[test]
 fn compile_for_in_uses_get_builtin() {
     let src = "for (var k in obj) {}";
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");

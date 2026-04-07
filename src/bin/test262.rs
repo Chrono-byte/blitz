@@ -1575,109 +1575,114 @@ fn run_harness_only(
     globals: &Rc<RefCell<ObjectData>>,
     baseline_snapshot: &HashMap<PropertyKey, PropertyDescriptor>,
 ) -> Result<(), String> {
-    let harness_dir = test262_root.join("harness");
-    let mut harness_files: Vec<String> = vec!["assert.js".to_string(), "sta.js".to_string()];
-    if harness_dir.exists() {
-        let mut extra: Vec<String> = Vec::new();
-        for ent in fs::read_dir(&harness_dir)
-            .map_err(|e| format!("Failed to read harness dir: {}", e))?
-            .flatten()
-        {
-            let p = ent.path();
-            if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                if ext != "js" {
+    let result = (|| {
+        let harness_dir = test262_root.join("harness");
+        let mut harness_files: Vec<String> = vec!["assert.js".to_string(), "sta.js".to_string()];
+        if harness_dir.exists() {
+            let mut extra: Vec<String> = Vec::new();
+            for ent in fs::read_dir(&harness_dir)
+                .map_err(|e| format!("Failed to read harness dir: {}", e))?
+                .flatten()
+            {
+                let p = ent.path();
+                if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                    if ext != "js" {
+                        continue;
+                    }
+                } else {
                     continue;
+                }
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    // Just store the filename, not the full path - it will be joined with harness dir later.
+                    if name == "sta.js" || name == "assert.js" {
+                        continue;
+                    }
+                    extra.push(name.to_string());
+                }
+            }
+            extra.sort();
+            harness_files.extend(extra);
+        }
+
+        let keep_globals: HashSet<String> = globals
+            .borrow()
+            .properties
+            .keys()
+            .filter_map(|k| match k {
+                PropertyKey::String(s) => Some(s.clone()),
+                PropertyKey::Symbol(_) => None,
+            })
+            .collect();
+
+        restore_globals(globals, baseline_snapshot);
+        let _ = runtime_utils::install_minimal_kernel_constructors(globals);
+        let mut vm = Vm::new(Rc::clone(globals));
+        for h in &harness_files {
+            let p = test262_root.join("harness").join(h);
+            if !p.exists() {
+                return Err(format!("Harness file missing: {}", p.display()));
+            }
+
+            let saved_detach = if h == "detachArrayBuffer.js" {
+                let mut globals_borrow = globals.borrow_mut();
+                match globals_borrow
+                    .properties
+                    .get_mut(&PropertyKey::String("$262".to_string()))
+                {
+                    Some(PropertyDescriptor::Data {
+                        value: Value::Object(obj),
+                        ..
+                    }) => obj
+                        .borrow_mut()
+                        .properties
+                        .shift_remove(&PropertyKey::String("detachArrayBuffer".to_string())),
+                    _ => None,
                 }
             } else {
-                continue;
-            }
-            if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                // Just store the filename, not the full path - it will be joined with harness dir later.
-                if name == "sta.js" || name == "assert.js" {
-                    continue;
-                }
-                extra.push(name.to_string());
-            }
-        }
-        extra.sort();
-        harness_files.extend(extra);
-    }
+                None
+            };
 
-    let keep_globals: HashSet<String> = globals
-        .borrow()
-        .properties
-        .keys()
-        .filter_map(|k| match k {
-            PropertyKey::String(s) => Some(s.clone()),
-            PropertyKey::Symbol(_) => None,
-        })
-        .collect();
+            let hsrc = fs::read_to_string(&p)
+                .map_err(|e| format!("Failed to read harness {}: {}", p.display(), e))?;
+            let session = parse_source_for_path(&hsrc, &p)
+                .map_err(|e| format!("Harness {} parse failed: {}", h, e))?;
+            let prog = session.program();
+            let chunk = compiler::compile_oxc(prog, &hsrc)
+                .map_err(|e| format!("Harness {} compile failed: {}", h, e))?;
+            let run_result = vm.run(chunk);
 
-    restore_globals(globals, baseline_snapshot);
-    let _ = runtime_utils::install_minimal_kernel_constructors(globals);
-    let mut vm = Vm::new(Rc::clone(globals));
-    for h in &harness_files {
-        let p = test262_root.join("harness").join(h);
-        if !p.exists() {
-            return Err(format!("Harness file missing: {}", p.display()));
-        }
-
-        let saved_detach = if h == "detachArrayBuffer.js" {
-            let mut globals_borrow = globals.borrow_mut();
-            match globals_borrow
-                .properties
-                .get_mut(&PropertyKey::String("$262".to_string()))
-            {
-                Some(PropertyDescriptor::Data {
+            if let Some(saved_detach) = saved_detach {
+                let mut globals_borrow = globals.borrow_mut();
+                if let Some(PropertyDescriptor::Data {
                     value: Value::Object(obj),
                     ..
-                }) => obj
-                    .borrow_mut()
+                }) = globals_borrow
                     .properties
-                    .shift_remove(&PropertyKey::String("detachArrayBuffer".to_string())),
-                _ => None,
+                    .get_mut(&PropertyKey::String("$262".to_string()))
+                {
+                    obj.borrow_mut().properties.insert(
+                        PropertyKey::String("detachArrayBuffer".to_string()),
+                        saved_detach,
+                    );
+                }
             }
-        } else {
-            None
-        };
 
-        let hsrc = fs::read_to_string(&p)
-            .map_err(|e| format!("Failed to read harness {}: {}", p.display(), e))?;
-        let session = parse_source_for_path(&hsrc, &p)
-            .map_err(|e| format!("Harness {} parse failed: {}", h, e))?;
-        let prog = session.program();
-        let chunk = compiler::compile_oxc(prog, &hsrc)
-            .map_err(|e| format!("Harness {} compile failed: {}", h, e))?;
-        let run_result = vm.run(chunk);
-
-        if let Some(saved_detach) = saved_detach {
-            let mut globals_borrow = globals.borrow_mut();
-            if let Some(PropertyDescriptor::Data {
-                value: Value::Object(obj),
-                ..
-            }) = globals_borrow
-                .properties
-                .get_mut(&PropertyKey::String("$262".to_string()))
-            {
-                obj.borrow_mut().properties.insert(
-                    PropertyKey::String("detachArrayBuffer".to_string()),
-                    saved_detach,
-                );
+            match run_result {
+                Ok(_) => {
+                    eprintln!("Harness ok: {}", h);
+                }
+                Err(e) => {
+                    eprintln!("Harness {} runtime failed: {}", h, e);
+                    print_vm_diag(&vm, &keep_globals);
+                    return Err(format!("Harness {} runtime failed: {}", h, e));
+                }
             }
         }
+        Ok(())
+    })();
 
-        match run_result {
-            Ok(_) => {
-                eprintln!("Harness ok: {}", h);
-            }
-            Err(e) => {
-                eprintln!("Harness {} runtime failed: {}", h, e);
-                print_vm_diag(&vm, &keep_globals);
-                return Err(format!("Harness {} runtime failed: {}", h, e));
-            }
-        }
-    }
-    Ok(())
+    force_runner_gc();
+    result
 }
 
 const SCOPE_DUMP_TEST: &str = "language/expressions/object/11.1.5-0-1.js";
@@ -1687,74 +1692,79 @@ fn run_scope_dump_test(
     globals: &Rc<RefCell<ObjectData>>,
     baseline_snapshot: &HashMap<PropertyKey, PropertyDescriptor>,
 ) -> Result<(), String> {
-    restore_globals(globals, baseline_snapshot);
-    let harness_dir = test262_root.join("harness");
-    let keep_globals: HashSet<String> = globals
-        .borrow()
-        .properties
-        .keys()
-        .filter_map(|k| match k {
-            PropertyKey::String(s) => Some(s.clone()),
-            PropertyKey::Symbol(_) => None,
-        })
-        .collect();
-    let mut vm = Vm::new(Rc::clone(globals));
+    let result = (|| {
+        restore_globals(globals, baseline_snapshot);
+        let harness_dir = test262_root.join("harness");
+        let keep_globals: HashSet<String> = globals
+            .borrow()
+            .properties
+            .keys()
+            .filter_map(|k| match k {
+                PropertyKey::String(s) => Some(s.clone()),
+                PropertyKey::Symbol(_) => None,
+            })
+            .collect();
+        let mut vm = Vm::new(Rc::clone(globals));
 
-    let harness_files = ["assert.js", "sta.js"];
-    for harness in &harness_files {
-        let path = harness_dir.join(harness);
-        if !path.exists() {
-            return Err(format!("Harness {} missing", path.display()));
+        let harness_files = ["assert.js", "sta.js"];
+        for harness in &harness_files {
+            let path = harness_dir.join(harness);
+            if !path.exists() {
+                return Err(format!("Harness {} missing", path.display()));
+            }
+            let src = read_harness_source(&path)?;
+            let session = parse_source_for_path(&src, &path)
+                .map_err(|e| format!("Harness {} parse failed: {}", harness, e))?;
+            let prog = session.program();
+            let chunk = compiler::compile_oxc(prog, &src)
+                .map_err(|e| format!("Harness {} compile failed: {}", harness, e))?;
+            vm.run(chunk)
+                .map_err(|e| format!("Harness {} runtime failed: {}", harness, e))?;
         }
-        let src = read_harness_source(&path)?;
-        let session = parse_source_for_path(&src, &path)
-            .map_err(|e| format!("Harness {} parse failed: {}", harness, e))?;
+
+        if vm.get_global("Test262Error").is_none() {
+            const FIX_SCRIPT: &str = r#"
+                if (typeof Test262Error !== "undefined"
+                    && typeof globalThis.Test262Error === "undefined") {
+                    globalThis.Test262Error = Test262Error;
+                }
+            "#;
+            let fix_path = test262_root.join("test262Error-fix.js");
+            let session = parse_source_for_path(FIX_SCRIPT, &fix_path)
+                .map_err(|e| format!("Failed to parse Test262Error fixer: {}", e))?;
+            let prog = session.program();
+            let chunk = compiler::compile_oxc(prog, FIX_SCRIPT)
+                .map_err(|e| format!("Failed to compile Test262Error fixer: {}", e))?;
+            let _ = vm.run(chunk);
+        }
+
+        let test_path = test262_root.join("test").join(SCOPE_DUMP_TEST);
+        let src = fs::read_to_string(&test_path).map_err(|e| {
+            format!(
+                "Failed to read scope dump test {}: {}",
+                test_path.display(),
+                e
+            )
+        })?;
+        let session = parse_source_for_path(&src, &test_path)
+            .map_err(|e| format!("Scope dump test parse failed: {}", e))?;
         let prog = session.program();
         let chunk = compiler::compile_oxc(prog, &src)
-            .map_err(|e| format!("Harness {} compile failed: {}", harness, e))?;
-        vm.run(chunk)
-            .map_err(|e| format!("Harness {} runtime failed: {}", harness, e))?;
-    }
+            .map_err(|e| format!("Scope dump test compile failed: {}", e))?;
+        let run_result = vm.run(chunk);
 
-    if vm.get_global("Test262Error").is_none() {
-        const FIX_SCRIPT: &str = r#"
-            if (typeof Test262Error !== "undefined"
-                && typeof globalThis.Test262Error === "undefined") {
-                globalThis.Test262Error = Test262Error;
-            }
-        "#;
-        let fix_path = test262_root.join("test262Error-fix.js");
-        let session = parse_source_for_path(FIX_SCRIPT, &fix_path)
-            .map_err(|e| format!("Failed to parse Test262Error fixer: {}", e))?;
-        let prog = session.program();
-        let chunk = compiler::compile_oxc(prog, FIX_SCRIPT)
-            .map_err(|e| format!("Failed to compile Test262Error fixer: {}", e))?;
-        let _ = vm.run(chunk);
-    }
+        if let Err(e) = &run_result {
+            eprintln!("Scope dump test runtime failed: {}", e);
+            print_vm_diag(&vm, &keep_globals);
+        }
 
-    let test_path = test262_root.join("test").join(SCOPE_DUMP_TEST);
-    let src = fs::read_to_string(&test_path).map_err(|e| {
-        format!(
-            "Failed to read scope dump test {}: {}",
-            test_path.display(),
-            e
-        )
-    })?;
-    let session = parse_source_for_path(&src, &test_path)
-        .map_err(|e| format!("Scope dump test parse failed: {}", e))?;
-    let prog = session.program();
-    let chunk = compiler::compile_oxc(prog, &src)
-        .map_err(|e| format!("Scope dump test compile failed: {}", e))?;
-    let run_result = vm.run(chunk);
+        run_result
+            .map(|_| ())
+            .map_err(|e| format!("Scope dump test runtime failed: {}", e))
+    })();
 
-    if let Err(e) = &run_result {
-        eprintln!("Scope dump test runtime failed: {}", e);
-        print_vm_diag(&vm, &keep_globals);
-    }
-
-    run_result
-        .map(|_| ())
-        .map_err(|e| format!("Scope dump test runtime failed: {}", e))
+    force_runner_gc();
+    result
 }
 
 fn main() {

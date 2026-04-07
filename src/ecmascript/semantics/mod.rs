@@ -3,6 +3,7 @@ use num_bigint::BigInt as BigIntValue;
 use num_traits::ToPrimitive;
 use regex::RegexBuilder;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::ecmascript::builtins;
@@ -18,6 +19,108 @@ use crate::{Parser, Vm, compiler};
 
 mod atomics;
 mod shadowrealm;
+
+fn json_value_identity(value: &Value) -> Option<usize> {
+    match value {
+        Value::Object(obj) => Some(Rc::as_ptr(obj) as usize),
+        Value::Array(arr, _) => Some(Rc::as_ptr(arr) as usize),
+        Value::Closure { props, .. } => Some(Rc::as_ptr(props) as usize),
+        Value::BuiltinObject(_, props) => Some(Rc::as_ptr(props) as usize),
+        Value::Promise(state) => Some(Rc::as_ptr(state) as usize),
+        _ => None,
+    }
+}
+
+fn json_stringify_value(
+    vm: &mut Vm,
+    value: &Value,
+    seen: &mut HashSet<usize>,
+) -> Result<Option<String>, crate::errors::RuntimeError> {
+    let result = match value {
+        Value::Uninitialized
+        | Value::Undefined
+        | Value::Builtin(_)
+        | Value::BuiltinObject(_, _)
+        | Value::Closure { .. } => None,
+        Value::Null => Some("null".to_string()),
+        Value::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
+        Value::Number(n) => {
+            if n.is_finite() {
+                Some(n.to_string())
+            } else {
+                Some("null".to_string())
+            }
+        }
+        Value::String(s) => Some({
+            let mut out = String::with_capacity(s.len() + 2);
+            out.push('"');
+            for ch in s.chars() {
+                match ch {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    '\u{08}' => out.push_str("\\b"),
+                    '\u{0c}' => out.push_str("\\f"),
+                    c if c < ' ' => out.push_str(&format!("\\u{:04x}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }),
+        Value::BigInt(_) => {
+            return Err(crate::errors::RuntimeError::from(
+                "Do not know how to serialize a BigInt",
+            ));
+        }
+        Value::Symbol(_, _) => None,
+        Value::Array(elements, _) => {
+            let identity = json_value_identity(value).expect("array has identity");
+            if !seen.insert(identity) {
+                return Err(crate::errors::RuntimeError::from(
+                    "Converting circular structure to JSON",
+                ));
+            }
+            let mut parts = Vec::with_capacity(elements.borrow().len());
+            for slot in elements.borrow().iter() {
+                match slot {
+                    Some(item) => match json_stringify_value(vm, item, seen)? {
+                        Some(json) => parts.push(json),
+                        None => parts.push("null".to_string()),
+                    },
+                    None => parts.push("null".to_string()),
+                }
+            }
+            seen.remove(&identity);
+            Some(format!("[{}]", parts.join(",")))
+        }
+        Value::Object(_) | Value::Promise(_) => {
+            let identity = json_value_identity(value).expect("object-like value has identity");
+            if !seen.insert(identity) {
+                return Err(crate::errors::RuntimeError::from(
+                    "Converting circular structure to JSON",
+                ));
+            }
+            let mut parts = Vec::new();
+            for key in own_enumerable_keys(value) {
+                let PropertyKey::String(name) = key else {
+                    continue;
+                };
+                let key_value = json_stringify_value(vm, &Value::String(name.clone()), seen)?
+                    .expect("strings stringify");
+                let prop_value = vm.get_property_host(value, &PropertyKey::String(name))?;
+                if let Some(serialized) = json_stringify_value(vm, &prop_value, seen)? {
+                    parts.push(format!("{}:{}", key_value, serialized));
+                }
+            }
+            seen.remove(&identity);
+            Some(format!("{{{}}}", parts.join(",")))
+        }
+    };
+    Ok(result)
+}
 
 /// Installs the Builtins into the given globals object.
 pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) -> Intrinsics {
@@ -3078,58 +3181,14 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PKey::String("stringify".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new({
-                fn escape_json_string(s: &str) -> String {
-                    let mut out = String::with_capacity(s.len() + 2);
-                    out.push('"');
-                    for ch in s.chars() {
-                        match ch {
-                            '"' => out.push_str("\\\""),
-                            '\\' => out.push_str("\\\\"),
-                            '\n' => out.push_str("\\n"),
-                            '\r' => out.push_str("\\r"),
-                            '\t' => out.push_str("\\t"),
-                            '\u{08}' => out.push_str("\\b"),
-                            '\u{0c}' => out.push_str("\\f"),
-                            c if c < ' ' => out.push_str(&format!("\\u{:04x}", c as u32)),
-                            c => out.push(c),
-                        }
-                    }
-                    out.push('"');
-                    out
-                }
-
                 move |_vm, args| {
                     let off = if args.len() > 1 { 1 } else { 0 };
                     let value = args.get(off).cloned().unwrap_or(Value::Undefined);
-                    let out = match value {
-                        Value::Uninitialized => Value::Undefined,
-                        Value::Undefined | Value::Builtin(_) | Value::BuiltinObject(_, _) => {
-                            Value::Undefined
-                        }
-                        Value::Null => Value::String("null".to_string()),
-                        Value::Bool(b) => {
-                            Value::String(if b { "true" } else { "false" }.to_string())
-                        }
-                        Value::Number(n) => {
-                            if n.is_finite() {
-                                Value::String(n.to_string())
-                            } else {
-                                Value::String("null".to_string())
-                            }
-                        }
-                        Value::String(s) => Value::String(escape_json_string(&s)),
-                        Value::BigInt(_) => {
-                            return Err(crate::errors::RuntimeError::from(
-                                "Do not know how to serialize a BigInt",
-                            ));
-                        }
-                        Value::Array(_, _) => Value::String("[]".to_string()),
-                        Value::Object(_) | Value::Closure { .. } | Value::Promise(_) => {
-                            Value::String("{}".to_string())
-                        }
-                        Value::Symbol(_, _) => Value::Undefined,
-                    };
-                    Ok(out)
+                    let mut seen = HashSet::new();
+                    Ok(match json_stringify_value(_vm, &value, &mut seen)? {
+                        Some(out) => Value::String(out),
+                        None => Value::Undefined,
+                    })
                 }
             }),
             &function_proto_map,
@@ -3153,7 +3212,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         let global_this_key = PKey::String("globalThis".to_string());
         g.properties.insert(
             global_this_key,
-            PropertyDescriptor::data(Value::Object(Rc::clone(globals))),
+            PropertyDescriptor::Data {
+                value: Value::Object(Rc::clone(globals)),
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
         );
         g.properties
             .entry(PKey::String("NaN".to_string()))
