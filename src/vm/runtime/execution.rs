@@ -3281,6 +3281,7 @@ impl Vm {
             Value::Symbol(_, _) => {
                 Err(self.throw_type_error("Cannot convert a Symbol value to a string"))
             }
+            Value::Promise(_) => Ok("[object Promise]".to_string()),
             _ => {
                 let prim = self.to_primitive(v, Some("string"))?;
                 self.to_string(&prim)

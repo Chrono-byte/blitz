@@ -455,6 +455,9 @@ struct RunnerOptions {
     /// Emit per-test start/finish logs.
     #[arg(long = "log-tests", action)]
     log_tests: bool,
+    /// Run a single hard-coded test and dump globals in the error handler style.
+    #[arg(long = "dump-scopes", action)]
+    dump_scopes: bool,
 }
 
 /// Parses a CSV environment variable into a vector of strings.
@@ -1534,6 +1537,36 @@ fn resolve_segment(test_root: &Path, segment: &str) -> PathBuf {
     }
 }
 
+fn print_vm_diag(vm: &Vm, keep_globals: &HashSet<String>) {
+    eprintln!("--- VM DIAGNOSTICS ---");
+    eprintln!("Preserved globals: {:?}", keep_globals);
+    let inspect_globals = [
+        "$262",
+        "Atomics",
+        "Function",
+        "Promise",
+        "SharedArrayBuffer",
+        "Int32Array",
+    ];
+    for name in &inspect_globals {
+        match vm.get_global(name) {
+            Some(v) => {
+                eprintln!("Global {}: {}", name, v);
+                match vm.list_global_own_keys(name) {
+                    Some(keys) => eprintln!("  own keys: {:?}", keys),
+                    None => eprintln!("  own keys: <none or non-object>"),
+                }
+                match vm.list_global_prototype_keys(name) {
+                    Some(pkeys) => eprintln!("  prototype keys: {:?}", pkeys),
+                    None => eprintln!("  prototype keys: <none or non-object>"),
+                }
+            }
+            None => eprintln!("Global {}: <missing>", name),
+        }
+    }
+    eprintln!("--- END DIAGNOSTICS ---");
+}
+
 fn run_harness_only(
     test262_root: &Path,
     globals: &Rc<RefCell<ObjectData>>,
@@ -1565,39 +1598,6 @@ fn run_harness_only(
         }
         extra.sort();
         harness_files.extend(extra);
-    }
-
-    // Helper: print richer VM diagnostics when a harness file causes a runtime
-    // failure. This includes preserved globals and important builtin shapes so
-    // we can reason about missing functions or prototype properties.
-    fn print_vm_diag(vm: &Vm, keep_globals: &HashSet<String>) {
-        eprintln!("--- VM DIAGNOSTICS ---");
-        eprintln!("Preserved globals: {:?}", keep_globals);
-        let inspect_globals = [
-            "$262",
-            "Atomics",
-            "Function",
-            "Promise",
-            "SharedArrayBuffer",
-            "Int32Array",
-        ];
-        for name in &inspect_globals {
-            match vm.get_global(name) {
-                Some(v) => {
-                    eprintln!("Global {}: {}", name, v);
-                    match vm.list_global_own_keys(name) {
-                        Some(keys) => eprintln!("  own keys: {:?}", keys),
-                        None => eprintln!("  own keys: <none or non-object>"),
-                    }
-                    match vm.list_global_prototype_keys(name) {
-                        Some(pkeys) => eprintln!("  prototype keys: {:?}", pkeys),
-                        None => eprintln!("  prototype keys: <none or non-object>"),
-                    }
-                }
-                None => eprintln!("Global {}: <missing>", name),
-            }
-        }
-        eprintln!("--- END DIAGNOSTICS ---");
     }
 
     let keep_globals: HashSet<String> = globals
@@ -1676,6 +1676,83 @@ fn run_harness_only(
     Ok(())
 }
 
+const SCOPE_DUMP_TEST: &str = "language/expressions/object/11.1.5-0-1.js";
+
+fn run_scope_dump_test(
+    test262_root: &Path,
+    globals: &Rc<RefCell<ObjectData>>,
+    baseline_snapshot: &HashMap<PropertyKey, PropertyDescriptor>,
+) -> Result<(), String> {
+    restore_globals(globals, baseline_snapshot);
+    let harness_dir = test262_root.join("harness");
+    let keep_globals: HashSet<String> = globals
+        .borrow()
+        .properties
+        .keys()
+        .filter_map(|k| match k {
+            PropertyKey::String(s) => Some(s.clone()),
+            PropertyKey::Symbol(_) => None,
+        })
+        .collect();
+    let mut vm = Vm::new(Rc::clone(globals));
+
+    let harness_files = ["assert.js", "sta.js"];
+    for harness in &harness_files {
+        let path = harness_dir.join(harness);
+        if !path.exists() {
+            return Err(format!("Harness {} missing", path.display()));
+        }
+        let src = read_harness_source(&path)?;
+        let session = parse_source_for_path(&src, &path)
+            .map_err(|e| format!("Harness {} parse failed: {}", harness, e))?;
+        let prog = session.program();
+        let chunk = compiler::compile_oxc(prog, &src)
+            .map_err(|e| format!("Harness {} compile failed: {}", harness, e))?;
+        vm.run(chunk)
+            .map_err(|e| format!("Harness {} runtime failed: {}", harness, e))?;
+    }
+
+    if vm.get_global("Test262Error").is_none() {
+        const FIX_SCRIPT: &str = r#"
+            if (typeof Test262Error !== "undefined"
+                && typeof globalThis.Test262Error === "undefined") {
+                globalThis.Test262Error = Test262Error;
+            }
+        "#;
+        let fix_path = test262_root.join("test262Error-fix.js");
+        let session = parse_source_for_path(FIX_SCRIPT, &fix_path)
+            .map_err(|e| format!("Failed to parse Test262Error fixer: {}", e))?;
+        let prog = session.program();
+        let chunk = compiler::compile_oxc(prog, FIX_SCRIPT)
+            .map_err(|e| format!("Failed to compile Test262Error fixer: {}", e))?;
+        let _ = vm.run(chunk);
+    }
+
+    let test_path = test262_root.join("test").join(SCOPE_DUMP_TEST);
+    let src = fs::read_to_string(&test_path).map_err(|e| {
+        format!(
+            "Failed to read scope dump test {}: {}",
+            test_path.display(),
+            e
+        )
+    })?;
+    let session = parse_source_for_path(&src, &test_path)
+        .map_err(|e| format!("Scope dump test parse failed: {}", e))?;
+    let prog = session.program();
+    let chunk = compiler::compile_oxc(prog, &src)
+        .map_err(|e| format!("Scope dump test compile failed: {}", e))?;
+    let run_result = vm.run(chunk);
+
+    if let Err(e) = &run_result {
+        eprintln!("Scope dump test runtime failed: {}", e);
+        print_vm_diag(&vm, &keep_globals);
+    }
+
+    run_result
+        .map(|_| ())
+        .map_err(|e| format!("Scope dump test runtime failed: {}", e))
+}
+
 fn main() {
     let opts = parse_args();
 
@@ -1742,6 +1819,19 @@ fn main() {
     // Snapshot the bootstrapped globals for test isolation.
     // Each test restores from this snapshot instead of deep-cloning.
     let baseline_snapshot = snapshot_globals(&globals);
+
+    if opts.dump_scopes {
+        match run_scope_dump_test(&test262_dir, &globals, &baseline_snapshot) {
+            Ok(()) => {
+                eprintln!("Scope dump run: ok");
+                exit(0);
+            }
+            Err(e) => {
+                eprintln!("Scope dump run: fail: {}", e);
+                exit(1);
+            }
+        }
+    }
 
     if opts.harness_only {
         match run_harness_only(&test262_dir, &globals, &baseline_snapshot) {
