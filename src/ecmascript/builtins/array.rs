@@ -8,7 +8,7 @@ use crate::runtime_utils::{
     builtin_object, canonical_index_key, collect_iterable_values, set_builtin_length,
     static_builtin_arg_offset, strict_equal, to_length, usize_to_f64,
 };
-use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
 
 /// 23.1 Array Objects
@@ -162,6 +162,11 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                         Ok(value) => value,
                         Err(err) => return Err(err),
                     };
+                    let constructor_candidate = vm.this_value();
+                    let use_constructor = matches!(
+                        constructor_candidate,
+                        Value::Closure { ref proto, .. } if proto.is_constructor
+                    );
 
                     let outcome: Result<Value, crate::errors::RuntimeError> = (|| {
                         if !matches!(map_fn, Value::Undefined) && !Vm::is_callable_value(&map_fn) {
@@ -174,7 +179,29 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                         if crate::trace::enabled() {
                             eprintln!("[trace] Array.fromAsync collected {} items", items.len());
                         }
-                        let mut out: Vec<Option<Value>> = Vec::with_capacity(items.len());
+                        let len = items.len();
+                        let created = if use_constructor {
+                            let ctor_len = if is_iterable_source(vm, &source)? {
+                                Vec::new()
+                            } else {
+                                vec![Value::Number(usize_to_f64(len))]
+                            };
+                            vm.construct_value(&constructor_candidate, &ctor_len)?
+                        } else {
+                            let out: Vec<Option<Value>> = vec![None; len];
+                            let props = Rc::new(RefCell::new(ObjectData::new()));
+                            props
+                                .borrow_mut()
+                                .set_prototype_value(Value::Object(Rc::clone(
+                                    &array_proto_for_from_async,
+                                )));
+                            props.borrow_mut().properties.insert(
+                                PKey::String("length".to_string()),
+                                PropertyDescriptor::data(Value::Number(usize_to_f64(len))),
+                            );
+                            Value::Array(Rc::new(RefCell::new(out)), props)
+                        };
+
                         for (i, mut value) in items.into_iter().enumerate() {
                             if !matches!(map_fn, Value::Undefined) {
                                 value = vm.call_value_with_this(
@@ -183,23 +210,35 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                                     &[value, Value::Number(usize_to_f64(i))],
                                 )?;
                             }
-                            out.push(Some(value));
+                            let key = Value::String(i.to_string());
+                            let mut desc_data = ObjectData::new();
+                            desc_data.properties.insert(
+                                PKey::String("value".to_string()),
+                                PropertyDescriptor::data(value),
+                            );
+                            desc_data.properties.insert(
+                                PKey::String("writable".to_string()),
+                                PropertyDescriptor::data(Value::Bool(true)),
+                            );
+                            desc_data.properties.insert(
+                                PKey::String("enumerable".to_string()),
+                                PropertyDescriptor::data(Value::Bool(true)),
+                            );
+                            desc_data.properties.insert(
+                                PKey::String("configurable".to_string()),
+                                PropertyDescriptor::data(Value::Bool(true)),
+                            );
+                            let desc = Value::Object(Rc::new(RefCell::new(desc_data)));
+                            if !vm.define_property_value(&created, &key, &desc)? {
+                                return Err(vm.throw_type_error(
+                                    "Array.fromAsync failed to define element",
+                                ));
+                            }
                         }
 
-                        let arr_rc = Rc::new(RefCell::new(out));
-                        let props = Rc::new(RefCell::new(ObjectData::new()));
-                        props
-                            .borrow_mut()
-                            .set_prototype_value(Value::Object(Rc::clone(
-                                &array_proto_for_from_async,
-                            )));
-                        props.borrow_mut().properties.insert(
-                            PKey::String("length".to_string()),
-                            PropertyDescriptor::data(Value::Number(usize_to_f64(
-                                arr_rc.borrow().len(),
-                            ))),
-                        );
-                        Ok(Value::Array(arr_rc, props))
+                        let len_key = Value::String("length".to_string());
+                        vm.set_property_host(&created, &len_key, Value::Number(usize_to_f64(len)))?;
+                        Ok(created)
                     })(
                     );
 
@@ -370,4 +409,20 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     );
 
     array_ctor_val
+}
+
+fn is_iterable_source(
+    vm: &mut Vm,
+    source: &Value,
+) -> Result<bool, crate::errors::RuntimeError> {
+    match source {
+        Value::Array(..) => Ok(true),
+        other => {
+            let iterator_method = vm.get_property_host(
+                other,
+                &PropertyKey::Symbol(SymbolId::well_known_iterator()),
+            )?;
+            Ok(Vm::is_callable_value(&iterator_method))
+        }
+    }
 }
