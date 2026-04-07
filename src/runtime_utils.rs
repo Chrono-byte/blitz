@@ -2861,6 +2861,13 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) {
         ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
     ));
     array_iterator_proto.borrow_mut().properties.insert(
+        PKey::Symbol(SymbolId::well_known_iterator()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+            &function_proto_map,
+        )),
+    );
+    array_iterator_proto.borrow_mut().properties.insert(
         PKey::String("next".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
