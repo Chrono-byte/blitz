@@ -3511,7 +3511,6 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         "__native_toNumber",
         "__native_toBoolean",
         "__native_abstractEquality",
-        "__native_instanceof",
         "__native_in",
         "__native_construct",
     ];

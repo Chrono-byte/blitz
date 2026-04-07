@@ -1155,11 +1155,9 @@ impl super::Compiler {
             }
             OExpr::BinaryExpression(b) => {
                 if matches!(b.operator, oast::BinaryOperator::Instanceof) {
-                    self.emit_get_global_name("__native_instanceof");
                     self.compile_expr_oast(&b.left)?;
                     self.compile_expr_oast(&b.right)?;
-                    self.emit(Op::CallIC, LINE);
-                    self.emit_byte(2, LINE);
+                    self.emit(Op::InstanceOf, LINE);
                     return Ok(());
                 }
                 if matches!(b.operator, oast::BinaryOperator::In) {

@@ -451,6 +451,8 @@ pub enum Op {
     DeleteIdentifier,
     /// Test whether a property exists on an object or its prototype chain.
     HasProperty,
+    /// Instanceof operator
+    InstanceOf,
     /// Call an iterator's `next()` method and push the result object.
     IteratorNext,
     /// Perform IteratorClose on the iterator on the stack.
@@ -559,6 +561,7 @@ impl Op {
             Op::DeleteProperty => "DeleteProperty",
             Op::DeleteIdentifier => "DeleteIdentifier",
             Op::HasProperty => "HasProperty",
+            Op::InstanceOf => "InstanceOf",
             Op::IteratorNext => "IteratorNext",
             Op::IteratorClose => "IteratorClose",
             Op::CallIC => "CallIC",

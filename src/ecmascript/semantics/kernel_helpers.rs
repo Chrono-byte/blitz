@@ -118,16 +118,6 @@ pub(crate) fn install_kernel_helpers(
     );
 
     insert_if_missing(
-        "__native_instanceof",
-        Value::Builtin(Rc::new(|vm, args| {
-            let off = static_builtin_arg_offset(vm, args, "");
-            let value = args.get(off).cloned().unwrap_or(Value::Undefined);
-            let ctor = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
-            Ok(Value::Bool(vm.instance_of(&value, &ctor)?))
-        })),
-    );
-
-    insert_if_missing(
         "__native_inProperty",
         Value::Builtin(Rc::new(|vm, args| {
             let prop = args.first().cloned().unwrap_or(Value::Undefined);

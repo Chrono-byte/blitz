@@ -2815,6 +2815,12 @@ impl Vm {
             Op::DeleteProperty => self.delete_property_op()?,
             Op::DeleteIdentifier => self.delete_identifier_op()?,
             Op::HasProperty => self.has_property_op()?,
+            Op::InstanceOf => {
+                let constructor = self.pop()?;
+                let value = self.pop()?;
+                let result = self.instance_of(&value, &constructor)?;
+                self.stack.push(Value::Bool(result));
+            }
             Op::SetProperty => {
                 if crate::trace::enabled() {
                     eprintln!(

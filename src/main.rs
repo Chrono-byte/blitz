@@ -216,18 +216,6 @@ fn main() -> Result<(), blitz::errors::Error> {
     );
 
     globals.borrow_mut().properties.insert(
-        blitz::value::PropertyKey::String("__native_instanceof".to_string()),
-        blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            let value = args.first().cloned().unwrap_or(Value::Undefined);
-            let ctor = args.get(1).cloned().unwrap_or(Value::Undefined);
-            match vm.instance_of(&value, &ctor) {
-                Ok(v) => Ok(Value::Bool(v)),
-                Err(e) => Err(e),
-            }
-        }))),
-    );
-
-    globals.borrow_mut().properties.insert(
         blitz::value::PropertyKey::String("__native_inProperty".to_string()),
         blitz::value::PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
             let prop = args.first().cloned().unwrap_or(Value::Undefined);
