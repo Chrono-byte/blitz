@@ -226,8 +226,28 @@ impl Compiler {
                 }
                 self.compile_expr_oast(&w.object)?;
                 self.emit(Op::PushWithEnv, LINE);
+                self.emit(Op::PushHandler, LINE);
+                let handler_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+
                 self.compile_statement_oast(&w.body)?;
+
+                self.emit(Op::PopHandler, LINE);
                 self.emit(Op::PopEnv, LINE);
+                self.emit(Op::Jump, LINE);
+                let skip_handler_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+
+                let handler_start = self.chunk.code.len();
+                self.patch_jump(handler_jump);
+
+                self.emit(Op::PopEnv, LINE);
+                self.emit(Op::Throw, LINE);
+                let after_handler = self.chunk.code.len();
+
+                self.patch_jump(skip_handler_jump);
             }
             OStmt::BlockStatement(b) => {
                 self.enter_block_scope_with_vars(&b.body);

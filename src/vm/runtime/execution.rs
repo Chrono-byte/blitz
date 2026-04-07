@@ -1471,6 +1471,9 @@ impl Vm {
                 if found
                     && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
                 {
+                    if name == "value" {
+                        eprintln!("[debug] property set via with for {}", name);
+                    }
                     return Ok(Some(self.get_property_host(&binding_object, &key)?));
                 }
             }
@@ -1497,6 +1500,9 @@ impl Vm {
             };
             if has_decl_binding {
                 let outer_env = outer.clone();
+                if name == "value" {
+                    eprintln!("[debug] setting lexical binding 'value'");
+                }
                 let result = current
                     .borrow_mut()
                     .set_mutable_binding(name, value.clone());
@@ -2648,6 +2654,7 @@ impl Vm {
             Op::GetPropertyIC => self.get_property_ic()?,
             Op::GetGlobalIC => self.get_global_ic()?,
             Op::DeleteProperty => self.delete_property_op()?,
+            Op::DeleteIdentifier => self.delete_identifier_op()?,
             Op::HasProperty => self.has_property_op()?,
             Op::SetProperty => {
                 if crate::trace::enabled() {
@@ -4249,6 +4256,51 @@ impl Vm {
         let obj = self.pop()?;
         let prop = self.to_property_key(&key)?;
         let deleted = self.delete_property_host(&obj, &prop)?;
+        self.stack.push(Value::Bool(deleted));
+        Ok(())
+    }
+
+    fn delete_identifier_op(&mut self) -> Result<(), crate::errors::RuntimeError> {
+        let name_val = self.pop()?;
+        let name = if let Value::String(s) = name_val {
+            s
+        } else {
+            return Err(self.throw_type_error("DeleteIdentifier requires string constant"));
+        };
+        let mut env = Some(Rc::clone(&self.lexical_env));
+        while let Some(current) = env {
+            let (has_binding, binding_object, with_environment, outer) = {
+                let borrowed = current.borrow();
+                (
+                    borrowed.has_binding(&name),
+                    borrowed.binding_object(),
+                    borrowed.is_with_environment(),
+                    borrowed.outer(),
+                )
+            };
+            if has_binding {
+                self.stack.push(Value::Bool(false));
+                return Ok(());
+            }
+            if let Some(binding_object) = binding_object {
+                let key = PropertyKey::String(name.clone());
+                let found = self.has_property_host(&binding_object, &key)?;
+                if found
+                    && (!with_environment || !self.is_unscopable_binding(&binding_object, &name)?)
+                {
+                    let deleted = self.delete_property_host(&binding_object, &key)?;
+                    self.bump_object_generation(&binding_object);
+                    self.stack.push(Value::Bool(deleted));
+                    return Ok(());
+                }
+            }
+            env = outer;
+        }
+
+        let global_obj = Value::Object(Rc::clone(&self.globals));
+        let key = PropertyKey::String(name.clone());
+        let deleted = self.delete_property_host(&global_obj, &key)?;
+        self.bump_object_generation(&global_obj);
         self.stack.push(Value::Bool(deleted));
         Ok(())
     }
