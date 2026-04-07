@@ -82,6 +82,159 @@ pub(super) const GC_STEP_INTERVAL: usize = 16;
 type Microtask = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 type DynamicImportJob = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 
+#[derive(Default)]
+pub(crate) struct OperandStack {
+    inner: Vec<Value>,
+    register: Option<Value>,
+}
+
+impl OperandStack {
+    pub(crate) fn with_capacity(cap: usize) -> Self {
+        Self {
+            inner: Vec::with_capacity(cap),
+            register: None,
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.inner.clear();
+        self.register = None;
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.inner.len() + self.register.is_some() as usize
+    }
+
+    pub(crate) fn push(&mut self, value: Value) {
+        if let Some(top) = self.register.replace(value) {
+            self.inner.push(top);
+        }
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<Value> {
+        if let Some(top) = self.register.take() {
+            Some(top)
+        } else {
+            self.inner.pop()
+        }
+    }
+
+    pub(crate) fn last(&self) -> Option<&Value> {
+        self.register.as_ref().or_else(|| self.inner.last())
+    }
+
+    pub(crate) fn iter(&self) -> OperandStackIter<'_> {
+        OperandStackIter {
+            inner: self.inner.iter(),
+            register: self.register.as_ref(),
+            register_emitted: false,
+        }
+    }
+
+    pub(crate) fn iter_rev(&self) -> OperandStackRevIter<'_> {
+        OperandStackRevIter {
+            inner: self.inner.iter().rev(),
+            register: self.register.as_ref(),
+            register_emitted: false,
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<Value> {
+        let mut values = self.inner.clone();
+        if let Some(top) = self.register.as_ref() {
+            values.push(top.clone());
+        }
+        values
+    }
+
+    pub(crate) fn take_all(&mut self) -> Vec<Value> {
+        let mut values = std::mem::take(&mut self.inner);
+        if let Some(top) = self.register.take() {
+            values.push(top);
+        }
+        values
+    }
+
+    pub(crate) fn restore_from(&mut self, mut values: Vec<Value>) {
+        if let Some(last) = values.pop() {
+            self.inner = values;
+            self.register = Some(last);
+        } else {
+            self.inner = Vec::new();
+            self.register = None;
+        }
+    }
+
+    pub(crate) fn truncate(&mut self, new_len: usize) {
+        let total = self.len();
+        if new_len >= total {
+            return;
+        }
+        if new_len == 0 {
+            self.clear();
+            return;
+        }
+        if new_len <= self.inner.len() {
+            self.inner.truncate(new_len);
+            self.register = None;
+        } else if new_len == self.inner.len() {
+            self.register = None;
+        }
+    }
+
+    pub(crate) fn swap(&mut self, a: usize, b: usize) {
+        let total = self.len();
+        if a >= total || b >= total {
+            panic!("swap index out of bounds");
+        }
+        let mut values = self.take_all();
+        values.swap(a, b);
+        self.restore_from(values);
+    }
+}
+
+pub(crate) struct OperandStackIter<'a> {
+    inner: std::slice::Iter<'a, Value>,
+    register: Option<&'a Value>,
+    register_emitted: bool,
+}
+
+impl<'a> Iterator for OperandStackIter<'a> {
+    type Item = &'a Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(value) = self.inner.next() {
+            Some(value)
+        } else if !self.register_emitted {
+            self.register_emitted = true;
+            self.register
+        } else {
+            None
+        }
+    }
+}
+
+pub(crate) struct OperandStackRevIter<'a> {
+    inner: std::iter::Rev<std::slice::Iter<'a, Value>>,
+    register: Option<&'a Value>,
+    register_emitted: bool,
+}
+
+impl<'a> Iterator for OperandStackRevIter<'a> {
+    type Item = &'a Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(value) = self.inner.next() {
+            Some(value)
+        } else if !self.register_emitted {
+            self.register_emitted = true;
+            self.register
+        } else {
+            None
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Global background Tokio runtime (lazy, shared across all Vm instances)
 // ---------------------------------------------------------------------------
@@ -150,7 +303,7 @@ pub struct Vm {
     pub(super) ip: usize,
     /// Operand stack. Shared across all frames; each frame records its base
     /// offset so the stack is truncated correctly on return.
-    pub(super) stack: Vec<Value>,
+    pub(super) stack: OperandStack,
     /// Local variables for the current frame.
     pub(super) locals: Vec<ValueSlot>,
     /// Current `this` binding.

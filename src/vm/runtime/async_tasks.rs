@@ -162,7 +162,7 @@ impl Vm {
         let env = Rc::clone(env);
         let promise_for_job = Rc::clone(&promise);
         let stack_base = self.stack.len();
-        let saved_stack = self.stack[..stack_base].to_vec();
+        let saved_stack = self.stack.snapshot();
         let caller_chunk = Rc::clone(&self.chunk);
         let caller_ip = self.ip;
         let caller_locals = self.locals.clone();
@@ -188,7 +188,7 @@ impl Vm {
         self.current_closure_env = caller_env;
         self.lexical_env = caller_lexical_env;
         self.current_slot_types = caller_slot_types;
-        self.stack = saved_stack;
+        self.stack.restore_from(saved_stack);
         self.frames.truncate(caller_frame_len);
         self.handlers = caller_handlers;
 

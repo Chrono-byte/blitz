@@ -41,7 +41,7 @@ impl Vm {
             realm,
             chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
             ip: 0,
-            stack: Vec::with_capacity(STACK_INITIAL_CAPACITY),
+            stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
             locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
             this_value: Value::Object(Rc::clone(&globals)),
             current_closure_env: None,
@@ -1029,7 +1029,7 @@ impl Vm {
                 if crate::trace::enabled() {
                     eprintln!("[trace] execute_call: callee not callable, dumping context...");
                     crate::trace::value_string("[trace]   callee", &callee);
-                    for (i, v) in self.stack.iter().rev().take(8).enumerate() {
+                    for (i, v) in self.stack.iter_rev().take(8).enumerate() {
                         crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
                     }
                     // Try to locate the callee value inside any known constant
@@ -1223,7 +1223,7 @@ impl Vm {
                 self.stack.len(),
                 self.ip.saturating_sub(1)
             );
-            for (i, v) in self.stack.iter().rev().take(6).enumerate() {
+            for (i, v) in self.stack.iter_rev().take(6).enumerate() {
                 crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
             }
         }
@@ -1306,7 +1306,7 @@ impl Vm {
                     );
                     crate::trace::value_string("[trace]   callee", &callee);
                     crate::trace::value_string("[trace]   receiver", &receiver);
-                    for (i, v) in self.stack.iter().rev().take(12).enumerate() {
+                    for (i, v) in self.stack.iter_rev().take(12).enumerate() {
                         crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
                     }
                     // Attempt to locate the callee in constants for active frames
@@ -1569,17 +1569,21 @@ impl Vm {
                 return result;
             }
             if let Some(binding_object) = binding_object {
-                let key = PropertyKey::String(name.to_string());
+                let name_str = name.to_string();
+                let key = PropertyKey::String(name_str.clone());
                 let found = self.has_property_host(&binding_object, &key)?;
                 if found
                     && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
                 {
-                    let _ = self.set_property_host(
-                        &binding_object,
-                        &Value::String(name.to_string()),
-                        value,
-                    )?;
-                    return Ok(true);
+                    let found_again = self.has_property_host(&binding_object, &key)?;
+                    if found_again {
+                        let _ = self.set_property_host(
+                            &binding_object,
+                            &Value::String(name_str),
+                            value,
+                        )?;
+                        return Ok(true);
+                    }
                 }
             }
             env = outer;
@@ -1637,10 +1641,16 @@ impl Vm {
                 if found
                     && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
                 {
-                    let _ =
-                        self.set_property_host(&binding_object, &Value::String(name_str), value)?;
-                    self.bump_object_generation(&binding_object);
-                    return Ok(true);
+                    let found_again = self.has_property_host(&binding_object, &key)?;
+                    if found_again {
+                        let _ = self.set_property_host(
+                            &binding_object,
+                            &Value::String(name_str),
+                            value,
+                        )?;
+                        self.bump_object_generation(&binding_object);
+                        return Ok(true);
+                    }
                 }
             }
             env = outer;
@@ -1712,7 +1722,7 @@ impl Vm {
                     callee.type_name()
                 );
                 crate::trace::value_string("[trace]   callee", callee);
-                for (i, v) in self.stack.iter().rev().take(6).enumerate() {
+                for (i, v) in self.stack.iter_rev().take(6).enumerate() {
                     crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
                 }
                 // Dump a small window of bytecode around the current ip to help
@@ -2107,7 +2117,7 @@ impl Vm {
                     self.invoke_async_closure(proto, &closure_env, call_args, this_arg.clone())
                 } else {
                     let stack_base = self.stack.len();
-                    let saved_stack = self.stack[..stack_base].to_vec();
+                    let saved_stack = self.stack.snapshot();
                     if crate::trace::enabled() {
                         eprintln!(
                             "[trace] call_with_this closure stack_base={} stack_len={} proto='{}'",
@@ -2134,7 +2144,7 @@ impl Vm {
                         self.this_value = caller_this;
                         self.current_closure_env = caller_env;
                         self.current_slot_types = caller_slot_types;
-                        self.stack = saved_stack;
+                        self.stack.restore_from(saved_stack);
                         self.frames.truncate(caller_frame_len);
                         self.handlers.truncate(caller_handler_len);
                     }
@@ -2146,7 +2156,7 @@ impl Vm {
                     eprintln!("[trace] call_with_this: callee not callable (final fallback)");
                     crate::trace::value_string("[trace]   callee", callee);
                     crate::trace::value_string("[trace]   this_arg", this_arg);
-                    for (i, v) in self.stack.iter().rev().take(8).enumerate() {
+                    for (i, v) in self.stack.iter_rev().take(8).enumerate() {
                         crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
                     }
                 }
@@ -2809,7 +2819,7 @@ impl Vm {
                         self.stack.len(),
                         self.ip.saturating_sub(1)
                     );
-                    for (i, v) in self.stack.iter().rev().take(6).enumerate() {
+                    for (i, v) in self.stack.iter_rev().take(6).enumerate() {
                         crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
                     }
                 }
@@ -3854,7 +3864,7 @@ impl Vm {
                 frame.stack_base,
                 result
             );
-            for (i, v) in self.stack.iter().rev().take(6).enumerate() {
+            for (i, v) in self.stack.iter_rev().take(6).enumerate() {
                 crate::trace::value_string(&format!("[trace]   ret_stack[{}]", i), v);
             }
         }
@@ -3866,7 +3876,7 @@ impl Vm {
         self.current_slot_types = frame.slot_types;
         self.chunk = frame.chunk;
         self.ip = frame.ip;
-        self.stack = frame.stack;
+        self.stack.restore_from(frame.stack);
         self.locals = frame.locals;
         self.this_value = frame.this_value;
         self.current_closure_env = frame.closure_env;
@@ -3998,7 +4008,7 @@ impl Vm {
             }
         }
 
-        let caller_stack = std::mem::take(&mut self.stack);
+        let caller_stack = self.stack.take_all();
         let stack_base = caller_stack.len();
 
         if crate::trace::enabled() {
@@ -4646,7 +4656,7 @@ impl Vm {
             if let Some(frame) = self.frames.pop() {
                 self.chunk = frame.chunk;
                 self.ip = frame.ip;
-                self.stack = frame.stack;
+                self.stack.restore_from(frame.stack);
                 self.locals = frame.locals;
                 self.this_value = frame.this_value;
                 self.current_closure_env = frame.closure_env;
@@ -5085,7 +5095,7 @@ impl Vm {
         crate::trace::value_string("[diag] offending value", offender);
 
         eprintln!("[diag] Stack snapshot (top -> bottom):");
-        for (idx, v) in self.stack.iter().rev().take(32).enumerate() {
+        for (idx, v) in self.stack.iter_rev().take(32).enumerate() {
             crate::trace::value_string(&format!("[diag]   stack[{}]", idx), v);
         }
 
