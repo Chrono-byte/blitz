@@ -514,7 +514,9 @@ pub fn native_to_builtin(native: NativeFn) -> BuiltinFn {
 pub fn define_native_global(globals: &Rc<RefCell<ObjectData>>, name: &str, native: NativeFn) {
     globals.borrow_mut().properties.insert(
         PropertyKey::String(name.to_string()),
-        PropertyDescriptor::data(Value::Builtin(native_to_builtin(native))),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
+            native(vm, Value::Undefined, args)
+        }))),
     );
 }
 

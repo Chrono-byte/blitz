@@ -1664,7 +1664,7 @@ impl Compiler {
                 return_type,
                 is_strict,
                 is_constructor: false,
-                is_async: false,
+                is_async: func.r#async,
                 is_generator: false,
             },
             _env_len,

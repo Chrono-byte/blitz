@@ -123,12 +123,14 @@ fn path_has_segment(path: &Path, wanted: &str) -> bool {
         .any(|component| component.as_os_str() == wanted)
 }
 
-/// Prints the arguments of a function call as a space-separated string.
-fn print_args(args: &[Value]) -> String {
-    args.iter()
-        .map(|v| format!("{}", v))
-        .collect::<Vec<_>>()
-        .join(" ")
+/// Prints the first argument of a function call using JS string coercion.
+fn print_args(vm: &mut Vm, args: &[Value]) -> String {
+    let value = args.first().cloned().unwrap_or(Value::Undefined);
+    match vm.to_string(&value) {
+        Ok(s) => s,
+        // `print` is a host helper, so degrade gracefully if coercion fails.
+        Err(_) => format!("{}", value),
+    }
 }
 
 fn select_files_to_run(
@@ -679,8 +681,8 @@ fn make_test_globals() -> Rc<RefCell<ObjectData>> {
         PropertyKey::String("globalThis".to_string()),
         PropertyDescriptor::data(global_this),
     );
-    let default_print: NativeFn = Rc::new(|_vm, _this, args| {
-        eprintln!("[test262 print] {}", print_args(args));
+    let default_print: NativeFn = Rc::new(|vm, _this, args| {
+        eprintln!("[test262 print] {}", print_args(vm, args));
         Ok(Value::Null)
     });
     define_native_global(&globals, "print", default_print);
@@ -1104,8 +1106,8 @@ fn run_test_file(
         let done_state: Rc<RefCell<Option<Option<String>>>> = Rc::new(RefCell::new(None));
         if is_async {
             let done_state_for_print = Rc::clone(&done_state);
-            let async_print: NativeFn = Rc::new(move |_vm, _this, args| {
-                let s = print_args(args);
+            let async_print: NativeFn = Rc::new(move |vm, _this, args| {
+                let s = print_args(vm, args);
                 if done_state_for_print.borrow().is_none()
                     && let Some(marker) = is_async_done_marker(&s)
                 {
@@ -2005,6 +2007,37 @@ mod tests {
 
         assert_eq!(top, "built-ins");
         assert_eq!(subsection, "built-ins/Array");
+    }
+
+    #[test]
+    fn print_args_uses_js_stringification() {
+        let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+        let intrinsics = runtime_utils::install_minimal_kernel_constructors(&globals);
+        let mut vm = Vm::new(Rc::clone(&globals));
+
+        let array_proto = intrinsics
+            .array_prototype
+            .expect("minimal intrinsics should install Array.prototype");
+        let array_props = Rc::new(RefCell::new(ObjectData::new()));
+        array_props.borrow_mut().set_prototype_value(array_proto);
+        let array = Value::Array(
+            Rc::new(RefCell::new(vec![
+                Some(Value::Number(1.0)),
+                Some(Value::Number(2.0)),
+            ])),
+            array_props,
+        );
+
+        assert_eq!(print_args(&mut vm, &[array]), "1,2");
+    }
+
+    #[test]
+    fn print_args_defaults_to_undefined_when_missing() {
+        let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+        let _intrinsics = runtime_utils::install_minimal_kernel_constructors(&globals);
+        let mut vm = Vm::new(Rc::clone(&globals));
+
+        assert_eq!(print_args(&mut vm, &[]), "undefined");
     }
 
     #[test]

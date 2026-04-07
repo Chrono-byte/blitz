@@ -137,6 +137,14 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                     let source = args.get(off).cloned().unwrap_or(Value::Undefined);
                     let map_fn = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
                     let this_arg = args.get(off + 2).cloned().unwrap_or(Value::Undefined);
+                    if crate::trace::enabled() {
+                        eprintln!(
+                            "[trace] Array.fromAsync start source={} map_fn={} this_arg={}",
+                            source.type_name(),
+                            map_fn.type_name(),
+                            this_arg.type_name()
+                        );
+                    }
 
                     let promise_ctor = match vm.get_global("Promise") {
                         Some(value) => value,
@@ -163,6 +171,9 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                         }
 
                         let items = collect_iterable_values(vm, &source)?;
+                        if crate::trace::enabled() {
+                            eprintln!("[trace] Array.fromAsync collected {} items", items.len());
+                        }
                         let mut out: Vec<Option<Value>> = Vec::with_capacity(items.len());
                         for (i, mut value) in items.into_iter().enumerate() {
                             if !matches!(map_fn, Value::Undefined) {
@@ -194,9 +205,18 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
 
                     match outcome {
                         Ok(value) => {
+                            if crate::trace::enabled() {
+                                eprintln!(
+                                    "[trace] Array.fromAsync success value type={}",
+                                    value.type_name()
+                                );
+                            }
                             vm.call_value_with_this(&promise_resolve, &promise_ctor, &[value])
                         }
                         Err(err) => {
+                            if crate::trace::enabled() {
+                                eprintln!("[trace] Array.fromAsync error {}", err);
+                            }
                             let reason = vm
                                 .last_uncaught_exception
                                 .take()
