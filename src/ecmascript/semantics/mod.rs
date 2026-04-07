@@ -19,6 +19,7 @@ use crate::{Parser, Vm, compiler};
 mod atomics;
 mod shadowrealm;
 
+/// Installs the Builtins into the given globals object.
 pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) -> Intrinsics {
     use PropertyKey as PKey;
 
