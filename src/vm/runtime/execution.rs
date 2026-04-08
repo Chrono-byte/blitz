@@ -1199,6 +1199,12 @@ impl Vm {
                 Ok(Self::make_iterator_result(result_value, true))
             }))),
         );
+        gen_obj.borrow_mut().properties.insert(
+            PropertyKey::Symbol(SymbolId::well_known_iterator()),
+            PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+                Ok(args.first().cloned().unwrap_or(Value::Undefined))
+            }))),
+        );
         Ok(Value::Object(gen_obj))
     }
 

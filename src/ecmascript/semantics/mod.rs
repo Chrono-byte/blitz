@@ -3651,6 +3651,14 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         })),
     );
     intrinsics.hidden_builtins.insert(
+        "requireObjectCoercible".to_string(),
+        Value::Builtin(Rc::new(|vm, args| {
+            let value = args.first().cloned().unwrap_or(Value::Undefined);
+            vm.to_object_value(value.clone())?;
+            Ok(value)
+        })),
+    );
+    intrinsics.hidden_builtins.insert(
         "forInKeys".to_string(),
         Value::Builtin(Rc::new(|vm, args| {
             let target = args.first().cloned().unwrap_or(Value::Undefined);

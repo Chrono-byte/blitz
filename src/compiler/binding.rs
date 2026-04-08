@@ -415,6 +415,10 @@ impl super::Compiler {
                 self.compile_binding_pattern_assignment_oast(&a.left, kind)?;
             }
             oast::BindingPattern::ArrayPattern(a) => {
+                self.emit_get_builtin_name("requireObjectCoercible");
+                self.emit(Op::Swap, LINE);
+                self.emit(Op::CallIC, LINE);
+                self.emit_byte(1, LINE);
                 if a.rest.is_none() {
                     let source_slot = self.alloc_temp_local("array_binding_source");
                     let iterator_slot = self.alloc_temp_local("array_binding_iterator");
@@ -485,6 +489,10 @@ impl super::Compiler {
                 }
             }
             oast::BindingPattern::ObjectPattern(o) => {
+                self.emit_get_builtin_name("requireObjectCoercible");
+                self.emit(Op::Swap, LINE);
+                self.emit(Op::CallIC, LINE);
+                self.emit_byte(1, LINE);
                 for prop in &o.properties {
                     let key = Self::binding_property_key_to_value(&prop.key).ok_or_else(|| {
                         crate::errors::CompilerError::from("unsupported object binding key")
