@@ -520,12 +520,8 @@ impl Compiler {
 
     pub(crate) fn emit_get_binding(&mut self, name: &str) {
         if let Some(slot) = self.resolve_local(name) {
-            if self.local_mirrors_global(slot) {
-                self.emit_get_global_name(name);
-            } else {
-                self.emit(Op::GetLocal, LINE);
-                self.emit_byte(slot as u8, LINE);
-            }
+            self.emit(Op::GetLocal, LINE);
+            self.emit_byte(slot as u8, LINE);
         } else if let Some(upvalue) = self.resolve_upvalue(name) {
             self.emit(Op::GetUpvalue, LINE);
             self.emit_byte(upvalue, LINE);
@@ -658,9 +654,15 @@ impl Compiler {
     }
 
     pub(crate) fn emit_typeof_identifier(&mut self, name: &str) {
-        let idx = self.global_name_index(name);
-        self.emit(Op::TypeofIdentifier, LINE);
-        self.emit_u16(idx as u16, LINE);
+        if let Some(slot) = self.resolve_local(name) {
+            self.emit(Op::GetLocal, LINE);
+            self.emit_byte(slot as u8, LINE);
+            self.emit(Op::Typeof, LINE);
+        } else {
+            let idx = self.global_name_index(name);
+            self.emit(Op::TypeofIdentifier, LINE);
+            self.emit_u16(idx as u16, LINE);
+        }
     }
 
     pub(crate) fn emit_set_global_name(&mut self, name: &str) {
