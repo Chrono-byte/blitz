@@ -28,6 +28,68 @@ impl super::Compiler {
         self.add_local_with_mirror(format!("__{}_{}", prefix, self.locals.len()), None, false)
     }
 
+    fn emit_super_property_get_static(
+        &mut self,
+        property: &str,
+        preserve_receiver: bool,
+    ) -> Result<(), crate::errors::CompilerError> {
+        self.emit(Op::GetThis, LINE);
+        self.emit(Op::Dup, LINE);
+        self.emit_constant(Value::String(property.to_string()), LINE);
+        self.emit(Op::GetSuperProperty, LINE);
+        if !preserve_receiver {
+            self.emit(Op::Swap, LINE);
+            self.emit(Op::Pop, LINE);
+        }
+        Ok(())
+    }
+
+    fn emit_super_property_get_computed(
+        &mut self,
+        key_expr: &oast::Expression,
+        preserve_receiver: bool,
+    ) -> Result<(), crate::errors::CompilerError> {
+        self.emit(Op::GetThis, LINE);
+        self.emit(Op::Dup, LINE);
+        self.compile_expr_oast(key_expr)?;
+        self.emit(Op::GetSuperProperty, LINE);
+        if !preserve_receiver {
+            self.emit(Op::Swap, LINE);
+            self.emit(Op::Pop, LINE);
+        }
+        Ok(())
+    }
+
+    fn emit_super_property_set_static(
+        &mut self,
+        property: &str,
+        value_expr: &oast::Expression,
+    ) -> Result<(), crate::errors::CompilerError> {
+        self.emit(Op::GetThis, LINE);
+        self.emit(Op::Dup, LINE);
+        self.emit_constant(Value::String(property.to_string()), LINE);
+        self.compile_expr_oast(value_expr)?;
+        self.emit(Op::SetSuperProperty, LINE);
+        self.emit(Op::Swap, LINE);
+        self.emit(Op::Pop, LINE);
+        Ok(())
+    }
+
+    fn emit_super_property_set_computed(
+        &mut self,
+        key_expr: &oast::Expression,
+        value_expr: &oast::Expression,
+    ) -> Result<(), crate::errors::CompilerError> {
+        self.emit(Op::GetThis, LINE);
+        self.emit(Op::Dup, LINE);
+        self.compile_expr_oast(key_expr)?;
+        self.compile_expr_oast(value_expr)?;
+        self.emit(Op::SetSuperProperty, LINE);
+        self.emit(Op::Swap, LINE);
+        self.emit(Op::Pop, LINE);
+        Ok(())
+    }
+
     fn compile_static_member_reference(
         &mut self,
         m: &oast::StaticMemberExpression<'_>,
@@ -559,18 +621,32 @@ impl super::Compiler {
                             }
                         }
                         oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
-                            self.compile_expr_oast(&m.object)?;
-                            self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                            self.compile_expr_oast(&a.right)?;
-                            self.emit(Op::SetPropertyIC, LINE);
-                            let slot = self.alloc_ic_slot()?;
-                            self.emit_byte(slot, LINE);
+                            if matches!(&m.object, OExpr::Super(_)) {
+                                self.emit_super_property_set_static(
+                                    m.property.name.as_str(),
+                                    &a.right,
+                                )?;
+                            } else {
+                                self.compile_expr_oast(&m.object)?;
+                                self.emit_constant(
+                                    Value::String(m.property.name.to_string()),
+                                    LINE,
+                                );
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit(Op::SetPropertyIC, LINE);
+                                let slot = self.alloc_ic_slot()?;
+                                self.emit_byte(slot, LINE);
+                            }
                         }
                         oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
-                            self.compile_expr_oast(&m.object)?;
-                            self.compile_expr_oast(&m.expression)?;
-                            self.compile_expr_oast(&a.right)?;
-                            self.emit(Op::SetProperty, LINE);
+                            if matches!(&m.object, OExpr::Super(_)) {
+                                self.emit_super_property_set_computed(&m.expression, &a.right)?;
+                            } else {
+                                self.compile_expr_oast(&m.object)?;
+                                self.compile_expr_oast(&m.expression)?;
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit(Op::SetProperty, LINE);
+                            }
                         }
                         _ => {
                             return Err(crate::errors::CompilerError::from(
@@ -646,36 +722,81 @@ impl super::Compiler {
                             }
                         }
                         oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
-                            let (object_slot, key_slot) =
-                                self.compile_static_member_reference(m)?;
-                            self.emit_reference_get(object_slot, key_slot, true)?;
-                            self.compile_expr_oast(&a.right)?;
-                            self.emit_compound_assignment_op(a.operator);
-                            let value_slot = self.alloc_temp_local("ref_value");
-                            self.emit(Op::SetLocal, LINE);
-                            self.emit_byte(value_slot as u8, LINE);
-                            self.emit_reference_set_from_slot(
-                                object_slot,
-                                key_slot,
-                                value_slot,
-                                true,
-                            )?;
+                            if matches!(&m.object, OExpr::Super(_)) {
+                                self.emit(Op::GetThis, LINE);
+                                self.emit(Op::Dup, LINE);
+                                self.emit_constant(
+                                    Value::String(m.property.name.to_string()),
+                                    LINE,
+                                );
+                                self.emit(Op::GetSuperProperty, LINE);
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit_compound_assignment_op(a.operator);
+                                self.emit_constant(
+                                    Value::String(m.property.name.to_string()),
+                                    LINE,
+                                );
+                                self.emit(Op::Swap, LINE);
+                                self.emit(Op::SetSuperProperty, LINE);
+                                self.emit(Op::Swap, LINE);
+                                self.emit(Op::Pop, LINE);
+                            } else {
+                                let (object_slot, key_slot) =
+                                    self.compile_static_member_reference(m)?;
+                                self.emit_reference_get(object_slot, key_slot, true)?;
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit_compound_assignment_op(a.operator);
+                                let value_slot = self.alloc_temp_local("ref_value");
+                                self.emit(Op::SetLocal, LINE);
+                                self.emit_byte(value_slot as u8, LINE);
+                                self.emit_reference_set_from_slot(
+                                    object_slot,
+                                    key_slot,
+                                    value_slot,
+                                    true,
+                                )?;
+                            }
                         }
                         oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
-                            let (object_slot, key_slot) =
-                                self.compile_computed_member_reference(m)?;
-                            self.emit_reference_get(object_slot, key_slot, false)?;
-                            self.compile_expr_oast(&a.right)?;
-                            self.emit_compound_assignment_op(a.operator);
-                            let value_slot = self.alloc_temp_local("ref_value");
-                            self.emit(Op::SetLocal, LINE);
-                            self.emit_byte(value_slot as u8, LINE);
-                            self.emit_reference_set_from_slot(
-                                object_slot,
-                                key_slot,
-                                value_slot,
-                                false,
-                            )?;
+                            if matches!(&m.object, OExpr::Super(_)) {
+                                let key_slot = self.alloc_temp_local("super_key");
+                                let receiver_slot = self.alloc_temp_local("super_receiver");
+                                self.emit(Op::GetThis, LINE);
+                                self.emit(Op::SetLocal, LINE);
+                                self.emit_byte(receiver_slot as u8, LINE);
+                                self.emit(Op::GetLocal, LINE);
+                                self.emit_byte(receiver_slot as u8, LINE);
+                                self.emit(Op::Dup, LINE);
+                                self.compile_expr_oast(&m.expression)?;
+                                self.emit(Op::SetLocal, LINE);
+                                self.emit_byte(key_slot as u8, LINE);
+                                self.emit(Op::GetLocal, LINE);
+                                self.emit_byte(key_slot as u8, LINE);
+                                self.emit(Op::GetSuperProperty, LINE);
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit_compound_assignment_op(a.operator);
+                                self.emit(Op::GetLocal, LINE);
+                                self.emit_byte(key_slot as u8, LINE);
+                                self.emit(Op::Swap, LINE);
+                                self.emit(Op::SetSuperProperty, LINE);
+                                self.emit(Op::Swap, LINE);
+                                self.emit(Op::Pop, LINE);
+                            } else {
+                                let (object_slot, key_slot) =
+                                    self.compile_computed_member_reference(m)?;
+                                self.emit_reference_get(object_slot, key_slot, false)?;
+                                self.compile_expr_oast(&a.right)?;
+                                self.emit_compound_assignment_op(a.operator);
+                                let value_slot = self.alloc_temp_local("ref_value");
+                                self.emit(Op::SetLocal, LINE);
+                                self.emit_byte(value_slot as u8, LINE);
+                                self.emit_reference_set_from_slot(
+                                    object_slot,
+                                    key_slot,
+                                    value_slot,
+                                    false,
+                                )?;
+                            }
                         }
                         _ => {
                             return Err(crate::errors::CompilerError::from(
@@ -1315,105 +1436,187 @@ impl super::Compiler {
                 }
             }
             OExpr::StaticMemberExpression(m) => {
-                self.compile_expr_oast(&m.object)?;
-                self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                if m.optional {
-                    self.emit(Op::Dup, LINE);
-                    self.emit(Op::JumpIfNullish, LINE);
-                    let skip_nullish = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
-                    self.emit(Op::Pop, LINE);
-                    self.emit(Op::Null, LINE);
-                    self.emit(Op::Jump, LINE);
-                    let end = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
-                    self.patch_jump(skip_nullish);
-                    self.emit(Op::GetPropertyIC, LINE);
-                    let slot = self.alloc_ic_slot()?;
-                    self.emit_byte(slot, LINE);
-                    self.patch_jump(end);
+                if matches!(&m.object, OExpr::Super(_)) {
+                    if m.optional {
+                        return Err(crate::errors::CompilerError::from(
+                            "optional chaining with super is not supported",
+                        ));
+                    }
+                    self.emit_super_property_get_static(m.property.name.as_str(), false)?;
                 } else {
-                    self.emit(Op::GetPropertyIC, LINE);
-                    let slot = self.alloc_ic_slot()?;
-                    self.emit_byte(slot, LINE);
+                    self.compile_expr_oast(&m.object)?;
+                    self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                    if m.optional {
+                        self.emit(Op::Dup, LINE);
+                        self.emit(Op::JumpIfNullish, LINE);
+                        let skip_nullish = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.emit(Op::Pop, LINE);
+                        self.emit(Op::Null, LINE);
+                        self.emit(Op::Jump, LINE);
+                        let end = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.patch_jump(skip_nullish);
+                        self.emit(Op::GetPropertyIC, LINE);
+                        let slot = self.alloc_ic_slot()?;
+                        self.emit_byte(slot, LINE);
+                        self.patch_jump(end);
+                    } else {
+                        self.emit(Op::GetPropertyIC, LINE);
+                        let slot = self.alloc_ic_slot()?;
+                        self.emit_byte(slot, LINE);
+                    }
                 }
             }
             OExpr::ComputedMemberExpression(m) => {
-                self.compile_expr_oast(&m.object)?;
-                self.compile_expr_oast(&m.expression)?;
-                if m.optional {
-                    self.emit(Op::Dup, LINE);
-                    self.emit(Op::JumpIfNullish, LINE);
-                    let skip_nullish = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
-                    self.emit(Op::Pop, LINE);
-                    self.emit(Op::Null, LINE);
-                    self.emit(Op::Jump, LINE);
-                    let end = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
-                    self.patch_jump(skip_nullish);
-                    self.emit(Op::GetProperty, LINE);
-                    self.patch_jump(end);
+                if matches!(&m.object, OExpr::Super(_)) {
+                    if m.optional {
+                        return Err(crate::errors::CompilerError::from(
+                            "optional chaining with super is not supported",
+                        ));
+                    }
+                    self.emit_super_property_get_computed(&m.expression, false)?;
                 } else {
-                    self.emit(Op::GetProperty, LINE);
+                    self.compile_expr_oast(&m.object)?;
+                    self.compile_expr_oast(&m.expression)?;
+                    if m.optional {
+                        self.emit(Op::Dup, LINE);
+                        self.emit(Op::JumpIfNullish, LINE);
+                        let skip_nullish = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.emit(Op::Pop, LINE);
+                        self.emit(Op::Null, LINE);
+                        self.emit(Op::Jump, LINE);
+                        let end = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.patch_jump(skip_nullish);
+                        self.emit(Op::GetProperty, LINE);
+                        self.patch_jump(end);
+                    } else {
+                        self.emit(Op::GetProperty, LINE);
+                    }
                 }
             }
             OExpr::ChainExpression(c) => {
                 use oast::ChainElement as CE;
                 match &c.expression {
                     CE::StaticMemberExpression(m) => {
-                        self.compile_expr_oast(&m.object)?;
-                        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                        if m.optional {
-                            self.emit(Op::Dup, LINE);
-                            self.emit(Op::JumpIfNullish, LINE);
-                            let skip_nullish = self.chunk.code.len();
-                            self.emit_byte(0, LINE);
-                            self.emit_byte(0, LINE);
-                            self.emit(Op::Pop, LINE);
-                            self.emit(Op::Null, LINE);
-                            self.emit(Op::Jump, LINE);
-                            let end = self.chunk.code.len();
-                            self.emit_byte(0, LINE);
-                            self.emit_byte(0, LINE);
-                            self.patch_jump(skip_nullish);
-                            self.emit(Op::GetPropertyIC, LINE);
-                            let slot = self.alloc_ic_slot()?;
-                            self.emit_byte(slot, LINE);
-                            self.patch_jump(end);
+                        if matches!(&m.object, OExpr::Super(_)) {
+                            if m.optional {
+                                return Err(crate::errors::CompilerError::from(
+                                    "optional chaining with super is not supported",
+                                ));
+                            }
+                            self.emit_super_property_get_static(m.property.name.as_str(), false)?;
                         } else {
-                            self.emit(Op::GetPropertyIC, LINE);
-                            let slot = self.alloc_ic_slot()?;
-                            self.emit_byte(slot, LINE);
+                            self.compile_expr_oast(&m.object)?;
+                            self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                            if m.optional {
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::JumpIfNullish, LINE);
+                                let skip_nullish = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.emit(Op::Pop, LINE);
+                                self.emit(Op::Null, LINE);
+                                self.emit(Op::Jump, LINE);
+                                let end = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.patch_jump(skip_nullish);
+                                self.emit(Op::GetPropertyIC, LINE);
+                                let slot = self.alloc_ic_slot()?;
+                                self.emit_byte(slot, LINE);
+                                self.patch_jump(end);
+                            } else {
+                                self.emit(Op::GetPropertyIC, LINE);
+                                let slot = self.alloc_ic_slot()?;
+                                self.emit_byte(slot, LINE);
+                            }
                         }
                     }
                     CE::ComputedMemberExpression(m) => {
-                        self.compile_expr_oast(&m.object)?;
-                        self.compile_expr_oast(&m.expression)?;
-                        if m.optional {
-                            self.emit(Op::Dup, LINE);
-                            self.emit(Op::JumpIfNullish, LINE);
-                            let skip_nullish = self.chunk.code.len();
-                            self.emit_byte(0, LINE);
-                            self.emit_byte(0, LINE);
-                            self.emit(Op::Pop, LINE);
-                            self.emit(Op::Null, LINE);
-                            self.emit(Op::Jump, LINE);
-                            let end = self.chunk.code.len();
-                            self.emit_byte(0, LINE);
-                            self.emit_byte(0, LINE);
-                            self.patch_jump(skip_nullish);
-                            self.emit(Op::GetProperty, LINE);
-                            self.patch_jump(end);
+                        if matches!(&m.object, OExpr::Super(_)) {
+                            if m.optional {
+                                return Err(crate::errors::CompilerError::from(
+                                    "optional chaining with super is not supported",
+                                ));
+                            }
+                            self.emit_super_property_get_computed(&m.expression, false)?;
                         } else {
-                            self.emit(Op::GetProperty, LINE);
+                            self.compile_expr_oast(&m.object)?;
+                            self.compile_expr_oast(&m.expression)?;
+                            if m.optional {
+                                self.emit(Op::Dup, LINE);
+                                self.emit(Op::JumpIfNullish, LINE);
+                                let skip_nullish = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.emit(Op::Pop, LINE);
+                                self.emit(Op::Null, LINE);
+                                self.emit(Op::Jump, LINE);
+                                let end = self.chunk.code.len();
+                                self.emit_byte(0, LINE);
+                                self.emit_byte(0, LINE);
+                                self.patch_jump(skip_nullish);
+                                self.emit(Op::GetProperty, LINE);
+                                self.patch_jump(end);
+                            } else {
+                                self.emit(Op::GetProperty, LINE);
+                            }
                         }
                     }
                     CE::CallExpression(c) => {
+                        if let OExpr::StaticMemberExpression(m) = &c.callee
+                            && matches!(&m.object, OExpr::Super(_))
+                        {
+                            if c.optional || m.optional {
+                                return Err(crate::errors::CompilerError::from(
+                                    "optional chaining with super is not supported",
+                                ));
+                            }
+                            self.emit_super_property_get_static(m.property.name.as_str(), true)?;
+                            let mut arg_count = 0usize;
+                            for arg in &c.arguments {
+                                if let Some(expr) = arg.as_expression() {
+                                    self.compile_expr_oast(expr)?;
+                                    arg_count += 1;
+                                } else {
+                                    self.emit(Op::Undefined, LINE);
+                                    arg_count += 1;
+                                }
+                            }
+                            self.emit(Op::CallMethod, LINE);
+                            self.emit_byte(arg_count as u8, LINE);
+                            return Ok(());
+                        }
+                        if let OExpr::ComputedMemberExpression(m) = &c.callee
+                            && matches!(&m.object, OExpr::Super(_))
+                        {
+                            if c.optional || m.optional {
+                                return Err(crate::errors::CompilerError::from(
+                                    "optional chaining with super is not supported",
+                                ));
+                            }
+                            self.emit_super_property_get_computed(&m.expression, true)?;
+                            let mut arg_count = 0usize;
+                            for arg in &c.arguments {
+                                if let Some(expr) = arg.as_expression() {
+                                    self.compile_expr_oast(expr)?;
+                                    arg_count += 1;
+                                } else {
+                                    self.emit(Op::Undefined, LINE);
+                                    arg_count += 1;
+                                }
+                            }
+                            self.emit(Op::CallMethod, LINE);
+                            self.emit_byte(arg_count as u8, LINE);
+                            return Ok(());
+                        }
                         let is_optional_call = c.optional;
                         // Recursively compile the callee (which may be a member expression)
                         self.compile_expr_oast(&c.callee)?;
@@ -1487,10 +1690,9 @@ impl super::Compiler {
                 }
             }
             OExpr::Super(_s) => {
-                self.emit(Op::GetThis, LINE);
-                self.emit_get_global_name("super");
-                self.emit(Op::GetProperty, LINE);
-                self.emit_constant(Value::String("[[Target]]".to_string()), LINE);
+                return Err(crate::errors::CompilerError::from(
+                    "super can only be used in property accesses or calls",
+                ));
             }
             OExpr::MetaProperty(m) => {
                 if m.meta.name.as_str() == "new" && m.property.name.as_str() == "target" {
@@ -1536,6 +1738,60 @@ impl super::Compiler {
                     self.emit_byte(c.arguments.len() as u8, LINE);
                     self.emit(Op::Spread, LINE);
                     self.emit_byte(c.arguments.len() as u8, LINE);
+                    return Ok(());
+                }
+
+                if let OExpr::Super(_) = &c.callee {
+                    return Err(crate::errors::CompilerError::from(
+                        "direct super() calls are not supported yet",
+                    ));
+                }
+
+                if let OExpr::StaticMemberExpression(m) = &c.callee
+                    && matches!(&m.object, OExpr::Super(_))
+                {
+                    if c.optional || m.optional {
+                        return Err(crate::errors::CompilerError::from(
+                            "optional chaining with super is not supported",
+                        ));
+                    }
+                    self.emit_super_property_get_static(m.property.name.as_str(), true)?;
+                    let mut arg_count = 0usize;
+                    for arg in &c.arguments {
+                        if let Some(expr) = arg.as_expression() {
+                            self.compile_expr_oast(expr)?;
+                            arg_count += 1;
+                        } else {
+                            self.emit(Op::Undefined, LINE);
+                            arg_count += 1;
+                        }
+                    }
+                    self.emit(Op::CallMethod, LINE);
+                    self.emit_byte(arg_count as u8, LINE);
+                    return Ok(());
+                }
+
+                if let OExpr::ComputedMemberExpression(m) = &c.callee
+                    && matches!(&m.object, OExpr::Super(_))
+                {
+                    if c.optional || m.optional {
+                        return Err(crate::errors::CompilerError::from(
+                            "optional chaining with super is not supported",
+                        ));
+                    }
+                    self.emit_super_property_get_computed(&m.expression, true)?;
+                    let mut arg_count = 0usize;
+                    for arg in &c.arguments {
+                        if let Some(expr) = arg.as_expression() {
+                            self.compile_expr_oast(expr)?;
+                            arg_count += 1;
+                        } else {
+                            self.emit(Op::Undefined, LINE);
+                            arg_count += 1;
+                        }
+                    }
+                    self.emit(Op::CallMethod, LINE);
+                    self.emit_byte(arg_count as u8, LINE);
                     return Ok(());
                 }
 
@@ -1813,6 +2069,21 @@ impl super::Compiler {
                 self.emit_byte(temp_slot as u8, LINE);
 
                 // Emit class elements (methods) similar to declaration lowering.
+                let instance_home_slot = if c.body.body.iter().any(|element| {
+                    matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static)
+                }) {
+                    self.emit(Op::GetLocal, LINE);
+                    self.emit_byte(temp_slot as u8, LINE);
+                    self.emit_constant(Value::String("prototype".to_string()), LINE);
+                    self.emit(Op::GetProperty, LINE);
+                    let home_slot = self.alloc_temp_local("class_home");
+                    self.emit(Op::Dup, LINE);
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(home_slot as u8, LINE);
+                    Some(home_slot)
+                } else {
+                    None
+                };
                 for element in &c.body.body {
                     if let oast::ClassElement::MethodDefinition(md) = element {
                         let method_name = match &md.key {
@@ -1849,15 +2120,17 @@ impl super::Compiler {
                             }
                             self.emit(Op::MakeClosure, LINE);
                             self.emit_byte(fidx as u8, LINE);
+                            self.emit_set_method_home_object(temp_slot)?;
                             self.emit(Op::SetPropertyIC, LINE);
                             let slot = self.alloc_ic_slot()?;
                             self.emit_byte(slot, LINE);
                         } else {
                             // instance: install on constructor.prototype
                             self.emit(Op::GetLocal, LINE);
-                            self.emit_byte(temp_slot as u8, LINE);
-                            self.emit_constant(Value::String("prototype".to_string()), LINE);
-                            self.emit(Op::GetProperty, LINE);
+                            self.emit_byte(
+                                instance_home_slot.expect("instance home slot") as u8,
+                                LINE,
+                            );
                             match &md.key {
                                 oast::PropertyKey::PrivateIdentifier(pid) => {
                                     let key = self.ensure_private_name_constant(&pid.name);
@@ -1870,6 +2143,9 @@ impl super::Compiler {
                             }
                             self.emit(Op::MakeClosure, LINE);
                             self.emit_byte(fidx as u8, LINE);
+                            self.emit_set_method_home_object(
+                                instance_home_slot.expect("instance home slot"),
+                            )?;
                             self.emit(Op::SetPropertyIC, LINE);
                             let slot = self.alloc_ic_slot()?;
                             self.emit_byte(slot, LINE);

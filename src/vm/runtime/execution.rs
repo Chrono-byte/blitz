@@ -219,44 +219,139 @@ impl Vm {
         self.this_value.clone()
     }
 
-    fn get_super_property(&mut self, this: &Value, key: &Value) -> Result<(), RuntimeError> {
-        let super_obj = self.get_prototype(this);
-        match super_obj {
-            Value::Object(obj) => {
-                let k = self.to_property_key(key)?;
-                let val = self.get_property_value(&Value::Object(obj), &k)?;
-                self.stack.push(val);
+    fn current_method_home_object(&self) -> Option<Value> {
+        let frame = self.call_stack.last()?;
+        match &frame.callee {
+            Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+                let props = props.borrow();
+                props
+                    .properties
+                    .get(&PropertyKey::String("[[HomeObject]]".to_string()))
+                    .and_then(|desc| match desc {
+                        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                        PropertyDescriptor::Accessor { .. } => None,
+                    })
             }
-            Value::Null => {
-                self.stack.push(Value::Undefined);
+            _ => None,
+        }
+    }
+
+    fn super_base_object(&self) -> Result<Value, RuntimeError> {
+        let home_object = self
+            .current_method_home_object()
+            .ok_or_else(|| RuntimeError::from("super used outside of a method"))?;
+        Ok(self.get_prototype(&home_object))
+    }
+
+    fn get_property_with_receiver(
+        &mut self,
+        obj: &Value,
+        key: &PropertyKey,
+        receiver: &Value,
+    ) -> Result<Value, RuntimeError> {
+        if matches!(obj, Value::Undefined | Value::Null) {
+            return Err(self.throw_type_error(&format!(
+                "Cannot read property '{:?}' of {}",
+                key,
+                obj.type_name()
+            )));
+        }
+        if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
+            return match desc {
+                PropertyDescriptor::Data { value, .. } => Ok(value),
+                PropertyDescriptor::Accessor { get, .. } => {
+                    if let Some(getter) = get {
+                        self.call_with_this(&getter, receiver, &[])
+                    } else {
+                        Ok(Value::Undefined)
+                    }
+                }
+            };
+        }
+        if let Value::String(text) = obj {
+            if matches!(key, PropertyKey::String(name) if name == "length") {
+                return Ok(Value::Number(text.chars().count() as f64));
             }
-            _ => {
-                self.stack.push(Value::Undefined);
+            if let Some(i) = array_index_from_key(key)
+                && let Some(ch) = text.chars().nth(i)
+            {
+                return Ok(Value::String(ch.to_string()));
             }
         }
+        Ok(Value::Undefined)
+    }
+
+    fn set_property_with_receiver(
+        &mut self,
+        obj: &Value,
+        key: &PropertyKey,
+        value: Value,
+        receiver: &Value,
+    ) -> Result<(), RuntimeError> {
+        if matches!(obj, Value::Undefined | Value::Null) {
+            return Err(self.throw_type_error(&format!(
+                "Cannot set property '{:?}' of {}",
+                key,
+                obj.type_name()
+            )));
+        }
+        if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
+            match desc {
+                PropertyDescriptor::Accessor { set, .. } => {
+                    if let Some(setter) = set {
+                        let _ = self.call_with_this(&setter, receiver, &[value])?;
+                        self.bump_object_generation(receiver);
+                        return Ok(());
+                    }
+                    if self.is_strict_mode() {
+                        return Err(self.throw_type_error("Cannot set property with no setter"));
+                    }
+                    return Ok(());
+                }
+                PropertyDescriptor::Data {
+                    writable: false, ..
+                } => {
+                    if self.is_strict_mode() {
+                        return Err(self.throw_type_error("Cannot assign to read only property"));
+                    }
+                    return Ok(());
+                }
+                PropertyDescriptor::Data { .. } => {
+                    self.set_property_tracked(receiver, key, value)?;
+                    return Ok(());
+                }
+            }
+        }
+        self.set_property_tracked(receiver, key, value)?;
+        Ok(())
+    }
+
+    fn get_super_property(&mut self, receiver: &Value, key: &Value) -> Result<(), RuntimeError> {
+        let super_obj = self.super_base_object()?;
+        if matches!(super_obj, Value::Null) {
+            self.stack.push(Value::Undefined);
+            return Ok(());
+        }
+        let k = self.to_property_key(key)?;
+        let val = self.get_property_with_receiver(&super_obj, &k, receiver)?;
+        self.stack.push(val);
         Ok(())
     }
 
     fn set_super_property(
         &mut self,
-        this: &Value,
+        receiver: &Value,
         key: &Value,
         value: Value,
     ) -> Result<(), RuntimeError> {
-        let super_obj = self.get_prototype(this);
-        match super_obj {
-            Value::Object(obj) => {
-                let k = self.to_property_key(key)?;
-                self.set_property_tracked(&Value::Object(obj), &k, value.clone())?;
-                self.stack.push(value);
-            }
-            Value::Null => {
-                self.stack.push(Value::Undefined);
-            }
-            _ => {
-                self.stack.push(Value::Undefined);
-            }
+        let super_obj = self.super_base_object()?;
+        if matches!(super_obj, Value::Null) {
+            self.stack.push(Value::Undefined);
+            return Ok(());
         }
+        let k = self.to_property_key(key)?;
+        self.set_property_with_receiver(&super_obj, &k, value.clone(), receiver)?;
+        self.stack.push(value);
         Ok(())
     }
 
@@ -2810,14 +2905,14 @@ impl Vm {
             }
             Op::GetSuperProperty => {
                 let key = self.pop()?;
-                let this = self.get_this();
-                self.get_super_property(&this, &key)?;
+                let receiver = self.pop()?;
+                self.get_super_property(&receiver, &key)?;
             }
             Op::SetSuperProperty => {
                 let value = self.pop()?;
                 let key = self.pop()?;
-                let this = self.get_this();
-                self.set_super_property(&this, &key, value)?;
+                let receiver = self.pop()?;
+                self.set_super_property(&receiver, &key, value)?;
             }
             Op::CallMethod => self.execute_call_method()?,
             Op::TailCallMethod => self.execute_tail_call_method()?,

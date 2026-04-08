@@ -1385,6 +1385,21 @@ impl Compiler {
         // Create closures for methods and install them on the constructor
         // (static) or constructor.prototype (instance). Private identifiers
         // are lowered to synthetic string keys recorded in `private_names`.
+        let instance_home_slot = if c.body.body.iter().any(
+            |element| matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static),
+        ) {
+            self.emit(Op::GetLocal, LINE);
+            self.emit_byte(slot as u8, LINE);
+            self.emit_constant(Value::String("prototype".to_string()), LINE);
+            self.emit(Op::GetProperty, LINE);
+            let home_slot = self.alloc_temp_local("class_home");
+            self.emit(Op::Dup, LINE);
+            self.emit(Op::SetLocal, LINE);
+            self.emit_byte(home_slot as u8, LINE);
+            Some(home_slot)
+        } else {
+            None
+        };
         for element in &c.body.body {
             if let oast::ClassElement::MethodDefinition(md) = element {
                 // Only handle method definitions for now.
@@ -1427,20 +1442,16 @@ impl Compiler {
                     // push closure
                     self.emit(Op::MakeClosure, LINE);
                     self.emit_byte(fidx as u8, LINE);
-
+                    self.emit_set_method_home_object(slot)?;
                     // set property: expects [obj, key, value]
                     self.emit(Op::SetPropertyIC, LINE);
                     let ic_slot = self.alloc_ic_slot()?;
                     self.emit_byte(ic_slot, LINE);
                 } else {
                     // instance method: install on constructor.prototype
-                    // push constructor
+                    let home_slot = instance_home_slot.expect("instance home slot");
                     self.emit(Op::GetLocal, LINE);
-                    self.emit_byte(slot as u8, LINE);
-                    // push "prototype" key and getProperty
-                    self.emit_constant(Value::String("prototype".to_string()), LINE);
-                    self.emit(Op::GetProperty, LINE);
-
+                    self.emit_byte(home_slot as u8, LINE);
                     // push key
                     match &md.key {
                         oast::PropertyKey::PrivateIdentifier(pid) => {
@@ -1456,7 +1467,7 @@ impl Compiler {
                     // push closure
                     self.emit(Op::MakeClosure, LINE);
                     self.emit_byte(fidx as u8, LINE);
-
+                    self.emit_set_method_home_object(home_slot)?;
                     // set property on prototype
                     self.emit(Op::SetPropertyIC, LINE);
                     let ic_slot = self.alloc_ic_slot()?;

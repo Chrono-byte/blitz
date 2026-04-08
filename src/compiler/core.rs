@@ -586,6 +586,32 @@ impl Compiler {
         self.emit_byte(idx as u8, LINE);
     }
 
+    /// Attach a home object to the method closure currently on top of the stack.
+    ///
+    /// The stack shape must be `[... home_object, key, closure]` when this is
+    /// called. The helper preserves that shape so the caller can immediately
+    /// emit the property installation that follows.
+    pub(crate) fn emit_set_method_home_object(
+        &mut self,
+        home_slot: usize,
+    ) -> Result<(), crate::errors::CompilerError> {
+        let method_slot = self.alloc_temp_local("method_closure");
+        self.emit(Op::Dup, LINE);
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(method_slot as u8, LINE);
+
+        self.emit(Op::GetLocal, LINE);
+        self.emit_byte(method_slot as u8, LINE);
+        self.emit_constant(Value::String("[[HomeObject]]".to_string()), LINE);
+        self.emit(Op::GetLocal, LINE);
+        self.emit_byte(home_slot as u8, LINE);
+        self.emit(Op::SetPropertyIC, LINE);
+        let slot = self.alloc_ic_slot()?;
+        self.emit_byte(slot, LINE);
+        self.emit(Op::Pop, LINE);
+        Ok(())
+    }
+
     pub(crate) fn emit_typeof_identifier(&mut self, name: &str) {
         let idx = self.global_name_index(name);
         self.emit(Op::TypeofIdentifier, LINE);

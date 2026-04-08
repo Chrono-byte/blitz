@@ -59,6 +59,60 @@ impl super::Compiler {
             return Ok(());
         }
 
+        if let OExpr::Super(_) = &c.callee {
+            return Err(crate::errors::CompilerError::from(
+                "direct super() calls are not supported yet",
+            ));
+        }
+
+        if let OExpr::StaticMemberExpression(m) = &c.callee
+            && matches!(&m.object, OExpr::Super(_))
+        {
+            if c.optional || m.optional {
+                return Err(crate::errors::CompilerError::from(
+                    "optional chaining with super is not supported",
+                ));
+            }
+            self.emit_super_property_get_static(m.property.name.as_str(), true)?;
+            let mut arg_count = 0usize;
+            for arg in &c.arguments {
+                if let Some(expr) = arg.as_expression() {
+                    self.compile_expr_oast(expr)?;
+                    arg_count += 1;
+                } else {
+                    self.emit(Op::Undefined, LINE);
+                    arg_count += 1;
+                }
+            }
+            self.emit(Op::TailCallMethod, LINE);
+            self.emit_byte(arg_count as u8, LINE);
+            return Ok(());
+        }
+
+        if let OExpr::ComputedMemberExpression(m) = &c.callee
+            && matches!(&m.object, OExpr::Super(_))
+        {
+            if c.optional || m.optional {
+                return Err(crate::errors::CompilerError::from(
+                    "optional chaining with super is not supported",
+                ));
+            }
+            self.emit_super_property_get_computed(&m.expression, true)?;
+            let mut arg_count = 0usize;
+            for arg in &c.arguments {
+                if let Some(expr) = arg.as_expression() {
+                    self.compile_expr_oast(expr)?;
+                    arg_count += 1;
+                } else {
+                    self.emit(Op::Undefined, LINE);
+                    arg_count += 1;
+                }
+            }
+            self.emit(Op::TailCallMethod, LINE);
+            self.emit_byte(arg_count as u8, LINE);
+            return Ok(());
+        }
+
         if let oast::Expression::StaticMemberExpression(m) = &c.callee {
             let is_optional_call = c.optional;
 
