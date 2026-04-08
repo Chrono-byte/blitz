@@ -90,9 +90,10 @@ pub(crate) fn install_bigint_and_number_builtins(
         PKey::String("valueOf".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 match this {
-                    Value::BigInt(n) => Ok(Value::BigInt(n)),
+                    Value::BigInt(n) => Ok(Value::BigInt(n.clone())),
                     Value::Object(obj) => {
                         if let Some(PropertyDescriptor::Data { value, .. }) = obj
                             .borrow()
@@ -118,7 +119,8 @@ pub(crate) fn install_bigint_and_number_builtins(
         PKey::String("toString".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 match this {
                     Value::BigInt(n) => Ok(Value::String(n.to_string())),
                     Value::Object(obj) => {
@@ -189,9 +191,10 @@ pub(crate) fn install_bigint_and_number_builtins(
         PKey::String("valueOf".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 let res = match this {
-                    Value::Number(n) => Value::Number(n),
+                    Value::Number(n) => Value::Number(*n),
                     Value::Object(obj) => {
                         if let Some(PropertyDescriptor::Data { value, .. }) = obj
                             .borrow()
@@ -212,10 +215,7 @@ pub(crate) fn install_bigint_and_number_builtins(
                     }
                 };
                 if crate::trace::enabled() {
-                    crate::trace::value_string(
-                        "[trace] Number.prototype.valueOf receiver",
-                        &args.first().cloned().unwrap_or(Value::Undefined),
-                    );
+                    crate::trace::value_string("[trace] Number.prototype.valueOf receiver", this);
                     crate::trace::value_string("[trace] Number.prototype.valueOf result", &res);
                 }
                 Ok(res)
@@ -227,7 +227,8 @@ pub(crate) fn install_bigint_and_number_builtins(
         PKey::String("toString".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 match this {
                     Value::Number(n) => Ok(Value::String(n.to_string())),
                     Value::Object(obj) => {

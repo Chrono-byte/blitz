@@ -27,7 +27,8 @@ pub(crate) fn create_promise_intrinsics(
         let _promise_proto_map_rc = Rc::clone(&promise_proto_map);
         Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Promise");
-            let executor = args.get(off).cloned().unwrap_or(Value::Undefined);
+            let undefined = Value::Undefined;
+            let executor = args.get(off).unwrap_or(&undefined);
 
             let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
                 on_fulfilled: Vec::new(),
@@ -42,10 +43,13 @@ pub(crate) fn create_promise_intrinsics(
                     return Ok(Value::Undefined);
                 }
                 *resolve_called_for_resolve.borrow_mut() = true;
-                let value = args
-                    .get(1)
-                    .cloned()
-                    .unwrap_or_else(|| args.first().cloned().unwrap_or(Value::Undefined));
+                let value = if let Some(value) = args.get(1) {
+                    value.clone()
+                } else if let Some(value) = args.first() {
+                    value.clone()
+                } else {
+                    Value::Undefined
+                };
                 if let Err(err) = resolve_promise_with_value(vm, &promise_for_resolve, value) {
                     let reason = vm
                         .last_uncaught_exception
@@ -63,17 +67,20 @@ pub(crate) fn create_promise_intrinsics(
                     return Ok(Value::Undefined);
                 }
                 *reject_called.borrow_mut() = true;
-                let reason = args
-                    .get(1)
-                    .cloned()
-                    .unwrap_or_else(|| args.first().cloned().unwrap_or(Value::Undefined));
+                let reason = if let Some(reason) = args.get(1) {
+                    reason.clone()
+                } else if let Some(reason) = args.first() {
+                    reason.clone()
+                } else {
+                    Value::Undefined
+                };
                 reject_pending_promise(vm, &promise_for_reject, reason);
                 Ok(Value::Undefined)
             }));
 
             vm.last_uncaught_exception = None;
             if let Err(err) =
-                vm.call_value_with_this(&executor, &Value::Undefined, &[resolve_fn, reject_fn])
+                vm.call_value_with_this(executor, &Value::Undefined, &[resolve_fn, reject_fn])
             {
                 let reason = vm
                     .last_uncaught_exception
@@ -100,7 +107,8 @@ pub(crate) fn create_promise_intrinsics(
         PKey::String("then".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 let on_fulfilled = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let on_rejected = args.get(2).cloned().unwrap_or(Value::Undefined);
                 let on_fulfilled = if Vm::is_callable_value(&on_fulfilled) {
@@ -253,12 +261,13 @@ pub(crate) fn create_promise_intrinsics(
         PKey::String("catch".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 let on_rejected = args.get(1).cloned().unwrap_or(Value::Undefined);
                 if let Value::Promise(_) = this {
                     let then_method =
-                        vm.get_property_host(&this, &PropertyKey::String("then".to_string()))?;
-                    vm.call_value_with_this(&then_method, &this, &[Value::Undefined, on_rejected])
+                        vm.get_property_host(this, &PropertyKey::String("then".to_string()))?;
+                    vm.call_value_with_this(&then_method, this, &[Value::Undefined, on_rejected])
                 } else {
                     Err(vm.throw_type_error("Promise.prototype.catch called on non-promise"))
                 }
@@ -272,15 +281,16 @@ pub(crate) fn create_promise_intrinsics(
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
                 let off = static_builtin_arg_offset(vm, args, "Promise");
-                let value = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let value = args.get(off).unwrap_or(&undefined);
                 let this_val = vm.this_value();
                 if !this_val.is_object() {
                     return Err(vm.throw_type_error("Promise.resolve called on non-object"));
                 }
-                if let Value::Promise(_) = &value
-                    && promise_constructor_matches(vm, &value, &this_val)?
+                if let Value::Promise(_) = value
+                    && promise_constructor_matches(vm, value, &this_val)?
                 {
-                    return Ok(value);
+                    return Ok(value.clone());
                 }
 
                 let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
@@ -300,8 +310,11 @@ pub(crate) fn create_promise_intrinsics(
                     .unwrap()
                     .clone()
                     .ok_or_else(|| vm.throw_type_error("Promise capability resolve missing"))?;
-                if let Err(err) = vm.call_value_with_this(&resolve_fn, &Value::Undefined, &[value])
-                {
+                if let Err(err) = vm.call_value_with_this(
+                    &resolve_fn,
+                    &Value::Undefined,
+                    std::slice::from_ref(value),
+                ) {
                     let reason = vm
                         .last_uncaught_exception
                         .take()
@@ -321,7 +334,8 @@ pub(crate) fn create_promise_intrinsics(
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
                 let off = static_builtin_arg_offset(vm, args, "Promise");
-                let iterable = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let iterable = args.get(off).unwrap_or(&undefined);
                 let this_val = vm.this_value();
                 if !this_val.is_object() {
                     return Err(vm.throw_type_error("Promise.all called on non-object"));
@@ -350,7 +364,7 @@ pub(crate) fn create_promise_intrinsics(
                     .clone()
                     .ok_or_else(|| vm.throw_type_error("Promise capability reject missing"))?;
 
-                let items = match collect_iterable_values(vm, &iterable) {
+                let items = match collect_iterable_values(vm, iterable) {
                     Ok(items) => items,
                     Err(err) => {
                         let reason = vm
@@ -472,7 +486,8 @@ pub(crate) fn create_promise_intrinsics(
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
                 let off = static_builtin_arg_offset(vm, args, "Promise");
-                let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let reason = args.get(off).unwrap_or(&undefined);
                 let this_val = vm.this_value();
                 if !this_val.is_object() {
                     return Err(vm.throw_type_error("Promise.reject called on non-object"));
@@ -495,8 +510,11 @@ pub(crate) fn create_promise_intrinsics(
                     .unwrap()
                     .clone()
                     .ok_or_else(|| vm.throw_type_error("Promise capability reject missing"))?;
-                if let Err(err) = vm.call_value_with_this(&reject_fn, &Value::Undefined, &[reason])
-                {
+                if let Err(err) = vm.call_value_with_this(
+                    &reject_fn,
+                    &Value::Undefined,
+                    std::slice::from_ref(reason),
+                ) {
                     let reject_reason = vm
                         .last_uncaught_exception
                         .take()

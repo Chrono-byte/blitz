@@ -710,7 +710,7 @@ fn resolve_promise_with_value_inner(
             // calls back synchronously.
             let resolve_called = Rc::clone(&already_resolved);
             let res_p = Rc::clone(result_promise);
-            let thenable = value.clone();
+            let thenable = value;
             let then_func = then_val;
 
             vm.queue_microtask(move |vm| {
@@ -866,15 +866,15 @@ pub(crate) fn fulfill_pending_promise(
 
     let mut state = promise.borrow_mut();
     if let PromiseState::Pending { on_fulfilled, .. } = &mut *state {
-        let callbacks = on_fulfilled.clone();
+        let callbacks = std::mem::take(on_fulfilled);
         let stored_value = value.clone();
         *state = PromiseState::Fulfilled(value);
         drop(state);
         for callback in callbacks {
-            let mut arg_value = Some(stored_value.clone());
+            let callback_value = stored_value.clone();
             vm.queue_microtask(move |vm| {
-                let args = [arg_value.take().unwrap()];
-                let _ = vm.call_value_with_this(&callback, &Value::Undefined, &args);
+                let args = std::slice::from_ref(&callback_value);
+                let _ = vm.call_value_with_this(&callback, &Value::Undefined, args);
                 Ok(())
             });
         }
@@ -891,7 +891,7 @@ pub(crate) fn reject_pending_promise(
 
     let mut state = promise.borrow_mut();
     if let PromiseState::Pending { on_rejected, .. } = &mut *state {
-        let callbacks = on_rejected.clone();
+        let callbacks = std::mem::take(on_rejected);
         let stored_reason = reason.clone();
         *state = PromiseState::Rejected(reason);
         drop(state);
@@ -904,10 +904,10 @@ pub(crate) fn reject_pending_promise(
             vm.call_unhandled_rejection(Value::Undefined, stored_reason);
         } else {
             for callback in callbacks {
-                let mut arg_reason = Some(stored_reason.clone());
+                let callback_reason = stored_reason.clone();
                 vm.queue_microtask(move |vm| {
-                    let args = [arg_reason.take().unwrap()];
-                    let _ = vm.call_value_with_this(&callback, &Value::Undefined, &args);
+                    let args = std::slice::from_ref(&callback_reason);
+                    let _ = vm.call_value_with_this(&callback, &Value::Undefined, args);
                     Ok(())
                 });
             }

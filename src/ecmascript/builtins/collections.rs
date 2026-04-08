@@ -109,10 +109,11 @@ pub(crate) fn install_map_set_constructors(
         PKey::String("get".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 let key = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let entries =
-                    vm.get_property_host(&this, &PropertyKey::String("__map_entries".to_string()))?;
+                    vm.get_property_host(this, &PropertyKey::String("__map_entries".to_string()))?;
                 if let Value::Array(arr, _) = entries {
                     for item in arr.borrow().iter() {
                         if let Some(Value::Array(pair, _)) = item {
@@ -134,10 +135,11 @@ pub(crate) fn install_map_set_constructors(
         PKey::String("has".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 let key = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let entries =
-                    vm.get_property_host(&this, &PropertyKey::String("__map_entries".to_string()))?;
+                    vm.get_property_host(this, &PropertyKey::String("__map_entries".to_string()))?;
                 if let Value::Array(arr, _) = entries {
                     for item in arr.borrow().iter() {
                         if let Some(Value::Array(pair, _)) = item {
@@ -159,10 +161,11 @@ pub(crate) fn install_map_set_constructors(
         PKey::String("delete".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 let key = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let entries_key = PropertyKey::String("__map_entries".to_string());
-                let entries = vm.get_property_host(&this, &entries_key)?;
+                let entries = vm.get_property_host(this, &entries_key)?;
                 if let Value::Array(arr, props) = entries {
                     let mut vec = arr.borrow_mut();
                     let removed = if let Some(pos) = vec.iter().position(|item| {
@@ -186,7 +189,7 @@ pub(crate) fn install_map_set_constructors(
                         PropertyDescriptor::data(Value::Number(new_len)),
                     );
                     let _ = vm.set_property_host(
-                        &this,
+                        this,
                         &Value::String("size".to_string()),
                         Value::Number(new_len),
                     )?;
@@ -201,11 +204,12 @@ pub(crate) fn install_map_set_constructors(
         PKey::String("set".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 let key = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let value = args.get(2).cloned().unwrap_or(Value::Undefined);
                 let entries_key = PropertyKey::String("__map_entries".to_string());
-                let entries = vm.get_property_host(&this, &entries_key)?;
+                let entries = vm.get_property_host(this, &entries_key)?;
                 if let Value::Array(arr, props) = entries {
                     let mut updated = false;
                     for item in arr.borrow_mut().iter_mut() {
@@ -241,12 +245,12 @@ pub(crate) fn install_map_set_constructors(
                         );
                     }
                     let _ = vm.set_property_host(
-                        &this,
+                        this,
                         &Value::String("size".to_string()),
                         Value::Number(usize_to_f64(arr.borrow().len())),
                     )?;
                 }
-                Ok(this)
+                Ok(this.clone())
             }),
             function_proto_map,
         )),
@@ -256,9 +260,10 @@ pub(crate) fn install_map_set_constructors(
         PKey::Symbol(SymbolId::well_known_iterator()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(move |vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 let entries =
-                    vm.get_property_host(&this, &PropertyKey::String("__map_entries".to_string()))?;
+                    vm.get_property_host(this, &PropertyKey::String("__map_entries".to_string()))?;
                 let mut iter = ObjectData::new();
                 iter.properties.insert(
                     PropertyKey::String("__iter_entries".to_string()),
@@ -271,18 +276,16 @@ pub(crate) fn install_map_set_constructors(
                 let function_proto_for_next = Rc::clone(&function_proto_for_map_iter);
                 let next_fn = builtin_object(
                     Rc::new(|vm, args| {
-                        let it = args.first().cloned().unwrap_or(Value::Undefined);
+                        let undefined = Value::Undefined;
+                        let it = args.first().unwrap_or(&undefined);
                         let entries = vm
                             .get_property_host(
-                                &it,
+                                it,
                                 &PropertyKey::String("__iter_entries".to_string()),
                             )
                             .unwrap_or(Value::Undefined);
                         let idx_val = vm
-                            .get_property_host(
-                                &it,
-                                &PropertyKey::String("__iter_index".to_string()),
-                            )
+                            .get_property_host(it, &PropertyKey::String("__iter_index".to_string()))
                             .unwrap_or(Value::Number(0.0));
                         let mut idx = vm
                             .to_number_value(&idx_val)
@@ -302,7 +305,7 @@ pub(crate) fn install_map_set_constructors(
                             done = false;
                         }
                         let _ = vm.set_property_host(
-                            &it,
+                            it,
                             &Value::String("__iter_index".to_string()),
                             Value::Number(usize_to_f64(idx)),
                         )?;
@@ -343,7 +346,8 @@ pub(crate) fn install_map_set_constructors(
         Value::Object(Rc::clone(function_proto_map)),
     )));
     let set_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let undefined = Value::Undefined;
+        let receiver = args.first().unwrap_or(&undefined);
         if matches!(
             receiver,
             Value::Object(_)
@@ -358,12 +362,12 @@ pub(crate) fn install_map_set_constructors(
                 PropertyDescriptor::data(Value::Number(0.0)),
             );
             let _ = vm.set_property_host(
-                &receiver,
+                receiver,
                 &Value::String("__set_values".to_string()),
                 Value::Array(arr_rc.clone(), arr_props),
             )?;
             let _ = vm.set_property_host(
-                &receiver,
+                receiver,
                 &Value::String("size".to_string()),
                 Value::Number(0.0),
             )?;
@@ -382,12 +386,12 @@ pub(crate) fn install_map_set_constructors(
                     }
                 }
                 let _ = vm.set_property_host(
-                    &receiver,
+                    receiver,
                     &Value::String("size".to_string()),
                     Value::Number(usize_to_f64(arr_rc.borrow().len())),
                 )?;
             }
-            return Ok(receiver);
+            return Ok(receiver.clone());
         }
         Ok(Value::Object(Rc::new(RefCell::new(ObjectData::new()))))
     });
@@ -404,10 +408,11 @@ pub(crate) fn install_map_set_constructors(
         PKey::String("add".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 let value = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let values =
-                    vm.get_property_host(&this, &PropertyKey::String("__set_values".to_string()))?;
+                    vm.get_property_host(this, &PropertyKey::String("__set_values".to_string()))?;
                 if let Value::Array(arr, props) = values {
                     let mut exists = false;
                     for existing in arr.borrow().iter().flatten() {
@@ -426,12 +431,12 @@ pub(crate) fn install_map_set_constructors(
                         );
                     }
                     let _ = vm.set_property_host(
-                        &this,
+                        this,
                         &Value::String("size".to_string()),
                         Value::Number(usize_to_f64(arr.borrow().len())),
                     )?;
                 }
-                Ok(this)
+                Ok(this.clone())
             }),
             function_proto_map,
         )),
@@ -440,10 +445,11 @@ pub(crate) fn install_map_set_constructors(
         PKey::String("has".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let this = args.first().unwrap_or(&undefined);
                 let value = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let values =
-                    vm.get_property_host(&this, &PropertyKey::String("__set_values".to_string()))?;
+                    vm.get_property_host(this, &PropertyKey::String("__set_values".to_string()))?;
                 if let Value::Array(arr, _) = values {
                     for existing in arr.borrow().iter().flatten() {
                         if strict_equal(existing, &value) {

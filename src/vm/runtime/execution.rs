@@ -884,20 +884,15 @@ impl Vm {
                 let mut runner = next_runner
                     .try_borrow_mut()
                     .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
-                let temp_root_base = runner.vm.gc_temp_roots.len();
-                if let Some(this_value) = args.first().cloned() {
-                    runner.vm.gc_temp_roots.push(this_value);
-                }
-                let outcome = if runner.completed {
+                let first_arg = args.first().cloned().unwrap_or(Value::Undefined);
+
+                if runner.completed {
                     Ok(Self::make_iterator_result(Value::Undefined, true))
                 } else {
                     if !runner.started {
                         runner.started = true;
                     } else {
-                        runner
-                            .vm
-                            .stack
-                            .push(args.first().cloned().unwrap_or(Value::Undefined));
+                        runner.vm.stack.push(first_arg);
                     }
 
                     loop {
@@ -918,9 +913,7 @@ impl Vm {
                             Err(err) => break Err(err),
                         }
                     }
-                };
-                runner.vm.gc_temp_roots.truncate(temp_root_base);
-                outcome
+                }
             }))),
         );
         gen_obj.borrow_mut().properties.insert(
@@ -929,17 +922,11 @@ impl Vm {
                 let mut runner = throw_runner
                     .try_borrow_mut()
                     .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
-                let temp_root_base = runner.vm.gc_temp_roots.len();
-                if let Some(this_value) = args.first().cloned() {
-                    runner.vm.gc_temp_roots.push(this_value);
-                }
-                let outcome = if runner.completed {
-                    Err(RuntimeError::from(format!(
-                        "Uncaught: {}",
-                        args.first().cloned().unwrap_or(Value::Undefined)
-                    )))
+                let thrown = args.first().cloned().unwrap_or(Value::Undefined);
+
+                if runner.completed {
+                    Err(RuntimeError::from(format!("Uncaught: {}", thrown)))
                 } else {
-                    let thrown = args.first().cloned().unwrap_or(Value::Undefined);
                     if let Err(err) = runner.vm.throw_value(thrown) {
                         runner.completed = true;
                         Err(err)
@@ -966,9 +953,7 @@ impl Vm {
                             }
                         }
                     }
-                };
-                runner.vm.gc_temp_roots.truncate(temp_root_base);
-                outcome
+                }
             }))),
         );
         gen_obj.borrow_mut().properties.insert(
@@ -977,17 +962,9 @@ impl Vm {
                 let mut runner = return_runner
                     .try_borrow_mut()
                     .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
-                let temp_root_base = runner.vm.gc_temp_roots.len();
-                if let Some(this_value) = args.first().cloned() {
-                    runner.vm.gc_temp_roots.push(this_value);
-                }
+                let result_value = args.first().cloned().unwrap_or(Value::Undefined);
                 runner.completed = true;
-                let result = Ok(Self::make_iterator_result(
-                    args.first().cloned().unwrap_or(Value::Undefined),
-                    true,
-                ));
-                runner.vm.gc_temp_roots.truncate(temp_root_base);
-                result
+                Ok(Self::make_iterator_result(result_value, true))
             }))),
         );
         Ok(Value::Object(gen_obj))
@@ -1274,11 +1251,12 @@ impl Vm {
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = Rc::clone(&self.lexical_env);
-                let result = (f.as_ref())(self, &call_args)?;
+                let result = (f.as_ref())(self, &call_args);
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
+                let result = result?;
                 if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
@@ -1292,11 +1270,12 @@ impl Vm {
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = Rc::clone(&self.lexical_env);
-                let result = (f.as_ref())(self, &call_args)?;
+                let result = (f.as_ref())(self, &call_args);
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
+                let result = result?;
                 if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
@@ -1589,15 +1568,9 @@ impl Vm {
                 if found
                     && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
                 {
-                    let found_again = self.has_property_host(&binding_object, &key)?;
-                    if found_again {
-                        let _ = self.set_property_host(
-                            &binding_object,
-                            &Value::String(name_str),
-                            value,
-                        )?;
-                        return Ok(true);
-                    }
+                    let _ =
+                        self.set_property_host(&binding_object, &Value::String(name_str), value)?;
+                    return Ok(true);
                 }
             }
             env = outer;
@@ -1652,16 +1625,10 @@ impl Vm {
                 if found
                     && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
                 {
-                    let found_again = self.has_property_host(&binding_object, &key)?;
-                    if found_again {
-                        let _ = self.set_property_host(
-                            &binding_object,
-                            &Value::String(name_str),
-                            value,
-                        )?;
-                        self.bump_object_generation(&binding_object);
-                        return Ok(true);
-                    }
+                    let _ =
+                        self.set_property_host(&binding_object, &Value::String(name_str), value)?;
+                    self.bump_object_generation(&binding_object);
+                    return Ok(true);
                 }
             }
             env = outer;
@@ -2024,7 +1991,8 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         let temp_root_base = self.gc_temp_roots.len();
         self.gc_temp_roots.push(callee.clone());
-        self.gc_temp_roots.push(this_arg.clone());
+        let this_arg_owned = this_arg.clone();
+        self.gc_temp_roots.push(this_arg_owned.clone());
         self.gc_temp_roots.extend(args.iter().cloned());
         let result = (|| match callee {
             Value::Builtin(f) => {
@@ -2032,9 +2000,9 @@ impl Vm {
                 // as the first argument so native functions that expect the
                 // receiver can access it (used by accessor getters/setters).
                 let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-                call_args.push(this_arg.clone());
+                call_args.push(this_arg_owned.clone());
                 call_args.extend_from_slice(args);
-                let prev_this = std::mem::replace(&mut self.this_value, this_arg.clone());
+                let prev_this = std::mem::replace(&mut self.this_value, this_arg_owned);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = Rc::clone(&self.lexical_env);
@@ -2067,9 +2035,9 @@ impl Vm {
             }
             Value::BuiltinObject(f, _props) => {
                 let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-                call_args.push(this_arg.clone());
+                call_args.push(this_arg_owned.clone());
                 call_args.extend_from_slice(args);
-                let prev_this = std::mem::replace(&mut self.this_value, this_arg.clone());
+                let prev_this = std::mem::replace(&mut self.this_value, this_arg_owned);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = Rc::clone(&self.lexical_env);
@@ -4138,10 +4106,6 @@ impl Vm {
         self.current_slot_types = Some(proto.slot_types.clone());
         self.yield_star_queue = None;
 
-        // Pre-allocate locals to at least `arity` slots, filling missing
-        // arguments with `undefined` per JavaScript semantics.
-        let args_for_arguments: Vec<Option<Value>> =
-            call_args.iter().map(|v| Some(v.clone())).collect();
         self.locals = std::iter::repeat_with(|| Rc::new(Mutex::new(Value::Undefined)))
             .take(proto.slot_types.len().max(proto.arity))
             .collect();
@@ -4166,12 +4130,15 @@ impl Vm {
             }
         }
         self.lexical_env = fn_env;
-        for (i, value) in call_args.into_iter().enumerate().take(proto.arity) {
+        for (i, value) in call_args.iter().cloned().enumerate().take(proto.arity) {
             *self.locals[i].borrow_mut() = value;
         }
         if let Some(slot) = proto.arguments_slot
             && slot < self.locals.len()
         {
+            // Only clone arguments when the callee actually needs `arguments`.
+            let args_for_arguments: Vec<Option<Value>> =
+                call_args.iter().map(|v| Some(v.clone())).collect();
             if proto.has_simple_parameter_list && !proto.is_strict {
                 let args_obj = self.build_mapped_arguments_object(proto, &args_for_arguments);
                 self.locals[slot] = Rc::new(Mutex::new(args_obj));
@@ -4206,10 +4173,13 @@ impl Vm {
                 let getter =
                     Value::Builtin(Rc::new(move |_vm, _args| Ok(getter_cell.borrow().clone())));
                 let setter = Value::Builtin(Rc::new(move |_vm, args| {
-                    let value = args
-                        .get(1)
-                        .cloned()
-                        .unwrap_or_else(|| args.first().cloned().unwrap_or(Value::Undefined));
+                    let value = if let Some(value) = args.get(1) {
+                        value.clone()
+                    } else if let Some(value) = args.first() {
+                        value.clone()
+                    } else {
+                        Value::Undefined
+                    };
                     *setter_cell.borrow_mut() = value;
                     Ok(Value::Undefined)
                 }));

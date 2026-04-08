@@ -47,10 +47,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
         PKey::String("isArray".to_string()),
         PropertyDescriptor::data({
             let builtin = builtin_object(
-                Rc::new(|_vm, args| {
-                    let value = args.get(1).cloned().unwrap_or(Value::Undefined);
-                    Ok(Value::Bool(matches!(value, Value::Array(..))))
-                }),
+                Rc::new(|_vm, args| Ok(Value::Bool(matches!(args.get(1), Some(Value::Array(..)))))),
                 function_proto_map,
             );
             set_builtin_length(&builtin, 1.0);
@@ -65,26 +62,27 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
             let builtin = builtin_object(
                 Rc::new(move |vm, args| {
                     let off = static_builtin_arg_offset(vm, args, "Array");
-                    let source = args.get(off).cloned().unwrap_or(Value::Undefined);
-                    let map_fn = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                    let undefined = Value::Undefined;
+                    let source = args.get(off).unwrap_or(&undefined);
+                    let map_fn = args.get(off + 1).unwrap_or(&undefined);
                     let has_map_fn = matches!(
                         map_fn,
                         Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. }
                     );
 
-                    let len = match &source {
+                    let len = match source {
                         Value::Array(arr, _) => arr.borrow().len(),
                         Value::String(s) => s.chars().count(),
                         _ => {
                             let len_v =
-                                vm.get_property_host(&source, &PKey::String("length".to_string()))?;
+                                vm.get_property_host(source, &PKey::String("length".to_string()))?;
                             to_length(vm, &len_v)?
                         }
                     };
 
                     let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
                     for i in 0..len {
-                        let mut v = match &source {
+                        let mut v = match source {
                             Value::Array(arr, _) => arr
                                 .borrow()
                                 .get(i)
@@ -95,11 +93,11 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                                 let ch = s.chars().nth(i).unwrap_or('\0');
                                 Value::String(ch.to_string())
                             }
-                            _ => vm.get_property_host(&source, &PKey::String(i.to_string()))?,
+                            _ => vm.get_property_host(source, &PKey::String(i.to_string()))?,
                         };
                         if has_map_fn {
                             v = vm.call_value_with_this(
-                                &map_fn,
+                                map_fn,
                                 &Value::Undefined,
                                 &[v, Value::Number(usize_to_f64(i))],
                             )?;
@@ -134,9 +132,10 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
             let builtin = builtin_object(
                 Rc::new(move |vm, args| {
                     let off = static_builtin_arg_offset(vm, args, "Array");
-                    let source = args.get(off).cloned().unwrap_or(Value::Undefined);
-                    let map_fn = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
-                    let this_arg = args.get(off + 2).cloned().unwrap_or(Value::Undefined);
+                    let undefined = Value::Undefined;
+                    let source = args.get(off).unwrap_or(&undefined);
+                    let map_fn = args.get(off + 1).unwrap_or(&undefined);
+                    let this_arg = args.get(off + 2).unwrap_or(&undefined);
                     if crate::trace::enabled() {
                         eprintln!(
                             "[trace] Array.fromAsync start source={} map_fn={} this_arg={}",
@@ -169,19 +168,19 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                     );
 
                     let outcome: Result<Value, crate::errors::RuntimeError> = (|| {
-                        if !matches!(map_fn, Value::Undefined) && !Vm::is_callable_value(&map_fn) {
+                        if !matches!(map_fn, Value::Undefined) && !Vm::is_callable_value(map_fn) {
                             return Err(
                                 vm.throw_type_error("Array.fromAsync mapfn is not callable")
                             );
                         }
 
-                        let items = collect_iterable_values(vm, &source)?;
+                        let items = collect_iterable_values(vm, source)?;
                         if crate::trace::enabled() {
                             eprintln!("[trace] Array.fromAsync collected {} items", items.len());
                         }
                         let len = items.len();
                         let created = if use_constructor {
-                            let ctor_len = if is_iterable_source(vm, &source)? {
+                            let ctor_len = if is_iterable_source(vm, source)? {
                                 Vec::new()
                             } else {
                                 vec![Value::Number(usize_to_f64(len))]
@@ -205,8 +204,8 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                         for (i, mut value) in items.into_iter().enumerate() {
                             if !matches!(map_fn, Value::Undefined) {
                                 value = vm.call_value_with_this(
-                                    &map_fn,
-                                    &this_arg,
+                                    map_fn,
+                                    this_arg,
                                     &[value, Value::Number(usize_to_f64(i))],
                                 )?;
                             }
@@ -278,10 +277,10 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
         PKey::String("lastIndexOf".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let search = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let length =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
+                let undefined = Value::Undefined;
+                let receiver = args.first().unwrap_or(&undefined);
+                let search = args.get(1).unwrap_or(&undefined);
+                let length = vm.get_property_host(receiver, &PKey::String("length".to_string()))?;
                 let len_num = vm.to_number_value(&length)?;
                 if !len_num.is_finite() || len_num <= 0.0 {
                     return Ok(Value::Number(-1.0));
@@ -304,12 +303,12 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                     len - 1
                 };
 
-                if let Value::Array(arr, _) = &receiver {
+                if let Value::Array(arr, _) = receiver {
                     let dense_len = arr.borrow().len().to_i64().unwrap_or(i64::MAX);
                     let mut idx = k.min(dense_len.saturating_sub(1));
                     while idx >= 0 {
                         if let Some(Some(element)) = arr.borrow().get(idx as usize)
-                            && strict_equal(element, &search)
+                            && strict_equal(element, search)
                         {
                             return Ok(Value::Number(idx.to_f64().unwrap_or(f64::NAN)));
                         }
@@ -364,8 +363,8 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                     candidates.dedup();
                     for idx in candidates.into_iter().rev() {
                         let key = PKey::String(u64_to_decimal_string(idx));
-                        let element = vm.get_property_host(&receiver, &key)?;
-                        if strict_equal(&element, &search) {
+                        let element = vm.get_property_host(receiver, &key)?;
+                        if strict_equal(&element, search) {
                             return Ok(Value::Number(idx.to_f64().unwrap_or(f64::NAN)));
                         }
                     }
@@ -374,15 +373,15 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
 
                 while k >= 0 {
                     let key = PKey::String(u64_to_decimal_string(k as u64));
-                    if vm.has_property_host(&receiver, &key)? {
-                        let element = vm.get_property_host(&receiver, &key)?;
+                    if vm.has_property_host(receiver, &key)? {
+                        let element = vm.get_property_host(receiver, &key)?;
                         if env::var("TSBLITZ_TRACE").ok().as_deref() == Some("1") {
                             eprintln!(
                                 "[trace] lastIndexOf k={} element={} search={}",
                                 k, element, search
                             );
                         }
-                        if strict_equal(&element, &search) {
+                        if strict_equal(&element, search) {
                             return Ok(Value::Number(k.to_f64().unwrap_or(f64::NAN)));
                         }
                     }
@@ -397,7 +396,8 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
         PKey::String("join".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                let undefined = Value::Undefined;
+                let receiver = args.first().unwrap_or(&undefined);
                 let sep = match args.get(1) {
                     Some(Value::Undefined) | None => ",".to_string(),
                     Some(v) => vm.to_string(v)?,

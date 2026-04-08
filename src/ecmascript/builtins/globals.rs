@@ -54,38 +54,26 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
 
     g.properties.insert(
         PKey::String("parseInt".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            global_parse_int(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(global_parse_int))),
     );
     g.properties.insert(
         PKey::String("parseFloat".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            global_parse_float(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(global_parse_float))),
     );
     g.properties.insert(
         PKey::String("encodeURI".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            global_encode_uri(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(global_encode_uri))),
     );
     g.properties.insert(
         PKey::String("encodeURIComponent".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            global_encode_uri_component(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(global_encode_uri_component))),
     );
     g.properties.insert(
         PKey::String("decodeURI".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            global_decode_uri(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(global_decode_uri))),
     );
     g.properties.insert(
         PKey::String("decodeURIComponent".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(|vm, args| {
-            global_decode_uri_component(vm, args)
-        }))),
+        PropertyDescriptor::data(Value::Builtin(Rc::new(global_decode_uri_component))),
     );
 }

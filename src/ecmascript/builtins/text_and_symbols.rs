@@ -308,40 +308,43 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         } else {
             0
         };
+        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let s = match args.get(value_idx) {
             None => String::new(),
             Some(v) => string_constructor_to_string(vm, v)?,
         };
         if vm.current_new_target().is_some()
-            && let Some(Value::Object(obj_rc)) = args.first()
+            && let Value::Object(obj_rc) = &receiver
         {
-            let mut obj = obj_rc.borrow_mut();
-            obj.set_prototype_value(Value::Object(Rc::clone(&string_proto_for_ctor)));
-            obj.properties.insert(
-                PKey::String("[[PrimitiveValue]]".to_string()),
-                PropertyDescriptor::data(Value::String(s.clone())),
-            );
-            obj.properties.insert(
-                PKey::String("length".to_string()),
-                PropertyDescriptor::Data {
-                    value: Value::Number(usize_to_f64(s.encode_utf16().count())),
-                    writable: false,
-                    enumerable: false,
-                    configurable: false,
-                },
-            );
-            for (idx, ch) in s.chars().enumerate() {
+            {
+                let mut obj = obj_rc.borrow_mut();
+                obj.set_prototype_value(Value::Object(Rc::clone(&string_proto_for_ctor)));
                 obj.properties.insert(
-                    PKey::String(usize_to_decimal_string(idx)),
+                    PKey::String("[[PrimitiveValue]]".to_string()),
+                    PropertyDescriptor::data(Value::String(s.clone())),
+                );
+                obj.properties.insert(
+                    PKey::String("length".to_string()),
                     PropertyDescriptor::Data {
-                        value: Value::String(ch.to_string()),
+                        value: Value::Number(usize_to_f64(s.encode_utf16().count())),
                         writable: false,
-                        enumerable: true,
+                        enumerable: false,
                         configurable: false,
                     },
                 );
+                for (idx, ch) in s.chars().enumerate() {
+                    obj.properties.insert(
+                        PKey::String(usize_to_decimal_string(idx)),
+                        PropertyDescriptor::Data {
+                            value: Value::String(ch.to_string()),
+                            writable: false,
+                            enumerable: true,
+                            configurable: false,
+                        },
+                    );
+                }
             }
-            return Ok(args.first().cloned().unwrap_or(Value::Undefined));
+            return Ok(receiver);
         }
         Ok(Value::String(s))
     });
@@ -434,9 +437,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
                         if i + 1 == literal_count {
                             break;
                         }
-                        let subst = substitutions.get(i).cloned();
-                        if let Some(subst) = subst {
-                            out.push_str(&vm.to_string(&subst)?);
+                        if let Some(subst) = substitutions.get(i) {
+                            out.push_str(&vm.to_string(subst)?);
                         }
                     }
                     Ok(Value::String(out))
@@ -612,16 +614,17 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         } else {
             0
         };
+        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let value = args.get(value_idx).cloned().unwrap_or(Value::Undefined);
         let prim = Value::Bool(vm.to_boolean(&value));
         if vm.current_new_target().is_some()
-            && let Some(Value::Object(obj)) = args.first()
+            && let Value::Object(obj) = &receiver
         {
             obj.borrow_mut().properties.insert(
                 PKey::String("[[PrimitiveValue]]".to_string()),
                 PropertyDescriptor::data(prim),
             );
-            return Ok(args.first().cloned().unwrap_or(Value::Undefined));
+            return Ok(receiver);
         }
         Ok(prim)
     });
