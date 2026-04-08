@@ -1601,10 +1601,14 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let target = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let key = args.get(2).cloned().unwrap_or(Value::Undefined);
                 let value = args.get(3).cloned().unwrap_or(Value::Undefined);
-                let _receiver = args.get(4).cloned().unwrap_or_else(|| target.clone());
+                let receiver = args.get(4).cloned().unwrap_or_else(|| target.clone());
                 let key = property_key_to_value(&vm.to_property_key(&key)?);
-                vm.set_property_host(&target, &key, value)?;
-                Ok(Value::Bool(true))
+                Ok(Value::Bool(vm.reflect_set_property_host(
+                    &target,
+                    &key,
+                    value,
+                    Some(receiver),
+                )?))
             }),
             &function_proto_map,
         )),

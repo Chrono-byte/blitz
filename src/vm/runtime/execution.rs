@@ -2422,6 +2422,74 @@ impl Vm {
         Ok(result)
     }
 
+    pub(crate) fn reflect_set_property_host(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        value: Value,
+        receiver: Option<Value>,
+    ) -> Result<bool, RuntimeError> {
+        let prop = self.to_property_key(key)?;
+        let receiver = receiver.unwrap_or_else(|| target.clone());
+        let saved_strict = self.current_strict_mode;
+        self.current_strict_mode = false;
+        let result = (|| -> Result<bool, RuntimeError> {
+            if let Some((desc, _holder)) = self.lookup_property_descriptor(target, &prop, 0)? {
+                match desc {
+                    PropertyDescriptor::Accessor { set, .. } => {
+                        if let Some(setter) = set {
+                            let _ = self.call_with_this(&setter, &receiver, &[value])?;
+                            self.bump_object_generation(&receiver);
+                            return Ok(true);
+                        }
+                        return Ok(false);
+                    }
+                    PropertyDescriptor::Data {
+                        writable: false, ..
+                    } => return Ok(false),
+                    PropertyDescriptor::Data { .. } => {}
+                }
+            }
+
+            let receiver_can_accept = match &receiver {
+                Value::Object(obj) => {
+                    let obj = obj.borrow();
+                    match obj.properties.get(&prop) {
+                        Some(PropertyDescriptor::Data {
+                            writable: false, ..
+                        }) => false,
+                        Some(PropertyDescriptor::Accessor { set: None, .. }) => false,
+                        Some(_) => true,
+                        None => obj.extensible,
+                    }
+                }
+                Value::Array(_, props)
+                | Value::Closure { props, .. }
+                | Value::BuiltinObject(_, props) => {
+                    let props = props.borrow();
+                    match props.properties.get(&prop) {
+                        Some(PropertyDescriptor::Data {
+                            writable: false, ..
+                        }) => false,
+                        Some(PropertyDescriptor::Accessor { set: None, .. }) => false,
+                        Some(_) => true,
+                        None => props.extensible,
+                    }
+                }
+                _ => false,
+            };
+
+            if !receiver_can_accept {
+                return Ok(false);
+            }
+
+            self.set_property_tracked(&receiver, &prop, value)?;
+            Ok(true)
+        })();
+        self.current_strict_mode = saved_strict;
+        result
+    }
+
     fn call_with_this(
         &mut self,
         callee: &Value,
@@ -5766,8 +5834,29 @@ impl Vm {
             );
             return Ok(Value::Object(Rc::new(RefCell::new(obj))));
         }
-        let msg = Value::String(message.to_string());
-        self.construct_value(&ctor, &[msg])
+        let proto = self
+            .get_property_host(&ctor, &PropertyKey::String("prototype".to_string()))
+            .unwrap_or(Value::Null);
+        let mut obj = ObjectData::with_prototype(match proto {
+            Value::Object(_)
+            | Value::Array(..)
+            | Value::Closure { .. }
+            | Value::BuiltinObject(_, _) => proto,
+            _ => Value::Null,
+        });
+        obj.properties.insert(
+            PropertyKey::String("constructor".to_string()),
+            PropertyDescriptor::data(ctor),
+        );
+        obj.properties.insert(
+            PropertyKey::String("message".to_string()),
+            PropertyDescriptor::data(Value::String(message.to_string())),
+        );
+        obj.properties.insert(
+            PropertyKey::String("name".to_string()),
+            PropertyDescriptor::data(Value::String(name.to_string())),
+        );
+        Ok(Value::Object(Rc::new(RefCell::new(obj))))
     }
 
     // -----------------------------------------------------------------------

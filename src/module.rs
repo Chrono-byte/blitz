@@ -226,7 +226,7 @@ impl ModuleLoader {
                                                 .unwrap_or("")
                                                 .to_string();
                                             let imported = sp
-                                                .get("imported")
+                                                .get("local")
                                                 .and_then(|e| e.get("name"))
                                                 .and_then(|n| n.as_str())
                                                 .unwrap_or(&exported)
