@@ -19,7 +19,6 @@ use oxc_ast::ast as oast;
 // modules can reference `crate::typecheck::Type` after removing the duplicate
 // module. Keep it conservative and compatible with existing usage.
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 /// Lightweight, conservative representation of types used by the checker.
 ///
@@ -109,7 +108,9 @@ pub enum BuiltinType {
 
 type Scope = HashMap<String, Type>;
 
-static STRICT_OVERRIDE: OnceLock<std::sync::Mutex<Option<bool>>> = OnceLock::new();
+thread_local! {
+    static STRICT_OVERRIDE: std::cell::RefCell<Option<bool>> = const { std::cell::RefCell::new(None) };
+}
 
 /// Return whether strict mode is currently enabled.
 ///
@@ -120,9 +121,7 @@ static STRICT_OVERRIDE: OnceLock<std::sync::Mutex<Option<bool>>> = OnceLock::new
 /// 2. The environment variable `TSBLITZ_STRICT` (non-zero means enabled).
 /// 3. Defaults to enabled when the environment variable is not set.
 fn strict_mode() -> bool {
-    if let Some(m) = STRICT_OVERRIDE.get()
-        && let Some(v) = *m.lock().unwrap()
-    {
+    if let Some(v) = STRICT_OVERRIDE.with(|m| *m.borrow()) {
         return v;
     }
     std::env::var("TSBLITZ_STRICT")
@@ -138,9 +137,9 @@ fn strict_mode() -> bool {
 /// # Panics
 /// Panics if the override mutex is poisoned.
 pub fn set_strict_override(v: Option<bool>) {
-    let m = STRICT_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None));
-    let mut g = m.lock().unwrap();
-    *g = v;
+    STRICT_OVERRIDE.with(|m| {
+        *m.borrow_mut() = v;
+    });
 }
 
 /// Run static type checking for a parsed program.

@@ -1095,20 +1095,16 @@ impl Vm {
                 let iter_obj = self.call_value_with_this(&iterator_method, &iterable, &[])?;
 
                 loop {
-                    let next_fn = self.get_property_host(
-                        &iter_obj,
-                        &PropertyKey::String("next".to_string()),
-                    )?;
+                    let next_fn = self
+                        .get_property_host(&iter_obj, &PropertyKey::String("next".to_string()))?;
                     let result = self.call_value_with_this(&next_fn, &iter_obj, &[])?;
-                    let done_val = self
-                        .get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+                    let done_val =
+                        self.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
                     if self.to_boolean(&done_val) {
                         break;
                     }
-                    let val = self.get_property_host(
-                        &result,
-                        &PropertyKey::String("value".to_string()),
-                    )?;
+                    let val =
+                        self.get_property_host(&result, &PropertyKey::String("value".to_string()))?;
                     flat.push(val);
                 }
             }
