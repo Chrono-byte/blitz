@@ -2837,35 +2837,35 @@ impl Vm {
                 let value = self.pop()?;
                 let key = self.pop()?;
                 let obj = self.pop()?;
-                if let Some(i) = array_index_from_value(&key) {
-                    if matches!(obj, Value::Array(..)) {
-                        let strict = self.is_strict_mode();
-                        self.reference_stack.push(ReferenceRecord::new(
-                            obj.clone(),
-                            PropertyKey::String(i.to_string()),
-                            strict,
-                        ));
-                        let result = set_array_index_property(&obj, i, value.clone());
-                        if crate::trace::enabled()
-                            && let Some(reference) = self.reference_stack.last()
-                        {
-                            crate::trace::value_string("[trace]   reference base", &reference.base);
-                            match &reference.referenced_name {
-                                PropertyKey::String(name) => {
-                                    eprintln!("[trace]   reference key='{}'", name);
-                                }
-                                PropertyKey::Symbol(_) => {
-                                    eprintln!("[trace]   reference key=symbol");
-                                }
+                if let Some(i) = array_index_from_value(&key)
+                    && matches!(obj, Value::Array(..))
+                {
+                    let strict = self.is_strict_mode();
+                    self.reference_stack.push(ReferenceRecord::new(
+                        obj.clone(),
+                        PropertyKey::String(i.to_string()),
+                        strict,
+                    ));
+                    let result = set_array_index_property(&obj, i, value.clone());
+                    if crate::trace::enabled()
+                        && let Some(reference) = self.reference_stack.last()
+                    {
+                        crate::trace::value_string("[trace]   reference base", &reference.base);
+                        match &reference.referenced_name {
+                            PropertyKey::String(name) => {
+                                eprintln!("[trace]   reference key='{}'", name);
                             }
-                            eprintln!("[trace]   reference strict={}", reference.strict);
+                            PropertyKey::Symbol(_) => {
+                                eprintln!("[trace]   reference key=symbol");
+                            }
                         }
-                        let _ = self.reference_stack.pop();
-                        result?;
-                        self.bump_object_generation(&obj);
-                        self.stack.push(value);
-                        return Ok(StepOutcome::Continue);
+                        eprintln!("[trace]   reference strict={}", reference.strict);
                     }
+                    let _ = self.reference_stack.pop();
+                    result?;
+                    self.bump_object_generation(&obj);
+                    self.stack.push(value);
+                    return Ok(StepOutcome::Continue);
                 }
                 let k = self.to_property_key(&key)?;
                 let strict = self.is_strict_mode();

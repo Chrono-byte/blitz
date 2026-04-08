@@ -635,10 +635,7 @@ fn compile_for_loop_back_jump_targets_loop_start() {
                     back_target = Some((i + 3) as isize + offset);
                     i += 3;
                 }
-                Op::JumpIfFalse
-                | Op::JumpIfTrue
-                | Op::JumpIfNullish
-                | Op::PushHandler => i += 3,
+                Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => i += 3,
                 Op::CompareJumpIfFalse => i += 4,
                 Op::Const
                 | Op::MakeClosure
