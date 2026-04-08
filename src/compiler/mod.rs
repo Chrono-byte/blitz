@@ -443,6 +443,21 @@ impl Compiler {
     }
 }
 
+#[cfg(test)]
+fn walk_chunk_ops(chunk: &Chunk) -> Vec<(usize, Op)> {
+    let mut ops = Vec::new();
+    let mut ip = 0usize;
+    while ip < chunk.code.len() {
+        if let Some(op) = Op::from_byte(chunk.code[ip]) {
+            ops.push((ip, op));
+            ip += opcode_width(op);
+        } else {
+            ip += 1;
+        }
+    }
+    ops
+}
+
 #[test]
 fn compile_simple_for_loop() {
     let src = "for (var i = 0; i < 3; i = i + 1) { console.log(i); }";
@@ -453,36 +468,11 @@ fn compile_simple_for_loop() {
     // Ensure we emitted a JumpIfFalse (test) and at least one Jump (back/jump-over)
     let mut saw_jump_if_false = false;
     let mut saw_jump = false;
-    let mut i = 0usize;
-    while i < chunk.code.len() {
-        if let Some(op) = Op::from_byte(chunk.code[i]) {
-            match op {
-                Op::JumpIfFalse => {
-                    saw_jump_if_false = true;
-                    i += 3;
-                }
-                Op::Jump => {
-                    saw_jump = true;
-                    i += 3;
-                }
-                Op::Const
-                | Op::MakeClosure
-                | Op::GetPropertyIC
-                | Op::SetPropertyIC
-                | Op::CallMethod
-                | Op::Call
-                | Op::CallIC
-                | Op::Construct
-                | Op::GetBuiltin
-                | Op::SetLocal
-                | Op::GetLocal
-                | Op::GetProperty
-                | Op::SetProperty => i += 2,
-                Op::SetGlobal | Op::GetGlobal | Op::GetGlobalIC => i += 3,
-                _ => i += 1,
-            }
-        } else {
-            i += 1;
+    for (_, op) in walk_chunk_ops(&chunk) {
+        match op {
+            Op::JumpIfFalse => saw_jump_if_false = true,
+            Op::Jump => saw_jump = true,
+            _ => {}
         }
     }
 
@@ -504,36 +494,11 @@ fn compile_for_with_continue() {
     // and at least one emitted for 'continue' which should be patched to jump to update.
     let mut jump_if_false = 0usize;
     let mut jump = 0usize;
-    let mut i = 0usize;
-    while i < chunk.code.len() {
-        if let Some(op) = Op::from_byte(chunk.code[i]) {
-            match op {
-                Op::JumpIfFalse => {
-                    jump_if_false += 1;
-                    i += 3;
-                }
-                Op::Jump => {
-                    jump += 1;
-                    i += 3;
-                }
-                Op::Const
-                | Op::MakeClosure
-                | Op::GetPropertyIC
-                | Op::SetPropertyIC
-                | Op::CallMethod
-                | Op::Call
-                | Op::CallIC
-                | Op::Construct
-                | Op::GetBuiltin
-                | Op::SetLocal
-                | Op::GetLocal
-                | Op::GetProperty
-                | Op::SetProperty => i += 2,
-                Op::SetGlobal | Op::GetGlobal | Op::GetGlobalIC => i += 3,
-                _ => i += 1,
-            }
-        } else {
-            i += 1;
+    for (_, op) in walk_chunk_ops(&chunk) {
+        match op {
+            Op::JumpIfFalse => jump_if_false += 1,
+            Op::Jump => jump += 1,
+            _ => {}
         }
     }
 
@@ -555,6 +520,8 @@ fn opcode_width(op: Op) -> usize {
         | Op::Call
         | Op::CallMethod
         | Op::CallIC
+        | Op::TailCallIC
+        | Op::TailCallMethod
         | Op::Construct
         | Op::PopN
         | Op::MakeClosure
@@ -622,45 +589,17 @@ fn compile_for_loop_back_jump_targets_loop_start() {
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
 
-    let mut i = 0usize;
     let mut loop_start = None;
     let mut back_target = None;
-    while i < chunk.code.len() {
-        if let Some(op) = Op::from_byte(chunk.code[i]) {
-            match op {
-                Op::GetLocal if loop_start.is_none() => {
-                    loop_start = Some(i);
-                    i += 2;
-                }
-                Op::Jump => {
-                    let lo = chunk.code.get(i + 1).copied().unwrap_or(0) as i16;
-                    let hi = chunk.code.get(i + 2).copied().unwrap_or(0) as i16;
-                    let offset = i16::from_le_bytes([lo as u8, hi as u8]) as isize;
-                    back_target = Some((i + 3) as isize + offset);
-                    i += 3;
-                }
-                Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => i += 3,
-                Op::CompareJumpIfFalse => i += 4,
-                Op::Const
-                | Op::MakeClosure
-                | Op::GetPropertyIC
-                | Op::SetPropertyIC
-                | Op::CallMethod
-                | Op::Call
-                | Op::CallIC
-                | Op::Construct
-                | Op::GetBuiltin
-                | Op::SetLocal
-                | Op::GetLocal
-                | Op::GetProperty
-                | Op::SetProperty
-                | Op::BuildArray
-                | Op::BuildObject => i += 2,
-                Op::SetGlobal | Op::GetGlobal | Op::GetGlobalIC => i += 3,
-                _ => i += 1,
+    for (ip, op) in walk_chunk_ops(&chunk) {
+        match op {
+            Op::GetGlobalIC if loop_start.is_none() => {
+                loop_start = Some(ip);
             }
-        } else {
-            i += 1;
+            Op::Jump => {
+                back_target = chunk.jump_target_from_ip(ip).map(|target| target as isize);
+            }
+            _ => {}
         }
     }
 

@@ -450,14 +450,9 @@ fn clear_array(arr: &Rc<RefCell<Vec<Option<Value>>>>) {
 
 #[cfg(feature = "gc_mark_sweep_prototype")]
 fn clear_env(env: &Rc<Mutex<Vec<ValueSlot>>>) {
-    // Closure environments are still part of the prototype GC's weakest
-    // invariants. Clearing them here can sever still-observable closures when
-    // root discovery misses a path through an object graph or temporary.
-    //
-    // Leave them intact for now; the collector can still reclaim the owning
-    // closure object once it becomes unreachable, and Test262 is more
-    // sensitive to correctness than to this prototype optimization.
-    let _ = env;
+    // Break closure cycles by dropping the captured values once the
+    // environment is determined to be unreachable.
+    env.borrow_mut().clear();
 }
 
 #[cfg(feature = "gc_mark_sweep_prototype")]
