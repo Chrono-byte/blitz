@@ -2682,11 +2682,12 @@ impl Vm {
                     .get(slot)
                     .map(|cell| cell.borrow().clone())
                     .ok_or("Bad local slot")?;
-                if crate::trace::enabled() && matches!(v, Value::Uninitialized)
+                if crate::trace::enabled()
+                    && matches!(v, Value::Uninitialized)
                     && let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone)
-                    {
-                        eprintln!("[trace] GetLocal TDZ name='{}' slot={}", name, slot);
-                    }
+                {
+                    eprintln!("[trace] GetLocal TDZ name='{}' slot={}", name, slot);
+                }
                 if matches!(v, Value::Uninitialized) {
                     return Err(self.throw_reference_error(
                         "Cannot access lexical binding before initialization",
