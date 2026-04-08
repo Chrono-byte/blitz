@@ -19,7 +19,7 @@ CLI (preferred over env):
 - --anti-segment seg [,seg...] (repeatable)
 - --es-version edition [,edition...] (repeatable)
 - --limit number
-- --jobs number
+- --workers number
 
 Segments may be labels like: language, built-ins, intl402, staging
 or paths relative to test262/test (e.g. built-ins/Array).
