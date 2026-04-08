@@ -93,8 +93,12 @@ pub(super) const MAX_PROTOTYPE_DEPTH: usize = 128;
 /// array write as sparse and storing it on the property bag instead.
 pub(super) const MAX_DENSE_ARRAY_GROWTH: usize = 1024;
 
-/// Number of interpreter steps between opportunistic GC attempts.
-pub(super) const GC_STEP_INTERVAL: usize = 16;
+/// Number of tracked heap allocations between opportunistic GC attempts.
+///
+/// The prototype collector is intentionally pressure-driven instead of
+/// step-driven so tight numeric loops do not pay GC overhead unless they are
+/// actually creating heap garbage.
+pub(super) const GC_ALLOCATION_PRESSURE_THRESHOLD: usize = 256;
 
 type Microtask = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 type DynamicImportJob = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
@@ -382,7 +386,7 @@ pub struct Vm {
     pub(super) global_env: Rc<RefCell<EnvironmentRecord>>,
     /// Queue of values for the current `yield*` expression, if any.
     pub(super) yield_star_queue: Option<VecDeque<Value>>,
-    /// Counter used to trigger opportunistic GC during interpreter progress.
+    /// Legacy step counter retained for non-GC builds and diagnostics.
     pub(super) gc_step_counter: usize,
     /// Whether runtime opcode profiling is enabled for this VM instance.
     pub(super) opcode_profiling_enabled: bool,

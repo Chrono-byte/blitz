@@ -65,6 +65,33 @@ fn benchmark_globals() -> Rc<RefCell<ObjectData>> {
     globals
 }
 
+fn unicode_comment_hotpath_source() -> String {
+    r#"
+        var hex = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F"];
+        for (var i = 0; i < 4096; i++) {
+            var uu = hex[(i >> 12) & 15] + hex[(i >> 8) & 15] + hex[(i >> 4) & 15] + hex[i & 15];
+            var xx = String.fromCharCode("0x" + uu);
+            if (xx.length !== 1) {
+                throw new Error("unexpected char length");
+            }
+        }
+    "#
+    .to_string()
+}
+
+fn comment_only_eval_source() -> String {
+    r#"
+        for (var i = 0; i < 4096; i++) {
+            eval("/* comment */");
+        }
+    "#
+    .to_string()
+}
+
+fn hotpath_number_value() -> Value {
+    Value::String("0x1234".to_string())
+}
+
 fn compile_fixture(path: &str) -> blitz::bytecode::Chunk {
     let source =
         std::fs::read_to_string(Path::new(path)).expect("benchmark fixture should be readable");
@@ -223,12 +250,87 @@ fn bench_execute_stress(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_execute_unicode_hotpaths(c: &mut Criterion) {
+    let mut group = c.benchmark_group("execute_unicode_hotpaths");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    for (fixture, source) in [
+        ("a5_like_from_char_code", unicode_comment_hotpath_source()),
+        ("a6_like_comment_only_eval", comment_only_eval_source()),
+    ] {
+        let session = Parser::parse_source(&source).expect("benchmark source should parse as JS");
+        let chunk = compiler::compile_oxc(session.program(), &source)
+            .expect("benchmark source should compile");
+        let globals = benchmark_globals();
+        let keep_globals = baseline_global_names(&globals);
+        let mut vm = Vm::new(Rc::clone(&globals));
+
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(BenchmarkId::from_parameter(fixture), &chunk, |b, chunk| {
+            b.iter_batched(
+                || chunk.clone(),
+                |chunk| {
+                    let _ = vm.run(chunk).expect("benchmark source should execute");
+                    vm.reset(&keep_globals);
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_micro_hotpaths(c: &mut Criterion) {
+    let mut group = c.benchmark_group("micro_hotpaths");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    let globals = benchmark_globals();
+    let mut vm = Vm::new(Rc::clone(&globals));
+    let string_ctor = vm
+        .get_global("String")
+        .expect("String constructor available");
+    let from_char_code = vm
+        .get_property_host(
+            &string_ctor,
+            &PropertyKey::String("fromCharCode".to_string()),
+        )
+        .expect("String.fromCharCode available");
+
+    group.bench_function("to_number_hex_string", |b| {
+        b.iter(|| {
+            let value = hotpath_number_value();
+            let _ = vm.to_number_value(&value).expect("number coercion");
+        });
+    });
+
+    group.bench_function("from_char_code_dispatch", |b| {
+        b.iter(|| {
+            let value = hotpath_number_value();
+            let _ = vm
+                .call_value_with_this(
+                    &from_char_code,
+                    &string_ctor,
+                    &[value, Value::String("1".to_string())],
+                )
+                .expect("builtin dispatch");
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     vm_suite,
     bench_compile,
     bench_execute_cold,
     bench_execute_fast,
     bench_execute_slow,
-    bench_execute_stress
+    bench_execute_stress,
+    bench_execute_unicode_hotpaths,
+    bench_micro_hotpaths
 );
 criterion_main!(vm_suite);

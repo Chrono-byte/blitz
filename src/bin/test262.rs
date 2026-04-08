@@ -9,6 +9,7 @@ Usage:
 - Optionally set `TEST262_JOBS` to control parallelism (default: available parallelism)
 - Optionally set `TEST262_SEGMENTS` to a comma-separated list of segments
 - Optionally set `TEST262_EXCLUDE` to a comma-separated list of segments to skip
+- Optionally set `TEST262_ES_VERSIONS` to a comma-separated list of ES editions to include
 
 CLI (preferred over env):
 - --segment seg [,seg...] (repeatable)
@@ -16,11 +17,14 @@ CLI (preferred over env):
 - --filter substring
 - --anti-filter substring
 - --anti-segment seg [,seg...] (repeatable)
+- --es-version edition [,edition...] (repeatable)
 - --limit number
 - --jobs number
 
 Segments may be labels like: language, built-ins, intl402, staging
 or paths relative to test262/test (e.g. built-ins/Array).
+ES editions may be labels like: ES5, ES6, ES2016, ..., ES2025, ESNext
+or bare values like `5`, `6`, `2016`, or `next`.
 APIs.
 */
 
@@ -138,6 +142,7 @@ fn select_files_to_run(
     filters: &[String],
     anti_filters: &[String],
     anti_segments: &[String],
+    es_versions: &[String],
     limit: Option<usize>,
 ) -> Vec<PathBuf> {
     let mut selected = Vec::new();
@@ -151,6 +156,14 @@ fn select_files_to_run(
         }
         if anti_segments.iter().any(|seg| path_has_segment(&file, seg)) {
             continue;
+        }
+        if !es_versions.is_empty() {
+            let Some(edition) = file_edition_label(&file) else {
+                continue;
+            };
+            if !es_versions.iter().any(|allowed| allowed == &edition) {
+                continue;
+            }
         }
         selected.push(file);
         if let Some(limit) = limit
@@ -355,6 +368,7 @@ fn run_test_in_thread(
 }
 
 /// Returns the bucket keys for a test file, based on its path relative to the test root.
+/// Language tests are grouped by ECMAScript edition when we can infer it from frontmatter.
 fn bucket_keys(test_root: &Path, file: &Path) -> (String, String) {
     let rel = file.strip_prefix(test_root).unwrap_or(file);
     let parts: Vec<String> = rel
@@ -370,11 +384,14 @@ fn bucket_keys(test_root: &Path, file: &Path) -> (String, String) {
         })
         .unwrap_or_default();
 
-    let top = dirs
-        .first()
-        .cloned()
-        .or_else(|| parts.first().cloned())
-        .unwrap_or_else(|| "<root>".to_string());
+    let top = if parts.first().is_some_and(|part| part == "language") {
+        file_edition_label(file).unwrap_or_else(|| "language".to_string())
+    } else {
+        dirs.first()
+            .cloned()
+            .or_else(|| parts.first().cloned())
+            .unwrap_or_else(|| "<root>".to_string())
+    };
     let subsection = if dirs.len() >= 2 {
         format!("{}/{}", dirs[0], dirs[1])
     } else {
@@ -446,6 +463,14 @@ struct RunnerOptions {
     /// Exclude tests whose path contains one of these exact path segments.
     #[arg(long = "anti-segment", value_name = "SEGMENT", value_delimiter = ',')]
     anti_segments: Vec<String>,
+    /// Include only tests whose inferred ES edition matches one of these values.
+    #[arg(
+        long = "es-version",
+        alias = "edition",
+        value_name = "EDITION",
+        value_delimiter = ','
+    )]
+    es_versions: Vec<String>,
     /// Optional maximum number of tests to run.
     #[arg(long = "limit", value_name = "N")]
     limit: Option<usize>,
@@ -511,6 +536,9 @@ fn parse_args() -> RunnerOptions {
     if opts.anti_segments.is_empty() {
         opts.anti_segments = parse_csv_env("TEST262_ANTI_SEGMENT");
     }
+    if opts.es_versions.is_empty() {
+        opts.es_versions = parse_csv_env("TEST262_ES_VERSIONS");
+    }
     if opts.limit.is_none() {
         opts.limit = parse_usize_env("TEST262_LIMIT");
     }
@@ -519,6 +547,14 @@ fn parse_args() -> RunnerOptions {
     }
     if !opts.log_tests {
         opts.log_tests = parse_bool_env("TEST262_LOG_TESTS").unwrap_or(false);
+    }
+
+    match normalize_es_versions(&opts.es_versions) {
+        Ok(values) => opts.es_versions = values,
+        Err(msg) => {
+            eprintln!("{}", msg);
+            exit(2);
+        }
     }
 
     opts
@@ -539,6 +575,10 @@ struct Negative {
 struct Meta {
     /// The flags associated with the test.
     flags: Option<Vec<String>>,
+    /// The language features associated with the test.
+    features: Option<Vec<String>>,
+    /// Sputnik-era ES5 identifier used by some older language tests.
+    es5id: Option<String>,
     /// The includes associated with the test.
     includes: Option<Vec<String>>,
     /// The negative metadata of the test.
@@ -598,6 +638,331 @@ fn extract_front_matter(src: &str) -> Option<String> {
     let end = src.find("---*/")?;
     let fm = &src[start + "/*---".len()..end];
     Some(fm.trim().to_string())
+}
+
+fn edition_label(edition: u8) -> Option<&'static str> {
+    match edition {
+        5 => Some("ES5"),
+        6 => Some("ES6"),
+        7 => Some("ES2016"),
+        8 => Some("ES2017"),
+        9 => Some("ES2018"),
+        10 => Some("ES2019"),
+        11 => Some("ES2020"),
+        12 => Some("ES2021"),
+        13 => Some("ES2022"),
+        14 => Some("ES2023"),
+        15 => Some("ES2024"),
+        16 => Some("ES2025"),
+        99 => Some("ESNext"),
+        _ => None,
+    }
+}
+
+fn feature_edition(feature: &str) -> Option<u8> {
+    match feature {
+        // ES2025
+        "Float16Array" => Some(16),
+        "import-attributes" => Some(16),
+        "Intl.DurationFormat" => Some(16),
+        "iterator-helpers" => Some(16),
+        "json-modules" => Some(16),
+        "promise-try" => Some(16),
+        "RegExp.escape" => Some(16),
+        "regexp-modifiers" => Some(16),
+        "set-methods" => Some(16),
+
+        // ES2024
+        "Atomics.waitAsync" => Some(15),
+        "array-grouping" => Some(15),
+        "arraybuffer-transfer" => Some(15),
+        "promise-with-resolvers" => Some(15),
+        "regexp-v-flag" => Some(15),
+        "resizable-arraybuffer" => Some(15),
+        "String.prototype.isWellFormed" => Some(15),
+        "String.prototype.toWellFormed" => Some(15),
+
+        // ES2023
+        "array-find-from-last" => Some(14),
+        "change-array-by-copy" => Some(14),
+        "hashbang" => Some(14),
+        "symbols-as-weakmap-keys" => Some(14),
+
+        // ES2022
+        "arbitrary-module-namespace-names" => Some(13),
+        "Array.prototype.at" => Some(13),
+        "class-fields-private" => Some(13),
+        "class-fields-private-in" => Some(13),
+        "class-fields-public" => Some(13),
+        "class-methods-private" => Some(13),
+        "class-static-block" => Some(13),
+        "class-static-fields-private" => Some(13),
+        "class-static-fields-public" => Some(13),
+        "class-static-methods-private" => Some(13),
+        "error-cause" => Some(13),
+        "Intl.DateTimeFormat-extend-timezonename" => Some(13),
+        "Intl.DisplayNames-v2" => Some(13),
+        "Intl-enumeration" => Some(13),
+        "Intl.Segmenter" => Some(13),
+        "Object.hasOwn" => Some(13),
+        "regexp-match-indices" => Some(13),
+        "String.prototype.at" => Some(13),
+        "top-level-await" => Some(13),
+        "TypedArray.prototype.at" => Some(13),
+
+        // ES2021
+        "AggregateError" => Some(12),
+        "align-detached-buffer-semantics-with-web-reality" => Some(12),
+        "FinalizationRegistry" => Some(12),
+        "Intl.DateTimeFormat-datetimestyle" => Some(12),
+        "Intl.DateTimeFormat-formatRange" => Some(12),
+        "Intl.DateTimeFormat-fractionalSecondDigits" => Some(12),
+        "Intl.DisplayNames" => Some(12),
+        "Intl.ListFormat" => Some(12),
+        "Intl.Locale" => Some(12),
+        "logical-assignment-operators" => Some(12),
+        "numeric-separator-literal" => Some(12),
+        "Promise.any" => Some(12),
+        "String.prototype.replaceAll" => Some(12),
+        "WeakRef" => Some(12),
+
+        // ES2020
+        "BigInt" => Some(11),
+        "coalesce-expression" => Some(11),
+        "Intl.NumberFormat-unified" => Some(11),
+        "Intl.RelativeTimeFormat" => Some(11),
+        "optional-chaining" => Some(11),
+        "dynamic-import" => Some(11),
+        "export-star-as-namespace-from-module" => Some(11),
+        "for-in-order" => Some(11),
+        "globalThis" => Some(11),
+        "import.meta" => Some(11),
+        "Promise.allSettled" => Some(11),
+        "String.prototype.matchAll" => Some(11),
+        "Symbol.matchAll" => Some(11),
+
+        // ES2019
+        "Array.prototype.flat" => Some(10),
+        "Array.prototype.flatMap" => Some(10),
+        "json-superset" => Some(10),
+        "Object.fromEntries" => Some(10),
+        "optional-catch-binding" => Some(10),
+        "stable-array-sort" => Some(10),
+        "stable-typedarray-sort" => Some(10),
+        "string-trimming" => Some(10),
+        "String.prototype.trimEnd" => Some(10),
+        "String.prototype.trimStart" => Some(10),
+        "Symbol.prototype.description" => Some(10),
+        "well-formed-json-stringify" => Some(10),
+
+        // ES2018
+        "async-iteration" => Some(9),
+        "IsHTMLDDA" => Some(9),
+        "object-rest" => Some(9),
+        "object-spread" => Some(9),
+        "Promise.prototype.finally" => Some(9),
+        "regexp-dotall" => Some(9),
+        "regexp-lookbehind" => Some(9),
+        "regexp-named-groups" => Some(9),
+        "regexp-unicode-property-escapes" => Some(9),
+        "Symbol.asyncIterator" => Some(9),
+
+        // ES2017
+        "async-functions" => Some(8),
+        "Atomics" => Some(8),
+        "Intl.DateTimeFormat-dayPeriod" => Some(8),
+        "intl-normative-optional" => Some(8),
+        "SharedArrayBuffer" => Some(8),
+
+        // ES2016
+        "Array.prototype.includes" => Some(7),
+        "exponentiation" => Some(7),
+        "u180e" => Some(7),
+
+        // ES6
+        "ArrayBuffer" => Some(6),
+        "Array.prototype.values" => Some(6),
+        "arrow-function" => Some(6),
+        "class" => Some(6),
+        "computed-property-names" => Some(6),
+        "const" => Some(6),
+        "cross-realm" => Some(6),
+        "DataView" => Some(6),
+        "DataView.prototype.getFloat32" => Some(6),
+        "DataView.prototype.getFloat64" => Some(6),
+        "DataView.prototype.getInt16" => Some(6),
+        "DataView.prototype.getInt32" => Some(6),
+        "DataView.prototype.getInt8" => Some(6),
+        "DataView.prototype.getUint16" => Some(6),
+        "DataView.prototype.getUint32" => Some(6),
+        "DataView.prototype.setUint8" => Some(6),
+        "default-parameters" => Some(6),
+        "destructuring-assignment" => Some(6),
+        "destructuring-binding" => Some(6),
+        "for-of" => Some(6),
+        "Float32Array" => Some(6),
+        "Float64Array" => Some(6),
+        "generators" => Some(6),
+        "Int8Array" => Some(6),
+        "Int16Array" => Some(6),
+        "Int32Array" => Some(6),
+        "let" => Some(6),
+        "Map" => Some(6),
+        "new.target" => Some(6),
+        "Object.is" => Some(6),
+        "Promise" => Some(6),
+        "Proxy" => Some(6),
+        "proxy-missing-checks" => Some(6),
+        "Reflect" => Some(6),
+        "Reflect.construct" => Some(6),
+        "Reflect.set" => Some(6),
+        "Reflect.setPrototypeOf" => Some(6),
+        "rest-parameters" => Some(6),
+        "Set" => Some(6),
+        "String.fromCodePoint" => Some(6),
+        "String.prototype.endsWith" => Some(6),
+        "String.prototype.includes" => Some(6),
+        "super" => Some(6),
+        "Symbol" => Some(6),
+        "Symbol.hasInstance" => Some(6),
+        "Symbol.isConcatSpreadable" => Some(6),
+        "Symbol.iterator" => Some(6),
+        "Symbol.match" => Some(6),
+        "Symbol.replace" => Some(6),
+        "Symbol.search" => Some(6),
+        "Symbol.species" => Some(6),
+        "Symbol.split" => Some(6),
+        "Symbol.toPrimitive" => Some(6),
+        "Symbol.toStringTag" => Some(6),
+        "Symbol.unscopables" => Some(6),
+        "tail-call-optimization" => Some(6),
+        "template" => Some(6),
+        "TypedArray" => Some(6),
+        "Uint8Array" => Some(6),
+        "Uint16Array" => Some(6),
+        "Uint32Array" => Some(6),
+        "Uint8ClampedArray" => Some(6),
+        "WeakMap" => Some(6),
+        "WeakSet" => Some(6),
+
+        // ES5
+        "caller" => Some(5),
+
+        // Legacy additions used by test262-fyi.
+        "__proto__" => Some(6),
+        "__getter__" => Some(8),
+        "__setter__" => Some(8),
+
+        // Experimental and proposal-stage features group under ESNext.
+        "Intl.Locale-info" => Some(99),
+        "Intl.NumberFormat-v3" => Some(99),
+        "legacy-regexp" => Some(99),
+        "Temporal" => Some(99),
+        "ShadowRealm" => Some(99),
+        "decorators" => Some(99),
+        "regexp-duplicate-named-groups" => Some(99),
+        "Array.fromAsync" => Some(99),
+        "explicit-resource-management" => Some(99),
+        "source-phase-imports" => Some(99),
+        "source-phase-imports-module-source" => Some(99),
+        "Atomics.pause" => Some(99),
+        "import-defer" => Some(99),
+        "canonical-tz" => Some(99),
+        "immutable-arraybuffer" => Some(99),
+        "nonextensible-applies-to-private" => Some(99),
+        "host-gc-required" => Some(99),
+        "Error.isError" => Some(99),
+        "iterator-sequencing" => Some(99),
+        "json-parse-with-source" => Some(99),
+        "Math.sumPrecise" => Some(99),
+        "uint8array-base64" => Some(99),
+        "upsert" => Some(99),
+        _ => None,
+    }
+}
+
+fn language_feature_group(features: Option<&[String]>) -> Option<String> {
+    let mut best_edition: Option<u8> = None;
+
+    for feature in features? {
+        let Some(edition) = feature_edition(feature) else {
+            continue;
+        };
+        best_edition = Some(match best_edition {
+            Some(current) => current.max(edition),
+            None => edition,
+        });
+    }
+
+    best_edition.and_then(|edition| edition_label(edition).map(str::to_string))
+}
+
+fn normalize_es_version(input: &str) -> Option<String> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let upper = raw.to_ascii_uppercase();
+    let label = if let Some(rest) = upper.strip_prefix("ES") {
+        match rest {
+            "NEXT" => "ESNext".to_string(),
+            "5" => "ES5".to_string(),
+            "6" => "ES6".to_string(),
+            "2016" => "ES2016".to_string(),
+            "2017" => "ES2017".to_string(),
+            "2018" => "ES2018".to_string(),
+            "2019" => "ES2019".to_string(),
+            "2020" => "ES2020".to_string(),
+            "2021" => "ES2021".to_string(),
+            "2022" => "ES2022".to_string(),
+            "2023" => "ES2023".to_string(),
+            "2024" => "ES2024".to_string(),
+            "2025" => "ES2025".to_string(),
+            _ => return None,
+        }
+    } else {
+        match upper.as_str() {
+            "NEXT" => "ESNext".to_string(),
+            "5" => "ES5".to_string(),
+            "6" => "ES6".to_string(),
+            "2016" => "ES2016".to_string(),
+            "2017" => "ES2017".to_string(),
+            "2018" => "ES2018".to_string(),
+            "2019" => "ES2019".to_string(),
+            "2020" => "ES2020".to_string(),
+            "2021" => "ES2021".to_string(),
+            "2022" => "ES2022".to_string(),
+            "2023" => "ES2023".to_string(),
+            "2024" => "ES2024".to_string(),
+            "2025" => "ES2025".to_string(),
+            _ => return None,
+        }
+    };
+
+    Some(label)
+}
+
+fn normalize_es_versions(values: &[String]) -> Result<Vec<String>, String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let Some(label) = normalize_es_version(value) else {
+            return Err(format!("Invalid ES version '{}'", value));
+        };
+        if !normalized.iter().any(|existing| existing == &label) {
+            normalized.push(label);
+        }
+    }
+    Ok(normalized)
+}
+
+fn file_edition_label(file: &Path) -> Option<String> {
+    let src = fs::read_to_string(file).ok()?;
+    let meta = parse_meta(&src)?;
+    if meta.es5id.is_some() {
+        return Some("ES5".to_string());
+    }
+    language_feature_group(meta.features.as_deref())
 }
 
 /// Parse Test262 metadata YAML into `Meta`
@@ -1866,6 +2231,7 @@ fn main() {
         &opts.filters,
         &opts.anti_filters,
         &opts.anti_segments,
+        &opts.es_versions,
         opts.limit,
     );
     let job_count = resolve_job_count(
@@ -2018,6 +2384,101 @@ mod tests {
 
         assert_eq!(top, "built-ins");
         assert_eq!(subsection, "built-ins/Array");
+    }
+
+    #[test]
+    fn bucket_keys_groups_language_tests_by_edition() {
+        let root = temp_dir("bucket-language");
+        let _guard = TempDirGuard(root.clone());
+        let file = root.join("language/expressions/grouping.js");
+
+        write_file(
+            &file,
+            r#"/*---
+features: [array-grouping]
+---*/
+const ok = 1;
+"#,
+        );
+
+        let (top, subsection) = bucket_keys(&root, &file);
+
+        assert_eq!(top, "ES2024");
+        assert_eq!(subsection, "language/expressions");
+    }
+
+    #[test]
+    fn bucket_keys_groups_es5_language_tests() {
+        let root = temp_dir("bucket-es5");
+        let _guard = TempDirGuard(root.clone());
+        let file = root.join("language/comments/sputnik.js");
+
+        write_file(
+            &file,
+            r#"/*---
+es5id: 7.4_A6
+---*/
+var ok = 1;
+"#,
+        );
+
+        let (top, subsection) = bucket_keys(&root, &file);
+
+        assert_eq!(top, "ES5");
+        assert_eq!(subsection, "language/comments");
+    }
+
+    #[test]
+    fn normalize_es_versions_accepts_common_forms() {
+        assert_eq!(normalize_es_version("5"), Some("ES5".to_string()));
+        assert_eq!(normalize_es_version("es6"), Some("ES6".to_string()));
+        assert_eq!(normalize_es_version("2016"), Some("ES2016".to_string()));
+        assert_eq!(normalize_es_version("next"), Some("ESNext".to_string()));
+    }
+
+    #[test]
+    fn normalize_es_versions_rejects_unknown_label() {
+        assert_eq!(normalize_es_version("ES1999"), None);
+        assert!(normalize_es_versions(&["ES5".to_string(), "ES6".to_string()]).is_ok());
+        assert!(normalize_es_versions(&["ES5".to_string(), "unknown".to_string()]).is_err());
+    }
+
+    #[test]
+    fn select_files_to_run_filters_by_es_version() {
+        let root = temp_dir("select-es-version");
+        let _guard = TempDirGuard(root.clone());
+        let es5_file = root.join("language/comments/es5.js");
+        let es2024_file = root.join("language/expressions/es2024.js");
+        let builtin_file = root.join("built-ins/Array/push.js");
+
+        write_file(
+            &es5_file,
+            r#"/*---
+es5id: 7.4_A6
+---*/
+var ok = 1;
+"#,
+        );
+        write_file(
+            &es2024_file,
+            r#"/*---
+features: [array-grouping]
+---*/
+const ok = 1;
+"#,
+        );
+        write_file(&builtin_file, "const ok = 1;\n");
+
+        let selected = select_files_to_run(
+            vec![builtin_file.clone(), es2024_file.clone(), es5_file.clone()],
+            &[],
+            &[],
+            &[],
+            &["ES5".to_string()],
+            None,
+        );
+
+        assert_eq!(selected, vec![es5_file]);
     }
 
     #[test]

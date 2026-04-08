@@ -1,6 +1,7 @@
 use crate::bytecode::{Chunk, FunctionProto, OP_COUNT, Op};
 use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
+use crate::gc;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
@@ -88,6 +89,7 @@ impl Vm {
             run_started_at: None,
         };
         vm.populate_realm_intrinsics(intrinsics);
+        gc::reset_allocation_pressure();
         vm
     }
 
@@ -329,8 +331,8 @@ impl Vm {
 
     /// Create a new Array object with the given elements and correct prototype.
     pub fn new_array(&self, elems: Vec<Option<Value>>) -> Value {
-        let arr_rc = crate::gc::track_array(Rc::new(RefCell::new(elems)));
-        let props = crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+        let arr_rc = gc::track_array(Rc::new(RefCell::new(elems)));
+        let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         let len = arr_rc.borrow().len();
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
@@ -346,7 +348,7 @@ impl Vm {
 
     /// Run the prototype mark/sweep collector and return mark statistics.
     #[cfg(feature = "gc_mark_sweep_prototype")]
-    pub fn collect_garbage_prototype(&self) -> crate::gc::GcStats {
+    pub fn collect_garbage_prototype(&self) -> gc::GcStats {
         let mut roots: Vec<Value> = Vec::new();
         let mut env_roots: Vec<Rc<Mutex<Vec<ValueSlot>>>> = Vec::new();
         roots.push(Value::Object(Rc::clone(&self.globals)));
@@ -479,7 +481,7 @@ impl Vm {
         if let Some(value) = self.realm.intrinsics.uri_error_constructor.clone() {
             roots.push(value);
         }
-        crate::gc::collect_with_env_roots(&roots, &env_roots)
+        gc::collect_with_env_roots(&roots, &env_roots)
     }
 
     /// Opportunistically collect garbage during interpreter progress.
@@ -488,8 +490,7 @@ impl Vm {
     /// every single bytecode step.
     #[cfg(feature = "gc_mark_sweep_prototype")]
     pub(super) fn maybe_collect_garbage_prototype(&mut self) {
-        self.gc_step_counter = self.gc_step_counter.wrapping_add(1);
-        if self.gc_step_counter < GC_STEP_INTERVAL {
+        if gc::allocation_pressure() < GC_ALLOCATION_PRESSURE_THRESHOLD {
             return;
         }
         self.gc_step_counter = 0;
@@ -710,6 +711,7 @@ impl Vm {
         self.chunk = Rc::new(Chunk::new(Rc::new(String::new())));
         self.obj_generations.clear();
         self.property_get_ic_cache.clear();
+        gc::reset_allocation_pressure();
         let mut g = self.globals.borrow_mut();
         g.properties
             .retain(|k, _| matches!(k, PropertyKey::String(s) if keep_globals.contains(s)));
@@ -750,6 +752,7 @@ impl Vm {
             })
             .unwrap_or(Value::Undefined);
         self.initialize_root_bindings();
+        gc::reset_allocation_pressure();
         self.begin_opcode_profile_run();
         self.property_get_ic_cache.clear();
 
@@ -840,7 +843,7 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     fn make_iterator_result(value: Value, done: bool) -> Value {
-        let obj = crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+        let obj = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         obj.borrow_mut().properties.insert(
             PropertyKey::String("value".to_string()),
             PropertyDescriptor::data(value),
@@ -885,7 +888,7 @@ impl Vm {
         let next_runner = Rc::clone(&runner);
         let throw_runner = Rc::clone(&runner);
         let return_runner = Rc::clone(&runner);
-        let gen_obj = crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+        let gen_obj = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         gen_obj.borrow_mut().properties.insert(
             PropertyKey::String("next".to_string()),
             PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
@@ -1788,7 +1791,7 @@ impl Vm {
                     | Value::BuiltinObject(_, _) => proto,
                     _ => Value::Null,
                 };
-                let instance_obj = crate::gc::track_object(Rc::new(RefCell::new(
+                let instance_obj = gc::track_object(Rc::new(RefCell::new(
                     ObjectData::with_prototype(instance_proto),
                 )));
                 instance_obj.borrow_mut().properties.insert(
@@ -1839,7 +1842,7 @@ impl Vm {
                     | Value::BuiltinObject(_, _) => proto,
                     _ => Value::Null,
                 };
-                let instance_obj = crate::gc::track_object(Rc::new(RefCell::new(
+                let instance_obj = gc::track_object(Rc::new(RefCell::new(
                     ObjectData::with_prototype(instance_proto),
                 )));
                 instance_obj.borrow_mut().properties.insert(
@@ -4042,7 +4045,7 @@ impl Vm {
 
         let arr_rc = Rc::new(RefCell::new(rest_slice));
         let props: Rc<RefCell<ObjectData>> =
-            crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+            gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
             PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
@@ -4483,7 +4486,7 @@ impl Vm {
 
         let closure = Value::Closure {
             proto: Rc::clone(&closure_proto),
-            env: crate::gc::track_env(Rc::new(Mutex::new(env_cells))),
+            env: gc::track_env(Rc::new(Mutex::new(env_cells))),
             lexical_this: None,
             props: Rc::clone(&props),
         };
@@ -4504,9 +4507,9 @@ impl Vm {
                 .object_prototype
                 .clone()
                 .unwrap_or(Value::Null);
-            let proto_obj_map: Rc<RefCell<ObjectData>> = crate::gc::track_object(Rc::new(
-                RefCell::new(ObjectData::with_prototype(object_proto)),
-            ));
+            let proto_obj_map: Rc<RefCell<ObjectData>> = gc::track_object(Rc::new(RefCell::new(
+                ObjectData::with_prototype(object_proto),
+            )));
             let proto_obj = Value::Object(Rc::clone(&proto_obj_map));
 
             // Set F.prototype.constructor = F
@@ -6127,29 +6130,47 @@ fn parse_js_number_string(s: &str) -> f64 {
         return f64::NEG_INFINITY;
     }
 
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        return parse_radix_number_string(hex, 16).unwrap_or(f64::NAN);
+    }
+    if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        return parse_radix_number_string(bin, 2).unwrap_or(f64::NAN);
+    }
+    if let Some(oct) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
+        return parse_radix_number_string(oct, 8).unwrap_or(f64::NAN);
+    }
+
     let (sign, body) = match s.as_bytes().first() {
         Some(b'+') => (1.0, &s[1..]),
         Some(b'-') => (-1.0, &s[1..]),
         _ => (1.0, s),
     };
 
-    let parsed = if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
-        BigIntValue::parse_bytes(hex.as_bytes(), 16)
-            .and_then(|n| n.to_f64())
-            .unwrap_or(f64::NAN)
-    } else if let Some(bin) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
-        BigIntValue::parse_bytes(bin.as_bytes(), 2)
-            .and_then(|n| n.to_f64())
-            .unwrap_or(f64::NAN)
-    } else if let Some(oct) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
-        BigIntValue::parse_bytes(oct.as_bytes(), 8)
-            .and_then(|n| n.to_f64())
-            .unwrap_or(f64::NAN)
-    } else {
-        body.parse::<f64>().unwrap_or(f64::NAN)
-    };
+    sign * body.parse::<f64>().unwrap_or(f64::NAN)
+}
 
-    sign * parsed
+fn parse_radix_number_string(body: &str, radix: u32) -> Option<f64> {
+    if body.is_empty() {
+        return None;
+    }
+
+    let mut value = 0.0;
+    let radix_f = radix as f64;
+
+    for byte in body.bytes() {
+        let digit = match byte {
+            b'0'..=b'9' => u32::from(byte - b'0'),
+            b'a'..=b'z' => u32::from(byte - b'a' + 10),
+            b'A'..=b'Z' => u32::from(byte - b'A' + 10),
+            _ => return None,
+        };
+        if digit >= radix {
+            return None;
+        }
+        value = value * radix_f + digit as f64;
+    }
+
+    Some(value)
 }
 
 fn parse_js_bigint_string(s: &str) -> Option<BigIntValue> {
@@ -6882,6 +6903,45 @@ mod tests {
         assert_eq!(vm.to_string(&Value::Number(1.0)).unwrap(), "1");
         assert_eq!(vm.to_string(&Value::Number(2.0)).unwrap(), "2");
         assert_eq!(vm.to_string(&Value::Number(-0.0)).unwrap(), "0");
+    }
+
+    #[test]
+    fn to_number_parses_radix_prefixed_strings() {
+        let globals = test_globals();
+        let mut vm = Vm::new(globals);
+
+        assert_eq!(
+            vm.to_number_value(&Value::String("0x10".to_string()))
+                .unwrap(),
+            16.0
+        );
+        assert_eq!(
+            vm.to_number_value(&Value::String("0b101".to_string()))
+                .unwrap(),
+            5.0
+        );
+        assert_eq!(
+            vm.to_number_value(&Value::String("0o10".to_string()))
+                .unwrap(),
+            8.0
+        );
+    }
+
+    #[test]
+    fn to_number_rejects_signed_radix_prefixed_strings() {
+        let globals = test_globals();
+        let mut vm = Vm::new(globals);
+
+        assert!(
+            vm.to_number_value(&Value::String("-0x10".to_string()))
+                .unwrap()
+                .is_nan()
+        );
+        assert!(
+            vm.to_number_value(&Value::String("+0b101".to_string()))
+                .unwrap()
+                .is_nan()
+        );
     }
 
     #[test]

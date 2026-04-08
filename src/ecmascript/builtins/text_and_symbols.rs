@@ -366,7 +366,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
                             n.trunc() as i64 as u32
                         };
                         let unit = (int & 0xFFFF) as u16;
-                        out.push_str(&String::from_utf16_lossy(&[unit]));
+                        out.push(char::from_u32(unit as u32).unwrap_or('\u{FFFD}'));
                     }
                     Ok(Value::String(out))
                 }),

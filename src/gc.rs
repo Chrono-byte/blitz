@@ -5,6 +5,7 @@
 //! When the feature is disabled, the tracking hooks become no-ops and the
 //! collector reports zero work.
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
@@ -40,6 +41,7 @@ struct HeapRegistry {
 #[cfg(feature = "gc_mark_sweep_prototype")]
 thread_local! {
     static HEAP: RefCell<HeapRegistry> = RefCell::new(HeapRegistry::default());
+    static ALLOCATION_PRESSURE: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(feature = "gc_mark_sweep_prototype")]
@@ -47,31 +49,69 @@ fn push_weak<T>(slot: &mut Vec<Weak<T>>, value: &Rc<T>) {
     slot.push(Rc::downgrade(value));
 }
 
+#[cfg(feature = "gc_mark_sweep_prototype")]
+fn bump_allocation_pressure() {
+    ALLOCATION_PRESSURE.with(|pressure| {
+        pressure.set(pressure.get().saturating_add(1));
+    });
+}
+
+/// Returns the number of tracked heap allocations since the last collection.
+pub fn allocation_pressure() -> usize {
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    {
+        ALLOCATION_PRESSURE.with(Cell::get)
+    }
+
+    #[cfg(not(feature = "gc_mark_sweep_prototype"))]
+    {
+        0
+    }
+}
+
+/// Reset the tracked allocation pressure back to zero.
+pub fn reset_allocation_pressure() {
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    ALLOCATION_PRESSURE.with(|pressure| pressure.set(0));
+}
+
 /// Register an object property bag with the collector.
 pub fn track_object(obj: Rc<RefCell<ObjectData>>) -> Rc<RefCell<ObjectData>> {
     #[cfg(feature = "gc_mark_sweep_prototype")]
-    HEAP.with(|heap| push_weak(&mut heap.borrow_mut().objects, &obj));
+    {
+        HEAP.with(|heap| push_weak(&mut heap.borrow_mut().objects, &obj));
+        bump_allocation_pressure();
+    }
     obj
 }
 
 /// Register an array backing store with the collector.
 pub fn track_array(arr: Rc<RefCell<Vec<Option<Value>>>>) -> Rc<RefCell<Vec<Option<Value>>>> {
     #[cfg(feature = "gc_mark_sweep_prototype")]
-    HEAP.with(|heap| push_weak(&mut heap.borrow_mut().arrays, &arr));
+    {
+        HEAP.with(|heap| push_weak(&mut heap.borrow_mut().arrays, &arr));
+        bump_allocation_pressure();
+    }
     arr
 }
 
 /// Register a closure environment vector with the collector.
 pub fn track_env(env: Rc<Mutex<Vec<ValueSlot>>>) -> Rc<Mutex<Vec<ValueSlot>>> {
     #[cfg(feature = "gc_mark_sweep_prototype")]
-    HEAP.with(|heap| push_weak(&mut heap.borrow_mut().envs, &env));
+    {
+        HEAP.with(|heap| push_weak(&mut heap.borrow_mut().envs, &env));
+        bump_allocation_pressure();
+    }
     env
 }
 
 /// Register a promise state with the collector.
 pub fn track_promise(promise: Rc<RefCell<PromiseState>>) -> Rc<RefCell<PromiseState>> {
     #[cfg(feature = "gc_mark_sweep_prototype")]
-    HEAP.with(|heap| push_weak(&mut heap.borrow_mut().promises, &promise));
+    {
+        HEAP.with(|heap| push_weak(&mut heap.borrow_mut().promises, &promise));
+        bump_allocation_pressure();
+    }
     promise
 }
 
@@ -219,6 +259,7 @@ fn collect_with_env_roots_impl(
             }
             heap.promises = new_promises;
         });
+        reset_allocation_pressure();
 
         stats
     }
@@ -604,5 +645,25 @@ mod tests {
         assert_eq!(stats.swept_envs, 0);
         assert!(weak_env.upgrade().is_some());
         assert!(weak_props.upgrade().is_some());
+    }
+
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    #[test]
+    fn allocation_pressure_tracks_heap_allocations() {
+        reset_allocation_pressure();
+        assert_eq!(allocation_pressure(), 0);
+
+        let _obj = track_object(Rc::new(RefCell::new(ObjectData::new())));
+        let _arr = track_array(Rc::new(RefCell::new(Vec::new())));
+        let _env = track_env(Rc::new(Mutex::new(Vec::new())));
+        let _promise = track_promise(Rc::new(RefCell::new(PromiseState::Pending {
+            on_fulfilled: Vec::new(),
+            on_rejected: Vec::new(),
+        })));
+
+        assert!(allocation_pressure() >= 4);
+
+        reset_allocation_pressure();
+        assert_eq!(allocation_pressure(), 0);
     }
 }

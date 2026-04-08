@@ -9,6 +9,59 @@ use crate::runtime_utils::{
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 
+fn is_js_line_terminator(c: char) -> bool {
+    matches!(c, '\u{000A}' | '\u{000D}' | '\u{2028}' | '\u{2029}')
+}
+
+/// Returns `true` when the source contains only whitespace and comments.
+///
+/// This is a cheap pre-scan for `eval` inputs that lets us skip parsing and
+/// compilation entirely for comment-only scripts. That matters for Test262
+/// comment conformance cases that call `eval` tens of thousands of times.
+fn source_is_whitespace_and_comments_only(src: &str) -> bool {
+    let mut chars = src.chars().peekable();
+
+    loop {
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+
+        match chars.peek().copied() {
+            None => return true,
+            Some('/') => {
+                chars.next();
+                match chars.peek().copied() {
+                    Some('/') => {
+                        chars.next();
+                        for c in chars.by_ref() {
+                            if is_js_line_terminator(c) {
+                                break;
+                            }
+                        }
+                    }
+                    Some('*') => {
+                        chars.next();
+                        let mut prev = '\0';
+                        let mut closed = false;
+                        for c in chars.by_ref() {
+                            if prev == '*' && c == '/' {
+                                closed = true;
+                                break;
+                            }
+                            prev = c;
+                        }
+                        if !closed {
+                            return false;
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+            Some(_) => return false,
+        }
+    }
+}
+
 pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
     use PropertyKey as PKey;
 
@@ -21,8 +74,12 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
                 Some(other) => return Ok(other.clone()),
                 None => return Ok(Value::Undefined),
             };
-            let trimmed = src.trim();
-            if !trimmed.is_empty()
+            let trimmed = src.trim_start();
+            if trimmed.starts_with('/') {
+                if source_is_whitespace_and_comments_only(src) {
+                    return Ok(Value::Undefined);
+                }
+            } else if !trimmed.is_empty()
                 && trimmed
                     .chars()
                     .all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
@@ -32,6 +89,8 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
                     return Ok(value);
                 }
                 return Err(vm.throw_reference_error(&format!("{trimmed} is not defined")));
+            } else if source_is_whitespace_and_comments_only(src) {
+                return Ok(Value::Undefined);
             }
             match vm.eval_expression_source(src) {
                 Ok(value) => return Ok(value),
@@ -76,4 +135,28 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
         PKey::String("decodeURIComponent".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new(global_decode_uri_component))),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_is_whitespace_and_comments_only;
+
+    #[test]
+    fn detects_comment_only_sources() {
+        assert!(source_is_whitespace_and_comments_only("/* comment */"));
+        assert!(source_is_whitespace_and_comments_only("// comment\n"));
+        assert!(source_is_whitespace_and_comments_only(" \t/* a */\n// b"));
+    }
+
+    #[test]
+    fn rejects_sources_with_code() {
+        assert!(!source_is_whitespace_and_comments_only("x"));
+        assert!(!source_is_whitespace_and_comments_only("/* comment */ x"));
+        assert!(!source_is_whitespace_and_comments_only("// comment\nx"));
+    }
+
+    #[test]
+    fn treats_unterminated_block_comment_as_non_comment_only() {
+        assert!(!source_is_whitespace_and_comments_only("/* comment"));
+    }
 }
