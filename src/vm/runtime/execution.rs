@@ -1742,29 +1742,6 @@ impl Vm {
         }
     }
 
-    /// Build a lexical environment for direct eval that can see the caller's
-    /// current local bindings by name while still chaining to the existing
-    /// lexical environment.
-    pub(crate) fn capture_eval_lexical_env(&self) -> Rc<RefCell<EnvironmentRecord>> {
-        let outer = Rc::clone(&self.lexical_env);
-        let env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(outer))));
-        let names = self
-            .current_slot_names
-            .as_ref()
-            .unwrap_or(&self.chunk.root_slot_names);
-        for (idx, maybe_name) in names.iter().enumerate() {
-            let Some(name) = maybe_name else {
-                continue;
-            };
-            if let Some(cell) = self.locals.get(idx) {
-                let initialized = !matches!(*cell.borrow(), Value::Uninitialized);
-                env.borrow_mut()
-                    .create_mutable_binding(name.clone(), Rc::clone(cell), initialized);
-            }
-        }
-        env
-    }
-
     /// Replace the current lexical environment.
     pub(crate) fn set_lexical_env(&mut self, env: Rc<RefCell<EnvironmentRecord>>) {
         self.lexical_env = env;
@@ -1772,18 +1749,7 @@ impl Vm {
 
     /// Adopt the caller's live bindings and slot metadata for a nested eval run.
     pub(crate) fn adopt_eval_context(&mut self, parent: &Vm) {
-        self.locals = parent.locals.clone();
-        self.current_slot_types = parent.current_slot_types.clone();
-        self.current_slot_names = parent.current_slot_names.clone();
-        self.current_closure_env = parent.current_closure_env.clone();
-        self.pending_closure_env = parent.pending_closure_env.clone();
-        self.this_value = parent.this_value.clone();
-        self.construct_new_target = parent.construct_new_target.clone();
-        self.current_arguments_object = parent.current_arguments_object.clone();
-        self.current_arguments_mapped_count = parent.current_arguments_mapped_count;
-        self.current_strict_mode = parent.current_strict_mode;
-        self.set_lexical_env(parent.capture_eval_lexical_env());
-        self.global_env = Rc::clone(&parent.global_env);
+        self.set_lexical_env(Rc::clone(&parent.lexical_env));
     }
 
     fn is_unscopable_binding(

@@ -1486,6 +1486,7 @@ impl Compiler {
                     self.emit(Op::SetPropertyIC, LINE);
                     let ic_slot = self.alloc_ic_slot()?;
                     self.emit_byte(ic_slot, LINE);
+                    self.emit(Op::Pop, LINE);
                 } else {
                     // instance method: install on constructor.prototype
                     let home_slot = instance_home_slot.expect("instance home slot");
@@ -1511,8 +1512,12 @@ impl Compiler {
                     self.emit(Op::SetPropertyIC, LINE);
                     let ic_slot = self.alloc_ic_slot()?;
                     self.emit_byte(ic_slot, LINE);
+                    self.emit(Op::Pop, LINE);
                 }
             }
+        }
+        if instance_home_slot.is_some() {
+            self.emit(Op::Pop, LINE);
         }
 
         Ok(())
@@ -1527,11 +1532,72 @@ impl Compiler {
             })
     }
 
-    /// Emit bytecode to initialize default parameter values.
+    /// Emit bytecode to initialize non-simple function parameters from hidden
+    /// raw argument slots.
     ///
-    /// For each parameter with an initializer, checks if the parameter is undefined
-    /// and if so, replaces it with the initializer expression's value.
-    fn emit_parameter_initializers(
+    /// Raw slots are expected to be laid out before any visible parameter
+    /// bindings. This keeps later parameters in TDZ while earlier defaults are
+    /// evaluated.
+    fn emit_parameter_initializers_from_raw_slots(
+        &mut self,
+        params: &oast::FormalParameters<'_>,
+        raw_slots: &[usize],
+    ) -> Result<(), crate::errors::CompilerError> {
+        let temp_slot = self.alloc_temp_local("param_init_value");
+
+        for (idx, param) in params.items.iter().enumerate() {
+            let raw_slot = raw_slots
+                .get(idx)
+                .copied()
+                .ok_or_else(|| crate::errors::CompilerError::from("missing parameter slot"))?;
+
+            self.emit(Op::GetLocal, LINE);
+            self.emit_byte(raw_slot as u8, LINE);
+
+            if let Some(init) = &param.initializer {
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::Undefined, LINE);
+                self.emit(Op::StrictEq, LINE);
+                self.emit(Op::JumpIfFalse, LINE);
+                let skip_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                self.compile_expr_oast(init)?;
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
+                self.patch_jump(skip_jump);
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
+            }
+
+            self.compile_binding_pattern_assignment_oast(
+                &param.pattern,
+                oxc_ast::ast::VariableDeclarationKind::Var,
+            )?;
+        }
+
+        if let Some(rest) = &params.rest {
+            let raw_slot = raw_slots
+                .get(params.items.len())
+                .copied()
+                .ok_or_else(|| crate::errors::CompilerError::from("missing rest parameter slot"))?;
+            self.emit(Op::GetLocal, LINE);
+            self.emit_byte(raw_slot as u8, LINE);
+            self.compile_binding_pattern_assignment_oast(
+                &rest.rest.argument,
+                oxc_ast::ast::VariableDeclarationKind::Var,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Emit bytecode to initialize default parameter values using the current
+    /// parameter slots directly.
+    fn emit_parameter_initializers_from_current_slots(
         &mut self,
         params: &oast::FormalParameters<'_>,
     ) -> Result<(), crate::errors::CompilerError> {
@@ -1615,6 +1681,8 @@ impl Compiler {
             return Err(err);
         }
 
+        let has_simple_parameter_list = Self::has_simple_parameter_list(func);
+
         let mut inner = Compiler {
             chunk: Chunk::new(Rc::clone(&self.source_text)),
             source_text: Rc::clone(&self.source_text),
@@ -1647,20 +1715,50 @@ impl Compiler {
         };
         inner.strict_context = function_is_strict;
 
-        // Parameter placeholders (no type information available here).
-        for p in &func.params.items {
-            let pname = match &p.pattern {
-                oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
-                _ => "_".to_string(),
-            };
-            inner.add_local_with_mirror(pname, None, false);
-        }
-        if let Some(rest) = &func.params.rest {
-            let pname = match &rest.rest.argument {
-                oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
-                _ => "_".to_string(),
-            };
-            inner.add_local_with_mirror(pname, None, false);
+        let mut raw_param_slots = Vec::new();
+        if has_simple_parameter_list {
+            // Parameter placeholders (no type information available here).
+            for p in &func.params.items {
+                let pname = match &p.pattern {
+                    oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
+                    _ => "_".to_string(),
+                };
+                inner.add_local_with_mirror(pname, None, false);
+            }
+            if let Some(rest) = &func.params.rest {
+                let pname = match &rest.rest.argument {
+                    oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
+                    _ => "_".to_string(),
+                };
+                inner.add_local_with_mirror(pname, None, false);
+            }
+        } else {
+            for _ in &func.params.items {
+                raw_param_slots.push(inner.add_local_with_mirror(
+                    format!("__param_raw_{}", raw_param_slots.len()),
+                    None,
+                    false,
+                ));
+            }
+            if func.params.rest.is_some() {
+                raw_param_slots.push(inner.add_local_with_mirror(
+                    "__param_raw_rest".to_string(),
+                    None,
+                    false,
+                ));
+            }
+            for p in &func.params.items {
+                if let oast::BindingPattern::BindingIdentifier(i) = &p.pattern {
+                    let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
+                    inner.mark_local_tdz(slot);
+                }
+            }
+            if let Some(rest) = &func.params.rest
+                && let oast::BindingPattern::BindingIdentifier(i) = &rest.rest.argument
+            {
+                let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
+                inner.mark_local_tdz(slot);
+            }
         }
         let self_binding_slot = self_name
             .map(|self_name| inner.add_local_with_mirror(self_name.to_string(), None, false));
@@ -1673,7 +1771,11 @@ impl Compiler {
             inner.emit_hoisted_function_decls_oast_stmts(&body.statements)?;
         }
 
-        inner.emit_parameter_initializers(&func.params)?;
+        if has_simple_parameter_list {
+            inner.emit_parameter_initializers_from_current_slots(&func.params)?;
+        } else {
+            inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
+        }
 
         // Compile function body statements into inner compiler.
         if let Some(body) = &func.body {
@@ -1735,6 +1837,11 @@ impl Compiler {
     ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
         let _env_len = self.locals.len();
         let function_is_strict = self.strict_context || Self::has_use_strict_directive(&func.body);
+        let has_simple_parameter_list = func.params.rest.is_none()
+            && func.params.items.iter().all(|param| {
+                matches!(param.pattern, oast::BindingPattern::BindingIdentifier(_))
+                    && param.initializer.is_none()
+            });
 
         if let Some(err) = Self::strict_binding_name_error(function_is_strict, name) {
             return Err(err);
@@ -1805,19 +1912,49 @@ impl Compiler {
         };
         inner.strict_context = function_is_strict;
 
-        for p in &func.params.items {
-            let pname = match &p.pattern {
-                oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
-                _ => "_".to_string(),
-            };
-            inner.add_local_with_mirror(pname, None, false);
-        }
-        if let Some(rest) = &func.params.rest {
-            let pname = match &rest.rest.argument {
-                oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
-                _ => "_".to_string(),
-            };
-            inner.add_local_with_mirror(pname, None, false);
+        let mut raw_param_slots = Vec::new();
+        if has_simple_parameter_list {
+            for p in &func.params.items {
+                let pname = match &p.pattern {
+                    oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
+                    _ => "_".to_string(),
+                };
+                inner.add_local_with_mirror(pname, None, false);
+            }
+            if let Some(rest) = &func.params.rest {
+                let pname = match &rest.rest.argument {
+                    oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
+                    _ => "_".to_string(),
+                };
+                inner.add_local_with_mirror(pname, None, false);
+            }
+        } else {
+            for _ in &func.params.items {
+                raw_param_slots.push(inner.add_local_with_mirror(
+                    format!("__param_raw_{}", raw_param_slots.len()),
+                    None,
+                    false,
+                ));
+            }
+            if func.params.rest.is_some() {
+                raw_param_slots.push(inner.add_local_with_mirror(
+                    "__param_raw_rest".to_string(),
+                    None,
+                    false,
+                ));
+            }
+            for p in &func.params.items {
+                if let oast::BindingPattern::BindingIdentifier(i) = &p.pattern {
+                    let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
+                    inner.mark_local_tdz(slot);
+                }
+            }
+            if let Some(rest) = &func.params.rest
+                && let oast::BindingPattern::BindingIdentifier(i) = &rest.rest.argument
+            {
+                let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
+                inner.mark_local_tdz(slot);
+            }
         }
         // Pre-declare nested functions inside this function body.
         inner.pre_declare_variables_oast_stmts(&func.body.statements);
@@ -1825,40 +1962,60 @@ impl Compiler {
 
         inner.emit_hoisted_function_decls_oast_stmts(&func.body.statements)?;
 
-        // Check if this is an implicit-return arrow function (expression: true).
-        // In that case, the body contains a single ExpressionStatement that should be returned.
-        if func.expression && func.body.statements.len() == 1 {
-            if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
-                // Compile the expression and return its value
-                inner.compile_expr_oast(&expr_stmt.expression)?;
-                inner.emit(Op::Return, LINE);
-            } else {
-                // Shouldn't happen for expression: true, but handle it safely
-                for stmt in &func.body.statements {
-                    if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-                        inner.compile_statement_oast(stmt)?;
+        if has_simple_parameter_list {
+            // Check if this is an implicit-return arrow function (expression: true).
+            // In that case, the body contains a single ExpressionStatement that should be returned.
+            if func.expression && func.body.statements.len() == 1 {
+                if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
+                    // Compile the expression and return its value
+                    inner.compile_expr_oast(&expr_stmt.expression)?;
+                    inner.emit(Op::Return, LINE);
+                } else {
+                    // Shouldn't happen for expression: true, but handle it safely
+                    for stmt in &func.body.statements {
+                        if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+                            inner.compile_statement_oast(stmt)?;
+                        }
                     }
+                    inner.emit(Op::Return, LINE);
+                }
+            } else {
+                // Regular function body with explicit statements
+                for stmt in &func.body.statements {
+                    if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+                        continue;
+                    }
+                    inner.compile_statement_oast(stmt)?;
                 }
                 inner.emit(Op::Return, LINE);
             }
         } else {
-            // Regular function body with explicit statements
-            for stmt in &func.body.statements {
-                if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-                    continue;
+            inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
+            if func.expression && func.body.statements.len() == 1 {
+                if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
+                    inner.compile_expr_oast(&expr_stmt.expression)?;
+                    inner.emit(Op::Return, LINE);
+                } else {
+                    for stmt in &func.body.statements {
+                        if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+                            inner.compile_statement_oast(stmt)?;
+                        }
+                    }
+                    inner.emit(Op::Return, LINE);
                 }
-                inner.compile_statement_oast(stmt)?;
+            } else {
+                for stmt in &func.body.statements {
+                    if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+                        continue;
+                    }
+                    inner.compile_statement_oast(stmt)?;
+                }
+                inner.emit(Op::Return, LINE);
             }
-            inner.emit(Op::Return, LINE);
         }
 
         let chunk = std::mem::take(&mut inner.chunk);
         let has_rest = func.params.rest.is_some();
-        let has_simple_parameter_list = func.params.rest.is_none()
-            && func.params.items.iter().all(|param| {
-                matches!(param.pattern, oast::BindingPattern::BindingIdentifier(_))
-                    && param.initializer.is_none()
-            });
         let slot_types = inner.local_types;
         let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
         let lexical_tdz = inner.local_tdz;

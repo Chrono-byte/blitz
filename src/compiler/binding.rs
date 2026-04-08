@@ -395,21 +395,94 @@ impl super::Compiler {
                 self.store_binding_identifier(i.name.as_str(), kind)?;
             }
             oast::BindingPattern::AssignmentPattern(a) => {
+                let temp_slot = self.alloc_temp_local("binding_default");
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::Undefined, LINE);
+                self.emit(Op::StrictEq, LINE);
+                self.emit(Op::JumpIfFalse, LINE);
+                let skip_default = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                self.compile_expr_oast(&a.right)?;
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
+                self.patch_jump(skip_default);
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
                 self.compile_binding_pattern_assignment_oast(&a.left, kind)?;
             }
             oast::BindingPattern::ArrayPattern(a) => {
-                for (idx, el) in a.elements.iter().enumerate() {
-                    let Some(el) = el else { continue };
+                if a.rest.is_none() {
+                    let source_slot = self.alloc_temp_local("array_binding_source");
+                    let iterator_slot = self.alloc_temp_local("array_binding_iterator");
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(source_slot as u8, LINE);
+
+                    self.emit(Op::GetLocal, LINE);
+                    self.emit_byte(source_slot as u8, LINE);
                     self.emit(Op::Dup, LINE);
-                    self.emit_constant(Value::String(idx.to_string()), LINE);
+                    self.emit_get_global_name("Symbol");
+                    self.emit_constant(Value::String("iterator".to_string()), LINE);
+                    self.emit(Op::GetPropertyIC, LINE);
+                    let iterator_ic = self.alloc_ic_slot()?;
+                    self.emit_byte(iterator_ic, LINE);
                     self.emit(Op::GetProperty, LINE);
-                    self.compile_binding_pattern_assignment_oast(el, kind)?;
+                    self.emit(Op::CallMethod, LINE);
+                    self.emit_byte(0, LINE);
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(iterator_slot as u8, LINE);
+
+                    for el in &a.elements {
+                        self.emit(Op::GetLocal, LINE);
+                        self.emit_byte(iterator_slot as u8, LINE);
+                        self.emit(Op::IteratorNext, LINE);
+
+                        if let Some(el) = el {
+                            self.emit(Op::Dup, LINE);
+                            self.emit_constant(Value::String("done".to_string()), LINE);
+                            self.emit(Op::GetProperty, LINE);
+                            self.emit(Op::JumpIfTrue, LINE);
+                            let done_jump = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.emit_constant(Value::String("value".to_string()), LINE);
+                            self.emit(Op::GetProperty, LINE);
+                            self.compile_binding_pattern_assignment_oast(el, kind)?;
+                            self.emit(Op::Jump, LINE);
+                            let after_jump = self.chunk.code.len();
+                            self.emit_byte(0, LINE);
+                            self.emit_byte(0, LINE);
+                            self.patch_jump(done_jump);
+                            self.emit(Op::Pop, LINE);
+                            self.emit(Op::Undefined, LINE);
+                            self.compile_binding_pattern_assignment_oast(el, kind)?;
+                            self.patch_jump(after_jump);
+                        } else {
+                            self.emit(Op::Pop, LINE);
+                        }
+                    }
+
+                    self.emit(Op::GetLocal, LINE);
+                    self.emit_byte(iterator_slot as u8, LINE);
+                    self.emit(Op::IteratorClose, LINE);
+                    self.emit(Op::Pop, LINE);
+                } else {
+                    for (idx, el) in a.elements.iter().enumerate() {
+                        let Some(el) = el else { continue };
+                        self.emit(Op::Dup, LINE);
+                        self.emit_constant(Value::String(idx.to_string()), LINE);
+                        self.emit(Op::GetProperty, LINE);
+                        self.compile_binding_pattern_assignment_oast(el, kind)?;
+                    }
+                    if let Some(rest) = &a.rest {
+                        self.emit(Op::Dup, LINE);
+                        self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
+                    }
+                    self.emit(Op::Pop, LINE);
                 }
-                if let Some(rest) = &a.rest {
-                    self.emit(Op::Dup, LINE);
-                    self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
-                }
-                self.emit(Op::Pop, LINE);
             }
             oast::BindingPattern::ObjectPattern(o) => {
                 for prop in &o.properties {

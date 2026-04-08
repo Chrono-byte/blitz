@@ -2276,6 +2276,7 @@ impl super::Compiler {
                             self.emit(Op::SetPropertyIC, LINE);
                             let slot = self.alloc_ic_slot()?;
                             self.emit_byte(slot, LINE);
+                            self.emit(Op::Pop, LINE);
                         } else {
                             // instance: install on constructor.prototype
                             self.emit(Op::GetLocal, LINE);
@@ -2301,8 +2302,12 @@ impl super::Compiler {
                             self.emit(Op::SetPropertyIC, LINE);
                             let slot = self.alloc_ic_slot()?;
                             self.emit_byte(slot, LINE);
+                            self.emit(Op::Pop, LINE);
                         }
                     }
+                }
+                if instance_home_slot.is_some() {
+                    self.emit(Op::Pop, LINE);
                 }
             }
             OExpr::AwaitExpression(a) => {
