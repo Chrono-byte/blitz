@@ -78,6 +78,11 @@ impl super::Compiler {
         property: &str,
         preserve_receiver: bool,
     ) -> Result<(), crate::errors::CompilerError> {
+        if !self.allow_super {
+            return Err(crate::errors::CompilerError::from(
+                "SyntaxError: super used outside of a method",
+            ));
+        }
         self.emit(Op::GetThis, LINE);
         self.emit(Op::Dup, LINE);
         self.emit_constant(Value::String(property.to_string()), LINE);
@@ -94,6 +99,11 @@ impl super::Compiler {
         key_expr: &oast::Expression,
         preserve_receiver: bool,
     ) -> Result<(), crate::errors::CompilerError> {
+        if !self.allow_super {
+            return Err(crate::errors::CompilerError::from(
+                "SyntaxError: super used outside of a method",
+            ));
+        }
         self.emit(Op::GetThis, LINE);
         self.emit(Op::Dup, LINE);
         self.compile_expr_oast(key_expr)?;
@@ -110,6 +120,11 @@ impl super::Compiler {
         property: &str,
         value_expr: &oast::Expression,
     ) -> Result<(), crate::errors::CompilerError> {
+        if !self.allow_super {
+            return Err(crate::errors::CompilerError::from(
+                "SyntaxError: super used outside of a method",
+            ));
+        }
         self.emit(Op::GetThis, LINE);
         self.emit(Op::Dup, LINE);
         self.emit_constant(Value::String(property.to_string()), LINE);
@@ -125,6 +140,11 @@ impl super::Compiler {
         key_expr: &oast::Expression,
         value_expr: &oast::Expression,
     ) -> Result<(), crate::errors::CompilerError> {
+        if !self.allow_super {
+            return Err(crate::errors::CompilerError::from(
+                "SyntaxError: super used outside of a method",
+            ));
+        }
         self.emit(Op::GetThis, LINE);
         self.emit(Op::Dup, LINE);
         self.compile_expr_oast(key_expr)?;
@@ -448,7 +468,7 @@ impl super::Compiler {
             OExpr::FunctionExpression(f) => {
                 let name = "<anonymous>";
                 let self_name = f.id.as_ref().map(|id| id.name.as_str());
-                let (proto, _env_len) = self.compile_function(name, self_name, f, None)?;
+                let (proto, _env_len) = self.compile_function(name, self_name, f, None, false)?;
                 let idx = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
                 self.emit_byte(idx as u8, LINE);
@@ -609,8 +629,13 @@ impl super::Compiler {
                         self.emit_constant(Value::String(descriptor_prop_name.to_string()), LINE);
                         if let oast::Expression::FunctionExpression(f) = &p.value {
                             let self_name = f.id.as_ref().map(|id| id.name.as_str());
-                            let (proto, _env_len) =
-                                self.compile_function(&method_name_owned, self_name, f, None)?;
+                            let (proto, _env_len) = self.compile_function(
+                                &method_name_owned,
+                                self_name,
+                                f,
+                                None,
+                                false,
+                            )?;
                             let idx = self.chunk.add_function(proto);
                             self.emit(Op::MakeClosure, LINE);
                             self.emit_byte(idx as u8, LINE);
@@ -1837,12 +1862,22 @@ impl super::Compiler {
                 }
             }
             OExpr::Super(_s) => {
+                if !self.allow_super {
+                    return Err(crate::errors::CompilerError::from(
+                        "SyntaxError: super used outside of a method",
+                    ));
+                }
                 return Err(crate::errors::CompilerError::from(
                     "super can only be used in property accesses or calls",
                 ));
             }
             OExpr::MetaProperty(m) => {
                 if m.meta.name.as_str() == "new" && m.property.name.as_str() == "target" {
+                    if !self.allow_new_target {
+                        return Err(crate::errors::CompilerError::from(
+                            "SyntaxError: new.target is only valid inside a function",
+                        ));
+                    }
                     self.emit(Op::GetNewTarget, LINE);
                 } else {
                     self.emit(Op::Undefined, LINE);
@@ -1889,6 +1924,11 @@ impl super::Compiler {
                 }
 
                 if let OExpr::Super(_) = &c.callee {
+                    if !self.allow_super {
+                        return Err(crate::errors::CompilerError::from(
+                            "SyntaxError: super used outside of a method",
+                        ));
+                    }
                     return Err(crate::errors::CompilerError::from(
                         "direct super() calls are not supported yet",
                     ));
@@ -2056,17 +2096,7 @@ impl super::Compiler {
                     }
                     self.emit(Op::CallIC, LINE);
                     self.emit_byte(arg_count as u8, LINE);
-                    self.emit(Op::Dup, LINE);
-                    self.emit_constant(Value::String("__tsblitz_eval_throw__".to_string()), LINE);
-                    self.emit(Op::GetPropertyIC, LINE);
-                    let slot = self.alloc_ic_slot()?;
-                    self.emit_byte(slot, LINE);
-                    self.emit(Op::JumpIfFalse, LINE);
-                    let skip_throw = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
-                    self.emit(Op::Throw, LINE);
-                    self.patch_jump(skip_throw);
+                    self.emit_eval_throw_check()?;
                     return Ok(());
                 }
 

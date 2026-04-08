@@ -44,7 +44,7 @@ impl Compiler {
                 return Err(err);
             }
 
-            let (proto, _env_len) = self.compile_function(&fname, None, f, None)?;
+            let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
             let idx = self.chunk.add_function(proto);
             self.emit(Op::MakeClosure, LINE);
             self.emit_byte(idx as u8, LINE);
@@ -161,7 +161,8 @@ impl Compiler {
                             self.emit_get_binding(id.name.as_str());
                         } else {
                             let fname = "<default>".to_string();
-                            let (proto, _env_len) = self.compile_function(&fname, None, f, None)?;
+                            let (proto, _env_len) =
+                                self.compile_function(&fname, None, f, None, false)?;
                             let idx = self.chunk.add_function(proto);
                             self.emit(Op::MakeClosure, LINE);
                             self.emit_byte(idx as u8, LINE);
@@ -1586,6 +1587,7 @@ impl Compiler {
             self_name,
             &md.value,
             None,
+            true,
         )?;
         let fidx = self.chunk.add_function(proto);
 
@@ -1666,6 +1668,7 @@ impl Compiler {
         self_name: Option<&str>,
         func: &oast::Function,
         return_type: Option<Type>,
+        allow_super: bool,
     ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
         let _env_len = self.locals.len();
         let function_is_strict = self.strict_context
@@ -1776,6 +1779,8 @@ impl Compiler {
             label_patches: Vec::new(),
             current_module: self.current_module.clone(),
             next_ic_slot: 0,
+            allow_new_target: true,
+            allow_super,
             outer_bindings: self.visible_bindings_snapshot(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
@@ -2005,6 +2010,8 @@ impl Compiler {
             label_patches: Vec::new(),
             current_module: self.current_module.clone(),
             next_ic_slot: 0,
+            allow_new_target: self.allow_new_target,
+            allow_super: self.allow_super,
             outer_bindings: self.visible_bindings_snapshot(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),

@@ -950,6 +950,11 @@ impl Vm {
         let saved_recent_return_value = self.recent_return_value.clone();
         let saved_last_uncaught_exception = self.last_uncaught_exception.clone();
         let saved_pending_exception = self.pending_exception;
+        let saved_lexical_env = if direct_eval {
+            Some(Rc::clone(&self.lexical_env))
+        } else {
+            None
+        };
         let saved_locals = if direct_eval {
             Some(self.locals.clone())
         } else {
@@ -974,6 +979,13 @@ impl Vm {
         self.current_strict_mode = self.chunk.root_strict;
         self.gc_temp_roots.clear();
         self.yield_star_queue = None;
+        if self.chunk.root_slot_names.is_empty() {
+            self.locals.clear();
+            self.current_slot_types = None;
+            self.current_slot_names = None;
+        } else {
+            self.initialize_root_bindings();
+        }
         if !direct_eval {
             self.this_value = self
                 .globals
@@ -1038,6 +1050,9 @@ impl Vm {
         self.last_uncaught_exception = saved_last_uncaught_exception;
         self.pending_exception = saved_pending_exception;
         if direct_eval {
+            if let Some(lexical_env) = saved_lexical_env {
+                self.lexical_env = lexical_env;
+            }
             if let Some(locals) = saved_locals {
                 self.locals = locals;
             }
@@ -1858,7 +1873,7 @@ impl Vm {
             binding_object,
             &PropertyKey::Symbol(SymbolId::well_known_unscopables()),
         )?;
-        if matches!(unscopables, Value::Undefined | Value::Null) {
+        if !unscopables.is_object() {
             return Ok(false);
         }
         Ok(self

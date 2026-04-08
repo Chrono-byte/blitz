@@ -80,11 +80,11 @@ impl Parser {
     /// # Errors
     ///
     pub fn parse_source(source: &str) -> Result<ParserSession, ParserError> {
-        // Default to JavaScript parsing for callers that don't provide
-        // filename/extension information. JS is the runtime default for
-        // this engine; callers that need TypeScript syntax should opt in via
-        // `parse_source_with_type(..., SourceType::ts())`.
-        Self::parse_source_with_type(source, SourceType::unambiguous())
+        // Default to ordinary script parsing for callers that don't provide
+        // filename/extension information. Callers that need module semantics
+        // must opt in explicitly via `parse_source_with_type(..., SourceType::mjs())`
+        // or the appropriate TypeScript variant.
+        Self::parse_source_with_type(source, SourceType::script())
     }
 
     /// Parse source text with an explicit Oxc SourceType (js or ts).

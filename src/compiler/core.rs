@@ -68,6 +68,10 @@ pub struct Compiler {
     pub current_module: Option<ModuleContext>,
     /// Monotonic inline-cache slot allocator for the current chunk.
     pub next_ic_slot: u8,
+    /// Whether `new.target` is valid in the current compilation context.
+    pub allow_new_target: bool,
+    /// Whether `super` property access/calls are valid in the current context.
+    pub allow_super: bool,
     /// Bindings visible from the immediately enclosing function.
     pub outer_bindings: HashMap<String, CaptureSource>,
     /// Upvalue indices allocated in this compiler.
@@ -178,6 +182,8 @@ impl Compiler {
             label_patches: Vec::new(),
             current_module: None,
             next_ic_slot: 0,
+            allow_new_target: false,
+            allow_super: false,
             outer_bindings: HashMap::new(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
@@ -254,10 +260,7 @@ impl Compiler {
     /// Returns an error if the maximum number of inline cache sites has been exceeded.
     pub fn alloc_ic_slot(&mut self) -> Result<u8, CompilerError> {
         let slot = self.next_ic_slot;
-        self.next_ic_slot = self
-            .next_ic_slot
-            .checked_add(1)
-            .ok_or_else(|| CompilerError::from("Too many inline cache sites"))?;
+        self.next_ic_slot = self.next_ic_slot.wrapping_add(1);
         Ok(slot)
     }
 
@@ -342,7 +345,6 @@ impl Compiler {
         None
     }
 
-    #[allow(dead_code)]
     pub(crate) fn check_var_or_lexical_against_block_vars(&self, name: &str) -> Option<String> {
         for scope in self.scopes.iter().rev() {
             if matches!(scope.kind, ScopeKind::Function) {
@@ -622,6 +624,54 @@ impl Compiler {
         let idx = self.global_name_index(name);
         self.emit(Op::GetBuiltin, LINE);
         self.emit_byte(idx as u8, LINE);
+    }
+
+    /// Check whether the value currently on the stack is the internal
+    /// eval-throw sentinel object and, if so, rethrow it.
+    ///
+    /// The eval builtins return ordinary JS values on success, so this guard
+    /// must avoid probing primitives directly.
+    pub(crate) fn emit_eval_throw_check(&mut self) -> Result<(), CompilerError> {
+        let jump_to_object_case = {
+            self.emit(Op::Dup, LINE);
+            self.emit(Op::Typeof, LINE);
+            self.emit(Op::Dup, LINE);
+            self.emit_constant(Value::String("object".to_string()), LINE);
+            self.emit(Op::StrictEq, LINE);
+            self.emit(Op::JumpIfTrue, LINE);
+            let patch = self.chunk.code.len();
+            self.emit_byte(0, LINE);
+            self.emit_byte(0, LINE);
+            patch
+        };
+
+        self.emit_constant(Value::String("function".to_string()), LINE);
+        self.emit(Op::StrictEq, LINE);
+        self.emit(Op::JumpIfFalse, LINE);
+        let jump_to_done = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+
+        let object_case = self.chunk.code.len();
+        self.patch_jump(jump_to_object_case);
+        self.emit(Op::Pop, LINE);
+        self.emit(Op::Dup, LINE);
+        self.emit_constant(Value::String("__tsblitz_eval_throw__".to_string()), LINE);
+        self.emit(Op::GetPropertyIC, LINE);
+        let slot = self.alloc_ic_slot()?;
+        self.emit_byte(slot, LINE);
+        self.emit(Op::JumpIfFalse, LINE);
+        let skip_throw = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+        self.emit(Op::Throw, LINE);
+        self.patch_jump(skip_throw);
+        self.patch_jump(jump_to_done);
+
+        // Keep the object-case label local so the borrow checker does not
+        // consider the earlier patching path to overlap with the fallthrough.
+        let _ = object_case;
+        Ok(())
     }
 
     /// Attach a home object to the method closure currently on top of the stack.

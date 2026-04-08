@@ -255,59 +255,7 @@ impl Compiler {
         &self,
         stmts: &[oast::Statement<'_>],
     ) -> Result<(), crate::errors::CompilerError> {
-        for stmt in stmts {
-            match stmt {
-                oast::Statement::BlockStatement(b) => {
-                    self.validate_early_errors_in_statements(&b.body)?
-                }
-                oast::Statement::IfStatement(i) => {
-                    self.validate_statement_position_function(&i.consequent)?;
-                    self.validate_early_errors_in_program(std::slice::from_ref(&i.consequent))?;
-                    if let Some(alt) = &i.alternate {
-                        self.validate_statement_position_function(alt)?;
-                        self.validate_early_errors_in_program(std::slice::from_ref(alt))?;
-                    }
-                }
-                oast::Statement::WhileStatement(w) => {
-                    self.validate_statement_position_function(&w.body)?;
-                    self.validate_early_errors_in_program(std::slice::from_ref(&w.body))?;
-                }
-                oast::Statement::DoWhileStatement(d) => {
-                    self.validate_statement_position_function(&d.body)?;
-                    self.validate_early_errors_in_program(std::slice::from_ref(&d.body))?;
-                }
-                oast::Statement::ForStatement(f) => {
-                    self.validate_statement_position_function(&f.body)?;
-                    self.validate_early_errors_in_program(std::slice::from_ref(&f.body))?;
-                }
-                oast::Statement::ForInStatement(f) => {
-                    self.validate_statement_position_function(&f.body)?;
-                    self.validate_early_errors_in_program(std::slice::from_ref(&f.body))?;
-                }
-                oast::Statement::ForOfStatement(f) => {
-                    self.validate_statement_position_function(&f.body)?;
-                    self.validate_early_errors_in_program(std::slice::from_ref(&f.body))?;
-                }
-                oast::Statement::LabeledStatement(l) => {
-                    self.validate_statement_position_function(&l.body)?;
-                    self.validate_early_errors_in_program(std::slice::from_ref(&l.body))?;
-                }
-                oast::Statement::WithStatement(w) => {
-                    self.validate_early_errors_in_program(std::slice::from_ref(&w.body))?;
-                }
-                oast::Statement::TryStatement(t) => {
-                    self.validate_early_errors_in_statements(&t.block.body)?;
-                    if let Some(handler) = &t.handler {
-                        self.validate_early_errors_in_statements(&handler.body.body)?;
-                    }
-                    if let Some(finalizer) = &t.finalizer {
-                        self.validate_early_errors_in_statements(&finalizer.body)?;
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(())
+        self.validate_early_errors_in_statements(stmts)
     }
 
     fn validate_early_errors_in_statements(
@@ -319,6 +267,22 @@ impl Compiler {
         for stmt in stmts {
             Self::lexical_declared_names_of_statement(stmt, &mut lexical);
             self.var_declared_names_of_statement(stmt, &mut vars);
+        }
+        let mut seen_lexical = HashSet::new();
+        for stmt in stmts {
+            if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+                continue;
+            }
+            let mut names = HashSet::new();
+            Self::lexical_declared_names_of_statement(stmt, &mut names);
+            for name in names {
+                if !seen_lexical.insert(name.clone()) {
+                    return Err(crate::errors::CompilerError::from(format!(
+                        "SyntaxError: redeclaration of lexical binding `{}`",
+                        name
+                    )));
+                }
+            }
         }
         if let Some(name) = lexical.iter().find(|name| vars.contains(*name)) {
             return Err(crate::errors::CompilerError::from(format!(

@@ -65,7 +65,6 @@ impl HandlerStack {
         self.records.len()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
@@ -92,7 +91,6 @@ impl HandlerStack {
 }
 
 /// ECMAScript reference record (base, referenced name, strict mode flag).
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct ReferenceRecord {
     pub(crate) base: Value,

@@ -56,7 +56,6 @@ pub(crate) use frame::Frame;
 pub(crate) use generator_runner::GeneratorRunner;
 pub(crate) use handler::{HandlerRecord, StepOutcome};
 pub(crate) use partial_descriptor::PartialDescriptor;
-#[allow(unused_imports)]
 pub(crate) use stack::{CallStack, HandlerStack, ReferenceRecord, ReferenceStack};
 
 /// Cached result for a `GetPropertyIC` site.
@@ -375,7 +374,6 @@ pub struct Vm {
     /// Queue for pending dynamic import jobs.
     pub(super) dynamic_import_jobs: VecDeque<DynamicImportJob>,
     /// Optional reference stack for future reference record handling.
-    #[allow(dead_code)]
     pub(super) reference_stack: ReferenceStack,
     /// Optional hook invoked when an unhandled rejection or microtask exception
     /// is observed. The hook receives two Values: the first is the promise

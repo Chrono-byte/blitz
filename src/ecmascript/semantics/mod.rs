@@ -3814,17 +3814,6 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             let prog = session.program();
             let chunk = compiler::compile_oxc_repl(prog, &eval_src)
                 .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
-            if let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk) {
-                let message = format!("redeclaration of lexical binding `{name}`");
-                let thrown = crate::runtime_utils::host_error_object(vm, "SyntaxError", &message);
-                if let Value::Object(obj) = &thrown {
-                    obj.borrow_mut().properties.insert(
-                        PropertyKey::String("__tsblitz_eval_throw__".to_string()),
-                        PropertyDescriptor::data(Value::Bool(true)),
-                    );
-                }
-                return Ok(thrown);
-            }
             match vm.run_nested(chunk, true) {
                 Ok(value) => Ok(value),
                 Err(err) => {

@@ -63,6 +63,11 @@ impl super::Compiler {
         }
 
         if let OExpr::Super(_) = &c.callee {
+            if !self.allow_super {
+                return Err(crate::errors::CompilerError::from(
+                    "SyntaxError: super used outside of a method",
+                ));
+            }
             return Err(crate::errors::CompilerError::from(
                 "direct super() calls are not supported yet",
             ));

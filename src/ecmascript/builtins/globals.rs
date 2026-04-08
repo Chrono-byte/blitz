@@ -4,8 +4,7 @@ use crate::compiler;
 use crate::parser::Parser;
 use crate::runtime_utils::{
     global_decode_uri, global_decode_uri_component, global_encode_uri, global_encode_uri_component,
-    global_parse_float, global_parse_int, host_error_object, static_builtin_arg_offset,
-    syntax_error,
+    global_parse_float, global_parse_int, static_builtin_arg_offset, syntax_error,
 };
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 
@@ -114,17 +113,6 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
             let prog = session.program();
             let chunk = compiler::compile_oxc(prog, &eval_src)
                 .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
-            if let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk) {
-                let message = format!("redeclaration of lexical binding `{name}`");
-                let thrown = host_error_object(vm, "SyntaxError", &message);
-                if let Value::Object(obj) = &thrown {
-                    obj.borrow_mut().properties.insert(
-                        PropertyKey::String("__tsblitz_eval_throw__".to_string()),
-                        PropertyDescriptor::data(Value::Bool(true)),
-                    );
-                }
-                return Ok(thrown);
-            }
             let mut eval_vm = vm.fork_execution();
             eval_vm.adopt_eval_context(vm);
             eval_vm.set_current_strict_mode(strict);

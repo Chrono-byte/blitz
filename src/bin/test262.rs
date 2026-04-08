@@ -584,7 +584,6 @@ struct Meta {
     /// The negative metadata of the test.
     negative: Option<Negative>,
     /// The locale associated with the test.
-    #[allow(dead_code)]
     locale: Option<Vec<String>>,
 }
 
@@ -995,7 +994,7 @@ fn parse_source_for_path(
     {
         SourceType::ts()
     } else {
-        SourceType::unambiguous()
+        SourceType::script()
     };
     Parser::parse_source_with_type(source, source_type)
 }
@@ -1650,10 +1649,7 @@ fn run_test_file(
                 && let Some(neg) = &m.negative
                 && neg.phase == "parse"
             {
-                match Parser::parse_source_with_type(
-                    &src,
-                    SourceType::unambiguous().with_module(true),
-                ) {
+                match Parser::parse_source_with_type(&src, SourceType::mjs()) {
                     Ok(session) => {
                         let prog = session.program();
                         if let Err(e) = compiler::compile_oxc(prog, &src) {

@@ -55,7 +55,8 @@ impl Compiler {
                         if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
                             self.add_var_local(name, None, mirror_global);
                         } else {
-                            let slot = self.add_local_with_mirror(name, None, mirror_global);
+                            let slot =
+                                self.add_local_with_mirror(name.clone(), None, mirror_global);
                             self.mark_local_tdz(slot);
                         }
                     }
@@ -93,7 +94,7 @@ impl Compiler {
                 && let Some(ident) = &f.id
             {
                 let fname = ident.name.to_string();
-                let (proto, _env_len) = self.compile_function(&fname, None, f, None)?;
+                let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
                 let idx = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
                 self.emit_byte(idx as u8, LINE);
