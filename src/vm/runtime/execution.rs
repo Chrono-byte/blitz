@@ -219,6 +219,16 @@ impl Vm {
         self.this_value.clone()
     }
 
+    fn closure_lexical_this(callee: &Value) -> Option<Value> {
+        match callee {
+            Value::Closure {
+                lexical_this: Some(this),
+                ..
+            } => Some((**this).clone()),
+            _ => None,
+        }
+    }
+
     fn current_method_home_object(&self) -> Option<Value> {
         let frame = self.call_stack.last()?;
         match &frame.callee {
@@ -1126,26 +1136,17 @@ impl Vm {
             } => {
                 let call_args = self.prepare_call_args(&args, proto)?;
                 // Argument validation removed in JS-first mode.
+                let this_arg = Self::closure_lexical_this(&callee).unwrap_or(Value::Undefined);
                 if proto.is_generator {
-                    let generator = self.create_generator_object(
-                        proto,
-                        env,
-                        call_args,
-                        Value::Undefined,
-                        &callee,
-                    )?;
+                    let generator =
+                        self.create_generator_object(proto, env, call_args, this_arg, &callee)?;
                     self.stack.push(generator);
                 } else if proto.is_async {
-                    let promise = self.invoke_async_closure(
-                        proto,
-                        env,
-                        call_args,
-                        Value::Undefined,
-                        &callee,
-                    )?;
+                    let promise =
+                        self.invoke_async_closure(proto, env, call_args, this_arg, &callee)?;
                     self.stack.push(promise);
                 } else {
-                    self.push_call_frame(proto, env, call_args, Value::Undefined, callee.clone())?;
+                    self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
                 }
             }
             _ => {
@@ -1309,17 +1310,13 @@ impl Vm {
                 ref proto, ref env, ..
             } => {
                 let call_args = self.prepare_call_args(&flat, proto)?;
+                let this_arg = Self::closure_lexical_this(&callee).unwrap_or(Value::Undefined);
                 if proto.is_async {
-                    let promise = self.invoke_async_closure(
-                        proto,
-                        env,
-                        call_args,
-                        Value::Undefined,
-                        &callee,
-                    )?;
+                    let promise =
+                        self.invoke_async_closure(proto, env, call_args, this_arg, &callee)?;
                     self.stack.push(promise);
                 } else {
-                    self.push_call_frame(proto, env, call_args, Value::Undefined, callee.clone())?;
+                    self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
                 }
             }
             _ => {
@@ -1411,6 +1408,7 @@ impl Vm {
             } => {
                 let call_args = self.prepare_call_args(&args, proto)?;
                 // Argument validation removed in JS-first mode.
+                let receiver = Self::closure_lexical_this(&callee).unwrap_or(receiver);
                 if proto.is_async {
                     let promise =
                         self.invoke_async_closure(proto, env, call_args, receiver, &callee)?;
@@ -2231,22 +2229,17 @@ impl Vm {
                     Value::Closure { env, .. } => Rc::clone(env),
                     _ => unreachable!(),
                 };
+                let this_arg = Self::closure_lexical_this(callee).unwrap_or(this_arg.clone());
                 if proto.is_generator {
                     Ok(self.create_generator_object(
                         proto,
                         &closure_env,
                         call_args,
-                        this_arg.clone(),
+                        this_arg,
                         callee,
                     )?)
                 } else if proto.is_async {
-                    self.invoke_async_closure(
-                        proto,
-                        &closure_env,
-                        call_args,
-                        this_arg.clone(),
-                        callee,
-                    )
+                    self.invoke_async_closure(proto, &closure_env, call_args, this_arg, callee)
                 } else {
                     let stack_base = self.stack.len();
                     let saved_stack = self.stack.snapshot();
@@ -2266,13 +2259,7 @@ impl Vm {
                     let caller_slot_types = self.current_slot_types.clone();
                     let caller_frame_len = self.call_stack.len();
                     let caller_handler_len = self.handlers.len();
-                    self.push_call_frame(
-                        proto,
-                        &closure_env,
-                        call_args,
-                        this_arg.clone(),
-                        callee.clone(),
-                    )?;
+                    self.push_call_frame(proto, &closure_env, call_args, this_arg, callee.clone())?;
                     let result = self.run_until_return(stack_base, true);
                     if result.is_ok() || !self.pending_exception {
                         // Restore caller state (run_until_return already truncated stack)
@@ -2484,7 +2471,7 @@ impl Vm {
             }
             // New op: GetThis
             Op::GetThis => {
-                self.stack.push(self.this_value.clone());
+                self.stack.push(self.get_this());
             }
             Op::GetUpvalue => {
                 let idx = self.read_byte()? as usize;
@@ -2888,6 +2875,7 @@ impl Vm {
             Op::TailCallIC => self.execute_tail_call()?,
             Op::PushWithEnv => {
                 let obj = self.pop()?;
+                let obj = self.to_object_value(obj)?;
                 let env = Rc::new(RefCell::new(EnvironmentRecord::new_object(
                     Some(Rc::clone(&self.lexical_env)),
                     obj,
@@ -4582,9 +4570,22 @@ impl Vm {
         let closure = Value::Closure {
             proto: Rc::clone(&closure_proto),
             env: gc::track_env(Rc::new(Mutex::new(env_cells))),
-            lexical_this: None,
+            lexical_this: if closure_proto.captures_this {
+                Some(Box::new(self.this_value.clone()))
+            } else {
+                None
+            },
             props: Rc::clone(&props),
         };
+
+        if closure_proto.captures_this
+            && let Some(home_object) = self.current_method_home_object()
+        {
+            props.borrow_mut().properties.insert(
+                PropertyKey::String("[[HomeObject]]".to_string()),
+                PropertyDescriptor::data(home_object),
+            );
+        }
 
         props.borrow_mut().properties.insert(
             PropertyKey::String("name".to_string()),
@@ -7155,6 +7156,23 @@ mod tests {
     }
 
     #[test]
+    fn with_statement_coerces_operand_to_object() {
+        let session = Parser::parse_source("with (undefined) { x = 1; }").expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        let err = vm.run(chunk).expect_err("with(undefined) should throw");
+
+        assert!(
+            err.to_string()
+                .contains("Cannot convert undefined or null to object")
+        );
+        assert!(vm.get_global("x").is_none());
+    }
+
+    #[test]
     fn void_operator_evaluates_to_undefined() {
         let session = Parser::parse_source("var x = void 0;").expect("parse ok");
         let program = session.program();
@@ -7352,6 +7370,61 @@ mod tests {
         let mut vm = Vm::new(Rc::clone(&globals));
         vm.run(chunk).expect("run ok");
         assert!(matches!(vm.get_global("A"), Some(Value::Closure { .. })));
+    }
+
+    #[test]
+    fn super_property_access_uses_home_object_and_lexical_this() {
+        let src = r#"
+            class C {
+                methodThis() { return this; }
+                method() { return super.toString(); }
+                arrow() { return (() => super.toString())(); }
+                arrowThis() { return (() => this)() === this; }
+                assign(v) { super.value = v; return this.value; }
+            }
+            var c = new C();
+            var method_this = c.methodThis();
+            var method_result = c.method();
+            var arrow_result = c.arrow();
+            var arrow_this_matches = c.arrowThis();
+            var assign_result = c.assign(9);
+        "#;
+        let session = Parser::parse_source(src).expect("parse ok");
+        let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+
+        let method_result = vm.get_global("method_result");
+        let method_this = vm.get_global("method_this");
+        let arrow_result = vm.get_global("arrow_result");
+        let arrow_this_matches = vm.get_global("arrow_this_matches");
+        let assign_result = vm.get_global("assign_result");
+        assert!(
+            matches!(method_this, Some(Value::Object(_))),
+            "unexpected method_this: {:?}",
+            method_this
+        );
+        assert!(
+            matches!(method_result, Some(Value::String(ref s)) if s == "[object Object]"),
+            "unexpected method_result: {:?}",
+            method_result
+        );
+        assert!(
+            matches!(arrow_result, Some(Value::String(ref s)) if s == "[object Object]"),
+            "unexpected arrow_result: {:?}",
+            arrow_result
+        );
+        assert!(
+            matches!(arrow_this_matches, Some(Value::Bool(true))),
+            "unexpected arrow_this_matches: {:?}",
+            arrow_this_matches
+        );
+        assert!(
+            matches!(assign_result, Some(Value::Number(n)) if (n - 9.0).abs() < f64::EPSILON),
+            "unexpected assign_result: {:?}",
+            assign_result
+        );
     }
 
     #[test]

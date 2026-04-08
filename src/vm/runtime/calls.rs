@@ -37,11 +37,14 @@ impl Vm {
         self.prune_handlers_for_tail_call();
         match callee {
             Value::Builtin(f) => {
+                let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
+                call_args.push(this_value.clone());
+                call_args.extend_from_slice(&args);
                 let prev_this = std::mem::replace(&mut self.this_value, this_value);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = std::rc::Rc::clone(&self.lexical_env);
-                let result = (f.as_ref())(self, &args)?;
+                let result = (f.as_ref())(self, &call_args)?;
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
@@ -51,11 +54,14 @@ impl Vm {
                 self.execute_return()
             }
             Value::BuiltinObject(f, _props) => {
+                let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
+                call_args.push(this_value.clone());
+                call_args.extend_from_slice(&args);
                 let prev_this = std::mem::replace(&mut self.this_value, this_value);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = std::rc::Rc::clone(&self.lexical_env);
-                let result = (f.as_ref())(self, &args)?;
+                let result = (f.as_ref())(self, &call_args)?;
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
@@ -68,6 +74,13 @@ impl Vm {
                 ref proto, ref env, ..
             } => {
                 let call_args = self.prepare_call_args(&args, proto)?;
+                let this_value = match &callee {
+                    Value::Closure {
+                        lexical_this: Some(this),
+                        ..
+                    } => (**this).clone(),
+                    _ => this_value,
+                };
                 if proto.is_generator {
                     let generator =
                         self.create_generator_object(proto, env, call_args, this_value, &callee)?;
@@ -117,6 +130,13 @@ impl Vm {
         args.reverse();
         let callee = self.pop()?;
         let receiver = self.pop()?;
+        let receiver = match &callee {
+            Value::Closure {
+                lexical_this: Some(this),
+                ..
+            } => (**this).clone(),
+            _ => receiver,
+        };
         if crate::trace::enabled() {
             eprintln!(
                 "[trace] execute_tail_call_method after pops stack_size={} receiver={:?} callee={:?}",
