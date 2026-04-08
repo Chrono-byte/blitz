@@ -160,7 +160,7 @@ impl Compiler {
                             self.compile_function_declaration_oast(f)?;
                             self.emit_get_binding(id.name.as_str());
                         } else {
-                            let fname = "<default>".to_string();
+                            let fname = "default".to_string();
                             let (proto, _env_len) =
                                 self.compile_function(&fname, None, f, None, false)?;
                             let idx = self.chunk.add_function(proto);

@@ -177,6 +177,8 @@ impl Compiler {
                             self.emit_set_global_name(&fname);
                         }
                         if self.current_module.is_some() {
+                            self.emit(Op::GetLocal, LINE);
+                            self.emit_byte(slot as u8, LINE);
                             self.emit_set_own_module_export(&fname)?;
                         }
                     }
@@ -205,6 +207,8 @@ impl Compiler {
                             self.emit_set_global_name(&fname);
                         }
                         if self.current_module.is_some() {
+                            self.emit(Op::GetLocal, LINE);
+                            self.emit_byte(slot as u8, LINE);
                             self.emit_set_own_module_export(&fname)?;
                         }
                     }
@@ -234,10 +238,12 @@ impl Compiler {
                                 self.emit_set_global_name(&fname);
                             }
                             if self.current_module.is_some() {
+                                self.emit(Op::GetLocal, LINE);
+                                self.emit_byte(slot as u8, LINE);
                                 self.emit_set_own_module_export("default")?;
                             }
                         } else {
-                            let fname = "<default>".to_string();
+                            let fname = "default".to_string();
                             let (proto, _env_len) =
                                 self.compile_function(&fname, None, f, None, false)?;
                             let idx = self.chunk.add_function(proto);
