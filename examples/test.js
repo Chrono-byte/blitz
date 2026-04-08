@@ -5,7 +5,7 @@ const dogProfile = {
   facts: {
     height: "5'10",
     name: "Terry",
-    note: "He's just that big; I don't know why, he just is."
+    note: "He's just that big; I don't know why, he just is.",
   },
 
   // Method that uses `this` to access object data.
@@ -28,10 +28,10 @@ const dogProfile = {
   // Make the object iterable so `...dogProfile` works in argument lists.
   // We yield the values we want to spread (height then summary).
   *[Symbol.iterator]() {
-    yield ['height', this.getHeight()];
-    yield ['name', this.getName()];
-    yield ['note', this.getReason()];
-  }
+    yield ["height", this.getHeight()];
+    yield ["name", this.getName()];
+    yield ["note", this.getReason()];
+  },
 };
 
 // Now this works because dogProfile is iterable
