@@ -3884,8 +3884,8 @@ fn build_regex(pattern: &str, flags: &str) -> Result<regex::Regex, crate::errors
         }
     }
 
-    let build_with = |pat: &str| {
-        let mut builder = RegexBuilder::new(pat);
+    let build_with = |pattern: &str| {
+        let mut builder = RegexBuilder::new(pattern);
         builder.case_insensitive(flags.contains('i'));
         builder.multi_line(flags.contains('m'));
         builder.dot_matches_new_line(flags.contains('s'));
@@ -3920,10 +3920,3 @@ fn sticky_caret_allows(subject: &str, start_index: usize, pattern: &str, multili
         .nth(start_index.saturating_sub(1))
         .is_some_and(|c| c == '\n' || c == '\r')
 }
-// ShadowRealm and host intrinsics
-//
-// - ShadowRealm: a minimal ShadowRealm host is provided (see `shadowrealm_*`
-//   helpers). Its behaviour is a pragmatic helper for tests and is not a
-//   authoritative ShadowRealm implementation. In particular, ShadowRealm
-//   import/evaluate currently uses the project's compiler and VM.run in a
-//   separate VM instance and does not fully replicate all Realm host semantics.
