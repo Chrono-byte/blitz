@@ -14,6 +14,50 @@ use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use blitz::vm::Vm;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
+const BASE_FIXTURES: [&str; 4] = [
+    "arithmetic_loop",
+    "function_calls",
+    "object_properties",
+    "closure_calls",
+];
+
+const HOTPATH_FIXTURES: [&str; 5] = [
+    "parse_numbers",
+    "parse_numbers_bases",
+    "uri_encode",
+    "string_methods",
+    "array_last_index_of",
+];
+
+const HOT_FIXTURES: [&str; 11] = [
+    "arithmetic_multi_ops",
+    "property_access_chain",
+    "array_element_access",
+    "nested_scope",
+    "method_call_chain",
+    "string_concat_loop",
+    "array_push_loop",
+    "object_property_write_loop",
+    "conditional_branching",
+    "ternary_operator",
+    "dense_array_last_index_of",
+];
+
+const COLD_FIXTURES: [&str; 10] = [
+    "try_catch_no_errors",
+    "try_catch_errors",
+    "type_coercion_edge_cases",
+    "array_for_each",
+    "array_map",
+    "array_filter",
+    "recursive_fib",
+    "deep_object_nesting",
+    "large_array_creation",
+    "json_stringify",
+];
+
+const MIXED_FIXTURES: [&str; 3] = ["dom_like_access", "array_iteration", "config_lookup"];
+
 fn benchmark_globals() -> Rc<RefCell<ObjectData>> {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
@@ -51,12 +95,13 @@ fn bench_compile(c: &mut Criterion) {
     let mut group = c.benchmark_group("compile");
     group.sample_size(100);
     group.measurement_time(Duration::from_secs(5));
-    for fixture in [
-        "arithmetic_loop",
-        "function_calls",
-        "object_properties",
-        "closure_calls",
-    ] {
+    for fixture in BASE_FIXTURES
+        .into_iter()
+        .chain(HOTPATH_FIXTURES)
+        .chain(HOT_FIXTURES)
+        .chain(COLD_FIXTURES)
+        .chain(MIXED_FIXTURES)
+    {
         let path = format!("benches/fixtures/{fixture}.js");
         let source = fixture_source(&path);
         group.throughput(Throughput::Bytes(source.len() as u64));
@@ -77,16 +122,11 @@ fn bench_compile(c: &mut Criterion) {
 
 fn bench_execute_cold(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_cold");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(20));
     group.warm_up_time(Duration::from_secs(3));
 
-    for fixture in [
-        "arithmetic_loop",
-        "function_calls",
-        "object_properties",
-        "closure_calls",
-    ] {
+    for fixture in COLD_FIXTURES {
         let path = format!("benches/fixtures/{fixture}.js");
         let chunk = compile_fixture(&path);
         group.throughput(Throughput::Elements(1));
@@ -101,18 +141,69 @@ fn bench_execute_cold(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_execute_hot(c: &mut Criterion) {
-    let mut group = c.benchmark_group("execute_hot");
-    group.sample_size(30);
-    group.measurement_time(Duration::from_secs(10));
+fn bench_execute_hotpaths(c: &mut Criterion) {
+    let mut group = c.benchmark_group("execute_hotpaths");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(20));
     group.warm_up_time(Duration::from_secs(3));
 
-    for fixture in [
-        "arithmetic_loop",
-        "function_calls",
-        "object_properties",
-        "closure_calls",
-    ] {
+    for fixture in HOTPATH_FIXTURES {
+        let path = format!("benches/fixtures/{fixture}.js");
+        let chunk = compile_fixture(&path);
+        let globals = benchmark_globals();
+        let keep_globals = baseline_global_names(&globals);
+        let mut vm = Vm::new(Rc::clone(&globals));
+
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(BenchmarkId::from_parameter(fixture), &chunk, |b, chunk| {
+            b.iter_batched(
+                || chunk.clone(),
+                |chunk| {
+                    let _ = vm.run(chunk).expect("fixture should execute");
+                    vm.reset(&keep_globals);
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_execute_hot(c: &mut Criterion) {
+    let mut group = c.benchmark_group("execute_hot");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(20));
+    group.warm_up_time(Duration::from_secs(3));
+
+    for fixture in BASE_FIXTURES.into_iter().chain(HOT_FIXTURES) {
+        let path = format!("benches/fixtures/{fixture}.js");
+        let chunk = compile_fixture(&path);
+        let globals = benchmark_globals();
+        let keep_globals = baseline_global_names(&globals);
+        let mut vm = Vm::new(Rc::clone(&globals));
+
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(BenchmarkId::from_parameter(fixture), &chunk, |b, chunk| {
+            b.iter_batched(
+                || chunk.clone(),
+                |chunk| {
+                    let _ = vm.run(chunk).expect("fixture should execute");
+                    vm.reset(&keep_globals);
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_execute_mixed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("execute_mixed");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(20));
+    group.warm_up_time(Duration::from_secs(3));
+
+    for fixture in MIXED_FIXTURES {
         let path = format!("benches/fixtures/{fixture}.js");
         let chunk = compile_fixture(&path);
         let globals = benchmark_globals();
@@ -138,6 +229,8 @@ criterion_group!(
     vm_suite,
     bench_compile,
     bench_execute_cold,
-    bench_execute_hot
+    bench_execute_hotpaths,
+    bench_execute_hot,
+    bench_execute_mixed
 );
 criterion_main!(vm_suite);

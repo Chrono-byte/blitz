@@ -2,3 +2,5 @@ target/
 # test262/ is now managed as a git submodule. Keep a local backup if needed.
 # test262/
 test262-mini/
+
+node_modules/
