@@ -102,8 +102,8 @@ impl EnvironmentRecord {
         self.bindings.contains_key(name)
     }
 
-    /// Resolve and read a binding value from this record chain.
-    pub fn get_binding_value(&self, name: &str) -> Result<Option<Value>, RuntimeError> {
+    /// Read a binding from this record without walking outer environments.
+    pub fn get_own_binding_value(&self, name: &str) -> Result<Option<Value>, RuntimeError> {
         if let Some(binding) = self.bindings.get(name) {
             if !binding.initialized {
                 return Err(RuntimeError::from(
@@ -111,6 +111,14 @@ impl EnvironmentRecord {
                 ));
             }
             return Ok(Some(binding.cell.borrow().clone()));
+        }
+        Ok(None)
+    }
+
+    /// Resolve and read a binding value from this record chain.
+    pub fn get_binding_value(&self, name: &str) -> Result<Option<Value>, RuntimeError> {
+        if let Some(value) = self.get_own_binding_value(name)? {
+            return Ok(Some(value));
         }
         if let Some(outer) = &self.outer
             && let Some(outer) = outer.upgrade()

@@ -1662,7 +1662,7 @@ impl Vm {
             let (binding_value, binding_object, with_environment, outer) = {
                 let borrowed = current.borrow();
                 (
-                    borrowed.get_binding_value(name)?,
+                    borrowed.get_own_binding_value(name)?,
                     borrowed.binding_object(),
                     borrowed.is_with_environment(),
                     borrowed.outer(),
@@ -1717,6 +1717,15 @@ impl Vm {
                 let should_sync_global = outer_env
                     .as_ref()
                     .is_some_and(|outer_rc| Rc::ptr_eq(outer_rc, &self.global_env));
+                if crate::trace::enabled() && name.starts_with("st_") {
+                    eprintln!(
+                        "[trace] set_lexical_identifier_value '{}' decl-binding sync_global={} -> {}",
+                        name,
+                        should_sync_global,
+                        value.type_name()
+                    );
+                    crate::trace::value_string("[trace]   value", &value);
+                }
                 if should_sync_global {
                     let key = PropertyKey::String(name.to_string());
                     self.globals
@@ -1790,6 +1799,14 @@ impl Vm {
                 if found
                     && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
                 {
+                    if crate::trace::enabled() && name.starts_with("st_") {
+                        eprintln!(
+                            "[trace] set_lexical_identifier_value '{}' via with-env -> {}",
+                            name,
+                            value.type_name()
+                        );
+                        crate::trace::value_string("[trace]   value", &value);
+                    }
                     let _ =
                         self.set_property_host(&binding_object, &Value::String(name_str), value)?;
                     self.bump_object_generation(&binding_object);
@@ -2412,9 +2429,35 @@ impl Vm {
                 if let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone)
                     && self.set_with_env_binding_value(&name, v.clone())?
                 {
+                    if crate::trace::enabled() && name.starts_with("st_") {
+                        eprintln!(
+                            "[trace] SetLocal '{}' satisfied by with-env -> {}",
+                            name,
+                            v.type_name()
+                        );
+                        crate::trace::value_string("[trace]   value", &v);
+                    }
                     return Ok(StepOutcome::Continue);
                 }
                 ensure_slot(&mut self.locals, slot);
+                if crate::trace::enabled()
+                    && self
+                        .chunk
+                        .root_slot_names
+                        .get(slot)
+                        .and_then(Clone::clone)
+                        .as_deref()
+                        .is_some_and(|name| name.starts_with("st_"))
+                {
+                    let name = self
+                        .chunk
+                        .root_slot_names
+                        .get(slot)
+                        .and_then(Clone::clone)
+                        .unwrap();
+                    eprintln!("[trace] SetLocal '{}' -> {}", name, v.type_name());
+                    crate::trace::value_string("[trace]   value", &v);
+                }
                 *self.locals[slot].borrow_mut() = v;
                 if let Some(arguments_object) = self.current_arguments_object.clone()
                     && slot < self.current_arguments_mapped_count
@@ -2453,7 +2496,37 @@ impl Vm {
                 let idx = self.read_short()? as usize;
                 let name = self.string_constant(idx)?;
                 let v = self.pop()?;
+                if crate::trace::enabled() && name.starts_with("st_") {
+                    eprintln!(
+                        "[trace] SetGlobal '{}' -> {}",
+                        name,
+                        v.type_name()
+                    );
+                    crate::trace::value_string("[trace]   value", &v);
+                }
                 if !self.set_lexical_identifier_value(&name, v.clone())? {
+                    if let Some(slot) = self
+                        .chunk
+                        .root_slot_names
+                        .iter()
+                        .position(|maybe_name| maybe_name.as_deref() == Some(name.as_str()))
+                    {
+                        if let Some(cell) = self.locals.get(slot) {
+                            *cell.borrow_mut() = v.clone();
+                        }
+                        let key = PropertyKey::String(name.clone());
+                        self.globals
+                            .borrow_mut()
+                            .properties
+                            .insert(key, PropertyDescriptor::data(v.clone()));
+                        if crate::trace::enabled() && name.starts_with("st_") {
+                            eprintln!(
+                                "[trace] SetGlobal '{}' mirrored directly to root slot {}",
+                                name, slot
+                            );
+                        }
+                        return Ok(StepOutcome::Continue);
+                    }
                     let key = PropertyKey::String(name.clone());
                     let current = self.globals.borrow().properties.get(&key).cloned();
                     match current {
@@ -2528,6 +2601,18 @@ impl Vm {
                     .find(|proto| Rc::as_ptr(&proto.chunk) == Rc::as_ptr(&self.chunk))
                     .and_then(|proto| proto.upvalues.get(idx))
                     .and_then(|spec| spec.mirror_global_name.clone());
+                if crate::trace::enabled()
+                    && mirror_global_name
+                        .as_deref()
+                        .is_some_and(|name| name.starts_with("st_"))
+                {
+                    eprintln!(
+                        "[trace] SetUpvalue '{}' -> {}",
+                        mirror_global_name.as_deref().unwrap(),
+                        value.type_name()
+                    );
+                    crate::trace::value_string("[trace]   value", &value);
+                }
                 let env = self
                     .current_closure_env
                     .as_ref()
@@ -4842,6 +4927,10 @@ impl Vm {
         } else {
             return Err(self.throw_reference_error(&format!("{name} is not defined")));
         };
+        if crate::trace::enabled() {
+            eprintln!("[trace] GetGlobalIC '{}' -> {}", name, value.type_name());
+            crate::trace::value_string("[trace]   value", &value);
+        }
         self.stack.push(value);
         Ok(())
     }
@@ -6932,6 +7021,7 @@ mod tests {
     use crate::compiler;
     use crate::parser::Parser;
     use crate::runtime_utils;
+    use crate::typecheck;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -7425,6 +7515,251 @@ mod tests {
             Some(Value::Closure { .. }) => {}
             other => panic!("expected function object for parseFloat, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn with_statement_prefers_object_bindings_over_global_nans() {
+        let session = Parser::parse_source(
+            r#"
+            this.p1 = 1;
+            this.p2 = 2;
+            this.p3 = 3;
+            var myObj = {
+              p1: "a",
+              p2: "b",
+              p3: "c",
+              value: "myObj_value",
+              valueOf: function() { return "obj_valueOf"; },
+              parseInt: function() { return "obj_parseInt"; },
+              NaN: "obj_NaN",
+              Infinity: "obj_Infinity",
+              eval: function() { return "obj_eval"; },
+              parseFloat: function() { return "obj_parseFloat"; },
+              isNaN: function() { return "obj_isNaN"; },
+              isFinite: function() { return "obj_isFinite"; }
+            };
+            var st_NaN = "NaN";
+            var f = function() {
+              with (myObj) {
+                st_NaN = NaN;
+                st_Infinity = Infinity;
+                st_eval = eval;
+                st_parseFloat = parseFloat;
+                st_isNaN = isNaN;
+                st_isFinite = isFinite;
+                p1 = "x1";
+                this.p2 = "x2";
+                delete p3;
+                var value = "value";
+              }
+            };
+            var st_Infinity = "Infinity";
+            var st_eval = "eval";
+            var st_parseFloat = "parseFloat";
+            var st_isNaN = "isNaN";
+            var st_isFinite = "isFinite";
+            f();
+        "#,
+        )
+        .expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+
+        assert_eq!(
+            vm.get_global("st_NaN"),
+            Some(Value::String("obj_NaN".into()))
+        );
+        assert_eq!(
+            vm.get_global("st_Infinity"),
+            Some(Value::String("obj_Infinity".into()))
+        );
+        match vm.get_global("st_eval") {
+            Some(Value::Closure { .. }) => {}
+            other => panic!("expected function object for eval, got {:?}", other),
+        }
+        match vm.get_global("st_parseFloat") {
+            Some(Value::Closure { .. }) => {}
+            other => panic!("expected function object for parseFloat, got {:?}", other),
+        }
+        match vm.get_global("st_isNaN") {
+            Some(Value::Closure { .. }) => {}
+            other => panic!("expected function object for isNaN, got {:?}", other),
+        }
+        match vm.get_global("st_isFinite") {
+            Some(Value::Closure { .. }) => {}
+            other => panic!("expected function object for isFinite, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn with_statement_prefers_object_bindings_over_global_nans_in_plain_call() {
+        let session = Parser::parse_source(
+            r#"
+            this.p1 = 1;
+            this.p2 = 2;
+            this.p3 = 3;
+            var result = "result";
+            var myObj = {p1: "a",
+                         p2: "b",
+                         p3: "c",
+                         value: "myObj_value",
+                         valueOf: function(){return "obj_valueOf";},
+                         parseInt: function(){return "obj_parseInt";},
+                         NaN: "obj_NaN",
+                         Infinity: "obj_Infinity",
+                         eval: function(){return "obj_eval";},
+                         parseFloat: function(){return "obj_parseFloat";},
+                         isNaN: function(){return "obj_isNaN";},
+                         isFinite: function(){return "obj_isFinite";}
+            };
+            var del;
+            var st_p1 = "p1";
+            var st_p2 = "p2";
+            var st_p3 = "p3";
+            var st_parseInt = "parseInt";
+            var st_NaN = "NaN";
+            var st_Infinity = "Infinity";
+            var st_eval = "eval";
+            var st_parseFloat = "parseFloat";
+            var st_isNaN = "isNaN";
+            var st_isFinite = "isFinite";
+
+            var f = function(){
+              with(myObj){
+                st_p1 = p1;
+                st_p2 = p2;
+                st_p3 = p3;
+                st_parseInt = parseInt;
+                st_NaN = NaN;
+                st_Infinity = Infinity;
+                st_eval = eval;
+                st_parseFloat = parseFloat;
+                st_isNaN = isNaN;
+                st_isFinite = isFinite;
+                p1 = "x1";
+                this.p2 = "x2";
+                del = delete p3;
+                var p4 = "x4";
+                p5 = "x5";
+                var value = "value";
+              }
+            };
+            f();
+        "#,
+        )
+        .expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+
+        assert_eq!(
+            vm.get_global("st_NaN"),
+            Some(Value::String("obj_NaN".into()))
+        );
+    }
+
+    #[test]
+    fn with_statement_prefers_object_bindings_over_global_nans_after_harness() {
+        typecheck::set_strict_override(Some(false));
+        struct ResetStrict;
+        impl Drop for ResetStrict {
+            fn drop(&mut self) {
+                typecheck::set_strict_override(None);
+            }
+        }
+        let _reset_strict = ResetStrict;
+
+        let globals = test_globals();
+        globals.borrow_mut().properties.insert(
+            PropertyKey::String("NaN".to_string()),
+            PropertyDescriptor::data(Value::Number(f64::NAN)),
+        );
+        globals.borrow_mut().properties.insert(
+            PropertyKey::String("Infinity".to_string()),
+            PropertyDescriptor::data(Value::Number(f64::INFINITY)),
+        );
+        let mut vm = Vm::new(Rc::clone(&globals));
+
+        for harness_name in ["assert.js", "sta.js"] {
+            let path = std::path::Path::new("test262/harness").join(harness_name);
+            let src = std::fs::read_to_string(&path).expect("read harness");
+            let session = Parser::parse_source(&src).expect("parse harness");
+            let program = session.program();
+            let chunk = compiler::compile(program, session.source()).expect("compile harness");
+            vm.run(chunk).expect("run harness");
+        }
+
+        let session = Parser::parse_source(
+            r#"
+            this.p1 = 1;
+            this.p2 = 2;
+            this.p3 = 3;
+            var result = "result";
+            var myObj = {p1: "a",
+                         p2: "b",
+                         p3: "c",
+                         value: "myObj_value",
+                         valueOf: function(){return "obj_valueOf";},
+                         parseInt: function(){return "obj_parseInt";},
+                         NaN: "obj_NaN",
+                         Infinity: "obj_Infinity",
+                         eval: function(){return "obj_eval";},
+                         parseFloat: function(){return "obj_parseFloat";},
+                         isNaN: function(){return "obj_isNaN";},
+                         isFinite: function(){return "obj_isFinite";}
+            };
+            var del;
+            var st_p1 = "p1";
+            var st_p2 = "p2";
+            var st_p3 = "p3";
+            var st_parseInt = "parseInt";
+            var st_NaN = "NaN";
+            var st_Infinity = "Infinity";
+            var st_eval = "eval";
+            var st_parseFloat = "parseFloat";
+            var st_isNaN = "isNaN";
+            var st_isFinite = "isFinite";
+
+            var f = function(){
+              with(myObj){
+                st_p1 = p1;
+                st_p2 = p2;
+                st_p3 = p3;
+                st_parseInt = parseInt;
+                st_NaN = NaN;
+                st_Infinity = Infinity;
+                st_eval = eval;
+                st_parseFloat = parseFloat;
+                st_isNaN = isNaN;
+                st_isFinite = isFinite;
+                p1 = "x1";
+                this.p2 = "x2";
+                del = delete p3;
+                var p4 = "x4";
+                p5 = "x5";
+                var value = "value";
+              }
+            };
+            f();
+        "#,
+        )
+        .expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+
+        vm.run(chunk).expect("run ok");
+
+        assert_eq!(
+            vm.get_global("st_NaN"),
+            Some(Value::String("obj_NaN".into()))
+        );
     }
 
     #[test]
