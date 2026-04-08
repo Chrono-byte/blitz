@@ -63,6 +63,9 @@ impl super::Compiler {
         name: &str,
         kind: oxc_ast::ast::VariableDeclarationKind,
     ) -> Result<(), crate::errors::CompilerError> {
+        if let Some(err) = Self::strict_binding_name_error(self.strict_context, name) {
+            return Err(err);
+        }
         let is_var = matches!(kind, oxc_ast::ast::VariableDeclarationKind::Var);
         let mirror_global = self.is_root && is_var;
 

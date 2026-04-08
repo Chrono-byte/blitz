@@ -5,6 +5,7 @@
 //! and basic bytecode emission.
 
 use crate::bytecode::{Chunk, Op, UpvalueSpec};
+use crate::errors::CompilerError;
 use crate::typecheck::Type;
 use crate::value::Value;
 use oxc_ast::ast as oast;
@@ -202,17 +203,58 @@ impl Compiler {
         self.emit_u16(idx, line);
     }
 
+    pub(crate) fn strict_binding_name_error(
+        strict_context: bool,
+        name: &str,
+    ) -> Option<CompilerError> {
+        if strict_context && matches!(name, "eval" | "arguments") {
+            Some(CompilerError::from(format!(
+                "SyntaxError: `{}` is not allowed in strict mode",
+                name
+            )))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn strict_binding_pattern_name_error(
+        strict_context: bool,
+        pattern: &oast::BindingPattern<'_>,
+    ) -> Option<CompilerError> {
+        use oast::BindingPattern as OPat;
+
+        match pattern {
+            OPat::BindingIdentifier(i) => Self::strict_binding_name_error(strict_context, &i.name),
+            OPat::AssignmentPattern(a) => {
+                Self::strict_binding_pattern_name_error(strict_context, &a.left)
+            }
+            OPat::ObjectPattern(o) => o.properties.iter().find_map(|prop| {
+                Self::strict_binding_pattern_name_error(strict_context, &prop.value)
+            }),
+            OPat::ArrayPattern(a) => a
+                .elements
+                .iter()
+                .flatten()
+                .find_map(|elem| Self::strict_binding_pattern_name_error(strict_context, elem))
+                .or_else(|| {
+                    a.rest.as_ref().and_then(|rest| {
+                        Self::strict_binding_pattern_name_error(strict_context, &rest.argument)
+                    })
+                }),
+        }
+    }
+
     /// Allocates a new inline cache slot for the current compilation chunk.
     ///
     /// # Errors
     ///
     /// Returns an error if the maximum number of inline cache sites has been exceeded.
-    pub fn alloc_ic_slot(&mut self) -> Result<u8, crate::errors::CompilerError> {
+    pub fn alloc_ic_slot(&mut self) -> Result<u8, CompilerError> {
         let slot = self.next_ic_slot;
         self.next_ic_slot = self
             .next_ic_slot
             .checked_add(1)
-            .ok_or_else(|| crate::errors::CompilerError::from("Too many inline cache sites"))?;
+            .ok_or_else(|| CompilerError::from("Too many inline cache sites"))?;
         Ok(slot)
     }
 
@@ -501,12 +543,12 @@ impl Compiler {
     pub(crate) fn emit_set_own_module_export(
         &mut self,
         export_name: &str,
-    ) -> Result<(), crate::errors::CompilerError> {
+    ) -> Result<(), CompilerError> {
         let module_index = self
             .current_module
             .as_ref()
             .map(|c| c.module_index)
-            .ok_or_else(|| crate::errors::CompilerError::from("module_index expected"))?;
+            .ok_or_else(|| CompilerError::from("module_index expected"))?;
         let cname_idx = self
             .chunk
             .add_constant(Value::String(export_name.to_string()));
@@ -594,7 +636,7 @@ impl Compiler {
     pub(crate) fn emit_set_method_home_object(
         &mut self,
         home_slot: usize,
-    ) -> Result<(), crate::errors::CompilerError> {
+    ) -> Result<(), CompilerError> {
         let method_slot = self.alloc_temp_local("method_closure");
         self.emit(Op::Dup, LINE);
         self.emit(Op::SetLocal, LINE);

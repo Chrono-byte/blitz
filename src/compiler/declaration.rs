@@ -34,6 +34,9 @@ impl Compiler {
             if let Some(err) = self.check_var_lexical_conflict(&fname) {
                 return Err(crate::errors::CompilerError::from(err));
             }
+            if let Some(err) = Self::strict_binding_name_error(self.strict_context, &fname) {
+                return Err(err);
+            }
 
             let (proto, _env_len) = self.compile_function(&fname, None, f, None)?;
             let idx = self.chunk.add_function(proto);
@@ -1528,6 +1531,34 @@ impl Compiler {
         return_type: Option<Type>,
     ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
         let _env_len = self.locals.len();
+        let function_is_strict = self.strict_context
+            || func
+                .body
+                .as_ref()
+                .is_some_and(|body| Self::has_use_strict_directive(body));
+
+        if let Some(err) = Self::strict_binding_name_error(function_is_strict, name) {
+            return Err(err);
+        }
+        if let Some(self_name) = self_name
+            && let Some(err) = Self::strict_binding_name_error(function_is_strict, self_name)
+        {
+            return Err(err);
+        }
+        for p in &func.params.items {
+            if let Some(err) =
+                Self::strict_binding_pattern_name_error(function_is_strict, &p.pattern)
+            {
+                return Err(err);
+            }
+        }
+        if let Some(rest) = &func.params.rest
+            && let Some(err) =
+                Self::strict_binding_pattern_name_error(function_is_strict, &rest.rest.argument)
+        {
+            return Err(err);
+        }
+
         let mut inner = Compiler {
             chunk: Chunk::new(Rc::clone(&self.source_text)),
             source_text: Rc::clone(&self.source_text),
@@ -1557,6 +1588,7 @@ impl Compiler {
             private_names: self.private_names.clone(),
             object_expr_had_set_property: false,
         };
+        inner.strict_context = function_is_strict;
 
         // Parameter placeholders (no type information available here).
         for p in &func.params.items {
@@ -1605,11 +1637,6 @@ impl Compiler {
         let lexical_tdz = inner.local_tdz;
         let has_prototype_property = !func.r#async;
         let is_constructor = !func.r#async && !func.generator;
-        let is_strict = self.strict_context
-            || func
-                .body
-                .as_ref()
-                .is_some_and(|body| Self::has_use_strict_directive(body));
         Ok((
             FunctionProto {
                 name: name.to_string(),
@@ -1627,7 +1654,7 @@ impl Compiler {
                 self_binding_slot,
                 has_simple_parameter_list,
                 return_type,
-                is_strict,
+                is_strict: function_is_strict,
                 is_constructor,
                 is_async: func.r#async,
                 is_generator: func.generator,
@@ -1650,6 +1677,25 @@ impl Compiler {
         return_type: Option<Type>,
     ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
         let _env_len = self.locals.len();
+        let function_is_strict = self.strict_context || Self::has_use_strict_directive(&func.body);
+
+        if let Some(err) = Self::strict_binding_name_error(function_is_strict, name) {
+            return Err(err);
+        }
+        for p in &func.params.items {
+            if let Some(err) =
+                Self::strict_binding_pattern_name_error(function_is_strict, &p.pattern)
+            {
+                return Err(err);
+            }
+        }
+        if let Some(rest) = &func.params.rest
+            && let Some(err) =
+                Self::strict_binding_pattern_name_error(function_is_strict, &rest.rest.argument)
+        {
+            return Err(err);
+        }
+
         let mut inner = Compiler {
             chunk: Chunk::new(Rc::clone(&self.source_text)),
             source_text: Rc::clone(&self.source_text),
@@ -1679,6 +1725,7 @@ impl Compiler {
             private_names: self.private_names.clone(),
             object_expr_had_set_property: false,
         };
+        inner.strict_context = function_is_strict;
 
         for p in &func.params.items {
             let pname = match &p.pattern {
@@ -1737,7 +1784,6 @@ impl Compiler {
         let slot_types = inner.local_types;
         let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
         let lexical_tdz = inner.local_tdz;
-        let is_strict = self.strict_context || Self::has_use_strict_directive(&func.body);
         Ok((
             FunctionProto {
                 name: name.to_string(),
@@ -1757,7 +1803,7 @@ impl Compiler {
                 self_binding_slot: None,
                 has_simple_parameter_list,
                 return_type,
-                is_strict,
+                is_strict: function_is_strict,
                 is_constructor: false,
                 is_async: func.r#async,
                 is_generator: false,

@@ -4979,6 +4979,18 @@ impl Vm {
                 PropertyDescriptor::Data { .. } => {}
             }
         }
+        if self.is_strict_mode() {
+            let extensible = match obj {
+                Value::Object(data) => data.borrow().extensible,
+                Value::Array(_, props) => props.borrow().extensible,
+                Value::Closure { props, .. } => props.borrow().extensible,
+                Value::BuiltinObject(_, props) => props.borrow().extensible,
+                _ => true,
+            };
+            if !extensible {
+                return Err(self.throw_type_error("Cannot add property to non-extensible object"));
+            }
+        }
         set_property(obj, key, value)?;
         self.bump_object_generation(obj);
 
@@ -7170,6 +7182,32 @@ mod tests {
                 .contains("Cannot convert undefined or null to object")
         );
         assert!(vm.get_global("x").is_none());
+    }
+
+    #[test]
+    fn strict_assignment_to_non_extensible_object_throws() {
+        let src = r#"
+            function f() {
+                'use strict';
+                var _8_7_2_5 = {};
+                Object.preventExtensions(_8_7_2_5);
+                _8_7_2_5.b = 11;
+            }
+            f();
+        "#;
+        let session = Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        let err = vm.run(chunk).expect_err("strict assignment should throw");
+
+        assert!(
+            err.to_string()
+                .contains("Cannot add property to non-extensible object")
+        );
+        assert!(vm.get_global("b").is_none());
     }
 
     #[test]

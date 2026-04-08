@@ -2642,6 +2642,26 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             &function_proto_map,
         )),
     );
+    object_ctor_map.borrow_mut().properties.insert(
+        PKey::String("preventExtensions".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(|vm, args| {
+                let off = static_builtin_arg_offset(vm, args, "Object");
+                let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let target = vm.to_object_value(target)?;
+                match &target {
+                    Value::Object(obj) => obj.borrow_mut().extensible = false,
+                    Value::Array(_, props)
+                    | Value::Closure { props, .. }
+                    | Value::BuiltinObject(_, props) => props.borrow_mut().extensible = false,
+                    Value::Promise(_) => {}
+                    _ => {}
+                }
+                Ok(target)
+            }),
+            &function_proto_map,
+        )),
+    );
 
     let array_ctor_val = builtins::array::install_array_constructor_and_late_prototype_methods(
         &array_ctor_map,
