@@ -1673,6 +1673,10 @@ impl Compiler {
                 .body
                 .as_ref()
                 .is_some_and(|body| Self::has_use_strict_directive(body));
+        let body_has_use_strict = func
+            .body
+            .as_ref()
+            .is_some_and(|body| Self::has_use_strict_directive(body));
 
         if let Some(err) = Self::strict_binding_name_error(function_is_strict, name) {
             return Err(err);
@@ -1718,7 +1722,7 @@ impl Compiler {
 
         let has_simple_parameter_list = Self::has_simple_parameter_list(func);
         if !has_simple_parameter_list {
-            if function_is_strict && !func.generator {
+            if body_has_use_strict && !func.generator {
                 return Err(crate::errors::CompilerError::from(
                     "SyntaxError: non-simple parameter list in strict mode",
                 ));
@@ -1902,6 +1906,7 @@ impl Compiler {
     ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
         let _env_len = self.locals.len();
         let function_is_strict = self.strict_context || Self::has_use_strict_directive(&func.body);
+        let body_has_use_strict = Self::has_use_strict_directive(&func.body);
         let has_simple_parameter_list = func.params.rest.is_none()
             && func.params.items.iter().all(|param| {
                 matches!(param.pattern, oast::BindingPattern::BindingIdentifier(_))
@@ -1946,7 +1951,7 @@ impl Compiler {
         }
 
         if !has_simple_parameter_list {
-            if function_is_strict {
+            if body_has_use_strict {
                 return Err(crate::errors::CompilerError::from(
                     "SyntaxError: non-simple parameter list in strict mode",
                 ));
