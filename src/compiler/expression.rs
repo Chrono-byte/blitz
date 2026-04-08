@@ -2096,7 +2096,6 @@ impl super::Compiler {
                     }
                     self.emit(Op::CallIC, LINE);
                     self.emit_byte(arg_count as u8, LINE);
-                    self.emit_eval_throw_check()?;
                     return Ok(());
                 }
 

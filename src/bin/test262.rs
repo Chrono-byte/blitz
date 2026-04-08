@@ -582,7 +582,7 @@ struct Meta {
     /// The includes associated with the test.
     includes: Option<Vec<String>>,
     /// The negative metadata of the test.
-    negative: Option<Negative>
+    negative: Option<Negative>,
 }
 
 /// A minimal subset of test262 error information.

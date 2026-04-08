@@ -3809,11 +3809,25 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             } else {
                 src.to_string()
             };
-            let session = Parser::parse_source(&eval_src)
-                .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
-            let prog = session.program();
-            let chunk = compiler::compile_oxc_repl(prog, &eval_src)
-                .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
+            let (allow_new_target, allow_super) = vm.current_compile_context_flags();
+            let chunk = crate::typecheck::with_strict_override(None, || {
+                compiler::with_compile_context_override(
+                    Some((allow_new_target, allow_super)),
+                    || {
+                        let session = Parser::parse_source(&eval_src)
+                            .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
+                        let prog = session.program();
+                        compiler::compile_oxc_repl(prog, &eval_src)
+                            .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))
+                    },
+                )
+            })?;
+            if let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk) {
+                return Err(syntax_error(
+                    vm,
+                    format!("redeclaration of lexical binding `{}`", name),
+                ));
+            }
             match vm.run_nested(chunk, true) {
                 Ok(value) => Ok(value),
                 Err(err) => {

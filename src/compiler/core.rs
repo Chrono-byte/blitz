@@ -14,6 +14,18 @@ use std::rc::Rc;
 
 const LINE: u32 = 1;
 
+thread_local! {
+    static COMPILE_CONTEXT_OVERRIDE: std::cell::RefCell<Option<(bool, bool)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn with_compile_context_override<R>(
+    context: Option<(bool, bool)>,
+    f: impl FnOnce() -> R,
+) -> R {
+    Compiler::with_compile_context_override(context, f)
+}
+
 /// Module compilation context describing imports/exports for the module being compiled.
 #[derive(Clone, Debug)]
 pub struct ModuleContext {
@@ -158,8 +170,14 @@ pub struct LabelPatchState {
 impl Compiler {
     /// Creates a new compiler instance
     pub fn new(source_text: Rc<String>) -> Self {
+        let (allow_new_target, allow_super) = COMPILE_CONTEXT_OVERRIDE
+            .with(|override_state| *override_state.borrow())
+            .unwrap_or((false, false));
+        let mut chunk = Chunk::new(Rc::clone(&source_text));
+        chunk.allow_new_target = allow_new_target;
+        chunk.allow_super = allow_super;
         Self {
-            chunk: Chunk::new(Rc::clone(&source_text)),
+            chunk,
             source_text,
             locals: Vec::new(),
             local_types: Vec::new(),
@@ -182,8 +200,8 @@ impl Compiler {
             label_patches: Vec::new(),
             current_module: None,
             next_ic_slot: 0,
-            allow_new_target: false,
-            allow_super: false,
+            allow_new_target,
+            allow_super,
             outer_bindings: HashMap::new(),
             upvalue_indices: HashMap::new(),
             captured_upvalues: Vec::new(),
@@ -672,6 +690,28 @@ impl Compiler {
         // consider the earlier patching path to overlap with the fallthrough.
         let _ = object_case;
         Ok(())
+    }
+
+    pub(crate) fn with_compile_context_override<R>(
+        context: Option<(bool, bool)>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        struct Reset(Option<(bool, bool)>);
+
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                COMPILE_CONTEXT_OVERRIDE.with(|state| {
+                    *state.borrow_mut() = self.0;
+                });
+            }
+        }
+
+        let previous = COMPILE_CONTEXT_OVERRIDE.with(|state| *state.borrow());
+        COMPILE_CONTEXT_OVERRIDE.with(|state| {
+            *state.borrow_mut() = context;
+        });
+        let _reset = Reset(previous);
+        f()
     }
 
     /// Attach a home object to the method closure currently on top of the stack.

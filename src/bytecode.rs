@@ -74,6 +74,10 @@ pub struct Chunk {
     pub root_lexical_tdz: Vec<bool>,
     /// Whether the compiled root source is strict.
     pub root_strict: bool,
+    /// Whether `new.target` is valid in this chunk's execution context.
+    pub allow_new_target: bool,
+    /// Whether `super` property access/calls are valid in this chunk.
+    pub allow_super: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -140,6 +144,8 @@ impl Chunk {
             root_slot_names: Vec::new(),
             root_lexical_tdz: Vec::new(),
             root_strict: false,
+            allow_new_target: false,
+            allow_super: false,
         }
     }
 

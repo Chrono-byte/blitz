@@ -1788,6 +1788,8 @@ impl Compiler {
             object_expr_had_set_property: false,
         };
         inner.strict_context = function_is_strict;
+        inner.chunk.allow_new_target = inner.allow_new_target;
+        inner.chunk.allow_super = inner.allow_super;
 
         let mut raw_param_slots = Vec::new();
         if has_simple_parameter_list {
@@ -2019,6 +2021,8 @@ impl Compiler {
             object_expr_had_set_property: false,
         };
         inner.strict_context = function_is_strict;
+        inner.chunk.allow_new_target = inner.allow_new_target;
+        inner.chunk.allow_super = inner.allow_super;
 
         let mut raw_param_slots = Vec::new();
         if has_simple_parameter_list {

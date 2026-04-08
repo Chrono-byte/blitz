@@ -35,8 +35,9 @@ use {
 };
 
 pub mod core;
-pub use core::{
-    CaptureSource, Compiler, FinallyPatchState, LabelPatchState, ModuleContext, Scope, ScopeKind,
+pub(crate) use core::{
+    Compiler, FinallyPatchState, LabelPatchState, ModuleContext, Scope, ScopeKind,
+    with_compile_context_override,
 };
 mod binding;
 mod declaration;
@@ -251,16 +252,61 @@ impl Compiler {
         Ok(())
     }
 
+    fn validate_early_errors_in_expression(
+        &self,
+        expr: &oast::Expression<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        match expr {
+            oast::Expression::FunctionExpression(f) => {
+                if let Some(body) = &f.body {
+                    self.validate_early_errors_in_statements(&body.statements, false)?;
+                }
+            }
+            oast::Expression::ArrowFunctionExpression(a) => {
+                self.validate_early_errors_in_statements(&a.body.statements, false)?;
+            }
+            oast::Expression::ClassExpression(c) => {
+                for element in &c.body.body {
+                    match element {
+                        oast::ClassElement::StaticBlock(block) => {
+                            self.validate_early_errors_in_statements(&block.body, false)?;
+                        }
+                        oast::ClassElement::MethodDefinition(md) => {
+                            if let Some(body) = &md.value.body {
+                                self.validate_early_errors_in_statements(&body.statements, false)?;
+                            }
+                        }
+                        oast::ClassElement::PropertyDefinition(prop) => {
+                            if let Some(value) = &prop.value {
+                                self.validate_early_errors_in_expression(value)?;
+                            }
+                        }
+                        oast::ClassElement::AccessorProperty(prop) => {
+                            if let Some(value) = &prop.value {
+                                self.validate_early_errors_in_expression(value)?;
+                            }
+                        }
+                        oast::ClassElement::TSIndexSignature(_) => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn validate_early_errors_in_program(
         &self,
         stmts: &[oast::Statement<'_>],
+        allow_module_declarations: bool,
     ) -> Result<(), crate::errors::CompilerError> {
-        self.validate_early_errors_in_statements(stmts)
+        self.validate_early_errors_in_statements(stmts, allow_module_declarations)
     }
 
     fn validate_early_errors_in_statements(
         &self,
         stmts: &[oast::Statement<'_>],
+        allow_module_declarations: bool,
     ) -> Result<(), crate::errors::CompilerError> {
         let mut lexical = HashSet::new();
         let mut vars = HashSet::new();
@@ -292,52 +338,100 @@ impl Compiler {
         }
 
         for stmt in stmts {
+            if matches!(
+                stmt,
+                oast::Statement::ImportDeclaration(_)
+                    | oast::Statement::ExportAllDeclaration(_)
+                    | oast::Statement::ExportDefaultDeclaration(_)
+                    | oast::Statement::ExportNamedDeclaration(_)
+            ) && !allow_module_declarations
+            {
+                return Err(crate::errors::CompilerError::from(
+                    "SyntaxError: module declaration in statement position",
+                ));
+            }
             match stmt {
                 oast::Statement::BlockStatement(b) => {
-                    self.validate_early_errors_in_statements(&b.body)?
+                    self.validate_early_errors_in_statements(&b.body, false)?
                 }
                 oast::Statement::IfStatement(i) => {
                     self.validate_statement_position_function(&i.consequent)?;
-                    self.validate_early_errors_in_statements(std::slice::from_ref(&i.consequent))?;
+                    self.validate_early_errors_in_statements(
+                        std::slice::from_ref(&i.consequent),
+                        false,
+                    )?;
                     if let Some(alt) = &i.alternate {
                         self.validate_statement_position_function(alt)?;
-                        self.validate_early_errors_in_statements(std::slice::from_ref(alt))?;
+                        self.validate_early_errors_in_statements(std::slice::from_ref(alt), false)?;
                     }
                 }
                 oast::Statement::WhileStatement(w) => {
                     self.validate_statement_position_function(&w.body)?;
-                    self.validate_early_errors_in_statements(std::slice::from_ref(&w.body))?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&w.body), false)?;
                 }
                 oast::Statement::DoWhileStatement(d) => {
                     self.validate_statement_position_function(&d.body)?;
-                    self.validate_early_errors_in_statements(std::slice::from_ref(&d.body))?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&d.body), false)?;
                 }
                 oast::Statement::ForStatement(f) => {
                     self.validate_statement_position_function(&f.body)?;
-                    self.validate_early_errors_in_statements(std::slice::from_ref(&f.body))?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false)?;
                 }
                 oast::Statement::ForInStatement(f) => {
                     self.validate_statement_position_function(&f.body)?;
-                    self.validate_early_errors_in_statements(std::slice::from_ref(&f.body))?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false)?;
                 }
                 oast::Statement::ForOfStatement(f) => {
                     self.validate_statement_position_function(&f.body)?;
-                    self.validate_early_errors_in_statements(std::slice::from_ref(&f.body))?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&f.body), false)?;
                 }
                 oast::Statement::LabeledStatement(l) => {
                     self.validate_statement_position_function(&l.body)?;
-                    self.validate_early_errors_in_statements(std::slice::from_ref(&l.body))?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&l.body), false)?;
                 }
                 oast::Statement::WithStatement(w) => {
-                    self.validate_early_errors_in_statements(std::slice::from_ref(&w.body))?;
+                    self.validate_early_errors_in_statements(std::slice::from_ref(&w.body), false)?;
                 }
                 oast::Statement::TryStatement(t) => {
-                    self.validate_early_errors_in_statements(&t.block.body)?;
+                    self.validate_early_errors_in_statements(&t.block.body, false)?;
                     if let Some(handler) = &t.handler {
-                        self.validate_early_errors_in_statements(&handler.body.body)?;
+                        self.validate_early_errors_in_statements(&handler.body.body, false)?;
                     }
                     if let Some(finalizer) = &t.finalizer {
-                        self.validate_early_errors_in_statements(&finalizer.body)?;
+                        self.validate_early_errors_in_statements(&finalizer.body, false)?;
+                    }
+                }
+                oast::Statement::FunctionDeclaration(f) => {
+                    if let Some(body) = &f.body {
+                        self.validate_early_errors_in_statements(&body.statements, false)?;
+                    }
+                }
+                oast::Statement::ClassDeclaration(c) => {
+                    for element in &c.body.body {
+                        match element {
+                            oast::ClassElement::StaticBlock(block) => {
+                                self.validate_early_errors_in_statements(&block.body, false)?;
+                            }
+                            oast::ClassElement::MethodDefinition(md) => {
+                                if let Some(body) = &md.value.body {
+                                    self.validate_early_errors_in_statements(
+                                        &body.statements,
+                                        false,
+                                    )?;
+                                }
+                            }
+                            oast::ClassElement::PropertyDefinition(prop) => {
+                                if let Some(expr) = &prop.value {
+                                    self.validate_early_errors_in_expression(expr)?;
+                                }
+                            }
+                            oast::ClassElement::AccessorProperty(prop) => {
+                                if let Some(expr) = &prop.value {
+                                    self.validate_early_errors_in_expression(expr)?;
+                                }
+                            }
+                            oast::ClassElement::TSIndexSignature(_) => {}
+                        }
                     }
                 }
                 _ => {}
@@ -376,8 +470,10 @@ impl Compiler {
                 .directives
                 .iter()
                 .any(|directive| directive.directive.as_str() == "use strict");
+        self.chunk.allow_new_target = self.allow_new_target;
+        self.chunk.allow_super = self.allow_super;
 
-        self.validate_early_errors_in_program(&program.body)?;
+        self.validate_early_errors_in_program(&program.body, program.source_type.is_module())?;
 
         self.pre_declare_functions_oast(program);
         self.pre_declare_variables_oast(program);

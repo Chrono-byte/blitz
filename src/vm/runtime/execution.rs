@@ -217,6 +217,11 @@ impl Vm {
         self.construct_new_target.clone()
     }
 
+    /// Return the compile-time context flags associated with the current chunk.
+    pub(crate) fn current_compile_context_flags(&self) -> (bool, bool) {
+        (self.chunk.allow_new_target, self.chunk.allow_super)
+    }
+
     fn get_new_target(&self) -> Value {
         self.construct_new_target
             .clone()
@@ -7526,6 +7531,8 @@ mod tests {
             root_slot_names: vec![],
             root_lexical_tdz: vec![],
             root_strict: false,
+            allow_new_target: false,
+            allow_super: false,
         });
         vm.ip = 0;
         vm.stack.push(obj.clone());
@@ -7563,6 +7570,8 @@ mod tests {
             root_slot_names: vec![],
             root_lexical_tdz: vec![],
             root_strict: false,
+            allow_new_target: false,
+            allow_super: false,
         });
         vm.ip = 0;
         vm.stack.push(obj.clone());
