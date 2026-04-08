@@ -1422,8 +1422,9 @@ impl Compiler {
         }
         // Emit class elements (methods/fields). Minimal implementation:
         // Create closures for methods and install them on the constructor
-        // (static) or constructor.prototype (instance). Private identifiers
-        // are lowered to synthetic string keys recorded in `private_names`.
+        // (static) or constructor.prototype (instance). Computed keys and
+        // accessors are lowered through objectDefineProperty so we preserve
+        // symbol keys and accessor semantics.
         let instance_home_slot = if c.body.body.iter().any(
             |element| matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static),
         ) {
@@ -1435,90 +1436,24 @@ impl Compiler {
             self.emit(Op::Dup, LINE);
             self.emit(Op::SetLocal, LINE);
             self.emit_byte(home_slot as u8, LINE);
+            self.emit(Op::Pop, LINE);
             Some(home_slot)
         } else {
             None
         };
         for element in &c.body.body {
             if let oast::ClassElement::MethodDefinition(md) = element {
-                // Only handle method definitions for now.
-                // Compile the method to a FunctionProto and create a closure.
-                let method_name = match &md.key {
-                    oast::PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
-                    oast::PropertyKey::Identifier(ident) => Some(ident.name.to_string()),
-                    oast::PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
-                    oast::PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
-                    oast::PropertyKey::PrivateIdentifier(pid) => Some(pid.name.to_string()),
-                    _ => None,
-                };
-                // Only support non-computed simple keys here.
-                let (proto, _env_len) = self.compile_function(
-                    method_name.as_deref().unwrap_or("<method>"),
-                    None,
-                    &md.value,
-                    None,
-                )?;
-                let fidx = self.chunk.add_function(proto);
-
-                if md.r#static {
-                    // static method: install on constructor object
-                    // push constructor
-                    self.emit(Op::GetLocal, LINE);
-                    self.emit_byte(slot as u8, LINE);
-
-                    // push key
-                    match &md.key {
-                        oast::PropertyKey::PrivateIdentifier(pid) => {
-                            let key = self.ensure_private_name_constant(&pid.name);
-                            self.emit_constant(key, LINE);
-                        }
-                        _ => {
-                            let key_str = method_name.unwrap_or_else(|| "".to_string());
-                            self.emit_constant(Value::String(key_str), LINE);
-                        }
-                    }
-
-                    // push closure
-                    self.emit(Op::MakeClosure, LINE);
-                    self.emit_byte(fidx as u8, LINE);
-                    self.emit_set_method_home_object(slot)?;
-                    // set property: expects [obj, key, value]
-                    self.emit(Op::SetPropertyIC, LINE);
-                    let ic_slot = self.alloc_ic_slot()?;
-                    self.emit_byte(ic_slot, LINE);
-                    self.emit(Op::Pop, LINE);
+                let target_slot = if md.r#static {
+                    slot
                 } else {
-                    // instance method: install on constructor.prototype
-                    let home_slot = instance_home_slot.expect("instance home slot");
-                    self.emit(Op::GetLocal, LINE);
-                    self.emit_byte(home_slot as u8, LINE);
-                    // push key
-                    match &md.key {
-                        oast::PropertyKey::PrivateIdentifier(pid) => {
-                            let key = self.ensure_private_name_constant(&pid.name);
-                            self.emit_constant(key, LINE);
-                        }
-                        _ => {
-                            let key_str = method_name.unwrap_or_else(|| "".to_string());
-                            self.emit_constant(Value::String(key_str), LINE);
-                        }
-                    }
-
-                    // push closure
-                    self.emit(Op::MakeClosure, LINE);
-                    self.emit_byte(fidx as u8, LINE);
-                    self.emit_set_method_home_object(home_slot)?;
-                    // set property on prototype
-                    self.emit(Op::SetPropertyIC, LINE);
-                    let ic_slot = self.alloc_ic_slot()?;
-                    self.emit_byte(ic_slot, LINE);
-                    self.emit(Op::Pop, LINE);
-                }
+                    instance_home_slot.expect("instance home slot")
+                };
+                self.emit_class_member_installation(target_slot, md)?;
             }
         }
-        if instance_home_slot.is_some() {
-            self.emit(Op::Pop, LINE);
-        }
+
+        self.emit(Op::GetLocal, LINE);
+        self.emit_byte(slot as u8, LINE);
 
         Ok(())
     }
@@ -1618,6 +1553,106 @@ impl Compiler {
             self.emit_byte(idx as u8, LINE);
             self.patch_jump(skip_jump);
         }
+        Ok(())
+    }
+
+    /// Lower a class method/getter/setter installation to a property
+    /// definition with a real descriptor object.
+    pub(super) fn emit_class_member_installation(
+        &mut self,
+        target_slot: usize,
+        md: &oast::MethodDefinition<'_>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        if matches!(md.kind, oast::MethodDefinitionKind::Constructor) {
+            return Ok(());
+        }
+
+        let method_name = if md.computed {
+            None
+        } else {
+            match &md.key {
+                oast::PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
+                oast::PropertyKey::Identifier(ident) => Some(ident.name.to_string()),
+                oast::PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+                oast::PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+                oast::PropertyKey::PrivateIdentifier(pid) => Some(pid.name.to_string()),
+                _ => None,
+            }
+        };
+
+        let self_name = md.value.id.as_ref().map(|id| id.name.as_str());
+        let (proto, _env_len) = self.compile_function(
+            method_name.as_deref().unwrap_or("<method>"),
+            self_name,
+            &md.value,
+            None,
+        )?;
+        let fidx = self.chunk.add_function(proto);
+
+        self.emit(Op::GetLocal, LINE);
+        self.emit_byte(target_slot as u8, LINE);
+        self.emit(Op::Dup, LINE);
+        self.emit_get_builtin_name("objectDefineProperty");
+        self.emit(Op::Swap, LINE);
+
+        if let Some(ref key_name) = method_name {
+            if matches!(md.key, oast::PropertyKey::PrivateIdentifier(_)) {
+                let key = self.ensure_private_name_constant(key_name);
+                self.emit_constant(key, LINE);
+            } else {
+                self.emit_constant(Value::String(key_name.clone()), LINE);
+            }
+        } else {
+            let key_expr = md
+                .key
+                .as_expression()
+                .expect("computed class member key must be an expression");
+            self.compile_expr_oast(key_expr)?;
+        }
+
+        let first_descriptor_key = match md.kind {
+            oast::MethodDefinitionKind::Method => "value",
+            oast::MethodDefinitionKind::Get => "get",
+            oast::MethodDefinitionKind::Set => "set",
+            oast::MethodDefinitionKind::Constructor => unreachable!(),
+        };
+        self.emit_constant(Value::String(first_descriptor_key.to_string()), LINE);
+        self.emit(Op::MakeClosure, LINE);
+        self.emit_byte(fidx as u8, LINE);
+        self.emit_set_method_home_object(target_slot)?;
+
+        let prop_count = match md.kind {
+            oast::MethodDefinitionKind::Method => {
+                self.emit_constant(Value::String("writable".to_string()), LINE);
+                self.emit_constant(Value::Bool(true), LINE);
+                self.emit_constant(Value::String("enumerable".to_string()), LINE);
+                self.emit_constant(Value::Bool(false), LINE);
+                self.emit_constant(Value::String("configurable".to_string()), LINE);
+                self.emit_constant(Value::Bool(true), LINE);
+                4
+            }
+            oast::MethodDefinitionKind::Get => {
+                self.emit_constant(Value::String("enumerable".to_string()), LINE);
+                self.emit_constant(Value::Bool(false), LINE);
+                self.emit_constant(Value::String("configurable".to_string()), LINE);
+                self.emit_constant(Value::Bool(true), LINE);
+                3
+            }
+            oast::MethodDefinitionKind::Set => {
+                self.emit_constant(Value::String("enumerable".to_string()), LINE);
+                self.emit_constant(Value::Bool(false), LINE);
+                self.emit_constant(Value::String("configurable".to_string()), LINE);
+                self.emit_constant(Value::Bool(true), LINE);
+                3
+            }
+            oast::MethodDefinitionKind::Constructor => unreachable!(),
+        };
+        self.emit(Op::BuildObject, LINE);
+        self.emit_byte(prop_count, LINE);
+        self.emit(Op::CallIC, LINE);
+        self.emit_byte(3, LINE);
+        self.emit(Op::Pop, LINE);
+        self.emit(Op::Pop, LINE);
         Ok(())
     }
 

@@ -4008,9 +4008,13 @@ impl Vm {
 
         let is_accessor = desc.get.is_some() || desc.set.is_some();
         let new_desc = if is_accessor {
+            let (current_get, current_set) = match &current {
+                Some(PropertyDescriptor::Accessor { get, set, .. }) => (get.clone(), set.clone()),
+                _ => (None, None),
+            };
             PropertyDescriptor::Accessor {
-                get: desc.get,
-                set: desc.set,
+                get: desc.get.or(current_get),
+                set: desc.set.or(current_set),
                 enumerable: desc.enumerable.unwrap_or_else(|| {
                     current.as_ref().is_some_and(|d| match d {
                         PropertyDescriptor::Data { enumerable, .. } => *enumerable,

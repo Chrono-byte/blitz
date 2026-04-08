@@ -2219,6 +2219,7 @@ impl super::Compiler {
                 // set local consumes one ctor -> [ctor]
                 self.emit(Op::SetLocal, LINE);
                 self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::Pop, LINE);
 
                 // Emit class elements (methods) similar to declaration lowering.
                 let instance_home_slot = if c.body.body.iter().any(|element| {
@@ -2232,83 +2233,23 @@ impl super::Compiler {
                     self.emit(Op::Dup, LINE);
                     self.emit(Op::SetLocal, LINE);
                     self.emit_byte(home_slot as u8, LINE);
+                    self.emit(Op::Pop, LINE);
                     Some(home_slot)
                 } else {
                     None
                 };
                 for element in &c.body.body {
                     if let oast::ClassElement::MethodDefinition(md) = element {
-                        let method_name = match &md.key {
-                            oast::PropertyKey::StaticIdentifier(ident) => {
-                                Some(ident.name.to_string())
-                            }
-                            oast::PropertyKey::Identifier(ident) => Some(ident.name.to_string()),
-                            oast::PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
-                            oast::PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
-                            oast::PropertyKey::PrivateIdentifier(pid) => Some(pid.name.to_string()),
-                            _ => None,
-                        };
-                        let (proto, _env_len) = self.compile_function(
-                            method_name.as_deref().unwrap_or("<method>"),
-                            None,
-                            &md.value,
-                            None,
-                        )?;
-                        let fidx = self.chunk.add_function(proto);
-
-                        if md.r#static {
-                            // static: install on constructor
-                            self.emit(Op::GetLocal, LINE);
-                            self.emit_byte(temp_slot as u8, LINE);
-                            match &md.key {
-                                oast::PropertyKey::PrivateIdentifier(pid) => {
-                                    let key = self.ensure_private_name_constant(&pid.name);
-                                    self.emit_constant(key, LINE);
-                                }
-                                _ => {
-                                    let key_str = method_name.unwrap_or_else(|| "".to_string());
-                                    self.emit_constant(Value::String(key_str), LINE);
-                                }
-                            }
-                            self.emit(Op::MakeClosure, LINE);
-                            self.emit_byte(fidx as u8, LINE);
-                            self.emit_set_method_home_object(temp_slot)?;
-                            self.emit(Op::SetPropertyIC, LINE);
-                            let slot = self.alloc_ic_slot()?;
-                            self.emit_byte(slot, LINE);
-                            self.emit(Op::Pop, LINE);
+                        let target_slot = if md.r#static {
+                            temp_slot
                         } else {
-                            // instance: install on constructor.prototype
-                            self.emit(Op::GetLocal, LINE);
-                            self.emit_byte(
-                                instance_home_slot.expect("instance home slot") as u8,
-                                LINE,
-                            );
-                            match &md.key {
-                                oast::PropertyKey::PrivateIdentifier(pid) => {
-                                    let key = self.ensure_private_name_constant(&pid.name);
-                                    self.emit_constant(key, LINE);
-                                }
-                                _ => {
-                                    let key_str = method_name.unwrap_or_else(|| "".to_string());
-                                    self.emit_constant(Value::String(key_str), LINE);
-                                }
-                            }
-                            self.emit(Op::MakeClosure, LINE);
-                            self.emit_byte(fidx as u8, LINE);
-                            self.emit_set_method_home_object(
-                                instance_home_slot.expect("instance home slot"),
-                            )?;
-                            self.emit(Op::SetPropertyIC, LINE);
-                            let slot = self.alloc_ic_slot()?;
-                            self.emit_byte(slot, LINE);
-                            self.emit(Op::Pop, LINE);
-                        }
+                            instance_home_slot.expect("instance home slot")
+                        };
+                        self.emit_class_member_installation(target_slot, md)?;
                     }
                 }
-                if instance_home_slot.is_some() {
-                    self.emit(Op::Pop, LINE);
-                }
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(temp_slot as u8, LINE);
             }
             OExpr::AwaitExpression(a) => {
                 self.compile_expr_oast(&a.argument)?;
