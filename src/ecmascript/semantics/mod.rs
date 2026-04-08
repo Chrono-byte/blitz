@@ -3797,6 +3797,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         })),
     );
     intrinsics.hidden_builtins.insert(
+        "throwTypeError".to_string(),
+        Value::Builtin(Rc::new(|vm, _args| {
+            Err(vm.throw_type_error("Cannot assign to imported binding"))
+        })),
+    );
+    intrinsics.hidden_builtins.insert(
         "directEval".to_string(),
         Value::Builtin(Rc::new(|vm, args| {
             let src = match args.first() {

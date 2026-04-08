@@ -232,9 +232,7 @@ impl Vm {
     }
 
     fn get_new_target(&self) -> Value {
-        self.construct_new_target
-            .clone()
-            .unwrap_or(Value::Undefined)
+        self.current_new_target().unwrap_or(Value::Undefined)
     }
 
     fn get_this(&self) -> Value {

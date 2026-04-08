@@ -434,6 +434,9 @@ impl Compiler {
                         }
                     }
                 }
+                oast::Statement::ExpressionStatement(e) => {
+                    self.validate_early_errors_in_expression(&e.expression)?;
+                }
                 _ => {}
             }
         }

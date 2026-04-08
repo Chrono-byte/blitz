@@ -719,15 +719,10 @@ impl super::Compiler {
                             {
                                 return Err(err);
                             }
-                            if self
+                            let is_imported = self
                                 .current_module
                                 .as_ref()
-                                .is_some_and(|c| c.imports.contains_key(name))
-                            {
-                                return Err(crate::errors::CompilerError::from(
-                                    "cannot assign to imported binding",
-                                ));
-                            }
+                                .is_some_and(|c| c.imports.contains_key(name));
                             self.compile_expr_oast(&a.right)?;
                             self.emit(Op::Dup, LINE);
                             if let Some(slot) = self.resolve_local(name) {
@@ -758,21 +753,10 @@ impl super::Compiler {
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
                                 self.emit(Op::SetUpvalue, LINE);
                                 self.emit_byte(upvalue, LINE);
+                            } else if is_imported {
+                                self.emit_throw_type_error("Cannot assign to imported binding");
                             } else {
-                                // Assignment to a non-local — could be an import binding
-                                if let Some((src_idx, exported_name)) = self
-                                    .current_module
-                                    .as_ref()
-                                    .and_then(|c| c.imports.get(name).map(|(i, n)| (*i, n.clone())))
-                                {
-                                    let cname_idx =
-                                        self.chunk.add_constant(Value::String(exported_name));
-                                    self.emit(Op::SetModuleExport, LINE);
-                                    self.emit_byte(src_idx as u8, LINE);
-                                    self.emit_byte(cname_idx as u8, LINE);
-                                } else {
-                                    self.emit_set_global_name(name);
-                                }
+                                self.emit_set_global_name(name);
                             }
                         }
                         oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
@@ -828,20 +812,18 @@ impl super::Compiler {
                             {
                                 return Err(err);
                             }
+                            let is_imported = self
+                                .current_module
+                                .as_ref()
+                                .is_some_and(|c| c.imports.contains_key(name));
                             if let Some(slot) = self.resolve_local(name) {
                                 self.emit(Op::GetLocal, LINE);
                                 self.emit_byte(slot as u8, LINE);
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
                                 self.emit(Op::GetUpvalue, LINE);
                                 self.emit_byte(upvalue, LINE);
-                            } else if self
-                                .current_module
-                                .as_ref()
-                                .is_some_and(|c| c.imports.contains_key(name))
-                            {
-                                return Err(crate::errors::CompilerError::from(
-                                    "cannot assign to imported binding",
-                                ));
+                            } else if is_imported {
+                                self.emit_get_binding(name);
                             } else {
                                 self.emit_get_global_name(name);
                             }
@@ -877,6 +859,8 @@ impl super::Compiler {
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
                                 self.emit(Op::SetUpvalue, LINE);
                                 self.emit_byte(upvalue, LINE);
+                            } else if is_imported {
+                                self.emit_throw_type_error("Cannot assign to imported binding");
                             } else {
                                 self.emit_set_global_name(name);
                             }
