@@ -5,7 +5,7 @@ use std::rc::Rc;
 use num_traits::ToPrimitive;
 
 use crate::runtime_utils::{
-    builtin_object, char_code_at, char_index_to_byte_index, non_enum_data,
+    array_from_values, builtin_object, char_code_at, char_index_to_byte_index, non_enum_data,
     require_object_coercible, set_builtin_length, set_builtin_name, static_builtin_arg_offset,
     this_boolean_value, this_string_value, this_string_value_ref, to_length,
     usize_to_decimal_string, usize_to_f64,
@@ -606,6 +606,55 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     string_proto_map.borrow_mut().properties.insert(
         PKey::String("slice".to_string()),
         non_enum_data(string_slice),
+    );
+
+    let string_split = builtin_object(
+        Rc::new(|vm, args| {
+            let undefined = Value::Undefined;
+            let receiver = args.first().unwrap_or(&undefined);
+            require_object_coercible(vm, receiver)?;
+            let s = this_string_value_ref(vm, receiver)?;
+            let s = s.as_ref();
+            let separator = args.get(1).unwrap_or(&Value::Undefined);
+            let limit = args.get(2).map(|v| to_length(vm, v)).transpose()?;
+
+            let parts: Vec<Value> = match separator {
+                Value::Undefined => vec![Value::String(s.to_string())],
+                Value::String(sep) => {
+                    if sep.is_empty() {
+                        s.chars().map(|ch| Value::String(ch.to_string())).collect()
+                    } else {
+                        s.split(sep)
+                            .map(|part| Value::String(part.to_string()))
+                            .collect()
+                    }
+                }
+                other => {
+                    let sep = vm.to_string(other)?;
+                    if sep.is_empty() {
+                        s.chars().map(|ch| Value::String(ch.to_string())).collect()
+                    } else {
+                        s.split(&sep)
+                            .map(|part| Value::String(part.to_string()))
+                            .collect()
+                    }
+                }
+            };
+            let parts = if let Some(limit) = limit {
+                parts.into_iter().take(limit).collect()
+            } else {
+                parts
+            };
+
+            Ok(array_from_values(parts))
+        }),
+        function_proto_map,
+    );
+    set_builtin_name(&string_split, "split");
+    set_builtin_length(&string_split, 1.0);
+    string_proto_map.borrow_mut().properties.insert(
+        PKey::String("split".to_string()),
+        non_enum_data(string_split),
     );
 
     let boolean_ctor_fn: BuiltinFn = Rc::new(|vm, args| {
