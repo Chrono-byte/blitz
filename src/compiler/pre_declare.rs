@@ -204,6 +204,9 @@ impl Compiler {
                         if self.is_root {
                             self.emit_set_global_name(&fname);
                         }
+                        if self.current_module.is_some() {
+                            self.emit_set_own_module_export(&fname)?;
+                        }
                     }
                 }
                 oast::Statement::ExportDefaultDeclaration(export) => {
