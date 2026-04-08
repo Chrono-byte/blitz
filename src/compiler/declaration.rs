@@ -1054,7 +1054,7 @@ impl Compiler {
                     return Ok(());
                 }
                 if let Some(arg) = &r.argument {
-                    self.compile_expr_oast_tail(arg)?;
+                    self.compile_expr_oast(arg)?;
                 } else {
                     self.emit(Op::Undefined, LINE);
                 }
@@ -1773,7 +1773,7 @@ impl Compiler {
         if func.expression && func.body.statements.len() == 1 {
             if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
                 // Compile the expression and return its value
-                inner.compile_expr_oast_tail(&expr_stmt.expression)?;
+                inner.compile_expr_oast(&expr_stmt.expression)?;
                 inner.emit(Op::Return, LINE);
             } else {
                 // Shouldn't happen for expression: true, but handle it safely

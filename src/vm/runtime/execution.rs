@@ -2438,26 +2438,10 @@ impl Vm {
             Op::GetGlobal => {
                 let idx = self.read_short()? as usize;
                 let name = self.string_constant(idx)?;
-                let v = if let Some(v) = self.resolve_lexical_identifier_value(&name)? {
+                let v = if let Some(v) = self.resolve_identifier_value(&name)? {
                     v
                 } else {
-                    let global_value = self
-                        .globals
-                        .borrow()
-                        .properties
-                        .get(&PropertyKey::String(name.clone()))
-                        .and_then(|d| match d {
-                            PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                            _ => None,
-                        });
-                    match global_value {
-                        Some(v) => v,
-                        None => {
-                            return Err(
-                                self.throw_reference_error(&format!("{name} is not defined"))
-                            );
-                        }
-                    }
+                    return Err(self.throw_reference_error(&format!("{name} is not defined")));
                 };
                 if crate::trace::enabled() {
                     eprintln!("[trace] GetGlobal '{}' -> {}", name, v.type_name());
@@ -2888,16 +2872,10 @@ impl Vm {
             Op::TypeofIdentifier => {
                 let name_idx = self.read_short()? as usize;
                 let name = self.string_constant(name_idx)?;
-                let value = if let Some(binding) = self.resolve_lexical_identifier_value(&name)? {
+                let value = if let Some(binding) = self.resolve_identifier_value(&name)? {
                     binding
                 } else {
-                    let key = PropertyKey::String(name.clone());
-                    let global_obj = Value::Object(Rc::clone(&self.globals));
-                    if self.has_property_host(&global_obj, &key)? {
-                        self.get_property_host(&global_obj, &key)?
-                    } else {
-                        Value::Undefined
-                    }
+                    Value::Undefined
                 };
                 self.stack
                     .push(Value::String(value.type_name().to_string()));
@@ -4551,17 +4529,7 @@ impl Vm {
         for _ in 0..n {
             let value = self.pop()?;
             let key_val = self.pop()?;
-            let key = match key_val {
-                Value::String(s) => PropertyKey::String(s),
-                Value::Symbol(sym, _) => PropertyKey::Symbol(sym),
-                other => {
-                    self.dump_diag("BuildObject: key must be string", &other);
-                    return Err(RuntimeError::from(format!(
-                        "BuildObject: key must be string (actual={})",
-                        other.type_name()
-                    )));
-                }
-            };
+            let key = self.to_property_key(&key_val)?;
             map.insert(key, PropertyDescriptor::data(value));
         }
         let mut data = ObjectData::new();
@@ -4869,22 +4837,10 @@ impl Vm {
     fn get_global_ic(&mut self) -> Result<(), RuntimeError> {
         let idx = self.read_short()? as usize;
         let name = self.string_constant(idx)?;
-        let value = if let Some(value) = self.resolve_lexical_identifier_value(&name)? {
+        let value = if let Some(value) = self.resolve_identifier_value(&name)? {
             value
         } else {
-            let global_value = self
-                .globals
-                .borrow()
-                .properties
-                .get(&PropertyKey::String(name.clone()))
-                .and_then(|d| match d {
-                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                    _ => None,
-                });
-            match global_value {
-                Some(value) => value,
-                None => return Err(self.throw_reference_error(&format!("{name} is not defined"))),
-            }
+            return Err(self.throw_reference_error(&format!("{name} is not defined")));
         };
         self.stack.push(value);
         Ok(())
@@ -7341,6 +7297,134 @@ mod tests {
                 .contains("Cannot convert undefined or null to object")
         );
         assert!(vm.get_global("x").is_none());
+    }
+
+    #[test]
+    fn with_statement_reads_bindings_from_object_environment() {
+        let session = Parser::parse_source(
+            r#"
+            var result;
+            var obj = { value: "from-with", NaN: "shadowed" };
+            with (obj) {
+                result = value;
+                result = result + ":" + NaN;
+            }
+        "#,
+        )
+        .expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+
+        assert_eq!(
+            vm.get_global("result"),
+            Some(Value::String("from-with:shadowed".into()))
+        );
+    }
+
+    #[test]
+    fn with_statement_inside_constructor_reads_and_writes_object_bindings() {
+        let session = Parser::parse_source(
+            r#"
+            var result = "result";
+            var myObj = { value: "myObj_value", NaN: "obj_NaN" };
+            var st_NaN = "NaN";
+            var f = function() {
+              with (myObj) {
+                st_NaN = NaN;
+                var value = "value";
+                return value;
+              }
+            };
+            var obj = new f();
+        "#,
+        )
+        .expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+
+        assert_eq!(
+            vm.get_global("st_NaN"),
+            Some(Value::String("obj_NaN".into()))
+        );
+    }
+
+    #[test]
+    fn with_statement_handles_common_identifier_shadowing_cases() {
+        let session = Parser::parse_source(
+            r#"
+            this.p1 = 1;
+            this.p2 = 2;
+            this.p3 = 3;
+            var st_NaN = "NaN";
+            var st_Infinity = "Infinity";
+            var st_eval = "eval";
+            var st_parseInt = "parseInt";
+            var st_parseFloat = "parseFloat";
+            var st_isNaN = "isNaN";
+            var st_isFinite = "isFinite";
+            var myObj = {
+              p1: "a",
+              p2: "b",
+              p3: "c",
+              value: "myObj_value",
+              valueOf: function() { return "obj_valueOf"; },
+              parseInt: function() { return "obj_parseInt"; },
+              NaN: "obj_NaN",
+              Infinity: "obj_Infinity",
+              eval: function() { return "obj_eval"; },
+              parseFloat: function() { return "obj_parseFloat"; },
+              isNaN: function() { return "obj_isNaN"; },
+              isFinite: function() { return "obj_isFinite"; }
+            };
+            var f = function() {
+              with (myObj) {
+                st_p1 = p1;
+                st_p2 = p2;
+                st_p3 = p3;
+                st_parseInt = parseInt;
+                st_NaN = NaN;
+                st_Infinity = Infinity;
+                st_eval = eval;
+                st_parseFloat = parseFloat;
+                st_isNaN = isNaN;
+                st_isFinite = isFinite;
+              }
+            };
+            var obj = new f();
+        "#,
+        )
+        .expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+
+        assert_eq!(
+            vm.get_global("st_NaN"),
+            Some(Value::String("obj_NaN".into()))
+        );
+        assert_eq!(
+            vm.get_global("st_Infinity"),
+            Some(Value::String("obj_Infinity".into()))
+        );
+        match vm.get_global("st_parseInt") {
+            Some(Value::Closure { .. }) => {}
+            other => panic!("expected function object for parseInt, got {:?}", other),
+        }
+        match vm.get_global("st_parseFloat") {
+            Some(Value::Closure { .. }) => {}
+            other => panic!("expected function object for parseFloat, got {:?}", other),
+        }
     }
 
     #[test]

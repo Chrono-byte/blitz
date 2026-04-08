@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::bytecode::Op;
 use crate::value::Value;
 use oxc_ast::ast as oast;
