@@ -21,6 +21,7 @@ impl super::Compiler {
         &mut self,
         c: &oast::CallExpression<'_>,
     ) -> Result<(), crate::errors::CompilerError> {
+        use oxc_ast::ast::Expression as OExpr;
         // Tail calls only need the optimized path for direct/non-spread calls.
         // Spread calls still lower through the existing non-tail path.
         let has_spread = c

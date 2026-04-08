@@ -28,7 +28,7 @@ impl super::Compiler {
         self.add_local_with_mirror(format!("__{}_{}", prefix, self.locals.len()), None, false)
     }
 
-    fn emit_super_property_get_static(
+    pub(super) fn emit_super_property_get_static(
         &mut self,
         property: &str,
         preserve_receiver: bool,
@@ -44,7 +44,7 @@ impl super::Compiler {
         Ok(())
     }
 
-    fn emit_super_property_get_computed(
+    pub(super) fn emit_super_property_get_computed(
         &mut self,
         key_expr: &oast::Expression,
         preserve_receiver: bool,
@@ -60,7 +60,7 @@ impl super::Compiler {
         Ok(())
     }
 
-    fn emit_super_property_set_static(
+    pub(super) fn emit_super_property_set_static(
         &mut self,
         property: &str,
         value_expr: &oast::Expression,
@@ -75,7 +75,7 @@ impl super::Compiler {
         Ok(())
     }
 
-    fn emit_super_property_set_computed(
+    pub(super) fn emit_super_property_set_computed(
         &mut self,
         key_expr: &oast::Expression,
         value_expr: &oast::Expression,
