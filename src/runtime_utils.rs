@@ -78,6 +78,52 @@ pub(crate) fn usize_to_f64(value: usize) -> f64 {
     value.to_f64().unwrap_or(f64::NAN)
 }
 
+/// Format a JavaScript `Number` for string conversion.
+///
+/// This intentionally follows ECMAScript `ToString` expectations for the
+/// cases we exercise in the VM: integral values should not keep Rust's
+/// trailing `.0` formatting.
+pub(crate) fn js_number_to_string(n: f64) -> String {
+    if n.is_nan() {
+        return "NaN".to_string();
+    }
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    if n == f64::INFINITY {
+        return "Infinity".to_string();
+    }
+    if n == f64::NEG_INFINITY {
+        return "-Infinity".to_string();
+    }
+
+    let abs = n.abs();
+    if !(1e-6..1e21).contains(&abs) {
+        let s = format!("{:e}", n);
+        if let Some(e_idx) = s.find('e') {
+            let mantissa = s[..e_idx].trim_end_matches('0').trim_end_matches('.');
+            let exp = &s[e_idx + 1..];
+            let (sign, digits) = if let Some(rest) = exp.strip_prefix('-') {
+                ('-', rest)
+            } else if let Some(rest) = exp.strip_prefix('+') {
+                ('+', rest)
+            } else {
+                ('+', exp)
+            };
+            let digits = digits.trim_start_matches('0');
+            let digits = if digits.is_empty() { "0" } else { digits };
+            return format!("{}e{}{}", mantissa, sign, digits);
+        }
+        return s;
+    }
+
+    if n.fract() == 0.0 {
+        format!("{:.0}", n)
+    } else {
+        n.to_string()
+    }
+}
+
 fn char_digit_value(ch: char) -> Option<u32> {
     match ch {
         '0'..='9' => Some(ch as u32 - '0' as u32),

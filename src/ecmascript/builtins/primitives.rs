@@ -10,6 +10,7 @@ use std::rc::Rc;
 use num_bigint::BigInt as BigIntValue;
 
 use crate::runtime_utils::builtin_object;
+use crate::runtime_utils::js_number_to_string;
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 /// Fundamental primitive wrapper builtins currently migrated from runtime_utils.
@@ -230,7 +231,7 @@ pub(crate) fn install_bigint_and_number_builtins(
                 let undefined = Value::Undefined;
                 let this = args.first().unwrap_or(&undefined);
                 match this {
-                    Value::Number(n) => Ok(Value::String(n.to_string())),
+                    Value::Number(n) => Ok(Value::String(js_number_to_string(*n))),
                     Value::Object(obj) => {
                         if let Some(PropertyDescriptor::Data { value, .. }) = obj
                             .borrow()
@@ -238,7 +239,7 @@ pub(crate) fn install_bigint_and_number_builtins(
                             .get(&PKey::String("[[PrimitiveValue]]".to_string()))
                             && let Value::Number(n) = value
                         {
-                            return Ok(Value::String(n.to_string()));
+                            return Ok(Value::String(js_number_to_string(*n)));
                         }
                         Err(vm.throw_type_error(
                             "Number.prototype.toString called on incompatible receiver",

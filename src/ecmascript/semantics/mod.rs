@@ -10,9 +10,9 @@ use crate::ecmascript::builtins;
 use crate::realm::Intrinsics;
 use crate::runtime_utils::{
     array_from_values, builtin_object, char_index_to_byte_index, descriptor_value_from_descriptor,
-    is_byte_offset_aligned, non_enum_data, own_enumerable_keys, own_property_descriptor,
-    own_property_keys, property_key_to_value, set_builtin_length, set_builtin_name,
-    static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length,
+    is_byte_offset_aligned, js_number_to_string, non_enum_data, own_enumerable_keys,
+    own_property_descriptor, own_property_keys, property_key_to_value, set_builtin_length,
+    set_builtin_name, static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length,
     usize_to_decimal_string, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
@@ -47,7 +47,7 @@ fn json_stringify_value(
         Value::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
         Value::Number(n) => {
             if n.is_finite() {
-                Some(n.to_string())
+                Some(js_number_to_string(*n))
             } else {
                 Some("null".to_string())
             }
