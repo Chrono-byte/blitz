@@ -21,6 +21,8 @@ pub(crate) struct Frame {
     pub(crate) this_value: Value,
     /// The callee value used to enter this frame.
     pub(crate) callee: Value,
+    /// The `[[NewTarget]]` value in effect for this frame, if any.
+    pub(crate) new_target: Option<Value>,
     /// The closure environment for this frame.
     pub(crate) closure_env: Option<Rc<Mutex<Vec<ValueSlot>>>>,
     /// Upvalue metadata for the current function.

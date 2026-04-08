@@ -214,7 +214,10 @@ impl Vm {
 
     /// Return the current `[[NewTarget]]` value.
     pub fn current_new_target(&self) -> Option<Value> {
-        self.construct_new_target.clone()
+        self.call_stack
+            .last()
+            .and_then(|frame| frame.new_target.clone())
+            .or_else(|| self.construct_new_target.clone())
     }
 
     /// Return the dynamic eval context flags for the currently executing code.
@@ -2057,6 +2060,7 @@ impl Vm {
             .lexical_env
             .borrow_mut()
             .set_binding_initialized_in_chain(name, true);
+        self.sync_named_binding_to_global_and_frames(name, &value);
 
         if self.current_slot_names.is_none()
             && self
@@ -3306,12 +3310,6 @@ impl Vm {
                 self.lexical_env = outer.unwrap_or_else(|| Rc::clone(&self.global_env));
             }
             Op::GetNewTarget => {
-                if crate::trace::enabled() {
-                    eprintln!(
-                        "[trace] GetNewTarget current_new_target={:?}",
-                        self.construct_new_target
-                    );
-                }
                 let new_target = self.get_new_target();
                 self.stack.push(new_target);
             }
@@ -4832,6 +4830,7 @@ impl Vm {
             ),
             this_value: std::mem::replace(&mut self.this_value, this_value.clone()),
             callee: callee.clone(),
+            new_target: self.construct_new_target.clone(),
             closure_env: self.current_closure_env.take(),
             upvalues: proto.upvalues.clone(),
             slot_types: self.current_slot_types.take(),

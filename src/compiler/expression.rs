@@ -2078,27 +2078,6 @@ impl super::Compiler {
                     return Ok(());
                 }
 
-                if let OExpr::Identifier(id) = &c.callee
-                    && id.name.as_str() == "eval"
-                    && self.resolve_local("eval").is_none()
-                    && !self.outer_bindings.contains_key("eval")
-                {
-                    self.emit_get_builtin_name("directEval");
-                    let mut arg_count = 0usize;
-                    for arg in &c.arguments {
-                        if let Some(expr) = arg.as_expression() {
-                            self.compile_expr_oast(expr)?;
-                            arg_count += 1;
-                        } else {
-                            self.emit(Op::Undefined, LINE);
-                            arg_count += 1;
-                        }
-                    }
-                    self.emit(Op::CallIC, LINE);
-                    self.emit_byte(arg_count as u8, LINE);
-                    return Ok(());
-                }
-
                 if let OExpr::PrivateFieldExpression(m) = &c.callee {
                     // Handle optional private field calls like obj.#method?.()
                     let is_optional_call = c.optional;
