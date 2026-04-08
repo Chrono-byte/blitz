@@ -255,23 +255,48 @@ pub(crate) fn install_bigint_and_number_builtins(
     );
     number_ctor_map.borrow_mut().properties.insert(
         PKey::String("NaN".to_string()),
-        PropertyDescriptor::data(Value::Number(f64::NAN)),
+        PropertyDescriptor::Data {
+            value: Value::Number(f64::NAN),
+            writable: false,
+            enumerable: false,
+            configurable: false,
+        },
     );
     number_ctor_map.borrow_mut().properties.insert(
         PKey::String("POSITIVE_INFINITY".to_string()),
-        PropertyDescriptor::data(Value::Number(f64::INFINITY)),
+        PropertyDescriptor::Data {
+            value: Value::Number(f64::INFINITY),
+            writable: false,
+            enumerable: false,
+            configurable: false,
+        },
     );
     number_ctor_map.borrow_mut().properties.insert(
         PKey::String("NEGATIVE_INFINITY".to_string()),
-        PropertyDescriptor::data(Value::Number(f64::NEG_INFINITY)),
+        PropertyDescriptor::Data {
+            value: Value::Number(f64::NEG_INFINITY),
+            writable: false,
+            enumerable: false,
+            configurable: false,
+        },
     );
     number_ctor_map.borrow_mut().properties.insert(
         PKey::String("MAX_VALUE".to_string()),
-        PropertyDescriptor::data(Value::Number(f64::MAX)),
+        PropertyDescriptor::Data {
+            value: Value::Number(f64::MAX),
+            writable: false,
+            enumerable: false,
+            configurable: false,
+        },
     );
     number_ctor_map.borrow_mut().properties.insert(
         PKey::String("MIN_VALUE".to_string()),
-        PropertyDescriptor::data(Value::Number(f64::MIN_POSITIVE)),
+        PropertyDescriptor::Data {
+            value: Value::Number(f64::MIN_POSITIVE),
+            writable: false,
+            enumerable: false,
+            configurable: false,
+        },
     );
     number_ctor_map.borrow_mut().properties.insert(
         PKey::String("isNaN".to_string()),

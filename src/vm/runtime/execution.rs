@@ -1669,24 +1669,6 @@ impl Vm {
                 )
             };
             if let Some(value) = binding_value {
-                let should_sync_global = outer
-                    .as_ref()
-                    .is_some_and(|outer_rc| Rc::ptr_eq(outer_rc, &self.global_env));
-                if should_sync_global {
-                    let key = PropertyKey::String(name.to_string());
-                    if let Some(value) =
-                        self.globals
-                            .borrow()
-                            .properties
-                            .get(&key)
-                            .and_then(|d| match d {
-                                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                                _ => None,
-                            })
-                    {
-                        return Ok(Some(value));
-                    }
-                }
                 return Ok(Some(value));
             }
             if let Some(binding_object) = binding_object {

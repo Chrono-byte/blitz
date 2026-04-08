@@ -49,6 +49,8 @@ pub struct Compiler {
     pub strict_context: bool,
     /// Current nested loop depth.
     pub loop_depth: usize,
+    /// Current nested `with` depth.
+    pub with_depth: usize,
     /// Stack of continue patch sites for nested loops. Each entry holds a list
     /// of code offsets (index of the first placeholder byte) that must be
     /// patched to jump to the loop's continue target when the loop is closed.
@@ -169,6 +171,7 @@ impl Compiler {
             is_root: true,
             strict_context: false,
             loop_depth: 0,
+            with_depth: 0,
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
             finally_patches: Vec::new(),

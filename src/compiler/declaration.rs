@@ -20,6 +20,12 @@ use std::rc::Rc;
 const LINE: u32 = 1;
 
 impl Compiler {
+    fn emit_with_env_pops(&mut self) {
+        for _ in 0..self.with_depth {
+            self.emit(Op::PopEnv, LINE);
+        }
+    }
+
     /// Compile a function declaration statement into bytecode.
     ///
     /// Creates a closure from the function and assigns it to a local slot,
@@ -239,15 +245,23 @@ impl Compiler {
                 }
                 self.compile_expr_oast(&w.object)?;
                 self.emit(Op::PushWithEnv, LINE);
+                self.with_depth += 1;
                 self.emit(Op::PushHandler, LINE);
                 let handler_jump = self.chunk.code.len();
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
 
+                let with_body_stmts = match &w.body {
+                    OStmt::BlockStatement(b) => &b.body[..],
+                    _ => std::slice::from_ref(&w.body),
+                };
+                self.enter_block_scope_with_vars(with_body_stmts);
                 self.compile_statement_oast_with_mode(&w.body, false, completion_slot)?;
+                self.exit_scope();
 
                 self.emit(Op::PopHandler, LINE);
                 self.emit(Op::PopEnv, LINE);
+                self.with_depth = self.with_depth.saturating_sub(1);
                 self.emit(Op::Jump, LINE);
                 let skip_handler_jump = self.chunk.code.len();
                 self.emit_byte(0, LINE);
@@ -257,6 +271,7 @@ impl Compiler {
                 self.patch_jump(handler_jump);
 
                 self.emit(Op::PopEnv, LINE);
+                self.with_depth = self.with_depth.saturating_sub(1);
                 self.emit(Op::Throw, LINE);
                 let _after_handler = self.chunk.code.len();
 
@@ -1025,6 +1040,7 @@ impl Compiler {
                     self.emit(Op::Dup, LINE);
                     self.emit(Op::SetLocal, LINE);
                     self.emit_byte(return_slot as u8, LINE);
+                    self.emit_with_env_pops();
                     self.emit(Op::True, LINE);
                     self.emit(Op::SetLocal, LINE);
                     self.emit_byte(did_return_slot as u8, LINE);
@@ -1042,9 +1058,11 @@ impl Compiler {
                 } else {
                     self.emit(Op::Undefined, LINE);
                 }
+                self.emit_with_env_pops();
                 self.emit(Op::Return, LINE);
             }
             OStmt::ContinueStatement(c) => {
+                self.emit_with_env_pops();
                 self.emit(Op::Jump, LINE);
                 let patch_pos = self.chunk.code.len();
                 self.emit_byte(0, LINE);
@@ -1079,6 +1097,7 @@ impl Compiler {
                 }
             }
             OStmt::BreakStatement(b) => {
+                self.emit_with_env_pops();
                 self.emit(Op::Jump, LINE);
                 let patch_pos = self.chunk.code.len();
                 self.emit_byte(0, LINE);
@@ -1576,6 +1595,7 @@ impl Compiler {
             is_root: false,
             strict_context: self.strict_context,
             loop_depth: 0,
+            with_depth: 0,
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
             finally_patches: Vec::new(),
@@ -1713,6 +1733,7 @@ impl Compiler {
             is_root: false,
             strict_context: self.strict_context,
             loop_depth: 0,
+            with_depth: 0,
             continue_patches: Vec::new(),
             break_patches: Vec::new(),
             finally_patches: Vec::new(),
