@@ -405,10 +405,15 @@ impl super::Compiler {
             OExpr::ObjectExpression(obj) => {
                 let mut count = 0usize;
                 let mut computed_indices: Vec<usize> = Vec::new();
+                let mut accessor_indices: Vec<usize> = Vec::new();
                 self.object_expr_had_set_property = false;
                 for (pi, prop) in obj.properties.iter().enumerate() {
                     if let oast::ObjectPropertyKind::ObjectProperty(p) = prop {
                         if p.computed {
+                            if !matches!(p.kind, oast::PropertyKind::Init) {
+                                accessor_indices.push(pi);
+                                continue;
+                            }
                             let key_debug = format!("{:?}", p.key);
                             if key_debug.contains("Symbol") && key_debug.contains("iterator") {
                                 self.emit_constant(
@@ -437,6 +442,10 @@ impl super::Compiler {
                                 continue;
                             }
                             computed_indices.push(pi);
+                            continue;
+                        }
+                        if !matches!(p.kind, oast::PropertyKind::Init) {
+                            accessor_indices.push(pi);
                             continue;
                         }
                         let key = match &p.key {
@@ -496,6 +505,76 @@ impl super::Compiler {
 
                         self.emit(Op::SetProperty, LINE);
                         self.object_expr_had_set_property = true;
+                    }
+                }
+
+                for idx in accessor_indices {
+                    if let oast::ObjectPropertyKind::ObjectProperty(p) = &obj.properties[idx] {
+                        let key_value = if p.computed {
+                            None
+                        } else {
+                            Some(match &p.key {
+                                oast::PropertyKey::StaticIdentifier(ident) => {
+                                    Value::String(ident.name.to_string())
+                                }
+                                oast::PropertyKey::Identifier(ident) => {
+                                    Value::String(ident.name.to_string())
+                                }
+                                oast::PropertyKey::StringLiteral(s) => {
+                                    Value::String(s.value.to_string())
+                                }
+                                oast::PropertyKey::NumericLiteral(n) => {
+                                    Value::String(n.value.to_string())
+                                }
+                                _ => {
+                                    return Err(crate::errors::CompilerError::from(
+                                        "unsupported accessor key",
+                                    ));
+                                }
+                            })
+                        };
+                        self.emit(Op::Dup, LINE);
+                        self.emit_get_builtin_name("objectDefineProperty");
+                        self.emit(Op::Swap, LINE);
+                        if let Some(ref key) = key_value {
+                            self.emit_constant(key.clone(), LINE);
+                        } else {
+                            let key_expr = p
+                                .key
+                                .as_expression()
+                                .expect("computed accessor key must be an expression");
+                            self.compile_expr_oast(key_expr)?;
+                        }
+
+                        let descriptor_prop_name = match p.kind {
+                            oast::PropertyKind::Get => "get",
+                            oast::PropertyKind::Set => "set",
+                            oast::PropertyKind::Init => unreachable!(),
+                        };
+                        let method_name_owned = if let Some(Value::String(s)) = &key_value {
+                            s.clone()
+                        } else {
+                            "<accessor>".to_string()
+                        };
+                        self.emit_constant(Value::String(descriptor_prop_name.to_string()), LINE);
+                        if let oast::Expression::FunctionExpression(f) = &p.value {
+                            let self_name = f.id.as_ref().map(|id| id.name.as_str());
+                            let (proto, _env_len) =
+                                self.compile_function(&method_name_owned, self_name, f, None)?;
+                            let idx = self.chunk.add_function(proto);
+                            self.emit(Op::MakeClosure, LINE);
+                            self.emit_byte(idx as u8, LINE);
+                        } else {
+                            self.compile_expr_oast(&p.value)?;
+                        }
+                        self.emit_constant(Value::String("enumerable".to_string()), LINE);
+                        self.emit_constant(Value::Bool(true), LINE);
+                        self.emit_constant(Value::String("configurable".to_string()), LINE);
+                        self.emit_constant(Value::Bool(true), LINE);
+                        self.emit(Op::BuildObject, LINE);
+                        self.emit_byte(3, LINE);
+                        self.emit(Op::CallIC, LINE);
+                        self.emit_byte(3, LINE);
                     }
                 }
 
@@ -1280,9 +1359,6 @@ impl super::Compiler {
                             oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
                             oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
                         }
-                        if u.prefix {
-                            self.emit(Op::Dup, LINE);
-                        }
                         let new_slot = self.alloc_temp_local("ref_new");
                         self.emit(Op::SetLocal, LINE);
                         self.emit_byte(new_slot as u8, LINE);
@@ -1308,9 +1384,6 @@ impl super::Compiler {
                         match u.operator {
                             oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
                             oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
-                        }
-                        if u.prefix {
-                            self.emit(Op::Dup, LINE);
                         }
                         let new_slot = self.alloc_temp_local("ref_new");
                         self.emit(Op::SetLocal, LINE);

@@ -828,6 +828,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     let array_values_builtin = make_array_iterator_builtin("value");
     let array_keys_builtin = make_array_iterator_builtin("key");
     let array_entries_builtin = make_array_iterator_builtin("key+value");
+    set_builtin_name(&array_values_builtin, "values");
+    set_builtin_name(&array_keys_builtin, "keys");
+    set_builtin_name(&array_entries_builtin, "entries");
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("values".to_string()),
         PropertyDescriptor::data(array_values_builtin.clone()),
@@ -1146,11 +1149,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     );
     function_proto_map.borrow_mut().properties.insert(
         PKey::String("call".to_string()),
-        PropertyDescriptor::data(function_call_val.clone()),
+        non_enum_data(function_call_val.clone()),
     );
     function_proto_map.borrow_mut().properties.insert(
         PKey::String("apply".to_string()),
-        PropertyDescriptor::data(builtin_object(
+        non_enum_data(builtin_object(
             Rc::new(|vm, args| {
                 let callee = args.first().cloned().unwrap_or(Value::Undefined);
                 let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1168,7 +1171,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     );
     function_proto_map.borrow_mut().properties.insert(
         PKey::String("bind".to_string()),
-        PropertyDescriptor::data(builtin_object(
+        non_enum_data(builtin_object(
             Rc::new({
                 let function_proto_map = Rc::clone(&function_proto_map);
                 let function_call_val = function_call_val;
@@ -3115,7 +3118,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     let math = Rc::new(RefCell::new(ObjectData::new()));
     math.borrow_mut().properties.insert(
         PKey::String("pow".to_string()),
-        PropertyDescriptor::data({
+        non_enum_data({
             let builtin = builtin_object(
                 Rc::new(|vm, args| {
                     let x = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
@@ -3128,6 +3131,26 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             builtin
         }),
     );
+    for (name, value) in [
+        ("E", std::f64::consts::E),
+        ("LN10", std::f64::consts::LN_10),
+        ("LN2", std::f64::consts::LN_2),
+        ("LOG10E", std::f64::consts::LOG10_E),
+        ("LOG2E", std::f64::consts::LOG2_E),
+        ("PI", std::f64::consts::PI),
+        ("SQRT1_2", std::f64::consts::FRAC_1_SQRT_2),
+        ("SQRT2", std::f64::consts::SQRT_2),
+    ] {
+        math.borrow_mut().properties.insert(
+            PKey::String(name.to_string()),
+            PropertyDescriptor::Data {
+                value: Value::Number(value),
+                writable: false,
+                enumerable: false,
+                configurable: false,
+            },
+        );
+    }
 
     let reflect = Rc::new(RefCell::new(ObjectData::new()));
     reflect.borrow_mut().properties.insert(
@@ -3636,6 +3659,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 keys.into_iter().map(Value::String).collect(),
             ))
         })),
+    );
+    intrinsics.hidden_builtins.insert(
+        "objectDefineProperty".to_string(),
+        Value::Builtin(Rc::new(Vm::define_property_builtin)),
     );
 
     intrinsics

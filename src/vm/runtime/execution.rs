@@ -890,6 +890,7 @@ impl Vm {
                     self.maybe_collect_garbage_prototype();
                 }
                 Ok(StepOutcome::Return(result)) => {
+                    self.pending_exception = false;
                     self.run_microtasks_if_needed()?;
                     #[cfg(feature = "gc_mark_sweep_prototype")]
                     {
@@ -2385,6 +2386,7 @@ impl Vm {
                     self.maybe_collect_garbage_prototype();
                 }
                 Ok(StepOutcome::Return(result)) => {
+                    self.pending_exception = false;
                     self.stack.truncate(stack_base);
                     if drain_microtasks {
                         self.run_microtasks_if_needed()?;
@@ -4440,6 +4442,7 @@ impl Vm {
                 if !matches!(object_proto, Value::Null) {
                     props.borrow_mut().set_prototype_value(object_proto);
                 }
+                self.install_arguments_iterator_property(&props);
                 self.current_arguments_object = None;
                 self.current_arguments_mapped_count = 0;
                 self.locals[slot] = Rc::new(Mutex::new(Value::Object(props)));
@@ -4561,7 +4564,25 @@ impl Vm {
         if !matches!(object_proto, Value::Null) {
             obj_rc.borrow_mut().set_prototype_value(object_proto);
         }
+        self.install_arguments_iterator_property(&obj_rc);
         Value::Object(obj_rc)
+    }
+
+    fn install_arguments_iterator_property(&mut self, obj_rc: &Rc<RefCell<ObjectData>>) {
+        let array_proto = self.realm.array_prototype();
+        let iterator_key = PropertyKey::Symbol(SymbolId::well_known_iterator());
+        let Ok(iterator) = self.get_property_host(&array_proto, &iterator_key) else {
+            return;
+        };
+        obj_rc.borrow_mut().properties.insert(
+            iterator_key,
+            PropertyDescriptor::Data {
+                value: iterator,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
     }
 
     fn build_array(&mut self) -> Result<(), RuntimeError> {
@@ -5249,15 +5270,17 @@ impl Vm {
     /// property was lost or was never installed.
     fn ensure_constructor_for_thrown(&mut self, thrown: Value) -> Result<Value, RuntimeError> {
         let key = PropertyKey::String("constructor".to_string());
-        let needs_repair =
-            matches!(
-                &thrown,
-                Value::Object(_)
-                    | Value::Array(..)
-                    | Value::Closure { .. }
-                    | Value::BuiltinObject(_, _)
-                    | Value::Promise(_)
-            ) && matches!(self.get_property_value(&thrown, &key), Ok(Value::Undefined));
+        let needs_repair = matches!(
+            &thrown,
+            Value::Object(_)
+                | Value::Array(..)
+                | Value::Closure { .. }
+                | Value::BuiltinObject(_, _)
+                | Value::Promise(_)
+        ) && !matches!(
+            self.lookup_property_descriptor(&thrown, &key, 0)?,
+            Some((_, holder)) if values_equal(&holder, &thrown)
+        );
         if !needs_repair {
             return Ok(thrown);
         }
@@ -7892,6 +7915,39 @@ mod tests {
         let mut vm = Vm::new(Rc::clone(&globals));
         vm.run(chunk).expect("run ok");
         assert!(matches!(vm.get_global("result"), Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn arguments_object_is_iterable_with_array_iterator() {
+        let session = Parser::parse_source(
+            r#"
+            function mapped(a, b, c) {
+                return arguments[Symbol.iterator].name
+                    + ":" + [...arguments].join(",");
+            }
+            function unmapped([a], b, c) {
+                return arguments[Symbol.iterator].name
+                    + ":" + [...arguments].join(",");
+            }
+            var mapped_result = mapped(1, 2, 3);
+            var unmapped_result = unmapped([1], 2, 3);
+        "#,
+        )
+        .expect("parse ok");
+        let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+
+        assert!(matches!(
+            vm.get_global("mapped_result"),
+            Some(Value::String(s)) if s == "values:1,2,3"
+        ));
+        assert!(matches!(
+            vm.get_global("unmapped_result"),
+            Some(Value::String(s)) if s == "values:1,2,3"
+        ));
     }
 
     #[test]

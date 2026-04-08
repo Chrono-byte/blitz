@@ -9,8 +9,7 @@ use std::rc::Rc;
 
 use num_bigint::BigInt as BigIntValue;
 
-use crate::runtime_utils::builtin_object;
-use crate::runtime_utils::js_number_to_string;
+use crate::runtime_utils::{builtin_object, js_number_to_string, non_enum_data};
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 /// Fundamental primitive wrapper builtins currently migrated from runtime_utils.
@@ -158,7 +157,7 @@ pub(crate) fn install_bigint_and_number_builtins(
     ));
     number_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&number_proto_map))),
+        non_enum_data(Value::Object(Rc::clone(&number_proto_map))),
     );
     let number_proto_for_ctor = Rc::clone(&number_proto_map);
     let number_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
@@ -186,11 +185,11 @@ pub(crate) fn install_bigint_and_number_builtins(
     let number_ctor_val = Value::BuiltinObject(number_ctor_fn, Rc::clone(&number_ctor_map));
     number_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
-        PropertyDescriptor::data(number_ctor_val.clone()),
+        non_enum_data(number_ctor_val.clone()),
     );
     number_proto_map.borrow_mut().properties.insert(
         PKey::String("valueOf".to_string()),
-        PropertyDescriptor::data(builtin_object(
+        non_enum_data(builtin_object(
             Rc::new(|vm, args| {
                 let undefined = Value::Undefined;
                 let this = args.first().unwrap_or(&undefined);
@@ -226,7 +225,7 @@ pub(crate) fn install_bigint_and_number_builtins(
     );
     number_proto_map.borrow_mut().properties.insert(
         PKey::String("toString".to_string()),
-        PropertyDescriptor::data(builtin_object(
+        non_enum_data(builtin_object(
             Rc::new(|vm, args| {
                 let undefined = Value::Undefined;
                 let this = args.first().unwrap_or(&undefined);
@@ -300,7 +299,7 @@ pub(crate) fn install_bigint_and_number_builtins(
     );
     number_ctor_map.borrow_mut().properties.insert(
         PKey::String("isNaN".to_string()),
-        PropertyDescriptor::data(builtin_object(
+        non_enum_data(builtin_object(
             Rc::new(|_vm, args| {
                 let value_idx = if args.len() > 1 { 1 } else { 0 };
                 let is_nan = matches!(args.get(value_idx), Some(Value::Number(n)) if n.is_nan());

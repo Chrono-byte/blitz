@@ -717,6 +717,12 @@ impl Compiler {
                     }
                 }
 
+                let thrown_slot = self.alloc_temp_local("forof_thrown");
+                self.emit(Op::PushHandler, LINE);
+                let handler_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+
                 let loop_start = self.chunk.code.len();
 
                 self.emit(Op::GetLocal, LINE);
@@ -799,11 +805,7 @@ impl Compiler {
                 self.emit_short_signed(back_offset, LINE);
 
                 self.patch_jump(exit_jump);
-                self.emit(Op::Jump, LINE);
-                let end_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-
+                self.emit(Op::PopHandler, LINE);
                 let break_cleanup = self.chunk.code.len();
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
@@ -832,6 +834,21 @@ impl Compiler {
                 self.emit_byte(iterator_slot as u8, LINE);
                 self.emit(Op::IteratorClose, LINE);
                 self.emit(Op::Pop, LINE);
+                self.emit(Op::Jump, LINE);
+                let end_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+
+                self.patch_jump(handler_jump);
+                self.emit(Op::SetLocal, LINE);
+                self.emit_byte(thrown_slot as u8, LINE);
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(iterator_slot as u8, LINE);
+                self.emit(Op::IteratorClose, LINE);
+                self.emit(Op::Pop, LINE);
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(thrown_slot as u8, LINE);
+                self.emit(Op::Throw, LINE);
                 self.patch_jump(end_jump);
                 self.loop_depth = self.loop_depth.saturating_sub(1);
             }
