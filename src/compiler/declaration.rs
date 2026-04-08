@@ -1092,20 +1092,20 @@ impl Compiler {
                         .rposition(|state| state.name == label_name)
                         .ok_or_else(|| {
                             crate::errors::CompilerError::from(format!(
-                                "unknown label '{}'",
+                                "SyntaxError: unknown label '{}'",
                                 label_name
                             ))
                         })?;
                     if !self.label_patches[idx].can_continue {
                         return Err(crate::errors::CompilerError::from(
-                            "'continue' used with non-iteration label",
+                            "SyntaxError: 'continue' used with non-iteration label",
                         ));
                     }
                     self.label_patches[idx].continue_patches.push(patch_pos);
                 } else {
                     if self.continue_patches.is_empty() {
                         return Err(crate::errors::CompilerError::from(
-                            "'continue' used outside of a loop",
+                            "SyntaxError: 'continue' used outside of a loop",
                         ));
                     }
                     if let Some(patches) = self.continue_patches.last_mut() {
@@ -1127,7 +1127,7 @@ impl Compiler {
                         .rposition(|state| state.name == label_name)
                         .ok_or_else(|| {
                             crate::errors::CompilerError::from(format!(
-                                "unknown label '{}'",
+                                "SyntaxError: unknown label '{}'",
                                 label_name
                             ))
                         })?;
@@ -1135,7 +1135,7 @@ impl Compiler {
                 } else {
                     if self.break_patches.is_empty() {
                         return Err(crate::errors::CompilerError::from(
-                            "'break' used outside of a loop",
+                            "SyntaxError: 'break' used outside of a loop",
                         ));
                     }
                     if let Some(patches) = self.break_patches.last_mut() {
@@ -1581,6 +1581,26 @@ impl Compiler {
         {
             return Err(err);
         }
+        if function_is_strict {
+            let mut seen = HashSet::new();
+            for p in &func.params.items {
+                if let oast::BindingPattern::BindingIdentifier(id) = &p.pattern
+                    && !seen.insert(id.name.to_string())
+                {
+                    return Err(crate::errors::CompilerError::from(
+                        "SyntaxError: duplicate parameter name in strict mode",
+                    ));
+                }
+            }
+            if let Some(rest) = &func.params.rest
+                && let oast::BindingPattern::BindingIdentifier(id) = &rest.rest.argument
+                && !seen.insert(id.name.to_string())
+            {
+                return Err(crate::errors::CompilerError::from(
+                    "SyntaxError: duplicate parameter name in strict mode",
+                ));
+            }
+        }
         for p in &func.params.items {
             if let Some(err) =
                 Self::strict_binding_pattern_name_error(function_is_strict, &p.pattern)
@@ -1718,6 +1738,26 @@ impl Compiler {
 
         if let Some(err) = Self::strict_binding_name_error(function_is_strict, name) {
             return Err(err);
+        }
+        if function_is_strict {
+            let mut seen = HashSet::new();
+            for p in &func.params.items {
+                if let oast::BindingPattern::BindingIdentifier(id) = &p.pattern
+                    && !seen.insert(id.name.to_string())
+                {
+                    return Err(crate::errors::CompilerError::from(
+                        "SyntaxError: duplicate parameter name in strict mode",
+                    ));
+                }
+            }
+            if let Some(rest) = &func.params.rest
+                && let oast::BindingPattern::BindingIdentifier(id) = &rest.rest.argument
+                && !seen.insert(id.name.to_string())
+            {
+                return Err(crate::errors::CompilerError::from(
+                    "SyntaxError: duplicate parameter name in strict mode",
+                ));
+            }
         }
         for p in &func.params.items {
             if let Some(err) =

@@ -404,6 +404,15 @@ fn mark_object(
         return;
     }
     let obj_ref = obj.borrow();
+    if let Some(env) = &obj_ref.captured_lexical_env {
+        mark_environment_record(
+            env,
+            marked_objects,
+            marked_arrays,
+            marked_envs,
+            marked_promises,
+        );
+    }
     for desc in obj_ref.properties.values() {
         match desc {
             PropertyDescriptor::Data { value, .. } => mark_value(
@@ -476,11 +485,37 @@ fn mark_env(
 }
 
 #[cfg(feature = "gc_mark_sweep_prototype")]
+fn mark_environment_record(
+    env: &Rc<RefCell<crate::environment::EnvironmentRecord>>,
+    marked_objects: &mut HashSet<usize>,
+    marked_arrays: &mut HashSet<usize>,
+    marked_envs: &mut HashSet<usize>,
+    marked_promises: &mut HashSet<usize>,
+) {
+    let ptr = Rc::as_ptr(env) as usize;
+    if !marked_envs.insert(ptr) {
+        return;
+    }
+    let mut values = Vec::new();
+    env.borrow().collect_binding_values(&mut values);
+    for value in values {
+        mark_value(
+            &value,
+            marked_objects,
+            marked_arrays,
+            marked_envs,
+            marked_promises,
+        );
+    }
+}
+
+#[cfg(feature = "gc_mark_sweep_prototype")]
 fn clear_object(obj: &Rc<RefCell<ObjectData>>) {
     let mut obj = obj.borrow_mut();
     obj.properties.clear();
     obj.strong_prototype = None;
     obj.weak_prototype = None;
+    obj.captured_lexical_env = None;
     obj.extensible = true;
 }
 

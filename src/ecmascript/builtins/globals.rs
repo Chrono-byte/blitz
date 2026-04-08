@@ -114,8 +114,9 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
             let chunk = compiler::compile_oxc(prog, &eval_src)
                 .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
             let mut eval_vm = vm.fork_execution();
+            eval_vm.adopt_eval_context(vm);
             eval_vm.set_current_strict_mode(strict);
-            match eval_vm.run(chunk) {
+            match eval_vm.run_nested(chunk) {
                 Ok(value) => Ok(value),
                 Err(err) => {
                     if let Some(thrown) = eval_vm.last_uncaught_exception.take() {

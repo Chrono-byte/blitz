@@ -19,11 +19,56 @@
 use crate::bytecode::{Chunk, FunctionProto, Op};
 use crate::value::Value;
 use oxc_ast::ast as oast;
+use oxc_syntax::number::NumberBase;
 use std::rc::Rc;
 
 const LINE: u32 = 1;
 
 impl super::Compiler {
+    fn validate_literal_early_errors(
+        &self,
+        expr: &oast::Expression,
+    ) -> Result<(), crate::errors::CompilerError> {
+        match expr {
+            oast::Expression::NumericLiteral(n) if self.strict_context => {
+                let raw = n.raw.as_ref().map_or_else(
+                    || n.span.source_text(self.source_text.as_str()),
+                    oxc_span::Str::as_str,
+                );
+                let leading_zero = {
+                    let mut bytes = raw.bytes();
+                    matches!(
+                        (bytes.next(), bytes.next()),
+                        (Some(b'0'), Some(b'0'..=b'9'))
+                    )
+                };
+                if matches!(n.base, NumberBase::Octal) && leading_zero {
+                    return Err(crate::errors::CompilerError::from(
+                        "SyntaxError: legacy octal numeric literal in strict mode",
+                    ));
+                }
+                if matches!(n.base, NumberBase::Decimal | NumberBase::Float) && leading_zero {
+                    return Err(crate::errors::CompilerError::from(
+                        "SyntaxError: leading zero numeric literal in strict mode",
+                    ));
+                }
+            }
+            oast::Expression::StringLiteral(s) if self.strict_context => {
+                let raw = s.span.source_text(self.source_text.as_str());
+                let bytes = raw.as_bytes();
+                for idx in 0..bytes.len().saturating_sub(1) {
+                    if bytes[idx] == b'\\' && matches!(bytes[idx + 1], b'0'..=b'7') {
+                        return Err(crate::errors::CompilerError::from(
+                            "SyntaxError: legacy octal escape sequence in strict mode",
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub(super) fn alloc_temp_local(&mut self, prefix: &str) -> usize {
         self.add_local_with_mirror(format!("__{}_{}", prefix, self.locals.len()), None, false)
     }
@@ -243,7 +288,10 @@ impl super::Compiler {
     ) -> Result<(), crate::errors::CompilerError> {
         use oxc_ast::ast::Expression as OExpr;
         match expr {
-            OExpr::NumericLiteral(n) => self.emit_constant(Value::Number(n.value), LINE),
+            OExpr::NumericLiteral(n) => {
+                self.validate_literal_early_errors(expr)?;
+                self.emit_constant(Value::Number(n.value), LINE)
+            }
             OExpr::BigIntLiteral(n) => {
                 // Use n.raw if available, otherwise use source text directly
                 let parsed = if let Some(raw) = &n.raw {
@@ -321,7 +369,10 @@ impl super::Compiler {
                     .ok_or_else(|| crate::errors::CompilerError::from("invalid bigint literal"))?;
                 self.emit_constant(Value::BigInt(parsed), LINE);
             }
-            OExpr::StringLiteral(s) => self.emit_constant(Value::String(s.value.to_string()), LINE),
+            OExpr::StringLiteral(s) => {
+                self.validate_literal_early_errors(expr)?;
+                self.emit_constant(Value::String(s.value.to_string()), LINE)
+            }
             OExpr::TemplateLiteral(t) => {
                 let first = t
                     .quasis

@@ -13,7 +13,7 @@ use crate::errors::RuntimeError;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::value::{Value, ValueSlot};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 /// A single lexical binding entry inside an environment record.
 pub struct Binding {
     /// Shared storage cell for the binding value.
@@ -24,7 +24,7 @@ pub struct Binding {
     pub initialized: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 /// Declarative environment record with an optional outer environment.
 pub struct EnvironmentRecord {
     outer: Option<Weak<RefCell<EnvironmentRecord>>>,

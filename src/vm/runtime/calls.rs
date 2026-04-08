@@ -25,7 +25,7 @@ impl Vm {
         }
         args.reverse();
         let callee = self.pop()?;
-        self.tail_call_value(callee, args, Value::Undefined)
+        self.tail_call_value(callee, args, Value::Undefined, false)
     }
 
     fn tail_call_value(
@@ -33,12 +33,16 @@ impl Vm {
         callee: Value,
         args: Vec<Value>,
         this_value: Value,
+        prepend_this_for_builtins: bool,
     ) -> Result<(), RuntimeError> {
         self.prune_handlers_for_tail_call();
         match callee {
             Value::Builtin(f) => {
-                let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-                call_args.push(this_value.clone());
+                let mut call_args: Vec<Value> =
+                    Vec::with_capacity(args.len() + usize::from(prepend_this_for_builtins));
+                if prepend_this_for_builtins {
+                    call_args.push(this_value.clone());
+                }
                 call_args.extend_from_slice(&args);
                 let prev_this = std::mem::replace(&mut self.this_value, this_value);
                 let prev_closure_env = self.current_closure_env.clone();
@@ -54,8 +58,11 @@ impl Vm {
                 self.execute_return()
             }
             Value::BuiltinObject(f, _props) => {
-                let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-                call_args.push(this_value.clone());
+                let mut call_args: Vec<Value> =
+                    Vec::with_capacity(args.len() + usize::from(prepend_this_for_builtins));
+                if prepend_this_for_builtins {
+                    call_args.push(this_value.clone());
+                }
                 call_args.extend_from_slice(&args);
                 let prev_this = std::mem::replace(&mut self.this_value, this_value);
                 let prev_closure_env = self.current_closure_env.clone();
@@ -145,6 +152,6 @@ impl Vm {
                 callee
             );
         }
-        self.tail_call_value(callee, args, receiver)
+        self.tail_call_value(callee, args, receiver, true)
     }
 }

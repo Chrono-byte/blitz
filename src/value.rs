@@ -244,6 +244,8 @@ pub struct ObjectData {
     pub strong_prototype: Option<Value>,
     /// Prototype pointer (weak to prevent reference cycles)
     pub weak_prototype: Option<WeakObject>,
+    /// Lexical environment captured by function objects, if any.
+    pub captured_lexical_env: Option<Rc<RefCell<crate::environment::EnvironmentRecord>>>,
     /// Extensible flag
     pub extensible: bool,
 }
@@ -261,6 +263,7 @@ impl ObjectData {
             properties: IndexMap::new(),
             strong_prototype: None,
             weak_prototype: None,
+            captured_lexical_env: None,
             extensible: true,
         }
     }
@@ -278,6 +281,7 @@ impl ObjectData {
             properties: IndexMap::new(),
             strong_prototype: None,
             weak_prototype: Some(WeakObject::new(prototype)),
+            captured_lexical_env: None,
             extensible: true,
         }
     }
@@ -299,6 +303,21 @@ impl ObjectData {
     pub fn set_weak_prototype(&mut self, prototype: &Rc<RefCell<ObjectData>>) {
         self.strong_prototype = None;
         self.weak_prototype = Some(WeakObject::new(prototype));
+    }
+
+    /// Store a captured lexical environment on this object.
+    pub fn set_captured_lexical_env(
+        &mut self,
+        env: Option<Rc<RefCell<crate::environment::EnvironmentRecord>>>,
+    ) {
+        self.captured_lexical_env = env;
+    }
+
+    /// Return the captured lexical environment, if any.
+    pub fn captured_lexical_env(
+        &self,
+    ) -> Option<Rc<RefCell<crate::environment::EnvironmentRecord>>> {
+        self.captured_lexical_env.clone()
     }
 
     /// Set the prototype from a runtime value.

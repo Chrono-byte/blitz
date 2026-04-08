@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use num_bigint::BigInt as BigIntValue;
 
-use crate::runtime_utils::{builtin_object, js_number_to_string, non_enum_data};
+use crate::runtime_utils::{builtin_object, js_number_to_string, non_enum_data, strict_equal};
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 /// Fundamental primitive wrapper builtins currently migrated from runtime_utils.
@@ -173,11 +173,25 @@ pub(crate) fn install_bigint_and_number_builtins(
             );
             return Ok(Value::Object(obj_rc));
         }
-        let value_idx = if vm.current_new_target().is_some() || args.len() > 1 {
+        let value_idx = if !matches!(vm.this_value(), Value::Undefined)
+            && args.len() == 1
+            && args
+                .first()
+                .is_some_and(|first| strict_equal(first, &vm.this_value()))
+        {
+            usize::MAX
+        } else if args.len() > 1
+            && args
+                .first()
+                .is_some_and(|first| strict_equal(first, &vm.this_value()))
+        {
             1
         } else {
             0
         };
+        if value_idx == usize::MAX {
+            return Ok(Value::Number(0.0));
+        }
         let value = args.get(value_idx).cloned().unwrap_or(Value::Number(0.0));
         let n = vm.to_number_value(&value)?;
         Ok(Value::Number(n))

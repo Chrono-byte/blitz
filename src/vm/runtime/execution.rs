@@ -142,8 +142,8 @@ impl Vm {
             dynamic_import_jobs: VecDeque::new(),
             unhandled_rejection_hook: self.unhandled_rejection_hook.clone(),
             reference_stack: ReferenceStack::new(),
-            lexical_env: Rc::new(RefCell::new(EnvironmentRecord::new(None))),
-            global_env: Rc::new(RefCell::new(EnvironmentRecord::new(None))),
+            lexical_env: Rc::clone(&self.lexical_env),
+            global_env: Rc::clone(&self.global_env),
             yield_star_queue: None,
             current_arguments_object: None,
             current_arguments_mapped_count: 0,
@@ -918,6 +918,100 @@ impl Vm {
         }
     }
 
+    /// Execute a chunk without resetting the caller's live lexical bindings.
+    ///
+    /// This is used for direct `eval`, where the evaluated code must observe
+    /// and update the current execution context.
+    pub(crate) fn run_nested(&mut self, chunk: Chunk) -> Result<Value, RuntimeError> {
+        let saved_chunk = Rc::clone(&self.chunk);
+        let saved_ip = self.ip;
+        let saved_stack = self.stack.snapshot();
+        let saved_root_chunk = self.root_chunk.clone();
+        let saved_current_strict_mode = self.current_strict_mode;
+        let saved_current_closure_env = self.current_closure_env.clone();
+        let saved_pending_closure_env = self.pending_closure_env.clone();
+        let saved_gc_temp_roots = self.gc_temp_roots.clone();
+        let saved_this_value = self.this_value.clone();
+        let saved_yield_star_queue = self.yield_star_queue.clone();
+        let saved_current_arguments_object = self.current_arguments_object.clone();
+        let saved_current_arguments_mapped_count = self.current_arguments_mapped_count;
+        let saved_recent_return_value = self.recent_return_value.clone();
+        let saved_last_uncaught_exception = self.last_uncaught_exception.clone();
+        let saved_pending_exception = self.pending_exception;
+
+        let chunk_rc = Rc::new(chunk);
+        self.root_chunk = Some(Rc::clone(&chunk_rc));
+        self.chunk = chunk_rc;
+        self.ip = 0;
+        self.stack.clear();
+        self.current_strict_mode = self.chunk.root_strict;
+        self.gc_temp_roots.clear();
+        self.yield_star_queue = None;
+        self.this_value = self
+            .globals
+            .borrow()
+            .properties
+            .get(&PropertyKey::String("globalThis".to_string()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or(Value::Undefined);
+        self.begin_opcode_profile_run();
+
+        let result = loop {
+            match self.step(None) {
+                Ok(StepOutcome::Continue) => {
+                    self.pending_exception = false;
+                    self.maybe_collect_garbage_prototype();
+                }
+                Ok(StepOutcome::Return(result)) => {
+                    self.pending_exception = false;
+                    self.run_microtasks_if_needed()?;
+                    #[cfg(feature = "gc_mark_sweep_prototype")]
+                    {
+                        let _ = self.collect_garbage_prototype();
+                    }
+                    self.finish_opcode_profile_run("return");
+                    break Ok(result);
+                }
+                Ok(StepOutcome::Yield(_)) => {
+                    break Err(self.throw_type_error("yield used outside generator resume"));
+                }
+                Err(err) => {
+                    if self.pending_exception {
+                        self.pending_exception = false;
+                        continue;
+                    }
+                    #[cfg(feature = "gc_mark_sweep_prototype")]
+                    {
+                        let _ = self.collect_garbage_prototype();
+                    }
+                    self.finish_opcode_profile_run("error");
+                    break Err(err);
+                }
+            }
+        };
+
+        self.chunk = saved_chunk;
+        self.ip = saved_ip;
+        self.stack.restore_from(saved_stack);
+        self.root_chunk = saved_root_chunk;
+        self.current_strict_mode = saved_current_strict_mode;
+        self.current_closure_env = saved_current_closure_env;
+        self.pending_closure_env = saved_pending_closure_env;
+        self.gc_temp_roots = saved_gc_temp_roots;
+        self.this_value = saved_this_value;
+        self.yield_star_queue = saved_yield_star_queue;
+        self.current_arguments_object = saved_current_arguments_object;
+        self.current_arguments_mapped_count = saved_current_arguments_mapped_count;
+        self.recent_return_value = saved_recent_return_value;
+        self.last_uncaught_exception = saved_last_uncaught_exception;
+        self.pending_exception = saved_pending_exception;
+
+        result
+    }
+
     fn initialize_root_bindings(&mut self) {
         let slot_names = self.chunk.root_slot_names.clone();
         let slot_tdz = self.chunk.root_lexical_tdz.clone();
@@ -1333,7 +1427,11 @@ impl Vm {
             } => {
                 let call_args = self.prepare_call_args(&flat, proto)?;
                 let this_arg = Self::closure_lexical_this(&callee).unwrap_or(Value::Undefined);
-                if proto.is_async {
+                if proto.is_generator {
+                    let generator =
+                        self.create_generator_object(proto, env, call_args, this_arg, &callee)?;
+                    self.stack.push(generator);
+                } else if proto.is_async {
                     let promise =
                         self.invoke_async_closure(proto, env, call_args, this_arg, &callee)?;
                     self.stack.push(promise);
@@ -1431,7 +1529,11 @@ impl Vm {
                 let call_args = self.prepare_call_args(&args, proto)?;
                 // Argument validation removed in JS-first mode.
                 let receiver = Self::closure_lexical_this(&callee).unwrap_or(receiver);
-                if proto.is_async {
+                if proto.is_generator {
+                    let generator =
+                        self.create_generator_object(proto, env, call_args, receiver, &callee)?;
+                    self.stack.push(generator);
+                } else if proto.is_async {
                     let promise =
                         self.invoke_async_closure(proto, env, call_args, receiver, &callee)?;
                     self.stack.push(promise);
@@ -1626,8 +1728,9 @@ impl Vm {
         let chunk = crate::compiler::compile_oxc_repl(prog, &wrapped)
             .map_err(|e| RuntimeError::from(format!("compile: {}", e)))?;
         let mut child = self.fork_execution();
+        child.adopt_eval_context(self);
         child.set_current_strict_mode(strict);
-        match child.run(chunk) {
+        match child.run_nested(chunk) {
             Ok(value) => Ok(value),
             Err(err) => {
                 if let Some(thrown) = child.last_uncaught_exception.take() {
@@ -1637,6 +1740,50 @@ impl Vm {
                 }
             }
         }
+    }
+
+    /// Build a lexical environment for direct eval that can see the caller's
+    /// current local bindings by name while still chaining to the existing
+    /// lexical environment.
+    pub(crate) fn capture_eval_lexical_env(&self) -> Rc<RefCell<EnvironmentRecord>> {
+        let outer = Rc::clone(&self.lexical_env);
+        let env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(outer))));
+        let names = self
+            .current_slot_names
+            .as_ref()
+            .unwrap_or(&self.chunk.root_slot_names);
+        for (idx, maybe_name) in names.iter().enumerate() {
+            let Some(name) = maybe_name else {
+                continue;
+            };
+            if let Some(cell) = self.locals.get(idx) {
+                let initialized = !matches!(*cell.borrow(), Value::Uninitialized);
+                env.borrow_mut()
+                    .create_mutable_binding(name.clone(), Rc::clone(cell), initialized);
+            }
+        }
+        env
+    }
+
+    /// Replace the current lexical environment.
+    pub(crate) fn set_lexical_env(&mut self, env: Rc<RefCell<EnvironmentRecord>>) {
+        self.lexical_env = env;
+    }
+
+    /// Adopt the caller's live bindings and slot metadata for a nested eval run.
+    pub(crate) fn adopt_eval_context(&mut self, parent: &Vm) {
+        self.locals = parent.locals.clone();
+        self.current_slot_types = parent.current_slot_types.clone();
+        self.current_slot_names = parent.current_slot_names.clone();
+        self.current_closure_env = parent.current_closure_env.clone();
+        self.pending_closure_env = parent.pending_closure_env.clone();
+        self.this_value = parent.this_value.clone();
+        self.construct_new_target = parent.construct_new_target.clone();
+        self.current_arguments_object = parent.current_arguments_object.clone();
+        self.current_arguments_mapped_count = parent.current_arguments_mapped_count;
+        self.current_strict_mode = parent.current_strict_mode;
+        self.set_lexical_env(parent.capture_eval_lexical_env());
+        self.global_env = Rc::clone(&parent.global_env);
     }
 
     fn is_unscopable_binding(
@@ -4355,9 +4502,16 @@ impl Vm {
                 *self.locals[idx].borrow_mut() = Value::Uninitialized;
             }
         }
-        let fn_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(Rc::clone(
-            &self.lexical_env,
-        )))));
+        let captured_lexical_env = match &callee {
+            Value::Closure { props, .. } => props
+                .borrow()
+                .captured_lexical_env()
+                .unwrap_or_else(|| Rc::clone(&self.lexical_env)),
+            _ => Rc::clone(&self.lexical_env),
+        };
+        let fn_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(
+            captured_lexical_env,
+        ))));
         for (idx, maybe_name) in proto.slot_names.iter().enumerate() {
             if let Some(name) = maybe_name
                 && idx < self.locals.len()
@@ -4768,6 +4922,9 @@ impl Vm {
             },
             props: Rc::clone(&props),
         };
+        props
+            .borrow_mut()
+            .set_captured_lexical_env(Some(Rc::clone(&self.lexical_env)));
 
         if closure_proto.captures_this
             && let Some(home_object) = self.current_method_home_object()
