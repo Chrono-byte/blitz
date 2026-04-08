@@ -1717,15 +1717,6 @@ impl Vm {
                 let should_sync_global = outer_env
                     .as_ref()
                     .is_some_and(|outer_rc| Rc::ptr_eq(outer_rc, &self.global_env));
-                if crate::trace::enabled() && name.starts_with("st_") {
-                    eprintln!(
-                        "[trace] set_lexical_identifier_value '{}' decl-binding sync_global={} -> {}",
-                        name,
-                        should_sync_global,
-                        value.type_name()
-                    );
-                    crate::trace::value_string("[trace]   value", &value);
-                }
                 if should_sync_global {
                     let key = PropertyKey::String(name.to_string());
                     self.globals
@@ -1799,14 +1790,6 @@ impl Vm {
                 if found
                     && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
                 {
-                    if crate::trace::enabled() && name.starts_with("st_") {
-                        eprintln!(
-                            "[trace] set_lexical_identifier_value '{}' via with-env -> {}",
-                            name,
-                            value.type_name()
-                        );
-                        crate::trace::value_string("[trace]   value", &value);
-                    }
                     let _ =
                         self.set_property_host(&binding_object, &Value::String(name_str), value)?;
                     self.bump_object_generation(&binding_object);
@@ -2429,35 +2412,9 @@ impl Vm {
                 if let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone)
                     && self.set_with_env_binding_value(&name, v.clone())?
                 {
-                    if crate::trace::enabled() && name.starts_with("st_") {
-                        eprintln!(
-                            "[trace] SetLocal '{}' satisfied by with-env -> {}",
-                            name,
-                            v.type_name()
-                        );
-                        crate::trace::value_string("[trace]   value", &v);
-                    }
                     return Ok(StepOutcome::Continue);
                 }
                 ensure_slot(&mut self.locals, slot);
-                if crate::trace::enabled()
-                    && self
-                        .chunk
-                        .root_slot_names
-                        .get(slot)
-                        .and_then(Clone::clone)
-                        .as_deref()
-                        .is_some_and(|name| name.starts_with("st_"))
-                {
-                    let name = self
-                        .chunk
-                        .root_slot_names
-                        .get(slot)
-                        .and_then(Clone::clone)
-                        .unwrap();
-                    eprintln!("[trace] SetLocal '{}' -> {}", name, v.type_name());
-                    crate::trace::value_string("[trace]   value", &v);
-                }
                 *self.locals[slot].borrow_mut() = v;
                 if let Some(arguments_object) = self.current_arguments_object.clone()
                     && slot < self.current_arguments_mapped_count
@@ -2486,47 +2443,13 @@ impl Vm {
                 } else {
                     return Err(self.throw_reference_error(&format!("{name} is not defined")));
                 };
-                if crate::trace::enabled() {
-                    eprintln!("[trace] GetGlobal '{}' -> {}", name, v.type_name());
-                    crate::trace::value_string("[trace]   value", &v);
-                }
                 self.stack.push(v);
             }
             Op::SetGlobal => {
                 let idx = self.read_short()? as usize;
                 let name = self.string_constant(idx)?;
                 let v = self.pop()?;
-                if crate::trace::enabled() && name.starts_with("st_") {
-                    eprintln!(
-                        "[trace] SetGlobal '{}' -> {}",
-                        name,
-                        v.type_name()
-                    );
-                    crate::trace::value_string("[trace]   value", &v);
-                }
                 if !self.set_lexical_identifier_value(&name, v.clone())? {
-                    if let Some(slot) = self
-                        .chunk
-                        .root_slot_names
-                        .iter()
-                        .position(|maybe_name| maybe_name.as_deref() == Some(name.as_str()))
-                    {
-                        if let Some(cell) = self.locals.get(slot) {
-                            *cell.borrow_mut() = v.clone();
-                        }
-                        let key = PropertyKey::String(name.clone());
-                        self.globals
-                            .borrow_mut()
-                            .properties
-                            .insert(key, PropertyDescriptor::data(v.clone()));
-                        if crate::trace::enabled() && name.starts_with("st_") {
-                            eprintln!(
-                                "[trace] SetGlobal '{}' mirrored directly to root slot {}",
-                                name, slot
-                            );
-                        }
-                        return Ok(StepOutcome::Continue);
-                    }
                     let key = PropertyKey::String(name.clone());
                     let current = self.globals.borrow().properties.get(&key).cloned();
                     match current {
@@ -2601,18 +2524,6 @@ impl Vm {
                     .find(|proto| Rc::as_ptr(&proto.chunk) == Rc::as_ptr(&self.chunk))
                     .and_then(|proto| proto.upvalues.get(idx))
                     .and_then(|spec| spec.mirror_global_name.clone());
-                if crate::trace::enabled()
-                    && mirror_global_name
-                        .as_deref()
-                        .is_some_and(|name| name.starts_with("st_"))
-                {
-                    eprintln!(
-                        "[trace] SetUpvalue '{}' -> {}",
-                        mirror_global_name.as_deref().unwrap(),
-                        value.type_name()
-                    );
-                    crate::trace::value_string("[trace]   value", &value);
-                }
                 let env = self
                     .current_closure_env
                     .as_ref()
@@ -4927,10 +4838,6 @@ impl Vm {
         } else {
             return Err(self.throw_reference_error(&format!("{name} is not defined")));
         };
-        if crate::trace::enabled() {
-            eprintln!("[trace] GetGlobalIC '{}' -> {}", name, value.type_name());
-            crate::trace::value_string("[trace]   value", &value);
-        }
         self.stack.push(value);
         Ok(())
     }
