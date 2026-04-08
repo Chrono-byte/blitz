@@ -16,7 +16,7 @@ use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 impl Vm {
     fn prune_stale_handlers(&mut self) {
@@ -28,6 +28,15 @@ impl Vm {
         {
             self.handlers.pop();
         }
+    }
+
+    /// Clear the property get inline cache.
+    ///
+    /// This is a blunt invalidation used when allocating fresh objects whose
+    /// addresses may be recycled by `Rc`. It avoids stale cache hits across
+    /// distinct allocations that happen to reuse the same pointer value.
+    pub(crate) fn clear_property_get_ic_cache(&mut self) {
+        self.property_get_ic_cache.clear();
     }
 
     // -----------------------------------------------------------------------
@@ -80,6 +89,60 @@ impl Vm {
         };
         vm.populate_realm_intrinsics(intrinsics);
         vm
+    }
+
+    /// Fork a new VM for nested execution while preserving the current realm.
+    ///
+    /// This is used for `eval`/`Function`-style dynamic execution that must
+    /// observe the same realm intrinsics and globals as the caller.
+    pub(crate) fn fork_execution(&self) -> Self {
+        let globals = Rc::clone(&self.globals);
+        let this_value = self
+            .globals
+            .borrow()
+            .properties
+            .get(&PropertyKey::String("globalThis".to_string()))
+            .and_then(|d| match d {
+                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or(Value::Undefined);
+        Self {
+            realm: self.realm.clone(),
+            chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
+            ip: 0,
+            stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
+            locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
+            this_value,
+            current_closure_env: None,
+            pending_closure_env: None,
+            gc_temp_roots: Vec::new(),
+            globals,
+            call_stack: CallStack::with_capacity(FRAMES_INITIAL_CAPACITY),
+            root_chunk: None,
+            current_slot_types: None,
+            obj_generations: HashMap::new(),
+            property_get_ic_cache: HashMap::new(),
+            bg_runtime: Arc::clone(&self.bg_runtime),
+            handlers: HandlerStack::with_capacity(32),
+            pending_exception: false,
+            module_loader: Rc::clone(&self.module_loader),
+            module_table: Vec::new(),
+            construct_new_target: None,
+            recent_return_value: None,
+            last_uncaught_exception: None,
+            microtasks: VecDeque::new(),
+            dynamic_import_jobs: VecDeque::new(),
+            unhandled_rejection_hook: self.unhandled_rejection_hook.clone(),
+            reference_stack: ReferenceStack::new(),
+            lexical_env: Rc::new(RefCell::new(EnvironmentRecord::new(None))),
+            global_env: Rc::new(RefCell::new(EnvironmentRecord::new(None))),
+            yield_star_queue: None,
+            gc_step_counter: 0,
+            opcode_profiling_enabled: self.opcode_profiling_enabled,
+            opcode_counts: [0; OP_COUNT],
+            run_started_at: None,
+        }
     }
 
     fn begin_opcode_profile_run(&mut self) {
@@ -804,7 +867,7 @@ impl Vm {
         call_args: Vec<Value>,
         this_value: Value,
     ) -> Result<Value, RuntimeError> {
-        let mut child = Vm::new(Rc::clone(&self.globals));
+        let mut child = self.fork_execution();
         child.push_call_frame(proto, closure_env, call_args, this_value)?;
         let runner = Rc::new(RefCell::new(GeneratorRunner {
             vm: child,
@@ -1430,7 +1493,7 @@ impl Vm {
         let prog = session.program();
         let chunk = crate::compiler::compile_oxc(prog, &wrapped)
             .map_err(|e| RuntimeError::from(format!("compile: {}", e)))?;
-        let mut child = Vm::new(Rc::clone(&self.globals));
+        let mut child = self.fork_execution();
         let _ = child.run(chunk)?;
         Ok(child
             .get_global("__tsblitz_eval_result")
@@ -4209,6 +4272,7 @@ impl Vm {
         {
             props.borrow_mut().set_prototype_value(proto_val);
         }
+        self.property_get_ic_cache.clear();
 
         self.stack
             .push(Value::Array(Rc::clone(&arr_rc), Rc::clone(&props)));
@@ -4262,6 +4326,7 @@ impl Vm {
         {
             data.set_prototype_value(proto_val);
         }
+        self.property_get_ic_cache.clear();
         let obj_rc = Rc::new(RefCell::new(data));
         self.stack.push(Value::Object(Rc::clone(&obj_rc)));
         if crate::trace::enabled() {

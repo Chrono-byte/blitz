@@ -142,6 +142,27 @@ pub fn set_strict_override(v: Option<bool>) {
     });
 }
 
+/// Return the current thread-local strict override, if any.
+pub(crate) fn strict_override() -> Option<bool> {
+    STRICT_OVERRIDE.with(|m| *m.borrow())
+}
+
+/// Temporarily set the thread-local strict override while running `f`.
+pub fn with_strict_override<R>(v: Option<bool>, f: impl FnOnce() -> R) -> R {
+    struct ResetStrict(Option<bool>);
+
+    impl Drop for ResetStrict {
+        fn drop(&mut self) {
+            set_strict_override(self.0);
+        }
+    }
+
+    let previous = strict_override();
+    set_strict_override(v);
+    let _reset = ResetStrict(previous);
+    f()
+}
+
 /// Run static type checking for a parsed program.
 ///
 /// # Errors

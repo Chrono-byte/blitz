@@ -552,12 +552,9 @@ pub(crate) fn strict_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
-pub(crate) fn static_builtin_arg_offset(vm: &Vm, args: &[Value], _global_name: &str) -> usize {
-    if let Some(first) = args.first() {
-        let this_val = vm.this_value();
-        if !matches!(this_val, Value::Undefined) && strict_equal(first, &this_val) {
-            return 1;
-        }
+pub(crate) fn static_builtin_arg_offset(vm: &Vm, _args: &[Value], _global_name: &str) -> usize {
+    if vm.current_new_target().is_some() || !matches!(vm.this_value(), Value::Undefined) {
+        return 1;
     }
     0
 }

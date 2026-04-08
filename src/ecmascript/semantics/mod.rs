@@ -1088,7 +1088,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
 
     let function_ctor_globals = Rc::clone(globals);
     let function_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-        let off = static_builtin_arg_offset(vm, args, "Function");
+        let off = if vm.current_new_target().is_some() {
+            1
+        } else {
+            0
+        };
         let user_args = args.get(off..).unwrap_or(&[]);
         let body_src = if let Some(last) = user_args.last() {
             vm.to_string(last)?
@@ -1101,20 +1105,19 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             params.push(vm.to_string(&user_args[idx])?);
         }
         let source = format!(
-            "function __tsblitz_dynamic({}) {{\n{}\n}}\n__tsblitz_eval_result = __tsblitz_dynamic;",
+            "(function __tsblitz_dynamic({}) {{\n{}\n}})",
             params.join(","),
             body_src
         );
-        let session =
-            Parser::parse_source(&source).map_err(|e| syntax_error(vm, format!("parse: {}", e)))?;
-        let prog = session.program();
-        let chunk = compiler::compile_oxc(prog, &source)
-            .map_err(|e| syntax_error(vm, format!("compile: {}", e)))?;
-        let mut child = Vm::new(Rc::clone(&function_ctor_globals));
-        child.run(chunk)?;
-        let result = child
-            .get_global("__tsblitz_eval_result")
-            .unwrap_or(Value::Undefined);
+        let chunk = crate::typecheck::with_strict_override(None, || {
+            let session = Parser::parse_source(&source)
+                .map_err(|e| syntax_error(vm, format!("parse: {}", e)))?;
+            let prog = session.program();
+            compiler::compile_oxc_repl(prog, &source)
+                .map_err(|e| syntax_error(vm, format!("compile: {}", e)))
+        })?;
+        let mut child = vm.fork_execution();
+        let result = child.run(chunk)?;
         match &result {
             Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
                 props.borrow_mut().properties.insert(
@@ -1264,6 +1267,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     .unwrap_or(Value::Null);
                 let mut inst = ObjectData::new();
                 inst.set_prototype_value(proto);
+                vm.clear_property_get_ic_cache();
                 Ok(Value::Object(Rc::new(RefCell::new(inst))))
             }
             _ => vm.to_object_value(value),

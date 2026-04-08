@@ -663,10 +663,11 @@ fn builtin_eval_script(globals: &Rc<RefCell<ObjectData>>, args: &[Value]) -> Res
     // Rc::clone gives us a shared handle — the new VM sees mutations from
     // the calling VM and vice versa. This matches spec: evalScript runs
     // in the SAME realm.
-    let session = Parser::parse_source(&src).map_err(|e| format!("evalScript parse: {}", e))?;
-    let prog = session.program();
-    let chunk =
-        compiler::compile_oxc(prog, &src).map_err(|e| format!("evalScript compile: {}", e))?;
+    let chunk = typecheck::with_strict_override(None, || {
+        let session = Parser::parse_source(&src).map_err(|e| format!("evalScript parse: {}", e))?;
+        let prog = session.program();
+        compiler::compile_oxc(prog, &src).map_err(|e| format!("evalScript compile: {}", e))
+    })?;
     let mut eval_vm = Vm::new(Rc::clone(globals));
     eval_vm
         .run(chunk)
