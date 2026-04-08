@@ -386,6 +386,12 @@ pub struct Vm {
     pub(super) global_env: Rc<RefCell<EnvironmentRecord>>,
     /// Queue of values for the current `yield*` expression, if any.
     pub(super) yield_star_queue: Option<VecDeque<Value>>,
+    /// Live arguments object for the currently executing frame, if any.
+    pub(super) current_arguments_object: Option<Value>,
+    /// Number of leading arguments currently mapped to local slots.
+    pub(super) current_arguments_mapped_count: usize,
+    /// Current strict-mode state for the active call context.
+    pub(super) current_strict_mode: bool,
     /// Legacy step counter retained for non-GC builds and diagnostics.
     pub(super) gc_step_counter: usize,
     /// Whether runtime opcode profiling is enabled for this VM instance.

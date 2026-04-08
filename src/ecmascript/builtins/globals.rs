@@ -7,7 +7,6 @@ use crate::runtime_utils::{
     global_parse_float, global_parse_int, static_builtin_arg_offset, syntax_error,
 };
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
-use crate::vm::Vm;
 
 fn is_js_line_terminator(c: char) -> bool {
     matches!(c, '\u{000A}' | '\u{000D}' | '\u{2028}' | '\u{2029}')
@@ -92,21 +91,28 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
             } else if source_is_whitespace_and_comments_only(src) {
                 return Ok(Value::Undefined);
             }
-            match vm.eval_expression_source(src) {
-                Ok(value) => return Ok(value),
-                Err(err) => {
-                    let msg = err.to_string();
-                    if !msg.contains("parse:") && !msg.contains("compile:") {
-                        return Err(err);
+            if !vm.is_strict_mode() {
+                match vm.eval_expression_source(src) {
+                    Ok(value) => return Ok(value),
+                    Err(err) => {
+                        let msg = err.to_string();
+                        if !msg.contains("parse:") && !msg.contains("compile:") {
+                            return Err(err);
+                        }
                     }
                 }
             }
-            let session = Parser::parse_source(src)
+            let eval_src = if vm.is_strict_mode() {
+                format!("'use strict';\n{src}")
+            } else {
+                src.to_string()
+            };
+            let session = Parser::parse_source(&eval_src)
                 .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
             let prog = session.program();
-            let chunk = compiler::compile_oxc(prog, src)
+            let chunk = compiler::compile_oxc(prog, &eval_src)
                 .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
-            let mut eval_vm = Vm::new(vm.globals_rc());
+            let mut eval_vm = vm.fork_execution();
             eval_vm.run(chunk)
         }))),
     );

@@ -749,6 +749,24 @@ fn imported_binding_assignment_is_rejected() {
 }
 
 #[test]
+fn strict_assignment_to_arguments_is_rejected() {
+    let src = r#"
+        function testcase() {
+            'use strict';
+            arguments = 7;
+        }
+    "#;
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+
+    let err = compile(program, session.source()).expect_err("compile should fail");
+    assert!(
+        err.to_string().contains("not allowed in strict mode"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn nullish_coalescing_is_supported() {
     let src = "1 ?? 2;";
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");

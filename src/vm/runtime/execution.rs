@@ -81,6 +81,9 @@ impl Vm {
             lexical_env: Rc::clone(&global_env),
             global_env,
             yield_star_queue: None,
+            current_arguments_object: None,
+            current_arguments_mapped_count: 0,
+            current_strict_mode: false,
             gc_step_counter: 0,
             opcode_profiling_enabled: std::env::var("BLITZ_VM_PROFILE")
                 .ok()
@@ -140,6 +143,9 @@ impl Vm {
             lexical_env: Rc::new(RefCell::new(EnvironmentRecord::new(None))),
             global_env: Rc::new(RefCell::new(EnvironmentRecord::new(None))),
             yield_star_queue: None,
+            current_arguments_object: None,
+            current_arguments_mapped_count: 0,
+            current_strict_mode: false,
             gc_step_counter: 0,
             opcode_profiling_enabled: self.opcode_profiling_enabled,
             opcode_counts: [0; OP_COUNT],
@@ -710,7 +716,7 @@ impl Vm {
     /// Returns whether the current execution frame is in strict mode.
     /// If there are no frames (root-level execution), returns false.
     pub fn is_strict_mode(&self) -> bool {
-        self.call_stack.last().is_some_and(|f| f.is_strict)
+        self.current_strict_mode
     }
 
     /// Return own keys for a global value if it is an object or closure.
@@ -794,6 +800,7 @@ impl Vm {
         self.stack.clear();
         self.locals.clear();
         self.call_stack.clear();
+        self.current_strict_mode = false;
         self.handlers.clear();
         self.root_chunk = None;
         self.current_slot_types = None;
@@ -839,6 +846,7 @@ impl Vm {
         self.stack.clear();
         self.locals.clear();
         self.call_stack.clear();
+        self.current_strict_mode = false;
         self.handlers.clear();
         self.current_slot_types = None;
         self.current_closure_env = None;
@@ -1592,17 +1600,18 @@ impl Vm {
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the evaluation fails.
     pub fn eval_expression_source(&mut self, source: &str) -> Result<Value, RuntimeError> {
-        let wrapped = format!("__tsblitz_eval_result = ({});", source);
+        let wrapped = if self.is_strict_mode() {
+            format!("'use strict'; (function() {{ return ({}); }})()", source)
+        } else {
+            format!("(function() {{ return ({}); }})()", source)
+        };
         let session = crate::parser::Parser::parse_source(&wrapped)
             .map_err(|e| RuntimeError::from(format!("parse: {}", e)))?;
         let prog = session.program();
-        let chunk = crate::compiler::compile_oxc(prog, &wrapped)
+        let chunk = crate::compiler::compile_oxc_repl(prog, &wrapped)
             .map_err(|e| RuntimeError::from(format!("compile: {}", e)))?;
         let mut child = self.fork_execution();
-        let _ = child.run(chunk)?;
-        Ok(child
-            .get_global("__tsblitz_eval_result")
-            .unwrap_or(Value::Undefined))
+        child.run(chunk)
     }
 
     fn is_unscopable_binding(
@@ -2271,6 +2280,8 @@ impl Vm {
                         self.current_slot_types = caller_slot_types;
                         self.stack.restore_from(saved_stack);
                         self.call_stack.truncate(caller_frame_len);
+                        self.current_strict_mode =
+                            self.call_stack.last().is_some_and(|f| f.is_strict);
                         self.handlers.truncate(caller_handler_len);
                     }
                     result
@@ -2401,6 +2412,18 @@ impl Vm {
                 }
                 ensure_slot(&mut self.locals, slot);
                 *self.locals[slot].borrow_mut() = v;
+                if let Some(arguments_object) = self.current_arguments_object.clone()
+                    && slot < self.current_arguments_mapped_count
+                {
+                    let key = PropertyKey::String(slot.to_string());
+                    if let Some((PropertyDescriptor::Data { writable: true, .. }, _)) =
+                        self.lookup_property_descriptor(&arguments_object, &key, 0)?
+                    {
+                        let value = self.locals[slot].borrow().clone();
+                        set_property(&arguments_object, &key, value)?;
+                        self.bump_object_generation(&arguments_object);
+                    }
+                }
             }
             Op::CloneLocalCell => {
                 let slot = self.read_byte()? as usize;
@@ -3840,7 +3863,26 @@ impl Vm {
             }
         };
 
-        data.properties.insert(key, new_desc);
+        let sync_arguments_value = match &new_desc {
+            PropertyDescriptor::Data {
+                value,
+                writable: true,
+                ..
+            } => Some(value.clone()),
+            _ => None,
+        };
+        data.properties.insert(key.clone(), new_desc);
+        if let Some(index) = array_index_from_key(&key)
+            && index < self.current_arguments_mapped_count
+            && matches!(
+                self.current_arguments_object.as_ref(),
+                Some(current) if values_equal(current, obj)
+            )
+            && let Some(value) = sync_arguments_value
+            && let Some(cell) = self.locals.get(index)
+        {
+            *cell.borrow_mut() = value;
+        }
         Ok(true)
     }
 
@@ -4086,6 +4128,9 @@ impl Vm {
         self.current_closure_env = frame.closure_env;
         self.lexical_env = frame.lexical_env;
         self.yield_star_queue = frame.yield_star_queue;
+        self.current_arguments_object = frame.arguments_object;
+        self.current_arguments_mapped_count = frame.arguments_mapped_count;
+        self.current_strict_mode = self.call_stack.last().is_some_and(|f| f.is_strict);
         // Handlers registered in the returning frame are now invalid.
         self.prune_stale_handlers();
         self.stack.push(result);
@@ -4267,12 +4312,25 @@ impl Vm {
             let args_for_arguments: Vec<Option<Value>> =
                 call_args.iter().map(|v| Some(v.clone())).collect();
             if proto.has_simple_parameter_list && !proto.is_strict {
+                let mapped_count = proto.arity.min(args_for_arguments.len());
                 let args_obj =
                     self.build_mapped_arguments_object(proto, callee.clone(), &args_for_arguments);
+                self.current_arguments_object = Some(args_obj.clone());
+                self.current_arguments_mapped_count = mapped_count;
                 self.locals[slot] = Rc::new(Mutex::new(args_obj));
             } else {
-                let arr_rc = Rc::new(RefCell::new(args_for_arguments));
                 let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+                for (idx, maybe_value) in args_for_arguments.iter().enumerate() {
+                    props.borrow_mut().properties.insert(
+                        PropertyKey::String(usize_to_decimal_string(idx)),
+                        PropertyDescriptor::Data {
+                            value: maybe_value.clone().unwrap_or(Value::Undefined),
+                            writable: true,
+                            enumerable: true,
+                            configurable: true,
+                        },
+                    );
+                }
                 if proto.is_strict {
                     let poison = Value::Builtin(Rc::new(|vm, _args| {
                         Err(vm.throw_type_error(
@@ -4300,9 +4358,20 @@ impl Vm {
                 }
                 props.borrow_mut().properties.insert(
                     PropertyKey::String("length".to_string()),
-                    PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+                    PropertyDescriptor::Data {
+                        value: Value::Number(args_for_arguments.len() as f64),
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
                 );
-                self.locals[slot] = Rc::new(Mutex::new(Value::Array(arr_rc, props)));
+                let object_proto = self.realm.object_prototype();
+                if !matches!(object_proto, Value::Null) {
+                    props.borrow_mut().set_prototype_value(object_proto);
+                }
+                self.current_arguments_object = None;
+                self.current_arguments_mapped_count = 0;
+                self.locals[slot] = Rc::new(Mutex::new(Value::Object(props)));
             }
         }
         self.pending_closure_env = None;
@@ -4348,7 +4417,10 @@ impl Vm {
             is_strict: proto.is_strict,
             lexical_env: Rc::clone(&self.lexical_env),
             yield_star_queue: self.yield_star_queue.take(),
+            arguments_object: self.current_arguments_object.take(),
+            arguments_mapped_count: self.current_arguments_mapped_count,
         });
+        self.current_strict_mode = proto.is_strict;
 
         self.configure_call_frame(proto, closure_env, call_args, this_value, callee)?;
 
@@ -4356,37 +4428,27 @@ impl Vm {
     }
 
     fn build_mapped_arguments_object(
-        &self,
+        &mut self,
         proto: &FunctionProto,
         callee: Value,
         args_for_arguments: &[Option<Value>],
     ) -> Value {
-        let obj_rc = Rc::new(RefCell::new(ObjectData::new()));
+        let obj_rc: Rc<RefCell<ObjectData>> =
+            gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         let arg_count = args_for_arguments.len();
         let mapped_count = proto.arity.min(self.locals.len());
         for idx in 0..arg_count {
             let key = PropertyKey::String(usize_to_decimal_string(idx));
             if idx < mapped_count {
-                let getter_cell = Rc::clone(&self.locals[idx]);
-                let setter_cell = Rc::clone(&self.locals[idx]);
-                let getter =
-                    Value::Builtin(Rc::new(move |_vm, _args| Ok(getter_cell.borrow().clone())));
-                let setter = Value::Builtin(Rc::new(move |_vm, args| {
-                    let value = if let Some(value) = args.get(1) {
-                        value.clone()
-                    } else if let Some(value) = args.first() {
-                        value.clone()
-                    } else {
-                        Value::Undefined
-                    };
-                    *setter_cell.borrow_mut() = value;
-                    Ok(Value::Undefined)
-                }));
                 obj_rc.borrow_mut().properties.insert(
                     key,
-                    PropertyDescriptor::Accessor {
-                        get: Some(getter),
-                        set: Some(setter),
+                    PropertyDescriptor::Data {
+                        value: args_for_arguments
+                            .get(idx)
+                            .cloned()
+                            .flatten()
+                            .unwrap_or(Value::Undefined),
+                        writable: true,
                         enumerable: true,
                         configurable: true,
                     },
@@ -4415,8 +4477,17 @@ impl Vm {
         );
         obj_rc.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(arg_count as f64)),
+            PropertyDescriptor::Data {
+                value: Value::Number(arg_count as f64),
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
         );
+        let object_proto = self.realm.object_prototype();
+        if !matches!(object_proto, Value::Null) {
+            obj_rc.borrow_mut().set_prototype_value(object_proto);
+        }
         Value::Object(obj_rc)
     }
 
@@ -4991,6 +5062,7 @@ impl Vm {
                 obj.type_name()
             )));
         }
+        let mut sync_arguments_slot = None;
         if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
             match desc {
                 PropertyDescriptor::Accessor { set, .. } => {
@@ -5014,6 +5086,14 @@ impl Vm {
                 }
                 PropertyDescriptor::Data { .. } => {}
             }
+            if matches!(
+                self.current_arguments_object.as_ref(),
+                Some(current) if values_equal(current, obj)
+            ) && let Some(index) = array_index_from_key(key)
+                && index < self.current_arguments_mapped_count
+            {
+                sync_arguments_slot = Some(index);
+            }
         }
         if self.is_strict_mode() {
             let extensible = match obj {
@@ -5029,6 +5109,17 @@ impl Vm {
         }
         set_property(obj, key, value)?;
         self.bump_object_generation(obj);
+        if let Some(index) = sync_arguments_slot
+            && let Some(cell) = self.locals.get(index)
+        {
+            *cell.borrow_mut() = self
+                .lookup_property_descriptor(obj, key, 0)?
+                .and_then(|(desc, _)| match desc {
+                    PropertyDescriptor::Data { value, .. } => Some(value),
+                    _ => None,
+                })
+                .unwrap_or(Value::Undefined);
+        }
 
         Ok(())
     }
@@ -5085,8 +5176,11 @@ impl Vm {
                 self.this_value = frame.this_value;
                 self.current_closure_env = frame.closure_env;
                 self.current_slot_types = frame.slot_types;
+                self.current_arguments_object = frame.arguments_object;
+                self.current_arguments_mapped_count = frame.arguments_mapped_count;
             }
         }
+        self.current_strict_mode = self.call_stack.last().is_some_and(|f| f.is_strict);
         // Drop handler records that belong to frames we just unwound.
         self.prune_stale_handlers();
 
@@ -7292,6 +7386,30 @@ mod tests {
             err.to_string()
                 .contains("strict arguments callee/caller is forbidden")
         );
+    }
+
+    #[test]
+    fn mapped_arguments_object_prototype_and_aliasing() {
+        let session = Parser::parse_source(
+            r#"
+            function testcase(a) {
+                arguments[0] = 2;
+                a = 3;
+                return Object.getPrototypeOf(arguments) === Object.prototype
+                    && arguments[0] === 3
+                    && a === 3
+                    && Object.getOwnPropertyDescriptor(arguments, "length").enumerable === false;
+            }
+            var result = testcase(1);
+        "#,
+        )
+        .expect("parse ok");
+        let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+        assert!(matches!(vm.get_global("result"), Some(Value::Bool(true))));
     }
 
     #[test]

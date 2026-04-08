@@ -564,6 +564,12 @@ impl super::Compiler {
                     oast::AssignmentOperator::Assign => match target {
                         oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
                             let name = id.name.as_str();
+                            if let Some(err) = Self::strict_binding_name_error(
+                                self.strict_context,
+                                name,
+                            ) {
+                                return Err(err);
+                            }
                             if self
                                 .current_module
                                 .as_ref()
@@ -668,6 +674,12 @@ impl super::Compiler {
                     | oast::AssignmentOperator::ShiftRightZeroFill => match target {
                         oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
                             let name = id.name.as_str();
+                            if let Some(err) = Self::strict_binding_name_error(
+                                self.strict_context,
+                                name,
+                            ) {
+                                return Err(err);
+                            }
                             if let Some(slot) = self.resolve_local(name) {
                                 self.emit(Op::GetLocal, LINE);
                                 self.emit_byte(slot as u8, LINE);

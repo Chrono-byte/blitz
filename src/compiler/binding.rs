@@ -134,6 +134,9 @@ impl super::Compiler {
         &mut self,
         name: &str,
     ) -> Result<(), crate::errors::CompilerError> {
+        if let Some(err) = Self::strict_binding_name_error(self.strict_context, name) {
+            return Err(err);
+        }
         if self
             .current_module
             .as_ref()

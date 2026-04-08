@@ -36,4 +36,9 @@ pub(crate) struct Frame {
     pub(crate) lexical_env: Rc<RefCell<EnvironmentRecord>>,
     /// The yield star queue for this frame.
     pub(crate) yield_star_queue: Option<VecDeque<Value>>,
+    /// The live arguments object for this frame, if the function uses mapped
+    /// arguments semantics.
+    pub(crate) arguments_object: Option<Value>,
+    /// Number of leading arguments that remain mapped to local slots.
+    pub(crate) arguments_mapped_count: usize,
 }
