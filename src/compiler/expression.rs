@@ -103,6 +103,39 @@ impl super::Compiler {
         Ok(())
     }
 
+    pub(super) fn try_emit_compare_jump_if_false(
+        &mut self,
+        expr: &oast::Expression,
+    ) -> Result<Option<usize>, crate::errors::CompilerError> {
+        use oxc_ast::ast::Expression as OExpr;
+        let OExpr::BinaryExpression(binary) = expr else {
+            return Ok(None);
+        };
+
+        let compare_op = match binary.operator {
+            oast::BinaryOperator::Equality => Op::Eq,
+            oast::BinaryOperator::StrictEquality => Op::StrictEq,
+            oast::BinaryOperator::Inequality => Op::Neq,
+            oast::BinaryOperator::StrictInequality => Op::StrictNeq,
+            oast::BinaryOperator::LessThan => Op::Lt,
+            oast::BinaryOperator::LessEqualThan => Op::Le,
+            oast::BinaryOperator::GreaterThan => Op::Gt,
+            oast::BinaryOperator::GreaterEqualThan => Op::Ge,
+            _ => return Ok(None),
+        };
+
+        self.compile_expr_oast(&binary.left)?;
+        self.compile_expr_oast(&binary.right)?;
+        self.emit(Op::CompareJumpIfFalse, LINE);
+        self.emit_byte(compare_op as u8, LINE);
+
+        // Return the start of the i16 offset field so callers can patch it.
+        let patch_addr = self.chunk.code.len();
+        self.emit_u16(0, LINE);
+
+        Ok(Some(patch_addr))
+    }
+
     fn emit_compound_assignment_op(&mut self, op: oast::AssignmentOperator) {
         match op {
             oast::AssignmentOperator::Addition => self.emit(Op::Add, LINE),
@@ -1239,19 +1272,30 @@ impl super::Compiler {
                 }
             },
             OExpr::ConditionalExpression(c) => {
-                self.compile_expr_oast(&c.test)?;
-                self.emit(Op::JumpIfFalse, LINE);
-                let jump_else = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-                self.compile_expr_oast(&c.consequent)?;
-                self.emit(Op::Jump, LINE);
-                let jump_end = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-                self.patch_jump(jump_else);
-                self.compile_expr_oast(&c.alternate)?;
-                self.patch_jump(jump_end);
+                if let Some(jump_else) = self.try_emit_compare_jump_if_false(&c.test)? {
+                    self.compile_expr_oast(&c.consequent)?;
+                    self.emit(Op::Jump, LINE);
+                    let jump_end = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.patch_jump(jump_else);
+                    self.compile_expr_oast(&c.alternate)?;
+                    self.patch_jump(jump_end);
+                } else {
+                    self.compile_expr_oast(&c.test)?;
+                    self.emit(Op::JumpIfFalse, LINE);
+                    let jump_else = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.compile_expr_oast(&c.consequent)?;
+                    self.emit(Op::Jump, LINE);
+                    let jump_end = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.patch_jump(jump_else);
+                    self.compile_expr_oast(&c.alternate)?;
+                    self.patch_jump(jump_end);
+                }
             }
             OExpr::SequenceExpression(seq) => {
                 let len = seq.expressions.len();

@@ -2733,6 +2733,26 @@ impl Vm {
                     self.jump(offset)?;
                 }
             }
+            Op::CompareJumpIfFalse => {
+                let compare_op = self.read_byte()?;
+                let offset = self.read_short_signed()?;
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let result = match Op::from_byte(compare_op) {
+                    Some(Op::Eq) => self.abstract_equality(&a, &b)?,
+                    Some(Op::Neq) => !self.abstract_equality(&a, &b)?,
+                    Some(Op::StrictEq) => values_equal(&a, &b),
+                    Some(Op::StrictNeq) => !values_equal(&a, &b),
+                    Some(Op::Lt) => a < b,
+                    Some(Op::Le) => a <= b,
+                    Some(Op::Gt) => a > b,
+                    Some(Op::Ge) => a >= b,
+                    _ => return Err(RuntimeError::from("Invalid compare-jump opcode")),
+                };
+                if !result {
+                    self.jump(offset)?;
+                }
+            }
             Op::JumpIfTrue => {
                 let offset = self.read_short_signed()?;
                 let v = self.pop()?;
@@ -2753,10 +2773,12 @@ impl Vm {
                 let key = self.pop()?;
                 let obj = self.pop()?;
                 let v = if let Some(i) = array_index_from_value(&key) {
-                    array_element_value(&obj, i).unwrap_or_else(|| {
-                        let k = self.to_property_key(&key).expect("property key conversion");
-                        self.get_property_value(&obj, &k).expect("property lookup")
-                    })
+                    if let Some(v) = array_element_value(&obj, i) {
+                        v
+                    } else {
+                        let k = self.to_property_key(&key)?;
+                        self.get_property_value(&obj, &k)?
+                    }
                 } else {
                     let k = self.to_property_key(&key)?;
                     self.get_property_value(&obj, &k)?
@@ -2764,12 +2786,12 @@ impl Vm {
                 if crate::trace::enabled() {
                     match self.to_property_key(&key) {
                         Ok(PropertyKey::String(s)) => {
-                        eprintln!(
-                            "[trace] GetProperty receiver={} key='{}' -> {}",
-                            obj.type_name(),
-                            s,
-                            v.type_name()
-                        );
+                            eprintln!(
+                                "[trace] GetProperty receiver={} key='{}' -> {}",
+                                obj.type_name(),
+                                s,
+                                v.type_name()
+                            );
                         }
                         Ok(PropertyKey::Symbol(_)) => {
                             eprintln!(
@@ -2816,31 +2838,34 @@ impl Vm {
                 let key = self.pop()?;
                 let obj = self.pop()?;
                 if let Some(i) = array_index_from_value(&key) {
-                    let strict = self.is_strict_mode();
-                    self.reference_stack.push(ReferenceRecord::new(
-                        obj.clone(),
-                        PropertyKey::String(i.to_string()),
-                        strict,
-                    ));
-                    let result = self.set_array_index_property(&obj, i, value.clone());
-                    if crate::trace::enabled()
-                        && let Some(reference) = self.reference_stack.last()
-                    {
-                        crate::trace::value_string("[trace]   reference base", &reference.base);
-                        match &reference.referenced_name {
-                            PropertyKey::String(name) => {
-                                eprintln!("[trace]   reference key='{}'", name);
+                    if matches!(obj, Value::Array(..)) {
+                        let strict = self.is_strict_mode();
+                        self.reference_stack.push(ReferenceRecord::new(
+                            obj.clone(),
+                            PropertyKey::String(i.to_string()),
+                            strict,
+                        ));
+                        let result = set_array_index_property(&obj, i, value.clone());
+                        if crate::trace::enabled()
+                            && let Some(reference) = self.reference_stack.last()
+                        {
+                            crate::trace::value_string("[trace]   reference base", &reference.base);
+                            match &reference.referenced_name {
+                                PropertyKey::String(name) => {
+                                    eprintln!("[trace]   reference key='{}'", name);
+                                }
+                                PropertyKey::Symbol(_) => {
+                                    eprintln!("[trace]   reference key=symbol");
+                                }
                             }
-                            PropertyKey::Symbol(_) => {
-                                eprintln!("[trace]   reference key=symbol");
-                            }
+                            eprintln!("[trace]   reference strict={}", reference.strict);
                         }
-                        eprintln!("[trace]   reference strict={}", reference.strict);
+                        let _ = self.reference_stack.pop();
+                        result?;
+                        self.bump_object_generation(&obj);
+                        self.stack.push(value);
+                        return Ok(StepOutcome::Continue);
                     }
-                    let _ = self.reference_stack.pop();
-                    result?;
-                    self.stack.push(value);
-                    return Ok(());
                 }
                 let k = self.to_property_key(&key)?;
                 let strict = self.is_strict_mode();
@@ -5125,6 +5150,13 @@ impl Vm {
                                 let offset = ((hi as i16) << 8) | (lo as i16);
                                 eprintln!("[diag]   {}: {:?} {}", j, op, offset);
                             }
+                            Op::CompareJumpIfFalse => {
+                                let cmp = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                let hi = self.chunk.code.get(j + 2).cloned().unwrap_or(0);
+                                let lo = self.chunk.code.get(j + 3).cloned().unwrap_or(0);
+                                let offset = ((hi as i16) << 8) | (lo as i16);
+                                eprintln!("[diag]   {}: {:?} cmp={} {}", j, op, cmp, offset);
+                            }
                             Op::SetLocal
                             | Op::GetLocal
                             | Op::Call
@@ -5306,6 +5338,13 @@ impl Vm {
                                 let lo = proto.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
                                 let val = ((hi << 8) | lo) as i16;
                                 eprintln!("[diag] {:#06}  {:12?} {}", j, op, val);
+                            }
+                            Op::CompareJumpIfFalse => {
+                                let cmp = proto.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                let hi = proto.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                                let lo = proto.chunk.code.get(j + 3).cloned().unwrap_or(0) as u16;
+                                let val = ((hi << 8) | lo) as i16;
+                                eprintln!("[diag] {:#06}  {:12?} cmp={} {}", j, op, cmp, val);
                             }
                             _ if opcode_width(op) == 2 => {
                                 let arg = proto.chunk.code.get(j + 1).cloned().unwrap_or(0);
@@ -5650,6 +5689,7 @@ fn opcode_width(op: Op) -> usize {
         | Op::BuildObject
         | Op::ArrayFromSpread => 2,
         Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
+        Op::CompareJumpIfFalse => 4,
         _ => 1,
     }
 }
@@ -5893,6 +5933,58 @@ fn array_index_from_key(key: &PropertyKey) -> Option<usize> {
         return None;
     }
     Some(idx as usize)
+}
+
+fn array_index_from_value(value: &Value) -> Option<usize> {
+    let Value::Number(n) = value else {
+        return None;
+    };
+    if !n.is_finite() || *n < 0.0 {
+        return None;
+    }
+    let idx = n.trunc();
+    if idx != *n || idx >= u32::MAX as f64 {
+        return None;
+    }
+    Some(idx as usize)
+}
+
+fn array_element_value(obj: &Value, index: usize) -> Option<Value> {
+    let Value::Array(arr, _) = obj else {
+        return None;
+    };
+    arr.borrow().get(index).cloned().flatten()
+}
+
+fn set_array_index_property(obj: &Value, index: usize, value: Value) -> Result<(), RuntimeError> {
+    let Value::Array(arr, props) = obj else {
+        return Ok(());
+    };
+    let mut p = props.borrow_mut();
+    let current_len = array_length(&p);
+    let next_len = current_len.max(index.saturating_add(1));
+    let dense_limit = arr.borrow().len().saturating_add(MAX_DENSE_ARRAY_GROWTH);
+    if index <= dense_limit {
+        let mut a = arr.borrow_mut();
+        if index >= a.len() {
+            a.resize(index + 1, Some(Value::Undefined));
+        }
+        a[index] = Some(value);
+        p.properties.insert(
+            PropertyKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(a.len() as f64)),
+        );
+    } else {
+        p.properties.insert(
+            PropertyKey::String(index.to_string()),
+            PropertyDescriptor::data(value),
+        );
+        p.properties.insert(
+            PropertyKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(next_len as f64)),
+        );
+    }
+    Ok(())
 }
 
 fn array_length(props: &ObjectData) -> usize {

@@ -304,6 +304,19 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                     len - 1
                 };
 
+                if let Value::Array(arr, _) = &receiver {
+                    let dense_len = arr.borrow().len().to_i64().unwrap_or(i64::MAX);
+                    let mut idx = k.min(dense_len.saturating_sub(1));
+                    while idx >= 0 {
+                        if let Some(Some(element)) = arr.borrow().get(idx as usize)
+                            && strict_equal(element, &search)
+                        {
+                            return Ok(Value::Number(idx.to_f64().unwrap_or(f64::NAN)));
+                        }
+                        idx -= 1;
+                    }
+                }
+
                 if len > 1_000_000 {
                     let mut candidates: Vec<u64> = Vec::new();
                     match &receiver {

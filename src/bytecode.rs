@@ -182,8 +182,8 @@ impl Chunk {
     /// `ip` is the index of the opcode byte. Returns `None` if `ip` is out of bounds,
     /// the opcode at `ip` is not a jump, or the computed target is out of bounds.
     pub fn jump_target_from_ip(&self, ip: usize) -> Option<usize> {
-        // need opcode + 2 bytes for i16 operand
-        if ip + 1 + 1 >= self.code.len() {
+        // need opcode + operand bytes
+        if ip >= self.code.len() {
             return None;
         }
         let b = self.code[ip];
@@ -191,9 +191,16 @@ impl Chunk {
         if !op.is_jump() {
             return None;
         }
-        // operand starts at ip + 1
-        let offset = self.read_i16_at(ip + 1)? as i32;
-        let next_instr = ip + 1 + 2;
+        let operand_pos = if matches!(op, Op::CompareJumpIfFalse) {
+            ip + 2
+        } else {
+            ip + 1
+        };
+        if operand_pos + 1 >= self.code.len() {
+            return None;
+        }
+        let offset = self.read_i16_at(operand_pos)? as i32;
+        let next_instr = operand_pos + 2;
         // offset is relative to the next instruction
         let target = (next_instr as i32).checked_add(offset)?;
         if target < 0 {
@@ -211,8 +218,7 @@ impl Chunk {
     ///
     /// Safety: callers must ensure no concurrent execution is reading/executing this `Chunk`.
     pub fn hotwire_jump_to_next(&mut self, ip: usize) -> Option<Op> {
-        // verify opcode + operand is present
-        if ip + 1 + 1 >= self.code.len() {
+        if ip >= self.code.len() {
             return None;
         }
         let byte = self.code[ip];
@@ -220,8 +226,12 @@ impl Chunk {
         if !op.is_jump() {
             return None;
         }
-        // set relative offset to 0 so target == next instruction
-        let ok = self.write_i16_at(ip + 1, 0);
+        let operand_pos = if matches!(op, Op::CompareJumpIfFalse) {
+            ip + 2
+        } else {
+            ip + 1
+        };
+        let ok = self.write_i16_at(operand_pos, 0);
         if !ok {
             return None;
         }
@@ -254,8 +264,7 @@ impl Chunk {
     ///
     /// The `target_ip` must be the byte index of the instruction to jump to.
     pub fn hotwire_redirect(&mut self, ip: usize, target_ip: usize) -> Option<Op> {
-        // verify opcode + operand is present
-        if ip + 1 + 1 >= self.code.len() || target_ip >= self.code.len() {
+        if ip >= self.code.len() || target_ip >= self.code.len() {
             return None;
         }
         let byte = self.code[ip];
@@ -263,14 +272,22 @@ impl Chunk {
         if !op.is_jump() {
             return None;
         }
+        let operand_pos = if matches!(op, Op::CompareJumpIfFalse) {
+            ip + 2
+        } else {
+            ip + 1
+        };
+        if operand_pos + 1 >= self.code.len() {
+            return None;
+        }
         // offset = target_ip - next_instr
-        let next_instr = ip + 1 + 2;
+        let next_instr = operand_pos + 2;
         let next_i = next_instr as i32;
         let t = target_ip as i32;
         let offset = t.checked_sub(next_i)?;
         // ensure offset fits in i16
         let offset_i16 = i16::try_from(offset).ok()?;
-        let ok = self.write_i16_at(ip + 1, offset_i16);
+        let ok = self.write_i16_at(operand_pos, offset_i16);
         if !ok {
             return None;
         }
@@ -472,10 +489,14 @@ pub enum Op {
     GetSuperProperty,
     /// Set super property (compiles to Object.getPrototypeOf(this).property = value).
     SetSuperProperty,
+    /// Compare two values and jump if the comparison is false.
+    /// Operand 1 encodes the comparison opcode (`Eq`, `Neq`, `Lt`, `Le`, `Gt`, `Ge`,
+    /// `StrictEq`, or `StrictNeq`).
+    CompareJumpIfFalse,
 }
 
 /// Total number of opcode variants.
-pub const OP_COUNT: usize = Op::SetSuperProperty as usize + 1;
+pub const OP_COUNT: usize = Op::CompareJumpIfFalse as usize + 1;
 
 impl Op {
     /// Converts a byte to an Op if valid, returns None otherwise
@@ -526,6 +547,7 @@ impl Op {
             Op::Return => "Return",
             Op::Jump => "Jump",
             Op::JumpIfFalse => "JumpIfFalse",
+            Op::CompareJumpIfFalse => "CompareJumpIfFalse",
             Op::BuildArray => "BuildArray",
             Op::BuildObject => "BuildObject",
             Op::GetProperty => "GetProperty",
@@ -579,7 +601,13 @@ impl Op {
 
     /// Returns a static slice of jump opcodes (no allocation).
     pub fn jumps() -> &'static [Op] {
-        static JUMPS: [Op; 4] = [Op::Jump, Op::JumpIfFalse, Op::JumpIfTrue, Op::JumpIfNullish];
+        static JUMPS: [Op; 5] = [
+            Op::Jump,
+            Op::JumpIfFalse,
+            Op::CompareJumpIfFalse,
+            Op::JumpIfTrue,
+            Op::JumpIfNullish,
+        ];
         &JUMPS
     }
 
@@ -587,7 +615,11 @@ impl Op {
     pub fn is_jump(&self) -> bool {
         matches!(
             self,
-            Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish
+            Op::Jump
+                | Op::JumpIfFalse
+                | Op::CompareJumpIfFalse
+                | Op::JumpIfTrue
+                | Op::JumpIfNullish
         )
     }
 
@@ -623,7 +655,7 @@ impl TryFrom<u8> for Op {
 
     fn try_from(b: u8) -> Result<Self, Self::Error> {
         if b < OP_COUNT as u8 {
-            // Safety: `Op` is #[repr(u8)] and has contiguous discriminants from 0..=SetSuperProperty.
+            // Safety: `Op` is #[repr(u8)] and has contiguous discriminants from 0..=CompareJumpIfFalse.
             Ok(unsafe { mem::transmute(b) })
         } else {
             Err(())

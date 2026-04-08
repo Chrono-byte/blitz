@@ -564,6 +564,7 @@ fn opcode_width(op: Op) -> usize {
         | Op::BuildObject
         | Op::ArrayFromSpread => 2,
         Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
+        Op::CompareJumpIfFalse => 4,
         _ => 1,
     }
 }
@@ -634,7 +635,11 @@ fn compile_for_loop_back_jump_targets_loop_start() {
                     back_target = Some((i + 3) as isize + offset);
                     i += 3;
                 }
-                Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => i += 3,
+                Op::JumpIfFalse
+                | Op::JumpIfTrue
+                | Op::JumpIfNullish
+                | Op::PushHandler => i += 3,
+                Op::CompareJumpIfFalse => i += 4,
                 Op::Const
                 | Op::MakeClosure
                 | Op::GetPropertyIC
@@ -818,6 +823,24 @@ fn nullish_coalescing_is_supported() {
     assert!(
         saw_coalesce,
         "expected nullish coalescing lowering to emit JumpIfNullish"
+    );
+}
+
+#[test]
+fn comparison_branches_use_compare_jump() {
+    let src = "if (a === b) { 1; } else { 2; } a === b ? 1 : 2;";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+
+    let chunk = compile(program, session.source()).expect("compile ok");
+    let saw_compare_jump = chunk
+        .code
+        .iter()
+        .filter_map(|b| Op::from_byte(*b))
+        .any(|op| matches!(op, Op::CompareJumpIfFalse));
+    assert!(
+        saw_compare_jump,
+        "expected comparison branching to emit CompareJumpIfFalse"
     );
 }
 

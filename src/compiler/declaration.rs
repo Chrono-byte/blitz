@@ -263,22 +263,37 @@ impl Compiler {
                 self.exit_scope();
             }
             OStmt::IfStatement(i) => {
-                self.compile_expr_oast(&i.test)?;
-                self.emit(Op::JumpIfFalse, LINE);
-                let jump_over = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-                self.compile_statement_oast(&i.consequent)?;
-                if let Some(alt) = &i.alternate {
-                    self.emit(Op::Jump, LINE);
-                    let jump_else = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
-                    self.patch_jump(jump_over);
-                    self.compile_statement_oast(alt)?;
-                    self.patch_jump(jump_else);
+                if let Some(jump_over) = self.try_emit_compare_jump_if_false(&i.test)? {
+                    self.compile_statement_oast(&i.consequent)?;
+                    if let Some(alt) = &i.alternate {
+                        self.emit(Op::Jump, LINE);
+                        let jump_else = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.patch_jump(jump_over);
+                        self.compile_statement_oast(alt)?;
+                        self.patch_jump(jump_else);
+                    } else {
+                        self.patch_jump(jump_over);
+                    }
                 } else {
-                    self.patch_jump(jump_over);
+                    self.compile_expr_oast(&i.test)?;
+                    self.emit(Op::JumpIfFalse, LINE);
+                    let jump_over = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.compile_statement_oast(&i.consequent)?;
+                    if let Some(alt) = &i.alternate {
+                        self.emit(Op::Jump, LINE);
+                        let jump_else = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.patch_jump(jump_over);
+                        self.compile_statement_oast(alt)?;
+                        self.patch_jump(jump_else);
+                    } else {
+                        self.patch_jump(jump_over);
+                    }
                 }
             }
             OStmt::SwitchStatement(s) => {
