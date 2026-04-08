@@ -97,6 +97,30 @@ impl EnvironmentRecord {
         );
     }
 
+    /// Mark an existing binding as initialized, if present.
+    pub fn set_binding_initialized(&mut self, name: &str, initialized: bool) -> bool {
+        if let Some(binding) = self.bindings.get_mut(name) {
+            binding.initialized = initialized;
+            return true;
+        }
+        false
+    }
+
+    /// Mark the first matching binding in this record chain as initialized.
+    pub fn set_binding_initialized_in_chain(&mut self, name: &str, initialized: bool) -> bool {
+        if self.set_binding_initialized(name, initialized) {
+            return true;
+        }
+        if let Some(outer) = &self.outer
+            && let Some(outer) = outer.upgrade()
+        {
+            return outer
+                .borrow_mut()
+                .set_binding_initialized_in_chain(name, initialized);
+        }
+        false
+    }
+
     /// Return whether this record directly contains `name`.
     pub fn has_binding(&self, name: &str) -> bool {
         self.bindings.contains_key(name)

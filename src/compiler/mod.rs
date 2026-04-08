@@ -695,6 +695,96 @@ fn compile_for_in_uses_get_builtin() {
 }
 
 #[test]
+fn compile_generator_non_simple_params_keep_later_params_tdz() {
+    let src = "function* f(x = y, y) {}";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let proto = chunk
+        .functions
+        .iter()
+        .find(|p| p.name == "f")
+        .expect("generator proto exists");
+
+    assert!(
+        proto
+            .slot_names
+            .iter()
+            .any(|name| name.as_deref() == Some("y")),
+        "expected generator parameter y to have a local slot"
+    );
+    let y_slot = proto
+        .slot_names
+        .iter()
+        .position(|name| name.as_deref() == Some("y"))
+        .expect("y slot");
+    assert!(
+        proto.lexical_tdz.get(y_slot).copied().unwrap_or(false),
+        "later generator parameter y should start in TDZ"
+    );
+
+    let mut ops = Vec::new();
+    let mut ip = 0usize;
+    while ip < proto.chunk.code.len() && ops.len() < 16 {
+        let op = Op::from_byte(proto.chunk.code[ip]).expect("valid opcode");
+        let width = opcode_width(op);
+        let operand = if matches!(op, Op::GetLocal | Op::SetLocal | Op::CloneLocalCell) {
+            proto.chunk.code.get(ip + 1).copied()
+        } else {
+            None
+        };
+        ops.push((op.name(), operand));
+        ip += width;
+    }
+    eprintln!("generator proto ops: {:?}", ops);
+}
+
+#[test]
+fn compile_object_generator_method_emits_body() {
+    let src = "var o = { *m() { let x; eval(\"var x;\"); } };";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    eprintln!(
+        "object generator function names: {:?}",
+        chunk
+            .functions
+            .iter()
+            .map(|p| (p.name.clone(), p.chunk.code.len(), p.is_generator))
+            .collect::<Vec<_>>()
+    );
+    let proto = chunk
+        .functions
+        .iter()
+        .find(|p| p.is_generator)
+        .expect("object generator proto exists");
+
+    eprintln!(
+        "object generator proto: code_len={} consts={} slots={} tdz={:?}",
+        proto.chunk.code.len(),
+        proto.chunk.constants.len(),
+        proto.slot_names.len(),
+        proto.lexical_tdz
+    );
+    let mut ops = Vec::new();
+    let mut ip = 0usize;
+    while ip < proto.chunk.code.len() && ops.len() < 24 {
+        let op = Op::from_byte(proto.chunk.code[ip]).expect("valid opcode");
+        let width = opcode_width(op);
+        ops.push(op.name());
+        ip += width;
+    }
+    eprintln!("object generator proto ops: {:?}", ops);
+
+    assert!(
+        !proto.chunk.code.is_empty(),
+        "object generator method should emit bytecode"
+    );
+}
+
+#[test]
 fn compile_dynamic_import_uses_get_builtin() {
     let src = "import('./dep.js');";
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");

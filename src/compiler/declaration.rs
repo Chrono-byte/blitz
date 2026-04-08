@@ -1717,6 +1717,36 @@ impl Compiler {
         }
 
         let has_simple_parameter_list = Self::has_simple_parameter_list(func);
+        if !has_simple_parameter_list {
+            if function_is_strict && !func.generator {
+                return Err(crate::errors::CompilerError::from(
+                    "SyntaxError: non-simple parameter list in strict mode",
+                ));
+            }
+            let mut seen = HashSet::new();
+            for p in &func.params.items {
+                let mut names = HashSet::new();
+                Self::collect_binding_names(&p.pattern, &mut names);
+                for name in names {
+                    if !seen.insert(name) {
+                        return Err(crate::errors::CompilerError::from(
+                            "SyntaxError: duplicate parameter name in non-simple parameter list",
+                        ));
+                    }
+                }
+            }
+            if let Some(rest) = &func.params.rest {
+                let mut names = HashSet::new();
+                Self::collect_binding_names(&rest.rest.argument, &mut names);
+                for name in names {
+                    if !seen.insert(name) {
+                        return Err(crate::errors::CompilerError::from(
+                            "SyntaxError: duplicate parameter name in non-simple parameter list",
+                        ));
+                    }
+                }
+            }
+        }
 
         let mut inner = Compiler {
             chunk: Chunk::new(Rc::clone(&self.source_text)),
@@ -1913,6 +1943,37 @@ impl Compiler {
                 Self::strict_binding_pattern_name_error(function_is_strict, &rest.rest.argument)
         {
             return Err(err);
+        }
+
+        if !has_simple_parameter_list {
+            if function_is_strict {
+                return Err(crate::errors::CompilerError::from(
+                    "SyntaxError: non-simple parameter list in strict mode",
+                ));
+            }
+            let mut seen = HashSet::new();
+            for p in &func.params.items {
+                let mut names = HashSet::new();
+                Self::collect_binding_names(&p.pattern, &mut names);
+                for name in names {
+                    if !seen.insert(name) {
+                        return Err(crate::errors::CompilerError::from(
+                            "SyntaxError: duplicate parameter name in non-simple parameter list",
+                        ));
+                    }
+                }
+            }
+            if let Some(rest) = &func.params.rest {
+                let mut names = HashSet::new();
+                Self::collect_binding_names(&rest.rest.argument, &mut names);
+                for name in names {
+                    if !seen.insert(name) {
+                        return Err(crate::errors::CompilerError::from(
+                            "SyntaxError: duplicate parameter name in non-simple parameter list",
+                        ));
+                    }
+                }
+            }
         }
 
         let mut inner = Compiler {

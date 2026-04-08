@@ -922,7 +922,19 @@ impl Vm {
     ///
     /// This is used for direct `eval`, where the evaluated code must observe
     /// and update the current execution context.
-    pub(crate) fn run_nested(&mut self, chunk: Chunk) -> Result<Value, RuntimeError> {
+    pub(crate) fn run_nested(
+        &mut self,
+        chunk: Chunk,
+        direct_eval: bool,
+    ) -> Result<Value, RuntimeError> {
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] run_nested direct_eval={} code_len={} source={:?}",
+                direct_eval,
+                chunk.code.len(),
+                &*chunk.source_text
+            );
+        }
         let saved_chunk = Rc::clone(&self.chunk);
         let saved_ip = self.ip;
         let saved_stack = self.stack.snapshot();
@@ -938,6 +950,21 @@ impl Vm {
         let saved_recent_return_value = self.recent_return_value.clone();
         let saved_last_uncaught_exception = self.last_uncaught_exception.clone();
         let saved_pending_exception = self.pending_exception;
+        let saved_locals = if direct_eval {
+            Some(self.locals.clone())
+        } else {
+            None
+        };
+        let saved_current_slot_types = if direct_eval {
+            self.current_slot_types.clone()
+        } else {
+            None
+        };
+        let saved_current_slot_names = if direct_eval {
+            self.current_slot_names.clone()
+        } else {
+            None
+        };
 
         let chunk_rc = Rc::new(chunk);
         self.root_chunk = Some(Rc::clone(&chunk_rc));
@@ -947,16 +974,18 @@ impl Vm {
         self.current_strict_mode = self.chunk.root_strict;
         self.gc_temp_roots.clear();
         self.yield_star_queue = None;
-        self.this_value = self
-            .globals
-            .borrow()
-            .properties
-            .get(&PropertyKey::String("globalThis".to_string()))
-            .and_then(|d| match d {
-                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                _ => None,
-            })
-            .unwrap_or(Value::Undefined);
+        if !direct_eval {
+            self.this_value = self
+                .globals
+                .borrow()
+                .properties
+                .get(&PropertyKey::String("globalThis".to_string()))
+                .and_then(|d| match d {
+                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                    _ => None,
+                })
+                .unwrap_or(Value::Undefined);
+        }
         self.begin_opcode_profile_run();
 
         let result = loop {
@@ -1008,8 +1037,38 @@ impl Vm {
         self.recent_return_value = saved_recent_return_value;
         self.last_uncaught_exception = saved_last_uncaught_exception;
         self.pending_exception = saved_pending_exception;
+        if direct_eval {
+            if let Some(locals) = saved_locals {
+                self.locals = locals;
+            }
+            self.current_slot_types = saved_current_slot_types;
+            self.current_slot_names = saved_current_slot_names;
+        }
 
         result
+    }
+
+    pub(crate) fn direct_eval_lexical_conflict_name(&self, chunk: &Chunk) -> Option<String> {
+        for maybe_name in &chunk.root_slot_names {
+            let Some(name) = maybe_name.as_deref() else {
+                continue;
+            };
+            let mut env = Some(Rc::clone(&self.lexical_env));
+            while let Some(current) = env {
+                let (conflict, outer) = {
+                    let borrowed = current.borrow();
+                    (
+                        !borrowed.is_with_environment() && borrowed.has_binding(name),
+                        borrowed.outer(),
+                    )
+                };
+                if conflict {
+                    return Some(name.to_string());
+                }
+                env = outer;
+            }
+        }
+        None
     }
 
     fn initialize_root_bindings(&mut self) {
@@ -1107,6 +1166,9 @@ impl Vm {
         let throw_runner = Rc::clone(&runner);
         let return_runner = Rc::clone(&runner);
         let gen_obj = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+        gen_obj
+            .borrow_mut()
+            .set_prototype_value(self.realm.generator_prototype());
         gen_obj.borrow_mut().properties.insert(
             PropertyKey::String("next".to_string()),
             PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
@@ -1736,10 +1798,39 @@ impl Vm {
         let mut child = self.fork_execution();
         child.adopt_eval_context(self);
         child.set_current_strict_mode(strict);
-        match child.run_nested(chunk) {
+        match child.run_nested(chunk, false) {
             Ok(value) => Ok(value),
             Err(err) => {
                 if let Some(thrown) = child.last_uncaught_exception.take() {
+                    Err(self.throw_exception(thrown))
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    /// Parse and evaluate a single expression source string in the current VM.
+    ///
+    /// This is the direct-eval equivalent of [`Vm::eval_expression_source`]:
+    /// it preserves the caller's execution context and leaves any new `var`
+    /// bindings in the current lexical environment chain.
+    pub fn eval_expression_source_direct(&mut self, source: &str) -> Result<Value, RuntimeError> {
+        let strict = self.active_strict_mode();
+        let wrapped = if strict {
+            format!("'use strict'; (function() {{ return ({}); }})()", source)
+        } else {
+            format!("(function() {{ return ({}); }})()", source)
+        };
+        let session = crate::parser::Parser::parse_source(&wrapped)
+            .map_err(|e| RuntimeError::from(format!("parse: {}", e)))?;
+        let prog = session.program();
+        let chunk = crate::compiler::compile_oxc_repl(prog, &wrapped)
+            .map_err(|e| RuntimeError::from(format!("compile: {}", e)))?;
+        match self.run_nested(chunk, true) {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                if let Some(thrown) = self.last_uncaught_exception.take() {
                     Err(self.throw_exception(thrown))
                 } else {
                     Err(err)
@@ -1948,6 +2039,10 @@ impl Vm {
 
         ensure_slot(&mut self.locals, slot);
         *self.locals[slot].borrow_mut() = value.clone();
+        let _ = self
+            .lexical_env
+            .borrow_mut()
+            .set_binding_initialized_in_chain(name, true);
 
         if self.current_slot_names.is_none()
             && self
@@ -2587,6 +2682,11 @@ impl Vm {
                     .get(slot)
                     .map(|cell| cell.borrow().clone())
                     .ok_or("Bad local slot")?;
+                if crate::trace::enabled() && matches!(v, Value::Uninitialized)
+                    && let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone)
+                    {
+                        eprintln!("[trace] GetLocal TDZ name='{}' slot={}", name, slot);
+                    }
                 if matches!(v, Value::Uninitialized) {
                     return Err(self.throw_reference_error(
                         "Cannot access lexical binding before initialization",
@@ -2622,6 +2722,12 @@ impl Vm {
                 }
                 ensure_slot(&mut self.locals, slot);
                 *self.locals[slot].borrow_mut() = v;
+                if let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone) {
+                    let _ = self
+                        .lexical_env
+                        .borrow_mut()
+                        .set_binding_initialized_in_chain(&name, true);
+                }
                 if let Some(arguments_object) = self.current_arguments_object.clone()
                     && slot < self.current_arguments_mapped_count
                 {
@@ -4504,6 +4610,21 @@ impl Vm {
         for (i, value) in call_args.iter().cloned().enumerate().take(proto.arity) {
             *self.locals[i].borrow_mut() = value;
         }
+        if crate::trace::enabled() && proto.is_generator && !proto.has_simple_parameter_list {
+            for (idx, slot) in self.locals.iter().enumerate() {
+                let name = proto
+                    .slot_names
+                    .get(idx)
+                    .and_then(Clone::clone)
+                    .unwrap_or_else(|| "<none>".to_string());
+                eprintln!(
+                    "[trace] configure_call_frame gen slot={} name='{}' value={}",
+                    idx,
+                    name,
+                    slot.borrow().type_name()
+                );
+            }
+        }
         if let Some(slot) = proto.self_binding_slot
             && slot < self.locals.len()
         {
@@ -4905,6 +5026,11 @@ impl Vm {
         props
             .borrow_mut()
             .set_captured_lexical_env(Some(Rc::clone(&self.lexical_env)));
+        if closure_proto.is_generator {
+            props
+                .borrow_mut()
+                .set_prototype_value(self.realm.generator_function_prototype());
+        }
 
         if closure_proto.captures_this
             && let Some(home_object) = self.current_method_home_object()
@@ -4935,27 +5061,33 @@ impl Vm {
         );
 
         if has_prototype_property {
-            let object_proto = self
-                .realm
-                .intrinsics
-                .object_prototype
-                .clone()
-                .unwrap_or(Value::Null);
-            let proto_obj_map: Rc<RefCell<ObjectData>> = gc::track_object(Rc::new(RefCell::new(
-                ObjectData::with_prototype(object_proto),
-            )));
-            let proto_obj = Value::Object(Rc::clone(&proto_obj_map));
+            let proto_obj = if closure_proto.is_generator {
+                self.realm.generator_prototype()
+            } else {
+                let object_proto = self
+                    .realm
+                    .intrinsics
+                    .object_prototype
+                    .clone()
+                    .unwrap_or(Value::Null);
+                let proto_obj_map: Rc<RefCell<ObjectData>> = gc::track_object(Rc::new(
+                    RefCell::new(ObjectData::with_prototype(object_proto)),
+                ));
+                Value::Object(Rc::clone(&proto_obj_map))
+            };
 
             // Set F.prototype.constructor = F
-            proto_obj_map.borrow_mut().properties.insert(
-                PropertyKey::String("constructor".to_string()),
-                PropertyDescriptor::Data {
-                    value: closure.clone(),
-                    writable: true,
-                    enumerable: false,
-                    configurable: true,
-                },
-            );
+            if let Value::Object(proto_obj_map) = &proto_obj {
+                proto_obj_map.borrow_mut().properties.insert(
+                    PropertyKey::String("constructor".to_string()),
+                    PropertyDescriptor::Data {
+                        value: closure.clone(),
+                        writable: true,
+                        enumerable: false,
+                        configurable: true,
+                    },
+                );
+            }
 
             props.borrow_mut().properties.insert(
                 PropertyKey::String("prototype".to_string()),
@@ -5007,6 +5139,9 @@ impl Vm {
         let obj = self.pop()?;
         let prop = self.to_property_key(&key)?;
         let deleted = self.delete_property_host(&obj, &prop)?;
+        if !deleted && self.is_strict_mode() {
+            return Err(self.throw_type_error("Cannot delete property in strict mode"));
+        }
         self.stack.push(Value::Bool(deleted));
         Ok(())
     }
@@ -8583,7 +8718,7 @@ mod tests {
             Some(Value::String(s)) => {
                 assert_eq!(
                     s,
-                    r#"{"value":{},"writable":true,"enumerable":false,"configurable":true}"#
+                    r#"{"configurable":true,"enumerable":false,"writable":true,"value":{}}"#
                 );
             }
             other => panic!("expected serialized descriptor string, got {:?}", other),

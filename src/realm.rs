@@ -144,6 +144,8 @@ pub struct Intrinsics {
     pub regexp_string_iterator_prototype: Option<Value>,
     /// Generator prototype for this realm.
     pub generator_prototype: Option<Value>,
+    /// GeneratorFunction prototype for this realm.
+    pub generator_function_prototype: Option<Value>,
     /// AsyncGenerator prototype for this realm.
     pub async_generator_prototype: Option<Value>,
     /// AsyncFromSyncIterator prototype for this realm.
@@ -229,6 +231,22 @@ impl Realm {
             .unwrap_or(Value::Null)
     }
 
+    /// Get the canonical `GeneratorFunction.prototype` for this realm.
+    pub fn generator_function_prototype(&self) -> Value {
+        self.intrinsics
+            .generator_function_prototype
+            .clone()
+            .unwrap_or_else(|| self.function_prototype())
+    }
+
+    /// Get the canonical `Generator.prototype` for this realm.
+    pub fn generator_prototype(&self) -> Value {
+        self.intrinsics
+            .generator_prototype
+            .clone()
+            .unwrap_or_else(|| self.object_prototype())
+    }
+
     /// Get the canonical `Array.prototype` for this realm.
     pub fn array_prototype(&self) -> Value {
         self.intrinsics
@@ -283,6 +301,8 @@ impl Realm {
             "Object" => self.intrinsics.object_prototype.clone(),
             "Array" => self.intrinsics.array_prototype.clone(),
             "Function" => self.intrinsics.function_prototype.clone(),
+            "GeneratorFunction" => self.intrinsics.generator_function_prototype.clone(),
+            "Generator" => self.intrinsics.generator_prototype.clone(),
             "String" => self.intrinsics.string_prototype.clone(),
             "Symbol" => self.intrinsics.symbol_prototype.clone(),
             "Error" => self.intrinsics.error_prototype.clone(),

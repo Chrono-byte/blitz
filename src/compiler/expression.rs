@@ -2038,6 +2038,38 @@ impl super::Compiler {
                     return Ok(());
                 }
 
+                if let OExpr::Identifier(id) = &c.callee
+                    && id.name.as_str() == "eval"
+                    && self.resolve_local("eval").is_none()
+                    && !self.outer_bindings.contains_key("eval")
+                {
+                    self.emit_get_builtin_name("directEval");
+                    let mut arg_count = 0usize;
+                    for arg in &c.arguments {
+                        if let Some(expr) = arg.as_expression() {
+                            self.compile_expr_oast(expr)?;
+                            arg_count += 1;
+                        } else {
+                            self.emit(Op::Undefined, LINE);
+                            arg_count += 1;
+                        }
+                    }
+                    self.emit(Op::CallIC, LINE);
+                    self.emit_byte(arg_count as u8, LINE);
+                    self.emit(Op::Dup, LINE);
+                    self.emit_constant(Value::String("__tsblitz_eval_throw__".to_string()), LINE);
+                    self.emit(Op::GetPropertyIC, LINE);
+                    let slot = self.alloc_ic_slot()?;
+                    self.emit_byte(slot, LINE);
+                    self.emit(Op::JumpIfFalse, LINE);
+                    let skip_throw = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.emit(Op::Throw, LINE);
+                    self.patch_jump(skip_throw);
+                    return Ok(());
+                }
+
                 if let OExpr::PrivateFieldExpression(m) = &c.callee {
                     // Handle optional private field calls like obj.#method?.()
                     let is_optional_call = c.optional;

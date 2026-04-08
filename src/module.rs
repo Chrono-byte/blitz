@@ -647,7 +647,8 @@ impl ModuleLoader {
         for source_spec in star_exports {
             let dep_rec_rc = self.construct(&base_dir, &source_spec)?;
             let dep_path = dep_rec_rc.borrow().path.clone();
-            if let Some(slot) = self.resolve_export(&dep_path, export_name, resolve_set)? {
+            let mut branch_set = resolve_set.clone();
+            if let Some(slot) = self.resolve_export(&dep_path, export_name, &mut branch_set)? {
                 match &found {
                     None => found = Some(slot),
                     Some(existing) => {
