@@ -145,7 +145,7 @@ impl Vm {
             yield_star_queue: None,
             current_arguments_object: None,
             current_arguments_mapped_count: 0,
-            current_strict_mode: false,
+            current_strict_mode: self.current_strict_mode,
             gc_step_counter: 0,
             opcode_profiling_enabled: self.opcode_profiling_enabled,
             opcode_counts: [0; OP_COUNT],
@@ -719,6 +719,14 @@ impl Vm {
         self.current_strict_mode
     }
 
+    pub(crate) fn active_strict_mode(&self) -> bool {
+        self.call_stack.last().is_some_and(|f| f.is_strict)
+    }
+
+    pub(crate) fn set_current_strict_mode(&mut self, strict: bool) {
+        self.current_strict_mode = strict;
+    }
+
     /// Return own keys for a global value if it is an object or closure.
     pub fn list_global_own_keys(&self, name: &str) -> Option<Vec<String>> {
         let g = self.globals.borrow();
@@ -800,7 +808,7 @@ impl Vm {
         self.stack.clear();
         self.locals.clear();
         self.call_stack.clear();
-        self.current_strict_mode = false;
+        self.current_strict_mode = self.chunk.root_strict;
         self.handlers.clear();
         self.root_chunk = None;
         self.current_slot_types = None;
@@ -846,7 +854,7 @@ impl Vm {
         self.stack.clear();
         self.locals.clear();
         self.call_stack.clear();
-        self.current_strict_mode = false;
+        self.current_strict_mode = self.chunk.root_strict;
         self.handlers.clear();
         self.current_slot_types = None;
         self.current_closure_env = None;
@@ -1049,7 +1057,10 @@ impl Vm {
                 let thrown = args.first().cloned().unwrap_or(Value::Undefined);
 
                 if runner.completed {
-                    Err(RuntimeError::from(format!("Uncaught: {}", thrown)))
+                    Err(RuntimeError::from(format!(
+                        "Uncaught: {}",
+                        runner.vm.format_uncaught_thrown_value(&thrown)
+                    )))
                 } else {
                     if let Err(err) = runner.vm.throw_value(thrown) {
                         runner.completed = true;
@@ -1600,7 +1611,8 @@ impl Vm {
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the evaluation fails.
     pub fn eval_expression_source(&mut self, source: &str) -> Result<Value, RuntimeError> {
-        let wrapped = if self.is_strict_mode() {
+        let strict = self.active_strict_mode();
+        let wrapped = if strict {
             format!("'use strict'; (function() {{ return ({}); }})()", source)
         } else {
             format!("(function() {{ return ({}); }})()", source)
@@ -1611,7 +1623,17 @@ impl Vm {
         let chunk = crate::compiler::compile_oxc_repl(prog, &wrapped)
             .map_err(|e| RuntimeError::from(format!("compile: {}", e)))?;
         let mut child = self.fork_execution();
-        child.run(chunk)
+        child.set_current_strict_mode(strict);
+        match child.run(chunk) {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                if let Some(thrown) = child.last_uncaught_exception.take() {
+                    Err(self.throw_exception(thrown))
+                } else {
+                    Err(err)
+                }
+            }
+        }
     }
 
     fn is_unscopable_binding(
@@ -1820,25 +1842,25 @@ impl Vm {
                 Value::Object(obj) => {
                     obj.borrow_mut().properties.insert(
                         PropertyKey::String("constructor".to_string()),
-                        PropertyDescriptor::data(ctor.clone()),
+                        crate::runtime_utils::non_enum_data(ctor.clone()),
                     );
                 }
                 Value::Array(_, props) => {
                     props.borrow_mut().properties.insert(
                         PropertyKey::String("constructor".to_string()),
-                        PropertyDescriptor::data(ctor.clone()),
+                        crate::runtime_utils::non_enum_data(ctor.clone()),
                     );
                 }
                 Value::Closure { props, .. } => {
                     props.borrow_mut().properties.insert(
                         PropertyKey::String("constructor".to_string()),
-                        PropertyDescriptor::data(ctor.clone()),
+                        crate::runtime_utils::non_enum_data(ctor.clone()),
                     );
                 }
                 Value::BuiltinObject(_, props) => {
                     props.borrow_mut().properties.insert(
                         PropertyKey::String("constructor".to_string()),
-                        PropertyDescriptor::data(ctor.clone()),
+                        crate::runtime_utils::non_enum_data(ctor.clone()),
                     );
                 }
                 _ => {}
@@ -2482,6 +2504,11 @@ impl Vm {
                         Some(PropertyDescriptor::Accessor { .. }) => {
                             let global_obj = Value::Object(Rc::clone(&self.globals));
                             self.set_property_tracked(&global_obj, &key, v)?;
+                        }
+                        None if self.is_strict_mode() => {
+                            return Err(
+                                self.throw_reference_error(&format!("{name} is not defined"))
+                            );
                         }
                         _ => {
                             self.globals
@@ -4314,7 +4341,7 @@ impl Vm {
             if proto.has_simple_parameter_list && !proto.is_strict {
                 let mapped_count = proto.arity.min(args_for_arguments.len());
                 let args_obj =
-                    self.build_mapped_arguments_object(proto, callee.clone(), &args_for_arguments);
+                    self.build_mapped_arguments_object(proto, callee, &args_for_arguments);
                 self.current_arguments_object = Some(args_obj.clone());
                 self.current_arguments_mapped_count = mapped_count;
                 self.locals[slot] = Rc::new(Mutex::new(args_obj));
@@ -5152,15 +5179,10 @@ impl Vm {
                 self.stack.push(thrown.clone());
                 return Err(match thrown {
                     Value::String(s) => RuntimeError::from(format!("Uncaught: {}", s)),
-                    other => {
-                        if let Ok(Value::String(msg)) = self
-                            .get_property_value(&other, &PropertyKey::String("message".to_string()))
-                        {
-                            RuntimeError::from(format!("Uncaught: {}", msg))
-                        } else {
-                            RuntimeError::from("Uncaught exception")
-                        }
-                    }
+                    other => RuntimeError::from(format!(
+                        "Uncaught: {}",
+                        self.format_uncaught_thrown_value(&other)
+                    )),
                 });
             }
         };
@@ -5335,6 +5357,29 @@ impl Vm {
         match self.throw_value(thrown) {
             Ok(()) => RuntimeError::from("JS exception"),
             Err(err) => err,
+        }
+    }
+
+    fn format_uncaught_thrown_value(&mut self, thrown: &Value) -> String {
+        let name = self
+            .get_property_value(thrown, &PropertyKey::String("name".to_string()))
+            .ok()
+            .and_then(|value| match value {
+                Value::String(s) => Some(s),
+                _ => None,
+            });
+        let message = self
+            .get_property_value(thrown, &PropertyKey::String("message".to_string()))
+            .ok()
+            .and_then(|value| match value {
+                Value::String(s) => Some(s),
+                _ => None,
+            });
+
+        match (name, message) {
+            (Some(name), Some(message)) if !message.is_empty() => format!("{name}: {message}"),
+            (Some(name), _) => name,
+            _ => format!("{}", thrown),
         }
     }
 
@@ -7043,6 +7088,7 @@ mod tests {
             root_slot_types: vec![],
             root_slot_names: vec![],
             root_lexical_tdz: vec![],
+            root_strict: false,
         });
         vm.ip = 0;
         vm.stack.push(obj.clone());
@@ -7079,6 +7125,7 @@ mod tests {
             root_slot_types: vec![],
             root_slot_names: vec![],
             root_lexical_tdz: vec![],
+            root_strict: false,
         });
         vm.ip = 0;
         vm.stack.push(obj.clone());

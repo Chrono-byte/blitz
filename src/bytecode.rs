@@ -72,6 +72,8 @@ pub struct Chunk {
     pub root_slot_names: Vec<Option<String>>,
     /// Root script temporal dead zone flags.
     pub root_lexical_tdz: Vec<bool>,
+    /// Whether the compiled root source is strict.
+    pub root_strict: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -137,6 +139,7 @@ impl Chunk {
             root_slot_types: Vec::new(),
             root_slot_names: Vec::new(),
             root_lexical_tdz: Vec::new(),
+            root_strict: false,
         }
     }
 

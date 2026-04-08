@@ -91,7 +91,8 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
             } else if source_is_whitespace_and_comments_only(src) {
                 return Ok(Value::Undefined);
             }
-            if !vm.is_strict_mode() {
+            let strict = vm.active_strict_mode();
+            if !strict {
                 match vm.eval_expression_source(src) {
                     Ok(value) => return Ok(value),
                     Err(err) => {
@@ -102,7 +103,7 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
                     }
                 }
             }
-            let eval_src = if vm.is_strict_mode() {
+            let eval_src = if strict {
                 format!("'use strict';\n{src}")
             } else {
                 src.to_string()
@@ -113,7 +114,17 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
             let chunk = compiler::compile_oxc(prog, &eval_src)
                 .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
             let mut eval_vm = vm.fork_execution();
-            eval_vm.run(chunk)
+            eval_vm.set_current_strict_mode(strict);
+            match eval_vm.run(chunk) {
+                Ok(value) => Ok(value),
+                Err(err) => {
+                    if let Some(thrown) = eval_vm.last_uncaught_exception.take() {
+                        Err(vm.throw_exception(thrown))
+                    } else {
+                        Err(err)
+                    }
+                }
+            }
         }))),
     );
 

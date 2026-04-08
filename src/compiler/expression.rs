@@ -564,10 +564,9 @@ impl super::Compiler {
                     oast::AssignmentOperator::Assign => match target {
                         oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
                             let name = id.name.as_str();
-                            if let Some(err) = Self::strict_binding_name_error(
-                                self.strict_context,
-                                name,
-                            ) {
+                            if let Some(err) =
+                                Self::strict_binding_name_error(self.strict_context, name)
+                            {
                                 return Err(err);
                             }
                             if self
@@ -674,10 +673,9 @@ impl super::Compiler {
                     | oast::AssignmentOperator::ShiftRightZeroFill => match target {
                         oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
                             let name = id.name.as_str();
-                            if let Some(err) = Self::strict_binding_name_error(
-                                self.strict_context,
-                                name,
-                            ) {
+                            if let Some(err) =
+                                Self::strict_binding_name_error(self.strict_context, name)
+                            {
                                 return Err(err);
                             }
                             if let Some(slot) = self.resolve_local(name) {
@@ -1208,6 +1206,8 @@ impl super::Compiler {
                         if let Some(slot) = self.resolve_local(name) {
                             self.emit(Op::GetLocal, LINE);
                             self.emit_byte(slot as u8, LINE);
+                            self.emit(Op::Neg, LINE);
+                            self.emit(Op::Neg, LINE);
                             if !u.prefix {
                                 self.emit(Op::Dup, LINE);
                             }
@@ -1229,6 +1229,8 @@ impl super::Compiler {
                         } else if let Some(upvalue) = self.resolve_upvalue(name) {
                             self.emit(Op::GetUpvalue, LINE);
                             self.emit_byte(upvalue, LINE);
+                            self.emit(Op::Neg, LINE);
+                            self.emit(Op::Neg, LINE);
                             if !u.prefix {
                                 self.emit(Op::Dup, LINE);
                             }
@@ -1244,6 +1246,8 @@ impl super::Compiler {
                             self.emit_byte(upvalue, LINE);
                         } else {
                             self.emit_get_global_name(name);
+                            self.emit(Op::Neg, LINE);
+                            self.emit(Op::Neg, LINE);
                             if !u.prefix {
                                 self.emit(Op::Dup, LINE);
                             }
@@ -1266,20 +1270,23 @@ impl super::Compiler {
                         self.emit_byte(old_slot as u8, LINE);
                         self.emit(Op::GetLocal, LINE);
                         self.emit_byte(old_slot as u8, LINE);
+                        self.emit(Op::Neg, LINE);
+                        self.emit(Op::Neg, LINE);
+                        if !u.prefix {
+                            self.emit(Op::Dup, LINE);
+                        }
                         self.emit_constant(Value::Number(1.0), LINE);
                         match u.operator {
                             oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
                             oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
                         }
+                        if u.prefix {
+                            self.emit(Op::Dup, LINE);
+                        }
                         let new_slot = self.alloc_temp_local("ref_new");
                         self.emit(Op::SetLocal, LINE);
                         self.emit_byte(new_slot as u8, LINE);
                         self.emit_reference_set_from_slot(object_slot, key_slot, new_slot, true)?;
-                        if !u.prefix {
-                            self.emit(Op::Pop, LINE);
-                            self.emit(Op::GetLocal, LINE);
-                            self.emit_byte(old_slot as u8, LINE);
-                        }
                     }
                     OTarget::ComputedMemberExpression(m) => {
                         let (object_slot, key_slot) = self.compile_computed_member_reference(m)?;
@@ -1289,20 +1296,23 @@ impl super::Compiler {
                         self.emit_byte(old_slot as u8, LINE);
                         self.emit(Op::GetLocal, LINE);
                         self.emit_byte(old_slot as u8, LINE);
+                        self.emit(Op::Neg, LINE);
+                        self.emit(Op::Neg, LINE);
+                        if !u.prefix {
+                            self.emit(Op::Dup, LINE);
+                        }
                         self.emit_constant(Value::Number(1.0), LINE);
                         match u.operator {
                             oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
                             oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
                         }
+                        if u.prefix {
+                            self.emit(Op::Dup, LINE);
+                        }
                         let new_slot = self.alloc_temp_local("ref_new");
                         self.emit(Op::SetLocal, LINE);
                         self.emit_byte(new_slot as u8, LINE);
                         self.emit_reference_set_from_slot(object_slot, key_slot, new_slot, false)?;
-                        if !u.prefix {
-                            self.emit(Op::Pop, LINE);
-                            self.emit(Op::GetLocal, LINE);
-                            self.emit_byte(old_slot as u8, LINE);
-                        }
                     }
                     _ => {
                         return Err(crate::errors::CompilerError::from(

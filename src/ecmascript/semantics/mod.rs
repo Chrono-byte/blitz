@@ -1142,7 +1142,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     );
     function_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
-        PropertyDescriptor::data(function_ctor_val.clone()),
+        non_enum_data(function_ctor_val.clone()),
     );
     function_proto_map.borrow_mut().properties.insert(
         PKey::String("call".to_string()),
@@ -1277,7 +1277,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
 
     object_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
-        PropertyDescriptor::data(object_ctor_val.clone()),
+        non_enum_data(object_ctor_val.clone()),
     );
 
     // 27.2 Promise Objects
