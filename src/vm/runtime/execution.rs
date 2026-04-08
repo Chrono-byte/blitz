@@ -4259,7 +4259,7 @@ impl Vm {
         if let Some(slot) = proto.self_binding_slot
             && slot < self.locals.len()
         {
-            *self.locals[slot].borrow_mut() = callee;
+            *self.locals[slot].borrow_mut() = callee.clone();
         }
         if let Some(slot) = proto.arguments_slot
             && slot < self.locals.len()
@@ -4267,11 +4267,37 @@ impl Vm {
             let args_for_arguments: Vec<Option<Value>> =
                 call_args.iter().map(|v| Some(v.clone())).collect();
             if proto.has_simple_parameter_list && !proto.is_strict {
-                let args_obj = self.build_mapped_arguments_object(proto, &args_for_arguments);
+                let args_obj =
+                    self.build_mapped_arguments_object(proto, callee.clone(), &args_for_arguments);
                 self.locals[slot] = Rc::new(Mutex::new(args_obj));
             } else {
                 let arr_rc = Rc::new(RefCell::new(args_for_arguments));
                 let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+                if proto.is_strict {
+                    let poison = Value::Builtin(Rc::new(|vm, _args| {
+                        Err(vm.throw_type_error(
+                            "Access to strict arguments callee/caller is forbidden",
+                        ))
+                    }));
+                    props.borrow_mut().properties.insert(
+                        PropertyKey::String("callee".to_string()),
+                        PropertyDescriptor::Accessor {
+                            get: Some(poison.clone()),
+                            set: Some(poison.clone()),
+                            enumerable: false,
+                            configurable: false,
+                        },
+                    );
+                    props.borrow_mut().properties.insert(
+                        PropertyKey::String("caller".to_string()),
+                        PropertyDescriptor::Accessor {
+                            get: Some(poison.clone()),
+                            set: Some(poison),
+                            enumerable: false,
+                            configurable: false,
+                        },
+                    );
+                }
                 props.borrow_mut().properties.insert(
                     PropertyKey::String("length".to_string()),
                     PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
@@ -4332,6 +4358,7 @@ impl Vm {
     fn build_mapped_arguments_object(
         &self,
         proto: &FunctionProto,
+        callee: Value,
         args_for_arguments: &[Option<Value>],
     ) -> Value {
         let obj_rc = Rc::new(RefCell::new(ObjectData::new()));
@@ -4377,6 +4404,15 @@ impl Vm {
                 );
             }
         }
+        obj_rc.borrow_mut().properties.insert(
+            PropertyKey::String("callee".to_string()),
+            PropertyDescriptor::Data {
+                value: callee,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
         obj_rc.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
             PropertyDescriptor::data(Value::Number(arg_count as f64)),
@@ -7208,6 +7244,54 @@ mod tests {
                 .contains("Cannot add property to non-extensible object")
         );
         assert!(vm.get_global("b").is_none());
+    }
+
+    #[test]
+    fn mapped_arguments_object_exposes_callee() {
+        let session = Parser::parse_source(
+            r#"
+            function testcase() {
+                var desc = Object.getOwnPropertyDescriptor(arguments, "callee");
+                return typeof arguments.callee === "function"
+                    && desc.configurable === true
+                    && desc.enumerable === false
+                    && desc.writable === true;
+            }
+            var result = testcase();
+        "#,
+        )
+        .expect("parse ok");
+        let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+        assert!(matches!(vm.get_global("result"), Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn strict_arguments_object_poison_pill_throws_on_callee() {
+        let session = Parser::parse_source(
+            r#"
+            function testcase() {
+                'use strict';
+                return arguments.callee;
+            }
+            testcase();
+        "#,
+        )
+        .expect("parse ok");
+        let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        let err = vm
+            .run(chunk)
+            .expect_err("strict callee access should throw");
+        assert!(
+            err.to_string()
+                .contains("strict arguments callee/caller is forbidden")
+        );
     }
 
     #[test]
