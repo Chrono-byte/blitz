@@ -562,6 +562,7 @@ fn opcode_width(op: Op) -> usize {
         | Op::GetBuiltin
         | Op::BuildArray
         | Op::BuildObject
+        | Op::Spread
         | Op::ArrayFromSpread => 2,
         Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
         Op::CompareJumpIfFalse => 4,

@@ -386,12 +386,12 @@ impl Compiler {
                 self.compile_statement_oast(&w.body)?;
                 self.exit_scope();
                 self.emit(Op::Jump, LINE);
-                let back_jump_pos = self.chunk.code.len();
+                let _back_jump_pos = self.chunk.code.len();
                 let back_offset = loop_start as isize - (self.chunk.code.len() + 2) as isize;
                 self.emit_short_signed(back_offset, LINE);
                 if let Some(patches) = self.continue_patches.pop() {
                     for patch_pos in patches {
-                        let target = back_jump_pos as isize - (patch_pos as isize) - 2;
+                        let target = loop_start as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
                         self.chunk.write_i16_at(patch_pos, v);
                     }

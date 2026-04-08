@@ -1082,59 +1082,34 @@ impl Vm {
                 continue;
             }
 
-            match value {
-                Some(Value::Array(arr, _)) => {
-                    flat.extend(arr.borrow().iter().filter_map(Clone::clone));
+            if let Some(iterable) = value {
+                let iterator_method = self.get_property_host(
+                    &iterable,
+                    &PropertyKey::Symbol(SymbolId::well_known_iterator()),
+                )?;
+
+                if !Self::is_callable_value(&iterator_method) {
+                    return Err(self.throw_type_error("Spread value is not iterable"));
                 }
-                other => {
-                    let this_for_iter = other.as_ref().unwrap_or(&Value::Undefined).clone();
-                    let iterator_method = self.get_property_host(
-                        &this_for_iter,
-                        &PropertyKey::Symbol(SymbolId::well_known_iterator()),
+
+                let iter_obj = self.call_value_with_this(&iterator_method, &iterable, &[])?;
+
+                loop {
+                    let next_fn = self.get_property_host(
+                        &iter_obj,
+                        &PropertyKey::String("next".to_string()),
                     )?;
-
-                    let is_callable = matches!(
-                        iterator_method,
-                        Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
-                    );
-
-                    if is_callable {
-                        let iter_obj =
-                            self.call_value_with_this(&iterator_method, &this_for_iter, &[])?;
-
-                        loop {
-                            let next_fn = self.get_property_host(
-                                &iter_obj,
-                                &PropertyKey::String("next".to_string()),
-                            )?;
-                            let result = self.call_value_with_this(&next_fn, &iter_obj, &[])?;
-                            let done_val = self.get_property_host(
-                                &result,
-                                &PropertyKey::String("done".to_string()),
-                            )?;
-                            if self.to_boolean(&done_val) {
-                                break;
-                            }
-                            let val = self.get_property_host(
-                                &result,
-                                &PropertyKey::String("value".to_string()),
-                            )?;
-                            flat.push(val);
-                        }
-                    } else {
-                        let len_val = self.get_property_host(
-                            other.as_ref().unwrap_or(&Value::Undefined),
-                            &PropertyKey::String("length".to_string()),
-                        )?;
-                        let len = self.to_number_value(&len_val)?.max(0.0) as usize;
-                        for idx in 0..len {
-                            let item = self.get_property_host(
-                                other.as_ref().unwrap_or(&Value::Undefined),
-                                &PropertyKey::String(usize_to_decimal_string(idx)),
-                            )?;
-                            flat.push(item);
-                        }
+                    let result = self.call_value_with_this(&next_fn, &iter_obj, &[])?;
+                    let done_val = self
+                        .get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+                    if self.to_boolean(&done_val) {
+                        break;
                     }
+                    let val = self.get_property_host(
+                        &result,
+                        &PropertyKey::String("value".to_string()),
+                    )?;
+                    flat.push(val);
                 }
             }
         }
@@ -2325,10 +2300,19 @@ impl Vm {
                         .as_ref()
                         .ok_or("GetUpvalue without closure env")?;
                     let env_guard = env.borrow();
-                    env_guard
-                        .get(idx)
-                        .map(|cell| cell.borrow().clone())
-                        .ok_or("Bad upvalue index")?
+                    env_guard.get(idx).map(|cell| cell.borrow().clone()).ok_or_else(|| {
+                        if crate::trace::enabled() {
+                            eprintln!(
+                                "[diag] GetUpvalue bad index={} env_len={} ip={} chunk_ptr={:p} chunk_len={}",
+                                idx,
+                                env_guard.len(),
+                                self.ip.saturating_sub(1),
+                                Rc::as_ptr(&self.chunk),
+                                self.chunk.code.len()
+                            );
+                        }
+                        "Bad upvalue index"
+                    })?
                 };
                 if matches!(value, Value::Uninitialized) {
                     return Err(self.throw_reference_error(
@@ -2345,7 +2329,19 @@ impl Vm {
                     .as_ref()
                     .ok_or("SetUpvalue without closure env")?;
                 let env_guard = env.borrow();
-                let cell = env_guard.get(idx).cloned().ok_or("Bad upvalue index")?;
+                let cell = env_guard.get(idx).cloned().ok_or_else(|| {
+                    if crate::trace::enabled() {
+                        eprintln!(
+                            "[diag] SetUpvalue bad index={} env_len={} ip={} chunk_ptr={:p} chunk_len={}",
+                            idx,
+                            env_guard.len(),
+                            self.ip.saturating_sub(1),
+                            Rc::as_ptr(&self.chunk),
+                            self.chunk.code.len()
+                        );
+                    }
+                    "Bad upvalue index"
+                })?;
                 *cell.borrow_mut() = value;
             }
             Op::Pop => {
@@ -4323,6 +4319,12 @@ impl Vm {
                     .as_ref()
                     .map_or(0, |env| env.borrow().len())
             );
+            for (i, upvalue) in closure_proto.upvalues.iter().enumerate() {
+                eprintln!(
+                    "[trace]   upvalue[{}] local={} index={}",
+                    i, upvalue.is_local, upvalue.index
+                );
+            }
         }
         for upvalue in &closure_proto.upvalues {
             let cell = if upvalue.is_local {
@@ -5082,10 +5084,10 @@ impl Vm {
     #[inline(always)]
     fn pop(&mut self) -> Result<Value, RuntimeError> {
         self.stack.pop().ok_or_else(|| {
-            if crate::trace::enabled() {
-                eprintln!("[diag] Stack underflow");
-                // Extra diagnostics: print some VM state to help map the
-                // underflow to the currently-executing frame and chunk.
+        if crate::trace::enabled() {
+            eprintln!("[diag] Stack underflow");
+            // Extra diagnostics: print some VM state to help map the
+            // underflow to the currently-executing frame and chunk.
                 eprintln!(
                     "[diag] chunk_ptr={:p} chunk_len={} frames={} handlers={}",
                     Rc::as_ptr(&self.chunk),
@@ -5114,13 +5116,126 @@ impl Vm {
                             Rc::as_ptr(&proto.chunk),
                             proto.chunk.code.len()
                         );
+                }
+            }
+                let mut found_owner = false;
+                for (fi, frame) in self.call_stack.iter().enumerate().rev().take(8) {
+                    if let Some(proto) = frame
+                        .chunk
+                        .functions
+                        .iter()
+                        .find(|proto| Rc::as_ptr(&proto.chunk) == Rc::as_ptr(&self.chunk))
+                    {
+                        eprintln!(
+                            "[diag] current chunk owner: frame[{}] proto='{}' span={}..{} proto_chunk_ptr={:p} proto_chunk_len={}",
+                            fi,
+                            proto.name,
+                            proto.span.start,
+                            proto.span.end,
+                            Rc::as_ptr(&proto.chunk),
+                            proto.chunk.code.len()
+                        );
+                        if let Some(src) = proto.source_text() {
+                            eprintln!("[diag] current chunk source:");
+                            for (line_no, line) in src.lines().take(12).enumerate() {
+                                eprintln!("[diag]   {:>5}: {}", line_no + 1, line);
+                            }
+                        }
+                        found_owner = true;
+                        break;
                     }
                 }
-                // Print a short constant pool dump for the current chunk (limited).
-                eprintln!("[diag] chunk constants (len={}):", self.chunk.constants.len());
-                for (i, c) in self.chunk.constants.iter().enumerate().take(32) {
-                    eprintln!("[diag]   const[{}] = {:?}", i, c);
+                if !found_owner {
+                    eprintln!(
+                        "[diag] current chunk owner: <unknown> ptr={:p} len={}",
+                        Rc::as_ptr(&self.chunk),
+                        self.chunk.code.len()
+                    );
                 }
+            eprintln!("[diag] Active frames (top -> bottom):");
+            for (fi, frame) in self.call_stack.iter().enumerate().rev().take(8) {
+                eprintln!(
+                    "[diag]  frame[{}] chunk_ptr={:p} chunk_len={} ip={} stack_base={} is_strict={}",
+                    fi,
+                    Rc::as_ptr(&frame.chunk),
+                    frame.chunk.code.len(),
+                    frame.ip,
+                    frame.stack_base,
+                    frame.is_strict
+                );
+                if let Some(&line_no) = frame.chunk.lines.get(frame.ip.saturating_sub(1)) {
+                    eprintln!("[diag]  frame[{}] source line {}:", fi, line_no);
+                    let line_idx = line_no.saturating_sub(1) as usize;
+                    for (idx, line) in frame.chunk.source_text.lines().enumerate() {
+                        if idx + 1 >= line_idx.saturating_sub(2)
+                            && idx < line_idx.saturating_add(2)
+                        {
+                            eprintln!("[diag]    {:>5}: {}", idx + 1, line);
+                        }
+                    }
+                }
+                let fstart = frame.ip.saturating_sub(8);
+                let fend = usize::min(frame.ip + 8, frame.chunk.code.len());
+                eprintln!("[diag]  frame[{}] disasm ({}..{}):", fi, fstart, fend);
+                let mut k = fstart;
+                while k < fend {
+                    let b = frame.chunk.code[k];
+                    if let Some(op) = Op::from_byte(b) {
+                        let width = opcode_width(op);
+                        match op {
+                            Op::Const => {
+                                let hi = frame.chunk.code.get(k + 1).cloned().unwrap_or(0) as u16;
+                                let lo = frame.chunk.code.get(k + 2).cloned().unwrap_or(0) as u16;
+                                let arg = (hi << 8) | lo;
+                                eprintln!("[diag]    {:#06}  Const       {}", k, arg);
+                            }
+                            Op::Jump
+                            | Op::JumpIfFalse
+                            | Op::JumpIfTrue
+                            | Op::JumpIfNullish
+                            | Op::PushHandler => {
+                                let hi = frame.chunk.code.get(k + 1).cloned().unwrap_or(0);
+                                let lo = frame.chunk.code.get(k + 2).cloned().unwrap_or(0);
+                                let offset = ((hi as i16) << 8) | (lo as i16);
+                                eprintln!("[diag]    {:#06}  {:?} {}", k, op, offset);
+                            }
+                            Op::CompareJumpIfFalse => {
+                                let cmp = frame.chunk.code.get(k + 1).cloned().unwrap_or(0);
+                                let hi = frame.chunk.code.get(k + 2).cloned().unwrap_or(0);
+                                let lo = frame.chunk.code.get(k + 3).cloned().unwrap_or(0);
+                                let offset = ((hi as i16) << 8) | (lo as i16);
+                                eprintln!("[diag]    {:#06}  {:?} cmp={} {}", k, op, cmp, offset);
+                            }
+                            _ if width == 2 => {
+                                let arg = frame.chunk.code.get(k + 1).cloned().unwrap_or(0);
+                                eprintln!("[diag]    {:#06}  {:?} {}", k, op, arg);
+                            }
+                            _ => eprintln!("[diag]    {:#06}  {:?}", k, op),
+                        }
+                        k += width;
+                    } else {
+                        eprintln!("[diag]    {:#06}  ???  0x{:02x}", k, b);
+                        k += 1;
+                    }
+                }
+                if let Some(proto_src) = frame
+                    .chunk
+                    .functions
+                    .iter()
+                    .find(|proto| Rc::as_ptr(&proto.chunk) == Rc::as_ptr(&frame.chunk))
+                    .and_then(|proto| proto.source_text())
+                {
+                    eprintln!("[diag]  frame[{}] source:", fi);
+                    for (line_no, line) in proto_src.lines().take(8).enumerate() {
+                        eprintln!("[diag]    {:>5}: {}", line_no + 1, line);
+                    }
+                }
+            }
+            // Print a short constant pool dump for the current chunk (limited).
+            eprintln!("[diag] chunk constants (len={}):", self.chunk.constants.len());
+            for (i, c) in self.chunk.constants.iter().enumerate().take(32) {
+                eprintln!("[diag]   const[{}] = {:?}", i, c);
+            }
                 let start = self.ip.saturating_sub(24);
                 let end = usize::min(self.ip + 24, self.chunk.code.len());
                 eprintln!("[diag] disasm window ({}..{}):", start, end);
@@ -5185,7 +5300,74 @@ impl Vm {
                         j += 1;
                     }
                 }
+                if self.chunk.code.len() <= 256 {
+                    eprintln!("[diag] full current-chunk disasm:");
+                    let mut full = 0usize;
+                    while full < self.chunk.code.len() {
+                        let b = self.chunk.code[full];
+                        if let Some(op) = Op::from_byte(b) {
+                            let width = opcode_width(op);
+                            match op {
+                                Op::Const => {
+                                    let hi = self.chunk.code.get(full + 1).cloned().unwrap_or(0) as u16;
+                                    let lo = self.chunk.code.get(full + 2).cloned().unwrap_or(0) as u16;
+                                    let arg = (hi << 8) | lo;
+                                    eprintln!("[diag]   {:#06}  Const       {}", full, arg);
+                                }
+                                Op::Jump
+                                | Op::JumpIfFalse
+                                | Op::JumpIfTrue
+                                | Op::JumpIfNullish
+                                | Op::PushHandler => {
+                                    let hi = self.chunk.code.get(full + 1).cloned().unwrap_or(0);
+                                    let lo = self.chunk.code.get(full + 2).cloned().unwrap_or(0);
+                                    let offset = ((hi as i16) << 8) | (lo as i16);
+                                    eprintln!("[diag]   {:#06}  {:?} {}", full, op, offset);
+                                }
+                                Op::CompareJumpIfFalse => {
+                                    let cmp = self.chunk.code.get(full + 1).cloned().unwrap_or(0);
+                                    let hi = self.chunk.code.get(full + 2).cloned().unwrap_or(0);
+                                    let lo = self.chunk.code.get(full + 3).cloned().unwrap_or(0);
+                                    let offset = ((hi as i16) << 8) | (lo as i16);
+                                    eprintln!("[diag]   {:#06}  {:?} cmp={} {}", full, op, cmp, offset);
+                                }
+                                _ if width == 2 => {
+                                    let arg = self.chunk.code.get(full + 1).cloned().unwrap_or(0);
+                                    eprintln!("[diag]   {:#06}  {:?} {}", full, op, arg);
+                                }
+                                _ => eprintln!("[diag]   {:#06}  {:?}", full, op),
+                            }
+                            full += width;
+                        } else {
+                            eprintln!("[diag]   {:#06}  ???  0x{:02x}", full, b);
+                            full += 1;
+                        }
+                    }
+                }
+                let raw_start = 44usize;
+                let raw_end = usize::min(56usize, self.chunk.code.len());
+                eprintln!("[diag] raw bytes ({}..{}):", raw_start, raw_end);
+                for i in raw_start..raw_end {
+                    eprintln!("[diag]   {:>5}: 0x{:02x}", i, self.chunk.code[i]);
+                }
+                let raw_start2 = 188usize;
+                let raw_end2 = usize::min(196usize, self.chunk.code.len());
+                eprintln!("[diag] raw bytes ({}..{}):", raw_start2, raw_end2);
+                for i in raw_start2..raw_end2 {
+                    eprintln!("[diag]   {:>5}: 0x{:02x}", i, self.chunk.code[i]);
+                }
                 eprintln!("[diag] Stack size: {}", self.stack.len());
+                if let Some(&line_no) = self.chunk.lines.get(self.ip.saturating_sub(1)) {
+                    eprintln!("[diag] source line {}:", line_no);
+                    let line_idx = line_no.saturating_sub(1) as usize;
+                    for (idx, line) in self.chunk.source_text.lines().enumerate() {
+                        if idx + 1 >= line_idx.saturating_sub(2)
+                            && idx < line_idx.saturating_add(2)
+                        {
+                            eprintln!("[diag]   {:>5}: {}", idx + 1, line);
+                        }
+                    }
+                }
             }
             RuntimeError::from("Stack underflow")
         })
@@ -5687,6 +5869,7 @@ fn opcode_width(op: Op) -> usize {
         | Op::GetBuiltin
         | Op::BuildArray
         | Op::BuildObject
+        | Op::Spread
         | Op::ArrayFromSpread => 2,
         Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
         Op::CompareJumpIfFalse => 4,
