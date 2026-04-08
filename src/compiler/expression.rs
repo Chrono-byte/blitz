@@ -457,7 +457,6 @@ impl super::Compiler {
                 let mut count = 0usize;
                 let mut computed_indices: Vec<usize> = Vec::new();
                 let mut accessor_indices: Vec<usize> = Vec::new();
-                self.object_expr_had_set_property = false;
                 for (pi, prop) in obj.properties.iter().enumerate() {
                     if let oast::ObjectPropertyKind::ObjectProperty(p) = prop {
                         if p.computed {
@@ -555,7 +554,7 @@ impl super::Compiler {
                         }
 
                         self.emit(Op::SetProperty, LINE);
-                        self.object_expr_had_set_property = true;
+                        self.emit(Op::Pop, LINE);
                     }
                 }
 
@@ -627,10 +626,6 @@ impl super::Compiler {
                         self.emit(Op::CallIC, LINE);
                         self.emit_byte(3, LINE);
                     }
-                }
-
-                if self.object_expr_had_set_property {
-                    self.emit(Op::Pop, LINE);
                 }
             }
             OExpr::ArrayExpression(arr) => {

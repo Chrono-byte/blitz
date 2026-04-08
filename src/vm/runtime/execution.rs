@@ -4762,12 +4762,16 @@ impl Vm {
 
     fn build_object(&mut self) -> Result<(), RuntimeError> {
         let n = self.read_byte()? as usize;
-        let mut map: IndexMap<PropertyKey, PropertyDescriptor> = IndexMap::with_capacity(n);
+        let mut entries: Vec<(PropertyKey, PropertyDescriptor)> = Vec::with_capacity(n);
         for _ in 0..n {
             let value = self.pop()?;
             let key_val = self.pop()?;
             let key = self.to_property_key(&key_val)?;
-            map.insert(key, PropertyDescriptor::data(value));
+            entries.push((key, PropertyDescriptor::data(value)));
+        }
+        let mut map: IndexMap<PropertyKey, PropertyDescriptor> = IndexMap::with_capacity(n);
+        for (key, desc) in entries.into_iter().rev() {
+            map.insert(key, desc);
         }
         let mut data = ObjectData::new();
         data.properties = map;
@@ -4913,11 +4917,21 @@ impl Vm {
 
         props.borrow_mut().properties.insert(
             PropertyKey::String("name".to_string()),
-            PropertyDescriptor::data(Value::String(closure_proto.name.clone())),
+            PropertyDescriptor::Data {
+                value: Value::String(closure_proto.name.clone()),
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
         );
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(closure_proto.arity as f64)),
+            PropertyDescriptor::Data {
+                value: Value::Number(closure_proto.arity as f64),
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
         );
 
         if has_prototype_property {
@@ -4945,11 +4959,12 @@ impl Vm {
 
             props.borrow_mut().properties.insert(
                 PropertyKey::String("prototype".to_string()),
-                PropertyDescriptor::data(proto_obj),
-            );
-            proto_obj_map.borrow_mut().properties.insert(
-                PropertyKey::String("constructor".to_string()),
-                PropertyDescriptor::data(closure.clone()),
+                PropertyDescriptor::Data {
+                    value: proto_obj,
+                    writable: true,
+                    enumerable: false,
+                    configurable: false,
+                },
             );
         }
 

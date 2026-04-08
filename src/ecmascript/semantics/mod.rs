@@ -2439,35 +2439,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     let off = static_builtin_arg_offset(vm, args, "Object");
                     let target = args.get(off).cloned().unwrap_or(Value::Undefined);
                     let mut names: Vec<String> = Vec::new();
-                    match &target {
-                        Value::Object(obj) => {
-                            for key in obj.borrow().properties.keys() {
-                                if let PropertyKey::String(name) = key {
-                                    names.push(name.clone());
-                                }
-                            }
+                    for key in own_property_keys(&target) {
+                        if let PropertyKey::String(name) = key {
+                            names.push(name);
                         }
-                        Value::Array(arr, props) => {
-                            for idx in 0..arr.borrow().len() {
-                                names.push(usize_to_decimal_string(idx));
-                            }
-                            for key in props.borrow().properties.keys() {
-                                if let PropertyKey::String(name) = key {
-                                    names.push(name.clone());
-                                }
-                            }
-                        }
-                        Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
-                            for key in props.borrow().properties.keys() {
-                                if let PropertyKey::String(name) = key {
-                                    names.push(name.clone());
-                                }
-                            }
-                        }
-                        _ => {}
                     }
-                    names.sort();
-                    names.dedup();
                     let arr_rc = Rc::new(RefCell::new(
                         names
                             .into_iter()
