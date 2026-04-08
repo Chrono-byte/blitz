@@ -4,7 +4,7 @@ use crate::errors::RuntimeError;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
-use crate::runtime_utils::{array_from_values, usize_to_decimal_string};
+use crate::runtime_utils::{array_from_values, js_number_to_string, usize_to_decimal_string};
 use crate::value::{
     BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
     ValueSlot,
@@ -822,6 +822,13 @@ impl Vm {
                     Rc::clone(&self.locals[idx]),
                     initialized,
                 );
+                if initialized {
+                    let value = self.locals[idx].borrow().clone();
+                    self.globals.borrow_mut().properties.insert(
+                        PropertyKey::String(name.clone()),
+                        PropertyDescriptor::data(value),
+                    );
+                }
             }
         }
         self.lexical_env = root_env;
@@ -860,15 +867,16 @@ impl Vm {
     // state and follow the spec's IteratorClose semantics for proper
     // conformance.
 
-    fn create_generator_object(
+    pub(super) fn create_generator_object(
         &mut self,
         proto: &Rc<FunctionProto>,
         closure_env: &Rc<Mutex<Vec<ValueSlot>>>,
         call_args: Vec<Value>,
         this_value: Value,
+        callee: &Value,
     ) -> Result<Value, RuntimeError> {
         let mut child = self.fork_execution();
-        child.push_call_frame(proto, closure_env, call_args, this_value)?;
+        child.push_call_frame(proto, closure_env, call_args, this_value, callee.clone())?;
         let runner = Rc::new(RefCell::new(GeneratorRunner {
             vm: child,
             started: false,
@@ -1015,19 +1023,31 @@ impl Vm {
                 self.maybe_collect_garbage_prototype();
                 self.stack.push(result);
             }
-            Value::Closure { ref proto, env, .. } => {
+            Value::Closure {
+                ref proto, ref env, ..
+            } => {
                 let call_args = self.prepare_call_args(&args, proto)?;
                 // Argument validation removed in JS-first mode.
                 if proto.is_generator {
-                    let generator =
-                        self.create_generator_object(proto, &env, call_args, Value::Undefined)?;
+                    let generator = self.create_generator_object(
+                        proto,
+                        env,
+                        call_args,
+                        Value::Undefined,
+                        &callee,
+                    )?;
                     self.stack.push(generator);
                 } else if proto.is_async {
-                    let promise =
-                        self.invoke_async_closure(proto, &env, call_args, Value::Undefined)?;
+                    let promise = self.invoke_async_closure(
+                        proto,
+                        env,
+                        call_args,
+                        Value::Undefined,
+                        &callee,
+                    )?;
                     self.stack.push(promise);
                 } else {
-                    self.push_call_frame(proto, &env, call_args, Value::Undefined)?;
+                    self.push_call_frame(proto, env, call_args, Value::Undefined, callee.clone())?;
                 }
             }
             _ => {
@@ -1187,14 +1207,21 @@ impl Vm {
                 self.maybe_collect_garbage_prototype();
                 self.stack.push(result);
             }
-            Value::Closure { ref proto, env, .. } => {
+            Value::Closure {
+                ref proto, ref env, ..
+            } => {
                 let call_args = self.prepare_call_args(&flat, proto)?;
                 if proto.is_async {
-                    let promise =
-                        self.invoke_async_closure(proto, &env, call_args, Value::Undefined)?;
+                    let promise = self.invoke_async_closure(
+                        proto,
+                        env,
+                        call_args,
+                        Value::Undefined,
+                        &callee,
+                    )?;
                     self.stack.push(promise);
                 } else {
-                    self.push_call_frame(proto, &env, call_args, Value::Undefined)?;
+                    self.push_call_frame(proto, env, call_args, Value::Undefined, callee.clone())?;
                 }
             }
             _ => {
@@ -1281,14 +1308,17 @@ impl Vm {
                 }
                 self.stack.push(result);
             }
-            Value::Closure { ref proto, env, .. } => {
+            Value::Closure {
+                ref proto, ref env, ..
+            } => {
                 let call_args = self.prepare_call_args(&args, proto)?;
                 // Argument validation removed in JS-first mode.
                 if proto.is_async {
-                    let promise = self.invoke_async_closure(proto, &env, call_args, receiver)?;
+                    let promise =
+                        self.invoke_async_closure(proto, env, call_args, receiver, &callee)?;
                     self.stack.push(promise);
                 } else {
-                    self.push_call_frame(proto, &env, call_args, receiver)?;
+                    self.push_call_frame(proto, env, call_args, receiver, callee.clone())?;
                 }
             }
             Value::Undefined => {
@@ -1512,6 +1542,24 @@ impl Vm {
                 )
             };
             if let Some(value) = binding_value {
+                let should_sync_global = outer
+                    .as_ref()
+                    .is_some_and(|outer_rc| Rc::ptr_eq(outer_rc, &self.global_env));
+                if should_sync_global {
+                    let key = PropertyKey::String(name.to_string());
+                    if let Some(value) =
+                        self.globals
+                            .borrow()
+                            .properties
+                            .get(&key)
+                            .and_then(|d| match d {
+                                PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                                _ => None,
+                            })
+                    {
+                        return Ok(Some(value));
+                    }
+                }
                 return Ok(Some(value));
             }
             if let Some(binding_object) = binding_object {
@@ -1525,6 +1573,14 @@ impl Vm {
             }
             env = outer;
         }
+
+        if let Some(frame) = self.call_stack.last()
+            && let Value::Closure { proto, .. } = &frame.callee
+            && proto.name == name
+        {
+            return Ok(Some(frame.callee.clone()));
+        }
+
         Ok(None)
     }
 
@@ -2083,9 +2139,16 @@ impl Vm {
                         &closure_env,
                         call_args,
                         this_arg.clone(),
+                        callee,
                     )?)
                 } else if proto.is_async {
-                    self.invoke_async_closure(proto, &closure_env, call_args, this_arg.clone())
+                    self.invoke_async_closure(
+                        proto,
+                        &closure_env,
+                        call_args,
+                        this_arg.clone(),
+                        callee,
+                    )
                 } else {
                     let stack_base = self.stack.len();
                     let saved_stack = self.stack.snapshot();
@@ -2105,7 +2168,13 @@ impl Vm {
                     let caller_slot_types = self.current_slot_types.clone();
                     let caller_frame_len = self.call_stack.len();
                     let caller_handler_len = self.handlers.len();
-                    self.push_call_frame(proto, &closure_env, call_args, this_arg.clone())?;
+                    self.push_call_frame(
+                        proto,
+                        &closure_env,
+                        call_args,
+                        this_arg.clone(),
+                        callee.clone(),
+                    )?;
                     let result = self.run_until_return(stack_base, true);
                     if result.is_ok() || !self.pending_exception {
                         // Restore caller state (run_until_return already truncated stack)
@@ -2351,25 +2420,41 @@ impl Vm {
             Op::SetUpvalue => {
                 let idx = self.read_byte()? as usize;
                 let value = self.pop()?;
+                let mirror_global_name = self
+                    .chunk
+                    .functions
+                    .iter()
+                    .find(|proto| Rc::as_ptr(&proto.chunk) == Rc::as_ptr(&self.chunk))
+                    .and_then(|proto| proto.upvalues.get(idx))
+                    .and_then(|spec| spec.mirror_global_name.clone());
                 let env = self
                     .current_closure_env
                     .as_ref()
                     .ok_or("SetUpvalue without closure env")?;
-                let env_guard = env.borrow();
-                let cell = env_guard.get(idx).cloned().ok_or_else(|| {
-                    if crate::trace::enabled() {
-                        eprintln!(
-                            "[diag] SetUpvalue bad index={} env_len={} ip={} chunk_ptr={:p} chunk_len={}",
-                            idx,
-                            env_guard.len(),
-                            self.ip.saturating_sub(1),
-                            Rc::as_ptr(&self.chunk),
-                            self.chunk.code.len()
-                        );
-                    }
-                    "Bad upvalue index"
-                })?;
+                let cell = {
+                    let env_guard = env.borrow();
+                    env_guard.get(idx).cloned().ok_or_else(|| {
+                        if crate::trace::enabled() {
+                            eprintln!(
+                                "[diag] SetUpvalue bad index={} env_len={} ip={} chunk_ptr={:p} chunk_len={}",
+                                idx,
+                                env_guard.len(),
+                                self.ip.saturating_sub(1),
+                                Rc::as_ptr(&self.chunk),
+                                self.chunk.code.len()
+                            );
+                        }
+                        "Bad upvalue index"
+                    })?
+                };
                 *cell.borrow_mut() = value;
+
+                if let Some(name) = mirror_global_name {
+                    let key = PropertyKey::String(name);
+                    let global_obj = Value::Object(Rc::clone(&self.globals));
+                    let current = cell.borrow().clone();
+                    self.set_property_tracked(&global_obj, &key, current)?;
+                }
             }
             Op::Pop => {
                 self.pop()?;
@@ -2691,13 +2776,18 @@ impl Vm {
                 } else {
                     let key = PropertyKey::String(name.clone());
                     let global_obj = Value::Object(Rc::clone(&self.globals));
-                    self.get_property_host(&global_obj, &key)?
+                    if self.has_property_host(&global_obj, &key)? {
+                        self.get_property_host(&global_obj, &key)?
+                    } else {
+                        Value::Undefined
+                    }
                 };
                 self.stack
                     .push(Value::String(value.type_name().to_string()));
             }
             Op::Call => self.execute_call()?,
             Op::CallIC => self.execute_call_ic()?,
+            Op::TailCallIC => self.execute_tail_call()?,
             Op::PushWithEnv => {
                 let obj = self.pop()?;
                 let env = Rc::new(RefCell::new(EnvironmentRecord::new_object(
@@ -2727,6 +2817,7 @@ impl Vm {
                 self.set_super_property(&this, &key, value)?;
             }
             Op::CallMethod => self.execute_call_method()?,
+            Op::TailCallMethod => self.execute_tail_call_method()?,
             Op::Spread => self.execute_spread()?,
             Op::ArrayFromSpread => self.execute_array_from_spread()?,
             Op::Construct => self.execute_construct()?,
@@ -3237,43 +3328,9 @@ impl Vm {
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the coercion fails.
     pub fn to_string(&mut self, v: &Value) -> Result<String, RuntimeError> {
-        fn format_js_number(n: f64) -> String {
-            if n.is_nan() {
-                return "NaN".to_string();
-            }
-            if n == 0.0 {
-                return "0".to_string();
-            }
-            if n == f64::INFINITY {
-                return "Infinity".to_string();
-            }
-            if n == f64::NEG_INFINITY {
-                return "-Infinity".to_string();
-            }
-            let abs = n.abs();
-            if !(1e-6..1e21).contains(&abs) {
-                let s = format!("{:e}", n);
-                if let Some(e_idx) = s.find('e') {
-                    let mantissa = s[..e_idx].trim_end_matches('0').trim_end_matches('.');
-                    let exp = &s[e_idx + 1..];
-                    let (sign, digits) = if let Some(rest) = exp.strip_prefix('-') {
-                        ('-', rest)
-                    } else if let Some(rest) = exp.strip_prefix('+') {
-                        ('+', rest)
-                    } else {
-                        ('+', exp)
-                    };
-                    let digits = digits.trim_start_matches('0');
-                    let digits = if digits.is_empty() { "0" } else { digits };
-                    return format!("{}e{}{}", mantissa, sign, digits);
-                }
-                return s;
-            }
-            n.to_string()
-        }
         match v {
             Value::String(s) => Ok(s.clone()),
-            Value::Number(n) => Ok(format_js_number(*n)),
+            Value::Number(n) => Ok(js_number_to_string(*n)),
             Value::Bool(b) => Ok(if *b {
                 "true".to_string()
             } else {
@@ -3914,7 +3971,7 @@ impl Vm {
     }
 
     /// Pop the return value, restore the caller's frame, and push the result.
-    fn execute_return(&mut self) -> Result<(), RuntimeError> {
+    pub(super) fn execute_return(&mut self) -> Result<(), RuntimeError> {
         let frame = self.call_stack.pop().ok_or("Return without call frame")?;
         let result = self.stack.pop().unwrap_or(Value::Undefined);
 
@@ -3957,7 +4014,7 @@ impl Vm {
         Ok(())
     }
 
-    fn prepare_call_args(
+    pub(super) fn prepare_call_args(
         &self,
         args: &[Value],
         proto: &FunctionProto,
@@ -4046,13 +4103,13 @@ impl Vm {
         Ok(())
     }
 
-    /// Save the caller's state and set up the callee.
-    pub(super) fn push_call_frame(
+    pub(super) fn configure_call_frame(
         &mut self,
         proto: &Rc<FunctionProto>,
         closure_env: &Rc<Mutex<Vec<ValueSlot>>>,
         call_args: Vec<Value>,
         mut this_value: Value,
+        callee: Value,
     ) -> Result<(), RuntimeError> {
         self.pending_closure_env = Some(Rc::clone(closure_env));
         if !proto.is_strict {
@@ -4069,35 +4126,14 @@ impl Vm {
             }
         }
 
-        let caller_stack = self.stack.take_all();
-        let stack_base = caller_stack.len();
-
         if crate::trace::enabled() {
             eprintln!(
-                "[trace] push_call_frame stack_base={} proto='{}' arity={} stack_len={}",
-                stack_base,
+                "[trace] configure_call_frame proto='{}' arity={} stack_len={}",
                 proto.name,
                 proto.arity,
                 self.stack.len()
             );
         }
-
-        self.call_stack.push(Frame {
-            chunk: Rc::clone(&self.chunk),
-            ip: self.ip,
-            stack: caller_stack,
-            locals: std::mem::replace(
-                &mut self.locals,
-                Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
-            ),
-            this_value: std::mem::replace(&mut self.this_value, this_value),
-            closure_env: self.current_closure_env.take(),
-            slot_types: self.current_slot_types.take(),
-            stack_base,
-            is_strict: proto.is_strict,
-            lexical_env: Rc::clone(&self.lexical_env),
-            yield_star_queue: self.yield_star_queue.take(),
-        });
 
         self.chunk = Rc::clone(&proto.chunk);
         self.ip = 0;
@@ -4105,6 +4141,7 @@ impl Vm {
         self.current_closure_env = Some(Rc::clone(closure_env));
         self.current_slot_types = Some(proto.slot_types.clone());
         self.yield_star_queue = None;
+        self.this_value = this_value;
 
         self.locals = std::iter::repeat_with(|| Rc::new(Mutex::new(Value::Undefined)))
             .take(proto.slot_types.len().max(proto.arity))
@@ -4133,10 +4170,14 @@ impl Vm {
         for (i, value) in call_args.iter().cloned().enumerate().take(proto.arity) {
             *self.locals[i].borrow_mut() = value;
         }
+        if let Some(slot) = proto.self_binding_slot
+            && slot < self.locals.len()
+        {
+            *self.locals[slot].borrow_mut() = callee;
+        }
         if let Some(slot) = proto.arguments_slot
             && slot < self.locals.len()
         {
-            // Only clone arguments when the callee actually needs `arguments`.
             let args_for_arguments: Vec<Option<Value>> =
                 call_args.iter().map(|v| Some(v.clone())).collect();
             if proto.has_simple_parameter_list && !proto.is_strict {
@@ -4153,6 +4194,51 @@ impl Vm {
             }
         }
         self.pending_closure_env = None;
+
+        Ok(())
+    }
+
+    /// Save the caller's state and set up the callee.
+    pub(super) fn push_call_frame(
+        &mut self,
+        proto: &Rc<FunctionProto>,
+        closure_env: &Rc<Mutex<Vec<ValueSlot>>>,
+        call_args: Vec<Value>,
+        this_value: Value,
+        callee: Value,
+    ) -> Result<(), RuntimeError> {
+        let caller_stack = self.stack.take_all();
+        let stack_base = caller_stack.len();
+
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] push_call_frame stack_base={} proto='{}' arity={} stack_len={}",
+                stack_base,
+                proto.name,
+                proto.arity,
+                self.stack.len()
+            );
+        }
+
+        self.call_stack.push(Frame {
+            chunk: Rc::clone(&self.chunk),
+            ip: self.ip,
+            stack: caller_stack,
+            locals: std::mem::replace(
+                &mut self.locals,
+                Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
+            ),
+            this_value: std::mem::replace(&mut self.this_value, this_value.clone()),
+            callee: callee.clone(),
+            closure_env: self.current_closure_env.take(),
+            slot_types: self.current_slot_types.take(),
+            stack_base,
+            is_strict: proto.is_strict,
+            lexical_env: Rc::clone(&self.lexical_env),
+            yield_star_queue: self.yield_star_queue.take(),
+        });
+
+        self.configure_call_frame(proto, closure_env, call_args, this_value, callee)?;
 
         Ok(())
     }
@@ -4595,6 +4681,33 @@ impl Vm {
         let key_val = self.pop()?;
         let obj = self.pop()?;
         let key = self.to_property_key(&key_val)?;
+        let skip_ic = matches!(obj, Value::Array(..))
+            && matches!(&key, PropertyKey::String(name) if name == "length");
+        if skip_ic {
+            let v = self.get_property_value(&obj, &key)?;
+            if crate::trace::enabled() {
+                match &key {
+                    PropertyKey::String(s) => {
+                        eprintln!(
+                            "[trace] GetPropertyIC bypass receiver={} key='{}' -> {}",
+                            obj.type_name(),
+                            s,
+                            v.type_name()
+                        );
+                    }
+                    PropertyKey::Symbol(_) => {
+                        eprintln!(
+                            "[trace] GetPropertyIC bypass receiver={} key=symbol -> {}",
+                            obj.type_name(),
+                            v.type_name()
+                        );
+                    }
+                }
+                crate::trace::value_string("[trace]   result", &v);
+            }
+            self.stack.push(v);
+            return Ok(());
+        }
         let chunk_identity = Rc::as_ptr(&self.chunk) as usize;
         let cache_key = (chunk_identity, slot);
         if let Some(receiver_identity) = object_identity(&obj) {
@@ -5060,7 +5173,7 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     #[inline(always)]
-    fn read_byte(&mut self) -> Result<u8, RuntimeError> {
+    pub(super) fn read_byte(&mut self) -> Result<u8, RuntimeError> {
         if self.ip >= self.chunk.code.len() {
             return Err(RuntimeError::from(format!(
                 "Unexpected end of bytecode at ip {}",
@@ -5113,7 +5226,7 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     #[inline(always)]
-    fn pop(&mut self) -> Result<Value, RuntimeError> {
+    pub(super) fn pop(&mut self) -> Result<Value, RuntimeError> {
         self.stack.pop().ok_or_else(|| {
         if crate::trace::enabled() {
             eprintln!("[diag] Stack underflow");
@@ -5434,7 +5547,7 @@ impl Vm {
     // Diagnostics (only emitted when tracing is enabled)
     // -----------------------------------------------------------------------
 
-    fn dump_diag(&self, label: &str, offender: &Value) {
+    pub(super) fn dump_diag(&self, label: &str, offender: &Value) {
         if !crate::trace::enabled() {
             return;
         }
@@ -5890,6 +6003,8 @@ fn opcode_width(op: Op) -> usize {
         | Op::Call
         | Op::CallMethod
         | Op::CallIC
+        | Op::TailCallIC
+        | Op::TailCallMethod
         | Op::Construct
         | Op::PopN
         | Op::MakeClosure
@@ -6757,6 +6872,16 @@ mod tests {
         })));
 
         assert_eq!(vm.to_string(&promise).unwrap(), "[object Promise]");
+    }
+
+    #[test]
+    fn to_string_formats_integral_numbers_without_trailing_decimal() {
+        let globals = test_globals();
+        let mut vm = Vm::new(globals);
+
+        assert_eq!(vm.to_string(&Value::Number(1.0)).unwrap(), "1");
+        assert_eq!(vm.to_string(&Value::Number(2.0)).unwrap(), "2");
+        assert_eq!(vm.to_string(&Value::Number(-0.0)).unwrap(), "0");
     }
 
     #[test]

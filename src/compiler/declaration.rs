@@ -35,7 +35,7 @@ impl Compiler {
                 return Err(crate::errors::CompilerError::from(err));
             }
 
-            let (proto, _env_len) = self.compile_function(&fname, f, None)?;
+            let (proto, _env_len) = self.compile_function(&fname, None, f, None)?;
             let idx = self.chunk.add_function(proto);
             self.emit(Op::MakeClosure, LINE);
             self.emit_byte(idx as u8, LINE);
@@ -79,7 +79,7 @@ impl Compiler {
         &mut self,
         stmt: &oast::Statement,
     ) -> Result<(), crate::errors::CompilerError> {
-        self.compile_statement_oast_with_mode(stmt, false)
+        self.compile_statement_oast_with_mode(stmt, false, None)
     }
 
     /// Compile an oxc AST statement into bytecode with optional result preservation.
@@ -100,6 +100,7 @@ impl Compiler {
         &mut self,
         stmt: &oast::Statement,
         skip_pop: bool,
+        completion_slot: Option<usize>,
     ) -> Result<(), crate::errors::CompilerError> {
         use oxc_ast::ast::{
             BindingPattern as OPat, ForStatementLeft as OForLeft, Statement as OStmt,
@@ -151,7 +152,7 @@ impl Compiler {
                             self.emit_get_binding(id.name.as_str());
                         } else {
                             let fname = "<default>".to_string();
-                            let (proto, _env_len) = self.compile_function(&fname, f, None)?;
+                            let (proto, _env_len) = self.compile_function(&fname, None, f, None)?;
                             let idx = self.chunk.add_function(proto);
                             self.emit(Op::MakeClosure, LINE);
                             self.emit_byte(idx as u8, LINE);
@@ -189,7 +190,10 @@ impl Compiler {
             OStmt::ClassDeclaration(c) => self.compile_class_declaration_oast(c)?,
             OStmt::ExpressionStatement(e) => {
                 self.compile_expr_oast(&e.expression)?;
-                if !skip_pop {
+                if let Some(slot) = completion_slot {
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(slot as u8, LINE);
+                } else if !skip_pop {
                     self.emit(Op::Pop, LINE);
                 }
             }
@@ -209,7 +213,7 @@ impl Compiler {
                     continue_patches: Vec::new(),
                     break_patches: Vec::new(),
                 });
-                self.compile_statement_oast(&l.body)?;
+                self.compile_statement_oast_with_mode(&l.body, false, completion_slot)?;
                 let label_state = self
                     .label_patches
                     .pop()
@@ -237,7 +241,7 @@ impl Compiler {
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
 
-                self.compile_statement_oast(&w.body)?;
+                self.compile_statement_oast_with_mode(&w.body, false, completion_slot)?;
 
                 self.emit(Op::PopHandler, LINE);
                 self.emit(Op::PopEnv, LINE);
@@ -258,20 +262,20 @@ impl Compiler {
             OStmt::BlockStatement(b) => {
                 self.enter_block_scope_with_vars(&b.body);
                 for s in &b.body {
-                    self.compile_statement_oast(s)?;
+                    self.compile_statement_oast_with_mode(s, false, completion_slot)?;
                 }
                 self.exit_scope();
             }
             OStmt::IfStatement(i) => {
                 if let Some(jump_over) = self.try_emit_compare_jump_if_false(&i.test)? {
-                    self.compile_statement_oast(&i.consequent)?;
+                    self.compile_statement_oast_with_mode(&i.consequent, false, completion_slot)?;
                     if let Some(alt) = &i.alternate {
                         self.emit(Op::Jump, LINE);
                         let jump_else = self.chunk.code.len();
                         self.emit_byte(0, LINE);
                         self.emit_byte(0, LINE);
                         self.patch_jump(jump_over);
-                        self.compile_statement_oast(alt)?;
+                        self.compile_statement_oast_with_mode(alt, false, completion_slot)?;
                         self.patch_jump(jump_else);
                     } else {
                         self.patch_jump(jump_over);
@@ -282,14 +286,14 @@ impl Compiler {
                     let jump_over = self.chunk.code.len();
                     self.emit_byte(0, LINE);
                     self.emit_byte(0, LINE);
-                    self.compile_statement_oast(&i.consequent)?;
+                    self.compile_statement_oast_with_mode(&i.consequent, false, completion_slot)?;
                     if let Some(alt) = &i.alternate {
                         self.emit(Op::Jump, LINE);
                         let jump_else = self.chunk.code.len();
                         self.emit_byte(0, LINE);
                         self.emit_byte(0, LINE);
                         self.patch_jump(jump_over);
-                        self.compile_statement_oast(alt)?;
+                        self.compile_statement_oast_with_mode(alt, false, completion_slot)?;
                         self.patch_jump(jump_else);
                     } else {
                         self.patch_jump(jump_over);
@@ -346,7 +350,7 @@ impl Compiler {
                 for (case_idx, case) in s.cases.iter().enumerate() {
                     case_starts[case_idx] = self.chunk.code.len();
                     for stmt in &case.consequent {
-                        self.compile_statement_oast(stmt)?;
+                        self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
                     }
                 }
                 let switch_end = self.chunk.code.len();
@@ -376,6 +380,16 @@ impl Compiler {
                 self.loop_depth += 1;
                 self.continue_patches.push(Vec::new());
                 self.break_patches.push(Vec::new());
+                let owns_completion_slot = completion_slot.is_none();
+                let loop_completion_slot = if let Some(slot) = completion_slot {
+                    slot
+                } else {
+                    let slot = self.alloc_temp_local("loop_result");
+                    self.emit(Op::Undefined, LINE);
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(slot as u8, LINE);
+                    slot
+                };
                 let loop_start = self.chunk.code.len();
                 self.compile_expr_oast(&w.test)?;
                 self.emit(Op::JumpIfFalse, LINE);
@@ -383,7 +397,7 @@ impl Compiler {
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
                 self.enter_block_scope();
-                self.compile_statement_oast(&w.body)?;
+                self.compile_statement_oast_with_mode(&w.body, false, Some(loop_completion_slot))?;
                 self.exit_scope();
                 self.emit(Op::Jump, LINE);
                 let _back_jump_pos = self.chunk.code.len();
@@ -396,10 +410,18 @@ impl Compiler {
                         self.chunk.write_i16_at(patch_pos, v);
                     }
                 }
-                self.patch_jump(exit_jump);
+                let cleanup_start = self.chunk.code.len();
+                if owns_completion_slot {
+                    self.emit(Op::GetLocal, LINE);
+                    self.emit_byte(loop_completion_slot as u8, LINE);
+                    let target = cleanup_start as isize - (exit_jump as isize) - 2;
+                    self.chunk.write_i16_at(exit_jump, target as i16);
+                } else {
+                    self.patch_jump(exit_jump);
+                }
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
-                        let target = self.chunk.code.len() - patch_pos - 2;
+                        let target = cleanup_start - patch_pos - 2;
                         self.chunk.write_i16_at(patch_pos, target as i16);
                     }
                 }
@@ -426,9 +448,19 @@ impl Compiler {
                 self.loop_depth += 1;
                 self.continue_patches.push(Vec::new());
                 self.break_patches.push(Vec::new());
+                let owns_completion_slot = completion_slot.is_none();
+                let loop_completion_slot = if let Some(slot) = completion_slot {
+                    slot
+                } else {
+                    let slot = self.alloc_temp_local("loop_result");
+                    self.emit(Op::Undefined, LINE);
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(slot as u8, LINE);
+                    slot
+                };
                 let loop_start = self.chunk.code.len();
                 self.enter_block_scope();
-                self.compile_statement_oast(&d.body)?;
+                self.compile_statement_oast_with_mode(&d.body, false, Some(loop_completion_slot))?;
                 self.exit_scope();
                 let test_start = self.chunk.code.len();
                 self.compile_expr_oast(&d.test)?;
@@ -447,10 +479,18 @@ impl Compiler {
                         self.chunk.write_i16_at(patch_pos, v);
                     }
                 }
-                self.patch_jump(exit_jump);
+                let cleanup_start = self.chunk.code.len();
+                if owns_completion_slot {
+                    self.emit(Op::GetLocal, LINE);
+                    self.emit_byte(loop_completion_slot as u8, LINE);
+                    let target = cleanup_start as isize - (exit_jump as isize) - 2;
+                    self.chunk.write_i16_at(exit_jump, target as i16);
+                } else {
+                    self.patch_jump(exit_jump);
+                }
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
-                        let target = self.chunk.code.len() - patch_pos - 2;
+                        let target = cleanup_start - patch_pos - 2;
                         let v = target as i16;
                         self.chunk.write_i16_at(patch_pos, v);
                     }
@@ -559,7 +599,7 @@ impl Compiler {
                 };
 
                 self.enter_block_scope();
-                self.compile_statement_oast(&f.body)?;
+                self.compile_statement_oast_with_mode(&f.body, false, completion_slot)?;
                 self.exit_scope();
 
                 let update_start = self.chunk.code.len();
@@ -724,7 +764,7 @@ impl Compiler {
                 }
 
                 self.enter_block_scope();
-                self.compile_statement_oast(&f.body)?;
+                self.compile_statement_oast_with_mode(&f.body, false, completion_slot)?;
                 self.exit_scope();
 
                 let update_start = loop_start;
@@ -916,7 +956,7 @@ impl Compiler {
                 }
 
                 self.enter_block_scope();
-                self.compile_statement_oast(&f.body)?;
+                self.compile_statement_oast_with_mode(&f.body, false, completion_slot)?;
                 self.exit_scope();
 
                 let update_start = self.chunk.code.len();
@@ -966,11 +1006,6 @@ impl Compiler {
                 self.loop_depth = self.loop_depth.saturating_sub(1);
             }
             OStmt::ReturnStatement(r) => {
-                if let Some(arg) = &r.argument {
-                    self.compile_expr_oast(arg)?;
-                } else {
-                    self.emit(Op::Undefined, LINE);
-                }
                 let return_target = self.finally_patches.last().and_then(|state| {
                     if state.in_finalizer {
                         None
@@ -979,6 +1014,11 @@ impl Compiler {
                     }
                 });
                 if let Some((return_slot, did_return_slot)) = return_target {
+                    if let Some(arg) = &r.argument {
+                        self.compile_expr_oast(arg)?;
+                    } else {
+                        self.emit(Op::Undefined, LINE);
+                    }
                     self.emit(Op::Dup, LINE);
                     self.emit(Op::SetLocal, LINE);
                     self.emit_byte(return_slot as u8, LINE);
@@ -993,6 +1033,11 @@ impl Compiler {
                         state.return_jumps.push(patch_pos);
                     }
                     return Ok(());
+                }
+                if let Some(arg) = &r.argument {
+                    self.compile_expr_oast_tail(arg)?;
+                } else {
+                    self.emit(Op::Undefined, LINE);
                 }
                 self.emit(Op::Return, LINE);
             }
@@ -1102,7 +1147,7 @@ impl Compiler {
 
                 self.enter_block_scope_with_vars(&t.block.body);
                 for stmt in &t.block.body {
-                    self.compile_statement_oast(stmt)?;
+                    self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
                 }
                 self.exit_scope();
 
@@ -1122,7 +1167,7 @@ impl Compiler {
                     let body_start = self.chunk.code.len();
                     self.enter_block_scope_with_vars(&fin.body);
                     for stmt in &fin.body {
-                        self.compile_statement_oast(stmt)?;
+                        self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
                     }
                     self.exit_scope();
                     let (did_return_slot, return_slot) = {
@@ -1175,14 +1220,22 @@ impl Compiler {
                                 oxc_ast::ast::VariableDeclarationKind::Let,
                             )?;
                             for stmt in &handler.body.body {
-                                self.compile_statement_oast(stmt)?;
+                                self.compile_statement_oast_with_mode(
+                                    stmt,
+                                    false,
+                                    completion_slot,
+                                )?;
                             }
                             self.exit_scope();
                         } else {
                             self.emit(Op::Pop, LINE);
                             self.enter_block_scope_with_vars(&handler.body.body);
                             for stmt in &handler.body.body {
-                                self.compile_statement_oast(stmt)?;
+                                self.compile_statement_oast_with_mode(
+                                    stmt,
+                                    false,
+                                    completion_slot,
+                                )?;
                             }
                             self.exit_scope();
                         }
@@ -1200,7 +1253,11 @@ impl Compiler {
                             }
                             self.enter_block_scope_with_vars(&fin.body);
                             for stmt in &fin.body {
-                                self.compile_statement_oast(stmt)?;
+                                self.compile_statement_oast_with_mode(
+                                    stmt,
+                                    false,
+                                    completion_slot,
+                                )?;
                             }
                             self.exit_scope();
                             let state =
@@ -1233,9 +1290,15 @@ impl Compiler {
                                     })?;
                                 state.in_finalizer = true;
                             }
+                            self.enter_block_scope_with_vars(&fin.body);
                             for stmt in &fin.body {
-                                self.compile_statement_oast(stmt)?;
+                                self.compile_statement_oast_with_mode(
+                                    stmt,
+                                    false,
+                                    completion_slot,
+                                )?;
                             }
+                            self.exit_scope();
                             let state =
                                 self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
                                     crate::errors::CompilerError::from("finally state missing")
@@ -1291,6 +1354,7 @@ impl Compiler {
             has_prototype_property: true,
             captures_this: false,
             arguments_slot: None,
+            self_binding_slot: None,
             has_simple_parameter_list: true,
             return_type: None,
             is_strict: true,
@@ -1336,6 +1400,7 @@ impl Compiler {
                 // Only support non-computed simple keys here.
                 let (proto, _env_len) = self.compile_function(
                     method_name.as_deref().unwrap_or("<method>"),
+                    None,
                     &md.value,
                     None,
                 )?;
@@ -1447,6 +1512,7 @@ impl Compiler {
     pub(super) fn compile_function(
         &mut self,
         name: &str,
+        self_name: Option<&str>,
         func: &oast::Function,
         return_type: Option<Type>,
     ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
@@ -1496,6 +1562,8 @@ impl Compiler {
             };
             inner.add_local_with_mirror(pname, None, false);
         }
+        let self_binding_slot = self_name
+            .map(|self_name| inner.add_local_with_mirror(self_name.to_string(), None, false));
         let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
 
         // Pre-declare nested functions inside this function body.
@@ -1545,6 +1613,7 @@ impl Compiler {
                 has_prototype_property,
                 captures_this: false,
                 arguments_slot: Some(arguments_slot),
+                self_binding_slot,
                 has_simple_parameter_list,
                 return_type,
                 is_strict,
@@ -1625,7 +1694,7 @@ impl Compiler {
         if func.expression && func.body.statements.len() == 1 {
             if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
                 // Compile the expression and return its value
-                inner.compile_expr_oast(&expr_stmt.expression)?;
+                inner.compile_expr_oast_tail(&expr_stmt.expression)?;
                 inner.emit(Op::Return, LINE);
             } else {
                 // Shouldn't happen for expression: true, but handle it safely
@@ -1674,6 +1743,7 @@ impl Compiler {
                 // Arrow functions do not create their own `arguments`; it is
                 // lexically resolved from the enclosing function/global scope.
                 arguments_slot: None,
+                self_binding_slot: None,
                 has_simple_parameter_list,
                 return_type,
                 is_strict,

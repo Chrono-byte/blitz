@@ -334,7 +334,8 @@ impl super::Compiler {
             }
             OExpr::FunctionExpression(f) => {
                 let name = "<anonymous>";
-                let (proto, _env_len) = self.compile_function(name, f, None)?;
+                let self_name = f.id.as_ref().map(|id| id.name.as_str());
+                let (proto, _env_len) = self.compile_function(name, self_name, f, None)?;
                 let idx = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
                 self.emit_byte(idx as u8, LINE);
@@ -1011,15 +1012,19 @@ impl super::Compiler {
             }
             OExpr::UnaryExpression(u) => match u.operator {
                 oast::UnaryOperator::Typeof => {
-                    if let OExpr::Identifier(id) = &u.argument {
-                        let name = id.name;
-                        if self.resolve_local(&name).is_some()
-                            || self.resolve_upvalue(&name).is_some()
-                        {
+                    if let Some(name) = Self::identifier_name_if_parenthesized(&u.argument) {
+                        if let Some(slot) = self.resolve_local(name) {
+                            if self.local_mirrors_global(slot) {
+                                self.emit_typeof_identifier(name);
+                            } else {
+                                self.compile_expr_oast(&u.argument)?;
+                                self.emit(Op::Typeof, LINE);
+                            }
+                        } else if self.resolve_upvalue(name).is_some() {
                             self.compile_expr_oast(&u.argument)?;
                             self.emit(Op::Typeof, LINE);
                         } else {
-                            self.emit_typeof_identifier(&name);
+                            self.emit_typeof_identifier(name);
                         }
                     } else {
                         self.compile_expr_oast(&u.argument)?;
@@ -1784,6 +1789,7 @@ impl super::Compiler {
                     has_prototype_property: true,
                     captures_this: false,
                     arguments_slot: None,
+                    self_binding_slot: None,
                     has_simple_parameter_list: true,
                     return_type: None,
                     is_strict: true,
@@ -1821,6 +1827,7 @@ impl super::Compiler {
                         };
                         let (proto, _env_len) = self.compile_function(
                             method_name.as_deref().unwrap_or("<method>"),
+                            None,
                             &md.value,
                             None,
                         )?;

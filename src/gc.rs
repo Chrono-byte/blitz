@@ -498,6 +498,7 @@ mod tests {
             has_prototype_property: false,
             captures_this: false,
             arguments_slot: None,
+            self_binding_slot: None,
             has_simple_parameter_list: true,
             return_type: None,
             is_strict: false,

@@ -93,7 +93,7 @@ impl Compiler {
                 && let Some(ident) = &f.id
             {
                 let fname = ident.name.to_string();
-                let (proto, _env_len) = self.compile_function(&fname, f, None)?;
+                let (proto, _env_len) = self.compile_function(&fname, None, f, None)?;
                 let idx = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
                 self.emit_byte(idx as u8, LINE);

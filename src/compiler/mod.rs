@@ -42,6 +42,7 @@ mod binding;
 mod declaration;
 mod expression;
 mod pre_declare;
+mod tail;
 
 const LINE: u32 = 1;
 
@@ -288,6 +289,7 @@ impl Compiler {
                     self.validate_early_errors_in_program(std::slice::from_ref(&f.body))?;
                 }
                 oast::Statement::LabeledStatement(l) => {
+                    self.validate_statement_position_function(&l.body)?;
                     self.validate_early_errors_in_program(std::slice::from_ref(&l.body))?;
                 }
                 oast::Statement::WithStatement(w) => {
@@ -359,6 +361,7 @@ impl Compiler {
                     self.validate_early_errors_in_statements(std::slice::from_ref(&f.body))?;
                 }
                 oast::Statement::LabeledStatement(l) => {
+                    self.validate_statement_position_function(&l.body)?;
                     self.validate_early_errors_in_statements(std::slice::from_ref(&l.body))?;
                 }
                 oast::Statement::WithStatement(w) => {
@@ -427,7 +430,7 @@ impl Compiler {
             let is_last_expr_stmt = repl_mode
                 && i == stmts.len() - 1
                 && matches!(stmt, oast::Statement::ExpressionStatement(_));
-            self.compile_statement_oast_with_mode(stmt, is_last_expr_stmt)?;
+            self.compile_statement_oast_with_mode(stmt, is_last_expr_stmt, None)?;
         }
 
         self.emit(Op::Return, LINE);

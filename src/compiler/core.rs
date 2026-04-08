@@ -82,10 +82,18 @@ pub struct Compiler {
 }
 
 /// Source of a captured variable in a closure.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum CaptureSource {
     /// Local variable captured from enclosing function scope.
-    Local(u8),
+    ///
+    /// `mirror_global_name` is set for root `var` bindings that are also
+    /// exposed on the global object.
+    Local {
+        /// Slot index in the enclosing function.
+        slot: u8,
+        /// Optional global property name mirrored by this binding.
+        mirror_global_name: Option<String>,
+    },
     /// Upvalue captured from outer closure.
     Upvalue(u8),
 }
@@ -421,7 +429,20 @@ impl Compiler {
         let mut bindings = HashMap::new();
         for scope in &self.scopes {
             for (name, slot) in &scope.bindings {
-                bindings.insert(name.clone(), CaptureSource::Local(*slot as u8));
+                if self.local_mirrors_global(*slot) {
+                    continue;
+                }
+                bindings.insert(
+                    name.clone(),
+                    CaptureSource::Local {
+                        slot: *slot as u8,
+                        mirror_global_name: if self.local_mirrors_global(*slot) {
+                            Some(name.clone())
+                        } else {
+                            None
+                        },
+                    },
+                );
             }
         }
         for (name, idx) in &self.upvalue_indices {
@@ -454,8 +475,12 @@ impl Compiler {
 
     pub(crate) fn emit_get_binding(&mut self, name: &str) {
         if let Some(slot) = self.resolve_local(name) {
-            self.emit(Op::GetLocal, LINE);
-            self.emit_byte(slot as u8, LINE);
+            if self.local_mirrors_global(slot) {
+                self.emit_get_global_name(name);
+            } else {
+                self.emit(Op::GetLocal, LINE);
+                self.emit_byte(slot as u8, LINE);
+            }
         } else if let Some(upvalue) = self.resolve_upvalue(name) {
             self.emit(Op::GetUpvalue, LINE);
             self.emit_byte(upvalue, LINE);
@@ -505,16 +530,21 @@ impl Compiler {
         if let Some(&idx) = self.upvalue_indices.get(name) {
             return Some(idx);
         }
-        let source = *self.outer_bindings.get(name)?;
+        let source = self.outer_bindings.get(name)?.clone();
         let idx = u8::try_from(self.captured_upvalues.len()).ok()?;
         let spec = match source {
-            CaptureSource::Local(slot) => UpvalueSpec {
+            CaptureSource::Local {
+                slot,
+                mirror_global_name,
+            } => UpvalueSpec {
                 is_local: true,
                 index: slot,
+                mirror_global_name,
             },
             CaptureSource::Upvalue(upvalue) => UpvalueSpec {
                 is_local: false,
                 index: upvalue,
+                mirror_global_name: None,
             },
         };
         self.captured_upvalues.push(spec);

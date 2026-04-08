@@ -152,6 +152,7 @@ impl Vm {
         env: &Rc<std::sync::Mutex<Vec<ValueSlot>>>,
         call_args: Vec<Value>,
         this_arg: Value,
+        callee: &Value,
     ) -> Result<Value, crate::errors::RuntimeError> {
         let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
             on_fulfilled: Vec::new(),
@@ -176,7 +177,7 @@ impl Vm {
 
         self.last_uncaught_exception = None;
         let exec_result = (|| {
-            self.push_call_frame(&proto, &env, call_args, this_arg)?;
+            self.push_call_frame(&proto, &env, call_args, this_arg, callee.clone())?;
             self.run_until_return(stack_base, false)
         })();
         self.maybe_collect_garbage_prototype();

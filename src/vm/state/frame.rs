@@ -19,6 +19,8 @@ pub(crate) struct Frame {
     pub(crate) locals: Vec<ValueSlot>,
     /// The `this` value for this frame.
     pub(crate) this_value: Value,
+    /// The callee value used to enter this frame.
+    pub(crate) callee: Value,
     /// The closure environment for this frame.
     pub(crate) closure_env: Option<Rc<Mutex<Vec<ValueSlot>>>>,
     /// The types of local variables for this frame.

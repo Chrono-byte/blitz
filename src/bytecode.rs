@@ -47,6 +47,10 @@ pub struct UpvalueSpec {
     pub is_local: bool,
     /// Slot or upvalue index in the enclosing function.
     pub index: u8,
+    /// Optional global binding name that should mirror writes to this captured
+    /// cell. Used for root `var` bindings that are also exposed on the global
+    /// object.
+    pub mirror_global_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +107,8 @@ pub struct FunctionProto {
     pub captures_this: bool,
     /// Slot index for the implicit `arguments` binding, if reserved.
     pub arguments_slot: Option<usize>,
+    /// Slot index for a named function-expression self binding, if reserved.
+    pub self_binding_slot: Option<usize>,
     /// Whether the formal parameter list is simple enough for mapped arguments.
     pub has_simple_parameter_list: bool,
     /// Return type annotation
@@ -479,6 +485,10 @@ pub enum Op {
     IteratorClose,
     /// Function call opcode reserved for inline-cached dispatch. Operand: nargs (u8).
     CallIC,
+    /// Tail-call opcode reserved for inline-cached dispatch. Operand: nargs (u8).
+    TailCallIC,
+    /// Tail-call opcode for method dispatch preserving an explicit receiver (`this`).
+    TailCallMethod,
     /// Push a `with` object environment using the top-of-stack value.
     PushWithEnv,
     /// Pop the current lexical environment.
@@ -591,6 +601,8 @@ impl Op {
             Op::IteratorNext => "IteratorNext",
             Op::IteratorClose => "IteratorClose",
             Op::CallIC => "CallIC",
+            Op::TailCallIC => "TailCallIC",
+            Op::TailCallMethod => "TailCallMethod",
             Op::PushWithEnv => "PushWithEnv",
             Op::PopEnv => "PopEnv",
             Op::GetNewTarget => "GetNewTarget",
