@@ -4,5 +4,5 @@ pub mod async_tasks;
 pub mod calls;
 /// Main VM execution loop and opcode helpers.
 pub mod execution;
-
+/// Same-value comparison helper.
 pub use execution::same_value;
