@@ -1,4 +1,4 @@
-use crate::bytecode::Chunk;
+use crate::bytecode::{Chunk, UpvalueSpec};
 use crate::environment::EnvironmentRecord;
 use crate::typecheck::Type;
 use crate::value::{Value, ValueSlot};
@@ -23,8 +23,12 @@ pub(crate) struct Frame {
     pub(crate) callee: Value,
     /// The closure environment for this frame.
     pub(crate) closure_env: Option<Rc<Mutex<Vec<ValueSlot>>>>,
+    /// Upvalue metadata for the current function.
+    pub(crate) upvalues: Vec<UpvalueSpec>,
     /// The types of local variables for this frame.
     pub(crate) slot_types: Option<Vec<Option<Type>>>,
+    /// The names of local variables for this frame.
+    pub(crate) slot_names: Option<Vec<Option<String>>>,
     /// Length of caller stack at call entry (diagnostic only).
     pub(crate) stack_base: usize,
     /// Whether this frame executes in strict mode.

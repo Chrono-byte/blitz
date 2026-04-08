@@ -1033,7 +1033,7 @@ impl Compiler {
                 });
                 if let Some((return_slot, did_return_slot)) = return_target {
                     if let Some(arg) = &r.argument {
-                        self.compile_expr_oast(arg)?;
+                        self.compile_expr_oast_tail(arg)?;
                     } else {
                         self.emit(Op::Undefined, LINE);
                     }
@@ -1054,7 +1054,7 @@ impl Compiler {
                     return Ok(());
                 }
                 if let Some(arg) = &r.argument {
-                    self.compile_expr_oast(arg)?;
+                    self.compile_expr_oast_tail(arg)?;
                 } else {
                     self.emit(Op::Undefined, LINE);
                 }

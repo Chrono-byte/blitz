@@ -475,7 +475,7 @@ struct RunnerOptions {
     #[arg(long = "limit", value_name = "N")]
     limit: Option<usize>,
     /// Number of tests to run in parallel.
-    #[arg(long = "jobs", short = 'j', value_name = "N")]
+    #[arg(long = "workers", short = 'w', value_name = "N")]
     jobs: Option<usize>,
     /// Run only harness files.
     #[arg(long = "harness-only", alias = "harness", action)]

@@ -24,6 +24,30 @@ impl super::Compiler {
         v: &oast::VariableDeclaration<'_>,
     ) -> Result<(), crate::errors::CompilerError> {
         for dec in &v.declarations {
+            if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var)
+                && self.with_depth > 0
+                && let oast::BindingPattern::BindingIdentifier(id) = &dec.id
+            {
+                let name = id.name.as_str();
+                if let Some(err) = Self::strict_binding_name_error(self.strict_context, name) {
+                    return Err(err);
+                }
+                if let Some(err) = self.check_var_lexical_conflict(name) {
+                    return Err(crate::errors::CompilerError::from(err));
+                }
+                if self.resolve_local(name).is_none() {
+                    self.add_var_local(name.to_string(), None, self.is_root);
+                }
+                if let Some(init) = &dec.init {
+                    self.compile_expr_oast(init)?;
+                    // Inside `with`, a `var` initializer should resolve
+                    // through the scope chain at runtime so an object
+                    // property can shadow the hoisted binding.
+                    self.emit_set_global_name(name);
+                }
+                continue;
+            }
+
             if let Some(init) = &dec.init {
                 self.compile_expr_oast(init)?;
             } else {

@@ -1287,6 +1287,9 @@ impl super::Compiler {
                         self.emit(Op::SetLocal, LINE);
                         self.emit_byte(new_slot as u8, LINE);
                         self.emit_reference_set_from_slot(object_slot, key_slot, new_slot, true)?;
+                        if !u.prefix {
+                            self.emit(Op::Pop, LINE);
+                        }
                     }
                     OTarget::ComputedMemberExpression(m) => {
                         let (object_slot, key_slot) = self.compile_computed_member_reference(m)?;
@@ -1313,6 +1316,9 @@ impl super::Compiler {
                         self.emit(Op::SetLocal, LINE);
                         self.emit_byte(new_slot as u8, LINE);
                         self.emit_reference_set_from_slot(object_slot, key_slot, new_slot, false)?;
+                        if !u.prefix {
+                            self.emit(Op::Pop, LINE);
+                        }
                     }
                     _ => {
                         return Err(crate::errors::CompilerError::from(

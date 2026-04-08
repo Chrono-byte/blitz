@@ -345,6 +345,8 @@ pub struct Vm {
     pub(super) root_chunk: Option<Rc<Chunk>>,
     /// Slot-type annotations for the current function (formerly used by TS checks).
     pub(super) current_slot_types: Option<Vec<Option<Type>>>,
+    /// Slot names for the current function.
+    pub(super) current_slot_names: Option<Vec<Option<String>>>,
     /// Per-object mutation generation counter, keyed by `Rc` pointer address.
     /// Incremented on every `SetProperty` so that stale IC entries are
     /// detected and evicted on the next lookup.

@@ -474,9 +474,6 @@ impl Compiler {
         let mut bindings = HashMap::new();
         for scope in &self.scopes {
             for (name, slot) in &scope.bindings {
-                if self.local_mirrors_global(*slot) {
-                    continue;
-                }
                 bindings.insert(
                     name.clone(),
                     CaptureSource::Local {

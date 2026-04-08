@@ -64,6 +64,7 @@ impl Vm {
             call_stack: CallStack::with_capacity(FRAMES_INITIAL_CAPACITY),
             root_chunk: None,
             current_slot_types: None,
+            current_slot_names: None,
             obj_generations: HashMap::new(),
             property_get_ic_cache: HashMap::new(),
             bg_runtime: get_global_bg_runtime(),
@@ -126,6 +127,7 @@ impl Vm {
             call_stack: CallStack::with_capacity(FRAMES_INITIAL_CAPACITY),
             root_chunk: None,
             current_slot_types: None,
+            current_slot_names: None,
             obj_generations: HashMap::new(),
             property_get_ic_cache: HashMap::new(),
             bg_runtime: Arc::clone(&self.bg_runtime),
@@ -1801,6 +1803,63 @@ impl Vm {
         Ok(false)
     }
 
+    fn set_current_frame_local_by_name(
+        &mut self,
+        name: &str,
+        value: Value,
+    ) -> Result<bool, RuntimeError> {
+        let slot = if let Some(names) = &self.current_slot_names {
+            names.iter().enumerate().find_map(|(idx, maybe_name)| {
+                maybe_name.as_deref().filter(|n| *n == name).map(|_| idx)
+            })
+        } else {
+            self.chunk
+                .root_slot_names
+                .iter()
+                .enumerate()
+                .find_map(|(idx, maybe_name)| {
+                    maybe_name.as_deref().filter(|n| *n == name).map(|_| idx)
+                })
+        };
+
+        let Some(slot) = slot else {
+            return Ok(false);
+        };
+
+        ensure_slot(&mut self.locals, slot);
+        *self.locals[slot].borrow_mut() = value.clone();
+
+        if self.current_slot_names.is_none()
+            && self
+                .chunk
+                .root_slot_names
+                .get(slot)
+                .and_then(Clone::clone)
+                .is_some()
+        {
+            let key = PropertyKey::String(name.to_string());
+            self.globals
+                .borrow_mut()
+                .properties
+                .insert(key, PropertyDescriptor::data(value));
+        }
+
+        if let Some(arguments_object) = self.current_arguments_object.clone()
+            && slot < self.current_arguments_mapped_count
+        {
+            let key = PropertyKey::String(slot.to_string());
+            if let Some((PropertyDescriptor::Data { writable: true, .. }, _)) =
+                self.lookup_property_descriptor(&arguments_object, &key, 0)?
+            {
+                let value = self.locals[slot].borrow().clone();
+                set_property(&arguments_object, &key, value)?;
+                self.bump_object_generation(&arguments_object);
+            }
+        }
+
+        Ok(true)
+    }
+
     /// Resolve a bare identifier against the current lexical/global environment.
     pub fn resolve_identifier_value(&mut self, name: &str) -> Result<Option<Value>, RuntimeError> {
         if let Some(value) = self.resolve_lexical_identifier_value(name)? {
@@ -2391,6 +2450,14 @@ impl Vm {
                 if let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone)
                     && let Some(v) = self.get_with_env_binding_value(&name)?
                 {
+                    if crate::trace::enabled() && name.starts_with("st_") {
+                        eprintln!(
+                            "[trace] GetLocal '{}' via with-env -> {}",
+                            name,
+                            v.type_name()
+                        );
+                        crate::trace::value_string("[trace]   value", &v);
+                    }
                     self.stack.push(v);
                     return Ok(StepOutcome::Continue);
                 }
@@ -2403,6 +2470,24 @@ impl Vm {
                     return Err(self.throw_reference_error(
                         "Cannot access lexical binding before initialization",
                     ));
+                }
+                if crate::trace::enabled()
+                    && self
+                        .chunk
+                        .root_slot_names
+                        .get(slot)
+                        .and_then(Clone::clone)
+                        .as_deref()
+                        .is_some_and(|name| name.starts_with("st_"))
+                {
+                    let name = self
+                        .chunk
+                        .root_slot_names
+                        .get(slot)
+                        .and_then(Clone::clone)
+                        .unwrap();
+                    eprintln!("[trace] GetLocal '{}' -> {}", name, v.type_name());
+                    crate::trace::value_string("[trace]   value", &v);
                 }
                 self.stack.push(v);
             }
@@ -2450,6 +2535,9 @@ impl Vm {
                 let name = self.string_constant(idx)?;
                 let v = self.pop()?;
                 if !self.set_lexical_identifier_value(&name, v.clone())? {
+                    if self.set_current_frame_local_by_name(&name, v.clone())? {
+                        return Ok(StepOutcome::Continue);
+                    }
                     let key = PropertyKey::String(name.clone());
                     let current = self.globals.borrow().properties.get(&key).cloned();
                     match current {
@@ -2518,11 +2606,9 @@ impl Vm {
                 let idx = self.read_byte()? as usize;
                 let value = self.pop()?;
                 let mirror_global_name = self
-                    .chunk
-                    .functions
-                    .iter()
-                    .find(|proto| Rc::as_ptr(&proto.chunk) == Rc::as_ptr(&self.chunk))
-                    .and_then(|proto| proto.upvalues.get(idx))
+                    .call_stack
+                    .last()
+                    .and_then(|frame| frame.upvalues.get(idx))
                     .and_then(|spec| spec.mirror_global_name.clone());
                 let env = self
                     .current_closure_env
@@ -4103,6 +4189,7 @@ impl Vm {
 
         // Restore caller state.
         self.current_slot_types = frame.slot_types;
+        self.current_slot_names = frame.slot_names;
         self.chunk = frame.chunk;
         self.ip = frame.ip;
         self.stack.restore_from(frame.stack);
@@ -4254,6 +4341,7 @@ impl Vm {
         self.stack.clear();
         self.current_closure_env = Some(Rc::clone(closure_env));
         self.current_slot_types = Some(proto.slot_types.clone());
+        self.current_slot_names = Some(proto.slot_names.clone());
         self.yield_star_queue = None;
         self.this_value = this_value;
 
@@ -4395,7 +4483,9 @@ impl Vm {
             this_value: std::mem::replace(&mut self.this_value, this_value.clone()),
             callee: callee.clone(),
             closure_env: self.current_closure_env.take(),
+            upvalues: proto.upvalues.clone(),
             slot_types: self.current_slot_types.take(),
+            slot_names: self.current_slot_names.take(),
             stack_base,
             is_strict: proto.is_strict,
             lexical_env: Rc::clone(&self.lexical_env),
@@ -5132,6 +5222,7 @@ impl Vm {
                 self.this_value = frame.this_value;
                 self.current_closure_env = frame.closure_env;
                 self.current_slot_types = frame.slot_types;
+                self.current_slot_names = frame.slot_names;
                 self.current_arguments_object = frame.arguments_object;
                 self.current_arguments_mapped_count = frame.arguments_mapped_count;
             }
@@ -7667,6 +7758,42 @@ mod tests {
             vm.get_global("st_NaN"),
             Some(Value::String("obj_NaN".into()))
         );
+    }
+
+    #[test]
+    fn with_statement_var_initializer_writes_through_object_binding() {
+        let session = Parser::parse_source(
+            r#"
+            var result;
+            var myObj = { value: "myObj_value" };
+            with (myObj) {
+              var value = "value";
+            }
+            result = value;
+        "#,
+        )
+        .expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+
+        assert_eq!(vm.get_global("result"), Some(Value::Undefined));
+        match vm.get_global("myObj") {
+            Some(Value::Object(obj)) => {
+                let value_key = PropertyKey::String("value".to_string());
+                let obj_borrow = obj.borrow();
+                match obj_borrow.properties.get(&value_key) {
+                    Some(PropertyDescriptor::Data { value, .. }) => {
+                        assert_eq!(value, &Value::String("value".into()))
+                    }
+                    other => panic!("expected data property for myObj.value, got {:?}", other),
+                }
+            }
+            other => panic!("expected object for myObj, got {:?}", other),
+        }
     }
 
     #[test]

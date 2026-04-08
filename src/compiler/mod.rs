@@ -598,7 +598,10 @@ fn compile_for_loop_back_jump_targets_loop_start() {
                 loop_start = Some(ip);
             }
             Op::Jump => {
-                back_target = chunk.jump_target_from_ip(ip).map(|target| target as isize);
+                let target = chunk.jump_target_from_ip(ip).map(|target| target as isize);
+                if target == loop_start.map(|v| v as isize) {
+                    back_target = target;
+                }
             }
             _ => {}
         }
