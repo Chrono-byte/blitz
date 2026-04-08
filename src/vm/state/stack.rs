@@ -69,10 +69,6 @@ impl HandlerStack {
         self.records.len()
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.records.is_empty()
-    }
-
     pub(crate) fn push(&mut self, record: HandlerRecord) {
         self.records.push(record);
     }
