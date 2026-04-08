@@ -644,11 +644,10 @@ impl Compiler {
         self.emit_byte(idx as u8, LINE);
     }
 
-    pub(crate) fn emit_throw_type_error(&mut self, message: &str) {
+    pub(crate) fn emit_throw_type_error(&mut self, _message: &str) {
         self.emit_get_builtin_name("throwTypeError");
-        self.emit_constant(Value::String(message.to_string()), LINE);
         self.emit(Op::CallIC, LINE);
-        self.emit_byte(1, LINE);
+        self.emit_byte(0, LINE);
     }
 
     /// Check whether the value currently on the stack is the internal

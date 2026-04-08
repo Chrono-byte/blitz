@@ -21,13 +21,53 @@ impl Compiler {
     /// declarations to preserve hoisting semantics during the migration.
     pub(crate) fn pre_declare_functions_oast(&mut self, program: &oast::Program<'_>) {
         for stmt in &program.body {
-            if let oast::Statement::FunctionDeclaration(fn_decl) = stmt
-                && let Some(ident) = &fn_decl.id
-            {
-                let name = ident.name.to_string();
-                if self.resolve_local(&name).is_none() {
-                    self.add_local_in_scope(self.current_function_scope_index(), name, None, false);
+            match stmt {
+                oast::Statement::FunctionDeclaration(fn_decl) => {
+                    if let Some(ident) = &fn_decl.id {
+                        let name = ident.name.to_string();
+                        if self.resolve_local(&name).is_none() {
+                            self.add_local_in_scope(
+                                self.current_function_scope_index(),
+                                name,
+                                None,
+                                false,
+                            );
+                        }
+                    }
                 }
+                oast::Statement::ExportNamedDeclaration(export) => {
+                    if let Some(oast::Declaration::FunctionDeclaration(fn_decl)) =
+                        &export.declaration
+                        && let Some(ident) = &fn_decl.id
+                    {
+                        let name = ident.name.to_string();
+                        if self.resolve_local(&name).is_none() {
+                            self.add_local_in_scope(
+                                self.current_function_scope_index(),
+                                name,
+                                None,
+                                false,
+                            );
+                        }
+                    }
+                }
+                oast::Statement::ExportDefaultDeclaration(export) => {
+                    if let oast::ExportDefaultDeclarationKind::FunctionDeclaration(fn_decl) =
+                        &export.declaration
+                        && let Some(ident) = &fn_decl.id
+                    {
+                        let name = ident.name.to_string();
+                        if self.resolve_local(&name).is_none() {
+                            self.add_local_in_scope(
+                                self.current_function_scope_index(),
+                                name,
+                                None,
+                                false,
+                            );
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -69,13 +109,37 @@ impl Compiler {
     /// slots for all function declarations encountered.
     pub(crate) fn pre_declare_functions_oast_stmts(&mut self, stmts: &[oast::Statement]) {
         for stmt in stmts {
-            if let oast::Statement::FunctionDeclaration(f) = stmt
-                && let Some(ident) = &f.id
-            {
-                let name = ident.name.to_string();
-                if self.resolve_local(&name).is_none() {
-                    self.add_local_with_mirror(name, None, self.is_root);
+            match stmt {
+                oast::Statement::FunctionDeclaration(f) => {
+                    if let Some(ident) = &f.id {
+                        let name = ident.name.to_string();
+                        if self.resolve_local(&name).is_none() {
+                            self.add_local_with_mirror(name, None, self.is_root);
+                        }
+                    }
                 }
+                oast::Statement::ExportNamedDeclaration(export) => {
+                    if let Some(oast::Declaration::FunctionDeclaration(f)) = &export.declaration
+                        && let Some(ident) = &f.id
+                    {
+                        let name = ident.name.to_string();
+                        if self.resolve_local(&name).is_none() {
+                            self.add_local_with_mirror(name, None, self.is_root);
+                        }
+                    }
+                }
+                oast::Statement::ExportDefaultDeclaration(export) => {
+                    if let oast::ExportDefaultDeclarationKind::FunctionDeclaration(f) =
+                        &export.declaration
+                        && let Some(ident) = &f.id
+                    {
+                        let name = ident.name.to_string();
+                        if self.resolve_local(&name).is_none() {
+                            self.add_local_with_mirror(name, None, self.is_root);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -90,27 +154,92 @@ impl Compiler {
         stmts: &[oast::Statement],
     ) -> Result<(), crate::errors::CompilerError> {
         for stmt in stmts {
-            if let oast::Statement::FunctionDeclaration(f) = stmt
-                && let Some(ident) = &f.id
-            {
-                let fname = ident.name.to_string();
-                let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
-                let idx = self.chunk.add_function(proto);
-                self.emit(Op::MakeClosure, LINE);
-                self.emit_byte(idx as u8, LINE);
-                let slot = if let Some(s) = self.resolve_local(&fname) {
-                    s
-                } else {
-                    self.add_local_with_mirror(fname.clone(), None, self.is_root)
-                };
-                if self.is_root {
-                    self.emit(Op::Dup, LINE);
+            match stmt {
+                oast::Statement::FunctionDeclaration(f) => {
+                    if let Some(ident) = &f.id {
+                        let fname = ident.name.to_string();
+                        let (proto, _env_len) =
+                            self.compile_function(&fname, None, f, None, false)?;
+                        let idx = self.chunk.add_function(proto);
+                        self.emit(Op::MakeClosure, LINE);
+                        self.emit_byte(idx as u8, LINE);
+                        let slot = if let Some(s) = self.resolve_local(&fname) {
+                            s
+                        } else {
+                            self.add_local_with_mirror(fname.clone(), None, self.is_root)
+                        };
+                        if self.is_root {
+                            self.emit(Op::Dup, LINE);
+                        }
+                        self.emit(Op::SetLocal, LINE);
+                        self.emit_byte(slot as u8, LINE);
+                        if self.is_root {
+                            self.emit_set_global_name(&fname);
+                        }
+                    }
                 }
-                self.emit(Op::SetLocal, LINE);
-                self.emit_byte(slot as u8, LINE);
-                if self.is_root {
-                    self.emit_set_global_name(&fname);
+                oast::Statement::ExportNamedDeclaration(export) => {
+                    if let Some(oast::Declaration::FunctionDeclaration(f)) = &export.declaration
+                        && let Some(ident) = &f.id
+                    {
+                        let fname = ident.name.to_string();
+                        let (proto, _env_len) =
+                            self.compile_function(&fname, None, f, None, false)?;
+                        let idx = self.chunk.add_function(proto);
+                        self.emit(Op::MakeClosure, LINE);
+                        self.emit_byte(idx as u8, LINE);
+                        let slot = if let Some(s) = self.resolve_local(&fname) {
+                            s
+                        } else {
+                            self.add_local_with_mirror(fname.clone(), None, self.is_root)
+                        };
+                        if self.is_root {
+                            self.emit(Op::Dup, LINE);
+                        }
+                        self.emit(Op::SetLocal, LINE);
+                        self.emit_byte(slot as u8, LINE);
+                        if self.is_root {
+                            self.emit_set_global_name(&fname);
+                        }
+                    }
                 }
+                oast::Statement::ExportDefaultDeclaration(export) => {
+                    if let oast::ExportDefaultDeclarationKind::FunctionDeclaration(f) =
+                        &export.declaration
+                    {
+                        if let Some(ident) = &f.id {
+                            let fname = ident.name.to_string();
+                            let (proto, _env_len) =
+                                self.compile_function(&fname, None, f, None, false)?;
+                            let idx = self.chunk.add_function(proto);
+                            self.emit(Op::MakeClosure, LINE);
+                            self.emit_byte(idx as u8, LINE);
+                            let slot = if let Some(s) = self.resolve_local(&fname) {
+                                s
+                            } else {
+                                self.add_local_with_mirror(fname.clone(), None, self.is_root)
+                            };
+                            if self.is_root {
+                                self.emit(Op::Dup, LINE);
+                            }
+                            self.emit(Op::SetLocal, LINE);
+                            self.emit_byte(slot as u8, LINE);
+                            if self.is_root {
+                                self.emit_set_global_name(&fname);
+                            }
+                            self.emit_get_binding(&fname);
+                        } else {
+                            let fname = "<default>".to_string();
+                            let (proto, _env_len) =
+                                self.compile_function(&fname, None, f, None, false)?;
+                            let idx = self.chunk.add_function(proto);
+                            self.emit(Op::MakeClosure, LINE);
+                            self.emit_byte(idx as u8, LINE);
+                        }
+                        self.emit_set_own_module_export("default")?;
+                    }
+                }
+                _ => {}
             }
         }
         Ok(())

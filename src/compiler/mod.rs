@@ -256,6 +256,10 @@ impl Compiler {
         &self,
         expr: &oast::Expression<'_>,
     ) -> Result<(), crate::errors::CompilerError> {
+        let mut expr = expr;
+        while let oast::Expression::ParenthesizedExpression(p) = expr {
+            expr = &p.expression;
+        }
         match expr {
             oast::Expression::FunctionExpression(f) => {
                 if let Some(body) = &f.body {
