@@ -176,6 +176,9 @@ impl Compiler {
                         if self.is_root {
                             self.emit_set_global_name(&fname);
                         }
+                        if self.current_module.is_some() {
+                            self.emit_set_own_module_export(&fname)?;
+                        }
                     }
                 }
                 oast::Statement::ExportNamedDeclaration(export) => {
@@ -227,7 +230,9 @@ impl Compiler {
                             if self.is_root {
                                 self.emit_set_global_name(&fname);
                             }
-                            self.emit_get_binding(&fname);
+                            if self.current_module.is_some() {
+                                self.emit_set_own_module_export("default")?;
+                            }
                         } else {
                             let fname = "<default>".to_string();
                             let (proto, _env_len) =
@@ -235,8 +240,10 @@ impl Compiler {
                             let idx = self.chunk.add_function(proto);
                             self.emit(Op::MakeClosure, LINE);
                             self.emit_byte(idx as u8, LINE);
+                            if self.current_module.is_some() {
+                                self.emit_set_own_module_export("default")?;
+                            }
                         }
-                        self.emit_set_own_module_export("default")?;
                     }
                 }
                 _ => {}
