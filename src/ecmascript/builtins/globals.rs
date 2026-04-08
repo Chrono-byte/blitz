@@ -92,6 +92,7 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
                 return Ok(Value::Undefined);
             }
             let strict = vm.active_strict_mode();
+            let (allow_new_target, allow_super) = vm.current_eval_context_flags();
             if !strict {
                 match vm.eval_expression_source(src) {
                     Ok(value) => return Ok(value),
@@ -108,18 +109,29 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
             } else {
                 src.to_string()
             };
-            let session = Parser::parse_source(&eval_src)
-                .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
-            let prog = session.program();
-            let chunk = compiler::compile_oxc(prog, &eval_src)
-                .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))?;
-            let mut eval_vm = vm.fork_execution();
-            eval_vm.adopt_eval_context(vm);
-            eval_vm.set_current_strict_mode(strict);
-            match eval_vm.run_nested(chunk, false) {
+            let chunk = crate::typecheck::with_strict_override(None, || {
+                compiler::with_compile_context_override(
+                    Some((allow_new_target, allow_super)),
+                    || {
+                        let session = Parser::parse_source(&eval_src)
+                            .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
+                        let prog = session.program();
+                        compiler::compile_oxc_repl(prog, &eval_src)
+                            .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))
+                    },
+                )
+            })?;
+            if let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk) {
+                return Err(syntax_error(
+                    vm,
+                    format!("redeclaration of lexical binding `{}`", name),
+                ));
+            }
+            vm.set_current_strict_mode(strict);
+            match vm.run_nested(chunk, true) {
                 Ok(value) => Ok(value),
                 Err(err) => {
-                    if let Some(thrown) = eval_vm.last_uncaught_exception.take() {
+                    if let Some(thrown) = vm.last_uncaught_exception.take() {
                         Err(vm.throw_exception(thrown))
                     } else {
                         Err(err)

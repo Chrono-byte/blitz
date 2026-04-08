@@ -3809,7 +3809,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             } else {
                 src.to_string()
             };
-            let (allow_new_target, allow_super) = vm.current_compile_context_flags();
+            let (allow_new_target, allow_super) = vm.current_eval_context_flags();
             let chunk = crate::typecheck::with_strict_override(None, || {
                 compiler::with_compile_context_override(
                     Some((allow_new_target, allow_super)),

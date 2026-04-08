@@ -46,6 +46,10 @@ impl CallStack {
     pub(crate) fn iter(&self) -> std::slice::Iter<'_, Frame> {
         self.frames.iter()
     }
+
+    pub(crate) fn iter_mut(&mut self) -> std::slice::IterMut<'_, Frame> {
+        self.frames.iter_mut()
+    }
 }
 
 /// Thin handler stack wrapper that isolates exception handler bookkeeping.

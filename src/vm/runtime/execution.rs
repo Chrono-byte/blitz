@@ -217,9 +217,15 @@ impl Vm {
         self.construct_new_target.clone()
     }
 
-    /// Return the compile-time context flags associated with the current chunk.
-    pub(crate) fn current_compile_context_flags(&self) -> (bool, bool) {
-        (self.chunk.allow_new_target, self.chunk.allow_super)
+    /// Return the dynamic eval context flags for the currently executing code.
+    ///
+    /// `new.target` is valid inside any function-like execution context.
+    /// `super` is valid only when the current frame has a home object.
+    pub(crate) fn current_eval_context_flags(&self) -> (bool, bool) {
+        (
+            self.current_closure_env.is_some(),
+            self.current_method_home_object().is_some(),
+        )
     }
 
     fn get_new_target(&self) -> Value {
@@ -932,14 +938,6 @@ impl Vm {
         chunk: Chunk,
         direct_eval: bool,
     ) -> Result<Value, RuntimeError> {
-        if crate::trace::enabled() {
-            eprintln!(
-                "[trace] run_nested direct_eval={} code_len={} source={:?}",
-                direct_eval,
-                chunk.code.len(),
-                &*chunk.source_text
-            );
-        }
         let saved_chunk = Rc::clone(&self.chunk);
         let saved_ip = self.ip;
         let saved_stack = self.stack.snapshot();
@@ -1949,13 +1947,9 @@ impl Vm {
                     .set_mutable_binding(name, value.clone());
                 let should_sync_global = outer_env
                     .as_ref()
-                    .is_some_and(|outer_rc| Rc::ptr_eq(outer_rc, &self.global_env));
+                    .is_none_or(|outer_rc| Rc::ptr_eq(outer_rc, &self.global_env));
                 if should_sync_global {
-                    let key = PropertyKey::String(name.to_string());
-                    self.globals
-                        .borrow_mut()
-                        .properties
-                        .insert(key, PropertyDescriptor::data(value));
+                    self.sync_named_binding_to_global_and_frames(name, &value);
                 }
                 return result;
             }
@@ -2093,6 +2087,24 @@ impl Vm {
         }
 
         Ok(true)
+    }
+
+    fn sync_named_binding_to_global_and_frames(&mut self, name: &str, value: &Value) {
+        let key = PropertyKey::String(name.to_string());
+        self.globals
+            .borrow_mut()
+            .properties
+            .insert(key, PropertyDescriptor::data(value.clone()));
+        for frame in self.call_stack.iter_mut() {
+            if let Some(names) = &frame.slot_names
+                && let Some(slot) = names.iter().enumerate().find_map(|(idx, maybe_name)| {
+                    maybe_name.as_deref().filter(|n| *n == name).map(|_| idx)
+                })
+                && let Some(cell) = frame.locals.get(slot)
+            {
+                *cell.borrow_mut() = value.clone();
+            }
+        }
     }
 
     /// Resolve a bare identifier against the current lexical/global environment.
@@ -2949,10 +2961,8 @@ impl Vm {
                 *cell.borrow_mut() = value;
 
                 if let Some(name) = mirror_global_name {
-                    let key = PropertyKey::String(name);
-                    let global_obj = Value::Object(Rc::clone(&self.globals));
                     let current = cell.borrow().clone();
-                    self.set_property_tracked(&global_obj, &key, current)?;
+                    self.sync_named_binding_to_global_and_frames(&name, &current);
                 }
             }
             Op::Pop => {
@@ -3296,6 +3306,12 @@ impl Vm {
                 self.lexical_env = outer.unwrap_or_else(|| Rc::clone(&self.global_env));
             }
             Op::GetNewTarget => {
+                if crate::trace::enabled() {
+                    eprintln!(
+                        "[trace] GetNewTarget current_new_target={:?}",
+                        self.construct_new_target
+                    );
+                }
                 let new_target = self.get_new_target();
                 self.stack.push(new_target);
             }
@@ -4645,15 +4661,6 @@ impl Vm {
                     }
                 };
             }
-        }
-
-        if crate::trace::enabled() {
-            eprintln!(
-                "[trace] configure_call_frame proto='{}' arity={} stack_len={}",
-                proto.name,
-                proto.arity,
-                self.stack.len()
-            );
         }
 
         self.chunk = Rc::clone(&proto.chunk);

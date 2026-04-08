@@ -1864,7 +1864,9 @@ impl Compiler {
         }
 
         inner.emit(Op::Return, LINE);
-        let chunk = std::mem::take(&mut inner.chunk);
+        let mut chunk = std::mem::take(&mut inner.chunk);
+        chunk.allow_new_target = inner.allow_new_target;
+        chunk.allow_super = inner.allow_super;
         let has_rest = func.params.rest.is_some();
         let has_simple_parameter_list = Self::has_simple_parameter_list(func);
         let slot_types = inner.local_types;
@@ -2126,7 +2128,9 @@ impl Compiler {
             }
         }
 
-        let chunk = std::mem::take(&mut inner.chunk);
+        let mut chunk = std::mem::take(&mut inner.chunk);
+        chunk.allow_new_target = inner.allow_new_target;
+        chunk.allow_super = inner.allow_super;
         let has_rest = func.params.rest.is_some();
         let slot_types = inner.local_types;
         let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
