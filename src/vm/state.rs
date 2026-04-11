@@ -97,7 +97,19 @@ pub(super) const MAX_DENSE_ARRAY_GROWTH: usize = 1024;
 /// The prototype collector is intentionally pressure-driven instead of
 /// step-driven so tight numeric loops do not pay GC overhead unless they are
 /// actually creating heap garbage.
-pub(super) const GC_ALLOCATION_PRESSURE_THRESHOLD: usize = 256;
+pub(super) const GC_ALLOCATION_PRESSURE_THRESHOLD: usize = 64;
+
+/// Runtime GC pressure threshold, overrideable via `TSBLITZ_GC_PRESSURE_THRESHOLD`.
+pub(super) fn gc_allocation_pressure_threshold() -> usize {
+    static THRESHOLD: OnceLock<usize> = OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        env::var("TSBLITZ_GC_PRESSURE_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(GC_ALLOCATION_PRESSURE_THRESHOLD)
+    })
+}
 
 type Microtask = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 type DynamicImportJob = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;

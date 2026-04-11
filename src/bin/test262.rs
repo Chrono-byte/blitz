@@ -184,8 +184,11 @@ fn resolve_job_count(
     selected_count: usize,
     available_parallelism: Option<usize>,
 ) -> usize {
+    // Keep default memory usage bounded when user did not set --workers.
+    // Explicit --workers still wins.
+    let bounded_default = available_parallelism.map(|n| n.min(2));
     requested_jobs
-        .or(available_parallelism)
+        .or(bounded_default)
         .unwrap_or(1)
         .max(1)
         .min(selected_count.max(1))
@@ -2371,7 +2374,7 @@ mod tests {
     #[test]
     fn resolve_job_count_clamps_to_selected_files() {
         assert_eq!(resolve_job_count(Some(64), 5, Some(8)), 5);
-        assert_eq!(resolve_job_count(None, 5, Some(8)), 5);
+        assert_eq!(resolve_job_count(None, 5, Some(8)), 2);
         assert_eq!(resolve_job_count(Some(0), 5, Some(8)), 1);
     }
 

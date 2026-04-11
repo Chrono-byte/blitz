@@ -618,7 +618,7 @@ impl Vm {
     /// every single bytecode step.
     #[cfg(feature = "gc_mark_sweep_prototype")]
     pub(super) fn maybe_collect_garbage_prototype(&mut self) {
-        if gc::allocation_pressure() < GC_ALLOCATION_PRESSURE_THRESHOLD {
+        if gc::allocation_pressure() < gc_allocation_pressure_threshold() {
             return;
         }
         self.gc_step_counter = 0;
@@ -1773,7 +1773,7 @@ impl Vm {
                 if let Some(proto) = self.realm.intrinsics.symbol_prototype.clone() {
                     data.set_prototype_value(proto);
                 }
-                Ok(Value::Object(Rc::new(RefCell::new(data))))
+                Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(data)))))
             }
             Value::Uninitialized => Err(self.throw_type_error("Uninitialized value")),
             Value::Builtin(_) => {
@@ -3025,7 +3025,9 @@ impl Vm {
                         let ctor = self.get_global("TypeError").unwrap_or(Value::Undefined);
                         let thrown = self
                             .construct_value(&ctor, &[])
-                            .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                            .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
+                                ObjectData::new(),
+                            )))));
                         match self.unwind_to_handler(thrown) {
                             Ok(()) => return Ok(StepOutcome::Continue),
                             Err(err) => return Err(err),
@@ -3060,7 +3062,9 @@ impl Vm {
                             let ctor = self.get_global("RangeError").unwrap_or(Value::Undefined);
                             let thrown = self
                                 .construct_value(&ctor, &[])
-                                .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                                .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
+                                    ObjectData::new(),
+                                )))));
                             match self.unwind_to_handler(thrown) {
                                 Ok(()) => return Ok(StepOutcome::Continue),
                                 Err(err) => return Err(err),
@@ -3085,7 +3089,9 @@ impl Vm {
                             let ctor = self.get_global("RangeError").unwrap_or(Value::Undefined);
                             let thrown = self
                                 .construct_value(&ctor, &[])
-                                .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                                .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
+                                    ObjectData::new(),
+                                )))));
                             match self.unwind_to_handler(thrown) {
                                 Ok(()) => return Ok(StepOutcome::Continue),
                                 Err(err) => return Err(err),
@@ -3141,7 +3147,9 @@ impl Vm {
                         let ctor = self.get_global("TypeError").unwrap_or(Value::Undefined);
                         let thrown = self
                             .construct_value(&ctor, &[])
-                            .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                            .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
+                                ObjectData::new(),
+                            )))));
                         match self.unwind_to_handler(thrown) {
                             Ok(()) => return Ok(StepOutcome::Continue),
                             Err(err) => return Err(err),
@@ -3154,7 +3162,9 @@ impl Vm {
                         let ctor = self.get_global("TypeError").unwrap_or(Value::Undefined);
                         let thrown = self
                             .construct_value(&ctor, &[])
-                            .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                            .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
+                                ObjectData::new(),
+                            )))));
                         match self.unwind_to_handler(thrown) {
                             Ok(()) => return Ok(StepOutcome::Continue),
                             Err(err) => return Err(err),
@@ -3170,7 +3180,9 @@ impl Vm {
                             let ctor = self.get_global("RangeError").unwrap_or(Value::Undefined);
                             let thrown = self
                                 .construct_value(&ctor, &[])
-                                .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                                .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
+                                    ObjectData::new(),
+                                )))));
                             match self.unwind_to_handler(thrown) {
                                 Ok(()) => return Ok(StepOutcome::Continue),
                                 Err(err) => return Err(err),
@@ -3190,7 +3202,9 @@ impl Vm {
                         let ctor = self.get_global("TypeError").unwrap_or(Value::Undefined);
                         let thrown = self
                             .construct_value(&ctor, &[])
-                            .unwrap_or(Value::Object(Rc::new(RefCell::new(ObjectData::new()))));
+                            .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
+                                ObjectData::new(),
+                            )))));
                         match self.unwind_to_handler(thrown) {
                             Ok(()) => return Ok(StepOutcome::Continue),
                             Err(err) => return Err(err),
@@ -4895,7 +4909,8 @@ impl Vm {
                 self.current_arguments_mapped_count = mapped_count;
                 self.locals[slot] = Rc::new(Mutex::new(args_obj));
             } else {
-                let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+                let props: Rc<RefCell<ObjectData>> =
+                    gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
                 for (idx, maybe_value) in args_for_arguments.iter().enumerate() {
                     props.borrow_mut().properties.insert(
                         PropertyKey::String(usize_to_decimal_string(idx)),
@@ -5102,7 +5117,8 @@ impl Vm {
         elems.reverse();
 
         let arr_rc = Rc::new(RefCell::new(elems));
-        let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+        let props: Rc<RefCell<ObjectData>> =
+            gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
             array_length_descriptor(n),
@@ -5172,7 +5188,7 @@ impl Vm {
             data.set_prototype_value(proto_val);
         }
         self.property_get_ic_cache.clear();
-        let obj_rc = Rc::new(RefCell::new(data));
+        let obj_rc = gc::track_object(Rc::new(RefCell::new(data)));
         self.stack.push(Value::Object(Rc::clone(&obj_rc)));
         if crate::trace::enabled() {
             eprintln!(
@@ -5194,7 +5210,8 @@ impl Vm {
             .ok_or("Bad function index")?;
         let has_prototype_property = proto.has_prototype_property;
 
-        let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
+        let props: Rc<RefCell<ObjectData>> =
+            gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         if let Some(function_val) = self
             .globals
             .borrow()
@@ -6040,7 +6057,7 @@ impl Vm {
                 PropertyKey::String("message".to_string()),
                 PropertyDescriptor::data(Value::String(message.to_string())),
             );
-            return Ok(Value::Object(Rc::new(RefCell::new(obj))));
+            return Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(obj)))));
         }
         let proto = self
             .get_property_host(&ctor, &PropertyKey::String("prototype".to_string()))
@@ -6064,7 +6081,7 @@ impl Vm {
             PropertyKey::String("name".to_string()),
             PropertyDescriptor::data(Value::String(name.to_string())),
         );
-        Ok(Value::Object(Rc::new(RefCell::new(obj))))
+        Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(obj)))))
     }
 
     // -----------------------------------------------------------------------
@@ -7535,7 +7552,7 @@ fn set_property(obj: &Value, key: &PropertyKey, value: Value) -> Result<(), Runt
 }
 
 pub(crate) fn build_module_namespace_object(exports: &HashMap<String, ValueSlot>) -> Value {
-    let namespace = Rc::new(RefCell::new(ObjectData::new()));
+    let namespace = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     let mut names: Vec<String> = exports
         .keys()
         .filter(|name| name.as_str() != "*")

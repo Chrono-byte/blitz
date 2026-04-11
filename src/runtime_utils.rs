@@ -61,6 +61,7 @@ use std::rc::Rc;
 
 use crate::compiler;
 use crate::compiler::ModuleContext;
+use crate::gc;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::parser::Parser;
 use crate::realm::Intrinsics;
@@ -829,7 +830,7 @@ pub(crate) fn resolve_promise_with_value(
 }
 
 pub(crate) fn builtin_object(f: BuiltinFn, function_proto: &Rc<RefCell<ObjectData>>) -> Value {
-    let props = Rc::new(RefCell::new(ObjectData::new()));
+    let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     props
         .borrow_mut()
         .set_prototype_value(Value::Object(Rc::clone(function_proto)));
@@ -1068,7 +1069,7 @@ pub(crate) fn shadowrealm_import_value(vm: &mut Vm, args: &[Value]) -> Result<Va
         }
     };
 
-    let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
+    let promise = gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
         on_fulfilled: Vec::new(),
         on_rejected: Vec::new(),
     })));
@@ -1218,7 +1219,7 @@ pub(crate) fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value,
     let specifier = args.first().unwrap_or(&undefined);
     let options = args.get(1).unwrap_or(&undefined);
 
-    let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
+    let promise = gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
         on_fulfilled: Vec::new(),
         on_rejected: Vec::new(),
     })));
@@ -1678,12 +1679,12 @@ pub(crate) fn atomics_waiters_array(
     {
         return Rc::clone(arr);
     }
-    let arr = crate::gc::track_array(Rc::new(RefCell::new(Vec::new())));
+    let arr = gc::track_array(Rc::new(RefCell::new(Vec::new())));
     buffer_data.properties.insert(
         PropertyKey::String("[[AtomicsWaiters]]".to_string()),
         PropertyDescriptor::data(Value::Array(
             Rc::clone(&arr),
-            crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
+            gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
         )),
     );
     arr
@@ -1699,11 +1700,11 @@ pub(crate) fn atomics_make_waiter_record(index: usize, resolve: Option<Value>) -
         PropertyKey::String("resolve".to_string()),
         PropertyDescriptor::data(resolve.unwrap_or(Value::Undefined)),
     );
-    Value::Object(crate::gc::track_object(Rc::new(RefCell::new(data))))
+    Value::Object(gc::track_object(Rc::new(RefCell::new(data))))
 }
 
 pub(crate) fn atomics_make_wait_result(async_flag: bool, value: Value) -> Value {
-    let result = crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+    let result = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     result.borrow_mut().properties.insert(
         PropertyKey::String("async".to_string()),
         PropertyDescriptor::data(Value::Bool(async_flag)),
@@ -2019,7 +2020,7 @@ pub fn own_property_descriptor_value(obj: &Value, key: &PropertyKey) -> Option<V
                 );
             }
         }
-        Value::Object(Rc::new(RefCell::new(obj)))
+        Value::Object(gc::track_object(Rc::new(RefCell::new(obj))))
     })
 }
 
@@ -2196,7 +2197,7 @@ pub(crate) fn descriptor_value_from_descriptor(
             );
         }
     }
-    Value::Object(Rc::new(RefCell::new(obj)))
+    Value::Object(gc::track_object(Rc::new(RefCell::new(obj))))
 }
 
 /// Returns the own property keys of an object.
@@ -2278,7 +2279,7 @@ pub(crate) fn array_from_values(values: Vec<Value>) -> Value {
     let arr_rc = Rc::new(RefCell::new(
         values.into_iter().map(Some).collect::<Vec<_>>(),
     ));
-    let props = Rc::new(RefCell::new(ObjectData::new()));
+    let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     props.borrow_mut().properties.insert(
         PropertyKey::String("length".to_string()),
         array_length_descriptor(arr_rc.borrow().len()),
@@ -2322,7 +2323,7 @@ pub(crate) fn host_error_object(vm: &mut Vm, name: &str, message: &str) -> Value
         PropertyKey::String("message".to_string()),
         PropertyDescriptor::data(Value::String(message.to_string())),
     );
-    Value::Object(Rc::new(RefCell::new(obj)))
+    Value::Object(gc::track_object(Rc::new(RefCell::new(obj))))
 }
 
 pub(crate) fn canonical_index_key(s: &str) -> Option<u64> {
@@ -2399,7 +2400,7 @@ fn clone_value_across_realms(
                 let len = arr_rc.borrow().len();
                 let placeholder_vec: Vec<Option<Value>> = vec![None; len];
                 let new_arr = Rc::new(RefCell::new(placeholder_vec));
-                let new_props = Rc::new(RefCell::new(ObjectData::new()));
+                let new_props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
                 if let Some(proto) = vm.realm().intrinsics.array_prototype.clone() {
                     new_props.borrow_mut().set_prototype_value(proto);
                 }
@@ -2463,7 +2464,7 @@ fn clone_value_across_realms(
                     if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
                         out.set_prototype_value(proto);
                     }
-                    let target_obj = Rc::new(RefCell::new(out));
+                    let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
                     let target_val = Value::Object(Rc::clone(&target_obj));
                     visited.insert(addr, target_val);
 
@@ -2498,7 +2499,7 @@ fn clone_value_across_realms(
                         // fall back to Array prototype for shape safety.
                         out.set_prototype_value(proto);
                     }
-                    let target_obj = Rc::new(RefCell::new(out));
+                    let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
                     let target_val = Value::Object(Rc::clone(&target_obj));
                     visited.insert(addr, target_val);
 
@@ -2559,7 +2560,7 @@ fn clone_value_across_realms(
                     if let Some(proto) = vm.realm().get_intrinsic_prototype("Map") {
                         out.set_prototype_value(proto);
                     }
-                    let target_obj = Rc::new(RefCell::new(out));
+                    let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
                     let target_val = Value::Object(Rc::clone(&target_obj));
                     visited.insert(addr, target_val);
 
@@ -2594,7 +2595,7 @@ fn clone_value_across_realms(
                         // No dedicated Set.prototype in intrinsics table; fall back to Array
                         out.set_prototype_value(proto);
                     }
-                    let target_obj = Rc::new(RefCell::new(out));
+                    let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
                     let target_val = Value::Object(Rc::clone(&target_obj));
                     visited.insert(addr, target_val);
 
@@ -2625,7 +2626,7 @@ fn clone_value_across_realms(
                     if let Some(proto) = vm.realm().get_intrinsic_prototype("Date") {
                         out.set_prototype_value(proto);
                     }
-                    let target_obj = Rc::new(RefCell::new(out));
+                    let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
                     let target_val = Value::Object(Rc::clone(&target_obj));
                     visited.insert(addr, target_val);
 
@@ -2649,7 +2650,7 @@ fn clone_value_across_realms(
                     if let Some(proto) = vm.realm().get_intrinsic_prototype("Object") {
                         out.set_prototype_value(proto);
                     }
-                    let target_obj = Rc::new(RefCell::new(out));
+                    let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
                     let target_val = Value::Object(Rc::clone(&target_obj));
                     visited.insert(addr, target_val);
 
@@ -2673,7 +2674,7 @@ fn clone_value_across_realms(
                 if let Some(proto) = vm.realm().intrinsics.object_prototype.clone() {
                     out.set_prototype_value(proto);
                 }
-                let target_obj = Rc::new(RefCell::new(out));
+                let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
                 let target_val = Value::Object(Rc::clone(&target_obj));
                 visited.insert(addr, target_val);
 
