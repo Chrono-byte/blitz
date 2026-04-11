@@ -290,19 +290,18 @@ impl Vm {
                     self.ip.saturating_sub(1)
                 );
             }
-            if has_prototype_property {
-                if let Value::Closure { props, .. } = &closure
-                    && let Some(PropertyDescriptor::Data { value, .. }) = props
-                        .borrow()
-                        .properties
-                        .get(&PropertyKey::String("prototype".to_string()))
-                    && let Value::Object(proto_obj_map) = value
-                {
-                    eprintln!(
-                        "[trace] make_closure: created proto_obj props_ptr={:p}",
-                        Rc::as_ptr(proto_obj_map)
-                    );
-                }
+            if has_prototype_property
+                && let Value::Closure { props, .. } = &closure
+                && let Some(PropertyDescriptor::Data { value, .. }) = props
+                    .borrow()
+                    .properties
+                    .get(&PropertyKey::String("prototype".to_string()))
+                && let Value::Object(proto_obj_map) = value
+            {
+                eprintln!(
+                    "[trace] make_closure: created proto_obj props_ptr={:p}",
+                    Rc::as_ptr(proto_obj_map)
+                );
             }
         }
         Ok(())
