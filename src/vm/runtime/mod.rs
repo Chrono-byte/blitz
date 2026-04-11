@@ -8,5 +8,7 @@ mod coercions;
 mod exceptions;
 /// Main VM execution loop and opcode helpers.
 pub mod execution;
+/// Lexical environment and identifier resolution helpers.
+mod lexical;
 /// Same-value comparison helper.
 pub use execution::same_value;

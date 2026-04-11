@@ -670,21 +670,6 @@ impl Vm {
         Rc::clone(&self.module_loader)
     }
 
-    /// Enter a new declarative lexical environment whose outer is the current environment.
-    pub fn enter_lexical_scope(&mut self) {
-        self.lexical_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(Rc::clone(
-            &self.lexical_env,
-        )))));
-    }
-
-    /// Leave the current lexical environment and restore its outer.
-    pub fn exit_lexical_scope(&mut self) {
-        let outer = self.lexical_env.borrow().outer();
-        if let Some(outer) = outer {
-            self.lexical_env = outer;
-        }
-    }
-
     /// Install a module's export slot map into the VM module table at the
     /// specified numeric module index. The provided `exports` map contains
     /// shared value slots allocated by the ModuleLoader so both VM and
@@ -1076,29 +1061,6 @@ impl Vm {
         }
 
         result
-    }
-
-    pub(crate) fn direct_eval_lexical_conflict_name(&self, chunk: &Chunk) -> Option<String> {
-        for maybe_name in &chunk.root_slot_names {
-            let Some(name) = maybe_name.as_deref() else {
-                continue;
-            };
-            let mut env = Some(Rc::clone(&self.lexical_env));
-            while let Some(current) = env {
-                let (conflict, outer) = {
-                    let borrowed = current.borrow();
-                    (
-                        !borrowed.is_with_environment() && borrowed.has_binding(name),
-                        borrowed.outer(),
-                    )
-                };
-                if conflict {
-                    return Some(name.to_string());
-                }
-                env = outer;
-            }
-        }
-        None
     }
 
     fn initialize_root_bindings(&mut self) {
@@ -1889,265 +1851,6 @@ impl Vm {
                 }
             }
         }
-    }
-
-    /// Replace the current lexical environment.
-    pub(crate) fn set_lexical_env(&mut self, env: Rc<RefCell<EnvironmentRecord>>) {
-        self.lexical_env = env;
-    }
-
-    /// Adopt the caller's live bindings and slot metadata for a nested eval run.
-    pub(crate) fn adopt_eval_context(&mut self, parent: &Vm) {
-        self.set_lexical_env(Rc::clone(&parent.lexical_env));
-    }
-
-    fn is_unscopable_binding(
-        &mut self,
-        binding_object: &Value,
-        name: &str,
-    ) -> Result<bool, RuntimeError> {
-        let unscopables = self.get_property_host(
-            binding_object,
-            &PropertyKey::Symbol(SymbolId::well_known_unscopables()),
-        )?;
-        if !unscopables.is_object() {
-            return Ok(false);
-        }
-        Ok(self
-            .get_property_host(&unscopables, &PropertyKey::String(name.to_string()))?
-            .is_truthy())
-    }
-
-    fn resolve_lexical_identifier_value(
-        &mut self,
-        name: &str,
-    ) -> Result<Option<Value>, RuntimeError> {
-        let mut env = Some(Rc::clone(&self.lexical_env));
-        while let Some(current) = env {
-            let (binding_value, binding_object, with_environment, outer) = {
-                let borrowed = current.borrow();
-                (
-                    borrowed.get_own_binding_value(name)?,
-                    borrowed.binding_object(),
-                    borrowed.is_with_environment(),
-                    borrowed.outer(),
-                )
-            };
-            if let Some(value) = binding_value {
-                return Ok(Some(value));
-            }
-            if let Some(binding_object) = binding_object {
-                let key = PropertyKey::String(name.to_string());
-                let found = self.has_property_host(&binding_object, &key)?;
-                if found
-                    && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
-                {
-                    return Ok(Some(self.get_property_host(&binding_object, &key)?));
-                }
-            }
-            env = outer;
-        }
-
-        if let Some(frame) = self.call_stack.last()
-            && let Value::Closure { proto, .. } = &frame.callee
-            && proto.name == name
-        {
-            return Ok(Some(frame.callee.clone()));
-        }
-
-        Ok(None)
-    }
-
-    fn set_lexical_identifier_value(
-        &mut self,
-        name: &str,
-        value: Value,
-    ) -> Result<bool, RuntimeError> {
-        let mut env = Some(Rc::clone(&self.lexical_env));
-        while let Some(current) = env {
-            let (has_decl_binding, binding_object, with_environment, outer) = {
-                let borrowed = current.borrow();
-                (
-                    borrowed.has_binding(name),
-                    borrowed.binding_object(),
-                    borrowed.is_with_environment(),
-                    borrowed.outer(),
-                )
-            };
-            if has_decl_binding {
-                let outer_env = outer;
-                let result = current
-                    .borrow_mut()
-                    .set_mutable_binding(name, value.clone());
-                let should_sync_global = outer_env
-                    .as_ref()
-                    .is_none_or(|outer_rc| Rc::ptr_eq(outer_rc, &self.global_env));
-                if should_sync_global {
-                    self.sync_named_binding_to_global_and_frames(name, &value);
-                }
-                return result;
-            }
-            if let Some(binding_object) = binding_object {
-                let name_str = name.to_string();
-                let key = PropertyKey::String(name_str.clone());
-                let found = self.has_property_host(&binding_object, &key)?;
-                if found
-                    && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
-                {
-                    let _ =
-                        self.set_property_host(&binding_object, &Value::String(name_str), value)?;
-                    return Ok(true);
-                }
-            }
-            env = outer;
-        }
-        Ok(false)
-    }
-
-    fn get_with_env_binding_value(&mut self, name: &str) -> Result<Option<Value>, RuntimeError> {
-        let mut env = Some(Rc::clone(&self.lexical_env));
-        while let Some(current) = env {
-            let (binding_object, with_environment, outer) = {
-                let borrowed = current.borrow();
-                (
-                    borrowed.binding_object(),
-                    borrowed.is_with_environment(),
-                    borrowed.outer(),
-                )
-            };
-            if let Some(binding_object) = binding_object {
-                let key = PropertyKey::String(name.to_string());
-                let found = self.has_property_host(&binding_object, &key)?;
-                if found
-                    && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
-                {
-                    return Ok(Some(self.get_property_host(&binding_object, &key)?));
-                }
-            }
-            env = outer;
-        }
-        Ok(None)
-    }
-
-    fn set_with_env_binding_value(
-        &mut self,
-        name: &str,
-        value: Value,
-    ) -> Result<bool, RuntimeError> {
-        let mut env = Some(Rc::clone(&self.lexical_env));
-        while let Some(current) = env {
-            let (binding_object, with_environment, outer) = {
-                let borrowed = current.borrow();
-                (
-                    borrowed.binding_object(),
-                    borrowed.is_with_environment(),
-                    borrowed.outer(),
-                )
-            };
-            if let Some(binding_object) = binding_object {
-                let name_str = name.to_string();
-                let key = PropertyKey::String(name_str.clone());
-                let found = self.has_property_host(&binding_object, &key)?;
-                if found
-                    && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
-                {
-                    let _ =
-                        self.set_property_host(&binding_object, &Value::String(name_str), value)?;
-                    self.bump_object_generation(&binding_object);
-                    return Ok(true);
-                }
-            }
-            env = outer;
-        }
-        Ok(false)
-    }
-
-    fn set_current_frame_local_by_name(
-        &mut self,
-        name: &str,
-        value: Value,
-    ) -> Result<bool, RuntimeError> {
-        let slot = if let Some(names) = &self.current_slot_names {
-            names.iter().enumerate().find_map(|(idx, maybe_name)| {
-                maybe_name.as_deref().filter(|n| *n == name).map(|_| idx)
-            })
-        } else {
-            self.chunk
-                .root_slot_names
-                .iter()
-                .enumerate()
-                .find_map(|(idx, maybe_name)| {
-                    maybe_name.as_deref().filter(|n| *n == name).map(|_| idx)
-                })
-        };
-
-        let Some(slot) = slot else {
-            return Ok(false);
-        };
-
-        ensure_slot(&mut self.locals, slot);
-        *self.locals[slot].borrow_mut() = value.clone();
-        let _ = self
-            .lexical_env
-            .borrow_mut()
-            .set_binding_initialized_in_chain(name, true);
-        self.sync_named_binding_to_global_and_frames(name, &value);
-
-        if self.current_slot_names.is_none()
-            && self
-                .chunk
-                .root_slot_names
-                .get(slot)
-                .and_then(Clone::clone)
-                .is_some()
-        {
-            let key = PropertyKey::String(name.to_string());
-            self.globals
-                .borrow_mut()
-                .properties
-                .insert(key, PropertyDescriptor::data(value));
-        }
-
-        if let Some(arguments_object) = self.current_arguments_object.clone()
-            && slot < self.current_arguments_mapped_count
-        {
-            let key = PropertyKey::String(slot.to_string());
-            if let Some((PropertyDescriptor::Data { writable: true, .. }, _)) =
-                self.lookup_property_descriptor(&arguments_object, &key, 0)?
-            {
-                let value = self.locals[slot].borrow().clone();
-                set_property(&arguments_object, &key, value)?;
-                self.bump_object_generation(&arguments_object);
-            }
-        }
-
-        Ok(true)
-    }
-
-    fn sync_named_binding_to_global_and_frames(&mut self, name: &str, value: &Value) {
-        let key = PropertyKey::String(name.to_string());
-        self.globals
-            .borrow_mut()
-            .properties
-            .insert(key, PropertyDescriptor::data(value.clone()));
-        for frame in self.call_stack.iter_mut() {
-            if let Some(names) = &frame.slot_names
-                && let Some(slot) = names.iter().enumerate().find_map(|(idx, maybe_name)| {
-                    maybe_name.as_deref().filter(|n| *n == name).map(|_| idx)
-                })
-                && let Some(cell) = frame.locals.get(slot)
-            {
-                *cell.borrow_mut() = value.clone();
-            }
-        }
-    }
-
-    /// Resolve a bare identifier against the current lexical/global environment.
-    pub fn resolve_identifier_value(&mut self, name: &str) -> Result<Option<Value>, RuntimeError> {
-        if let Some(value) = self.resolve_lexical_identifier_value(name)? {
-            return Ok(Some(value));
-        }
-        Ok(self.get_global(name))
     }
 
     /// Host hook: construct a callable with `new` semantics.
@@ -5813,7 +5516,7 @@ impl Vm {
         Ok(())
     }
 
-    fn bump_object_generation(&mut self, obj: &Value) {
+    pub(super) fn bump_object_generation(&mut self, obj: &Value) {
         let ptr = match obj {
             Value::Object(m) => Some(m.borrow().identity as usize),
             Value::Array(_, props) => Some(props.borrow().identity as usize),
@@ -6727,7 +6430,7 @@ fn list_own_keys_of_value(v: &Value) -> Option<Vec<String>> {
 
 /// Grow a locals vector so that `slot` is a valid index.
 #[inline(always)]
-fn ensure_slot(locals: &mut Vec<ValueSlot>, slot: usize) {
+pub(super) fn ensure_slot(locals: &mut Vec<ValueSlot>, slot: usize) {
     if slot >= locals.len() {
         locals.resize_with(slot + 1, || Rc::new(Mutex::new(Value::Undefined)));
     }
