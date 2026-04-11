@@ -120,7 +120,7 @@ impl TestResult {
 fn force_runner_gc() {
     #[cfg(feature = "gc_mark_sweep_prototype")]
     {
-        let _ = blitz::gc::collect_aggressive(&[]);
+        let _ = blitz::gc::collect(&[]);
     }
 }
 

@@ -117,151 +117,128 @@ pub fn track_promise(promise: Rc<RefCell<PromiseState>>) -> Rc<RefCell<PromiseSt
 
 /// Prototype collector entry point.
 pub fn collect(roots: &[Value]) -> GcStats {
-    collect_with_env_roots(roots, &[])
-}
-
-/// Aggressive collector entry point intended for teardown-style cleanup.
-///
-/// Unlike the regular collector, this may clear swept closure environments.
-/// That is unsafe during normal execution if root discovery is incomplete, but
-/// it is exactly what we want once a whole test/realm has finished.
-pub fn collect_aggressive(roots: &[Value]) -> GcStats {
-    collect_with_env_roots_impl(roots, &[], true)
-}
-
-/// Prototype collector entry point with explicit closure-environment roots.
-pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSlot>>>]) -> GcStats {
-    collect_with_env_roots_impl(roots, env_roots, false)
-}
-
-fn collect_with_env_roots_impl(
-    roots: &[Value],
-    env_roots: &[Rc<Mutex<Vec<ValueSlot>>>],
-    clear_envs_aggressively: bool,
-) -> GcStats {
-    #[cfg(not(feature = "gc_mark_sweep_prototype"))]
     {
-        let _ = roots;
-        let _ = env_roots;
-        let _ = clear_envs_aggressively;
-        return GcStats::default();
-    }
+        let env_roots: &[Rc<Mutex<Vec<ValueSlot>>>] = &[];
+        {
+            let clear_envs_aggressively = false;
 
-    #[cfg(feature = "gc_mark_sweep_prototype")]
-    {
-        let mut marked_objects: HashSet<usize> = HashSet::new();
-        let mut marked_arrays: HashSet<usize> = HashSet::new();
-        let mut marked_envs: HashSet<usize> = HashSet::new();
-        let mut marked_promises: HashSet<usize> = HashSet::new();
+            #[cfg(feature = "gc_mark_sweep_prototype")]
+            {
+                let mut marked_objects: HashSet<usize> = HashSet::new();
+                let mut marked_arrays: HashSet<usize> = HashSet::new();
+                let mut marked_envs: HashSet<usize> = HashSet::new();
+                let mut marked_promises: HashSet<usize> = HashSet::new();
 
-        for root in roots {
-            mark_value(
-                root,
-                &mut marked_objects,
-                &mut marked_arrays,
-                &mut marked_envs,
-                &mut marked_promises,
-            );
+                for root in roots {
+                    mark_value(
+                        root,
+                        &mut marked_objects,
+                        &mut marked_arrays,
+                        &mut marked_envs,
+                        &mut marked_promises,
+                    );
+                }
+                for env in env_roots {
+                    mark_env(
+                        env,
+                        &mut marked_objects,
+                        &mut marked_arrays,
+                        &mut marked_envs,
+                        &mut marked_promises,
+                    );
+                }
+
+                let mut stats = GcStats {
+                    marked_nodes: marked_objects.len()
+                        + marked_arrays.len()
+                        + marked_envs.len()
+                        + marked_promises.len(),
+                    ..GcStats::default()
+                };
+
+                HEAP.with(|heap| {
+                    let mut heap = heap.borrow_mut();
+                    let mut new_objects = Vec::with_capacity(heap.objects.len());
+                    let mut swept_objects = Vec::new();
+                    for weak in heap.objects.drain(..) {
+                        if let Some(obj) = weak.upgrade() {
+                            let ptr = Rc::as_ptr(&obj) as usize;
+                            if marked_objects.contains(&ptr) {
+                                new_objects.push(weak);
+                            } else {
+                                stats.swept_objects += 1;
+                                swept_objects.push(obj);
+                            }
+                        }
+                    }
+                    for obj in swept_objects {
+                        clear_object(&obj);
+                    }
+                    heap.objects = new_objects;
+
+                    let mut new_arrays = Vec::with_capacity(heap.arrays.len());
+                    let mut swept_arrays = Vec::new();
+                    for weak in heap.arrays.drain(..) {
+                        if let Some(arr) = weak.upgrade() {
+                            let ptr = Rc::as_ptr(&arr) as usize;
+                            if marked_arrays.contains(&ptr) {
+                                new_arrays.push(weak);
+                            } else {
+                                stats.swept_arrays += 1;
+                                swept_arrays.push(arr);
+                            }
+                        }
+                    }
+                    for arr in swept_arrays {
+                        clear_array(&arr);
+                    }
+                    heap.arrays = new_arrays;
+
+                    let mut new_envs = Vec::with_capacity(heap.envs.len());
+                    let mut swept_envs = Vec::new();
+                    for weak in heap.envs.drain(..) {
+                        if let Some(env) = weak.upgrade() {
+                            let ptr = Rc::as_ptr(&env) as usize;
+                            if marked_envs.contains(&ptr) {
+                                new_envs.push(weak);
+                            } else {
+                                stats.swept_envs += 1;
+                                swept_envs.push(env);
+                            }
+                        }
+                    }
+                    for env in swept_envs {
+                        if clear_envs_aggressively {
+                            clear_env_aggressively(&env);
+                        } else {
+                            clear_env(&env);
+                        }
+                    }
+                    heap.envs = new_envs;
+
+                    let mut new_promises = Vec::with_capacity(heap.promises.len());
+                    let mut swept_promises = Vec::new();
+                    for weak in heap.promises.drain(..) {
+                        if let Some(promise) = weak.upgrade() {
+                            let ptr = Rc::as_ptr(&promise) as usize;
+                            if marked_promises.contains(&ptr) {
+                                new_promises.push(weak);
+                            } else {
+                                stats.swept_promises += 1;
+                                swept_promises.push(promise);
+                            }
+                        }
+                    }
+                    for promise in swept_promises {
+                        clear_promise(&promise);
+                    }
+                    heap.promises = new_promises;
+                });
+                reset_allocation_pressure();
+
+                stats
+            }
         }
-        for env in env_roots {
-            mark_env(
-                env,
-                &mut marked_objects,
-                &mut marked_arrays,
-                &mut marked_envs,
-                &mut marked_promises,
-            );
-        }
-
-        let mut stats = GcStats {
-            marked_nodes: marked_objects.len()
-                + marked_arrays.len()
-                + marked_envs.len()
-                + marked_promises.len(),
-            ..GcStats::default()
-        };
-
-        HEAP.with(|heap| {
-            let mut heap = heap.borrow_mut();
-            let mut new_objects = Vec::with_capacity(heap.objects.len());
-            let mut swept_objects = Vec::new();
-            for weak in heap.objects.drain(..) {
-                if let Some(obj) = weak.upgrade() {
-                    let ptr = Rc::as_ptr(&obj) as usize;
-                    if marked_objects.contains(&ptr) {
-                        new_objects.push(weak);
-                    } else {
-                        stats.swept_objects += 1;
-                        swept_objects.push(obj);
-                    }
-                }
-            }
-            for obj in swept_objects {
-                clear_object(&obj);
-            }
-            heap.objects = new_objects;
-
-            let mut new_arrays = Vec::with_capacity(heap.arrays.len());
-            let mut swept_arrays = Vec::new();
-            for weak in heap.arrays.drain(..) {
-                if let Some(arr) = weak.upgrade() {
-                    let ptr = Rc::as_ptr(&arr) as usize;
-                    if marked_arrays.contains(&ptr) {
-                        new_arrays.push(weak);
-                    } else {
-                        stats.swept_arrays += 1;
-                        swept_arrays.push(arr);
-                    }
-                }
-            }
-            for arr in swept_arrays {
-                clear_array(&arr);
-            }
-            heap.arrays = new_arrays;
-
-            let mut new_envs = Vec::with_capacity(heap.envs.len());
-            let mut swept_envs = Vec::new();
-            for weak in heap.envs.drain(..) {
-                if let Some(env) = weak.upgrade() {
-                    let ptr = Rc::as_ptr(&env) as usize;
-                    if marked_envs.contains(&ptr) {
-                        new_envs.push(weak);
-                    } else {
-                        stats.swept_envs += 1;
-                        swept_envs.push(env);
-                    }
-                }
-            }
-            for env in swept_envs {
-                if clear_envs_aggressively {
-                    clear_env_aggressively(&env);
-                } else {
-                    clear_env(&env);
-                }
-            }
-            heap.envs = new_envs;
-
-            let mut new_promises = Vec::with_capacity(heap.promises.len());
-            let mut swept_promises = Vec::new();
-            for weak in heap.promises.drain(..) {
-                if let Some(promise) = weak.upgrade() {
-                    let ptr = Rc::as_ptr(&promise) as usize;
-                    if marked_promises.contains(&ptr) {
-                        new_promises.push(weak);
-                    } else {
-                        stats.swept_promises += 1;
-                        swept_promises.push(promise);
-                    }
-                }
-            }
-            for promise in swept_promises {
-                clear_promise(&promise);
-            }
-            heap.promises = new_promises;
-        });
-        reset_allocation_pressure();
-
-        stats
     }
 }
 
@@ -661,7 +638,7 @@ mod tests {
         drop(closure);
         drop(env);
 
-        let stats = collect_aggressive(&[]);
+        let stats = collect(&[]);
         assert!(stats.swept_envs >= 1);
         assert!(weak_env.upgrade().is_none());
         assert!(weak_props.upgrade().is_none());
@@ -683,7 +660,7 @@ mod tests {
 
         drop(env);
 
-        let stats = collect_aggressive(std::slice::from_ref(&closure));
+        let stats = collect(std::slice::from_ref(&closure));
         assert_eq!(stats.swept_envs, 0);
         assert!(weak_env.upgrade().is_some());
         assert!(weak_props.upgrade().is_some());

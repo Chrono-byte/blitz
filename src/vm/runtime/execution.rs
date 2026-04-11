@@ -616,7 +616,7 @@ impl Vm {
         if let Some(value) = self.realm.intrinsics.uri_error_constructor.clone() {
             roots.push(value);
         }
-        gc::collect_with_env_roots(&roots, &env_roots)
+        gc::collect(&roots)
     }
 
     /// Opportunistically collect garbage during interpreter progress.
