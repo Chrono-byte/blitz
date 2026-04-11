@@ -55,6 +55,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::rc::Weak;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use num_bigint::BigInt as BigIntValue;
 use num_traits::Zero;
@@ -238,6 +239,8 @@ impl PropertyDescriptor {
 /// Object storage with properties and prototype.
 #[derive(Clone, Debug)]
 pub struct ObjectData {
+    /// Stable object identity token used by runtime caches.
+    pub identity: u64,
     /// Property table
     pub properties: IndexMap<PropertyKey, PropertyDescriptor>,
     /// Strongly stored prototype for non-object prototype values.
@@ -257,9 +260,15 @@ impl Default for ObjectData {
 }
 
 impl ObjectData {
+    fn next_identity() -> u64 {
+        static NEXT_OBJECT_IDENTITY: AtomicU64 = AtomicU64::new(1);
+        NEXT_OBJECT_IDENTITY.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// Create an empty object data container with a null prototype.
     pub fn new() -> Self {
         Self {
+            identity: Self::next_identity(),
             properties: IndexMap::new(),
             strong_prototype: None,
             weak_prototype: None,
@@ -278,6 +287,7 @@ impl ObjectData {
     /// Create an object with a weak prototype reference (prevents cycles).
     pub fn with_weak_prototype(prototype: &Rc<RefCell<ObjectData>>) -> Self {
         Self {
+            identity: Self::next_identity(),
             properties: IndexMap::new(),
             strong_prototype: None,
             weak_prototype: Some(WeakObject::new(prototype)),

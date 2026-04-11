@@ -607,7 +607,7 @@ pub(crate) fn same_value_zero(a: &Value, b: &Value) -> bool {
 }
 
 pub(crate) fn static_builtin_arg_offset(vm: &Vm, _args: &[Value], _global_name: &str) -> usize {
-    if vm.current_new_target().is_some() || !matches!(vm.this_value(), Value::Undefined) {
+    if vm.current_new_target().is_some() || vm.builtin_this_arg_prepended() {
         return 1;
     }
     0

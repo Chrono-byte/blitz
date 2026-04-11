@@ -97,7 +97,7 @@ pub(super) const MAX_DENSE_ARRAY_GROWTH: usize = 1024;
 /// The prototype collector is intentionally pressure-driven instead of
 /// step-driven so tight numeric loops do not pay GC overhead unless they are
 /// actually creating heap garbage.
-pub(super) const GC_ALLOCATION_PRESSURE_THRESHOLD: usize = 64;
+pub(super) const GC_ALLOCATION_PRESSURE_THRESHOLD: usize = 128;
 
 /// Runtime GC pressure threshold, overrideable via `TSBLITZ_GC_PRESSURE_THRESHOLD`.
 pub(super) fn gc_allocation_pressure_threshold() -> usize {
@@ -337,6 +337,8 @@ pub struct Vm {
     pub(super) locals: Vec<ValueSlot>,
     /// Current `this` binding.
     pub(super) this_value: Value,
+    /// Whether the current builtin call received an explicit receiver in args[0].
+    pub(super) builtin_this_arg_prepended: bool,
     /// Upvalue environment for the currently executing closure, if any.
     pub(super) current_closure_env: Option<Rc<Mutex<Vec<ValueSlot>>>>,
     /// Temporary root for a callee closure environment while a call frame is

@@ -45,14 +45,20 @@ impl Vm {
                 }
                 call_args.extend_from_slice(&args);
                 let prev_this = std::mem::replace(&mut self.this_value, this_value);
+                let prev_builtin_this = std::mem::replace(
+                    &mut self.builtin_this_arg_prepended,
+                    prepend_this_for_builtins,
+                );
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = std::rc::Rc::clone(&self.lexical_env);
-                let result = (f.as_ref())(self, &call_args)?;
+                let result = (f.as_ref())(self, &call_args);
+                self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
+                let result = result?;
                 self.maybe_collect_garbage_prototype();
                 self.stack.push(result);
                 self.execute_return()
@@ -65,14 +71,20 @@ impl Vm {
                 }
                 call_args.extend_from_slice(&args);
                 let prev_this = std::mem::replace(&mut self.this_value, this_value);
+                let prev_builtin_this = std::mem::replace(
+                    &mut self.builtin_this_arg_prepended,
+                    prepend_this_for_builtins,
+                );
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = std::rc::Rc::clone(&self.lexical_env);
-                let result = (f.as_ref())(self, &call_args)?;
+                let result = (f.as_ref())(self, &call_args);
+                self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
+                let result = result?;
                 self.maybe_collect_garbage_prototype();
                 self.stack.push(result);
                 self.execute_return()

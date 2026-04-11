@@ -2096,7 +2096,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     );
     function_proto_map.borrow_mut().properties.insert(
         PKey::String("call".to_string()),
-        non_enum_data(function_call_val.clone()),
+        non_enum_data(function_call_val),
     );
     function_proto_map.borrow_mut().properties.insert(
         PKey::String("apply".to_string()),
@@ -2121,7 +2121,6 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         non_enum_data(builtin_object(
             Rc::new({
                 let function_proto_map = Rc::clone(&function_proto_map);
-                let function_call_val = function_call_val;
                 move |_vm, args| {
                     let target = args.first().cloned().unwrap_or(Value::Undefined);
                     let bound_this = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -2135,7 +2134,6 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     let bound_target = target;
                     let bound_this_arg = bound_this;
                     let prefix_args = bound_args;
-                    let call_builtin = function_call_val.clone();
                     Ok(builtin_object(
                         Rc::new(move |vm, call_args| {
                             if crate::trace::enabled() {
@@ -2145,30 +2143,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                                 );
                             }
                             let mut combined = prefix_args.clone();
-                            if call_args
-                                .first()
-                                .is_some_and(|first| strict_equal(first, &vm.this_value()))
-                            {
+                            if vm.builtin_this_arg_prepended() {
                                 combined.extend(call_args.iter().skip(1).cloned());
                             } else {
                                 combined.extend(call_args.iter().cloned());
                             }
-                            if strict_equal(&bound_target, &call_builtin) {
-                                if let Value::BuiltinObject(f, _) = &call_builtin {
-                                    let mut call_args = Vec::with_capacity(combined.len() + 1);
-                                    call_args.push(bound_this_arg.clone());
-                                    call_args.extend(combined.iter().cloned());
-                                    (f.as_ref())(vm, &call_args)
-                                } else {
-                                    vm.call_value_with_this(
-                                        &bound_target,
-                                        &bound_this_arg,
-                                        &combined,
-                                    )
-                                }
-                            } else {
-                                vm.call_value_with_this(&bound_target, &bound_this_arg, &combined)
-                            }
+                            vm.call_value_with_this(&bound_target, &bound_this_arg, &combined)
                         }),
                         &function_proto_map,
                     ))

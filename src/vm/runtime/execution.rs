@@ -60,6 +60,7 @@ impl Vm {
             stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
             locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
             this_value: Value::Object(Rc::clone(&globals)),
+            builtin_this_arg_prepended: false,
             current_closure_env: None,
             pending_closure_env: None,
             gc_temp_roots: Vec::new(),
@@ -123,6 +124,7 @@ impl Vm {
             stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
             locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
             this_value,
+            builtin_this_arg_prepended: false,
             current_closure_env: None,
             pending_closure_env: None,
             gc_temp_roots: Vec::new(),
@@ -213,6 +215,11 @@ impl Vm {
     /// Return the current `this` value.
     pub fn this_value(&self) -> Value {
         self.this_value.clone()
+    }
+
+    /// Return whether the current builtin call includes `this` at args[0].
+    pub(crate) fn builtin_this_arg_prepended(&self) -> bool {
+        self.builtin_this_arg_prepended
     }
 
     /// Return the current `[[NewTarget]]` value.
@@ -1307,14 +1314,18 @@ impl Vm {
         match callee {
             Value::Builtin(f) => {
                 let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
+                let prev_builtin_this =
+                    std::mem::replace(&mut self.builtin_this_arg_prepended, false);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = Rc::clone(&self.lexical_env);
-                let result = (f.as_ref())(self, &args)?;
+                let result = (f.as_ref())(self, &args);
+                self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
+                let result = result?;
                 if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
@@ -1323,14 +1334,18 @@ impl Vm {
             }
             Value::BuiltinObject(f, _props) => {
                 let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
+                let prev_builtin_this =
+                    std::mem::replace(&mut self.builtin_this_arg_prepended, false);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = Rc::clone(&self.lexical_env);
-                let result = (f.as_ref())(self, &args)?;
+                let result = (f.as_ref())(self, &args);
+                self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
+                let result = result?;
                 if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
@@ -1482,14 +1497,18 @@ impl Vm {
         match callee {
             Value::Builtin(f) => {
                 let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
+                let prev_builtin_this =
+                    std::mem::replace(&mut self.builtin_this_arg_prepended, false);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = Rc::clone(&self.lexical_env);
-                let result = (f.as_ref())(self, &flat)?;
+                let result = (f.as_ref())(self, &flat);
+                self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
+                let result = result?;
                 if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
@@ -1498,14 +1517,18 @@ impl Vm {
             }
             Value::BuiltinObject(f, _props) => {
                 let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
+                let prev_builtin_this =
+                    std::mem::replace(&mut self.builtin_this_arg_prepended, false);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = Rc::clone(&self.lexical_env);
-                let result = (f.as_ref())(self, &flat)?;
+                let result = (f.as_ref())(self, &flat);
+                self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
+                let result = result?;
                 if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
@@ -1580,10 +1603,13 @@ impl Vm {
                 call_args.push(receiver.clone());
                 call_args.extend_from_slice(&args);
                 let prev_this = std::mem::replace(&mut self.this_value, receiver);
+                let prev_builtin_this =
+                    std::mem::replace(&mut self.builtin_this_arg_prepended, true);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &call_args);
+                self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
@@ -1599,10 +1625,13 @@ impl Vm {
                 call_args.push(receiver.clone());
                 call_args.extend_from_slice(&args);
                 let prev_this = std::mem::replace(&mut self.this_value, receiver);
+                let prev_builtin_this =
+                    std::mem::replace(&mut self.builtin_this_arg_prepended, true);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &call_args);
+                self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
@@ -2211,6 +2240,7 @@ impl Vm {
                 let instance_obj = gc::track_object(Rc::new(RefCell::new(
                     ObjectData::with_prototype(instance_proto),
                 )));
+                self.property_get_ic_cache.clear();
                 instance_obj.borrow_mut().properties.insert(
                     PropertyKey::String("constructor".to_string()),
                     PropertyDescriptor::data(callee.clone()),
@@ -2262,6 +2292,7 @@ impl Vm {
                 let instance_obj = gc::track_object(Rc::new(RefCell::new(
                     ObjectData::with_prototype(instance_proto),
                 )));
+                self.property_get_ic_cache.clear();
                 instance_obj.borrow_mut().properties.insert(
                     PropertyKey::String("constructor".to_string()),
                     PropertyDescriptor::data(callee.clone()),
@@ -2305,7 +2336,10 @@ impl Vm {
                 Ok(result)
             }
             Value::Builtin(f) => {
+                let prev_builtin_this =
+                    std::mem::replace(&mut self.builtin_this_arg_prepended, false);
                 let result = (f.as_ref())(self, args);
+                self.builtin_this_arg_prepended = prev_builtin_this;
                 if let Ok(value) = &result {
                     if matches!(
                         value,
@@ -2569,14 +2603,18 @@ impl Vm {
                 call_args.push(this_arg_owned.clone());
                 call_args.extend_from_slice(args);
                 let prev_this = std::mem::replace(&mut self.this_value, this_arg_owned);
+                let prev_builtin_this =
+                    std::mem::replace(&mut self.builtin_this_arg_prepended, true);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = Rc::clone(&self.lexical_env);
-                let result = (f.as_ref())(self, &call_args)?;
+                let result = (f.as_ref())(self, &call_args);
+                self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
+                let result = result?;
                 let result_root_base = self.gc_temp_roots.len();
                 self.gc_temp_roots.push(result.clone());
                 let post_call = (|| {
@@ -2604,14 +2642,18 @@ impl Vm {
                 call_args.push(this_arg_owned.clone());
                 call_args.extend_from_slice(args);
                 let prev_this = std::mem::replace(&mut self.this_value, this_arg_owned);
+                let prev_builtin_this =
+                    std::mem::replace(&mut self.builtin_this_arg_prepended, true);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
                 let prev_lexical_env = Rc::clone(&self.lexical_env);
-                let result = (f.as_ref())(self, &call_args)?;
+                let result = (f.as_ref())(self, &call_args);
+                self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
                 self.current_closure_env = prev_closure_env;
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
+                let result = result?;
                 let result_root_base = self.gc_temp_roots.len();
                 self.gc_temp_roots.push(result.clone());
                 let post_call = (|| {
@@ -3023,11 +3065,9 @@ impl Vm {
                     } else {
                         // Mixing BigInt and other numeric types should throw a JS TypeError
                         let ctor = self.get_global("TypeError").unwrap_or(Value::Undefined);
-                        let thrown = self
-                            .construct_value(&ctor, &[])
-                            .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                                ObjectData::new(),
-                            )))));
+                        let thrown = self.construct_value(&ctor, &[]).unwrap_or(Value::Object(
+                            gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
+                        ));
                         match self.unwind_to_handler(thrown) {
                             Ok(()) => return Ok(StepOutcome::Continue),
                             Err(err) => return Err(err),
@@ -3060,11 +3100,9 @@ impl Vm {
                         if y.is_zero() {
                             // Division by zero for BigInt throws RangeError
                             let ctor = self.get_global("RangeError").unwrap_or(Value::Undefined);
-                            let thrown = self
-                                .construct_value(&ctor, &[])
-                                .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                                    ObjectData::new(),
-                                )))));
+                            let thrown = self.construct_value(&ctor, &[]).unwrap_or(Value::Object(
+                                gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
+                            ));
                             match self.unwind_to_handler(thrown) {
                                 Ok(()) => return Ok(StepOutcome::Continue),
                                 Err(err) => return Err(err),
@@ -3087,11 +3125,9 @@ impl Vm {
                     (Value::BigInt(x), Value::BigInt(y)) => {
                         if y.is_zero() {
                             let ctor = self.get_global("RangeError").unwrap_or(Value::Undefined);
-                            let thrown = self
-                                .construct_value(&ctor, &[])
-                                .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                                    ObjectData::new(),
-                                )))));
+                            let thrown = self.construct_value(&ctor, &[]).unwrap_or(Value::Object(
+                                gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
+                            ));
                             match self.unwind_to_handler(thrown) {
                                 Ok(()) => return Ok(StepOutcome::Continue),
                                 Err(err) => return Err(err),
@@ -3145,11 +3181,9 @@ impl Vm {
                     Err(_e) => {
                         // Convert runtime error into a JS TypeError where appropriate
                         let ctor = self.get_global("TypeError").unwrap_or(Value::Undefined);
-                        let thrown = self
-                            .construct_value(&ctor, &[])
-                            .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                                ObjectData::new(),
-                            )))));
+                        let thrown = self.construct_value(&ctor, &[]).unwrap_or(Value::Object(
+                            gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
+                        ));
                         match self.unwind_to_handler(thrown) {
                             Ok(()) => return Ok(StepOutcome::Continue),
                             Err(err) => return Err(err),
@@ -3160,11 +3194,9 @@ impl Vm {
                     Ok(n) => n,
                     Err(_e) => {
                         let ctor = self.get_global("TypeError").unwrap_or(Value::Undefined);
-                        let thrown = self
-                            .construct_value(&ctor, &[])
-                            .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                                ObjectData::new(),
-                            )))));
+                        let thrown = self.construct_value(&ctor, &[]).unwrap_or(Value::Object(
+                            gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
+                        ));
                         match self.unwind_to_handler(thrown) {
                             Ok(()) => return Ok(StepOutcome::Continue),
                             Err(err) => return Err(err),
@@ -3178,11 +3210,9 @@ impl Vm {
                         let exp = y;
                         if exp.is_negative() {
                             let ctor = self.get_global("RangeError").unwrap_or(Value::Undefined);
-                            let thrown = self
-                                .construct_value(&ctor, &[])
-                                .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                                    ObjectData::new(),
-                                )))));
+                            let thrown = self.construct_value(&ctor, &[]).unwrap_or(Value::Object(
+                                gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
+                            ));
                             match self.unwind_to_handler(thrown) {
                                 Ok(()) => return Ok(StepOutcome::Continue),
                                 Err(err) => return Err(err),
@@ -3200,11 +3230,9 @@ impl Vm {
                     // Mixing BigInt and Number -> throw TypeError as JS semantics
                     _ => {
                         let ctor = self.get_global("TypeError").unwrap_or(Value::Undefined);
-                        let thrown = self
-                            .construct_value(&ctor, &[])
-                            .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                                ObjectData::new(),
-                            )))));
+                        let thrown = self.construct_value(&ctor, &[]).unwrap_or(Value::Object(
+                            gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
+                        ));
                         match self.unwind_to_handler(thrown) {
                             Ok(()) => return Ok(StepOutcome::Continue),
                             Err(err) => return Err(err),
@@ -5512,6 +5540,10 @@ impl Vm {
 
     /// Inline-cached property access with generation-based invalidation.
     fn get_property_ic(&mut self) -> Result<(), RuntimeError> {
+        // TODO: Re-enable stable per-site caching once generation tracking
+        // covers every mutation path. For now, clear stale entries eagerly so
+        // correctness takes precedence over cache hits.
+        self.property_get_ic_cache.clear();
         let slot = self.read_byte()?;
         let key_val = self.pop()?;
         let obj = self.pop()?;
@@ -5775,10 +5807,10 @@ impl Vm {
 
     fn bump_object_generation(&mut self, obj: &Value) {
         let ptr = match obj {
-            Value::Object(m) => Some(Rc::as_ptr(m) as usize),
-            Value::Array(_, props) => Some(Rc::as_ptr(props) as usize),
-            Value::Closure { props, .. } => Some(Rc::as_ptr(props) as usize),
-            Value::BuiltinObject(_, props) => Some(Rc::as_ptr(props) as usize),
+            Value::Object(m) => Some(m.borrow().identity as usize),
+            Value::Array(_, props) => Some(props.borrow().identity as usize),
+            Value::Closure { props, .. } => Some(props.borrow().identity as usize),
+            Value::BuiltinObject(_, props) => Some(props.borrow().identity as usize),
             _ => None,
         };
         if let Some(p) = ptr {
@@ -6004,7 +6036,10 @@ impl Vm {
         match (name, message) {
             (Some(name), Some(message)) if !message.is_empty() => format!("{name}: {message}"),
             (Some(name), _) => name,
-            _ => format!("{}", thrown),
+            (None, Some(message)) if !message.is_empty() => message,
+            _ => self
+                .to_string(thrown)
+                .unwrap_or_else(|_| format!("{}", thrown)),
         }
     }
 
@@ -6057,6 +6092,7 @@ impl Vm {
                 PropertyKey::String("message".to_string()),
                 PropertyDescriptor::data(Value::String(message.to_string())),
             );
+            self.property_get_ic_cache.clear();
             return Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(obj)))));
         }
         let proto = self
@@ -6081,6 +6117,7 @@ impl Vm {
             PropertyKey::String("name".to_string()),
             PropertyDescriptor::data(Value::String(name.to_string())),
         );
+        self.property_get_ic_cache.clear();
         Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(obj)))))
     }
 
@@ -6993,12 +7030,12 @@ fn ensure_slot(locals: &mut Vec<ValueSlot>, slot: usize) {
 
 fn object_identity(obj: &Value) -> Option<usize> {
     match obj {
-        Value::Object(map) => Some(Rc::as_ptr(map) as usize),
-        // Use the array's props object for identity so IC keys remain stable
-        // across dense storage reallocations and avoid pointer-reuse hits.
-        Value::Array(_, props) => Some(Rc::as_ptr(props) as usize),
-        Value::Closure { props, .. } => Some(Rc::as_ptr(props) as usize),
-        Value::BuiltinObject(_, props) => Some(Rc::as_ptr(props) as usize),
+        Value::Object(map) => Some(map.borrow().identity as usize),
+        // Use the array's props object identity so IC keys remain stable across
+        // dense storage reallocations.
+        Value::Array(_, props) => Some(props.borrow().identity as usize),
+        Value::Closure { props, .. } => Some(props.borrow().identity as usize),
+        Value::BuiltinObject(_, props) => Some(props.borrow().identity as usize),
         _ => None,
     }
 }
