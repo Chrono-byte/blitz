@@ -845,11 +845,7 @@ pub(crate) fn resolve_promise_with_value(
 }
 
 pub(crate) fn builtin_object(f: BuiltinFn, function_proto: &Rc<RefCell<ObjectData>>) -> Value {
-    let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
-    props
-        .borrow_mut()
-        .set_prototype_value(Value::Object(Rc::clone(function_proto)));
-    Value::BuiltinObject(f, props)
+    crate::ecmascript::semantics::builtin_object(f, function_proto)
 }
 
 /// Delegate to the ECMAScript semantics module for builtin wiring.
@@ -1347,45 +1343,11 @@ pub(crate) fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value,
 }
 
 pub(crate) fn set_builtin_length(target: &Value, length: f64) {
-    let desc = PropertyDescriptor::Data {
-        value: Value::Number(length),
-        writable: false,
-        enumerable: false,
-        configurable: true,
-    };
-    match target {
-        Value::Object(props)
-        | Value::Array(_, props)
-        | Value::Closure { props, .. }
-        | Value::BuiltinObject(_, props) => {
-            props
-                .borrow_mut()
-                .properties
-                .insert(PropertyKey::String("length".to_string()), desc);
-        }
-        _ => {}
-    }
+    crate::ecmascript::semantics::set_builtin_length(target, length)
 }
 
 pub(crate) fn set_builtin_name(target: &Value, name: &str) {
-    let desc = PropertyDescriptor::Data {
-        value: Value::String(name.to_string()),
-        writable: false,
-        enumerable: false,
-        configurable: true,
-    };
-    match target {
-        Value::Object(props)
-        | Value::Array(_, props)
-        | Value::Closure { props, .. }
-        | Value::BuiltinObject(_, props) => {
-            props
-                .borrow_mut()
-                .properties
-                .insert(PropertyKey::String("name".to_string()), desc);
-        }
-        _ => {}
-    }
+    crate::ecmascript::semantics::set_builtin_name(target, name)
 }
 
 /// Converts a value to a non-negative integer length suitable for array operations.
