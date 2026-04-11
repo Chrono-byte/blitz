@@ -378,8 +378,15 @@ fn mark_value(
                         );
                     }
                 }
-                PromiseState::Fulfilled(v) | PromiseState::Rejected(v) => mark_value(
+                PromiseState::Fulfilled(v) => mark_value(
                     &v,
+                    marked_objects,
+                    marked_arrays,
+                    marked_envs,
+                    marked_promises,
+                ),
+                PromiseState::Rejected { reason, .. } => mark_value(
+                    &reason,
                     marked_objects,
                     marked_arrays,
                     marked_envs,

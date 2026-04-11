@@ -6,10 +6,12 @@ use num_traits::ToPrimitive;
 
 use crate::runtime_utils::{
     array_length_descriptor, builtin_object, canonical_index_key, collect_iterable_values,
-    set_builtin_length, static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string,
-    usize_to_f64,
+    reject_pending_promise, resolve_promise_with_value, set_builtin_length,
+    static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string, usize_to_f64,
 };
-use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
+use crate::value::{
+    BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
+};
 use crate::vm::Vm;
 
 /// 23.1 Array Objects
@@ -179,135 +181,50 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                 Rc::new(move |vm, args| {
                     let off = static_builtin_arg_offset(vm, args, "Array");
                     let undefined = Value::Undefined;
-                    let source = args.get(off).unwrap_or(&undefined);
-                    let map_fn = args.get(off + 1).unwrap_or(&undefined);
-                    let this_arg = args.get(off + 2).unwrap_or(&undefined);
-                    if crate::trace::enabled() {
-                        eprintln!(
-                            "[trace] Array.fromAsync start source={} map_fn={} this_arg={}",
-                            source.type_name(),
-                            map_fn.type_name(),
-                            this_arg.type_name()
-                        );
-                    }
-
-                    let promise_ctor = match vm.get_global("Promise") {
-                        Some(value) => value,
-                        None => return Err(vm.throw_type_error("Promise constructor missing")),
-                    };
-                    let promise_resolve = match vm
-                        .get_property_host(&promise_ctor, &PKey::String("resolve".to_string()))
-                    {
-                        Ok(value) => value,
-                        Err(err) => return Err(err),
-                    };
-                    let promise_reject = match vm
-                        .get_property_host(&promise_ctor, &PKey::String("reject".to_string()))
-                    {
-                        Ok(value) => value,
-                        Err(err) => return Err(err),
-                    };
+                    let source = args.get(off).cloned().unwrap_or(undefined);
+                    let map_fn = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                    let this_arg = args.get(off + 2).cloned().unwrap_or(Value::Undefined);
+                    let result_promise =
+                        crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
+                            on_fulfilled: Vec::new(),
+                            on_rejected: Vec::new(),
+                        })));
                     let constructor_candidate = vm.this_value();
                     let use_constructor = matches!(
                         constructor_candidate,
                         Value::Closure { ref proto, .. } if proto.is_constructor
                     );
-
-                    let outcome: Result<Value, crate::errors::RuntimeError> = (|| {
-                        if !matches!(map_fn, Value::Undefined) && !Vm::is_callable_value(map_fn) {
-                            return Err(
-                                vm.throw_type_error("Array.fromAsync mapfn is not callable")
-                            );
-                        }
-
-                        let items = collect_iterable_values(vm, source)?;
-                        if crate::trace::enabled() {
-                            eprintln!("[trace] Array.fromAsync collected {} items", items.len());
-                        }
-                        let len = items.len();
-                        let created = if use_constructor {
-                            let ctor_len = if is_iterable_source(vm, source)? {
-                                Vec::new()
-                            } else {
-                                vec![Value::Number(usize_to_f64(len))]
-                            };
-                            vm.construct_value(&constructor_candidate, &ctor_len)?
-                        } else {
-                            let out: Vec<Option<Value>> = vec![None; len];
-                            let props = Rc::new(RefCell::new(ObjectData::new()));
-                            props
-                                .borrow_mut()
-                                .set_prototype_value(Value::Object(Rc::clone(
-                                    &array_proto_for_from_async,
-                                )));
-                            props.borrow_mut().properties.insert(
-                                PKey::String("length".to_string()),
-                                array_length_descriptor(len),
-                            );
-                            Value::Array(Rc::new(RefCell::new(out)), props)
-                        };
-
-                        for (i, mut value) in items.into_iter().enumerate() {
-                            if !matches!(map_fn, Value::Undefined) {
-                                value = vm.call_value_with_this(
-                                    map_fn,
-                                    this_arg,
-                                    &[value, Value::Number(usize_to_f64(i))],
-                                )?;
+                    let source_for_job = source;
+                    let map_fn_for_job = map_fn;
+                    let this_arg_for_job = this_arg;
+                    let constructor_for_job = constructor_candidate;
+                    let array_proto_for_job = Rc::clone(&array_proto_for_from_async);
+                    let result_promise_for_job = Rc::clone(&result_promise);
+                    vm.queue_microtask(move |vm| {
+                        let outcome = execute_array_from_async_job(
+                            vm,
+                            &source_for_job,
+                            &map_fn_for_job,
+                            &this_arg_for_job,
+                            &constructor_for_job,
+                            use_constructor,
+                            &array_proto_for_job,
+                        );
+                        match outcome {
+                            Ok(value) => {
+                                resolve_promise_with_value(vm, &result_promise_for_job, value)?;
                             }
-                            let key = Value::String(i.to_string());
-                            let mut desc_data = ObjectData::new();
-                            desc_data.properties.insert(
-                                PKey::String("value".to_string()),
-                                PropertyDescriptor::data(value),
-                            );
-                            desc_data.properties.insert(
-                                PKey::String("writable".to_string()),
-                                PropertyDescriptor::data(Value::Bool(true)),
-                            );
-                            desc_data.properties.insert(
-                                PKey::String("enumerable".to_string()),
-                                PropertyDescriptor::data(Value::Bool(true)),
-                            );
-                            desc_data.properties.insert(
-                                PKey::String("configurable".to_string()),
-                                PropertyDescriptor::data(Value::Bool(true)),
-                            );
-                            let desc = Value::Object(Rc::new(RefCell::new(desc_data)));
-                            if !vm.define_property_value(&created, &key, &desc)? {
-                                return Err(
-                                    vm.throw_type_error("Array.fromAsync failed to define element")
-                                );
+                            Err(err) => {
+                                let reason = vm
+                                    .last_uncaught_exception
+                                    .take()
+                                    .unwrap_or_else(|| Value::String(format!("{}", err)));
+                                reject_pending_promise(vm, &result_promise_for_job, reason);
                             }
                         }
-
-                        let len_key = Value::String("length".to_string());
-                        vm.set_property_host(&created, &len_key, Value::Number(usize_to_f64(len)))?;
-                        Ok(created)
-                    })(
-                    );
-
-                    match outcome {
-                        Ok(value) => {
-                            if crate::trace::enabled() {
-                                eprintln!(
-                                    "[trace] Array.fromAsync success value type={}",
-                                    value.type_name()
-                                );
-                            }
-                            vm.call_value_with_this(&promise_resolve, &promise_ctor, &[value])
-                        }
-                        Err(err) => {
-                            if crate::trace::enabled() {
-                                eprintln!("[trace] Array.fromAsync error {}", err);
-                            }
-                            let reason = vm
-                                .last_uncaught_exception
-                                .take()
-                                .unwrap_or_else(|| Value::String(format!("{}", err)));
-                            vm.call_value_with_this(&promise_reject, &promise_ctor, &[reason])
-                        }
-                    }
+                        Ok(())
+                    });
+                    Ok(Value::Promise(result_promise))
                 }),
                 &function_proto_map,
             );
@@ -479,4 +396,157 @@ fn is_iterable_source(vm: &mut Vm, source: &Value) -> Result<bool, crate::errors
             Ok(Vm::is_callable_value(&iterator_method))
         }
     }
+}
+
+fn close_iterator(vm: &mut Vm, iter_obj: &Value) -> Result<(), crate::errors::RuntimeError> {
+    let return_fn = vm.get_property_host(iter_obj, &PropertyKey::String("return".to_string()))?;
+    if Vm::is_callable_value(&return_fn) {
+        let _ = vm.call_value_with_this(&return_fn, iter_obj, &[])?;
+    }
+    Ok(())
+}
+
+fn execute_array_from_async_job(
+    vm: &mut Vm,
+    source: &Value,
+    map_fn: &Value,
+    this_arg: &Value,
+    constructor_candidate: &Value,
+    use_constructor: bool,
+    array_proto_for_from_async: &Rc<RefCell<ObjectData>>,
+) -> Result<Value, crate::errors::RuntimeError> {
+    if !matches!(map_fn, Value::Undefined) && !Vm::is_callable_value(map_fn) {
+        return Err(vm.throw_type_error("Array.fromAsync mapfn is not callable"));
+    }
+
+    let created = if use_constructor {
+        let ctor_len = if is_iterable_source(vm, source)? {
+            Vec::new()
+        } else {
+            let items = collect_iterable_values(vm, source)?;
+            vec![Value::Number(usize_to_f64(items.len()))]
+        };
+        vm.construct_value(constructor_candidate, &ctor_len)?
+    } else {
+        let len = if is_iterable_source(vm, source)? {
+            0
+        } else {
+            collect_iterable_values(vm, source)?.len()
+        };
+        let out: Vec<Option<Value>> = vec![None; len];
+        let props = Rc::new(RefCell::new(ObjectData::new()));
+        props
+            .borrow_mut()
+            .set_prototype_value(Value::Object(Rc::clone(array_proto_for_from_async)));
+        props.borrow_mut().properties.insert(
+            PropertyKey::String("length".to_string()),
+            array_length_descriptor(len),
+        );
+        Value::Array(Rc::new(RefCell::new(out)), props)
+    };
+
+    if is_iterable_source(vm, source)? {
+        let iterator_method = vm.get_property_host(
+            source,
+            &PropertyKey::Symbol(SymbolId::well_known_iterator()),
+        )?;
+        if !Vm::is_callable_value(&iterator_method) {
+            return Err(vm.throw_type_error("Array.fromAsync source is not iterable"));
+        }
+
+        let iter_obj = vm.call_value_with_this(&iterator_method, source, &[])?;
+        let mut index = 0usize;
+        let iter_result: Result<(), crate::errors::RuntimeError> = (|| {
+            loop {
+                let next_fn =
+                    vm.get_property_host(&iter_obj, &PropertyKey::String("next".to_string()))?;
+                let result = vm.call_value_with_this(&next_fn, &iter_obj, &[])?;
+                let done_val =
+                    vm.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+                if vm.to_boolean(&done_val) {
+                    break;
+                }
+                let mut value =
+                    vm.get_property_host(&result, &PropertyKey::String("value".to_string()))?;
+                if !matches!(map_fn, Value::Undefined) {
+                    let mapped = vm.call_value_with_this(
+                        map_fn,
+                        this_arg,
+                        &[value, Value::Number(usize_to_f64(index))],
+                    )?;
+                    value = vm.await_value(mapped)?;
+                }
+                let key = Value::String(index.to_string());
+                let mut desc_data = ObjectData::new();
+                desc_data.properties.insert(
+                    PropertyKey::String("value".to_string()),
+                    PropertyDescriptor::data(value),
+                );
+                desc_data.properties.insert(
+                    PropertyKey::String("writable".to_string()),
+                    PropertyDescriptor::data(Value::Bool(true)),
+                );
+                desc_data.properties.insert(
+                    PropertyKey::String("enumerable".to_string()),
+                    PropertyDescriptor::data(Value::Bool(true)),
+                );
+                desc_data.properties.insert(
+                    PropertyKey::String("configurable".to_string()),
+                    PropertyDescriptor::data(Value::Bool(true)),
+                );
+                let desc = Value::Object(Rc::new(RefCell::new(desc_data)));
+                if !vm.define_property_value(&created, &key, &desc)? {
+                    return Err(vm.throw_type_error("Array.fromAsync failed to define element"));
+                }
+                index += 1;
+            }
+            Ok(())
+        })();
+        if let Err(err) = iter_result {
+            close_iterator(vm, &iter_obj)?;
+            return Err(err);
+        }
+
+        let len_key = Value::String("length".to_string());
+        vm.set_property_host(&created, &len_key, Value::Number(usize_to_f64(index)))?;
+    } else {
+        let items = collect_iterable_values(vm, source)?;
+        let len = items.len();
+        for (i, mut value) in items.into_iter().enumerate() {
+            if !matches!(map_fn, Value::Undefined) {
+                let mapped = vm.call_value_with_this(
+                    map_fn,
+                    this_arg,
+                    &[value, Value::Number(usize_to_f64(i))],
+                )?;
+                value = vm.await_value(mapped)?;
+            }
+            let key = Value::String(i.to_string());
+            let mut desc_data = ObjectData::new();
+            desc_data.properties.insert(
+                PropertyKey::String("value".to_string()),
+                PropertyDescriptor::data(value),
+            );
+            desc_data.properties.insert(
+                PropertyKey::String("writable".to_string()),
+                PropertyDescriptor::data(Value::Bool(true)),
+            );
+            desc_data.properties.insert(
+                PropertyKey::String("enumerable".to_string()),
+                PropertyDescriptor::data(Value::Bool(true)),
+            );
+            desc_data.properties.insert(
+                PropertyKey::String("configurable".to_string()),
+                PropertyDescriptor::data(Value::Bool(true)),
+            );
+            let desc = Value::Object(Rc::new(RefCell::new(desc_data)));
+            if !vm.define_property_value(&created, &key, &desc)? {
+                return Err(vm.throw_type_error("Array.fromAsync failed to define element"));
+            }
+        }
+        let len_key = Value::String("length".to_string());
+        vm.set_property_host(&created, &len_key, Value::Number(usize_to_f64(len)))?;
+    }
+
+    Ok(created)
 }

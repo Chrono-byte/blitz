@@ -14,8 +14,8 @@ use crate::runtime_utils::{
     collect_iterable_values, descriptor_value_from_descriptor, is_byte_offset_aligned,
     js_number_to_string, non_enum_data, own_enumerable_keys, own_property_descriptor,
     own_property_keys, property_key_to_value, same_value_zero, set_builtin_length,
-    set_builtin_name, static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length,
-    usize_to_decimal_string, usize_to_f64,
+    set_builtin_name, static_builtin_arg_offset, strict_equal, syntax_error, to_index,
+    to_integer_or_infinity, to_length, usize_to_decimal_string, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{Parser, Vm, compiler};
@@ -572,52 +572,66 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     );
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("with".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new({
-                let array_proto_map = Rc::clone(&array_proto_map);
-                move |vm, args| {
-                    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                    let len_val =
-                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                    let len = to_length(vm, &len_val)?;
-                    let relative_index =
-                        vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
-                    let actual_index = if relative_index < 0.0 {
-                        len as isize + relative_index.trunc() as isize
-                    } else {
-                        relative_index.trunc() as isize
-                    };
-                    if actual_index < 0 || actual_index as usize >= len {
-                        return Err(vm.throw_range_error("Array.prototype.with index out of range"));
-                    }
-                    let replacement = args.get(2).cloned().unwrap_or(Value::Undefined);
-                    let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
-                    for i in 0..len {
-                        if i == actual_index as usize {
-                            out.push(Some(replacement.clone()));
-                            continue;
-                        }
-                        let key = PKey::String(i.to_string());
-                        if vm.has_property_host(&receiver, &key)? {
-                            out.push(Some(vm.get_property_host(&receiver, &key)?));
+        non_enum_data({
+            let builtin = builtin_object(
+                Rc::new({
+                    let array_proto_map = Rc::clone(&array_proto_map);
+                    move |vm, args| {
+                        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                        let len_val =
+                            vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
+                        let len = to_length(vm, &len_val)?;
+                        let relative_index =
+                            to_integer_or_infinity(vm, args.get(1).unwrap_or(&Value::Undefined))?;
+                        let actual_index = if relative_index < 0 {
+                            len as isize + relative_index
                         } else {
-                            out.push(None);
+                            relative_index
+                        };
+                        if actual_index < 0 || actual_index as usize >= len {
+                            return Err(
+                                vm.throw_range_error("Array.prototype.with index out of range")
+                            );
                         }
+                        let actual_index = actual_index as usize;
+                        let replacement = args.get(2).cloned().unwrap_or(Value::Undefined);
+                        let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
+                        for i in 0..len {
+                            if i == actual_index {
+                                out.push(Some(replacement.clone()));
+                                continue;
+                            }
+                            let key = PKey::String(i.to_string());
+                            let value = if matches!(receiver, Value::Array(..))
+                                && own_property_descriptor(&receiver, &key).is_none()
+                            {
+                                vm.get_property_host(
+                                    &Value::Object(Rc::clone(&array_proto_map)),
+                                    &key,
+                                )?
+                            } else {
+                                vm.get_property_host(&receiver, &key)?
+                            };
+                            out.push(Some(value));
+                        }
+                        let arr_rc = Rc::new(RefCell::new(out));
+                        let props = Rc::new(RefCell::new(ObjectData::new()));
+                        props
+                            .borrow_mut()
+                            .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
+                        props.borrow_mut().properties.insert(
+                            PKey::String("length".to_string()),
+                            array_length_descriptor(arr_rc.borrow().len()),
+                        );
+                        Ok(Value::Array(arr_rc, props))
                     }
-                    let arr_rc = Rc::new(RefCell::new(out));
-                    let props = Rc::new(RefCell::new(ObjectData::new()));
-                    props
-                        .borrow_mut()
-                        .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
-                    props.borrow_mut().properties.insert(
-                        PKey::String("length".to_string()),
-                        array_length_descriptor(arr_rc.borrow().len()),
-                    );
-                    Ok(Value::Array(arr_rc, props))
-                }
-            }),
-            &function_proto_map,
-        )),
+                }),
+                &function_proto_map,
+            );
+            set_builtin_name(&builtin, "with");
+            set_builtin_length(&builtin, 2.0);
+            builtin
+        }),
     );
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("push".to_string()),
@@ -675,11 +689,17 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                                 .unwrap_or(0);
                             delete_count.min(len.saturating_sub(start))
                         };
+                        if actual_delete_count > u32::MAX as usize {
+                            return Err(vm.throw_range_error("Invalid array length"));
+                        }
                         let insert_items: Vec<Value> = args.iter().skip(3).cloned().collect();
                         let insert_count = insert_items.len();
                         let new_len = len
                             .saturating_sub(actual_delete_count)
                             .saturating_add(insert_count);
+                        if new_len > u32::MAX as usize {
+                            return Err(vm.throw_range_error("Invalid array length"));
+                        }
                         if new_len > 9_007_199_254_740_991usize {
                             return Err(vm.throw_type_error("Array length exceeds supported size"));
                         }
@@ -2797,16 +2817,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             let this = args.first().cloned().unwrap_or(Value::Undefined);
             let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
             let key = vm.to_property_key(&key_value)?;
-            if crate::trace::enabled() {
-                eprintln!("[trace] hasOwnProperty this={:?} key={:?}", this, key_value);
-            }
-            let has_own = match this {
-                Value::Object(obj) => obj.borrow().properties.contains_key(&key),
-                Value::Array(_, props)
-                | Value::Closure { props, .. }
-                | Value::BuiltinObject(_, props) => props.borrow().properties.contains_key(&key),
-                _ => false,
-            };
+            let has_own = own_property_descriptor(&this, &key).is_some();
             Ok(Value::Bool(has_own))
         }),
         &function_proto_map,

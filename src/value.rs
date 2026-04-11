@@ -344,8 +344,13 @@ pub enum PromiseState {
     },
     /// Promise has been resolved with a value
     Fulfilled(Value),
-    /// Promise has been rejected with a reason
-    Rejected(Value),
+    /// Promise has been rejected with a reason.
+    Rejected {
+        /// Rejection reason.
+        reason: Value,
+        /// Whether the rejection has a handler attached.
+        handled: bool,
+    },
 }
 
 #[derive(Clone)]

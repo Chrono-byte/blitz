@@ -736,7 +736,7 @@ fn resolve_promise_with_value_inner(
                 });
                 return Ok(());
             }
-            PromiseState::Rejected(reason) => {
+            PromiseState::Rejected { reason, .. } => {
                 let reason = reason.clone();
                 let reject_called = Rc::clone(&already_resolved);
                 let res_p = Rc::clone(result_promise);
@@ -946,15 +946,30 @@ pub(crate) fn reject_pending_promise(
     if let PromiseState::Pending { on_rejected, .. } = &mut *state {
         let callbacks = std::mem::take(on_rejected);
         let stored_reason = reason.clone();
-        *state = PromiseState::Rejected(reason);
+        let handled = !callbacks.is_empty();
+        *state = PromiseState::Rejected { reason, handled };
         drop(state);
         if callbacks.is_empty() {
-            // No rejection handlers registered: notify host hook about an
-            // unhandled rejection. Hosts may inspect the promise and reason.
-            // The promise object is not directly accessible here, so pass
-            // Undefined as the placeholder. Embedding the Promise object
-            // would require changing PromiseState layout.
-            vm.call_unhandled_rejection(Value::Undefined, stored_reason);
+            let promise_ref = Rc::clone(promise);
+            vm.queue_microtask(move |vm| {
+                let still_unhandled = {
+                    let state = promise_ref.borrow();
+                    match &*state {
+                        PromiseState::Rejected {
+                            reason,
+                            handled: false,
+                        } => reason == &stored_reason,
+                        _ => false,
+                    }
+                };
+                if still_unhandled {
+                    vm.call_unhandled_rejection(
+                        Value::Promise(Rc::clone(&promise_ref)),
+                        stored_reason.clone(),
+                    );
+                }
+                Ok(())
+            });
         } else {
             for callback in callbacks {
                 let callback_reason = stored_reason.clone();
@@ -1376,6 +1391,25 @@ pub(crate) fn to_index(vm: &mut Vm, value: &Value) -> Result<usize, RuntimeError
     }
     int_val
         .to_usize()
+        .ok_or_else(|| vm.throw_range_error("Invalid array index"))
+}
+
+/// Converts a value to an integer index using ECMAScript `ToIntegerOrInfinity`
+/// semantics, returning an `isize` so callers can apply their own bounds checks.
+pub(crate) fn to_integer_or_infinity(vm: &mut Vm, value: &Value) -> Result<isize, RuntimeError> {
+    let num = vm.to_number_value(value)?;
+    if num.is_nan() || num == 0.0 {
+        return Ok(0);
+    }
+    if num.is_infinite() {
+        return Err(vm.throw_range_error("Invalid array index"));
+    }
+    let int_val = num.trunc();
+    if !int_val.is_finite() {
+        return Err(vm.throw_range_error("Invalid array index"));
+    }
+    int_val
+        .to_isize()
         .ok_or_else(|| vm.throw_range_error("Invalid array index"))
 }
 
@@ -1893,9 +1927,14 @@ pub(crate) fn own_property_descriptor(
     match obj {
         Value::Object(data) => data.borrow().properties.get(key).cloned(),
         Value::Array(arr, props) => {
+            let props_ref = props.borrow();
+            if let Some(desc) = props_ref.properties.get(key).cloned() {
+                return Some(desc);
+            }
             if let PropertyKey::String(s) = key
                 && let Some(idx) = canonical_index_key(s)
                 && let Some(idx) = idx.to_usize()
+                && idx < array_length(&props_ref)
                 && let Some(Some(value)) = arr.borrow().get(idx).cloned()
             {
                 return Some(PropertyDescriptor::Data {
@@ -1905,13 +1944,27 @@ pub(crate) fn own_property_descriptor(
                     configurable: true,
                 });
             }
-            props.borrow().properties.get(key).cloned()
+            None
         }
         Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
             props.borrow().properties.get(key).cloned()
         }
         _ => None,
     }
+}
+
+fn array_length(props: &ObjectData) -> usize {
+    props
+        .properties
+        .get(&PropertyKey::String("length".to_string()))
+        .and_then(|desc| match desc {
+            PropertyDescriptor::Data {
+                value: Value::Number(n),
+                ..
+            } if n.is_finite() && *n >= 0.0 => Some(*n as usize),
+            _ => None,
+        })
+        .unwrap_or(0)
 }
 
 /// Returns the value of the own property descriptor for the given key, if one exists.

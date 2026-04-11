@@ -666,13 +666,13 @@ impl super::Compiler {
                                 self.compile_expr_oast(&s.argument)?;
                             }
                             oast::ArrayExpressionElement::Elision(_) => {
-                                self.emit(Op::Undefined, LINE);
+                                self.emit_constant(Value::Uninitialized, LINE);
                             }
                             _ => {
                                 if let Some(expr) = el.as_expression() {
                                     self.compile_expr_oast(expr)?;
                                 } else {
-                                    self.emit(Op::Undefined, LINE);
+                                    self.emit_constant(Value::Uninitialized, LINE);
                                 }
                             }
                         }
@@ -695,7 +695,7 @@ impl super::Compiler {
                         if let Some(expr) = el.as_expression() {
                             self.compile_expr_oast(expr)?;
                         } else {
-                            self.emit(Op::Undefined, LINE);
+                            self.emit_constant(Value::Uninitialized, LINE);
                         }
                     }
                     self.emit(Op::BuildArray, LINE);

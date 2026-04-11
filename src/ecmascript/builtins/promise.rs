@@ -220,7 +220,8 @@ pub(crate) fn create_promise_intrinsics(
                                 Ok(())
                             });
                         }
-                        PromiseState::Rejected(reason) => {
+                        PromiseState::Rejected { reason, handled } => {
+                            *handled = true;
                             let reason = reason.clone();
                             let user_on_rejected = on_rejected;
                             let res_p_r = Rc::clone(&result_promise);

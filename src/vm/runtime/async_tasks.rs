@@ -121,7 +121,7 @@ impl Vm {
         Ok(())
     }
 
-    pub(super) fn run_microtasks_if_needed(&mut self) -> Result<(), crate::errors::RuntimeError> {
+    pub(crate) fn run_microtasks_if_needed(&mut self) -> Result<(), crate::errors::RuntimeError> {
         while !self.microtasks.is_empty() || !self.dynamic_import_jobs.is_empty() {
             if !self.microtasks.is_empty() {
                 self.drain_microtasks()?;
@@ -130,6 +130,47 @@ impl Vm {
             self.drain_dynamic_import_jobs()?;
         }
         Ok(())
+    }
+
+    /// Resolve a value through the runtime's promise machinery and wait for it
+    /// to settle using the existing microtask queue.
+    pub(crate) fn await_value(
+        &mut self,
+        value: Value,
+    ) -> Result<Value, crate::errors::RuntimeError> {
+        let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
+            on_fulfilled: Vec::new(),
+            on_rejected: Vec::new(),
+        })));
+        resolve_promise_with_value(self, &promise, value)?;
+        loop {
+            let settled_state = {
+                let state_ref = promise.borrow();
+                match &*state_ref {
+                    PromiseState::Fulfilled(v) => Some(Ok(v.clone())),
+                    PromiseState::Rejected { reason, .. } => Some(Err(reason.clone())),
+                    PromiseState::Pending { .. } => None,
+                }
+            };
+
+            match settled_state {
+                Some(Ok(value)) => return Ok(value),
+                Some(Err(reason)) => {
+                    self.last_uncaught_exception = Some(reason);
+                    return Err(crate::errors::RuntimeError::from("Promise rejected"));
+                }
+                None => {
+                    if !self.microtasks.is_empty() || !self.dynamic_import_jobs.is_empty() {
+                        self.run_microtasks_if_needed()?;
+                        self.maybe_collect_garbage_prototype();
+                        continue;
+                    }
+                    return Err(crate::errors::RuntimeError::from(
+                        "Promise did not settle during synchronous await",
+                    ));
+                }
+            }
+        }
     }
 
     /// Drain any pending microtasks, ensuring async bootstrap work completes.

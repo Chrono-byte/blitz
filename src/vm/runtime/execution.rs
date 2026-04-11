@@ -3658,12 +3658,14 @@ impl Vm {
                 match awaited {
                     Value::Promise(state) => {
                         let mut settled = false;
-                        for _ in 0..1024 {
+                        loop {
                             let settled_state = {
                                 let state_ref = state.borrow();
                                 match &*state_ref {
                                     PromiseState::Fulfilled(v) => Some(Ok(v.clone())),
-                                    PromiseState::Rejected(reason) => Some(Err(reason.clone())),
+                                    PromiseState::Rejected { reason, .. } => {
+                                        Some(Err(reason.clone()))
+                                    }
                                     PromiseState::Pending { .. } => None,
                                 }
                             };
@@ -3680,15 +3682,21 @@ impl Vm {
                                     break;
                                 }
                                 None => {
-                                    if !self.microtasks.is_empty() {
+                                    if !self.microtasks.is_empty()
+                                        || !self.dynamic_import_jobs.is_empty()
+                                    {
                                         self.run_microtasks_if_needed()?;
                                         self.maybe_collect_garbage_prototype();
+                                        continue;
                                     }
+                                    break;
                                 }
                             }
                         }
                         if !settled {
-                            self.stack.push(Value::Undefined);
+                            return Err(RuntimeError::from(
+                                "Promise did not settle during synchronous await",
+                            ));
                         }
                     }
                     other => self.stack.push(other),
@@ -4534,7 +4542,12 @@ impl Vm {
                 }
             }
             Value::Array(arr, props) => {
+                let props_ref = props.borrow();
+                if let Some(desc) = props_ref.properties.get(key) {
+                    return Ok(Some((desc.clone(), obj.clone())));
+                }
                 if let Some(i) = array_index_from_key(key)
+                    && i < array_length(&props_ref)
                     && let Some(opt_v) = arr.borrow().get(i).cloned()
                     && let Some(v) = opt_v
                 {
@@ -4548,11 +4561,7 @@ impl Vm {
                         obj.clone(),
                     )));
                 }
-                let p = props.borrow();
-                if let Some(desc) = p.properties.get(key) {
-                    return Ok(Some((desc.clone(), obj.clone())));
-                }
-                let proto = p.get_prototype();
+                let proto = props_ref.get_prototype();
                 if !matches!(proto, Value::Null) {
                     return self.lookup_property_descriptor(&proto, key, depth + 1);
                 }
@@ -5037,7 +5046,11 @@ impl Vm {
         let n = self.read_byte()? as usize;
         let mut elems: Vec<Option<Value>> = Vec::with_capacity(n);
         for _ in 0..n {
-            elems.push(Some(self.pop()?));
+            let value = self.pop()?;
+            elems.push(match value {
+                Value::Uninitialized => None,
+                other => Some(other),
+            });
         }
         elems.reverse();
 
@@ -5613,6 +5626,26 @@ impl Vm {
                 key,
                 obj.type_name()
             )));
+        }
+        if let Value::Array(arr, props) = obj
+            && matches!(key, PropertyKey::String(s) if s == "length")
+            && let Value::Number(new_len_f) = value.clone()
+        {
+            let new_len = if new_len_f.is_nan() || new_len_f < 0.0 {
+                0usize
+            } else {
+                new_len_f as usize
+            };
+            let mut a = arr.borrow_mut();
+            if new_len < a.len() {
+                a.truncate(new_len);
+            }
+            props.borrow_mut().properties.insert(
+                PropertyKey::String("length".to_string()),
+                PropertyDescriptor::data(Value::Number(new_len as f64)),
+            );
+            self.bump_object_generation(obj);
+            return Ok(());
         }
         let mut sync_arguments_slot = None;
         if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
@@ -7215,18 +7248,12 @@ fn get_property(obj: &Value, key: &PropertyKey, depth: usize) -> Result<Value, R
             Ok(Value::Undefined)
         }
         Value::Array(arr, props) => {
-            if let Some(i) = array_index_from_key(key)
-                && let Some(opt_value) = arr.borrow().get(i).cloned()
-                && let Some(value) = opt_value
-            {
-                return Ok(value);
-            }
-            let p = props.borrow();
-            if let Some(desc) = p.properties.get(key) {
+            let props_ref = props.borrow();
+            if let Some(desc) = props_ref.properties.get(key) {
                 return match desc {
                     PropertyDescriptor::Data { value, .. } => Ok(value.clone()),
                     PropertyDescriptor::Accessor { get, .. } => {
-                        if let Some(Value::Closure { .. } | Value::Builtin(_)) = get {
+                        if get.is_some() {
                             Ok(Value::Undefined)
                         } else {
                             Ok(Value::Undefined)
@@ -7234,7 +7261,14 @@ fn get_property(obj: &Value, key: &PropertyKey, depth: usize) -> Result<Value, R
                     }
                 };
             }
-            let proto = p.get_prototype();
+            if let Some(i) = array_index_from_key(key)
+                && i < array_length(&props_ref)
+                && let Some(opt_value) = arr.borrow().get(i).cloned()
+                && let Some(value) = opt_value
+            {
+                return Ok(value);
+            }
+            let proto = props_ref.get_prototype();
             if !matches!(proto, Value::Null) {
                 return get_property(&proto, key, depth + 1);
             }
