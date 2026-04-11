@@ -81,11 +81,11 @@ mod uri;
 
 pub(crate) use atomics::*;
 pub(crate) use numbers::*;
+pub use promises::install_minimal_kernel_constructors;
 pub(crate) use promises::*;
 pub(crate) use properties::*;
 pub(crate) use shadowrealm::*;
 pub(crate) use uri::*;
-pub use promises::install_minimal_kernel_constructors;
 
 pub(crate) fn set_builtin_length(target: &Value, length: f64) {
     crate::ecmascript::semantics::set_builtin_length(target, length)
