@@ -2387,6 +2387,22 @@ impl Vm {
                 }
             }
             Value::Array(arr, props) => {
+                let mut p = props.borrow_mut();
+                if let Some(desc) = p.properties.get(key) {
+                    match desc {
+                        PropertyDescriptor::Data { configurable, .. }
+                        | PropertyDescriptor::Accessor { configurable, .. }
+                            if !*configurable =>
+                        {
+                            return Ok(false);
+                        }
+                        _ => {
+                            p.properties.shift_remove(key);
+                            return Ok(true);
+                        }
+                    }
+                }
+                drop(p);
                 if let PropertyKey::String(s) = key
                     && let Ok(i) = s.parse::<usize>()
                     && i < arr.borrow().len()
@@ -4384,6 +4400,12 @@ impl Vm {
             } => Some(value.clone()),
             _ => None,
         };
+        if let Value::Array(arr, _) = obj
+            && let Some(index) = array_index_from_key(&key)
+            && index < arr.borrow().len()
+        {
+            arr.borrow_mut()[index] = None;
+        }
         data.properties.insert(key.clone(), new_desc);
         if let Some(index) = array_index_from_key(&key)
             && index < self.current_arguments_mapped_count
@@ -7182,7 +7204,7 @@ fn set_array_index_property(obj: &Value, index: usize, value: Value) -> Result<(
     if index <= dense_limit {
         let mut a = arr.borrow_mut();
         if index >= a.len() {
-            a.resize(index + 1, Some(Value::Undefined));
+            a.resize(index + 1, None);
         }
         a[index] = Some(value);
         let next_len = next_len.max(a.len());
@@ -7358,7 +7380,7 @@ fn set_property(obj: &Value, key: &PropertyKey, value: Value) -> Result<(), Runt
                 if i <= dense_limit {
                     let mut a = arr.borrow_mut();
                     if i >= a.len() {
-                        a.resize(i + 1, Some(Value::Undefined));
+                        a.resize(i + 1, None);
                     }
                     a[i] = Some(value);
                     p.properties.insert(
