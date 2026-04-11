@@ -709,15 +709,15 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             } else {
                                 None
                             };
-                            if let Some(target_idx) = target {
-                                if let Some(value) = snapshot.get(idx).cloned() {
-                                    vm.set_property_host(
-                                        &this,
-                                        &Value::String(target_idx.to_string()),
-                                        value,
-                                    )?;
-                                    written_targets.insert(target_idx);
-                                }
+                            if let Some(target_idx) = target
+                                && let Some(value) = snapshot.get(idx).cloned()
+                            {
+                                vm.set_property_host(
+                                    &this,
+                                    &Value::String(target_idx.to_string()),
+                                    value,
+                                )?;
+                                written_targets.insert(target_idx);
                             }
                         }
                         for (offset, value) in insert_items.into_iter().enumerate() {
@@ -1894,8 +1894,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PKey::String("deleteProperty".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let target = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let key = args.get(2).cloned().unwrap_or(Value::Undefined);
+                let off = static_builtin_arg_offset(vm, args, "Reflect");
+                let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let key = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
                 let key = vm.to_property_key(&key)?;
                 Ok(Value::Bool(vm.delete_property_host(&target, &key)?))
             }),
@@ -1906,9 +1907,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PKey::String("defineProperty".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let target = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let key = args.get(2).cloned().unwrap_or(Value::Undefined);
-                let desc = args.get(3).cloned().unwrap_or(Value::Undefined);
+                let off = static_builtin_arg_offset(vm, args, "Reflect");
+                let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let key = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                let desc = args.get(off + 2).cloned().unwrap_or(Value::Undefined);
                 let ok = vm.define_property_value(&target, &key, &desc)?;
                 Ok(Value::Bool(ok))
             }),
@@ -1919,9 +1921,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PKey::String("get".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let target = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let key = args.get(2).cloned().unwrap_or(Value::Undefined);
-                let _receiver = args.get(3).cloned().unwrap_or_else(|| target.clone());
+                let off = static_builtin_arg_offset(vm, args, "Reflect");
+                let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let key = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                let _receiver = args.get(off + 2).cloned().unwrap_or_else(|| target.clone());
                 let key = vm.to_property_key(&key)?;
                 vm.get_property_host(&target, &key)
             }),
@@ -1934,8 +1937,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             let object_proto_map = Rc::clone(&object_proto_map);
             builtin_object(
                 Rc::new(move |vm, args| {
-                    let target = args.get(1).cloned().unwrap_or(Value::Undefined);
-                    let key = args.get(2).cloned().unwrap_or(Value::Undefined);
+                    let off = static_builtin_arg_offset(vm, args, "Reflect");
+                    let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let key = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
                     let key = vm.to_property_key(&key)?;
                     let Some(desc) = own_property_descriptor(&target, &key) else {
                         return Ok(Value::Undefined);
@@ -1950,8 +1954,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PKey::String("has".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let target = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let key = args.get(2).cloned().unwrap_or(Value::Undefined);
+                let off = static_builtin_arg_offset(vm, args, "Reflect");
+                let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let key = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
                 let key = vm.to_property_key(&key)?;
                 Ok(Value::Bool(vm.has_property_host(&target, &key)?))
             }),
@@ -1962,7 +1967,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PKey::String("isExtensible".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let target = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let off = static_builtin_arg_offset(vm, args, "Reflect");
+                let target = args.get(off).cloned().unwrap_or(Value::Undefined);
                 let target = vm.to_object_value(target)?;
                 let extensible = match target {
                     Value::Object(obj) => obj.borrow().extensible,
@@ -1981,7 +1987,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PKey::String("preventExtensions".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let target = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let off = static_builtin_arg_offset(vm, args, "Reflect");
+                let target = args.get(off).cloned().unwrap_or(Value::Undefined);
                 let target = vm.to_object_value(target)?;
                 match &target {
                     Value::Object(obj) => obj.borrow_mut().extensible = false,
@@ -2000,10 +2007,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PKey::String("set".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(|vm, args| {
-                let target = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let key = args.get(2).cloned().unwrap_or(Value::Undefined);
-                let value = args.get(3).cloned().unwrap_or(Value::Undefined);
-                let receiver = args.get(4).cloned().unwrap_or_else(|| target.clone());
+                let off = static_builtin_arg_offset(vm, args, "Reflect");
+                let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                let key = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                let value = args.get(off + 2).cloned().unwrap_or(Value::Undefined);
+                let receiver = args.get(off + 3).cloned().unwrap_or_else(|| target.clone());
                 let key = property_key_to_value(&vm.to_property_key(&key)?);
                 Ok(Value::Bool(vm.reflect_set_property_host(
                     &target,

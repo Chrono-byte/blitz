@@ -7,6 +7,7 @@ use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
 use crate::runtime_utils::{
     array_from_values, array_length_descriptor, js_number_to_string, usize_to_decimal_string,
+    usize_to_f64,
 };
 use crate::value::{
     BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
@@ -4172,11 +4173,31 @@ impl Vm {
         desc: PartialDescriptor,
     ) -> Result<bool, RuntimeError> {
         if let Value::Array(arr, props) = obj
-            && matches!(key, PropertyKey::String(name) if name == "length")
+            && matches!(key, PropertyKey::String(ref name) if name == "length")
         {
-            let mut data = props.borrow_mut();
-            let current = data.properties.get(&key).cloned();
-            let current_len = array_length(&data);
+            if desc.has_get || desc.has_set {
+                return Ok(false);
+            }
+
+            let next_len = if let Some(value) = &desc.value {
+                let _ = self.to_uint32_value(value)?;
+                let len_num = self.to_number_value(value)?;
+                if !len_num.is_finite() || len_num < 0.0 {
+                    return Err(self.throw_range_error("Invalid array length"));
+                }
+                let truncated = len_num.trunc();
+                if truncated != len_num || truncated > u32::MAX as f64 {
+                    return Err(self.throw_range_error("Invalid array length"));
+                }
+                Some(truncated as usize)
+            } else {
+                None
+            };
+
+            let (current, current_len) = {
+                let data = props.borrow();
+                (data.properties.get(&key).cloned(), array_length(&data))
+            };
             let current_writable = current.as_ref().is_none_or(|d| match d {
                 PropertyDescriptor::Data { writable, .. } => *writable,
                 PropertyDescriptor::Accessor { .. } => false,
@@ -4190,9 +4211,6 @@ impl Vm {
                 PropertyDescriptor::Accessor { configurable, .. } => *configurable,
             });
 
-            if desc.has_get || desc.has_set {
-                return Ok(false);
-            }
             if let Some(true) = desc.configurable {
                 return Ok(false);
             }
@@ -4217,49 +4235,42 @@ impl Vm {
                 return Ok(false);
             }
 
-            let mut next_len = current_len;
-            if let Some(value) = &desc.value {
-                let len_num = self.to_number_value(value)?;
-                if !len_num.is_finite() || len_num < 0.0 {
-                    return Err(self.throw_range_error("Invalid array length"));
+            let next_len = next_len.unwrap_or(current_len);
+            if next_len < current_len {
+                if !current_writable {
+                    return Ok(false);
                 }
-                let truncated = len_num.trunc();
-                if truncated != len_num || truncated > u32::MAX as f64 {
-                    return Err(self.throw_range_error("Invalid array length"));
-                }
-                next_len = truncated as usize;
-                if next_len < current_len {
-                    if !current_writable {
-                        return Ok(false);
-                    }
+                {
                     let mut arr_mut = arr.borrow_mut();
                     if next_len < arr_mut.len() {
                         arr_mut.truncate(next_len);
                     }
-                    let delete_keys: Vec<PropertyKey> = data
-                        .properties
-                        .keys()
-                        .filter(|prop_key| {
-                            array_index_from_key(prop_key).is_some_and(|idx| idx >= next_len)
-                        })
-                        .cloned()
-                        .collect();
-                    for prop_key in delete_keys {
-                        data.properties.shift_remove(&prop_key);
-                    }
                 }
-                if next_len > current_len && !current_writable {
-                    return Ok(false);
+                let mut data = props.borrow_mut();
+                let delete_keys: Vec<PropertyKey> = data
+                    .properties
+                    .keys()
+                    .filter(|prop_key| {
+                        array_index_from_key(prop_key).is_some_and(|idx| idx >= next_len)
+                    })
+                    .cloned()
+                    .collect();
+                for prop_key in delete_keys {
+                    data.properties.shift_remove(&prop_key);
                 }
             }
+            if next_len > current_len && !current_writable {
+                return Ok(false);
+            }
 
+            let mut data = props.borrow_mut();
             let final_desc = PropertyDescriptor::Data {
                 value: Value::Number(usize_to_f64(next_len)),
                 writable: next_writable,
                 enumerable: current_enumerable,
                 configurable: false,
             };
-            data.properties.insert(key.clone(), final_desc);
+            data.properties.insert(key, final_desc);
             return Ok(true);
         }
         let target = match obj {
@@ -7533,8 +7544,8 @@ mod tests {
     use crate::compiler;
     use crate::parser::Parser;
     use crate::runtime_utils;
-    use crate::typecheck;
     use crate::runtime_utils::strict_equal;
+    use crate::typecheck;
     use std::cell::RefCell;
     use std::rc::Rc;
 
