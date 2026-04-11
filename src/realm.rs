@@ -232,7 +232,9 @@ impl Realm {
 
     /// Get the canonical `Function.prototype` for this realm.
     pub fn function_prototype(&self) -> Value {
-        self.function_prototype_ref().cloned().unwrap_or(Value::Null)
+        self.function_prototype_ref()
+            .cloned()
+            .unwrap_or(Value::Null)
     }
 
     /// Borrow the canonical `GeneratorFunction.prototype` for this realm.
@@ -260,7 +262,9 @@ impl Realm {
 
     /// Get the canonical `Generator.prototype` for this realm.
     pub fn generator_prototype(&self) -> Value {
-        self.generator_prototype_ref().cloned().unwrap_or(Value::Null)
+        self.generator_prototype_ref()
+            .cloned()
+            .unwrap_or(Value::Null)
     }
 
     /// Borrow the canonical `Array.prototype` for this realm.
