@@ -598,6 +598,13 @@ pub(crate) fn strict_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
+pub(crate) fn same_value_zero(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x == y || (x.is_nan() && y.is_nan()),
+        _ => strict_equal(a, b),
+    }
+}
+
 pub(crate) fn static_builtin_arg_offset(vm: &Vm, _args: &[Value], _global_name: &str) -> usize {
     if vm.current_new_target().is_some() || !matches!(vm.this_value(), Value::Undefined) {
         return 1;
@@ -2221,9 +2228,19 @@ pub(crate) fn array_from_values(values: Vec<Value>) -> Value {
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
         PropertyKey::String("length".to_string()),
-        PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
+        array_length_descriptor(arr_rc.borrow().len()),
     );
     Value::Array(arr_rc, props)
+}
+
+/// Create the standard array `length` descriptor.
+pub(crate) fn array_length_descriptor(length: usize) -> PropertyDescriptor {
+    PropertyDescriptor::Data {
+        value: Value::Number(usize_to_f64(length)),
+        writable: true,
+        enumerable: false,
+        configurable: false,
+    }
 }
 
 pub(crate) fn syntax_error(vm: &mut Vm, message: String) -> RuntimeError {
@@ -2336,7 +2353,7 @@ fn clone_value_across_realms(
                 // insert length property placeholder
                 new_props.borrow_mut().properties.insert(
                     PropertyKey::String("length".to_string()),
-                    PropertyDescriptor::data(Value::Number(usize_to_f64(len))),
+                    array_length_descriptor(len),
                 );
                 let new_val = Value::Array(Rc::clone(&new_arr), Rc::clone(&new_props));
                 visited.insert(addr, new_val);
@@ -2446,7 +2463,16 @@ fn clone_value_across_realms(
                             let cloned = helper(vm, value, visited, transfer_set)?;
                             target_obj.borrow_mut().properties.insert(
                                 PropertyKey::String(key_name.to_string()),
-                                PropertyDescriptor::data(cloned),
+                                if key_name == &"length" {
+                                    PropertyDescriptor::Data {
+                                        value: cloned,
+                                        writable: true,
+                                        enumerable: false,
+                                        configurable: false,
+                                    }
+                                } else {
+                                    PropertyDescriptor::data(cloned)
+                                },
                             );
                         }
                     }

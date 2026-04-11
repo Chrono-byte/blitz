@@ -5,8 +5,9 @@ use std::rc::Rc;
 use num_traits::ToPrimitive;
 
 use crate::runtime_utils::{
-    builtin_object, canonical_index_key, collect_iterable_values, set_builtin_length,
-    static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string, usize_to_f64,
+    array_length_descriptor, builtin_object, canonical_index_key, collect_iterable_values,
+    set_builtin_length, static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string,
+    usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
@@ -22,12 +23,32 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     let array_ctor_props = Rc::clone(array_ctor_map);
     let array_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Array");
-        let elems: Vec<Option<Value>> = args.iter().skip(off).map(|v| Some(v.clone())).collect();
-        let arr_rc = Rc::new(RefCell::new(elems));
+        let tail = &args[off..];
+        let (arr_rc, length) = if tail.len() == 1 {
+            match tail[0] {
+                Value::Number(n)
+                    if n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n <= 4_294_967_295.0 =>
+                {
+                    (Rc::new(RefCell::new(Vec::new())), n as usize)
+                }
+                Value::Number(_) => {
+                    return Err(vm.throw_range_error("Invalid array length"));
+                }
+                _ => {
+                    let elems: Vec<Option<Value>> = tail.iter().map(|v| Some(v.clone())).collect();
+                    let len = elems.len();
+                    (Rc::new(RefCell::new(elems)), len)
+                }
+            }
+        } else {
+            let elems: Vec<Option<Value>> = tail.iter().map(|v| Some(v.clone())).collect();
+            let len = elems.len();
+            (Rc::new(RefCell::new(elems)), len)
+        };
         let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
         props.borrow_mut().properties.insert(
             PKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
+            array_length_descriptor(length),
         );
         if let Some(pval) = array_ctor_props
             .borrow()
@@ -51,6 +72,33 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                 function_proto_map,
             );
             set_builtin_length(&builtin, 1.0);
+            builtin
+        }),
+    );
+    array_ctor_map.borrow_mut().properties.insert(
+        PKey::String("of".to_string()),
+        PropertyDescriptor::data({
+            let array_proto_for_of = Rc::clone(array_proto_map);
+            let function_proto_map = Rc::clone(function_proto_map);
+            let builtin = builtin_object(
+                Rc::new(move |vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Array");
+                    let elems: Vec<Option<Value>> =
+                        args.iter().skip(off).cloned().map(Some).collect();
+                    let arr_rc = Rc::new(RefCell::new(elems));
+                    let props = Rc::new(RefCell::new(ObjectData::new()));
+                    props
+                        .borrow_mut()
+                        .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_of)));
+                    props.borrow_mut().properties.insert(
+                        PKey::String("length".to_string()),
+                        array_length_descriptor(arr_rc.borrow().len()),
+                    );
+                    Ok(Value::Array(arr_rc, props))
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 0.0);
             builtin
         }),
     );
@@ -112,9 +160,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                         .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_from)));
                     props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(usize_to_f64(
-                            arr_rc.borrow().len(),
-                        ))),
+                        array_length_descriptor(arr_rc.borrow().len()),
                     );
                     Ok(Value::Array(arr_rc, props))
                 }),
@@ -196,7 +242,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                                 )));
                             props.borrow_mut().properties.insert(
                                 PKey::String("length".to_string()),
-                                PropertyDescriptor::data(Value::Number(usize_to_f64(len))),
+                                array_length_descriptor(len),
                             );
                             Value::Array(Rc::new(RefCell::new(out)), props)
                         };

@@ -5,7 +5,9 @@ use crate::gc;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
-use crate::runtime_utils::{array_from_values, js_number_to_string, usize_to_decimal_string};
+use crate::runtime_utils::{
+    array_from_values, array_length_descriptor, js_number_to_string, usize_to_decimal_string,
+};
 use crate::value::{
     BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
     ValueSlot,
@@ -461,7 +463,7 @@ impl Vm {
         let len = arr_rc.borrow().len();
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(len as f64)),
+            array_length_descriptor(len),
         );
 
         if let Some(proto) = self.realm.intrinsics.array_prototype.clone() {
@@ -4169,6 +4171,97 @@ impl Vm {
         key: PropertyKey,
         desc: PartialDescriptor,
     ) -> Result<bool, RuntimeError> {
+        if let Value::Array(arr, props) = obj
+            && matches!(key, PropertyKey::String(name) if name == "length")
+        {
+            let mut data = props.borrow_mut();
+            let current = data.properties.get(&key).cloned();
+            let current_len = array_length(&data);
+            let current_writable = current.as_ref().is_none_or(|d| match d {
+                PropertyDescriptor::Data { writable, .. } => *writable,
+                PropertyDescriptor::Accessor { .. } => false,
+            });
+            let current_enumerable = current.as_ref().is_some_and(|d| match d {
+                PropertyDescriptor::Data { enumerable, .. } => *enumerable,
+                PropertyDescriptor::Accessor { enumerable, .. } => *enumerable,
+            });
+            let current_configurable = current.as_ref().is_some_and(|d| match d {
+                PropertyDescriptor::Data { configurable, .. } => *configurable,
+                PropertyDescriptor::Accessor { configurable, .. } => *configurable,
+            });
+
+            if desc.has_get || desc.has_set {
+                return Ok(false);
+            }
+            if let Some(true) = desc.configurable {
+                return Ok(false);
+            }
+            if let Some(enumerable) = desc.enumerable
+                && enumerable != current_enumerable
+            {
+                return Ok(false);
+            }
+            if !current_configurable {
+                if let Some(true) = desc.configurable {
+                    return Ok(false);
+                }
+                if let Some(enumerable) = desc.enumerable
+                    && enumerable != current_enumerable
+                {
+                    return Ok(false);
+                }
+            }
+
+            let next_writable = desc.writable.unwrap_or(current_writable);
+            if !current_writable && desc.writable == Some(true) {
+                return Ok(false);
+            }
+
+            let mut next_len = current_len;
+            if let Some(value) = &desc.value {
+                let len_num = self.to_number_value(value)?;
+                if !len_num.is_finite() || len_num < 0.0 {
+                    return Err(self.throw_range_error("Invalid array length"));
+                }
+                let truncated = len_num.trunc();
+                if truncated != len_num || truncated > u32::MAX as f64 {
+                    return Err(self.throw_range_error("Invalid array length"));
+                }
+                next_len = truncated as usize;
+                if next_len < current_len {
+                    if !current_writable {
+                        return Ok(false);
+                    }
+                    let mut arr_mut = arr.borrow_mut();
+                    if next_len < arr_mut.len() {
+                        arr_mut.truncate(next_len);
+                    }
+                    let delete_keys: Vec<PropertyKey> = data
+                        .properties
+                        .keys()
+                        .filter(|prop_key| {
+                            array_index_from_key(prop_key).is_some_and(|idx| idx >= next_len)
+                        })
+                        .cloned()
+                        .collect();
+                    for prop_key in delete_keys {
+                        data.properties.shift_remove(&prop_key);
+                    }
+                }
+                if next_len > current_len && !current_writable {
+                    return Ok(false);
+                }
+            }
+
+            let final_desc = PropertyDescriptor::Data {
+                value: Value::Number(usize_to_f64(next_len)),
+                writable: next_writable,
+                enumerable: current_enumerable,
+                configurable: false,
+            };
+            data.properties.insert(key.clone(), final_desc);
+            return Ok(true);
+        }
         let target = match obj {
             Value::Object(data) => data,
             Value::Array(_, props) => props,
@@ -4941,7 +5034,7 @@ impl Vm {
         let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(n as f64)),
+            array_length_descriptor(n),
         );
 
         if let Some(array_val) = self
@@ -7048,9 +7141,10 @@ fn set_array_index_property(obj: &Value, index: usize, value: Value) -> Result<(
             a.resize(index + 1, Some(Value::Undefined));
         }
         a[index] = Some(value);
+        let next_len = next_len.max(a.len());
         p.properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(a.len() as f64)),
+            PropertyDescriptor::data(Value::Number(next_len as f64)),
         );
     } else {
         p.properties.insert(
@@ -7252,7 +7346,7 @@ fn set_property(obj: &Value, key: &PropertyKey, value: Value) -> Result<(), Runt
                 let mut p = props.borrow_mut();
                 p.properties.insert(
                     PropertyKey::String("length".to_string()),
-                    PropertyDescriptor::data(Value::Number(a.len() as f64)),
+                    PropertyDescriptor::data(Value::Number(new_len as f64)),
                 );
                 return Ok(());
             }
@@ -7440,6 +7534,7 @@ mod tests {
     use crate::parser::Parser;
     use crate::runtime_utils;
     use crate::typecheck;
+    use crate::runtime_utils::strict_equal;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -7451,6 +7546,17 @@ mod tests {
         );
         runtime_utils::install_minimal_kernel_constructors(&globals);
         globals
+    }
+
+    fn run_script(src: &str) -> (Vm, Rc<RefCell<ObjectData>>) {
+        let session = Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compiler::compile(program, session.source()).expect("compile ok");
+
+        let globals = test_globals();
+        let mut vm = Vm::new(Rc::clone(&globals));
+        vm.run(chunk).expect("run ok");
+        (vm, globals)
     }
 
     #[test]
@@ -7605,6 +7711,174 @@ mod tests {
     fn same_value_distinguishes_signed_zero() {
         assert!(!same_value(&Value::Number(0.0), &Value::Number(-0.0)));
         assert!(same_value(&Value::Number(-0.0), &Value::Number(-0.0)));
+    }
+
+    #[test]
+    fn object_assign_copies_properties_and_returns_target() {
+        let (mut vm, _) = run_script(
+            r#"
+            var target = { a: 1 };
+            var result = Object.assign(target, { b: 2 }, null, { c: 3 });
+        "#,
+        );
+
+        let target = vm.get_global("target").expect("target");
+        let result = vm.get_global("result").expect("result");
+        assert!(strict_equal(&target, &result));
+        let a = vm
+            .get_property_host(&target, &PropertyKey::String("a".to_string()))
+            .unwrap();
+        let b = vm
+            .get_property_host(&target, &PropertyKey::String("b".to_string()))
+            .unwrap();
+        let c = vm
+            .get_property_host(&target, &PropertyKey::String("c".to_string()))
+            .unwrap();
+        assert!(matches!(a, Value::Number(n) if (n - 1.0).abs() < f64::EPSILON));
+        assert!(matches!(b, Value::Number(n) if (n - 2.0).abs() < f64::EPSILON));
+        assert!(matches!(c, Value::Number(n) if (n - 3.0).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn object_from_entries_set_prototype_of_and_to_locale_string_work() {
+        let (mut vm, _) = run_script(
+            r#"
+            var entries = [['a', 1], ['b', 2]];
+            var created = Object.fromEntries(entries);
+            var proto = { marker: true };
+            var target = {};
+            var proto_result = Object.setPrototypeOf(target, proto);
+            var locale = ({}).toLocaleString();
+        "#,
+        );
+
+        match vm.get_global("created") {
+            Some(Value::Object(obj)) => {
+                assert!(matches!(
+                    vm.get_property_host(&Value::Object(Rc::clone(&obj)), &PropertyKey::String("a".to_string())).ok(),
+                    Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON
+                ));
+                assert!(matches!(
+                    vm.get_property_host(&Value::Object(Rc::clone(&obj)), &PropertyKey::String("b".to_string())).ok(),
+                    Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON
+                ));
+            }
+            other => panic!("expected object, got {:?}", other),
+        }
+
+        let target = vm.get_global("target").expect("target");
+        let proto = vm.get_global("proto").expect("proto");
+        let target_proto = vm.get_prototype(&target);
+        assert!(strict_equal(&target_proto, &proto));
+        assert!(strict_equal(
+            &vm.get_global("proto_result").expect("proto_result"),
+            &target
+        ));
+        assert_eq!(
+            vm.get_global("locale"),
+            Some(Value::String("[object Object]".to_string()))
+        );
+    }
+
+    #[test]
+    fn object_freeze_and_seal_report_state() {
+        let (vm, _) = run_script(
+            r#"
+            var frozen_obj = { a: 1 };
+            var sealed_obj = { b: 2 };
+            Object.freeze(frozen_obj);
+            Object.seal(sealed_obj);
+            var frozen = Object.isFrozen(frozen_obj);
+            var sealed = Object.isSealed(sealed_obj);
+            var not_frozen = Object.isFrozen(sealed_obj);
+        "#,
+        );
+
+        assert!(matches!(vm.get_global("frozen"), Some(Value::Bool(true))));
+        assert!(matches!(vm.get_global("sealed"), Some(Value::Bool(true))));
+        assert!(matches!(
+            vm.get_global("not_frozen"),
+            Some(Value::Bool(false))
+        ));
+    }
+
+    #[test]
+    fn array_includes_uses_same_value_zero_and_index_of_uses_strict_equality() {
+        let (vm, _) = run_script(
+            r#"
+            var arr = [NaN, 1];
+            var includes_nan = arr.includes(NaN);
+            var index_of_nan = arr.indexOf(NaN);
+        "#,
+        );
+
+        assert!(matches!(
+            vm.get_global("includes_nan"),
+            Some(Value::Bool(true))
+        ));
+        assert!(matches!(
+            vm.get_global("index_of_nan"),
+            Some(Value::Number(n)) if (n + 1.0).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn array_at_returns_negative_index_and_slice_preserves_holes() {
+        let (vm, _) = run_script(
+            r#"
+            var at_value = [10, 20, 30].at(-1);
+            var sparse = [1, 2];
+            delete sparse[1];
+            var sliced = sparse.slice(0, 2);
+        "#,
+        );
+
+        assert!(matches!(
+            vm.get_global("at_value"),
+            Some(Value::Number(n)) if (n - 30.0).abs() < f64::EPSILON
+        ));
+        match vm.get_global("sliced") {
+            Some(Value::Array(arr, _)) => {
+                let slots = arr.borrow();
+                assert!(
+                    matches!(slots.get(0).cloned().flatten(), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON)
+                );
+                assert!(slots.get(1).is_some_and(|slot| slot.is_none()));
+            }
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn array_of_builds_array_from_arguments() {
+        let (vm, _) = run_script(
+            r#"
+            var created = Array.of(4, 5, 6);
+        "#,
+        );
+
+        match vm.get_global("created") {
+            Some(Value::Array(arr, props)) => {
+                assert_eq!(arr.borrow().len(), 3);
+                assert!(
+                    matches!(arr.borrow().get(0).cloned().flatten(), Some(Value::Number(n)) if (n - 4.0).abs() < f64::EPSILON)
+                );
+                assert!(
+                    matches!(arr.borrow().get(1).cloned().flatten(), Some(Value::Number(n)) if (n - 5.0).abs() < f64::EPSILON)
+                );
+                assert!(
+                    matches!(arr.borrow().get(2).cloned().flatten(), Some(Value::Number(n)) if (n - 6.0).abs() < f64::EPSILON)
+                );
+                assert!(matches!(
+                    props.borrow().properties.get(&PropertyKey::String("length".to_string())),
+                    Some(PropertyDescriptor::Data {
+                        value: Value::Number(n),
+                        ..
+                    }) if (*n - 3.0).abs() < f64::EPSILON
+                ));
+            }
+            other => panic!("expected array, got {:?}", other),
+        }
     }
 
     #[test]

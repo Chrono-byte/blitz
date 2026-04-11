@@ -3,15 +3,17 @@ use num_bigint::BigInt as BigIntValue;
 use num_traits::ToPrimitive;
 use regex::RegexBuilder;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ecmascript::builtins;
 use crate::realm::Intrinsics;
 use crate::runtime_utils::{
-    array_from_values, builtin_object, char_index_to_byte_index, descriptor_value_from_descriptor,
-    is_byte_offset_aligned, js_number_to_string, non_enum_data, own_enumerable_keys,
-    own_property_descriptor, own_property_keys, property_key_to_value, set_builtin_length,
+    array_from_values, array_length_descriptor, builtin_object, char_index_to_byte_index,
+    collect_iterable_values, descriptor_value_from_descriptor, is_byte_offset_aligned,
+    js_number_to_string, non_enum_data, own_enumerable_keys, own_property_descriptor,
+    own_property_keys, property_key_to_value, same_value_zero, set_builtin_length,
     set_builtin_name, static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_length,
     usize_to_decimal_string, usize_to_f64,
 };
@@ -29,6 +31,92 @@ fn json_value_identity(value: &Value) -> Option<usize> {
         Value::BuiltinObject(_, props) => Some(Rc::as_ptr(props) as usize),
         Value::Promise(state) => Some(Rc::as_ptr(state) as usize),
         _ => None,
+    }
+}
+
+fn with_object_data_mut<T>(value: &Value, f: impl FnOnce(&mut ObjectData) -> T) -> Option<T> {
+    match value {
+        Value::Object(obj) => Some(f(&mut obj.borrow_mut())),
+        Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+            Some(f(&mut props.borrow_mut()))
+        }
+        _ => None,
+    }
+}
+
+fn own_properties_all_non_configurable(value: &Value) -> bool {
+    own_property_keys(value).into_iter().all(|key| {
+        own_property_descriptor(value, &key).is_some_and(|desc| match desc {
+            PropertyDescriptor::Data { configurable, .. }
+            | PropertyDescriptor::Accessor { configurable, .. } => !configurable,
+        })
+    })
+}
+
+fn own_properties_frozen(value: &Value) -> bool {
+    own_property_keys(value).into_iter().all(|key| {
+        own_property_descriptor(value, &key).is_some_and(|desc| match desc {
+            PropertyDescriptor::Data {
+                writable,
+                configurable,
+                ..
+            } => !writable && !configurable,
+            PropertyDescriptor::Accessor { configurable, .. } => !configurable,
+        })
+    })
+}
+
+fn array_like_length(vm: &mut Vm, receiver: &Value) -> Result<usize, crate::errors::RuntimeError> {
+    let len_val = vm.get_property_host(receiver, &PropertyKey::String("length".to_string()))?;
+    let len_num = vm.to_number_value(&len_val)?;
+    let max_safe_len = 9_007_199_254_740_991u128;
+    if len_num.is_nan() || len_num <= 0.0 {
+        return Ok(0);
+    }
+    if !len_num.is_finite() {
+        return Ok(max_safe_len as usize);
+    }
+    let len = len_num
+        .trunc()
+        .to_u128()
+        .unwrap_or(max_safe_len)
+        .min(max_safe_len);
+    Ok(len as usize)
+}
+
+fn collect_indexed_snapshot(
+    vm: &mut Vm,
+    receiver: &Value,
+    len: usize,
+) -> Result<(Vec<usize>, HashMap<usize, Value>), crate::errors::RuntimeError> {
+    let mut keys = Vec::new();
+    let mut values = HashMap::new();
+    for key in own_property_keys(receiver) {
+        let PropertyKey::String(s) = key else {
+            continue;
+        };
+        let Ok(idx) = s.parse::<usize>() else {
+            continue;
+        };
+        if idx >= len || values.contains_key(&idx) {
+            continue;
+        }
+        let value = vm.get_property_host(receiver, &PropertyKey::String(s))?;
+        keys.push(idx);
+        values.insert(idx, value);
+    }
+    keys.sort_unstable();
+    Ok((keys, values))
+}
+
+fn array_length_is_writable(receiver: &Value) -> bool {
+    match receiver {
+        Value::Array(_, props) => props
+            .borrow()
+            .properties
+            .get(&PropertyKey::String("length".to_string()))
+            .is_none_or(|desc| matches!(desc, PropertyDescriptor::Data { writable: true, .. })),
+        _ => true,
     }
 }
 
@@ -233,7 +321,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_map)));
                 props.borrow_mut().properties.insert(
                     PKey::String("length".to_string()),
-                    PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
+                    array_length_descriptor(arr_rc.borrow().len()),
                 );
                 Ok(Value::Array(arr_rc, props))
             }),
@@ -284,71 +372,97 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             &function_proto_map,
         )),
     );
-    array_proto_map.borrow_mut().properties.insert(
-        PKey::String("sort".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
-                let compare_fn = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let has_compare = matches!(
-                    compare_fn,
-                    Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. }
-                );
-                if let Value::Array(arr, props) = &this {
-                    // Dense-value sort with explicit `undefined` values and holes retained at the tail.
-                    let snapshot = arr.borrow().clone();
+    array_proto_map
+        .borrow_mut()
+        .properties
+        .insert(PKey::String("sort".to_string()), {
+            let sort_fn = builtin_object(
+                Rc::new(|vm, args| {
+                    let this = args.first().cloned().unwrap_or(Value::Undefined);
+                    let compare_fn = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let compare_is_undefined = matches!(compare_fn, Value::Undefined);
+                    let compare_is_callable = compare_is_undefined
+                        || matches!(
+                            compare_fn,
+                            Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. }
+                        );
+                    if !compare_is_callable {
+                        return Err(
+                            vm.throw_type_error("Array.prototype.sort comparefn is not callable")
+                        );
+                    }
+
+                    let len = array_like_length(vm, &this)?;
+                    let (keys, snapshot) = collect_indexed_snapshot(vm, &this, len)?;
                     let mut values: Vec<Value> = Vec::new();
                     let mut undefined_count = 0usize;
-                    let mut hole_count = 0usize;
-                    for slot in snapshot {
-                        match slot {
-                            Some(Value::Undefined) => undefined_count += 1,
-                            Some(v) => values.push(v),
-                            None => hole_count += 1,
+                    for idx in &keys {
+                        match snapshot.get(idx).cloned().unwrap_or(Value::Undefined) {
+                            Value::Undefined => undefined_count += 1,
+                            v => values.push(v),
                         }
                     }
 
+                    let compare_pair =
+                        |vm: &mut Vm,
+                         a: &Value,
+                         b: &Value|
+                         -> Result<Ordering, crate::errors::RuntimeError> {
+                            if compare_is_undefined {
+                                let sa = vm.to_string(a)?;
+                                let sb = vm.to_string(b)?;
+                                return Ok(sa.cmp(&sb));
+                            }
+                            let cmp = vm.call_value_with_this(
+                                &compare_fn,
+                                &Value::Undefined,
+                                &[a.clone(), b.clone()],
+                            )?;
+                            let cmp_num = vm.to_number_value(&cmp)?;
+                            Ok(if cmp_num.is_nan() || cmp_num == 0.0 {
+                                Ordering::Equal
+                            } else if cmp_num < 0.0 {
+                                Ordering::Less
+                            } else {
+                                Ordering::Greater
+                            })
+                        };
                     let n = values.len();
                     for i in 0..n {
                         for j in (i + 1)..n {
-                            let swap = if has_compare {
-                                let cmp = vm.call_value_with_this(
-                                    &compare_fn,
-                                    &Value::Undefined,
-                                    &[values[i].clone(), values[j].clone()],
-                                )?;
-                                let cmp_num = vm.to_number_value(&cmp)?;
-                                cmp_num.is_finite() && cmp_num > 0.0
-                            } else {
-                                let ai = vm.to_string(&values[i])?;
-                                let aj = vm.to_string(&values[j])?;
-                                ai > aj
-                            };
-                            if swap {
+                            if compare_pair(vm, &values[i], &values[j])? == Ordering::Greater {
                                 values.swap(i, j);
                             }
                         }
                     }
 
-                    // Keep explicit undefined values and holes at the tail.
-                    while undefined_count > 0 {
-                        values.push(Value::Undefined);
-                        undefined_count -= 1;
+                    let cutoff = values.len() + undefined_count;
+                    let mut next_index = 0usize;
+                    for value in values {
+                        vm.set_property_host(&this, &Value::String(next_index.to_string()), value)?;
+                        next_index += 1;
                     }
-                    let mut next_slots: Vec<Option<Value>> =
-                        values.into_iter().map(Some).collect::<Vec<_>>();
-                    next_slots.extend((0..hole_count).map(|_| None));
-                    *arr.borrow_mut() = next_slots;
-                    props.borrow_mut().properties.insert(
-                        PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(usize_to_f64(arr.borrow().len()))),
-                    );
-                }
-                Ok(this)
-            }),
-            &function_proto_map,
-        )),
-    );
+                    for _ in 0..undefined_count {
+                        vm.set_property_host(
+                            &this,
+                            &Value::String(next_index.to_string()),
+                            Value::Undefined,
+                        )?;
+                        next_index += 1;
+                    }
+                    for idx in keys {
+                        if idx >= cutoff {
+                            let _ =
+                                vm.delete_property_host(&this, &PKey::String(idx.to_string()))?;
+                        }
+                    }
+                    Ok(this)
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&sort_fn, 1.0);
+            PropertyDescriptor::data(sort_fn)
+        });
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("toReversed".to_string()),
         PropertyDescriptor::data(builtin_object(
@@ -376,9 +490,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
                     props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(usize_to_f64(
-                            arr_rc.borrow().len(),
-                        ))),
+                        array_length_descriptor(arr_rc.borrow().len()),
                     );
                     Ok(Value::Array(arr_rc, props))
                 }
@@ -450,9 +562,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
                     props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(usize_to_f64(
-                            arr_rc.borrow().len(),
-                        ))),
+                        array_length_descriptor(arr_rc.borrow().len()),
                     );
                     Ok(Value::Array(arr_rc, props))
                 }
@@ -501,9 +611,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
                     props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(usize_to_f64(
-                            arr_rc.borrow().len(),
-                        ))),
+                        array_length_descriptor(arr_rc.borrow().len()),
                     );
                     Ok(Value::Array(arr_rc, props))
                 }
@@ -535,67 +643,220 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             &function_proto_map,
         )),
     );
-    array_proto_map.borrow_mut().properties.insert(
-        PKey::String("splice".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new({
-                let array_proto_map = Rc::clone(&array_proto_map);
-                move |vm, args| {
+    array_proto_map
+        .borrow_mut()
+        .properties
+        .insert(PKey::String("splice".to_string()), {
+            let splice_fn = builtin_object(
+                Rc::new({
+                    let array_proto_map = Rc::clone(&array_proto_map);
+                    move |vm, args| {
+                        let this = args.first().cloned().unwrap_or(Value::Undefined);
+                        let len = array_like_length(vm, &this)?;
+                        let arg_count = args.len().saturating_sub(1);
+                        let start_raw =
+                            vm.to_number_value(args.get(1).unwrap_or(&Value::Number(0.0)))?;
+                        let start = if start_raw < 0.0 {
+                            let back = start_raw.abs().trunc().to_usize().unwrap_or(len);
+                            len.saturating_sub(back)
+                        } else {
+                            start_raw.trunc().to_usize().unwrap_or(len).min(len)
+                        };
+                        let actual_delete_count = if arg_count == 0 {
+                            0
+                        } else if arg_count == 1 {
+                            len.saturating_sub(start)
+                        } else {
+                            let delete_count = vm
+                                .to_number_value(args.get(2).unwrap())?
+                                .max(0.0)
+                                .trunc()
+                                .to_usize()
+                                .unwrap_or(0);
+                            delete_count.min(len.saturating_sub(start))
+                        };
+                        let insert_items: Vec<Value> = args.iter().skip(3).cloned().collect();
+                        let insert_count = insert_items.len();
+                        let new_len = len
+                            .saturating_sub(actual_delete_count)
+                            .saturating_add(insert_count);
+                        if new_len > 9_007_199_254_740_991usize {
+                            return Err(vm.throw_type_error("Array length exceeds supported size"));
+                        }
+                        let (keys, snapshot) = collect_indexed_snapshot(vm, &this, len)?;
+                        let mut removed: Vec<Option<Value>> =
+                            Vec::with_capacity(actual_delete_count);
+                        for i in 0..actual_delete_count {
+                            removed.push(snapshot.get(&(start + i)).cloned());
+                        }
+                        let removed_arr = Rc::new(RefCell::new(removed));
+                        let removed_props = Rc::new(RefCell::new(ObjectData::new()));
+                        removed_props
+                            .borrow_mut()
+                            .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
+                        removed_props.borrow_mut().properties.insert(
+                            PKey::String("length".to_string()),
+                            array_length_descriptor(removed_arr.borrow().len()),
+                        );
+
+                        let delta = insert_count as isize - actual_delete_count as isize;
+                        let mut written_targets: HashSet<usize> = HashSet::new();
+                        for idx in &keys {
+                            let target = if *idx < start {
+                                Some(*idx)
+                            } else if *idx >= start + actual_delete_count {
+                                idx.checked_add_signed(delta)
+                            } else {
+                                None
+                            };
+                            if let Some(target_idx) = target {
+                                if let Some(value) = snapshot.get(idx).cloned() {
+                                    vm.set_property_host(
+                                        &this,
+                                        &Value::String(target_idx.to_string()),
+                                        value,
+                                    )?;
+                                    written_targets.insert(target_idx);
+                                }
+                            }
+                        }
+                        for (offset, value) in insert_items.into_iter().enumerate() {
+                            let idx = start + offset;
+                            vm.set_property_host(&this, &Value::String(idx.to_string()), value)?;
+                            written_targets.insert(idx);
+                        }
+                        for idx in keys {
+                            if idx >= start && !written_targets.contains(&idx) {
+                                let _ =
+                                    vm.delete_property_host(&this, &PKey::String(idx.to_string()))?;
+                            }
+                        }
+                        if !array_length_is_writable(&this) && new_len != len {
+                            return Err(vm.throw_type_error("Array length is not writable"));
+                        }
+                        vm.set_property_host(
+                            &this,
+                            &Value::String("length".to_string()),
+                            Value::Number(new_len as f64),
+                        )?;
+                        Ok(Value::Array(removed_arr, removed_props))
+                    }
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&splice_fn, 2.0);
+            PropertyDescriptor::data(splice_fn)
+        });
+    array_proto_map
+        .borrow_mut()
+        .properties
+        .insert(PKey::String("shift".to_string()), {
+            let shift_fn = builtin_object(
+                Rc::new(move |vm, args| {
                     let this = args.first().cloned().unwrap_or(Value::Undefined);
-                    let (arr, props) = match this {
-                        Value::Array(arr, props) => (arr, props),
-                        _ => return Ok(array_from_values(Vec::new())),
-                    };
-                    let len = arr.borrow().len();
-                    let start_raw =
-                        vm.to_number_value(args.get(1).unwrap_or(&Value::Number(0.0)))?;
-                    let start = if start_raw < 0.0 {
-                        let back = start_raw.abs().trunc().to_usize().unwrap_or(len);
-                        len.saturating_sub(back)
-                    } else {
-                        start_raw.trunc().to_usize().unwrap_or(len).min(len)
-                    };
-                    let delete_count = if let Some(dc) = args.get(2) {
-                        vm.to_number_value(dc)?
-                            .max(0.0)
-                            .trunc()
-                            .to_usize()
-                            .unwrap_or(0)
-                    } else {
-                        len.saturating_sub(start)
-                    };
-                    let mut vec = arr.borrow_mut();
-                    let end = start.saturating_add(delete_count).min(vec.len());
-                    let removed: Vec<Value> =
-                        vec[start..end].iter().filter_map(Clone::clone).collect();
-                    let insert_items: Vec<Option<Value>> =
-                        args.iter().skip(3).cloned().map(Some).collect();
-                    vec.splice(start..end, insert_items);
-                    let new_len = usize_to_f64(vec.len());
-                    drop(vec);
-                    props.borrow_mut().properties.insert(
-                        PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(new_len)),
-                    );
-                    let removed_arr = Rc::new(RefCell::new(
-                        removed.into_iter().map(Some).collect::<Vec<_>>(),
-                    ));
-                    let removed_props = Rc::new(RefCell::new(ObjectData::new()));
-                    removed_props
-                        .borrow_mut()
-                        .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
-                    removed_props.borrow_mut().properties.insert(
-                        PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(usize_to_f64(
-                            removed_arr.borrow().len(),
-                        ))),
-                    );
-                    Ok(Value::Array(removed_arr, removed_props))
-                }
-            }),
-            &function_proto_map,
-        )),
-    );
+                    let len = array_like_length(vm, &this)?;
+                    if len == 0 {
+                        return Ok(Value::Undefined);
+                    }
+                    let result = vm.get_property_host(&this, &PKey::String("0".to_string()))?;
+                    let (keys, snapshot) = collect_indexed_snapshot(vm, &this, len)?;
+                    let source_keys: HashSet<usize> = keys.iter().copied().collect();
+                    let mut written_targets: HashSet<usize> = HashSet::new();
+
+                    for idx in keys.iter().copied() {
+                        if idx == 0 {
+                            continue;
+                        }
+                        if let Some(value) = snapshot.get(&idx).cloned() {
+                            vm.set_property_host(
+                                &this,
+                                &Value::String((idx - 1).to_string()),
+                                value,
+                            )?;
+                            written_targets.insert(idx - 1);
+                        }
+                    }
+                    for idx in keys {
+                        if !source_keys.contains(&(idx + 1)) && !written_targets.contains(&idx) {
+                            let _ =
+                                vm.delete_property_host(&this, &PKey::String(idx.to_string()))?;
+                        }
+                    }
+                    if !array_length_is_writable(&this) {
+                        return Err(vm.throw_type_error("Array length is not writable"));
+                    }
+                    vm.set_property_host(
+                        &this,
+                        &Value::String("length".to_string()),
+                        Value::Number((len - 1) as f64),
+                    )?;
+                    Ok(result)
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&shift_fn, 0.0);
+            PropertyDescriptor::data(shift_fn)
+        });
+    array_proto_map
+        .borrow_mut()
+        .properties
+        .insert(PKey::String("unshift".to_string()), {
+            let unshift_fn = builtin_object(
+                Rc::new(move |vm, args| {
+                    let this = args.first().cloned().unwrap_or(Value::Undefined);
+                    let len = array_like_length(vm, &this)?;
+                    let insert_items: Vec<Value> = args.iter().skip(1).cloned().collect();
+                    let insert_count = insert_items.len();
+                    if insert_count == 0 {
+                        return Ok(Value::Number(usize_to_f64(len)));
+                    }
+                    let new_len = len.checked_add(insert_count).ok_or_else(|| {
+                        vm.throw_type_error("Array length exceeds supported size")
+                    })?;
+                    if new_len > 9_007_199_254_740_991usize {
+                        return Err(vm.throw_type_error("Array length exceeds supported size"));
+                    }
+                    let mut keys: Vec<usize> = own_property_keys(&this)
+                        .into_iter()
+                        .filter_map(|key| match key {
+                            PropertyKey::String(s) => s.parse::<usize>().ok(),
+                            PropertyKey::Symbol(_) => None,
+                        })
+                        .filter(|idx| *idx < len)
+                        .collect();
+                    keys.sort_unstable_by(|a, b| b.cmp(a));
+                    for idx in keys {
+                        let from_key = PKey::String(idx.to_string());
+                        let to_key = Value::String((idx + insert_count).to_string());
+                        let from_present = vm.has_property_host(&this, &from_key)?;
+                        if from_present {
+                            let value = vm.get_property_host(&this, &from_key)?;
+                            vm.set_property_host(&this, &to_key, value)?;
+                        } else {
+                            let _ = vm.delete_property_host(
+                                &this,
+                                &PKey::String((idx + insert_count).to_string()),
+                            )?;
+                        }
+                    }
+                    for (idx, value) in insert_items.into_iter().enumerate() {
+                        vm.set_property_host(&this, &Value::String(idx.to_string()), value)?;
+                    }
+                    if !array_length_is_writable(&this) {
+                        return Err(vm.throw_type_error("Array length is not writable"));
+                    }
+                    vm.set_property_host(
+                        &this,
+                        &Value::String("length".to_string()),
+                        Value::Number(new_len as f64),
+                    )?;
+                    Ok(Value::Number(usize_to_f64(new_len)))
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&unshift_fn, 0.0);
+            PropertyDescriptor::data(unshift_fn)
+        });
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("toSpliced".to_string()),
         PropertyDescriptor::data(builtin_object(
@@ -605,7 +866,18 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
                     let len_val =
                         vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                    let len = to_length(vm, &len_val)?;
+                    let len_num = vm.to_number_value(&len_val)?;
+                    let max_safe_len = 9_007_199_254_740_991u128;
+                    let len = if !len_num.is_finite() || len_num <= 0.0 {
+                        0usize
+                    } else {
+                        len_num
+                            .trunc()
+                            .to_u128()
+                            .unwrap_or(max_safe_len)
+                            .min(max_safe_len) as usize
+                    };
+                    let insert_count = args.len().saturating_sub(3);
                     let start_raw =
                         vm.to_number_value(args.get(1).unwrap_or(&Value::Number(0.0)))?;
                     let start = if start_raw < 0.0 {
@@ -624,6 +896,18 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         len.saturating_sub(start)
                     };
                     let actual_delete_count = delete_count.min(len.saturating_sub(start));
+                    let new_len = (len as u128)
+                        .checked_sub(actual_delete_count as u128)
+                        .and_then(|n| n.checked_add(insert_count as u128))
+                        .ok_or_else(|| {
+                            vm.throw_type_error("Array length exceeds supported size")
+                        })?;
+                    if new_len > max_safe_len {
+                        return Err(vm.throw_type_error("Array length exceeds supported size"));
+                    }
+                    if new_len > 4_294_967_295u128 {
+                        return Err(vm.throw_range_error("Invalid array length"));
+                    }
                     let mut out: Vec<Option<Value>> = Vec::new();
                     for i in 0..start {
                         let key = PKey::String(i.to_string());
@@ -649,9 +933,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
                     props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(usize_to_f64(
-                            arr_rc.borrow().len(),
-                        ))),
+                        array_length_descriptor(arr_rc.borrow().len()),
                     );
                     Ok(Value::Array(arr_rc, props))
                 }
@@ -688,9 +970,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
                     props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(usize_to_f64(
-                            arr_rc.borrow().len(),
-                        ))),
+                        array_length_descriptor(arr_rc.borrow().len()),
                     );
                     Ok(Value::Array(arr_rc, props))
                 }
@@ -944,35 +1224,157 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             &function_proto_map,
         )),
     );
-    // Array.prototype.indexOf
+    array_proto_map.borrow_mut().properties.insert(
+        PKey::String("at".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(move |vm, args| {
+                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                let len_val =
+                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
+                let len = to_length(vm, &len_val)?;
+                let index = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+                if index.is_nan() {
+                    return Ok(Value::Undefined);
+                }
+                let idx = if index < 0.0 {
+                    let offset = index.trunc() as isize;
+                    len as isize + offset
+                } else {
+                    index.trunc() as isize
+                };
+                if idx < 0 || idx as usize >= len {
+                    return Ok(Value::Undefined);
+                }
+                let key = PKey::String((idx as usize).to_string());
+                if vm.has_property_host(&receiver, &key)? {
+                    Ok(vm.get_property_host(&receiver, &key)?)
+                } else {
+                    Ok(Value::Undefined)
+                }
+            }),
+            &function_proto_map,
+        )),
+    );
+    array_proto_map.borrow_mut().properties.insert(
+        PKey::String("includes".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new(move |vm, args| {
+                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                let search = args.get(1).cloned().unwrap_or(Value::Undefined);
+                let len_val =
+                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
+                let len = to_length(vm, &len_val)?;
+                let from_index = args.get(2).cloned().unwrap_or(Value::Number(0.0));
+                let mut k = match vm.to_number_value(&from_index)? {
+                    n if n.is_nan() => 0isize,
+                    n if n >= 0.0 => n.trunc() as isize,
+                    n => len as isize + n.trunc() as isize,
+                };
+                if k < 0 {
+                    k = 0;
+                }
+                while (k as usize) < len {
+                    let key = PKey::String((k as usize).to_string());
+                    if vm.has_property_host(&receiver, &key)? {
+                        let element = vm.get_property_host(&receiver, &key)?;
+                        if same_value_zero(&element, &search) {
+                            return Ok(Value::Bool(true));
+                        }
+                    }
+                    k += 1;
+                }
+                Ok(Value::Bool(false))
+            }),
+            &function_proto_map,
+        )),
+    );
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("indexOf".to_string()),
         PropertyDescriptor::data(builtin_object(
             Rc::new(move |vm, args| {
                 let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let search_element = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let from_index = args.get(2).cloned().unwrap_or(Value::Number(0.0));
-
+                let search = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let len_val =
                     vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
                 let len = to_length(vm, &len_val)?;
-                let mut k = match from_index {
-                    Value::Number(n) if n.is_finite() && n > 0.0 => n as usize,
-                    _ => 0usize,
+                let from_index = args.get(2).cloned().unwrap_or(Value::Number(0.0));
+                let mut k = match vm.to_number_value(&from_index)? {
+                    n if n.is_nan() => 0isize,
+                    n if n >= 0.0 => n.trunc() as isize,
+                    n => len as isize + n.trunc() as isize,
                 };
-                if k > len {
-                    return Ok(Value::Number(-1.0));
+                if k < 0 {
+                    k = 0;
                 }
-                while k < len {
-                    let key = PKey::String(k.to_string());
-                    if vm.has_property_host(&receiver, &key)?
-                        && strict_equal(&vm.get_property_host(&receiver, &key)?, &search_element)
-                    {
-                        return Ok(Value::Number(usize_to_f64(k)));
+                while (k as usize) < len {
+                    let key = PKey::String((k as usize).to_string());
+                    if vm.has_property_host(&receiver, &key)? {
+                        let element = vm.get_property_host(&receiver, &key)?;
+                        if strict_equal(&element, &search) {
+                            return Ok(Value::Number(usize_to_f64(k as usize)));
+                        }
                     }
                     k += 1;
                 }
                 Ok(Value::Number(-1.0))
+            }),
+            &function_proto_map,
+        )),
+    );
+    array_proto_map.borrow_mut().properties.insert(
+        PKey::String("slice".to_string()),
+        PropertyDescriptor::data(builtin_object(
+            Rc::new({
+                let array_proto_for_slice = Rc::clone(&array_proto_map);
+                move |vm, args| {
+                    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+                    let len_val =
+                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
+                    let len = to_length(vm, &len_val)?;
+                    let start_raw =
+                        vm.to_number_value(args.get(1).unwrap_or(&Value::Number(0.0)))?;
+                    let start = if start_raw.is_nan() {
+                        0usize
+                    } else if start_raw < 0.0 {
+                        let back = start_raw.trunc().abs().to_usize().unwrap_or(len);
+                        len.saturating_sub(back)
+                    } else {
+                        start_raw.trunc().to_usize().unwrap_or(len).min(len)
+                    };
+                    let end = if let Some(end_arg) = args.get(2) {
+                        let end_raw = vm.to_number_value(end_arg)?;
+                        if end_raw.is_nan() {
+                            0usize
+                        } else if end_raw < 0.0 {
+                            let back = end_raw.trunc().abs().to_usize().unwrap_or(len);
+                            len.saturating_sub(back)
+                        } else {
+                            end_raw.trunc().to_usize().unwrap_or(len).min(len)
+                        }
+                    } else {
+                        len
+                    };
+                    let end = end.max(start);
+                    let mut out: Vec<Option<Value>> = Vec::with_capacity(end.saturating_sub(start));
+                    for i in start..end {
+                        let key = PKey::String(i.to_string());
+                        if vm.has_property_host(&receiver, &key)? {
+                            out.push(Some(vm.get_property_host(&receiver, &key)?));
+                        } else {
+                            out.push(None);
+                        }
+                    }
+                    let arr_rc = Rc::new(RefCell::new(out));
+                    let props = Rc::new(RefCell::new(ObjectData::new()));
+                    props
+                        .borrow_mut()
+                        .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_slice)));
+                    props.borrow_mut().properties.insert(
+                        PKey::String("length".to_string()),
+                        array_length_descriptor(arr_rc.borrow().len()),
+                    );
+                    Ok(Value::Array(arr_rc, props))
+                }
             }),
             &function_proto_map,
         )),
@@ -2295,41 +2697,25 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
 
     let (map_ctor_val, set_ctor_val) =
         builtins::collections::install_map_set_constructors(&object_proto_map, &function_proto_map);
-    object_proto_map.borrow_mut().properties.insert(
-        PKey::String("toString".to_string()),
-        non_enum_data(builtin_object(
-            Rc::new(|_vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Null);
-                if let Value::Object(obj) = &this
-                    && let Some(PropertyDescriptor::Data { value, .. }) = obj
-                        .borrow()
-                        .properties
-                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                {
-                    return Ok(Value::String(format!("[object {}]", value.object_tag())));
-                }
-                Ok(Value::String(format!("[object {}]", this.object_tag())))
-            }),
-            &function_proto_map,
-        )),
+    let object_to_string = builtin_object(
+        Rc::new(|_vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Null);
+            if let Value::Object(obj) = &this
+                && let Some(PropertyDescriptor::Data { value, .. }) = obj
+                    .borrow()
+                    .properties
+                    .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+            {
+                return Ok(Value::String(format!("[object {}]", value.object_tag())));
+            }
+            Ok(Value::String(format!("[object {}]", this.object_tag())))
+        }),
+        &function_proto_map,
     );
+    set_builtin_length(&object_to_string, 0.0);
     object_proto_map.borrow_mut().properties.insert(
         PKey::String("toString".to_string()),
-        non_enum_data(builtin_object(
-            Rc::new(|_vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Null);
-                if let Value::Object(obj) = &this
-                    && let Some(PropertyDescriptor::Data { value, .. }) = obj
-                        .borrow()
-                        .properties
-                        .get(&PKey::String("[[PrimitiveValue]]".to_string()))
-                {
-                    return Ok(Value::String(format!("[object {}]", value.object_tag())));
-                }
-                Ok(Value::String(format!("[object {}]", this.object_tag())))
-            }),
-            &function_proto_map,
-        )),
+        non_enum_data(object_to_string),
     );
     object_proto_map.borrow_mut().properties.insert(
         PKey::String("join".to_string()),
@@ -2384,57 +2770,194 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             &function_proto_map,
         )),
     );
+    let object_to_locale_string = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            let obj = vm.to_object_value(this)?;
+            let to_string = vm.get_property_host(&obj, &PKey::String("toString".to_string()))?;
+            vm.call_value_with_this(&to_string, &obj, &[])
+        }),
+        &function_proto_map,
+    );
+    set_builtin_length(&object_to_locale_string, 0.0);
+    object_proto_map.borrow_mut().properties.insert(
+        PKey::String("toLocaleString".to_string()),
+        non_enum_data(object_to_locale_string),
+    );
+    let has_own_property = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let key = vm.to_property_key(&key_value)?;
+            if crate::trace::enabled() {
+                eprintln!("[trace] hasOwnProperty this={:?} key={:?}", this, key_value);
+            }
+            let has_own = match this {
+                Value::Object(obj) => obj.borrow().properties.contains_key(&key),
+                Value::Array(_, props)
+                | Value::Closure { props, .. }
+                | Value::BuiltinObject(_, props) => props.borrow().properties.contains_key(&key),
+                _ => false,
+            };
+            Ok(Value::Bool(has_own))
+        }),
+        &function_proto_map,
+    );
+    set_builtin_length(&has_own_property, 1.0);
     object_proto_map.borrow_mut().properties.insert(
         PKey::String("hasOwnProperty".to_string()),
-        non_enum_data(builtin_object(
-            Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
-                let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let key = vm.to_property_key(&key_value)?;
-                if crate::trace::enabled() {
-                    eprintln!("[trace] hasOwnProperty this={:?} key={:?}", this, key_value);
-                }
-                let has_own = match this {
-                    Value::Object(obj) => obj.borrow().properties.contains_key(&key),
-                    Value::Array(_, props)
-                    | Value::Closure { props, .. }
-                    | Value::BuiltinObject(_, props) => {
-                        props.borrow().properties.contains_key(&key)
-                    }
-                    _ => false,
-                };
-                Ok(Value::Bool(has_own))
-            }),
-            &function_proto_map,
-        )),
+        non_enum_data(has_own_property),
     );
+    let property_is_enumerable = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let key = vm.to_property_key(&key_value)?;
+            let enumerable = own_property_descriptor(&this, &key).is_some_and(|desc| match desc {
+                PropertyDescriptor::Data { enumerable, .. }
+                | PropertyDescriptor::Accessor { enumerable, .. } => enumerable,
+            });
+            Ok(Value::Bool(enumerable))
+        }),
+        &function_proto_map,
+    );
+    set_builtin_length(&property_is_enumerable, 1.0);
     object_proto_map.borrow_mut().properties.insert(
         PKey::String("propertyIsEnumerable".to_string()),
-        non_enum_data(builtin_object(
-            Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
-                let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let key = vm.to_property_key(&key_value)?;
-                let enumerable =
-                    own_property_descriptor(&this, &key).is_some_and(|desc| match desc {
-                        PropertyDescriptor::Data { enumerable, .. }
-                        | PropertyDescriptor::Accessor { enumerable, .. } => enumerable,
-                    });
-                Ok(Value::Bool(enumerable))
-            }),
-            &function_proto_map,
-        )),
+        non_enum_data(property_is_enumerable),
     );
+    let is_prototype_of = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            let value = args.get(1).cloned().unwrap_or(Value::Undefined);
+            Ok(Value::Bool(vm.is_prototype_of(&this, &value)?))
+        }),
+        &function_proto_map,
+    );
+    set_builtin_length(&is_prototype_of, 1.0);
     object_proto_map.borrow_mut().properties.insert(
         PKey::String("isPrototypeOf".to_string()),
-        non_enum_data(builtin_object(
-            Rc::new(|vm, args| {
-                let this = args.first().cloned().unwrap_or(Value::Undefined);
-                let value = args.get(1).cloned().unwrap_or(Value::Undefined);
-                Ok(Value::Bool(vm.is_prototype_of(&this, &value)?))
-            }),
-            &function_proto_map,
-        )),
+        non_enum_data(is_prototype_of),
+    );
+    let define_getter = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            let name = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let getter = args.get(2).cloned().unwrap_or(Value::Undefined);
+            if !matches!(getter, Value::Undefined) && !Vm::is_callable_value(&getter) {
+                return Err(vm.throw_type_error("Getter must be callable"));
+            }
+            let this = vm.to_object_value(this)?;
+            let key = vm.to_property_key(&name)?;
+            let mut desc = ObjectData::new();
+            desc.properties.insert(
+                PKey::String("get".to_string()),
+                PropertyDescriptor::data(getter),
+            );
+            desc.properties.insert(
+                PKey::String("set".to_string()),
+                PropertyDescriptor::data(Value::Undefined),
+            );
+            desc.properties.insert(
+                PKey::String("enumerable".to_string()),
+                PropertyDescriptor::data(Value::Bool(true)),
+            );
+            desc.properties.insert(
+                PKey::String("configurable".to_string()),
+                PropertyDescriptor::data(Value::Bool(true)),
+            );
+            let desc = Value::Object(Rc::new(RefCell::new(desc)));
+            if !vm.define_property_value(&this, &property_key_to_value(&key), &desc)? {
+                return Err(vm.throw_type_error("__defineGetter__ failed"));
+            }
+            Ok(Value::Undefined)
+        }),
+        &function_proto_map,
+    );
+    set_builtin_length(&define_getter, 2.0);
+    object_proto_map.borrow_mut().properties.insert(
+        PKey::String("__defineGetter__".to_string()),
+        non_enum_data(define_getter),
+    );
+    let define_setter = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            let name = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let setter = args.get(2).cloned().unwrap_or(Value::Undefined);
+            if !matches!(setter, Value::Undefined) && !Vm::is_callable_value(&setter) {
+                return Err(vm.throw_type_error("Setter must be callable"));
+            }
+            let this = vm.to_object_value(this)?;
+            let key = vm.to_property_key(&name)?;
+            let mut desc = ObjectData::new();
+            desc.properties.insert(
+                PKey::String("get".to_string()),
+                PropertyDescriptor::data(Value::Undefined),
+            );
+            desc.properties.insert(
+                PKey::String("set".to_string()),
+                PropertyDescriptor::data(setter),
+            );
+            desc.properties.insert(
+                PKey::String("enumerable".to_string()),
+                PropertyDescriptor::data(Value::Bool(true)),
+            );
+            desc.properties.insert(
+                PKey::String("configurable".to_string()),
+                PropertyDescriptor::data(Value::Bool(true)),
+            );
+            let desc = Value::Object(Rc::new(RefCell::new(desc)));
+            if !vm.define_property_value(&this, &property_key_to_value(&key), &desc)? {
+                return Err(vm.throw_type_error("__defineSetter__ failed"));
+            }
+            Ok(Value::Undefined)
+        }),
+        &function_proto_map,
+    );
+    set_builtin_length(&define_setter, 2.0);
+    object_proto_map.borrow_mut().properties.insert(
+        PKey::String("__defineSetter__".to_string()),
+        non_enum_data(define_setter),
+    );
+    let lookup_getter = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            let name = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let this = vm.to_object_value(this)?;
+            let key = vm.to_property_key(&name)?;
+            if let Some(desc) = own_property_descriptor(&this, &key)
+                && let PropertyDescriptor::Accessor { get, .. } = desc
+            {
+                return Ok(get.unwrap_or(Value::Undefined));
+            }
+            Ok(Value::Undefined)
+        }),
+        &function_proto_map,
+    );
+    set_builtin_length(&lookup_getter, 1.0);
+    object_proto_map.borrow_mut().properties.insert(
+        PKey::String("__lookupGetter__".to_string()),
+        non_enum_data(lookup_getter),
+    );
+    let lookup_setter = builtin_object(
+        Rc::new(|vm, args| {
+            let this = args.first().cloned().unwrap_or(Value::Undefined);
+            let name = args.get(1).cloned().unwrap_or(Value::Undefined);
+            let this = vm.to_object_value(this)?;
+            let key = vm.to_property_key(&name)?;
+            if let Some(desc) = own_property_descriptor(&this, &key)
+                && let PropertyDescriptor::Accessor { set, .. } = desc
+            {
+                return Ok(set.unwrap_or(Value::Undefined));
+            }
+            Ok(Value::Undefined)
+        }),
+        &function_proto_map,
+    );
+    set_builtin_length(&lookup_setter, 1.0);
+    object_proto_map.borrow_mut().properties.insert(
+        PKey::String("__lookupSetter__".to_string()),
+        non_enum_data(lookup_setter),
     );
     object_ctor_map.borrow_mut().properties.insert(
         PKey::String("create".to_string()),
@@ -2484,17 +3007,48 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         }),
     );
     object_ctor_map.borrow_mut().properties.insert(
-        PKey::String("is".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|vm, args| {
-                let off = static_builtin_arg_offset(vm, args, "Object");
-                let a = args.get(off).cloned().unwrap_or(Value::Undefined);
-                let b = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
-                Ok(Value::Bool(crate::vm::same_value(&a, &b)))
-            }),
-            &function_proto_map,
-        )),
+        PKey::String("assign".to_string()),
+        PropertyDescriptor::data({
+            let builtin = builtin_object(
+                Rc::new(|vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let target = vm.to_object_value(target)?;
+                    for source in args.iter().skip(off + 1).cloned() {
+                        if matches!(source, Value::Undefined | Value::Null) {
+                            continue;
+                        }
+                        let source_obj = vm.to_object_value(source)?;
+                        for key in own_enumerable_keys(&source_obj) {
+                            let value = vm.get_property_host(&source_obj, &key)?;
+                            let key_value = property_key_to_value(&key);
+                            vm.set_property_host(&target, &key_value, value)?;
+                        }
+                    }
+                    Ok(target)
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 2.0);
+            builtin
+        }),
     );
+    object_ctor_map
+        .borrow_mut()
+        .properties
+        .insert(PKey::String("is".to_string()), {
+            let builtin = builtin_object(
+                Rc::new(|vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    let a = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let b = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                    Ok(Value::Bool(crate::vm::same_value(&a, &b)))
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 2.0);
+            PropertyDescriptor::data(builtin)
+        });
     object_ctor_map.borrow_mut().properties.insert(
         PKey::String("hasOwn".to_string()),
         PropertyDescriptor::data({
@@ -2557,30 +3111,34 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
 
     object_ctor_map.borrow_mut().properties.insert(
         PKey::String("getOwnPropertySymbols".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|_vm, args| {
-                let target = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let symbols = own_property_keys(&target)
-                    .into_iter()
-                    .filter_map(|key| {
-                        if let PropertyKey::Symbol(id) = key {
-                            Some(Value::Symbol(id, None))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                Ok(array_from_values(symbols))
-            }),
-            &function_proto_map,
-        )),
+        {
+            let builtin = builtin_object(
+                Rc::new(|_vm, args| {
+                    let target = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let symbols = own_property_keys(&target)
+                        .into_iter()
+                        .filter_map(|key| {
+                            if let PropertyKey::Symbol(id) = key {
+                                Some(Value::Symbol(id, None))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    Ok(array_from_values(symbols))
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 1.0);
+            PropertyDescriptor::data(builtin)
+        },
     );
 
     object_ctor_map.borrow_mut().properties.insert(
         PKey::String("getOwnPropertyDescriptors".to_string()),
-        PropertyDescriptor::data({
+        {
             let object_proto_map = Rc::clone(&object_proto_map);
-            builtin_object(
+            let builtin = builtin_object(
                 Rc::new(move |vm, args| {
                     let off = static_builtin_arg_offset(vm, args, "Object");
                     let target = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -2597,8 +3155,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     Ok(Value::Object(Rc::new(RefCell::new(result))))
                 }),
                 &function_proto_map,
-            )
-        }),
+            );
+            set_builtin_length(&builtin, 1.0);
+            PropertyDescriptor::data(builtin)
+        },
     );
     object_ctor_map.borrow_mut().properties.insert(
         PKey::String("getOwnPropertyNames".to_string()),
@@ -2698,65 +3258,75 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             builtin
         }),
     );
-    object_ctor_map.borrow_mut().properties.insert(
-        PKey::String("defineProperty".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|vm, args| {
-                let off = static_builtin_arg_offset(vm, args, "Object");
-                if args.len() < off + 3 {
-                    return Ok(Value::Undefined);
-                }
-                let target = args[off].clone();
-                if crate::trace::enabled() {
-                    eprintln!(
-                        "[trace] Object.defineProperty target={:?} key={:?} desc={:?}",
-                        target,
-                        args.get(off + 1),
-                        args.get(off + 2)
-                    );
-                }
-                let ok = vm.define_property_value(&target, &args[off + 1], &args[off + 2])?;
-                if !ok {
-                    return Err(vm.throw_type_error("Object.defineProperty failed"));
-                }
-                Ok(target)
-            }),
-            &function_proto_map,
-        )),
-    );
-
-    object_ctor_map.borrow_mut().properties.insert(
-        PKey::String("defineProperties".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|vm, args| {
-                let off = static_builtin_arg_offset(vm, args, "Object");
-                let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-                let props = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
-                if !matches!(
-                    props,
-                    Value::Object(_)
-                        | Value::Array(..)
-                        | Value::Closure { .. }
-                        | Value::BuiltinObject(_, _)
-                ) {
-                    return Err(vm.throw_type_error("Object.defineProperties called on non-object"));
-                }
-                for key in own_property_keys(&props) {
-                    let descriptor = vm.get_property_host(&props, &key)?;
-                    if matches!(descriptor, Value::Undefined) {
-                        continue;
+    object_ctor_map
+        .borrow_mut()
+        .properties
+        .insert(PKey::String("defineProperty".to_string()), {
+            let builtin = builtin_object(
+                Rc::new(|vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    if args.len() < off + 3 {
+                        return Ok(Value::Undefined);
                     }
-                    let key_value = property_key_to_value(&key);
-                    let ok = vm.define_property_value(&target, &key_value, &descriptor)?;
+                    let target = args[off].clone();
+                    if crate::trace::enabled() {
+                        eprintln!(
+                            "[trace] Object.defineProperty target={:?} key={:?} desc={:?}",
+                            target,
+                            args.get(off + 1),
+                            args.get(off + 2)
+                        );
+                    }
+                    let ok = vm.define_property_value(&target, &args[off + 1], &args[off + 2])?;
                     if !ok {
-                        return Err(vm.throw_type_error("Object.defineProperties failed"));
+                        return Err(vm.throw_type_error("Object.defineProperty failed"));
                     }
-                }
-                Ok(target)
-            }),
-            &function_proto_map,
-        )),
-    );
+                    Ok(target)
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 3.0);
+            PropertyDescriptor::data(builtin)
+        });
+
+    object_ctor_map
+        .borrow_mut()
+        .properties
+        .insert(PKey::String("defineProperties".to_string()), {
+            let builtin = builtin_object(
+                Rc::new(|vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let props = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                    if !matches!(
+                        props,
+                        Value::Object(_)
+                            | Value::Array(..)
+                            | Value::Closure { .. }
+                            | Value::BuiltinObject(_, _)
+                    ) {
+                        return Err(
+                            vm.throw_type_error("Object.defineProperties called on non-object")
+                        );
+                    }
+                    for key in own_property_keys(&props) {
+                        let descriptor = vm.get_property_host(&props, &key)?;
+                        if matches!(descriptor, Value::Undefined) {
+                            continue;
+                        }
+                        let key_value = property_key_to_value(&key);
+                        let ok = vm.define_property_value(&target, &key_value, &descriptor)?;
+                        if !ok {
+                            return Err(vm.throw_type_error("Object.defineProperties failed"));
+                        }
+                    }
+                    Ok(target)
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 2.0);
+            PropertyDescriptor::data(builtin)
+        });
     object_ctor_map.borrow_mut().properties.insert(
         PKey::String("getPrototypeOf".to_string()),
         PropertyDescriptor::data(builtin_object(
@@ -2773,42 +3343,271 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             &function_proto_map,
         )),
     );
-    object_ctor_map.borrow_mut().properties.insert(
-        PKey::String("isExtensible".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|_vm, args| {
-                let target = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let extensible = match target {
-                    Value::Object(obj) => obj.borrow().extensible,
-                    Value::Array(_, props)
-                    | Value::Closure { props, .. }
-                    | Value::BuiltinObject(_, props) => props.borrow().extensible,
-                    _ => false,
-                };
-                Ok(Value::Bool(extensible))
-            }),
-            &function_proto_map,
-        )),
-    );
+    object_ctor_map
+        .borrow_mut()
+        .properties
+        .insert(PKey::String("isExtensible".to_string()), {
+            let builtin = builtin_object(
+                Rc::new(|_vm, args| {
+                    let target = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let extensible = match target {
+                        Value::Object(obj) => obj.borrow().extensible,
+                        Value::Array(_, props)
+                        | Value::Closure { props, .. }
+                        | Value::BuiltinObject(_, props) => props.borrow().extensible,
+                        _ => false,
+                    };
+                    Ok(Value::Bool(extensible))
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 1.0);
+            PropertyDescriptor::data(builtin)
+        });
     object_ctor_map.borrow_mut().properties.insert(
         PKey::String("preventExtensions".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(|vm, args| {
-                let off = static_builtin_arg_offset(vm, args, "Object");
-                let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-                let target = vm.to_object_value(target)?;
-                match &target {
-                    Value::Object(obj) => obj.borrow_mut().extensible = false,
-                    Value::Array(_, props)
-                    | Value::Closure { props, .. }
-                    | Value::BuiltinObject(_, props) => props.borrow_mut().extensible = false,
-                    Value::Promise(_) => {}
-                    _ => {}
-                }
-                Ok(target)
-            }),
-            &function_proto_map,
-        )),
+        {
+            let builtin = builtin_object(
+                Rc::new(|vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let target = vm.to_object_value(target)?;
+                    match &target {
+                        Value::Object(obj) => obj.borrow_mut().extensible = false,
+                        Value::Array(_, props)
+                        | Value::Closure { props, .. }
+                        | Value::BuiltinObject(_, props) => props.borrow_mut().extensible = false,
+                        Value::Promise(_) => {}
+                        _ => {}
+                    }
+                    Ok(target)
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 1.0);
+            PropertyDescriptor::data(builtin)
+        },
+    );
+    object_ctor_map.borrow_mut().properties.insert(
+        PKey::String("setPrototypeOf".to_string()),
+        PropertyDescriptor::data({
+            let builtin = builtin_object(
+                Rc::new(|vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let target = vm.to_object_value(target)?;
+                    let proto = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                    if !matches!(
+                        proto,
+                        Value::Null
+                            | Value::Object(_)
+                            | Value::Array(..)
+                            | Value::Closure { .. }
+                            | Value::BuiltinObject(_, _)
+                    ) {
+                        return Err(vm.throw_type_error(
+                            "Object.setPrototypeOf prototype must be object or null",
+                        ));
+                    }
+                    let current_proto = vm.get_prototype(&target);
+                    if strict_equal(&current_proto, &proto) {
+                        return Ok(target);
+                    }
+                    let Some(updated) = with_object_data_mut(&target, |data| {
+                        if !data.extensible {
+                            return false;
+                        }
+                        data.set_prototype_value(proto.clone());
+                        true
+                    }) else {
+                        return Ok(target);
+                    };
+                    if !updated {
+                        return Err(vm.throw_type_error(
+                            "Object.setPrototypeOf called on non-extensible object",
+                        ));
+                    }
+                    Ok(target)
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 2.0);
+            builtin
+        }),
+    );
+    object_ctor_map.borrow_mut().properties.insert(
+        PKey::String("freeze".to_string()),
+        PropertyDescriptor::data({
+            let builtin = builtin_object(
+                Rc::new(|vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let target = vm.to_object_value(target)?;
+                    if with_object_data_mut(&target, |data| {
+                        for desc in data.properties.values_mut() {
+                            match desc {
+                                PropertyDescriptor::Data {
+                                    writable,
+                                    configurable,
+                                    ..
+                                } => {
+                                    *writable = false;
+                                    *configurable = false;
+                                }
+                                PropertyDescriptor::Accessor { configurable, .. } => {
+                                    *configurable = false;
+                                }
+                            }
+                        }
+                        data.extensible = false;
+                    })
+                    .is_none()
+                    {
+                        return Ok(target);
+                    }
+                    Ok(target)
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 1.0);
+            builtin
+        }),
+    );
+    object_ctor_map.borrow_mut().properties.insert(
+        PKey::String("seal".to_string()),
+        PropertyDescriptor::data({
+            let builtin = builtin_object(
+                Rc::new(|vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let target = vm.to_object_value(target)?;
+                    if with_object_data_mut(&target, |data| {
+                        for desc in data.properties.values_mut() {
+                            match desc {
+                                PropertyDescriptor::Data { configurable, .. }
+                                | PropertyDescriptor::Accessor { configurable, .. } => {
+                                    *configurable = false;
+                                }
+                            }
+                        }
+                        data.extensible = false;
+                    })
+                    .is_none()
+                    {
+                        return Ok(target);
+                    }
+                    Ok(target)
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 1.0);
+            builtin
+        }),
+    );
+    object_ctor_map.borrow_mut().properties.insert(
+        PKey::String("isSealed".to_string()),
+        PropertyDescriptor::data({
+            let builtin = builtin_object(
+                Rc::new(|vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let target = vm.to_object_value(target)?;
+                    let sealed = matches!(target, Value::Promise(_))
+                        || own_properties_all_non_configurable(&target);
+                    Ok(Value::Bool(sealed))
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 1.0);
+            builtin
+        }),
+    );
+    object_ctor_map.borrow_mut().properties.insert(
+        PKey::String("isFrozen".to_string()),
+        PropertyDescriptor::data({
+            let builtin = builtin_object(
+                Rc::new(|vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let target = vm.to_object_value(target)?;
+                    let frozen =
+                        matches!(target, Value::Promise(_)) || own_properties_frozen(&target);
+                    Ok(Value::Bool(frozen))
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 1.0);
+            builtin
+        }),
+    );
+    object_ctor_map.borrow_mut().properties.insert(
+        PKey::String("fromEntries".to_string()),
+        PropertyDescriptor::data({
+            let object_proto_for_from_entries = Rc::clone(&object_proto_map);
+            let builtin = builtin_object(
+                Rc::new(move |vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    let iterable = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let entries = collect_iterable_values(vm, &iterable)?;
+                    let result = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
+                        Value::Object(Rc::clone(&object_proto_for_from_entries)),
+                    ))));
+                    for entry in entries {
+                        let entry_obj = vm.to_object_value(entry)?;
+                        let key =
+                            vm.get_property_host(&entry_obj, &PKey::String("0".to_string()))?;
+                        let value =
+                            vm.get_property_host(&entry_obj, &PKey::String("1".to_string()))?;
+                        let prop_key = vm.to_property_key(&key)?;
+                        let key_value = property_key_to_value(&prop_key);
+                        vm.set_property_host(&result, &key_value, value)?;
+                    }
+                    Ok(result)
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 1.0);
+            builtin
+        }),
+    );
+    object_ctor_map.borrow_mut().properties.insert(
+        PKey::String("groupBy".to_string()),
+        PropertyDescriptor::data({
+            let object_proto_for_group_by = Rc::clone(&object_proto_map);
+            let builtin = builtin_object(
+                Rc::new(move |vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Object");
+                    let iterable = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let callback = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                    if !Vm::is_callable_value(&callback) {
+                        return Err(vm.throw_type_error("Object.groupBy callback is not callable"));
+                    }
+                    let items = collect_iterable_values(vm, &iterable)?;
+                    let mut groups: HashMap<PropertyKey, Vec<Value>> = HashMap::new();
+                    for (index, item) in items.into_iter().enumerate() {
+                        let key = vm.call_value_with_this(
+                            &callback,
+                            &Value::Undefined,
+                            &[item.clone(), Value::Number(usize_to_f64(index))],
+                        )?;
+                        let prop_key = vm.to_property_key(&key)?;
+                        groups.entry(prop_key).or_default().push(item);
+                    }
+                    let mut result = ObjectData::new();
+                    result.set_prototype_value(Value::Null);
+                    for (key, group) in groups {
+                        result
+                            .properties
+                            .insert(key, PropertyDescriptor::data(array_from_values(group)));
+                    }
+                    let _ = &object_proto_for_group_by;
+                    Ok(Value::Object(Rc::new(RefCell::new(result))))
+                }),
+                &function_proto_map,
+            );
+            set_builtin_length(&builtin, 2.0);
+            builtin
+        }),
     );
 
     let array_ctor_val = builtins::array::install_array_constructor_and_late_prototype_methods(
@@ -3787,7 +4586,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         async_from_sync_iterator_prototype: None,
         throw_type_error: Some(throw_type_error_val),
         typed_array_constructors,
-        hidden_builtins: std::collections::HashMap::new(),
+        hidden_builtins: HashMap::new(),
     };
 
     intrinsics.hidden_builtins.insert(
