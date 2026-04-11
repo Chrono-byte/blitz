@@ -4451,298 +4451,48 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
 
     let atomics_obj = atomics::build_atomics_object(&object_proto_map, &function_proto_map);
 
-    {
-        let mut g = globals.borrow_mut();
-        builtins::text_and_symbols::install_string_boolean_symbol_builtins(
-            &mut g,
-            &object_proto_map,
-            &function_proto_map,
-        );
-        builtins::primitives::install_bigint_and_number_builtins(
-            &mut g,
-            &object_proto_map,
-            &function_proto_map,
-        );
-        let global_this_key = PKey::String("globalThis".to_string());
-        g.properties.insert(
-            global_this_key,
-            PropertyDescriptor::Data {
-                value: Value::Object(Rc::clone(globals)),
-                writable: true,
-                enumerable: false,
-                configurable: true,
-            },
-        );
-        g.properties
-            .entry(PKey::String("NaN".to_string()))
-            .or_insert(PropertyDescriptor::data(Value::Number(f64::NAN)));
-        g.properties
-            .entry(PKey::String("Infinity".to_string()))
-            .or_insert(PropertyDescriptor::data(Value::Number(f64::INFINITY)));
-        g.properties
-            .entry(PKey::String("undefined".to_string()))
-            .or_insert(PropertyDescriptor::Data {
-                value: Value::Undefined,
-                writable: false,
-                enumerable: false,
-                configurable: false,
-            });
-        builtins::globals::install_global_function_builtins(&mut g);
-        g.properties.insert(
-            PKey::String("Reflect".to_string()),
-            PropertyDescriptor::data(Value::Object(reflect_obj)),
-        );
-        set_builtin_name(&object_ctor_val, "Object");
-        set_builtin_name(&function_ctor_val, "Function");
-        set_builtin_name(&array_ctor_val, "Array");
-        set_builtin_name(&regexp_ctor_val, "RegExp");
-        set_builtin_name(&promise_ctor_val, "Promise");
-        set_builtin_name(&date_ctor_val, "Date");
-        set_builtin_name(&error_ctor_val, "Error");
-        set_builtin_name(&aggregate_error_ctor_val, "AggregateError");
-        set_builtin_name(&map_ctor_val, "Map");
-        set_builtin_name(&set_ctor_val, "Set");
-
-        g.properties.insert(
-            PKey::String("Function".to_string()),
-            PropertyDescriptor::data(function_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Object".to_string()),
-            PropertyDescriptor::data(object_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Array".to_string()),
-            PropertyDescriptor::data(array_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("RegExp".to_string()),
-            PropertyDescriptor::data(regexp_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Promise".to_string()),
-            PropertyDescriptor::data(promise_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Date".to_string()),
-            PropertyDescriptor::data(date_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("ArrayBuffer".to_string()),
-            PropertyDescriptor::data(arraybuffer_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("SharedArrayBuffer".to_string()),
-            PropertyDescriptor::data(sharedarraybuffer_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("DataView".to_string()),
-            PropertyDescriptor::data(dataview_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Uint8Array".to_string()),
-            PropertyDescriptor::data(uint8array_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Int8Array".to_string()),
-            PropertyDescriptor::data(int8array_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Uint16Array".to_string()),
-            PropertyDescriptor::data(uint16array_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Int16Array".to_string()),
-            PropertyDescriptor::data(int16array_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Uint32Array".to_string()),
-            PropertyDescriptor::data(uint32array_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Int32Array".to_string()),
-            PropertyDescriptor::data(int32array_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Float32Array".to_string()),
-            PropertyDescriptor::data(float32array_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Float64Array".to_string()),
-            PropertyDescriptor::data(float64array_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Uint8ClampedArray".to_string()),
-            PropertyDescriptor::data(uint8clampedarray_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("BigInt64Array".to_string()),
-            PropertyDescriptor::data(bigint64array_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("BigUint64Array".to_string()),
-            PropertyDescriptor::data(biguint64array_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Error".to_string()),
-            PropertyDescriptor::data(error_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("AggregateError".to_string()),
-            PropertyDescriptor::data(aggregate_error_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("EvalError".to_string()),
-            PropertyDescriptor::data(eval_error_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("RangeError".to_string()),
-            PropertyDescriptor::data(range_error_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("ReferenceError".to_string()),
-            PropertyDescriptor::data(reference_error_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("SyntaxError".to_string()),
-            PropertyDescriptor::data(syntax_error_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("TypeError".to_string()),
-            PropertyDescriptor::data(type_error_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("URIError".to_string()),
-            PropertyDescriptor::data(uri_error_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Math".to_string()),
-            PropertyDescriptor::data(Value::Object(math)),
-        );
-
-        g.properties.insert(
-            PKey::String("JSON".to_string()),
-            PropertyDescriptor::data(Value::Object(json_obj)),
-        );
-        g.properties.insert(
-            PKey::String("Atomics".to_string()),
-            PropertyDescriptor::data(atomics_obj),
-        );
-        g.properties.insert(
-            PKey::String("ShadowRealm".to_string()),
-            PropertyDescriptor::data(shadowrealm_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Map".to_string()),
-            PropertyDescriptor::data(map_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Set".to_string()),
-            PropertyDescriptor::data(set_ctor_val),
-        );
-
-        let make_placeholder_ctor =
-            |name: &'static str, returns_target_on_construct: bool| -> Value {
-                let proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-                    Rc::clone(&object_proto_map),
-                ))));
-                let ctor_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-                    Rc::clone(&function_proto_map),
-                ))));
-                ctor_map.borrow_mut().properties.insert(
-                    PKey::String("prototype".to_string()),
-                    PropertyDescriptor::data(Value::Object(Rc::clone(&proto_map))),
-                );
-                let name_owned = name.to_string();
-                let ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-                    if vm.current_new_target().is_some() {
-                        if returns_target_on_construct && name_owned == "Proxy" {
-                            return Ok(args.get(1).cloned().unwrap_or(Value::Undefined));
-                        }
-                        return Ok(args.first().cloned().unwrap_or(Value::Undefined));
-                    }
-                    if returns_target_on_construct && name_owned == "Proxy" {
-                        return Ok(args.first().cloned().unwrap_or(Value::Undefined));
-                    }
-                    Ok(Value::Undefined)
-                });
-                let ctor_val = Value::BuiltinObject(ctor_fn, Rc::clone(&ctor_map));
-                ctor_map.borrow_mut().properties.insert(
-                    PKey::String("name".to_string()),
-                    PropertyDescriptor::data(Value::String(name.to_string())),
-                );
-                proto_map.borrow_mut().properties.insert(
-                    PKey::String("constructor".to_string()),
-                    PropertyDescriptor::data(ctor_val.clone()),
-                );
-                ctor_val
-            };
-
-        let weakref_ctor_val = make_placeholder_ctor("WeakRef", false);
-        let finalization_registry_ctor_val = make_placeholder_ctor("FinalizationRegistry", false);
-        let temporal_namespace = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
-            Value::Object(Rc::clone(&object_proto_map)),
-        ))));
-        g.properties.insert(
-            PKey::String("WeakRef".to_string()),
-            PropertyDescriptor::data(weakref_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("FinalizationRegistry".to_string()),
-            PropertyDescriptor::data(finalization_registry_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Temporal".to_string()),
-            PropertyDescriptor::data(temporal_namespace),
-        );
-
-        let weakmap_ctor_val = make_placeholder_ctor("WeakMap", false);
-        let weakset_ctor_val = make_placeholder_ctor("WeakSet", false);
-        let proxy_ctor_val = make_placeholder_ctor("Proxy", true);
-        g.properties.insert(
-            PKey::String("WeakMap".to_string()),
-            PropertyDescriptor::data(weakmap_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("WeakSet".to_string()),
-            PropertyDescriptor::data(weakset_ctor_val),
-        );
-        g.properties.insert(
-            PKey::String("Proxy".to_string()),
-            PropertyDescriptor::data(proxy_ctor_val),
-        );
-
-        let insert_math_builtin = |name: &'static str, length: f64, func: BuiltinFn| -> Value {
-            let func_val = builtin_object(func, &function_proto_map);
-            set_builtin_name(&func_val, name);
-            set_builtin_length(&func_val, length);
-            func_val
-        };
-        g.properties.insert(
-            PKey::String("isNaN".to_string()),
-            PropertyDescriptor::data(insert_math_builtin(
-                "isNaN",
-                1.0,
-                Rc::new(|vm, args| {
-                    let v = args.first().cloned().unwrap_or(Value::Undefined);
-                    let n = vm.to_number_value(&v)?;
-                    Ok(Value::Bool(n.is_nan()))
-                }),
-            )),
-        );
-        g.properties.insert(
-            PKey::String("isFinite".to_string()),
-            PropertyDescriptor::data(insert_math_builtin(
-                "isFinite",
-                1.0,
-                Rc::new(|vm, args| {
-                    let v = args.first().cloned().unwrap_or(Value::Undefined);
-                    let n = vm.to_number_value(&v)?;
-                    Ok(Value::Bool(n.is_finite()))
-                }),
-            )),
-        );
-    }
+    install_global_bindings(
+        globals,
+        &object_proto_map,
+        &function_proto_map,
+        &GlobalIntrinsicValues {
+            reflect_obj: &reflect_obj,
+            object_ctor_val: &object_ctor_val,
+            function_ctor_val: &function_ctor_val,
+            array_ctor_val: &array_ctor_val,
+            regexp_ctor_val: &regexp_ctor_val,
+            promise_ctor_val: &promise_ctor_val,
+            date_ctor_val: &date_ctor_val,
+            error_ctor_val: &error_ctor_val,
+            aggregate_error_ctor_val: &aggregate_error_ctor_val,
+            map_ctor_val: &map_ctor_val,
+            set_ctor_val: &set_ctor_val,
+            arraybuffer_ctor_val: &arraybuffer_ctor_val,
+            sharedarraybuffer_ctor_val: &sharedarraybuffer_ctor_val,
+            dataview_ctor_val: &dataview_ctor_val,
+            uint8array_ctor_val: &uint8array_ctor_val,
+            int8array_ctor_val: &int8array_ctor_val,
+            uint16array_ctor_val: &uint16array_ctor_val,
+            int16array_ctor_val: &int16array_ctor_val,
+            uint32array_ctor_val: &uint32array_ctor_val,
+            int32array_ctor_val: &int32array_ctor_val,
+            float32array_ctor_val: &float32array_ctor_val,
+            float64array_ctor_val: &float64array_ctor_val,
+            uint8clampedarray_ctor_val: &uint8clampedarray_ctor_val,
+            bigint64array_ctor_val: &bigint64array_ctor_val,
+            biguint64array_ctor_val: &biguint64array_ctor_val,
+            eval_error_ctor_val: &eval_error_ctor_val,
+            range_error_ctor_val: &range_error_ctor_val,
+            reference_error_ctor_val: &reference_error_ctor_val,
+            syntax_error_ctor_val: &syntax_error_ctor_val,
+            type_error_ctor_val: &type_error_ctor_val,
+            uri_error_ctor_val: &uri_error_ctor_val,
+            math: &math,
+            json_obj: &json_obj,
+            atomics_obj: &atomics_obj,
+            shadowrealm_ctor_val: &shadowrealm_ctor_val,
+        },
+    );
 
     let get_ctor = |name: &str| -> Option<Value> {
         globals
@@ -4849,84 +4599,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         hidden_builtins: HashMap::new(),
     };
 
-    intrinsics.hidden_builtins.insert(
-        "dynamicImport".to_string(),
-        Value::Builtin(Rc::new(|vm, args| {
-            crate::runtime_utils::dynamic_import_value(vm, args)
-        })),
-    );
-    intrinsics.hidden_builtins.insert(
-        "throwTypeError".to_string(),
-        Value::Builtin(Rc::new(|vm, _args| {
-            Err(vm.throw_type_error("Cannot assign to imported binding"))
-        })),
-    );
-    intrinsics.hidden_builtins.insert(
-        "directEval".to_string(),
-        Value::Builtin(Rc::new(|vm, args| {
-            let src = match args.first() {
-                Some(Value::String(s)) => s.as_str(),
-                Some(other) => return Ok(other.clone()),
-                None => return Ok(Value::Undefined),
-            };
-            let eval_src = if vm.active_strict_mode() {
-                format!("'use strict';\n{src}")
-            } else {
-                src.to_string()
-            };
-            let (allow_new_target, allow_super) = vm.current_eval_context_flags();
-            let chunk = crate::typecheck::with_strict_override(None, || {
-                compiler::with_compile_context_override(
-                    Some((allow_new_target, allow_super)),
-                    || {
-                        let session = Parser::parse_source(&eval_src)
-                            .map_err(|e| syntax_error(vm, format!("eval parse: {}", e)))?;
-                        let prog = session.program();
-                        compiler::compile_oxc_repl(prog, &eval_src)
-                            .map_err(|e| syntax_error(vm, format!("eval compile: {}", e)))
-                    },
-                )
-            })?;
-            if let Some(name) = vm.direct_eval_lexical_conflict_name(&chunk) {
-                return Err(syntax_error(
-                    vm,
-                    format!("redeclaration of lexical binding `{}`", name),
-                ));
-            }
-            match vm.run_nested(chunk, true) {
-                Ok(value) => Ok(value),
-                Err(err) => {
-                    if let Some(thrown) = vm.last_uncaught_exception.take() {
-                        Err(vm.throw_exception(thrown))
-                    } else {
-                        Err(err)
-                    }
-                }
-            }
-        })),
-    );
-    intrinsics.hidden_builtins.insert(
-        "requireObjectCoercible".to_string(),
-        Value::Builtin(Rc::new(|vm, args| {
-            let value = args.first().cloned().unwrap_or(Value::Undefined);
-            vm.to_object_value(value.clone())?;
-            Ok(value)
-        })),
-    );
-    intrinsics.hidden_builtins.insert(
-        "forInKeys".to_string(),
-        Value::Builtin(Rc::new(|vm, args| {
-            let target = args.first().cloned().unwrap_or(Value::Undefined);
-            let keys = vm.for_in_keys_of_value(&target)?;
-            Ok(array_from_values(
-                keys.into_iter().map(Value::String).collect(),
-            ))
-        })),
-    );
-    intrinsics.hidden_builtins.insert(
-        "objectDefineProperty".to_string(),
-        Value::Builtin(Rc::new(Vm::define_property_builtin)),
-    );
+    install_hidden_builtins(&mut intrinsics);
 
     intrinsics
 }
