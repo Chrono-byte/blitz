@@ -4178,7 +4178,10 @@ impl Vm {
         let mut desc = PartialDescriptor::default();
         if !matches!(
             v,
-            Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::BuiltinObject(_, _)
+            Value::Object(_)
+                | Value::Array(..)
+                | Value::Closure { .. }
+                | Value::BuiltinObject(_, _)
         ) {
             return Err(self.throw_type_error("Property description must be an object"));
         }

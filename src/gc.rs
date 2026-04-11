@@ -122,10 +122,7 @@ pub fn collect(roots: &[Value]) -> GcStats {
 }
 
 /// Prototype collector entry point with explicit closure-environment roots.
-pub fn collect_with_env_roots(
-    roots: &[Value],
-    env_roots: &[Rc<Mutex<Vec<ValueSlot>>>],
-) -> GcStats {
+pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSlot>>>]) -> GcStats {
     {
         {
             let clear_envs_aggressively = false;
