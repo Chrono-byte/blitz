@@ -418,13 +418,7 @@ impl super::Compiler {
                 self.emit(Op::CallIC, LINE);
                 self.emit_byte(1, LINE);
                 if a.rest.is_none() {
-                    let source_slot = self.alloc_temp_local("array_binding_source");
                     let iterator_slot = self.alloc_temp_local("array_binding_iterator");
-                    self.emit(Op::SetLocal, LINE);
-                    self.emit_byte(source_slot as u8, LINE);
-
-                    self.emit(Op::GetLocal, LINE);
-                    self.emit_byte(source_slot as u8, LINE);
                     self.emit(Op::Dup, LINE);
                     self.emit_get_global_name("Symbol");
                     self.emit_constant(Value::String("iterator".to_string()), LINE);

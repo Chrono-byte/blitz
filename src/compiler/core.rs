@@ -664,13 +664,7 @@ impl Compiler {
         &mut self,
         home_slot: usize,
     ) -> Result<(), CompilerError> {
-        let method_slot = self.alloc_temp_local("method_closure");
         self.emit(Op::Dup, LINE);
-        self.emit(Op::SetLocal, LINE);
-        self.emit_byte(method_slot as u8, LINE);
-
-        self.emit(Op::GetLocal, LINE);
-        self.emit_byte(method_slot as u8, LINE);
         self.emit_constant(Value::String("[[HomeObject]]".to_string()), LINE);
         self.emit(Op::GetLocal, LINE);
         self.emit_byte(home_slot as u8, LINE);

@@ -1434,10 +1434,8 @@ impl Compiler {
             self.emit_constant(Value::String("prototype".to_string()), LINE);
             self.emit(Op::GetProperty, LINE);
             let home_slot = self.alloc_temp_local("class_home");
-            self.emit(Op::Dup, LINE);
             self.emit(Op::SetLocal, LINE);
             self.emit_byte(home_slot as u8, LINE);
-            self.emit(Op::Pop, LINE);
             Some(home_slot)
         } else {
             None

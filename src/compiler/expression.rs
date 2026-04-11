@@ -207,13 +207,15 @@ impl super::Compiler {
         Ok(())
     }
 
-    fn emit_reference_set_from_slot(
+    fn emit_reference_set_current_value(
         &mut self,
         object_slot: usize,
         key_slot: usize,
-        value_slot: usize,
         use_ic: bool,
     ) -> Result<(), crate::errors::CompilerError> {
+        let value_slot = self.alloc_temp_local("ref_value");
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(value_slot as u8, LINE);
         self.emit(Op::GetLocal, LINE);
         self.emit_byte(object_slot as u8, LINE);
         self.emit(Op::GetLocal, LINE);
@@ -890,15 +892,7 @@ impl super::Compiler {
                                 self.emit_reference_get(object_slot, key_slot, true)?;
                                 self.compile_expr_oast(&a.right)?;
                                 self.emit_compound_assignment_op(a.operator);
-                                let value_slot = self.alloc_temp_local("ref_value");
-                                self.emit(Op::SetLocal, LINE);
-                                self.emit_byte(value_slot as u8, LINE);
-                                self.emit_reference_set_from_slot(
-                                    object_slot,
-                                    key_slot,
-                                    value_slot,
-                                    true,
-                                )?;
+                                self.emit_reference_set_current_value(object_slot, key_slot, true)?;
                             }
                         }
                         oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
@@ -931,13 +925,9 @@ impl super::Compiler {
                                 self.emit_reference_get(object_slot, key_slot, false)?;
                                 self.compile_expr_oast(&a.right)?;
                                 self.emit_compound_assignment_op(a.operator);
-                                let value_slot = self.alloc_temp_local("ref_value");
-                                self.emit(Op::SetLocal, LINE);
-                                self.emit_byte(value_slot as u8, LINE);
-                                self.emit_reference_set_from_slot(
+                                self.emit_reference_set_current_value(
                                     object_slot,
                                     key_slot,
-                                    value_slot,
                                     false,
                                 )?;
                             }
@@ -1009,15 +999,7 @@ impl super::Compiler {
                             self.emit_byte(0, LINE);
                             self.emit(Op::Pop, LINE);
                             self.compile_expr_oast(&a.right)?;
-                            let value_slot = self.alloc_temp_local("ref_value");
-                            self.emit(Op::SetLocal, LINE);
-                            self.emit_byte(value_slot as u8, LINE);
-                            self.emit_reference_set_from_slot(
-                                object_slot,
-                                key_slot,
-                                value_slot,
-                                true,
-                            )?;
+                            self.emit_reference_set_current_value(object_slot, key_slot, true)?;
                             self.patch_jump(jump_end);
                         }
                         oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
@@ -1031,15 +1013,7 @@ impl super::Compiler {
                             self.emit_byte(0, LINE);
                             self.emit(Op::Pop, LINE);
                             self.compile_expr_oast(&a.right)?;
-                            let value_slot = self.alloc_temp_local("ref_value");
-                            self.emit(Op::SetLocal, LINE);
-                            self.emit_byte(value_slot as u8, LINE);
-                            self.emit_reference_set_from_slot(
-                                object_slot,
-                                key_slot,
-                                value_slot,
-                                false,
-                            )?;
+                            self.emit_reference_set_current_value(object_slot, key_slot, false)?;
                             self.patch_jump(jump_end);
                         }
                         _ => {
@@ -1109,15 +1083,7 @@ impl super::Compiler {
                             self.emit_byte(0, LINE);
                             self.emit(Op::Pop, LINE);
                             self.compile_expr_oast(&a.right)?;
-                            let value_slot = self.alloc_temp_local("ref_value");
-                            self.emit(Op::SetLocal, LINE);
-                            self.emit_byte(value_slot as u8, LINE);
-                            self.emit_reference_set_from_slot(
-                                object_slot,
-                                key_slot,
-                                value_slot,
-                                true,
-                            )?;
+                            self.emit_reference_set_current_value(object_slot, key_slot, true)?;
                             self.patch_jump(jump_end);
                         }
                         oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
@@ -1131,15 +1097,7 @@ impl super::Compiler {
                             self.emit_byte(0, LINE);
                             self.emit(Op::Pop, LINE);
                             self.compile_expr_oast(&a.right)?;
-                            let value_slot = self.alloc_temp_local("ref_value");
-                            self.emit(Op::SetLocal, LINE);
-                            self.emit_byte(value_slot as u8, LINE);
-                            self.emit_reference_set_from_slot(
-                                object_slot,
-                                key_slot,
-                                value_slot,
-                                false,
-                            )?;
+                            self.emit_reference_set_current_value(object_slot, key_slot, false)?;
                             self.patch_jump(jump_end);
                         }
                         _ => {
@@ -1229,15 +1187,7 @@ impl super::Compiler {
                             self.patch_jump(jump_end);
                             self.emit(Op::Pop, LINE);
                             self.compile_expr_oast(&a.right)?;
-                            let value_slot = self.alloc_temp_local("ref_value");
-                            self.emit(Op::SetLocal, LINE);
-                            self.emit_byte(value_slot as u8, LINE);
-                            self.emit_reference_set_from_slot(
-                                object_slot,
-                                key_slot,
-                                value_slot,
-                                true,
-                            )?;
+                            self.emit_reference_set_current_value(object_slot, key_slot, true)?;
                             self.patch_jump(after_store);
                         }
                         oast::SimpleAssignmentTarget::ComputedMemberExpression(m) => {
@@ -1256,15 +1206,7 @@ impl super::Compiler {
                             self.patch_jump(jump_end);
                             self.emit(Op::Pop, LINE);
                             self.compile_expr_oast(&a.right)?;
-                            let value_slot = self.alloc_temp_local("ref_value");
-                            self.emit(Op::SetLocal, LINE);
-                            self.emit_byte(value_slot as u8, LINE);
-                            self.emit_reference_set_from_slot(
-                                object_slot,
-                                key_slot,
-                                value_slot,
-                                false,
-                            )?;
+                            self.emit_reference_set_current_value(object_slot, key_slot, false)?;
                             self.patch_jump(after_store);
                         }
                         _ => {
@@ -1414,10 +1356,7 @@ impl super::Compiler {
                             oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
                             oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
                         }
-                        let new_slot = self.alloc_temp_local("ref_new");
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(new_slot as u8, LINE);
-                        self.emit_reference_set_from_slot(object_slot, key_slot, new_slot, true)?;
+                        self.emit_reference_set_current_value(object_slot, key_slot, true)?;
                         if !u.prefix {
                             self.emit(Op::Pop, LINE);
                         }
@@ -1440,10 +1379,7 @@ impl super::Compiler {
                             oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
                             oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
                         }
-                        let new_slot = self.alloc_temp_local("ref_new");
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(new_slot as u8, LINE);
-                        self.emit_reference_set_from_slot(object_slot, key_slot, new_slot, false)?;
+                        self.emit_reference_set_current_value(object_slot, key_slot, false)?;
                         if !u.prefix {
                             self.emit(Op::Pop, LINE);
                         }
@@ -1601,7 +1537,6 @@ impl super::Compiler {
                     self.emit_super_property_get_static(m.property.name.as_str(), false)?;
                 } else {
                     self.compile_expr_oast(&m.object)?;
-                    self.emit_constant(Value::String(m.property.name.to_string()), LINE);
                     if m.optional {
                         self.emit(Op::Dup, LINE);
                         self.emit(Op::JumpIfNullish, LINE);
@@ -1615,11 +1550,13 @@ impl super::Compiler {
                         self.emit_byte(0, LINE);
                         self.emit_byte(0, LINE);
                         self.patch_jump(skip_nullish);
+                        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
                         self.emit(Op::GetPropertyIC, LINE);
                         let slot = self.alloc_ic_slot()?;
                         self.emit_byte(slot, LINE);
                         self.patch_jump(end);
                     } else {
+                        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
                         self.emit(Op::GetPropertyIC, LINE);
                         let slot = self.alloc_ic_slot()?;
                         self.emit_byte(slot, LINE);
@@ -1636,7 +1573,6 @@ impl super::Compiler {
                     self.emit_super_property_get_computed(&m.expression, false)?;
                 } else {
                     self.compile_expr_oast(&m.object)?;
-                    self.compile_expr_oast(&m.expression)?;
                     if m.optional {
                         self.emit(Op::Dup, LINE);
                         self.emit(Op::JumpIfNullish, LINE);
@@ -1650,9 +1586,11 @@ impl super::Compiler {
                         self.emit_byte(0, LINE);
                         self.emit_byte(0, LINE);
                         self.patch_jump(skip_nullish);
+                        self.compile_expr_oast(&m.expression)?;
                         self.emit(Op::GetProperty, LINE);
                         self.patch_jump(end);
                     } else {
+                        self.compile_expr_oast(&m.expression)?;
                         self.emit(Op::GetProperty, LINE);
                     }
                 }
@@ -1670,7 +1608,6 @@ impl super::Compiler {
                             self.emit_super_property_get_static(m.property.name.as_str(), false)?;
                         } else {
                             self.compile_expr_oast(&m.object)?;
-                            self.emit_constant(Value::String(m.property.name.to_string()), LINE);
                             if m.optional {
                                 self.emit(Op::Dup, LINE);
                                 self.emit(Op::JumpIfNullish, LINE);
@@ -1684,11 +1621,19 @@ impl super::Compiler {
                                 self.emit_byte(0, LINE);
                                 self.emit_byte(0, LINE);
                                 self.patch_jump(skip_nullish);
+                                self.emit_constant(
+                                    Value::String(m.property.name.to_string()),
+                                    LINE,
+                                );
                                 self.emit(Op::GetPropertyIC, LINE);
                                 let slot = self.alloc_ic_slot()?;
                                 self.emit_byte(slot, LINE);
                                 self.patch_jump(end);
                             } else {
+                                self.emit_constant(
+                                    Value::String(m.property.name.to_string()),
+                                    LINE,
+                                );
                                 self.emit(Op::GetPropertyIC, LINE);
                                 let slot = self.alloc_ic_slot()?;
                                 self.emit_byte(slot, LINE);
@@ -1705,7 +1650,6 @@ impl super::Compiler {
                             self.emit_super_property_get_computed(&m.expression, false)?;
                         } else {
                             self.compile_expr_oast(&m.object)?;
-                            self.compile_expr_oast(&m.expression)?;
                             if m.optional {
                                 self.emit(Op::Dup, LINE);
                                 self.emit(Op::JumpIfNullish, LINE);
@@ -1719,9 +1663,11 @@ impl super::Compiler {
                                 self.emit_byte(0, LINE);
                                 self.emit_byte(0, LINE);
                                 self.patch_jump(skip_nullish);
+                                self.compile_expr_oast(&m.expression)?;
                                 self.emit(Op::GetProperty, LINE);
                                 self.patch_jump(end);
                             } else {
+                                self.compile_expr_oast(&m.expression)?;
                                 self.emit(Op::GetProperty, LINE);
                             }
                         }
@@ -2228,17 +2174,12 @@ impl super::Compiler {
                 self.emit(Op::MakeClosure, LINE);
                 self.emit_byte(idx as u8, LINE);
                 // To initialize class elements we need a local slot to hold the
-                // constructor while we install methods. Duplicate the ctor and
-                // store into a temp local so the original ctor remains on the
-                // stack as the expression result.
+                // constructor while we install methods.
                 let temp_name = format!("__class_ctor_{}", self.locals.len());
                 let temp_slot = self.add_local_with_mirror(temp_name, None, false);
-                // dup ctor -> [ctor, ctor]
                 self.emit(Op::Dup, LINE);
-                // set local consumes one ctor -> [ctor]
                 self.emit(Op::SetLocal, LINE);
                 self.emit_byte(temp_slot as u8, LINE);
-                self.emit(Op::Pop, LINE);
 
                 // Emit class elements (methods) similar to declaration lowering.
                 let instance_home_slot = if c.body.body.iter().any(|element| {
@@ -2249,10 +2190,8 @@ impl super::Compiler {
                     self.emit_constant(Value::String("prototype".to_string()), LINE);
                     self.emit(Op::GetProperty, LINE);
                     let home_slot = self.alloc_temp_local("class_home");
-                    self.emit(Op::Dup, LINE);
                     self.emit(Op::SetLocal, LINE);
                     self.emit_byte(home_slot as u8, LINE);
-                    self.emit(Op::Pop, LINE);
                     Some(home_slot)
                 } else {
                     None
@@ -2267,8 +2206,6 @@ impl super::Compiler {
                         self.emit_class_member_installation(target_slot, md)?;
                     }
                 }
-                self.emit(Op::GetLocal, LINE);
-                self.emit_byte(temp_slot as u8, LINE);
             }
             OExpr::AwaitExpression(a) => {
                 self.compile_expr_oast(&a.argument)?;
