@@ -168,7 +168,7 @@ pub struct Intrinsics {
 #[derive(Clone)]
 pub struct Realm {
     /// Canonical intrinsics for this realm.
-    pub intrinsics: Intrinsics,
+    pub intrinsics: Rc<Intrinsics>,
     /// The global object (`globalThis` / the global environment's object record).
     pub global_object: Rc<RefCell<ObjectData>>,
 }
@@ -177,7 +177,7 @@ impl Realm {
     /// Create a new Realm with an empty global object and default intrinsics.
     pub fn new() -> Self {
         Self {
-            intrinsics: Intrinsics::default(),
+            intrinsics: Rc::new(Intrinsics::default()),
             global_object: Rc::new(RefCell::new(ObjectData::new())),
         }
     }
@@ -185,7 +185,7 @@ impl Realm {
     /// Create a Realm that wraps an existing globals object.
     pub fn with_globals(globals: Rc<RefCell<ObjectData>>) -> Self {
         Self {
-            intrinsics: Intrinsics::default(),
+            intrinsics: Rc::new(Intrinsics::default()),
             global_object: globals,
         }
     }
@@ -215,128 +215,163 @@ impl Realm {
         );
     }
 
+    /// Borrow the canonical `Object.prototype` for this realm.
+    pub fn object_prototype_ref(&self) -> Option<&Value> {
+        self.intrinsics.object_prototype.as_ref()
+    }
+
     /// Get the canonical `Object.prototype` for this realm.
     pub fn object_prototype(&self) -> Value {
-        self.intrinsics
-            .object_prototype
-            .clone()
-            .unwrap_or(Value::Null)
+        self.object_prototype_ref().cloned().unwrap_or(Value::Null)
+    }
+
+    /// Borrow the canonical `Function.prototype` for this realm.
+    pub fn function_prototype_ref(&self) -> Option<&Value> {
+        self.intrinsics.function_prototype.as_ref()
     }
 
     /// Get the canonical `Function.prototype` for this realm.
     pub fn function_prototype(&self) -> Value {
+        self.function_prototype_ref().cloned().unwrap_or(Value::Null)
+    }
+
+    /// Borrow the canonical `GeneratorFunction.prototype` for this realm.
+    pub fn generator_function_prototype_ref(&self) -> Option<&Value> {
         self.intrinsics
-            .function_prototype
-            .clone()
-            .unwrap_or(Value::Null)
+            .generator_function_prototype
+            .as_ref()
+            .or_else(|| self.function_prototype_ref())
     }
 
     /// Get the canonical `GeneratorFunction.prototype` for this realm.
     pub fn generator_function_prototype(&self) -> Value {
+        self.generator_function_prototype_ref()
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
+    /// Borrow the canonical `Generator.prototype` for this realm.
+    pub fn generator_prototype_ref(&self) -> Option<&Value> {
         self.intrinsics
-            .generator_function_prototype
-            .clone()
-            .unwrap_or_else(|| self.function_prototype())
+            .generator_prototype
+            .as_ref()
+            .or_else(|| self.object_prototype_ref())
     }
 
     /// Get the canonical `Generator.prototype` for this realm.
     pub fn generator_prototype(&self) -> Value {
-        self.intrinsics
-            .generator_prototype
-            .clone()
-            .unwrap_or_else(|| self.object_prototype())
+        self.generator_prototype_ref().cloned().unwrap_or(Value::Null)
+    }
+
+    /// Borrow the canonical `Array.prototype` for this realm.
+    pub fn array_prototype_ref(&self) -> Option<&Value> {
+        self.intrinsics.array_prototype.as_ref()
     }
 
     /// Get the canonical `Array.prototype` for this realm.
     pub fn array_prototype(&self) -> Value {
-        self.intrinsics
-            .array_prototype
-            .clone()
-            .unwrap_or(Value::Null)
+        self.array_prototype_ref().cloned().unwrap_or(Value::Null)
+    }
+
+    /// Borrow the canonical `Error.prototype` for this realm.
+    pub fn error_prototype_ref(&self) -> Option<&Value> {
+        self.intrinsics.error_prototype.as_ref()
     }
 
     /// Get the canonical `Error.prototype` for this realm.
     pub fn error_prototype(&self) -> Value {
-        self.intrinsics
-            .error_prototype
-            .clone()
-            .unwrap_or(Value::Null)
+        self.error_prototype_ref().cloned().unwrap_or(Value::Null)
+    }
+
+    /// Borrow a constructor intrinsic by name.
+    pub fn intrinsic_constructor(&self, name: &str) -> Option<&Value> {
+        match name {
+            "Boolean" => self.intrinsics.boolean_constructor.as_ref(),
+            "BigInt" => self.intrinsics.bigint_constructor.as_ref(),
+            "Object" => self.intrinsics.object_constructor.as_ref(),
+            "Array" => self.intrinsics.array_constructor.as_ref(),
+            "Function" => self.intrinsics.function_constructor.as_ref(),
+            "String" => self.intrinsics.string_constructor.as_ref(),
+            "Symbol" => self.intrinsics.symbol_constructor.as_ref(),
+            "Number" => self.intrinsics.number_constructor.as_ref(),
+            "Error" => self.intrinsics.error_constructor.as_ref(),
+            "AggregateError" => self.intrinsics.aggregate_error_constructor.as_ref(),
+            "TypeError" => self.intrinsics.type_error_constructor.as_ref(),
+            "RangeError" => self.intrinsics.range_error_constructor.as_ref(),
+            "ReferenceError" => self.intrinsics.reference_error_constructor.as_ref(),
+            "SyntaxError" => self.intrinsics.syntax_error_constructor.as_ref(),
+            "EvalError" => self.intrinsics.eval_error_constructor.as_ref(),
+            "URIError" => self.intrinsics.uri_error_constructor.as_ref(),
+            "Promise" => self.intrinsics.promise_constructor.as_ref(),
+            "Date" => self.intrinsics.date_constructor.as_ref(),
+            "RegExp" => self.intrinsics.regexp_constructor.as_ref(),
+            "Map" => self.intrinsics.map_constructor.as_ref(),
+            "Set" => self.intrinsics.set_constructor.as_ref(),
+            "ArrayBuffer" => self.intrinsics.arraybuffer_constructor.as_ref(),
+            "SharedArrayBuffer" => self.intrinsics.shared_array_buffer_constructor.as_ref(),
+            "DataView" => self.intrinsics.data_view_constructor.as_ref(),
+            "TypedArray" => self.intrinsics.typed_array_constructor.as_ref(),
+            _ => None,
+        }
     }
 
     /// Retrieve a constructor intrinsic by name.
     pub fn get_intrinsic_constructor(&self, name: &str) -> Option<Value> {
+        self.intrinsic_constructor(name).cloned()
+    }
+
+    /// Borrow a prototype intrinsic by name.
+    pub fn intrinsic_prototype(&self, name: &str) -> Option<&Value> {
         match name {
-            "Boolean" => self.intrinsics.boolean_constructor.clone(),
-            "BigInt" => self.intrinsics.bigint_constructor.clone(),
-            "Object" => self.intrinsics.object_constructor.clone(),
-            "Array" => self.intrinsics.array_constructor.clone(),
-            "Function" => self.intrinsics.function_constructor.clone(),
-            "String" => self.intrinsics.string_constructor.clone(),
-            "Symbol" => self.intrinsics.symbol_constructor.clone(),
-            "Number" => self.intrinsics.number_constructor.clone(),
-            "Error" => self.intrinsics.error_constructor.clone(),
-            "AggregateError" => self.intrinsics.aggregate_error_constructor.clone(),
-            "TypeError" => self.intrinsics.type_error_constructor.clone(),
-            "RangeError" => self.intrinsics.range_error_constructor.clone(),
-            "ReferenceError" => self.intrinsics.reference_error_constructor.clone(),
-            "SyntaxError" => self.intrinsics.syntax_error_constructor.clone(),
-            "EvalError" => self.intrinsics.eval_error_constructor.clone(),
-            "URIError" => self.intrinsics.uri_error_constructor.clone(),
-            "Promise" => self.intrinsics.promise_constructor.clone(),
-            "Date" => self.intrinsics.date_constructor.clone(),
-            "RegExp" => self.intrinsics.regexp_constructor.clone(),
-            "Map" => self.intrinsics.map_constructor.clone(),
-            "Set" => self.intrinsics.set_constructor.clone(),
-            "ArrayBuffer" => self.intrinsics.arraybuffer_constructor.clone(),
-            "SharedArrayBuffer" => self.intrinsics.shared_array_buffer_constructor.clone(),
-            "DataView" => self.intrinsics.data_view_constructor.clone(),
-            "TypedArray" => self.intrinsics.typed_array_constructor.clone(),
+            "Object" => self.intrinsics.object_prototype.as_ref(),
+            "Array" => self.intrinsics.array_prototype.as_ref(),
+            "Function" => self.intrinsics.function_prototype.as_ref(),
+            "GeneratorFunction" => self.intrinsics.generator_function_prototype.as_ref(),
+            "Generator" => self.intrinsics.generator_prototype.as_ref(),
+            "String" => self.intrinsics.string_prototype.as_ref(),
+            "Symbol" => self.intrinsics.symbol_prototype.as_ref(),
+            "Error" => self.intrinsics.error_prototype.as_ref(),
+            "Promise" => self.intrinsics.promise_prototype.as_ref(),
+            "Date" => self.intrinsics.date_prototype.as_ref(),
+            "Map" => self.intrinsics.map_prototype.as_ref(),
+            "Set" => self.intrinsics.set_prototype.as_ref(),
+            "TypedArray" => self.intrinsics.typed_array_prototype.as_ref(),
+            "Boolean" => self.intrinsics.boolean_prototype.as_ref(),
+            "Number" => self.intrinsics.number_prototype.as_ref(),
+            "BigInt" => self.intrinsics.bigint_prototype.as_ref(),
+            "RegExp" => self.intrinsics.regexp_prototype.as_ref(),
+            "ArrayBuffer" => self.intrinsics.arraybuffer_prototype.as_ref(),
+            "SharedArrayBuffer" => self.intrinsics.shared_array_buffer_prototype.as_ref(),
+            "DataView" => self.intrinsics.data_view_prototype.as_ref(),
             _ => None,
         }
     }
 
     /// Retrieve a prototype intrinsic by name.
     pub fn get_intrinsic_prototype(&self, name: &str) -> Option<Value> {
-        match name {
-            "Object" => self.intrinsics.object_prototype.clone(),
-            "Array" => self.intrinsics.array_prototype.clone(),
-            "Function" => self.intrinsics.function_prototype.clone(),
-            "GeneratorFunction" => self.intrinsics.generator_function_prototype.clone(),
-            "Generator" => self.intrinsics.generator_prototype.clone(),
-            "String" => self.intrinsics.string_prototype.clone(),
-            "Symbol" => self.intrinsics.symbol_prototype.clone(),
-            "Error" => self.intrinsics.error_prototype.clone(),
-            "Promise" => self.intrinsics.promise_prototype.clone(),
-            "Date" => self.intrinsics.date_prototype.clone(),
-            "Map" => self.intrinsics.map_prototype.clone(),
-            "Set" => self.intrinsics.set_prototype.clone(),
-            "TypedArray" => self.intrinsics.typed_array_prototype.clone(),
-            "Boolean" => self.intrinsics.boolean_prototype.clone(),
-            "Number" => self.intrinsics.number_prototype.clone(),
-            "BigInt" => self.intrinsics.bigint_prototype.clone(),
-            "RegExp" => self.intrinsics.regexp_prototype.clone(),
-            "ArrayBuffer" => self.intrinsics.arraybuffer_prototype.clone(),
-            "SharedArrayBuffer" => self.intrinsics.shared_array_buffer_prototype.clone(),
-            "DataView" => self.intrinsics.data_view_prototype.clone(),
-            _ => None,
-        }
+        self.intrinsic_prototype(name).cloned()
     }
 
     /// Replace the stored intrinsics with a fresh set constructed by the kernel prelude.
     pub fn set_intrinsics(&mut self, intrinsics: Intrinsics) {
-        self.intrinsics = intrinsics;
+        self.intrinsics = Rc::new(intrinsics);
     }
 
     /// Register a VM-internal builtin that is resolved by `GetBuiltin`.
     pub fn set_hidden_builtin(&mut self, name: &str, value: Value) {
-        self.intrinsics
+        Rc::make_mut(&mut self.intrinsics)
             .hidden_builtins
             .insert(name.to_string(), value);
     }
 
+    /// Borrow a VM-internal builtin by name.
+    pub fn hidden_builtin(&self, name: &str) -> Option<&Value> {
+        self.intrinsics.hidden_builtins.get(name)
+    }
+
     /// Look up a VM-internal builtin by name.
     pub fn get_hidden_builtin(&self, name: &str) -> Option<Value> {
-        self.intrinsics.hidden_builtins.get(name).cloned()
+        self.hidden_builtin(name).cloned()
     }
 }
 

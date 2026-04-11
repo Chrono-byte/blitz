@@ -6,13 +6,6 @@
 //! - Import extraction for module graph building
 //! - Error conversion to Blitz error types
 //!
-//! # Migration Note
-//!
-//! Historically this module converted Oxc's ESTree JSON into an internal AST.
-//! The legacy conversion helpers were removed during migration to use `oxc_ast`
-//! natively. Callers should use [`Parser::parse_source`] which returns an
-//! `oast::Program` (an alias for `oxc_ast::ast::Program`).
-//!
 //! # Example
 //!
 //! ```no_run

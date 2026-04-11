@@ -199,6 +199,13 @@ impl Vm {
             on_fulfilled: Vec::new(),
             on_rejected: Vec::new(),
         })));
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] invoke_async_closure start promise={:p} fn='{}'",
+                Rc::as_ptr(&promise),
+                proto.name
+            );
+        }
 
         let proto = Rc::clone(proto);
         let env = Rc::clone(env);
@@ -238,21 +245,53 @@ impl Vm {
         self.maybe_collect_garbage_prototype();
         match exec_result {
             Ok(result) => {
+                if crate::trace::enabled() {
+                    eprintln!(
+                        "[trace] invoke_async_closure queue_resolve promise={:p}",
+                        Rc::as_ptr(&promise_for_job)
+                    );
+                }
                 let promise_job = Rc::clone(&promise_for_job);
                 let mut result_cell = Some(result);
                 self.queue_microtask(move |vm| {
+                    if crate::trace::enabled() {
+                        eprintln!(
+                            "[trace] invoke_async_closure run_resolve promise={:p}",
+                            Rc::as_ptr(&promise_job)
+                        );
+                    }
                     let value = result_cell.take().unwrap();
-                    resolve_promise_with_value(vm, &promise_job, value)?;
+                    if crate::trace::enabled() {
+                        crate::trace::value_string("[trace] invoke_async_closure resolve_value", &value);
+                    }
+                    if let Err(err) = resolve_promise_with_value(vm, &promise_job, value) {
+                        if crate::trace::enabled() {
+                            eprintln!("[trace] invoke_async_closure resolve_error: {}", err);
+                        }
+                        return Err(err);
+                    }
                     Ok(())
                 });
             }
             Err(err) => {
+                if crate::trace::enabled() {
+                    eprintln!(
+                        "[trace] invoke_async_closure queue_reject promise={:p}",
+                        Rc::as_ptr(&promise_for_job)
+                    );
+                }
                 let reason = thrown_value
                     .or_else(|| self.last_uncaught_exception.take())
                     .unwrap_or_else(|| Value::String(format!("{}", err)));
                 let promise_job = Rc::clone(&promise_for_job);
                 let mut reason_cell = Some(reason);
                 self.queue_microtask(move |vm| {
+                    if crate::trace::enabled() {
+                        eprintln!(
+                            "[trace] invoke_async_closure run_reject promise={:p}",
+                            Rc::as_ptr(&promise_job)
+                        );
+                    }
                     let reason = reason_cell.take().unwrap();
                     reject_pending_promise(vm, &promise_job, reason);
                     Ok(())

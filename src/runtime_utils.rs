@@ -606,11 +606,26 @@ pub(crate) fn same_value_zero(a: &Value, b: &Value) -> bool {
     }
 }
 
-pub(crate) fn static_builtin_arg_offset(vm: &Vm, _args: &[Value], _global_name: &str) -> usize {
-    if vm.current_new_target().is_some() || vm.builtin_this_arg_prepended() {
-        return 1;
+pub(crate) fn static_builtin_arg_offset(vm: &Vm, args: &[Value], global_name: &str) -> usize {
+    let has_new_target = vm.current_new_target().is_some();
+    let prepended_this = vm.builtin_this_arg_prepended();
+    let offset = if has_new_target || prepended_this {
+        1
+    } else {
+        0
+    };
+    if crate::trace::enabled() && global_name == "Object" {
+        let first_type = args.first().map_or("<none>", Value::type_name);
+        eprintln!(
+            "[trace] static_builtin_arg_offset Object -> {} (new_target={}, prepended_this={}, args_len={}, arg0_type={})",
+            offset,
+            has_new_target,
+            prepended_this,
+            args.len(),
+            first_type
+        );
     }
-    0
+    offset
 }
 
 pub(crate) fn promise_constructor_matches(
@@ -921,6 +936,13 @@ pub(crate) fn fulfill_pending_promise(
     let mut state = promise.borrow_mut();
     if let PromiseState::Pending { on_fulfilled, .. } = &mut *state {
         let callbacks = std::mem::take(on_fulfilled);
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] fulfill_pending_promise promise={:p} callbacks={}",
+                Rc::as_ptr(promise),
+                callbacks.len()
+            );
+        }
         let stored_value = value.clone();
         *state = PromiseState::Fulfilled(value);
         drop(state);
@@ -946,6 +968,13 @@ pub(crate) fn reject_pending_promise(
     let mut state = promise.borrow_mut();
     if let PromiseState::Pending { on_rejected, .. } = &mut *state {
         let callbacks = std::mem::take(on_rejected);
+        if crate::trace::enabled() {
+            eprintln!(
+                "[trace] reject_pending_promise promise={:p} callbacks={}",
+                Rc::as_ptr(promise),
+                callbacks.len()
+            );
+        }
         let stored_reason = reason.clone();
         let handled = !callbacks.is_empty();
         *state = PromiseState::Rejected { reason, handled };
