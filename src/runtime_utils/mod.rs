@@ -1,0 +1,689 @@
+//! Utility functions for runtime operations.
+//!
+//! Notes on ECMAScript conformance
+//!
+//! This module contains a number of pragmatic, simplified, or host-specific
+//! implementations of ECMAScript semantics used by the VM. The implementations
+//! in this file are intentionally pragmatic (smaller and easier to test) and
+//! therefore diverge from ECMA-262 in several observable ways. Call sites
+//! should treat the behaviour here as engine-specific unless the code is
+//! adjusted to follow the spec precisely.
+//!
+//! Known divergences (summary):
+//! - Module namespace objects are created as plain objects with copied values
+//!   rather than the spec-defined exotic namespace objects backed by live
+//!   export slots. See `ModuleLoader` in `src/module.rs` for details.
+//! - Dynamic `import()` is implemented synchronously in places and does not
+//!   always follow Promise job/microtask timing; import `options` are
+//!   currently ignored in some paths.
+//! - Promise/thenable resolution is implemented with direct calls to `then`
+//!   helpers which can resolve synchronously; the spec requires careful job
+//!   scheduling (PromiseResolveThenableJob) to match observed ordering. Concretely
+//!   this runtime calls a detected `then` property synchronously and invokes
+//!   the resolve/reject callbacks immediately which can produce different
+//!   microtask ordering compared to a spec-conformant engine.
+//! - Microtask/job queue draining is host-specific: thrown errors will abort
+//!   remaining microtasks in the current implementation. Hosts usually run
+//!   microtasks to completion and handle exceptions via host-defined hooks.
+//! - Some Array prototype methods are simplified and differ from spec (for
+//!   example `reduce` and `sort` edge cases and iterator behaviour). Concrete
+//!   deviations include:
+//!   * `Array.prototype.reduce`: when no initial value is provided and the
+//!     array has no defined elements the spec requires a TypeError; current
+//!     implementation returns `undefined` or behaves differently.
+//!   * `Array.prototype.sort`: comparator semantics are simplified; compare
+//!     results were interpreted via `is_sign_positive` rather than the proper
+//!     ToNumber negative/zero/positive semantics and NaN handling.
+//!   * Array iterators: the iterator factory is implemented as a stub that
+//!     does not produce a proper iterator over elements (iterator `next`
+//!     semantics are simplified). Implementing a proper iterator object is
+//!     required for conformance.
+//! - Object own-key ordering is built from HashMap iteration and thus does
+//!   not follow the spec ordering rules for integer indices / string keys /
+//!   symbols.
+//! - TypeScript slot-type runtime checks are a non-standard extension: the
+//!   VM can optionally enforce compile-time slot types at runtime; this is
+//!   not part of ECMA-262.
+//!
+//! Where behaviour is observable by user code (module namespace live bindings,
+//! promise/microtask ordering, array semantics, property key order), the
+//! implementation is considered non-compliant with ECMA-262 and should be
+//! updated if strict conformance is required. See the project notes and
+//! module-level comments in `src/module.rs`, `src/vm/runtime/async_tasks.rs`,
+//! and `src/vm/state.rs` for targeted recommendations.
+
+use std::borrow::Cow;
+use std::cell::{RefCell, RefMut};
+use std::collections::{HashMap, HashSet};
+use std::env;
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use crate::compiler;
+use crate::compiler::ModuleContext;
+use crate::gc;
+use crate::mutex_compat::MutexBorrowExt;
+use crate::parser::Parser;
+use crate::realm::Intrinsics;
+use crate::value::SymbolId;
+use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
+use crate::vm::Vm;
+use crate::{RuntimeError, bytecode};
+use num_bigint::{BigInt as BigIntValue, Sign};
+use num_traits::{FromPrimitive, ToPrimitive};
+
+mod atomics;
+mod numbers;
+mod promises;
+mod properties;
+mod shadowrealm;
+mod uri;
+
+pub(crate) use atomics::*;
+pub(crate) use numbers::*;
+pub(crate) use promises::*;
+pub(crate) use properties::*;
+pub(crate) use shadowrealm::*;
+pub(crate) use uri::*;
+pub use promises::install_minimal_kernel_constructors;
+
+pub(crate) fn set_builtin_length(target: &Value, length: f64) {
+    crate::ecmascript::semantics::set_builtin_length(target, length)
+}
+
+pub(crate) fn set_builtin_name(target: &Value, name: &str) {
+    crate::ecmascript::semantics::set_builtin_name(target, name)
+}
+
+/// The maximum array length as a floating-point value.
+const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
+
+/// Clears the slot types in a chunk and its nested function chunks.
+pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
+    // Recursive helper that rebuilds chunks and their nested function chunks.
+    fn rebuild(
+        rc_chunk: &Rc<bytecode::Chunk>,
+        visited: &mut HashMap<*const bytecode::Chunk, Rc<bytecode::Chunk>>,
+    ) -> Rc<bytecode::Chunk> {
+        let key = Rc::as_ptr(rc_chunk);
+        if let Some(existing) = visited.get(&key) {
+            return Rc::clone(existing);
+        }
+
+        // Rebuild the chunk fields, replacing functions with cleared slot types.
+        let mut new_chunk = bytecode::Chunk::new(Rc::clone(&rc_chunk.source_text));
+        new_chunk.code = rc_chunk.code.clone();
+        new_chunk.constants = rc_chunk.constants.clone();
+        new_chunk.lines = rc_chunk.lines.clone();
+        new_chunk.root_slot_types = rc_chunk.root_slot_types.iter().map(|_| None).collect();
+        new_chunk.root_slot_names = rc_chunk.root_slot_names.clone();
+        new_chunk.root_lexical_tdz = rc_chunk.root_lexical_tdz.clone();
+        // Slot/global type annotations removed in JS-first mode; nothing to do.
+
+        // Process functions
+        let mut new_funcs = Vec::new();
+        for f in &rc_chunk.functions {
+            // Rebuild nested chunk for this function
+            let nested = rebuild(&f.chunk, visited);
+            let mut nf = f.clone();
+            // Replace all slot type annotations and return type with None
+            nf.slot_types = nf.slot_types.iter().map(|_| None).collect();
+            nf.return_type = None;
+            nf.chunk = nested;
+            new_funcs.push(nf);
+        }
+        new_chunk.functions = new_funcs;
+
+        let rc_new = Rc::new(new_chunk);
+        visited.insert(key, Rc::clone(&rc_new));
+        rc_new
+    }
+
+    let rc = Rc::new(chunk);
+    let mut visited: HashMap<*const bytecode::Chunk, Rc<bytecode::Chunk>> = HashMap::new();
+    let rc_cleared = rebuild(&rc, &mut visited);
+    Rc::try_unwrap(rc_cleared).unwrap_or_else(|rc| (*rc).clone())
+}
+
+pub(crate) fn strict_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Undefined, Value::Undefined) => true,
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Number(x), Value::Number(y)) => x == y,
+        (Value::BigInt(x), Value::BigInt(y)) => x == y,
+        (Value::Symbol(x, _), Value::Symbol(y, _)) => x == y,
+        (Value::Object(ax), Value::Object(bx)) => Rc::ptr_eq(ax, bx),
+        (Value::Array(ax, _), Value::Array(bx, _)) => Rc::ptr_eq(ax, bx),
+        (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
+        (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
+        (Value::Promise(ap), Value::Promise(bp)) => Rc::ptr_eq(ap, bp),
+        (Value::Builtin(af), Value::Builtin(bf)) => Rc::ptr_eq(af, bf),
+        _ => false,
+    }
+}
+
+pub(crate) fn same_value_zero(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x == y || (x.is_nan() && y.is_nan()),
+        _ => strict_equal(a, b),
+    }
+}
+
+pub(crate) fn static_builtin_arg_offset(vm: &Vm, args: &[Value], global_name: &str) -> usize {
+    let has_new_target = vm.current_new_target().is_some();
+    let prepended_this = vm.builtin_this_arg_prepended();
+    let offset = if has_new_target || prepended_this {
+        1
+    } else {
+        0
+    };
+    if crate::trace::enabled() && global_name == "Object" {
+        let first_type = args.first().map_or("<none>", Value::type_name);
+        eprintln!(
+            "[trace] static_builtin_arg_offset Object -> {} (new_target={}, prepended_this={}, args_len={}, arg0_type={})",
+            offset,
+            has_new_target,
+            prepended_this,
+            args.len(),
+            first_type
+        );
+    }
+    offset
+}
+
+pub(crate) fn to_length(vm: &mut Vm, value: &Value) -> Result<usize, RuntimeError> {
+    let num = vm.to_number_value(value)?;
+    if num.is_nan() || num <= 0.0_f64 {
+        return Ok(0);
+    }
+    if !num.is_finite() {
+        return Err(vm.throw_range_error("Invalid array length"));
+    }
+    let int_len = num.trunc();
+    if int_len > MAX_ARRAY_LENGTH_F {
+        return Err(vm.throw_range_error("Invalid array length"));
+    }
+
+    int_len
+        .to_usize()
+        .ok_or_else(|| vm.throw_range_error("Invalid array length"))
+}
+
+pub(crate) fn to_index(vm: &mut Vm, value: &Value) -> Result<usize, RuntimeError> {
+    let num = vm.to_number_value(value)?;
+    if num.is_nan() {
+        return Ok(0);
+    }
+    if !num.is_finite() || num < 0.0_f64 {
+        return Err(vm.throw_range_error("Invalid array index"));
+    }
+    let int_val = num.trunc();
+    if int_val > MAX_ARRAY_LENGTH_F {
+        return Err(vm.throw_range_error("Invalid array index"));
+    }
+    int_val
+        .to_usize()
+        .ok_or_else(|| vm.throw_range_error("Invalid array index"))
+}
+
+/// Converts a value to an integer index using ECMAScript `ToIntegerOrInfinity`
+/// semantics, returning an `isize` so callers can apply their own bounds checks.
+pub(crate) fn to_integer_or_infinity(vm: &mut Vm, value: &Value) -> Result<isize, RuntimeError> {
+    let num = vm.to_number_value(value)?;
+    if num.is_nan() || num == 0.0 {
+        return Ok(0);
+    }
+    if num.is_infinite() {
+        return Err(vm.throw_range_error("Invalid array index"));
+    }
+    let int_val = num.trunc();
+    if !int_val.is_finite() {
+        return Err(vm.throw_range_error("Invalid array index"));
+    }
+    int_val
+        .to_isize()
+        .ok_or_else(|| vm.throw_range_error("Invalid array index"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AtomicsValueKind {
+    Number { bits: u32, signed: bool },
+    BigInt { signed: bool },
+}
+
+#[derive(Clone)]
+pub(crate) struct AtomicsViewInfo {
+    pub(crate) view: Rc<RefCell<ObjectData>>,
+    pub(crate) data: Rc<RefCell<Vec<Option<Value>>>>,
+    pub(crate) buffer: Rc<RefCell<ObjectData>>,
+    pub(crate) kind_name: String,
+    pub(crate) value_kind: AtomicsValueKind,
+    pub(crate) length: usize,
+    pub(crate) is_shared: bool,
+}
+
+pub(crate) fn syntax_error(vm: &mut Vm, message: String) -> RuntimeError {
+    let err_val = host_error_object(vm, "SyntaxError", &message);
+    vm.throw_exception(err_val)
+}
+
+pub(crate) fn host_error_object(vm: &mut Vm, name: &str, message: &str) -> Value {
+    let mut obj = ObjectData::new();
+    let proto = vm
+        .realm()
+        .get_intrinsic_constructor(name)
+        .and_then(|ctor| {
+            vm.get_property_host(&ctor, &PropertyKey::String("prototype".to_string()))
+                .ok()
+        })
+        .or_else(|| vm.realm().intrinsics.error_prototype.clone());
+    if let Some(proto) = proto {
+        obj.set_prototype_value(proto);
+    }
+    obj.properties.insert(
+        PropertyKey::String("name".to_string()),
+        PropertyDescriptor::data(Value::String(name.to_string())),
+    );
+    obj.properties.insert(
+        PropertyKey::String("message".to_string()),
+        PropertyDescriptor::data(Value::String(message.to_string())),
+    );
+    Value::Object(gc::track_object(Rc::new(RefCell::new(obj))))
+}
+
+pub(crate) fn canonical_index_key(s: &str) -> Option<u64> {
+    if s.is_empty() {
+        return None;
+    }
+    if s != "0" && s.starts_with('0') {
+        return None;
+    }
+    let idx = s.parse::<u64>().ok()?;
+    if !decimal_u64_eq_str(idx, s) {
+        return None;
+    }
+    Some(idx)
+}
+
+/// Returns the UTF-16 code unit at the given index, if one exists.
+pub(crate) fn char_code_at(string: &str, index: usize) -> Option<u32> {
+    string.encode_utf16().nth(index).map(u32::from)
+}
+
+/// Returns the byte index corresponding to the given character index in the string.
+pub(crate) fn char_index_to_byte_index(string: &str, index: usize) -> usize {
+    if index == 0 {
+        return 0;
+    }
+    string
+        .char_indices()
+        .nth(index)
+        .map_or(string.len(), |(byte_idx, _)| byte_idx)
+}
+
+/// Structured-clone helper for cross-realm value transfers used by ShadowRealm
+/// operations. Implements copying semantics for primitives, Array, Object,
+/// Date, RegExp, Map, Set, ArrayBuffer, and TypedArray shaped objects used by
+/// this runtime. Preserves cycles/shared references by using a visited map and
+/// creates host-realm objects with the appropriate host intrinsics as
+/// prototypes. Returns Err(String) for uncloneable values (functions,
+/// promises, symbols, accessors, etc.).
+fn clone_value_across_realms(
+    vm: &mut Vm,
+    value: &Value,
+    transfer_set: Option<&HashSet<usize>>,
+) -> Result<Value, String> {
+    use std::collections::HashMap;
+
+    // visited maps source Rc pointer addresses to already-created clone Values
+    // so we can preserve cycles and shared references.
+    fn helper(
+        vm: &mut Vm,
+        v: &Value,
+        visited: &mut HashMap<usize, Value>,
+        transfer_set: Option<&HashSet<usize>>,
+    ) -> Result<Value, String> {
+        match v {
+            Value::Undefined => Ok(Value::Undefined),
+            Value::Null => Ok(Value::Null),
+            Value::Bool(b) => Ok(Value::Bool(*b)),
+            Value::Number(n) => Ok(Value::Number(*n)),
+            Value::String(s) => Ok(Value::String(s.clone())),
+            Value::BigInt(bi) => Ok(Value::BigInt(bi.clone())),
+            Value::Symbol(_, _) => Err("Cannot clone Symbol across realms".to_string()),
+            Value::Promise(_) => Err("Cannot clone Promise across realms".to_string()),
+            Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. } => {
+                Err("Cannot clone functions/closures across realms".to_string())
+            }
+            Value::Array(arr_rc, props_rc) => {
+                let addr = Rc::as_ptr(arr_rc) as usize;
+                if let Some(existing) = visited.get(&addr) {
+                    return Ok(existing.clone());
+                }
+
+                // Reserve a placeholder array in visited to handle cycles.
+                let len = arr_rc.borrow().len();
+                let placeholder_vec: Vec<Option<Value>> = vec![None; len];
+                let new_arr = Rc::new(RefCell::new(placeholder_vec));
+                let new_props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+                if let Some(proto) = vm.realm().intrinsics.array_prototype.clone() {
+                    new_props.borrow_mut().set_prototype_value(proto);
+                }
+                // insert length property placeholder
+                new_props.borrow_mut().properties.insert(
+                    PropertyKey::String("length".to_string()),
+                    array_length_descriptor(len),
+                );
+                let new_val = Value::Array(Rc::clone(&new_arr), Rc::clone(&new_props));
+                visited.insert(addr, new_val);
+
+                // Fill dense slots
+                for (i, slot) in arr_rc.borrow().iter().enumerate() {
+                    if let Some(sv) = slot {
+                        let cloned = helper(vm, sv, visited, transfer_set)?;
+                        new_arr.borrow_mut()[i] = Some(cloned);
+                    } else {
+                        new_arr.borrow_mut()[i] = None;
+                    }
+                }
+
+                // Clone property bag (data descriptors only)
+                for (k, desc) in &props_rc.borrow().properties {
+                    match desc {
+                        PropertyDescriptor::Data { value, .. } => {
+                            let cloned = helper(vm, value, visited, transfer_set)?;
+                            new_props
+                                .borrow_mut()
+                                .properties
+                                .insert(k.clone(), PropertyDescriptor::data(cloned));
+                        }
+                        _ => {
+                            return Err(
+                                "Cannot clone accessor properties across realms".to_string()
+                            );
+                        }
+                    }
+                }
+
+                Ok(Value::Array(new_arr, new_props))
+            }
+            Value::Object(obj_rc) => {
+                let addr = Rc::as_ptr(obj_rc) as usize;
+                if let Some(existing) = visited.get(&addr) {
+                    return Ok(existing.clone());
+                }
+
+                // Detect special internal shapes used by runtime: ArrayBuffer,
+                // TypedArray, Map, Set, Date, RegExp by inspecting internal slots
+                let borrow = obj_rc.borrow();
+
+                // (no-op) helper removed; build placeholders inline below
+
+                // ArrayBuffer: identified by [[ArrayBufferData]] internal slot
+                if let Some(PropertyDescriptor::Data { value: ab_data, .. }) = borrow
+                    .properties
+                    .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
+                {
+                    // Create placeholder object with host ArrayBuffer prototype
+                    let mut out = ObjectData::new();
+                    if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
+                        out.set_prototype_value(proto);
+                    }
+                    let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
+                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    visited.insert(addr, target_val);
+
+                    // Clone underlying data (expected to be Value::Array)
+                    let cloned_data = helper(vm, ab_data, visited, transfer_set)?;
+                    target_obj.borrow_mut().properties.insert(
+                        PropertyKey::String("[[ArrayBufferData]]".to_string()),
+                        PropertyDescriptor::data(cloned_data),
+                    );
+                    // Copy byteLength if present
+                    if let Some(PropertyDescriptor::Data { value, .. }) = borrow
+                        .properties
+                        .get(&PropertyKey::String("byteLength".to_string()))
+                    {
+                        let bl = helper(vm, value, visited, transfer_set)?;
+                        target_obj.borrow_mut().properties.insert(
+                            PropertyKey::String("byteLength".to_string()),
+                            PropertyDescriptor::data(bl),
+                        );
+                    }
+                    return Ok(Value::Object(target_obj));
+                }
+
+                // TypedArray: identified by [[TypedArrayData]]
+                if let Some(PropertyDescriptor::Data { value: ta_data, .. }) = borrow
+                    .properties
+                    .get(&PropertyKey::String("[[TypedArrayData]]".to_string()))
+                {
+                    let mut out = ObjectData::new();
+                    if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
+                        // TypedArray prototype not separately tracked in Intrinsics here,
+                        // fall back to Array prototype for shape safety.
+                        out.set_prototype_value(proto);
+                    }
+                    let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
+                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    visited.insert(addr, target_val);
+
+                    let cloned_ta = helper(vm, ta_data, visited, transfer_set)?;
+                    target_obj.borrow_mut().properties.insert(
+                        PropertyKey::String("[[TypedArrayData]]".to_string()),
+                        PropertyDescriptor::data(cloned_ta),
+                    );
+                    // copy common numeric properties (length, byteLength)
+                    for key_name in &["length", "byteLength"] {
+                        if let Some(PropertyDescriptor::Data { value, .. }) = borrow
+                            .properties
+                            .get(&PropertyKey::String(key_name.to_string()))
+                        {
+                            let cloned = helper(vm, value, visited, transfer_set)?;
+                            target_obj.borrow_mut().properties.insert(
+                                PropertyKey::String(key_name.to_string()),
+                                if key_name == &"length" {
+                                    PropertyDescriptor::Data {
+                                        value: cloned,
+                                        writable: true,
+                                        enumerable: false,
+                                        configurable: false,
+                                    }
+                                } else {
+                                    PropertyDescriptor::data(cloned)
+                                },
+                            );
+                        }
+                    }
+                    // copy numeric indexed properties if present
+                    for (k, desc) in &borrow.properties {
+                        if let PropertyKey::String(s) = k
+                            && canonical_index_key(s).is_some()
+                        {
+                            if let PropertyDescriptor::Data { value, .. } = desc {
+                                let cloned = helper(vm, value, visited, transfer_set)?;
+                                target_obj.borrow_mut().properties.insert(
+                                    PropertyKey::String(s.clone()),
+                                    PropertyDescriptor::data(cloned),
+                                );
+                            } else {
+                                return Err(
+                                    "Cannot clone accessor properties across realms".to_string()
+                                );
+                            }
+                        }
+                    }
+                    return Ok(Value::Object(target_obj));
+                }
+
+                // Map: detect by __map_entries internal slot
+                if let Some(PropertyDescriptor::Data { value: entries, .. }) = borrow
+                    .properties
+                    .get(&PropertyKey::String("__map_entries".to_string()))
+                {
+                    let mut out = ObjectData::new();
+                    if let Some(proto) = vm.realm().get_intrinsic_prototype("Map") {
+                        out.set_prototype_value(proto);
+                    }
+                    let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
+                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    visited.insert(addr, target_val);
+
+                    let cloned_entries = helper(vm, entries, visited, transfer_set)?;
+                    target_obj.borrow_mut().properties.insert(
+                        PropertyKey::String("__map_entries".to_string()),
+                        PropertyDescriptor::data(cloned_entries),
+                    );
+                    // copy size
+                    if let Some(PropertyDescriptor::Data { value, .. }) = borrow
+                        .properties
+                        .get(&PropertyKey::String("size".to_string()))
+                    {
+                        let cloned = helper(vm, value, visited, transfer_set)?;
+                        target_obj.borrow_mut().properties.insert(
+                            PropertyKey::String("size".to_string()),
+                            PropertyDescriptor::data(cloned),
+                        );
+                    }
+                    return Ok(Value::Object(target_obj));
+                }
+
+                // Set: detect by __set_values internal slot
+                if let Some(PropertyDescriptor::Data {
+                    value: set_vals, ..
+                }) = borrow
+                    .properties
+                    .get(&PropertyKey::String("__set_values".to_string()))
+                {
+                    let mut out = ObjectData::new();
+                    if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
+                        // No dedicated Set.prototype in intrinsics table; fall back to Array
+                        out.set_prototype_value(proto);
+                    }
+                    let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
+                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    visited.insert(addr, target_val);
+
+                    let cloned_vals = helper(vm, set_vals, visited, transfer_set)?;
+                    target_obj.borrow_mut().properties.insert(
+                        PropertyKey::String("__set_values".to_string()),
+                        PropertyDescriptor::data(cloned_vals),
+                    );
+                    if let Some(PropertyDescriptor::Data { value, .. }) = borrow
+                        .properties
+                        .get(&PropertyKey::String("size".to_string()))
+                    {
+                        let cloned = helper(vm, value, visited, transfer_set)?;
+                        target_obj.borrow_mut().properties.insert(
+                            PropertyKey::String("size".to_string()),
+                            PropertyDescriptor::data(cloned),
+                        );
+                    }
+                    return Ok(Value::Object(target_obj));
+                }
+
+                // Date: look for [[PrimitiveValue]] internal slot
+                if let Some(PropertyDescriptor::Data { value: prim, .. }) = borrow
+                    .properties
+                    .get(&PropertyKey::String("[[PrimitiveValue]]".to_string()))
+                {
+                    let mut out = ObjectData::new();
+                    if let Some(proto) = vm.realm().get_intrinsic_prototype("Date") {
+                        out.set_prototype_value(proto);
+                    }
+                    let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
+                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    visited.insert(addr, target_val);
+
+                    let cloned_prim = helper(vm, prim, visited, transfer_set)?;
+                    target_obj.borrow_mut().properties.insert(
+                        PropertyKey::String("[[PrimitiveValue]]".to_string()),
+                        PropertyDescriptor::data(cloned_prim),
+                    );
+                    return Ok(Value::Object(target_obj));
+                }
+
+                // RegExp: look for 'source' and 'flags' properties
+                if borrow
+                    .properties
+                    .contains_key(&PropertyKey::String("source".to_string()))
+                    && borrow
+                        .properties
+                        .contains_key(&PropertyKey::String("flags".to_string()))
+                {
+                    let mut out = ObjectData::new();
+                    if let Some(proto) = vm.realm().get_intrinsic_prototype("Object") {
+                        out.set_prototype_value(proto);
+                    }
+                    let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
+                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    visited.insert(addr, target_val);
+
+                    // copy source, flags, lastIndex if present
+                    for key in ["source", "flags", "lastIndex"] {
+                        if let Some(PropertyDescriptor::Data { value, .. }) =
+                            borrow.properties.get(&PropertyKey::String(key.to_string()))
+                        {
+                            let cloned = helper(vm, value, visited, transfer_set)?;
+                            target_obj.borrow_mut().properties.insert(
+                                PropertyKey::String(key.to_string()),
+                                PropertyDescriptor::data(cloned),
+                            );
+                        }
+                    }
+                    return Ok(Value::Object(target_obj));
+                }
+
+                // Generic object fallback: create placeholder and copy data properties
+                let mut out = ObjectData::new();
+                if let Some(proto) = vm.realm().intrinsics.object_prototype.clone() {
+                    out.set_prototype_value(proto);
+                }
+                let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
+                let target_val = Value::Object(Rc::clone(&target_obj));
+                visited.insert(addr, target_val);
+
+                for (k, desc) in &borrow.properties {
+                    match desc {
+                        PropertyDescriptor::Data { value, .. } => {
+                            let cloned = helper(vm, value, visited, transfer_set)?;
+                            target_obj
+                                .borrow_mut()
+                                .properties
+                                .insert(k.clone(), PropertyDescriptor::data(cloned));
+                        }
+                        _ => {
+                            return Err(
+                                "Cannot clone accessor properties across realms".to_string()
+                            );
+                        }
+                    }
+                }
+
+                Ok(Value::Object(target_obj))
+            }
+            Value::Uninitialized => Err("Cannot clone uninitialized value".to_string()),
+        }
+    }
+
+    let mut visited: HashMap<usize, Value> = HashMap::new();
+    helper(vm, value, &mut visited, transfer_set)
+}
+
+// - Intrinsics bootstrapping: `install_minimal_kernel_constructors` installs a
+//   limited set of constructors and prototype objects sufficient for the
+//   runtime prelude. These intrinsics are intentionally minimal and may omit
+//   some property attribute details or exotic object behaviors required by the
+//   spec.
+//
+// Promise constructor matching
+//
+// - `promise_constructor_matches` currently checks the `constructor` property
+//   of a promise object for equality with the provided constructor. This is a
+//   pragmatic check that may be fragile for embellished prototype chains or
+//   host-constructed promise-like objects. Spec-compliant engines use
+//   internal brand checks and the Promise constructor's intrinsic behaviour.
+//   Consider replacing property-based checks with a stricter internal brand
+//   or explicit slot marking on promise state.
