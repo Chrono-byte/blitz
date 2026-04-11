@@ -1821,6 +1821,10 @@ fn run_test_file(
                         let release_hook = release_handle.as_ref();
 
                         loop {
+                            if let Err(e) = vm.flush_microtasks() {
+                                break Err(e.to_string());
+                            }
+
                             if let Some(state) = done_state.borrow().as_ref() {
                                 let async_result = match state {
                                     None => Ok(v),

@@ -262,7 +262,10 @@ impl Vm {
                     }
                     let value = result_cell.take().unwrap();
                     if crate::trace::enabled() {
-                        crate::trace::value_string("[trace] invoke_async_closure resolve_value", &value);
+                        crate::trace::value_string(
+                            "[trace] invoke_async_closure resolve_value",
+                            &value,
+                        );
                     }
                     if let Err(err) = resolve_promise_with_value(vm, &promise_job, value) {
                         if crate::trace::enabled() {

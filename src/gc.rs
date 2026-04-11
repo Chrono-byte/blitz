@@ -117,8 +117,16 @@ pub fn track_promise(promise: Rc<RefCell<PromiseState>>) -> Rc<RefCell<PromiseSt
 
 /// Prototype collector entry point.
 pub fn collect(roots: &[Value]) -> GcStats {
+    let env_roots: &[Rc<Mutex<Vec<ValueSlot>>>] = &[];
+    collect_with_env_roots(roots, env_roots)
+}
+
+/// Prototype collector entry point with explicit closure-environment roots.
+pub fn collect_with_env_roots(
+    roots: &[Value],
+    env_roots: &[Rc<Mutex<Vec<ValueSlot>>>],
+) -> GcStats {
     {
-        let env_roots: &[Rc<Mutex<Vec<ValueSlot>>>] = &[];
         {
             let clear_envs_aggressively = false;
 
@@ -163,7 +171,7 @@ pub fn collect(roots: &[Value]) -> GcStats {
                     for weak in heap.objects.drain(..) {
                         if let Some(obj) = weak.upgrade() {
                             let ptr = Rc::as_ptr(&obj) as usize;
-                            if marked_objects.contains(&ptr) {
+                            if marked_objects.contains(&ptr) || Rc::strong_count(&obj) > 1 {
                                 new_objects.push(weak);
                             } else {
                                 stats.swept_objects += 1;
@@ -181,7 +189,7 @@ pub fn collect(roots: &[Value]) -> GcStats {
                     for weak in heap.arrays.drain(..) {
                         if let Some(arr) = weak.upgrade() {
                             let ptr = Rc::as_ptr(&arr) as usize;
-                            if marked_arrays.contains(&ptr) {
+                            if marked_arrays.contains(&ptr) || Rc::strong_count(&arr) > 1 {
                                 new_arrays.push(weak);
                             } else {
                                 stats.swept_arrays += 1;
@@ -199,7 +207,7 @@ pub fn collect(roots: &[Value]) -> GcStats {
                     for weak in heap.envs.drain(..) {
                         if let Some(env) = weak.upgrade() {
                             let ptr = Rc::as_ptr(&env) as usize;
-                            if marked_envs.contains(&ptr) {
+                            if marked_envs.contains(&ptr) || Rc::strong_count(&env) > 1 {
                                 new_envs.push(weak);
                             } else {
                                 stats.swept_envs += 1;
@@ -221,7 +229,7 @@ pub fn collect(roots: &[Value]) -> GcStats {
                     for weak in heap.promises.drain(..) {
                         if let Some(promise) = weak.upgrade() {
                             let ptr = Rc::as_ptr(&promise) as usize;
-                            if marked_promises.contains(&ptr) {
+                            if marked_promises.contains(&ptr) || Rc::strong_count(&promise) > 1 {
                                 new_promises.push(weak);
                             } else {
                                 stats.swept_promises += 1;

@@ -616,7 +616,7 @@ impl Vm {
         if let Some(value) = self.realm.intrinsics.uri_error_constructor.clone() {
             roots.push(value);
         }
-        gc::collect(&roots)
+        gc::collect_with_env_roots(&roots, &env_roots)
     }
 
     /// Opportunistically collect garbage during interpreter progress.
@@ -4176,45 +4176,49 @@ impl Vm {
     /// Returns a [`crate::errors::RuntimeError`] if the operation fails.
     fn read_descriptor_from_value(&mut self, v: &Value) -> Result<PartialDescriptor, RuntimeError> {
         let mut desc = PartialDescriptor::default();
-        let data = match v {
-            Value::Object(obj) => obj.borrow(),
-            _ => {
-                return Err(self.throw_type_error("Property description must be an object"));
-            }
-        };
-        let get_field = |field: &str| {
-            data.properties
-                .get(&PropertyKey::String(field.to_string()))
-                .and_then(|desc| match desc {
-                    PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-                    _ => None,
-                })
-        };
+        if !matches!(
+            v,
+            Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::BuiltinObject(_, _)
+        ) {
+            return Err(self.throw_type_error("Property description must be an object"));
+        }
 
-        if let Some(value) = get_field("value") {
+        fn get_field(
+            vm: &mut Vm,
+            object: &Value,
+            field: &str,
+        ) -> Result<Option<Value>, RuntimeError> {
+            let key = PropertyKey::String(field.to_string());
+            if !vm.has_property_host(object, &key)? {
+                return Ok(None);
+            }
+            vm.get_property_host(object, &key).map(Some)
+        }
+
+        if let Some(value) = get_field(self, v, "value")? {
             desc.value = Some(value);
             desc.has_value = true;
         }
-        if let Some(value) = get_field("writable") {
+        if let Some(value) = get_field(self, v, "writable")? {
             desc.writable = Some(self.to_boolean(&value));
             desc.has_writable = true;
         }
-        if let Some(value) = get_field("enumerable") {
+        if let Some(value) = get_field(self, v, "enumerable")? {
             desc.enumerable = Some(self.to_boolean(&value));
             desc.has_enumerable = true;
         }
-        if let Some(value) = get_field("configurable") {
+        if let Some(value) = get_field(self, v, "configurable")? {
             desc.configurable = Some(self.to_boolean(&value));
             desc.has_configurable = true;
         }
-        if let Some(getter) = get_field("get") {
+        if let Some(getter) = get_field(self, v, "get")? {
             if !matches!(getter, Value::Undefined) && !Self::is_callable_value(&getter) {
                 return Err(self.throw_type_error("Getter must be callable"));
             }
             desc.get = Some(getter);
             desc.has_get = true;
         }
-        if let Some(setter) = get_field("set") {
+        if let Some(setter) = get_field(self, v, "set")? {
             if !matches!(setter, Value::Undefined) && !Self::is_callable_value(&setter) {
                 return Err(self.throw_type_error("Setter must be callable"));
             }
@@ -9043,6 +9047,53 @@ mod tests {
             get_property(&d, &PropertyKey::String("done".to_string()), 0).unwrap(),
             Value::Bool(true)
         ));
+    }
+
+    #[test]
+    fn harness_property_helper_works_across_multiple_runs() {
+        let globals = test_globals();
+        globals.borrow_mut().properties.insert(
+            PropertyKey::String("NaN".to_string()),
+            PropertyDescriptor::data(Value::Number(f64::NAN)),
+        );
+        globals.borrow_mut().properties.insert(
+            PropertyKey::String("Infinity".to_string()),
+            PropertyDescriptor::data(Value::Number(f64::INFINITY)),
+        );
+        runtime_utils::install_minimal_kernel_constructors(&globals);
+        let mut vm = Vm::new(Rc::clone(&globals));
+
+        for harness_name in ["assert.js", "sta.js", "propertyHelper.js"] {
+            let path = std::path::Path::new("test262/harness").join(harness_name);
+            let src = std::fs::read_to_string(&path).expect("read harness");
+            let session = Parser::parse_source(&src).expect("parse harness");
+            let program = session.program();
+            let chunk = compiler::compile_oxc(program, session.source()).expect("compile harness");
+            vm.run(chunk).expect("run harness");
+        }
+
+        typecheck::set_strict_override(Some(true));
+        let src = r#"
+            var obj;
+            var prop = 'prop';
+
+            function reset(desc) {
+              desc.value = prop;
+              obj = Object.defineProperty({}, prop, desc);
+            }
+
+            function checkDesc(desc) {
+              reset(desc);
+              assert(verifyProperty(obj, prop, desc));
+            }
+
+            checkDesc({ enumerable: false, writable: false, configurable: false });
+        "#;
+        let session = Parser::parse_source(src).expect("parse test");
+        let program = session.program();
+        let chunk = compiler::compile_oxc(program, session.source()).expect("compile test");
+        vm.run(chunk).expect("run test");
+        typecheck::set_strict_override(None);
     }
 
     #[test]
