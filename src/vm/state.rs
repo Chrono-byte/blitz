@@ -260,31 +260,28 @@ impl<'a> Iterator for OperandStackRevIter<'a> {
 // ---------------------------------------------------------------------------
 
 static GLOBAL_BG_RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
-
 pub(super) fn get_global_bg_runtime() -> Arc<Runtime> {
-    GLOBAL_BG_RUNTIME
-        .get_or_init(|| {
-            let threads_from_env = env::var("TSBLITZ_BG_THREADS")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .filter(|&n| n > 0 && n <= 1024); // upper bound for sanity
+    Arc::<Runtime>::clone(GLOBAL_BG_RUNTIME.get_or_init(|| {
+        let threads_from_env = env::var("TSBLITZ_BG_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0 && n <= 1024); // upper bound for sanity
 
-            let cpus = std::thread::available_parallelism()
-                .map(std::num::NonZero::get)
-                .unwrap_or(4);
+        let cpus = std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(4);
 
-            // Reserve 1 core for main thread, but at least 1 worker
-            let threads = threads_from_env.unwrap_or_else(|| cpus.saturating_sub(1).max(1));
+        // Reserve 1 core for main thread, but at least 1 worker
+        let threads = threads_from_env.unwrap_or_else(|| cpus.saturating_sub(1).max(1));
 
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(threads)
-                .thread_name("blitz-bg")
-                .build()
-                .expect("Failed to build Tokio runtime for VM background tasks");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(threads)
+            .thread_name("blitz-bg")
+            .build()
+            .expect("Failed to build Tokio runtime for VM background tasks");
 
-            Arc::new(rt)
-        })
-        .clone()
+        Arc::new(rt)
+    }))
 }
 
 // ---------------------------------------------------------------------------
