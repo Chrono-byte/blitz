@@ -29,6 +29,69 @@ fn run_script(src: &str) -> (Vm, Rc<RefCell<ObjectData>>) {
 }
 
 #[test]
+fn object_get_own_property_descriptor_reports_data_flags() {
+    let (vm, _globals) = run_script(
+        r#"
+        var obj = {};
+        Object.defineProperty(obj, "prop", {
+          value: "prop",
+          enumerable: false,
+          writable: false,
+          configurable: false,
+        });
+        var desc = Object.getOwnPropertyDescriptor(obj, "prop");
+        globalThis.desc_value = desc.value;
+        globalThis.desc_enumerable = desc.enumerable;
+        globalThis.desc_writable = desc.writable;
+        globalThis.desc_configurable = desc.configurable;
+        "#,
+    );
+
+    assert_eq!(
+        vm.get_global("desc_value"),
+        Some(Value::String("prop".to_string()))
+    );
+    assert_eq!(vm.get_global("desc_enumerable"), Some(Value::Bool(false)));
+    assert_eq!(vm.get_global("desc_writable"), Some(Value::Bool(false)));
+    assert_eq!(vm.get_global("desc_configurable"), Some(Value::Bool(false)));
+}
+
+#[test]
+fn object_get_own_property_descriptor_works_when_extracted() {
+    let (vm, _globals) = run_script(
+        r#"
+        var obj = { a: 1, b: true };
+        var getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+        var desc = getOwnPropertyDescriptor(obj, "a");
+        globalThis.desc_value = desc && desc.value;
+        globalThis.desc_enumerable = desc && desc.enumerable;
+        "#,
+    );
+
+    assert_eq!(vm.get_global("desc_value"), Some(Value::Number(1.0)));
+    assert_eq!(vm.get_global("desc_enumerable"), Some(Value::Bool(true)));
+}
+
+#[test]
+fn reflect_own_keys_matches_get_own_property_descriptor() {
+    let (vm, _globals) = run_script(
+        r#"
+        var obj = { a: 1, b: true };
+        var keys = Reflect.ownKeys(obj);
+        globalThis.k0 = keys[0];
+        globalThis.k1 = keys[1];
+        globalThis.d0 = Object.getOwnPropertyDescriptor(obj, keys[0]) !== undefined;
+        globalThis.d1 = Object.getOwnPropertyDescriptor(obj, keys[1]) !== undefined;
+        "#,
+    );
+
+    assert_eq!(vm.get_global("k0"), Some(Value::String("a".to_string())));
+    assert_eq!(vm.get_global("k1"), Some(Value::String("b".to_string())));
+    assert_eq!(vm.get_global("d0"), Some(Value::Bool(true)));
+    assert_eq!(vm.get_global("d1"), Some(Value::Bool(true)));
+}
+
+#[test]
 fn builtin_object_property_lookup_uses_props_and_prototype() {
     let proto = Rc::new(RefCell::new(ObjectData::new()));
     proto.borrow_mut().properties.insert(

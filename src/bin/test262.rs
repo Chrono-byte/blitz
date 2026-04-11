@@ -120,7 +120,20 @@ impl TestResult {
 fn force_runner_gc() {
     #[cfg(feature = "gc_mark_sweep_prototype")]
     {
-        let _ = blitz::gc::collect(&[]);
+        if env::var_os("TSBLITZ_GC_TRACE").is_some() {
+            eprintln!(
+                "[gc] runner force gc before={:?}",
+                blitz::gc::heap_snapshot()
+            );
+        }
+        let stats = blitz::gc::collect(&[]);
+        if env::var_os("TSBLITZ_GC_TRACE").is_some() {
+            eprintln!(
+                "[gc] runner force gc stats={:?} after={:?}",
+                stats,
+                blitz::gc::heap_snapshot()
+            );
+        }
     }
 }
 

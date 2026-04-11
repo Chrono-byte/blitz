@@ -69,7 +69,10 @@ impl Vm {
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
                 let result = result?;
+                let result_root_base = self.gc_temp_roots.len();
+                self.gc_temp_roots.push(result.clone());
                 self.maybe_collect_garbage_prototype();
+                self.gc_temp_roots.truncate(result_root_base);
                 self.stack.push(result);
                 self.execute_return()
             }
@@ -95,7 +98,10 @@ impl Vm {
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
                 let result = result?;
+                let result_root_base = self.gc_temp_roots.len();
+                self.gc_temp_roots.push(result.clone());
                 self.maybe_collect_garbage_prototype();
+                self.gc_temp_roots.truncate(result_root_base);
                 self.stack.push(result);
                 self.execute_return()
             }
@@ -203,10 +209,13 @@ impl Vm {
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
                 let result = result?;
+                let result_root_base = self.gc_temp_roots.len();
+                self.gc_temp_roots.push(result.clone());
                 if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
                 self.maybe_collect_garbage_prototype();
+                self.gc_temp_roots.truncate(result_root_base);
                 self.stack.push(result);
             }
             Value::BuiltinObject(f, _props) => {
@@ -223,10 +232,13 @@ impl Vm {
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
                 let result = result?;
+                let result_root_base = self.gc_temp_roots.len();
+                self.gc_temp_roots.push(result.clone());
                 if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
                 self.maybe_collect_garbage_prototype();
+                self.gc_temp_roots.truncate(result_root_base);
                 self.stack.push(result);
             }
             Value::Closure {
@@ -390,10 +402,13 @@ impl Vm {
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
                 let result = result?;
+                let result_root_base = self.gc_temp_roots.len();
+                self.gc_temp_roots.push(result.clone());
                 if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
                 self.maybe_collect_garbage_prototype();
+                self.gc_temp_roots.truncate(result_root_base);
                 self.stack.push(result);
             }
             Value::BuiltinObject(f, _props) => {
@@ -410,10 +425,13 @@ impl Vm {
                 self.current_slot_types = prev_slot_types;
                 self.lexical_env = prev_lexical_env;
                 let result = result?;
+                let result_root_base = self.gc_temp_roots.len();
+                self.gc_temp_roots.push(result.clone());
                 if self.call_stack.is_empty() {
                     self.run_microtasks_if_needed()?;
                 }
                 self.maybe_collect_garbage_prototype();
+                self.gc_temp_roots.truncate(result_root_base);
                 self.stack.push(result);
             }
             Value::Closure {

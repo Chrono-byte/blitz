@@ -20,6 +20,11 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 impl Vm {
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    fn gc_trace_enabled() -> bool {
+        std::env::var_os("TSBLITZ_GC_TRACE").is_some() || crate::trace::enabled()
+    }
+
     pub(super) fn prune_stale_handlers(&mut self) {
         let active_frames = self.call_stack.len();
         while self
@@ -362,6 +367,27 @@ impl Vm {
     /// Run the prototype mark/sweep collector and return mark statistics.
     #[cfg(feature = "gc_mark_sweep_prototype")]
     pub fn collect_garbage_prototype(&self) -> gc::GcStats {
+        // The current prototype GC cannot inspect captures held inside queued
+        // host-side microtask/import-job closures. Collecting while those queues
+        // are non-empty can reclaim still-live JS values reachable only through
+        // those opaque Rust closures, leading to stalled async work.
+        if !self.microtasks.is_empty() || !self.dynamic_import_jobs.is_empty() {
+            if Self::gc_trace_enabled() {
+                eprintln!(
+                    "[gc] skip collect: pending_jobs microtasks={} import_jobs={}",
+                    self.microtasks.len(),
+                    self.dynamic_import_jobs.len()
+                );
+            }
+            return gc::GcStats::default();
+        }
+
+        let before = if Self::gc_trace_enabled() {
+            Some(gc::heap_snapshot())
+        } else {
+            None
+        };
+
         let mut roots: Vec<Value> = Vec::new();
         let mut env_roots: Vec<Rc<Mutex<Vec<ValueSlot>>>> = Vec::new();
         roots.push(Value::Object(Rc::clone(&self.globals)));
@@ -369,6 +395,9 @@ impl Vm {
         roots.extend(self.locals.iter().map(|c| c.borrow().clone()));
         roots.push(self.this_value.clone());
         if let Some(value) = &self.construct_new_target {
+            roots.push(value.clone());
+        }
+        if let Some(value) = &self.current_arguments_object {
             roots.push(value.clone());
         }
         if let Some(value) = &self.recent_return_value {
@@ -395,6 +424,13 @@ impl Vm {
             roots.extend(frame.stack.iter().cloned());
             roots.extend(frame.locals.iter().map(|c| c.borrow().clone()));
             roots.push(frame.this_value.clone());
+            roots.push(frame.callee.clone());
+            if let Some(value) = &frame.new_target {
+                roots.push(value.clone());
+            }
+            if let Some(value) = &frame.arguments_object {
+                roots.push(value.clone());
+            }
             if let Some(queue) = &frame.yield_star_queue {
                 roots.extend(queue.iter().cloned());
             }
@@ -494,7 +530,33 @@ impl Vm {
         if let Some(value) = self.realm.intrinsics.uri_error_constructor.clone() {
             roots.push(value);
         }
-        gc::collect_with_env_roots(&roots, &env_roots)
+        let stats = gc::collect_with_env_roots(&roots, &env_roots);
+        if Self::gc_trace_enabled() {
+            let after = gc::heap_snapshot();
+            if let Some(before) = before {
+                eprintln!(
+                    "[gc] collect roots={} env_roots={} marked={} swept(o={}, a={}, e={}, p={}) pressure={} -> {} live(o={}, a={}, e={}, p={}) -> (o={}, a={}, e={}, p={})",
+                    roots.len(),
+                    env_roots.len(),
+                    stats.marked_nodes,
+                    stats.swept_objects,
+                    stats.swept_arrays,
+                    stats.swept_envs,
+                    stats.swept_promises,
+                    before.allocation_pressure,
+                    after.allocation_pressure,
+                    before.live_objects,
+                    before.live_arrays,
+                    before.live_envs,
+                    before.live_promises,
+                    after.live_objects,
+                    after.live_arrays,
+                    after.live_envs,
+                    after.live_promises,
+                );
+            }
+        }
+        stats
     }
 
     /// Opportunistically collect garbage during interpreter progress.
@@ -503,7 +565,31 @@ impl Vm {
     /// every single bytecode step.
     #[cfg(feature = "gc_mark_sweep_prototype")]
     pub(super) fn maybe_collect_garbage_prototype(&mut self) {
-        if gc::allocation_pressure() < gc_allocation_pressure_threshold() {
+        let pressure = gc::allocation_pressure();
+        let threshold = gc_allocation_pressure_threshold();
+        if pressure < threshold {
+            return;
+        }
+        // Opportunistic prototype-GC is only safe at quiescent points where
+        // live JS values are fully represented in the VM root sets. Nested JS
+        // calls and pending host jobs still keep additional opaque temporaries.
+        if !self.call_stack.is_empty()
+            || !self.microtasks.is_empty()
+            || !self.dynamic_import_jobs.is_empty()
+            || self.pending_closure_env.is_some()
+        {
+            if Self::gc_trace_enabled() {
+                eprintln!(
+                    "[gc] skip maybe_collect pressure={} threshold={} call_stack={} microtasks={} import_jobs={} pending_closure_env={} temp_roots={}",
+                    pressure,
+                    threshold,
+                    self.call_stack.len(),
+                    self.microtasks.len(),
+                    self.dynamic_import_jobs.len(),
+                    self.pending_closure_env.is_some(),
+                    self.gc_temp_roots.len(),
+                );
+            }
             return;
         }
         self.gc_step_counter = 0;

@@ -29,6 +29,29 @@ pub struct GcStats {
     pub swept_promises: usize,
 }
 
+/// Snapshot of the prototype collector's tracked heap usage.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GcHeapSnapshot {
+    /// Tracked object/property bags still strongly alive.
+    pub live_objects: usize,
+    /// Tracked array backing stores still strongly alive.
+    pub live_arrays: usize,
+    /// Tracked closure environments still strongly alive.
+    pub live_envs: usize,
+    /// Tracked promise states still strongly alive.
+    pub live_promises: usize,
+    /// Weak registry slots for objects, including dead weak entries.
+    pub tracked_object_slots: usize,
+    /// Weak registry slots for arrays, including dead weak entries.
+    pub tracked_array_slots: usize,
+    /// Weak registry slots for environments, including dead weak entries.
+    pub tracked_env_slots: usize,
+    /// Weak registry slots for promises, including dead weak entries.
+    pub tracked_promise_slots: usize,
+    /// Current allocation pressure counter.
+    pub allocation_pressure: usize,
+}
+
 #[cfg(feature = "gc_mark_sweep_prototype")]
 #[derive(Default)]
 struct HeapRegistry {
@@ -113,6 +136,36 @@ pub fn track_promise(promise: Rc<RefCell<PromiseState>>) -> Rc<RefCell<PromiseSt
         bump_allocation_pressure();
     }
     promise
+}
+
+/// Return a snapshot of tracked heap usage for the prototype collector.
+pub fn heap_snapshot() -> GcHeapSnapshot {
+    #[cfg(feature = "gc_mark_sweep_prototype")]
+    {
+        let mut snapshot = GcHeapSnapshot::default();
+        HEAP.with(|heap| {
+            let heap = heap.borrow();
+            snapshot.tracked_object_slots = heap.objects.len();
+            snapshot.tracked_array_slots = heap.arrays.len();
+            snapshot.tracked_env_slots = heap.envs.len();
+            snapshot.tracked_promise_slots = heap.promises.len();
+            snapshot.live_objects = heap.objects.iter().filter(|w| w.strong_count() > 0).count();
+            snapshot.live_arrays = heap.arrays.iter().filter(|w| w.strong_count() > 0).count();
+            snapshot.live_envs = heap.envs.iter().filter(|w| w.strong_count() > 0).count();
+            snapshot.live_promises = heap
+                .promises
+                .iter()
+                .filter(|w| w.strong_count() > 0)
+                .count();
+        });
+        snapshot.allocation_pressure = allocation_pressure();
+        snapshot
+    }
+
+    #[cfg(not(feature = "gc_mark_sweep_prototype"))]
+    {
+        GcHeapSnapshot::default()
+    }
 }
 
 /// Prototype collector entry point.
