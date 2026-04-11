@@ -1886,10 +1886,22 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             (Some(low), None) => {
                                 let _ = vm.delete_property_host(&receiver, &lower_key)?;
                                 vm.set_property_host(&receiver, &upper_key_value, low)?;
+                                if let Value::Array(arr, props) = &receiver {
+                                    if lower < arr.borrow().len() {
+                                        arr.borrow_mut()[lower] = None;
+                                    }
+                                    props.borrow_mut().properties.shift_remove(&lower_key);
+                                }
                             }
                             (None, Some(high)) => {
                                 let _ = vm.delete_property_host(&receiver, &upper_key)?;
                                 vm.set_property_host(&receiver, &lower_key_value, high)?;
+                                if let Value::Array(arr, props) = &receiver {
+                                    if upper < arr.borrow().len() {
+                                        arr.borrow_mut()[upper] = None;
+                                    }
+                                    props.borrow_mut().properties.shift_remove(&upper_key);
+                                }
                             }
                             (None, None) => {}
                         }

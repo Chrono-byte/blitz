@@ -2397,6 +2397,12 @@ impl Vm {
                             return Ok(false);
                         }
                         _ => {
+                            if let PropertyKey::String(s) = key
+                                && let Ok(i) = s.parse::<usize>()
+                                && i < arr.borrow().len()
+                            {
+                                arr.borrow_mut()[i] = None;
+                            }
                             p.properties.shift_remove(key);
                             return Ok(true);
                         }
@@ -4305,7 +4311,26 @@ impl Vm {
             _ => return Ok(false),
         };
         let mut data = target.borrow_mut();
-        let current = data.properties.get(&key).cloned();
+        let current =
+            if let Value::Array(arr, _) = obj {
+                let current = data.properties.get(&key).cloned();
+                if current.is_some() {
+                    current
+                } else if let Some(index) = array_index_from_key(&key) {
+                    arr.borrow().get(index).cloned().flatten().map(|value| {
+                        PropertyDescriptor::Data {
+                            value,
+                            writable: true,
+                            enumerable: true,
+                            configurable: true,
+                        }
+                    })
+                } else {
+                    None
+                }
+            } else {
+                data.properties.get(&key).cloned()
+            };
 
         if current.is_none() && !data.extensible {
             return Ok(false);
@@ -8066,6 +8091,93 @@ mod tests {
             get_property(&arr, &PropertyKey::String("length".to_string()), 0).unwrap(),
             Value::Number(n) if (n - 4294967295.0).abs() < f64::EPSILON
         ));
+    }
+
+    #[test]
+    fn dense_array_element_redefinition_preserves_configurability() {
+        let globals = test_globals();
+        let mut vm = Vm::new(globals);
+        let arr_data = Rc::new(RefCell::new(vec![
+            Some(Value::Number(1.0)),
+            Some(Value::Number(2.0)),
+        ]));
+        let props = Rc::new(RefCell::new(ObjectData::new()));
+        props.borrow_mut().properties.insert(
+            PropertyKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(2.0)),
+        );
+        let arr = Value::Array(Rc::clone(&arr_data), Rc::clone(&props));
+        let getter = Value::Builtin(Rc::new(|_, _| Ok(Value::Undefined)));
+        let mut desc = PartialDescriptor::default();
+        desc.get = Some(getter);
+        desc.has_get = true;
+
+        assert!(
+            vm.define_own_property(&arr, PropertyKey::String("0".to_string()), desc)
+                .unwrap()
+        );
+        assert!(matches!(
+            props
+                .borrow()
+                .properties
+                .get(&PropertyKey::String("0".to_string())),
+            Some(PropertyDescriptor::Accessor {
+                configurable: true,
+                ..
+            })
+        ));
+        assert!(
+            vm.delete_property_host(&arr, &PropertyKey::String("0".to_string()))
+                .unwrap()
+        );
+        assert!(
+            !vm.has_property_host(&arr, &PropertyKey::String("0".to_string()))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn reverse_with_length_shrink_clears_lower_index() {
+        let (vm, _) = run_script(
+            r#"
+            var array = ["first", "second"];
+            Object.defineProperty(array, 0, {
+                get: function() {
+                    array.length = 0;
+                    return "first";
+                }
+            });
+            array.reverse();
+        "#,
+        );
+
+        match vm.get_global("array") {
+            Some(Value::Array(arr, props)) => {
+                assert!(
+                    !vm.has_property_host(
+                        &Value::Array(Rc::clone(&arr), Rc::clone(&props)),
+                        &PropertyKey::String("0".to_string())
+                    )
+                    .unwrap()
+                );
+                assert!(
+                    vm.has_property_host(
+                        &Value::Array(Rc::clone(&arr), Rc::clone(&props)),
+                        &PropertyKey::String("1".to_string())
+                    )
+                    .unwrap()
+                );
+                assert!(matches!(
+                    vm.get_property_host(
+                        &Value::Array(Rc::clone(&arr), Rc::clone(&props)),
+                        &PropertyKey::String("1".to_string())
+                    )
+                    .unwrap(),
+                    Value::String(ref s) if s == "first"
+                ));
+            }
+            other => panic!("expected array, got {:?}", other),
+        }
     }
 
     #[test]
