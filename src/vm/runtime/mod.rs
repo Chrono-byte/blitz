@@ -4,6 +4,8 @@ pub mod async_tasks;
 pub mod calls;
 /// Shared coercion and numeric parsing helpers.
 mod coercions;
+/// Exception construction and unwinding helpers.
+mod exceptions;
 /// Main VM execution loop and opcode helpers.
 pub mod execution;
 /// Same-value comparison helper.

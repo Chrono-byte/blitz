@@ -15,12 +15,12 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.5.57", features = ["derive"] }
 ouroboros = "0.18"
-oxc_allocator = "0.123.0"
-oxc_ast = { version = "0.123.0", features = ["serialize"] }
-oxc_parser = "0.123.0"
-oxc_semantic = "0.123.0"
-oxc_span = "0.123.0"
-oxc_syntax = "0.123.0"
+oxc_allocator = "0.124.0"
+oxc_ast = { version = "0.124.0", features = ["serialize"] }
+oxc_parser = "0.124.0"
+oxc_semantic = "0.124.0"
+oxc_span = "0.124.0"
+oxc_syntax = "0.124.0"
 rustyline = "18"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
