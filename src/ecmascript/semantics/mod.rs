@@ -1243,6 +1243,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                                 receiver.clone(),
                             ],
                         )?;
+                        if crate::trace::enabled() {
+                            eprintln!("[trace] findLast i={} item={:?} found={:?}", i, item, found);
+                        }
                         if found.is_truthy() {
                             return Ok(item);
                         }
@@ -1661,61 +1664,83 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     );
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("findLast".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(move |vm, args| {
-                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
-                let len = array_like_length(vm, &receiver)?;
-                let mut i = len;
-                while i > 0 {
-                    i -= 1;
-                    let key = PKey::String(i.to_string());
-                    let item = vm.get_property_host(&receiver, &key)?;
-                    let found = vm.call_value_with_this(
-                        &callback,
-                        &this_arg,
-                        &[
-                            item.clone(),
-                            Value::Number(usize_to_f64(i)),
-                            receiver.clone(),
-                        ],
-                    )?;
-                    if found.is_truthy() {
-                        return Ok(item);
+        non_enum_data({
+            let find_last_fn = builtin_object(
+                Rc::new(move |vm, args| {
+                    let this = args.first().cloned().unwrap_or(Value::Undefined);
+                    let receiver = vm.to_object_value(this)?;
+                    let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    if !Vm::is_callable_value(&callback) {
+                        return Err(vm.throw_type_error(
+                            "Array.prototype.findLast callback is not callable",
+                        ));
                     }
-                }
-                Ok(Value::Undefined)
-            }),
-            &function_proto_map,
-        )),
+                    let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+                    let len = array_like_length(vm, &receiver)?;
+                    let mut i = len;
+                    while i > 0 {
+                        i -= 1;
+                        let key = PKey::String(i.to_string());
+                        let item = vm.get_property_host(&receiver, &key)?;
+                        let found = vm.call_value_with_this(
+                            &callback,
+                            &this_arg,
+                            &[
+                                item.clone(),
+                                Value::Number(usize_to_f64(i)),
+                                receiver.clone(),
+                            ],
+                        )?;
+                        if found.is_truthy() {
+                            return Ok(item);
+                        }
+                    }
+                    Ok(Value::Undefined)
+                }),
+                &function_proto_map,
+            );
+            set_builtin_name(&find_last_fn, "findLast");
+            set_builtin_length(&find_last_fn, 1.0);
+            find_last_fn
+        }),
     );
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("findLastIndex".to_string()),
-        PropertyDescriptor::data(builtin_object(
-            Rc::new(move |vm, args| {
-                let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
-                let len = array_like_length(vm, &receiver)?;
-                let mut i = len;
-                while i > 0 {
-                    i -= 1;
-                    let key = PKey::String(i.to_string());
-                    let item = vm.get_property_host(&receiver, &key)?;
-                    let found = vm.call_value_with_this(
-                        &callback,
-                        &this_arg,
-                        &[item, Value::Number(usize_to_f64(i)), receiver.clone()],
-                    )?;
-                    if found.is_truthy() {
-                        return Ok(Value::Number(usize_to_f64(i)));
+        non_enum_data({
+            let find_last_index_fn = builtin_object(
+                Rc::new(move |vm, args| {
+                    let this = args.first().cloned().unwrap_or(Value::Undefined);
+                    let receiver = vm.to_object_value(this)?;
+                    let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    if !Vm::is_callable_value(&callback) {
+                        return Err(vm.throw_type_error(
+                            "Array.prototype.findLastIndex callback is not callable",
+                        ));
                     }
-                }
-                Ok(Value::Number(-1.0))
-            }),
-            &function_proto_map,
-        )),
+                    let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+                    let len = array_like_length(vm, &receiver)?;
+                    let mut i = len;
+                    while i > 0 {
+                        i -= 1;
+                        let key = PKey::String(i.to_string());
+                        let item = vm.get_property_host(&receiver, &key)?;
+                        let found = vm.call_value_with_this(
+                            &callback,
+                            &this_arg,
+                            &[item, Value::Number(usize_to_f64(i)), receiver.clone()],
+                        )?;
+                        if found.is_truthy() {
+                            return Ok(Value::Number(usize_to_f64(i)));
+                        }
+                    }
+                    Ok(Value::Number(-1.0))
+                }),
+                &function_proto_map,
+            );
+            set_builtin_name(&find_last_index_fn, "findLastIndex");
+            set_builtin_length(&find_last_index_fn, 1.0);
+            find_last_index_fn
+        }),
     );
     array_proto_map.borrow_mut().properties.insert(
         PKey::String("flatMap".to_string()),
