@@ -723,6 +723,9 @@ impl super::Compiler {
                                 .current_module
                                 .as_ref()
                                 .is_some_and(|c| c.imports.contains_key(name));
+                            if is_imported {
+                                return Err(Self::imported_binding_assignment_error());
+                            }
                             self.compile_expr_oast(&a.right)?;
                             self.emit(Op::Dup, LINE);
                             if let Some(slot) = self.resolve_local(name) {
@@ -753,8 +756,6 @@ impl super::Compiler {
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
                                 self.emit(Op::SetUpvalue, LINE);
                                 self.emit_byte(upvalue, LINE);
-                            } else if is_imported {
-                                self.emit_throw_type_error("Cannot assign to imported binding");
                             } else {
                                 self.emit_set_global_name(name);
                             }
@@ -816,14 +817,15 @@ impl super::Compiler {
                                 .current_module
                                 .as_ref()
                                 .is_some_and(|c| c.imports.contains_key(name));
+                            if is_imported {
+                                return Err(Self::imported_binding_assignment_error());
+                            }
                             if let Some(slot) = self.resolve_local(name) {
                                 self.emit(Op::GetLocal, LINE);
                                 self.emit_byte(slot as u8, LINE);
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
                                 self.emit(Op::GetUpvalue, LINE);
                                 self.emit_byte(upvalue, LINE);
-                            } else if is_imported {
-                                self.emit_get_binding(name);
                             } else {
                                 self.emit_get_global_name(name);
                             }
@@ -859,8 +861,6 @@ impl super::Compiler {
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
                                 self.emit(Op::SetUpvalue, LINE);
                                 self.emit_byte(upvalue, LINE);
-                            } else if is_imported {
-                                self.emit_throw_type_error("Cannot assign to imported binding");
                             } else {
                                 self.emit_set_global_name(name);
                             }

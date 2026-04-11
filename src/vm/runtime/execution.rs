@@ -8138,7 +8138,7 @@ mod tests {
 
     #[test]
     fn reverse_with_length_shrink_clears_lower_index() {
-        let (vm, _) = run_script(
+        let (mut vm, _) = run_script(
             r#"
             var array = ["first", "second"];
             Object.defineProperty(array, 0, {

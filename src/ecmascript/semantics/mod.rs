@@ -1671,20 +1671,18 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 while i > 0 {
                     i -= 1;
                     let key = PKey::String(i.to_string());
-                    if vm.has_property_host(&receiver, &key)? {
-                        let item = vm.get_property_host(&receiver, &key)?;
-                        let found = vm.call_value_with_this(
-                            &callback,
-                            &this_arg,
-                            &[
-                                item.clone(),
-                                Value::Number(usize_to_f64(i)),
-                                receiver.clone(),
-                            ],
-                        )?;
-                        if found.is_truthy() {
-                            return Ok(item);
-                        }
+                    let item = vm.get_property_host(&receiver, &key)?;
+                    let found = vm.call_value_with_this(
+                        &callback,
+                        &this_arg,
+                        &[
+                            item.clone(),
+                            Value::Number(usize_to_f64(i)),
+                            receiver.clone(),
+                        ],
+                    )?;
+                    if found.is_truthy() {
+                        return Ok(item);
                     }
                 }
                 Ok(Value::Undefined)
@@ -1704,16 +1702,14 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 while i > 0 {
                     i -= 1;
                     let key = PKey::String(i.to_string());
-                    if vm.has_property_host(&receiver, &key)? {
-                        let item = vm.get_property_host(&receiver, &key)?;
-                        let found = vm.call_value_with_this(
-                            &callback,
-                            &this_arg,
-                            &[item, Value::Number(usize_to_f64(i)), receiver.clone()],
-                        )?;
-                        if found.is_truthy() {
-                            return Ok(Value::Number(usize_to_f64(i)));
-                        }
+                    let item = vm.get_property_host(&receiver, &key)?;
+                    let found = vm.call_value_with_this(
+                        &callback,
+                        &this_arg,
+                        &[item, Value::Number(usize_to_f64(i)), receiver.clone()],
+                    )?;
+                    if found.is_truthy() {
+                        return Ok(Value::Number(usize_to_f64(i)));
                     }
                 }
                 Ok(Value::Number(-1.0))
@@ -1877,8 +1873,15 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         } else {
                             None
                         };
+                        let lower_still_exists =
+                            lower_exists && vm.has_property_host(&receiver, &lower_key)?;
+                        let upper_still_exists =
+                            upper_exists && vm.has_property_host(&receiver, &upper_key)?;
 
-                        match (lower_value, upper_value) {
+                        match (
+                            lower_still_exists.then_some(lower_value).flatten(),
+                            upper_still_exists.then_some(upper_value).flatten(),
+                        ) {
                             (Some(low), Some(high)) => {
                                 vm.set_property_host(&receiver, &lower_key_value, high)?;
                                 vm.set_property_host(&receiver, &upper_key_value, low)?;

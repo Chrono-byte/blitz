@@ -166,8 +166,7 @@ impl super::Compiler {
             .as_ref()
             .is_some_and(|c| c.imports.contains_key(name))
         {
-            self.emit_throw_type_error("Cannot assign to imported binding");
-            return Ok(());
+            return Err(Self::imported_binding_assignment_error());
         }
         if let Some(slot) = self.resolve_local(name) {
             self.emit(Op::SetLocal, LINE);

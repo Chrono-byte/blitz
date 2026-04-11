@@ -244,6 +244,10 @@ impl Compiler {
         }
     }
 
+    pub(crate) fn imported_binding_assignment_error() -> CompilerError {
+        CompilerError::from("SyntaxError: Cannot assign to imported binding")
+    }
+
     pub(crate) fn strict_binding_pattern_name_error(
         strict_context: bool,
         pattern: &oast::BindingPattern<'_>,
@@ -627,12 +631,6 @@ impl Compiler {
         let idx = self.global_name_index(name);
         self.emit(Op::GetBuiltin, LINE);
         self.emit_byte(idx as u8, LINE);
-    }
-
-    pub(crate) fn emit_throw_type_error(&mut self, _message: &str) {
-        self.emit_get_builtin_name("throwTypeError");
-        self.emit(Op::CallIC, LINE);
-        self.emit_byte(0, LINE);
     }
 
     pub(crate) fn with_compile_context_override<R>(
