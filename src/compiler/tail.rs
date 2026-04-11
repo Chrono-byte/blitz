@@ -92,7 +92,7 @@ impl super::Compiler {
                     arg_count += 1;
                 }
             }
-            self.emit(Op::TailCallMethod, LINE);
+            self.emit(Op::CallMethod, LINE);
             self.emit_byte(arg_count as u8, LINE);
             return Ok(());
         }
@@ -116,7 +116,7 @@ impl super::Compiler {
                     arg_count += 1;
                 }
             }
-            self.emit(Op::TailCallMethod, LINE);
+            self.emit(Op::CallMethod, LINE);
             self.emit_byte(arg_count as u8, LINE);
             return Ok(());
         }
@@ -164,7 +164,7 @@ impl super::Compiler {
             if is_optional_call {
                 self.emit(Op::Call, LINE);
             } else {
-                self.emit(Op::TailCallMethod, LINE);
+                self.emit(Op::CallMethod, LINE);
             }
             self.emit_byte(arg_count as u8, LINE);
             return Ok(());
@@ -208,7 +208,7 @@ impl super::Compiler {
             if is_optional_call {
                 self.emit(Op::Call, LINE);
             } else {
-                self.emit(Op::TailCallMethod, LINE);
+                self.emit(Op::CallMethod, LINE);
             }
             self.emit_byte(arg_count as u8, LINE);
             return Ok(());
@@ -254,7 +254,7 @@ impl super::Compiler {
             if is_optional_call {
                 self.emit(Op::Call, LINE);
             } else {
-                self.emit(Op::TailCallMethod, LINE);
+                self.emit(Op::CallMethod, LINE);
             }
             self.emit_byte(arg_count as u8, LINE);
             return Ok(());
@@ -302,7 +302,7 @@ impl super::Compiler {
                 arg_count += 1;
             }
         }
-        self.emit(Op::TailCallIC, LINE);
+        self.emit(Op::CallIC, LINE);
         self.emit_byte(arg_count as u8, LINE);
         Ok(())
     }
@@ -339,7 +339,7 @@ impl super::Compiler {
             self.compile_expr_oast(sub)?;
             arg_count += 1;
         }
-        self.emit(Op::TailCallIC, LINE);
+        self.emit(Op::CallIC, LINE);
         self.emit_byte(arg_count as u8, LINE);
         Ok(())
     }

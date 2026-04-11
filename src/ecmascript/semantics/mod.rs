@@ -1243,9 +1243,6 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                                 receiver.clone(),
                             ],
                         )?;
-                        if crate::trace::enabled() {
-                            eprintln!("[trace] findLast i={} item={:?} found={:?}", i, item, found);
-                        }
                         if found.is_truthy() {
                             return Ok(item);
                         }
@@ -1670,13 +1667,13 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     let this = args.first().cloned().unwrap_or(Value::Undefined);
                     let receiver = vm.to_object_value(this)?;
                     let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let len = array_like_length(vm, &receiver)?;
                     if !Vm::is_callable_value(&callback) {
                         return Err(vm.throw_type_error(
                             "Array.prototype.findLast callback is not callable",
                         ));
                     }
                     let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
-                    let len = array_like_length(vm, &receiver)?;
                     let mut i = len;
                     while i > 0 {
                         i -= 1;
@@ -1712,13 +1709,13 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     let this = args.first().cloned().unwrap_or(Value::Undefined);
                     let receiver = vm.to_object_value(this)?;
                     let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
+                    let len = array_like_length(vm, &receiver)?;
                     if !Vm::is_callable_value(&callback) {
                         return Err(vm.throw_type_error(
                             "Array.prototype.findLastIndex callback is not callable",
                         ));
                     }
                     let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
-                    let len = array_like_length(vm, &receiver)?;
                     let mut i = len;
                     while i > 0 {
                         i -= 1;

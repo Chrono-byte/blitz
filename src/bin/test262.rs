@@ -89,6 +89,8 @@ impl BucketStats {
 enum TestResult {
     /// The test passed.
     Pass,
+    /// The test was skipped because the feature is unsupported.
+    Skip(String),
     /// The test failed.
     Fail(String),
     /// The test encountered a stack overflow.
@@ -101,6 +103,7 @@ impl TestResult {
     fn description(&self) -> String {
         match self {
             TestResult::Pass => "pass".to_string(),
+            TestResult::Skip(msg) => format!("skip: {}", msg),
             TestResult::Fail(msg) => format!("fail: {}", msg),
             TestResult::StackOverflow => "stack overflow".to_string(),
             TestResult::Panic(msg) => format!("panic: {}", msg),
@@ -302,7 +305,13 @@ fn run_test_in_thread(
 
                 match result {
                     Ok(Ok(())) => TestResult::Pass,
-                    Ok(Err(e)) => TestResult::Fail(e),
+                    Ok(Err(e)) => {
+                        if e.contains("UNSUPPORTED:") {
+                            TestResult::Skip(e)
+                        } else {
+                            TestResult::Fail(e)
+                        }
+                    }
                     Err(panic_payload) => {
                         let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
                             s.clone()
@@ -1260,6 +1269,13 @@ fn collect_tests(dir: &Path, out: &mut Vec<PathBuf>, excludes: &[PathBuf]) {
 
 /// Decide whether a test is unsupported before execution begins.
 fn unsupported_reason(_path: &Path, _src: &str, meta: &Option<Meta>) -> Option<String> {
+    if let Some(m) = meta
+        && let Some(features) = &m.features
+        && features.iter().any(|f| f == "resizable-arraybuffer")
+    {
+        return Some("UNSUPPORTED: feature resizable-arraybuffer".to_string());
+    }
+
     if let Some(m) = meta
         && let Some(flags) = &m.flags
         && flags
@@ -2247,6 +2263,10 @@ fn main() {
                 ran += 1;
                 top_level.entry(top_key).or_default().pass += 1;
                 subsections.entry(subsection_key).or_default().pass += 1;
+            }
+            TestResult::Skip(_) => {
+                top_level.entry(top_key).or_default().skip += 1;
+                subsections.entry(subsection_key).or_default().skip += 1;
             }
             TestResult::Fail(e) => {
                 ran += 1;
