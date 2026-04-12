@@ -29,20 +29,20 @@ APIs.
 */
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::process::exit;
+use std::process::{Command, exit};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser as ClapParser;
 use oxc_span::SourceType;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Builder;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -86,6 +86,7 @@ impl BucketStats {
 }
 
 /// The result of a test run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum TestResult {
     /// The test passed.
     Pass,
@@ -134,6 +135,33 @@ fn force_runner_gc() {
                 blitz::gc::heap_snapshot()
             );
         }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn maybe_trim_allocator() {
+    if env::var_os("TSBLITZ_TRIM_ALLOCATOR").is_none() {
+        return;
+    }
+
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> i32;
+    }
+
+    // SAFETY: `malloc_trim` is a process-global allocator advisory call provided
+    // by glibc. It takes no borrowed Rust pointers and has no Rust-visible aliasing
+    // requirements. We ignore the return value because trimming is best-effort.
+    let trimmed = unsafe { malloc_trim(0) };
+    if env::var_os("TSBLITZ_GC_TRACE").is_some() {
+        eprintln!("[gc] allocator trim requested result={}", trimmed);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn maybe_trim_allocator() {
+    if env::var_os("TSBLITZ_TRIM_ALLOCATOR").is_some() && env::var_os("TSBLITZ_GC_TRACE").is_some()
+    {
+        eprintln!("[gc] allocator trim requested but unsupported on this target");
     }
 }
 
@@ -291,7 +319,7 @@ fn run_test_in_thread(
     log_tests: bool,
     release_handle: Option<Arc<PermitReleaser>>,
 ) -> TestResult {
-    const STACK_SIZE: usize = 8 * 1024 * 1024; // 3 MB stack for tests
+    const STACK_SIZE: usize = 2 * 1024 * 1024; // 2 MB stack for tests
 
     let (tx, rx) = mpsc::channel();
 
@@ -354,6 +382,7 @@ fn run_test_in_thread(
             // has gone out of scope. Run an explicit collector cycle so passed
             // tests do not leave cyclic JS heaps hanging around until thread exit.
             force_runner_gc();
+            maybe_trim_allocator();
 
             if log_tests {
                 eprintln!(
@@ -468,6 +497,18 @@ fn print_bucket_summary(
     about = "Run the local Test262 connector against the blitz VM"
 )]
 struct RunnerOptions {
+    /// Disable subprocess batching and run selected tests directly in-process.
+    #[arg(long = "no-subprocess", action)]
+    no_subprocess: bool,
+    /// Hidden internal file list used by subprocess batches.
+    #[arg(long = "file-list", value_name = "PATH", hide = true)]
+    file_list: Option<PathBuf>,
+    /// Hidden internal JSON report path written by subprocess batches.
+    #[arg(long = "report-json", value_name = "PATH", hide = true)]
+    report_json: Option<PathBuf>,
+    /// Number of exact-file tests to hand to each subprocess batch.
+    #[arg(long = "batch-size", value_name = "N", default_value_t = 200)]
+    batch_size: usize,
     /// List of test segments to include.
     #[arg(
         long = "segment",
@@ -539,6 +580,197 @@ fn parse_bool_env(name: &str) -> Option<bool> {
             "1" | "true" | "yes" | "on"
         )
     })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SubprocessBatchReport {
+    results: Vec<(usize, PathBuf, TestResult)>,
+}
+
+fn load_file_list(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read file list {}: {}", path.display(), e))?;
+    Ok(contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
+
+fn unique_temp_path(prefix: &str, ext: &str) -> PathBuf {
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    env::temp_dir().join(format!("blitz-test262-{prefix}-{pid}-{nanos}.{ext}"))
+}
+
+fn should_use_subprocess_batches(opts: &RunnerOptions, selected_count: usize) -> bool {
+    !opts.no_subprocess
+        && opts.file_list.is_none()
+        && !opts.harness_only
+        && !opts.dump_scopes
+        && selected_count > 1
+}
+
+fn run_selected_tests_via_subprocess_batches(
+    files_to_run: Vec<PathBuf>,
+    job_count: usize,
+    log_tests: bool,
+    batch_size: usize,
+) -> Result<Vec<(usize, PathBuf, TestResult)>, String> {
+    let exe = env::current_exe().map_err(|e| format!("Failed to resolve current exe: {e}"))?;
+    let effective_batch_size = batch_size.max(1);
+
+    let chunk_queue: Arc<Mutex<VecDeque<(usize, Vec<PathBuf>)>>> = Arc::new(Mutex::new(
+        files_to_run
+            .chunks(effective_batch_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| (chunk_idx * effective_batch_size, chunk.to_vec()))
+            .collect(),
+    ));
+    let results: Arc<Mutex<Vec<(usize, PathBuf, TestResult)>>> = Arc::new(Mutex::new(Vec::new()));
+    let worker_errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let worker_count = job_count.max(1).min(files_to_run.len().max(1));
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for _ in 0..worker_count {
+        let exe = exe.clone();
+        let queue = Arc::clone(&chunk_queue);
+        let shared_results = Arc::clone(&results);
+        let shared_errors = Arc::clone(&worker_errors);
+        handles.push(thread::spawn(move || loop {
+            let Some((chunk_start, chunk_files)) = ({
+                let mut guard = queue.lock().expect("subprocess chunk queue poisoned");
+                guard.pop_front()
+            }) else {
+                break;
+            };
+
+            let file_list_path = unique_temp_path("files", "txt");
+            let report_path = unique_temp_path("report", "json");
+            let file_list_contents = chunk_files
+                .iter()
+                .map(|path| path.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            if let Err(e) = fs::write(&file_list_path, file_list_contents) {
+                shared_errors.lock().expect("subprocess errors poisoned").push(
+                    format!(
+                        "Failed to write subprocess file list {}: {}",
+                        file_list_path.display(),
+                        e
+                    ),
+                );
+                break;
+            }
+
+            let mut command = Command::new(&exe);
+            command.arg("--file-list").arg(&file_list_path);
+            command.arg("--report-json").arg(&report_path);
+            command.arg("--no-subprocess");
+            command.arg("--workers").arg("1");
+            if log_tests {
+                command.arg("--log-tests");
+            }
+
+            let status = command.status();
+            let _ = fs::remove_file(&file_list_path);
+
+            match status {
+                Ok(status) if status.success() || status.code() == Some(1) => {}
+                Ok(status) => {
+                    let _ = fs::remove_file(&report_path);
+                    shared_errors.lock().expect("subprocess errors poisoned").push(
+                        format!(
+                            "Subprocess batch failed with status {} for {} tests",
+                            status,
+                            chunk_files.len()
+                        ),
+                    );
+                    break;
+                }
+                Err(e) => {
+                    let _ = fs::remove_file(&report_path);
+                    shared_errors.lock().expect("subprocess errors poisoned").push(
+                        format!(
+                            "Failed to launch subprocess batch for {} tests: {}",
+                            chunk_files.len(),
+                            e
+                        ),
+                    );
+                    break;
+                }
+            }
+
+            let report_contents = match fs::read_to_string(&report_path) {
+                Ok(contents) => contents,
+                Err(e) => {
+                    let _ = fs::remove_file(&report_path);
+                    shared_errors.lock().expect("subprocess errors poisoned").push(
+                        format!(
+                            "Failed to read subprocess report {}: {}",
+                            report_path.display(),
+                            e
+                        ),
+                    );
+                    break;
+                }
+            };
+            let _ = fs::remove_file(&report_path);
+
+            let report: SubprocessBatchReport = match serde_json::from_str(&report_contents) {
+                Ok(report) => report,
+                Err(e) => {
+                    shared_errors.lock().expect("subprocess errors poisoned").push(
+                        format!(
+                            "Failed to parse subprocess report {}: {}",
+                            report_path.display(),
+                            e
+                        ),
+                    );
+                    break;
+                }
+            };
+
+            let mut out = shared_results.lock().expect("subprocess results poisoned");
+            out.extend(
+                report
+                    .results
+                    .into_iter()
+                    .map(|(idx, file, result)| (chunk_start + idx, file, result)),
+            );
+        }));
+    }
+
+    for handle in handles {
+        if let Err(join_err) = handle.join() {
+            let msg = if let Some(s) = join_err.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = join_err.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "unknown worker panic".to_string()
+            };
+            worker_errors
+                .lock()
+                .expect("subprocess errors poisoned")
+                .push(format!("Subprocess worker panicked: {}", msg));
+        }
+    }
+
+    let errors = worker_errors.lock().expect("subprocess errors poisoned");
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+    drop(errors);
+
+    let mut out = results.lock().expect("subprocess results poisoned").clone();
+    sort_test_results(&mut out);
+    Ok(out)
 }
 
 /// Parses the command line arguments
@@ -1362,6 +1594,7 @@ fn run_test_file(
     let src = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
     let meta = parse_meta(&src);
+    let emit_async_marker = env::var_os("TSBLITZ_EMIT_ASYNC_MARKER").is_some();
 
     if let Some(reason) = unsupported_reason(path, &src, &meta) {
         return Err(Test262Error::without_mode(path, reason).into_string());
@@ -1840,7 +2073,12 @@ fn run_test_file(
 
                             if let Some(state) = done_state.borrow().as_ref() {
                                 let async_result = match state {
-                                    None => Ok(v),
+                                    None => {
+                                        if emit_async_marker {
+                                            println!("Test262:AsyncTestComplete");
+                                        }
+                                        Ok(v)
+                                    }
                                     Some(err) => Err(format!("async test failed: {}", err)),
                                 };
                                 break async_result;
@@ -2256,14 +2494,24 @@ fn main() {
         }
     }
 
-    let files_to_run = select_files_to_run(
-        files,
-        &opts.filters,
-        &opts.anti_filters,
-        &opts.anti_segments,
-        &opts.es_versions,
-        opts.limit,
-    );
+    let files_to_run = if let Some(file_list) = &opts.file_list {
+        match load_file_list(file_list) {
+            Ok(files) => files,
+            Err(msg) => {
+                eprintln!("{}", msg);
+                exit(2);
+            }
+        }
+    } else {
+        select_files_to_run(
+            files,
+            &opts.filters,
+            &opts.anti_filters,
+            &opts.anti_segments,
+            &opts.es_versions,
+            opts.limit,
+        )
+    };
     let job_count = resolve_job_count(
         opts.jobs,
         files_to_run.len(),
@@ -2271,13 +2519,27 @@ fn main() {
             .ok()
             .map(std::num::NonZero::get),
     );
-    let mut test_results =
-        run_selected_tests(files_to_run, test262_dir.clone(), job_count, opts.log_tests);
+    let mut test_results = if should_use_subprocess_batches(&opts, files_to_run.len()) {
+        match run_selected_tests_via_subprocess_batches(
+            files_to_run,
+            job_count,
+            opts.log_tests,
+            opts.batch_size,
+        ) {
+            Ok(results) => results,
+            Err(msg) => {
+                eprintln!("{}", msg);
+                exit(2);
+            }
+        }
+    } else {
+        run_selected_tests(files_to_run, test262_dir.clone(), job_count, opts.log_tests)
+    };
     sort_test_results(&mut test_results);
 
     let mut failed_cases = Vec::new();
-    for (idx, f, result) in test_results {
-        let (top_key, subsection_key) = bucket_keys(&test_root, &f);
+    for (idx, f, result) in &test_results {
+        let (top_key, subsection_key) = bucket_keys(&test_root, f);
         match result {
             TestResult::Pass => {
                 ran += 1;
@@ -2292,39 +2554,42 @@ fn main() {
                 ran += 1;
                 top_level.entry(top_key).or_default().fail += 1;
                 subsections.entry(subsection_key).or_default().fail += 1;
-                failed_cases.push((idx, f.clone(), e));
+                failed_cases.push((*idx, f.clone(), e.clone()));
             }
             TestResult::StackOverflow => {
                 ran += 1;
                 top_level.entry(top_key).or_default().fail += 1;
                 subsections.entry(subsection_key).or_default().fail += 1;
-                failed_cases.push((idx, f.clone(), "Stack overflow".into()));
+                failed_cases.push((*idx, f.clone(), "Stack overflow".into()));
             }
             TestResult::Panic(msg) => {
                 ran += 1;
                 top_level.entry(top_key).or_default().fail += 1;
                 subsections.entry(subsection_key).or_default().fail += 1;
-                failed_cases.push((idx, f.clone(), format!("Panic: {}", msg)));
+                failed_cases.push((*idx, f.clone(), format!("Panic: {}", msg)));
             }
         }
     }
 
+    let internal_report_mode = opts.report_json.is_some();
     failed_cases.sort_by_key(|(idx, _, _)| *idx);
     for (_, f, msg) in failed_cases {
-        if msg == "Stack overflow" {
-            if let Ok(rel) = f.strip_prefix(&test262_dir) {
-                eprintln!("STACKOVERFLOW: {}", rel.display());
+        if !internal_report_mode {
+            if msg == "Stack overflow" {
+                if let Ok(rel) = f.strip_prefix(&test262_dir) {
+                    eprintln!("STACKOVERFLOW: {}", rel.display());
+                } else {
+                    eprintln!("STACKOVERFLOW: {}", f.display());
+                }
+            } else if let Some(rest) = msg.strip_prefix("Panic: ") {
+                if let Ok(rel) = f.strip_prefix(&test262_dir) {
+                    eprintln!("PANIC: {}: {}", rel.display(), rest);
+                } else {
+                    eprintln!("PANIC: {}: {}", f.display(), rest);
+                }
             } else {
-                eprintln!("STACKOVERFLOW: {}", f.display());
+                eprintln!("FAIL: {}", msg);
             }
-        } else if let Some(rest) = msg.strip_prefix("Panic: ") {
-            if let Ok(rel) = f.strip_prefix(&test262_dir) {
-                eprintln!("PANIC: {}: {}", rel.display(), rest);
-            } else {
-                eprintln!("PANIC: {}: {}", f.display(), rest);
-            }
-        } else {
-            eprintln!("FAIL: {}", msg);
         }
         failed.push((f, msg));
     }
@@ -2338,14 +2603,38 @@ fn main() {
 
     let exit_code = if failed.is_empty() { 0 } else { 1 };
 
-    eprintln!(
-        "Test262: ran {}, passed {}, failed {} ({:.2}% pass rate)",
-        ran,
-        passed,
-        failed.len(),
-        pass_pct
-    );
-    print_bucket_summary("Sections:", &top_level, 12, false);
+    if !internal_report_mode {
+        eprintln!(
+            "Test262: ran {}, passed {}, failed {} ({:.2}% pass rate)",
+            ran,
+            passed,
+            failed.len(),
+            pass_pct
+        );
+        print_bucket_summary("Sections:", &top_level, 12, false);
+    }
+
+    if let Some(report_path) = &opts.report_json {
+        let report = SubprocessBatchReport {
+            results: test_results,
+        };
+        match serde_json::to_string(&report) {
+            Ok(json) => {
+                if let Err(e) = fs::write(report_path, json) {
+                    eprintln!(
+                        "Failed to write subprocess report {}: {}",
+                        report_path.display(),
+                        e
+                    );
+                    exit(2);
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to serialize subprocess report: {}", e);
+                exit(2);
+            }
+        }
+    }
 
     exit(exit_code);
 }
