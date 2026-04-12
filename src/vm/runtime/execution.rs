@@ -1,7 +1,8 @@
+#![allow(trivial_numeric_casts)]
+
 use crate::bytecode::{Chunk, OP_COUNT, Op};
 use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
-use crate::gc;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
@@ -12,6 +13,7 @@ use crate::value::{
 };
 use crate::vm::runtime::coercions::{parse_js_bigint_string, parse_js_number_string, to_number};
 use crate::vm::state::*;
+use crate::{gc, opcode_from_instr, payload_byte};
 use num_bigint::BigInt as BigIntValue;
 use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
 use std::cell::RefCell;
@@ -3043,15 +3045,13 @@ impl Vm {
                     let mut k = fstart;
                 while k < fend {
                         let instr = frame.chunk.code[k];
-                        let b = (instr & 0xFF) as u8;
+                        let b = opcode_from_instr(instr);
                         if let Some(op) = Op::from_byte(b) {
                         let width = opcode_width(op);
                         match op {
                             Op::Const => {
-                                let instr_hi = *frame.chunk.code.get(k + 1).unwrap_or(&0u32);
-                                let instr_lo = *frame.chunk.code.get(k + 2).unwrap_or(&0u32);
-                                let hi = ((instr_hi >> 8) & 0xFF) as u16;
-                                let lo = ((instr_lo >> 8) & 0xFF) as u16;
+                                let hi = payload_byte(instr, 0) as u16;
+                                let lo = payload_byte(instr, 1) as u16;
                                 let arg = (hi << 8) | lo;
                                 eprintln!("[diag]    {:#06}  Const       {}", k, arg);
                             }
@@ -3060,26 +3060,20 @@ impl Vm {
                             | Op::JumpIfTrue
                             | Op::JumpIfNullish
                             | Op::PushHandler => {
-                                let instr_hi = *frame.chunk.code.get(k + 1).unwrap_or(&0u32);
-                                let instr_lo = *frame.chunk.code.get(k + 2).unwrap_or(&0u32);
-                                let hi = ((instr_hi >> 8) & 0xFF) as i16;
-                                let lo = ((instr_lo >> 8) & 0xFF) as i16;
-                                let offset = ((hi as i16) << 8) | (lo as i16);
+                                let hi = payload_byte(instr, 0) as i32;
+                                let lo = payload_byte(instr, 1) as i32;
+                                let offset = (((hi << 8) | lo) as i32) as i16;
                                 eprintln!("[diag]    {:#06}  {:?} {}", k, op, offset);
                             }
                             Op::CompareJumpIfFalse => {
-                                let instr_cmp = *frame.chunk.code.get(k + 1).unwrap_or(&0u32);
-                                let instr_hi = *frame.chunk.code.get(k + 2).unwrap_or(&0u32);
-                                let instr_lo = *frame.chunk.code.get(k + 3).unwrap_or(&0u32);
-                                let cmp = (instr_cmp & 0xFF) as u8;
-                                let hi = ((instr_hi >> 8) & 0xFF) as i16;
-                                let lo = ((instr_lo >> 8) & 0xFF) as i16;
-                                let offset = ((hi as i16) << 8) | (lo as i16);
+                                let cmp = payload_byte(instr, 0);
+                                let hi = payload_byte(instr, 1) as i32;
+                                let lo = payload_byte(instr, 2) as i32;
+                                let offset = (((hi << 8) | lo) as i32) as i16;
                                 eprintln!("[diag]    {:#06}  {:?} cmp={} {}", k, op, cmp, offset);
                             }
                             _ if width == 2 => {
-                                let instr = *frame.chunk.code.get(k + 1).unwrap_or(&0u32);
-                                let arg = ((instr >> 8) & 0xFF) as u32;
+                                let arg = payload_byte(instr, 0) as u32;
                                 eprintln!("[diag]    {:#06}  {:?} {}", k, op, arg);
                             }
                             _ => eprintln!("[diag]    {:#06}  {:?}", k, op),
@@ -3137,9 +3131,9 @@ impl Vm {
                             | Op::PushHandler => {
                                 let instr_hi = *self.chunk.code.get(j + 1).unwrap_or(&0u32);
                                 let instr_lo = *self.chunk.code.get(j + 2).unwrap_or(&0u32);
-                                let hi = ((instr_hi >> 8) & 0xFF) as i16;
-                                let lo = ((instr_lo >> 8) & 0xFF) as i16;
-                                let offset = ((hi as i16) << 8) | (lo as i16);
+                                let hi = ((instr_hi >> 8) & 0xFF) as i32;
+                                let lo = ((instr_lo >> 8) & 0xFF) as i32;
+                                let offset = (((hi << 8) | lo) as i32) as i16;
                                 eprintln!("[diag]   {}: {:?} {}", j, op, offset);
                             }
                             Op::CompareJumpIfFalse => {

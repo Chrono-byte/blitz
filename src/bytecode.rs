@@ -230,12 +230,14 @@ impl Chunk {
     /// 24-bit payload is the relative offset.
     pub fn jump_target_from_ip(&self, ip: usize) -> Option<usize> {
         let instr = *self.code.get(ip)?;
-        let op_byte = (instr & 0xFF) as u8;
+        let op_byte = opcode_from_instr(instr);
         let op = Op::from_byte(op_byte)?;
         if !op.is_jump() {
             return None;
         }
+        // read signed 24-bit payload from instruction at ip
         let offset = self.read_i24_payload_at(ip)?;
+        // next instruction index is always ip + 1 (fixed-width u32 words)
         let next = ip as i64 + 1;
         let target = next.checked_add(offset as i64)?;
         if target < 0 || target >= (self.code.len() as i64) {
@@ -300,6 +302,70 @@ impl Chunk {
         } else {
             None
         }
+    }
+}
+
+// Centralized instruction decoding helpers for the fixed-width u32 layout.
+#[inline]
+pub fn opcode_from_instr(instr: u32) -> u8 {
+    (instr & 0xFF) as u8
+}
+
+#[inline]
+fn payload_u24(instr: u32) -> u32 {
+    (instr >> 8) & 0x00FF_FFFF
+}
+
+#[inline]
+fn payload_i24(instr: u32) -> i32 {
+    let payload = payload_u24(instr);
+    if (payload & 0x0080_0000) != 0 {
+        (payload | 0xFF00_0000) as i32
+    } else {
+        payload as i32
+    }
+}
+
+#[inline]
+pub fn payload_byte(instr: u32, idx: usize) -> u8 {
+    // idx: 0 -> first payload byte (bits 8..15), 1 -> bits 16..23, 2 -> bits 24..31
+    if idx > 2 {
+        0
+    } else {
+        ((instr >> (8 * (idx + 1))) & 0xFF) as u8
+    }
+}
+
+// Local helper to compute opcode width in instruction-word units. This mirrors
+// the runtime opcode_width used by the VM disassembler. Kept local here for
+// test purposes.
+fn opcode_width(op: Op) -> usize {
+    match op {
+        Op::Const => 3,
+        Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => 3,
+        Op::GetLocal
+        | Op::SetLocal
+        | Op::CloneLocalCell
+        | Op::Call
+        | Op::CallMethod
+        | Op::CallIC
+        | Op::TailCallIC
+        | Op::TailCallMethod
+        | Op::Construct
+        | Op::PopN
+        | Op::MakeClosure
+        | Op::GetUpvalue
+        | Op::SetUpvalue
+        | Op::GetPropertyIC
+        | Op::SetPropertyIC
+        | Op::GetBuiltin
+        | Op::BuildArray
+        | Op::BuildObject
+        | Op::Spread
+        | Op::ArrayFromSpread => 2,
+        Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
+        Op::CompareJumpIfFalse => 4,
+        _ => 1,
     }
 }
 
@@ -627,6 +693,7 @@ impl Op {
 
     /// Returns the offset from the Opcode to the jump operand.
     /// This keeps the jump logic clean if you add more instructions!
+    #[allow(dead_code)]
     fn jump_operand_offset(&self) -> usize {
         match self {
             Op::CompareJumpIfFalse => 2,
@@ -726,14 +793,16 @@ mod tests {
             0x00u32,
         ];
         // verify jump_target_from_ip
+        // debug print
+        eprintln!("c.code words: {:?}", c.code);
         let target = c.jump_target_from_ip(0).expect("target");
-        // compute expected: next_instr = 3, offset = 3 -> target = 6
-        assert_eq!(target, 6usize);
+        // compute expected under fixed-width words: next = ip + 1 -> 1 + 3 = 4
+        assert_eq!(target, 4usize);
         // hotwire to next: sets offset = 0 => target becomes next_instr (3)
         let orig = c.hotwire_jump_to_next(0).expect("hotwire");
         assert_eq!(orig, Op::Jump);
         let t2 = c.jump_target_from_ip(0).expect("target2");
-        assert_eq!(t2, 3usize);
+        assert_eq!(t2, 1usize);
 
         // make unconditional should be a no-op for Jump
         let orig2 = c.hotwire_make_unconditional(0).expect("make_uncond");

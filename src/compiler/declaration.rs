@@ -651,7 +651,7 @@ impl Compiler {
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let target = self.chunk.code.len() - patch_pos - 2;
-                        self.chunk.write_i16_at(patch_pos, target as i16);
+                        self.chunk.write_i24_payload_at(patch_pos, target as i32);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -813,7 +813,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = break_cleanup as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
-                        self.chunk.write_i16_at(patch_pos, v);
+                        self.chunk.write_i24_payload_at(patch_pos, v as i32);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -1001,7 +1001,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = update_start as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
-                        self.chunk.write_i16_at(patch_pos, v);
+                        self.chunk.write_i24_payload_at(patch_pos, v as i32);
                     }
                 }
 
