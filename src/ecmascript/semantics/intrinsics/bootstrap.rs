@@ -196,7 +196,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         |vm: &mut Vm,
                          a: &Value,
                          b: &Value|
-                         -> Result<Ordering, crate::errors::RuntimeError> {
+                         -> Result<Ordering, RuntimeError> {
                             if compare_is_undefined {
                                 let sa = vm.to_string(a)?;
                                 let sb = vm.to_string(b)?;
@@ -758,7 +758,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 move |_vm, args| {
                     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
                     let mut out: Vec<Option<Value>> = Vec::new();
-                    let mut append = |value: Value| -> Result<(), crate::errors::RuntimeError> {
+                    let mut append = |value: Value| -> Result<(), RuntimeError> {
                         match value {
                             Value::Array(arr, _) => {
                                 out.extend(arr.borrow().iter().cloned());
@@ -2627,7 +2627,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PropertyDescriptor::data(Value::String("TypedArray".to_string())),
     );
     let typedarray_ctor_fn: BuiltinFn = Rc::new(move |_vm, _args| {
-        Err(crate::errors::RuntimeError::from(
+        Err(RuntimeError::from(
             "TypeError: TypedArray constructor is not directly callable",
         ))
     });
@@ -3234,7 +3234,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         | Value::Closure { .. }
                         | Value::BuiltinObject(_, _) => ObjectData::with_prototype(proto),
                         _ => {
-                            return Err(crate::errors::RuntimeError::from(
+                            return Err(RuntimeError::from(
                                 "Object.create: prototype must be object or null",
                             ));
                         }
@@ -3251,7 +3251,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             };
                             let ok = vm.define_property_value(&created, &key_value, &descriptor)?;
                             if !ok {
-                                return Err(crate::errors::RuntimeError::from(
+                                return Err(RuntimeError::from(
                                     "Object.create: define property failed",
                                 ));
                             }
@@ -3509,7 +3509,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             let val = vm.get_property_host(&target, &key)?;
                             Ok(array_from_values(vec![key_val, val]))
                         })
-                        .collect::<Result<Vec<_>, crate::errors::RuntimeError>>()?;
+                        .collect::<Result<Vec<_>, RuntimeError>>()?;
                     Ok(array_from_values(entries))
                 }),
                 &function_proto_map,
@@ -3930,7 +3930,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         };
 
         let Value::Object(obj) = &mut inst else {
-            return Err(crate::errors::RuntimeError::from(
+            return Err(RuntimeError::from(
                 "RegExp constructor failed to create an object",
             ));
         };
@@ -4064,7 +4064,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
 
             let m = caps
                 .get(0)
-                .ok_or_else(|| crate::errors::RuntimeError::from("RegExp exec missing match"))?;
+                .ok_or_else(|| RuntimeError::from("RegExp exec missing match"))?;
             if global {
                 let end_char = subject[..m.end()].chars().count();
                 let _ = vm.set_property_host(

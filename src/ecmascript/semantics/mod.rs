@@ -9,23 +9,23 @@ use std::rc::Rc;
 
 use crate::ecmascript::builtins;
 use crate::realm::Intrinsics;
-use crate::runtime_utils::{
-    array_from_values, array_length_descriptor, char_index_to_byte_index, collect_iterable_values,
-    descriptor_value_from_descriptor, is_byte_offset_aligned, js_number_to_string, non_enum_data,
-    own_enumerable_keys, own_property_descriptor, own_property_keys, property_key_to_value,
-    same_value_zero, static_builtin_arg_offset, strict_equal, syntax_error, to_index,
-    to_integer_or_infinity, to_length, usize_to_decimal_string, usize_to_f64,
-};
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
-use crate::{Parser, Vm, compiler};
+use crate::{Parser, Vm, compiler, RuntimeError};
+use crate::runtime_utils::{char_index_to_byte_index, collect_iterable_values, static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_integer_or_infinity, to_length};
 
-mod atomics;
-mod intrinsics;
-mod shadowrealm;
+pub mod atomics;
+pub mod intrinsics;
+pub mod numbers;
+pub mod properties;
+pub mod shadowrealm;
+pub mod uri;
 
 pub(crate) use intrinsics::{
     builtin_object, install_minimal_kernel_constructors, set_builtin_length, set_builtin_name,
 };
+pub(crate) use numbers::*;
+pub(crate) use properties::*;
+pub(crate) use crate::runtime_utils::same_value_zero;
 
 fn json_value_identity(value: &Value) -> Option<usize> {
     match value {
@@ -70,7 +70,7 @@ fn own_properties_frozen(value: &Value) -> bool {
     })
 }
 
-fn array_like_length(vm: &mut Vm, receiver: &Value) -> Result<usize, crate::errors::RuntimeError> {
+fn array_like_length(vm: &mut Vm, receiver: &Value) -> Result<usize, RuntimeError> {
     let len_val = vm.get_property_host(receiver, &PropertyKey::String("length".to_string()))?;
     let len_num = vm.to_number_value(&len_val)?;
     let max_safe_len = 9_007_199_254_740_991u128;
@@ -92,7 +92,7 @@ fn collect_indexed_snapshot(
     vm: &mut Vm,
     receiver: &Value,
     len: usize,
-) -> Result<(Vec<usize>, HashMap<usize, Value>), crate::errors::RuntimeError> {
+) -> Result<(Vec<usize>, HashMap<usize, Value>), RuntimeError> {
     let mut keys = Vec::new();
     let mut values = HashMap::new();
     for key in own_property_keys(receiver) {
@@ -137,7 +137,7 @@ fn json_stringify_value(
     vm: &mut Vm,
     value: &Value,
     seen: &mut HashSet<usize>,
-) -> Result<Option<String>, crate::errors::RuntimeError> {
+) -> Result<Option<String>, RuntimeError> {
     let result = match value {
         Value::Uninitialized
         | Value::Undefined
@@ -173,7 +173,7 @@ fn json_stringify_value(
             out
         }),
         Value::BigInt(_) => {
-            return Err(crate::errors::RuntimeError::from(
+            return Err(RuntimeError::from(
                 "Do not know how to serialize a BigInt",
             ));
         }
@@ -181,7 +181,7 @@ fn json_stringify_value(
         Value::Array(elements, _) => {
             let identity = json_value_identity(value).expect("array has identity");
             if !seen.insert(identity) {
-                return Err(crate::errors::RuntimeError::from(
+                return Err(RuntimeError::from(
                     "Converting circular structure to JSON",
                 ));
             }
@@ -201,7 +201,7 @@ fn json_stringify_value(
         Value::Object(_) | Value::Promise(_) => {
             let identity = json_value_identity(value).expect("object-like value has identity");
             if !seen.insert(identity) {
-                return Err(crate::errors::RuntimeError::from(
+                return Err(RuntimeError::from(
                     "Converting circular structure to JSON",
                 ));
             }
@@ -224,7 +224,7 @@ fn json_stringify_value(
     Ok(result)
 }
 
-fn build_regex(pattern: &str, flags: &str) -> Result<regex::Regex, crate::errors::RuntimeError> {
+fn build_regex(pattern: &str, flags: &str) -> Result<regex::Regex, RuntimeError> {
     fn simplified_harness_pattern(pattern: &str) -> Option<&'static str> {
         if pattern.starts_with("(?:[A-Za-z") {
             Some("(?:[A-Za-z])")
@@ -247,9 +247,9 @@ fn build_regex(pattern: &str, flags: &str) -> Result<regex::Regex, crate::errors
         Ok(re) => Ok(re),
         Err(_) if simplified_harness_pattern(pattern).is_some() => {
             build_with(simplified_harness_pattern(pattern).expect("checked is_some"))
-                .map_err(|e| crate::errors::RuntimeError::from(format!("RegExp build: {}", e)))
+                .map_err(|e| RuntimeError::from(format!("RegExp build: {}", e)))
         }
-        Err(e) => Err(crate::errors::RuntimeError::from(format!(
+        Err(e) => Err(RuntimeError::from(format!(
             "RegExp build: {}",
             e
         ))),

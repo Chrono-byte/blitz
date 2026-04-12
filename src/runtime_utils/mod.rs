@@ -52,7 +52,6 @@
 //! module-level comments in `src/module.rs`, `src/vm/runtime/async_tasks.rs`,
 //! and `src/vm/state.rs` for targeted recommendations.
 
-use std::borrow::Cow;
 use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -73,19 +72,20 @@ use num_bigint::{BigInt as BigIntValue, Sign};
 use num_traits::{FromPrimitive, ToPrimitive};
 
 mod atomics;
-mod numbers;
+mod numbers; // kept as a thin compatibility re-export; moved implementation into ecmascript::semantics
 mod promises;
-mod properties;
+mod properties; // kept as a thin compatibility re-export; implementation moved
 mod shadowrealm;
-mod uri;
+mod uri; // kept as thin compatibility re-export; implementation moved
 
 pub(crate) use atomics::*;
-pub(crate) use numbers::*;
+// Re-export semantics implementations from ecmascript::semantics to preserve existing imports.
+pub(crate) use crate::ecmascript::semantics::numbers::*;
+pub(crate) use crate::ecmascript::semantics::properties::*;
+pub(crate) use crate::ecmascript::semantics::uri::*;
 pub use promises::install_minimal_kernel_constructors;
 pub(crate) use promises::*;
-pub(crate) use properties::*;
 pub(crate) use shadowrealm::*;
-pub(crate) use uri::*;
 
 pub(crate) fn set_builtin_length(target: &Value, length: f64) {
     crate::ecmascript::semantics::set_builtin_length(target, length)
