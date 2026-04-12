@@ -162,7 +162,10 @@ impl super::Compiler {
         self.compile_expr_oast(&m.object)?;
         let object_slot = self.alloc_temp_local("ref_obj");
         self.emit(Op::SetLocal, LINE);
-        self.emit_byte(u8::try_from(object_slot).expect("object_slot fits in u8"), LINE);
+        self.emit_byte(
+            u8::try_from(object_slot).expect("object_slot fits in u8"),
+            LINE,
+        );
 
         self.emit_constant(Value::String(m.property.name.to_string()), LINE);
         let key_slot = self.alloc_temp_local("ref_key");
@@ -215,13 +218,22 @@ impl super::Compiler {
     ) -> Result<(), crate::errors::CompilerError> {
         let value_slot = self.alloc_temp_local("ref_value");
         self.emit(Op::SetLocal, LINE);
-        self.emit_byte(u8::try_from(value_slot).expect("value_slot fits in u8"), LINE);
+        self.emit_byte(
+            u8::try_from(value_slot).expect("value_slot fits in u8"),
+            LINE,
+        );
         self.emit(Op::GetLocal, LINE);
-        self.emit_byte(u8::try_from(object_slot).expect("object_slot fits in u8"), LINE);
+        self.emit_byte(
+            u8::try_from(object_slot).expect("object_slot fits in u8"),
+            LINE,
+        );
         self.emit(Op::GetLocal, LINE);
         self.emit_byte(u8::try_from(key_slot).expect("key_slot fits in u8"), LINE);
         self.emit(Op::GetLocal, LINE);
-        self.emit_byte(u8::try_from(value_slot).expect("value_slot fits in u8"), LINE);
+        self.emit_byte(
+            u8::try_from(value_slot).expect("value_slot fits in u8"),
+            LINE,
+        );
         if use_ic {
             self.emit(Op::SetPropertyIC, LINE);
             let slot = self.alloc_ic_slot()?;
@@ -428,14 +440,20 @@ impl super::Compiler {
                     self.emit_constant(Value::String(cooked), LINE);
                 }
                 self.emit(Op::BuildArray, LINE);
-                self.emit_byte(u8::try_from(t.quasi.quasis.len()).expect("quasis.len fits in u8"), LINE);
+                self.emit_byte(
+                    u8::try_from(t.quasi.quasis.len()).expect("quasis.len fits in u8"),
+                    LINE,
+                );
                 self.emit(Op::Dup, LINE);
                 self.emit_constant(Value::String("raw".to_string()), LINE);
                 for quasi in &t.quasi.quasis {
                     self.emit_constant(Value::String(quasi.value.raw.to_string()), LINE);
                 }
                 self.emit(Op::BuildArray, LINE);
-                self.emit_byte(u8::try_from(t.quasi.quasis.len()).expect("quasis.len fits in u8"), LINE);
+                self.emit_byte(
+                    u8::try_from(t.quasi.quasis.len()).expect("quasis.len fits in u8"),
+                    LINE,
+                );
                 self.emit(Op::SetPropertyIC, LINE);
                 let slot = self.alloc_ic_slot()?;
                 self.emit_byte(slot, LINE);
