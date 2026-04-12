@@ -518,7 +518,8 @@ fn walk_chunk_ops(chunk: &Chunk) -> Vec<(usize, Op)> {
     while ip < chunk.code.len() {
         if let Some(op) = Op::from_byte((chunk.code[ip] & 0xFF) as u8) {
             ops.push((ip, op));
-            ip += opcode_width(op);
+            // fixed-width model: one u32 per instruction
+            ip += 1;
         } else {
             ip += 1;
         }

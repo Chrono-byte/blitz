@@ -221,6 +221,13 @@ impl Compiler {
         self.chunk.write_instr(instr, line);
         // Reset pending operand byte counter for this new instruction.
         self.pending_operand_bytes = 0;
+        // Temporary debug: log emission of opcode with its instruction index
+        eprintln!(
+            "[compile-debug] emit idx={} op={:?} op_byte=0x{:02x}",
+            self.chunk.code.len() - 1,
+            op,
+            op.to_byte()
+        );
     }
 
     pub(crate) fn emit_byte(&mut self, byte: u8, line: u32) {
@@ -240,6 +247,10 @@ impl Compiler {
         self.pending_operand_bytes += 1;
         // Record line info for operand emissions as well (keep same line for alignment)
         self.chunk.lines.push(line);
+        eprintln!(
+            "[compile-debug] emit_byte at idx={} byte=0x{:02x} pending_bytes={}",
+            idx, byte, self.pending_operand_bytes
+        );
     }
 
     pub(crate) fn emit_u16(&mut self, value: u16, line: u32) {
@@ -730,6 +741,10 @@ impl Compiler {
         let rel = target - (offset as isize) - 1;
         let val = i32::try_from(rel).expect("jump offset overflow");
         let ok = self.chunk.write_i24_payload_at(offset, val);
+        eprintln!(
+            "[compile-debug] patch_jump at instr_idx={} rel={} ok={}",
+            offset, val, ok
+        );
         assert!(ok, "failed to write jump payload");
     }
 
@@ -747,6 +762,10 @@ impl Compiler {
             let rel = (target as isize) - (patch_pos as isize) - 1;
             let v = i32::try_from(rel).expect("offset overflow");
             let ok = self.chunk.write_i24_payload_at(patch_pos, v);
+            eprintln!(
+                "[compile-debug] patch_jump_list write instr_idx={} rel={} ok={}",
+                patch_pos, v, ok
+            );
             assert!(ok, "failed to write jump payload");
         }
     }

@@ -204,6 +204,11 @@ impl Chunk {
         if val < -(1 << 23) || val >= (1 << 23) {
             return false;
         }
+        // Temporary debug: log all write_i24_payload_at calls to help locate emission sites.
+        eprintln!(
+            "[bytecode-debug] write_i24_payload_at idx={} val={}",
+            idx, val
+        );
         let instr = self.code[idx];
         // clear upper 24 bits then or in new payload
         let payload_u32 = ((val as u32) & 0x00FF_FFFF) << 8;

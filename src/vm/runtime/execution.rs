@@ -2834,6 +2834,10 @@ impl Vm {
 
     fn jump(&mut self, offset: isize) -> Result<(), RuntimeError> {
         let new_ip = (self.ip as isize) + offset;
+        // Temporary debug: log large or suspicious jump offsets to locate emission sites.
+        if offset.abs() > 10 {
+            eprintln!("[vm-debug] jump at ip={} offset={} next_ip_calc={}", self.ip, offset, new_ip);
+        }
         if new_ip < 0 || (new_ip as usize) > self.chunk.code.len() {
             return Err(RuntimeError::from(format!(
                 "Jump target out of bounds (ip={} offset={})",
