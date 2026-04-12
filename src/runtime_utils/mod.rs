@@ -68,7 +68,6 @@ use crate::value::SymbolId;
 use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 use crate::{RuntimeError, bytecode};
-use num_bigint::BigInt as BigIntValue;
 use num_traits::{FromPrimitive, ToPrimitive};
 
 mod atomics;

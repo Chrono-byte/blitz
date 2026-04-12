@@ -1,6 +1,14 @@
 use crate::ecmascript::semantics::atomics as semantics_atomics;
 use super::*;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use num_bigint::BigInt as BigIntValue;
+use num_traits::ToPrimitive;
+use crate::{RuntimeError, Vm};
+use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::gc;
+
 // Delegate pure algorithmic helpers to the semantics module. This keeps the
 // runtime-specific code here small and avoids duplicating logic.
 fn atomics_value_kind(kind_name: &str) -> Option<AtomicsValueKind> {
