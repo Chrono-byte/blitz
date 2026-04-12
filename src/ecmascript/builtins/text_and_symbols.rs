@@ -76,7 +76,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     ));
     string_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&string_proto_map))),
+        PropertyDescriptor::data(Value::Object(string_proto_map.clone())),
     );
 
     let boolean_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
@@ -92,7 +92,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     boolean_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
         PropertyDescriptor::Data {
-            value: Value::Object(Rc::clone(&boolean_proto_map)),
+            value: Value::Object(boolean_proto_map.clone()),
             writable: false,
             enumerable: false,
             configurable: false,
@@ -120,9 +120,9 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     ));
     symbol_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&symbol_proto_map))),
+        PropertyDescriptor::data(Value::Object(symbol_proto_map.clone())),
     );
-    let symbol_ctor_val = Value::BuiltinObject(symbol_ctor_fn.clone(), Rc::clone(&symbol_ctor_map));
+    let symbol_ctor_val = Value::BuiltinObject(symbol_ctor_fn.clone(), symbol_ctor_map.clone());
     set_builtin_length(&symbol_ctor_val, 0.0);
     symbol_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
@@ -301,7 +301,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         );
     }
 
-    let string_proto_for_ctor = Rc::clone(&string_proto_map);
+    let string_proto_for_ctor = string_proto_map.clone();
     let string_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
         let value_idx = if vm.current_new_target().is_some() || args.len() > 1 {
             1
@@ -318,7 +318,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         {
             {
                 let mut obj = obj_rc.borrow_mut();
-                obj.set_prototype_value(Value::Object(Rc::clone(&string_proto_for_ctor)));
+                obj.set_prototype_value(Value::Object(string_proto_for_ctor.clone()));
                 obj.properties.insert(
                     PKey::String("[[PrimitiveValue]]".to_string()),
                     PropertyDescriptor::data(Value::String(s.clone())),
@@ -348,7 +348,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         }
         Ok(Value::String(s))
     });
-    let string_ctor_val = Value::BuiltinObject(string_ctor_fn.clone(), Rc::clone(&string_ctor_map));
+    let string_ctor_val = Value::BuiltinObject(string_ctor_fn.clone(), string_ctor_map.clone());
     set_builtin_length(&string_ctor_val, 1.0);
     set_builtin_name(&string_ctor_val, "String");
     string_ctor_map.borrow_mut().properties.insert(
@@ -677,7 +677,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         }
         Ok(prim)
     });
-    let boolean_ctor_val = Value::BuiltinObject(boolean_ctor_fn, Rc::clone(&boolean_ctor_map));
+    let boolean_ctor_val = Value::BuiltinObject(boolean_ctor_fn, boolean_ctor_map.clone());
     set_builtin_length(&boolean_ctor_val, 1.0);
     set_builtin_name(&boolean_ctor_val, "Boolean");
     boolean_proto_map.borrow_mut().properties.insert(

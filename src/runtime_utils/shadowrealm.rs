@@ -14,7 +14,7 @@ impl ShadowRealmRecord {
     pub(crate) fn new(base_dir: PathBuf) -> Self {
         let globals = Rc::new(RefCell::new(ObjectData::new()));
         Self {
-            vm: RefCell::new(Vm::new(Rc::clone(&globals))),
+            vm: RefCell::new(Vm::new(globals.clone())),
             base_dir,
         }
     }

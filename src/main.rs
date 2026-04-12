@@ -93,7 +93,7 @@ fn main() -> Result<(), blitz::errors::Error> {
 
     // Public globals visible to user code (populated by the prelude)
     let globals: Rc<RefCell<blitz::value::ObjectData>> = if cli.test262_harness {
-        let done_state = Rc::clone(&async_done_state);
+        let done_state = async_done_state.clone();
         let print_native: blitz::value::NativeFn = Rc::new(move |vm, _this, args| {
             let value = args.first().cloned().unwrap_or(Value::Undefined);
             let rendered = match vm.to_string(&value) {
@@ -111,7 +111,7 @@ fn main() -> Result<(), blitz::errors::Error> {
     } else {
         let globals: Rc<RefCell<blitz::value::ObjectData>> =
             Rc::new(RefCell::new(blitz::value::ObjectData::new()));
-        let global_this = Value::Object(Rc::clone(&globals));
+        let global_this = Value::Object(globals.clone());
         {
             let mut g = globals.borrow_mut();
             g.properties.insert(
@@ -244,7 +244,7 @@ mod tests {
         let globals = Rc::new(RefCell::new(ObjectData::new()));
         globals.borrow_mut().properties.insert(
             PropertyKey::String("globalThis".to_string()),
-            PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+            PropertyDescriptor::data(Value::Object(globals.clone())),
         );
         globals
     }
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn run_source_executes_basic_program() {
         let globals = Rc::new(RefCell::new(ObjectData::new()));
-        let mut vm = Vm::new(Rc::clone(&globals));
+        let mut vm = Vm::new(globals.clone());
 
         run_source(&mut vm, "var answer = 1 + 2; answer;").expect("run");
 
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn run_source_returns_expression_result() {
         let globals = test_globals();
-        let mut vm = Vm::new(Rc::clone(&globals));
+        let mut vm = Vm::new(globals.clone());
 
         let result = run_source_repl(&mut vm, "1 + 2").expect("run");
         assert!(

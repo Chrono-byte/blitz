@@ -110,7 +110,7 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
         }
 
         // Rebuild the chunk fields, replacing functions with cleared slot types.
-        let mut new_chunk = bytecode::Chunk::new(Rc::clone(&rc_chunk.source_text));
+        let mut new_chunk = bytecode::Chunk::new(rc_chunk.source_text.clone());
         new_chunk.code = rc_chunk.code.clone();
         new_chunk.constants = rc_chunk.constants.clone();
         new_chunk.lines = rc_chunk.lines.clone();
@@ -134,7 +134,7 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
         new_chunk.functions = new_funcs;
 
         let rc_new = Rc::new(new_chunk);
-        visited.insert(key, Rc::clone(&rc_new));
+        visited.insert(key, rc_new.clone());
         rc_new
     }
 
@@ -375,7 +375,7 @@ fn clone_value_across_realms(
                     PropertyKey::String("length".to_string()),
                     array_length_descriptor(len),
                 );
-                let new_val = Value::Array(Rc::clone(&new_arr), Rc::clone(&new_props));
+                let new_val = Value::Array(new_arr.clone(), new_props.clone());
                 visited.insert(addr, new_val);
 
                 // Fill dense slots
@@ -431,7 +431,7 @@ fn clone_value_across_realms(
                         out.set_prototype_value(proto);
                     }
                     let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
-                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    let target_val = Value::Object(target_obj.clone());
                     visited.insert(addr, target_val);
 
                     // Clone underlying data (expected to be Value::Array)
@@ -466,7 +466,7 @@ fn clone_value_across_realms(
                         out.set_prototype_value(proto);
                     }
                     let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
-                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    let target_val = Value::Object(target_obj.clone());
                     visited.insert(addr, target_val);
 
                     let cloned_ta = helper(vm, ta_data, visited, transfer_set)?;
@@ -527,7 +527,7 @@ fn clone_value_across_realms(
                         out.set_prototype_value(proto);
                     }
                     let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
-                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    let target_val = Value::Object(target_obj.clone());
                     visited.insert(addr, target_val);
 
                     let cloned_entries = helper(vm, entries, visited, transfer_set)?;
@@ -562,7 +562,7 @@ fn clone_value_across_realms(
                         out.set_prototype_value(proto);
                     }
                     let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
-                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    let target_val = Value::Object(target_obj.clone());
                     visited.insert(addr, target_val);
 
                     let cloned_vals = helper(vm, set_vals, visited, transfer_set)?;
@@ -593,7 +593,7 @@ fn clone_value_across_realms(
                         out.set_prototype_value(proto);
                     }
                     let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
-                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    let target_val = Value::Object(target_obj.clone());
                     visited.insert(addr, target_val);
 
                     let cloned_prim = helper(vm, prim, visited, transfer_set)?;
@@ -617,7 +617,7 @@ fn clone_value_across_realms(
                         out.set_prototype_value(proto);
                     }
                     let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
-                    let target_val = Value::Object(Rc::clone(&target_obj));
+                    let target_val = Value::Object(target_obj.clone());
                     visited.insert(addr, target_val);
 
                     // copy source, flags, lastIndex if present
@@ -641,7 +641,7 @@ fn clone_value_across_realms(
                     out.set_prototype_value(proto);
                 }
                 let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
-                let target_val = Value::Object(Rc::clone(&target_obj));
+                let target_val = Value::Object(target_obj.clone());
                 visited.insert(addr, target_val);
 
                 for (k, desc) in &borrow.properties {

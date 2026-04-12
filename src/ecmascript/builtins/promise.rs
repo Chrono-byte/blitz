@@ -24,7 +24,7 @@ pub(crate) fn create_promise_intrinsics(
     ));
 
     let promise_ctor_fn: BuiltinFn = {
-        let _promise_proto_map_rc = Rc::clone(&promise_proto_map);
+        let _promise_proto_map_rc = promise_proto_map.clone();
         Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Promise");
             let undefined = Value::Undefined;
@@ -35,9 +35,9 @@ pub(crate) fn create_promise_intrinsics(
                 on_rejected: Vec::new(),
             })));
 
-            let promise_for_resolve = Rc::clone(&promise);
+            let promise_for_resolve = promise.clone();
             let resolve_called = Rc::new(RefCell::new(false));
-            let resolve_called_for_resolve = Rc::clone(&resolve_called);
+            let resolve_called_for_resolve = resolve_called.clone();
             let resolve_fn = Value::Builtin(Rc::new(move |vm, args| {
                 if *resolve_called_for_resolve.borrow() {
                     return Ok(Value::Undefined);
@@ -60,8 +60,8 @@ pub(crate) fn create_promise_intrinsics(
                 Ok(Value::Undefined)
             }));
 
-            let promise_for_reject = Rc::clone(&promise);
-            let reject_called = Rc::clone(&resolve_called);
+            let promise_for_reject = promise.clone();
+            let reject_called = resolve_called.clone();
             let reject_fn = Value::Builtin(Rc::new(move |vm, args| {
                 if *reject_called.borrow() {
                     return Ok(Value::Undefined);
@@ -95,9 +95,9 @@ pub(crate) fn create_promise_intrinsics(
 
     promise_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&promise_proto_map))),
+        PropertyDescriptor::data(Value::Object(promise_proto_map.clone())),
     );
-    let promise_ctor_val = Value::BuiltinObject(promise_ctor_fn, Rc::clone(&promise_ctor_map));
+    let promise_ctor_val = Value::BuiltinObject(promise_ctor_fn, promise_ctor_map.clone());
 
     promise_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
@@ -128,7 +128,7 @@ pub(crate) fn create_promise_intrinsics(
                             on_fulfilled: Vec::new(),
                             on_rejected: Vec::new(),
                         })));
-                    let result_promise_value = Value::Promise(Rc::clone(&result_promise));
+                    let result_promise_value = Value::Promise(result_promise.clone());
 
                     let mut state = promise_rc.borrow_mut();
                     match &mut *state {
@@ -137,7 +137,7 @@ pub(crate) fn create_promise_intrinsics(
                             on_rejected: existing_rejected,
                         } => {
                             let user_on_fulfilled = on_fulfilled;
-                            let res_p_f = Rc::clone(&result_promise);
+                            let res_p_f = result_promise.clone();
                             let on_fulfilled_fn = Value::Builtin(Rc::new(move |vm, args| {
                                 let off = if args.len() > 1 { 1 } else { 0 };
                                 let value = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -164,7 +164,7 @@ pub(crate) fn create_promise_intrinsics(
                             }));
 
                             let user_on_rejected = on_rejected;
-                            let res_p_r = Rc::clone(&result_promise);
+                            let res_p_r = result_promise.clone();
                             let on_rejected_fn = Value::Builtin(Rc::new(move |vm, args| {
                                 let off = if args.len() > 1 { 1 } else { 0 };
                                 let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -196,7 +196,7 @@ pub(crate) fn create_promise_intrinsics(
                         PromiseState::Fulfilled(value) => {
                             let value = value.clone();
                             let user_on_fulfilled = on_fulfilled;
-                            let res_p_f = Rc::clone(&result_promise);
+                            let res_p_f = result_promise.clone();
                             vm.queue_microtask(move |vm| {
                                 if matches!(user_on_fulfilled, Value::Undefined) {
                                     resolve_promise_with_value(vm, &res_p_f, value.clone())?;
@@ -224,7 +224,7 @@ pub(crate) fn create_promise_intrinsics(
                             *handled = true;
                             let reason = reason.clone();
                             let user_on_rejected = on_rejected;
-                            let res_p_r = Rc::clone(&result_promise);
+                            let res_p_r = result_promise.clone();
                             vm.queue_microtask(move |vm| {
                                 if matches!(user_on_rejected, Value::Undefined) {
                                     reject_pending_promise(vm, &res_p_r, reason.clone());
@@ -296,8 +296,8 @@ pub(crate) fn create_promise_intrinsics(
 
                 let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
-                let resolve_slot_capture = Rc::clone(&resolve_slot);
-                let reject_slot_capture = Rc::clone(&reject_slot);
+                let resolve_slot_capture = resolve_slot.clone();
+                let reject_slot_capture = reject_slot.clone();
                 let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                     let off = if executor_args.len() > 2 { 1 } else { 0 };
                     *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();
@@ -344,8 +344,8 @@ pub(crate) fn create_promise_intrinsics(
 
                 let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
-                let resolve_slot_capture = Rc::clone(&resolve_slot);
-                let reject_slot_capture = Rc::clone(&reject_slot);
+                let resolve_slot_capture = resolve_slot.clone();
+                let reject_slot_capture = reject_slot.clone();
                 let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                     let off = if executor_args.len() > 2 { 1 } else { 0 };
                     *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();
@@ -394,15 +394,15 @@ pub(crate) fn create_promise_intrinsics(
                     let then_val =
                         vm.get_property_host(&item, &PropertyKey::String("then".to_string()))?;
                     if Vm::is_callable_value(&then_val) {
-                        let results_rc = Rc::clone(&results);
-                        let remaining_rc = Rc::clone(&remaining);
-                        let settled_rc = Rc::clone(&settled);
+                        let results_rc = results.clone();
+                        let remaining_rc = remaining.clone();
+                        let settled_rc = settled.clone();
                         let resolve_fn_rc = resolve_fn.clone();
                         let reject_fn_rc = reject_fn.clone();
                         let resolve_slot_resolved = Rc::new(Mutex::new(false));
                         let reject_slot_resolved = Rc::new(Mutex::new(false));
 
-                        let resolve_slot_resolved_cb = Rc::clone(&resolve_slot_resolved);
+                        let resolve_slot_resolved_cb = resolve_slot_resolved.clone();
                         let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
                             if *settled_rc.lock().unwrap()
                                 || *resolve_slot_resolved_cb.lock().unwrap()
@@ -429,8 +429,8 @@ pub(crate) fn create_promise_intrinsics(
                             Ok(Value::Undefined)
                         }));
 
-                        let reject_slot_resolved_cb = Rc::clone(&reject_slot_resolved);
-                        let settled_rc = Rc::clone(&settled);
+                        let reject_slot_resolved_cb = reject_slot_resolved.clone();
+                        let settled_rc = settled.clone();
                         let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
                             if *settled_rc.lock().unwrap()
                                 || *reject_slot_resolved_cb.lock().unwrap()
@@ -496,8 +496,8 @@ pub(crate) fn create_promise_intrinsics(
 
                 let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
-                let resolve_slot_capture = Rc::clone(&resolve_slot);
-                let reject_slot_capture = Rc::clone(&reject_slot);
+                let resolve_slot_capture = resolve_slot.clone();
+                let reject_slot_capture = reject_slot.clone();
                 let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                     let off = if executor_args.len() > 2 { 1 } else { 0 };
                     *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();

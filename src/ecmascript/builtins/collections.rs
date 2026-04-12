@@ -96,10 +96,10 @@ pub(crate) fn install_map_set_constructors(
         }
         Ok(Value::Object(Rc::new(RefCell::new(ObjectData::new()))))
     });
-    let map_ctor_val = Value::BuiltinObject(map_ctor_fn.clone(), Rc::clone(&map_ctor_map));
+    let map_ctor_val = Value::BuiltinObject(map_ctor_fn.clone(), map_ctor_map.clone());
     map_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&map_proto_map))),
+        PropertyDescriptor::data(Value::Object(map_proto_map.clone())),
     );
     map_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
@@ -273,7 +273,7 @@ pub(crate) fn install_map_set_constructors(
                     PropertyKey::String("__iter_index".to_string()),
                     PropertyDescriptor::data(Value::Number(0.0)),
                 );
-                let function_proto_for_next = Rc::clone(&function_proto_for_map_iter);
+                let function_proto_for_next = function_proto_for_map_iter.clone();
                 let next_fn = builtin_object(
                     Rc::new(|vm, args| {
                         let undefined = Value::Undefined;
@@ -395,10 +395,10 @@ pub(crate) fn install_map_set_constructors(
         }
         Ok(Value::Object(Rc::new(RefCell::new(ObjectData::new()))))
     });
-    let set_ctor_val = Value::BuiltinObject(set_ctor_fn.clone(), Rc::clone(&set_ctor_map));
+    let set_ctor_val = Value::BuiltinObject(set_ctor_fn.clone(), set_ctor_map.clone());
     set_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&set_proto_map))),
+        PropertyDescriptor::data(Value::Object(set_proto_map.clone())),
     );
     set_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
@@ -479,7 +479,7 @@ pub(crate) fn install_map_set_constructors(
                     PropertyKey::String("__iter_index".to_string()),
                     PropertyDescriptor::data(Value::Number(0.0)),
                 );
-                let function_proto_for_next = Rc::clone(&function_proto_for_set_iter);
+                let function_proto_for_next = function_proto_for_set_iter.clone();
                 let next_fn = builtin_object(
                     Rc::new(|vm, args| {
                         let it = args.first().cloned().unwrap_or(Value::Undefined);

@@ -28,9 +28,9 @@ pub(crate) fn install_bigint_and_number_builtins(
     ));
     bigint_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&bigint_proto_map))),
+        PropertyDescriptor::data(Value::Object(bigint_proto_map.clone())),
     );
-    let bigint_proto_for_ctor = Rc::clone(&bigint_proto_map);
+    let bigint_proto_for_ctor = bigint_proto_map.clone();
     let bigint_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
         let value_idx = if vm.current_new_target().is_some() || args.len() > 1 {
             1
@@ -70,7 +70,7 @@ pub(crate) fn install_bigint_and_number_builtins(
 
         if vm.current_new_target().is_some() {
             let mut obj = ObjectData::new();
-            obj.set_prototype_value(Value::Object(Rc::clone(&bigint_proto_for_ctor)));
+            obj.set_prototype_value(Value::Object(bigint_proto_for_ctor.clone()));
             let obj_rc = Rc::new(RefCell::new(obj));
             obj_rc.borrow_mut().properties.insert(
                 PKey::String("[[PrimitiveValue]]".to_string()),
@@ -81,7 +81,7 @@ pub(crate) fn install_bigint_and_number_builtins(
             Ok(Value::BigInt(bigint))
         }
     });
-    let bigint_ctor_val = Value::BuiltinObject(bigint_ctor_fn, Rc::clone(&bigint_ctor_map));
+    let bigint_ctor_val = Value::BuiltinObject(bigint_ctor_fn, bigint_ctor_map.clone());
     bigint_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(bigint_ctor_val.clone()),
@@ -157,15 +157,15 @@ pub(crate) fn install_bigint_and_number_builtins(
     ));
     number_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        non_enum_data(Value::Object(Rc::clone(&number_proto_map))),
+        non_enum_data(Value::Object(number_proto_map.clone())),
     );
-    let number_proto_for_ctor = Rc::clone(&number_proto_map);
+    let number_proto_for_ctor = number_proto_map.clone();
     let number_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
         if vm.current_new_target().is_some() {
             let value = args.get(1).cloned().unwrap_or(Value::Number(0.0));
             let n = vm.to_number_value(&value)?;
             let mut obj = ObjectData::new();
-            obj.set_prototype_value(Value::Object(Rc::clone(&number_proto_for_ctor)));
+            obj.set_prototype_value(Value::Object(number_proto_for_ctor.clone()));
             let obj_rc = Rc::new(RefCell::new(obj));
             obj_rc.borrow_mut().properties.insert(
                 PKey::String("[[PrimitiveValue]]".to_string()),
@@ -196,7 +196,7 @@ pub(crate) fn install_bigint_and_number_builtins(
         let n = vm.to_number_value(&value)?;
         Ok(Value::Number(n))
     });
-    let number_ctor_val = Value::BuiltinObject(number_ctor_fn, Rc::clone(&number_ctor_map));
+    let number_ctor_val = Value::BuiltinObject(number_ctor_fn, number_ctor_map.clone());
     number_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         non_enum_data(number_ctor_val.clone()),

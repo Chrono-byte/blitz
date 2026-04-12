@@ -18,7 +18,7 @@ pub(crate) fn build_shadowrealm_constructor(
     let shadowrealm_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
         ObjectData::with_prototype(Value::Object(Rc::clone(function_proto_map))),
     ));
-    let shadowrealm_proto_val = Value::Object(Rc::clone(&shadowrealm_proto_map));
+    let shadowrealm_proto_val = Value::Object(shadowrealm_proto_map.clone());
     let shadowrealm_ctor_fn: BuiltinFn = Rc::new({
         let shadowrealm_proto_val = shadowrealm_proto_val;
         move |vm, _args| {
@@ -33,10 +33,10 @@ pub(crate) fn build_shadowrealm_constructor(
         }
     });
     let shadowrealm_ctor_val =
-        Value::BuiltinObject(shadowrealm_ctor_fn, Rc::clone(&shadowrealm_ctor_map));
+        Value::BuiltinObject(shadowrealm_ctor_fn, shadowrealm_ctor_map.clone());
     shadowrealm_ctor_map.borrow_mut().properties.insert(
         PropertyKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&shadowrealm_proto_map))),
+        PropertyDescriptor::data(Value::Object(shadowrealm_proto_map.clone())),
     );
     shadowrealm_proto_map.borrow_mut().properties.insert(
         PropertyKey::String("constructor".to_string()),

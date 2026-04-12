@@ -167,7 +167,7 @@ impl ModuleLoader {
             resolved_canon.clone(),
             session,
         )));
-        self.map.insert(resolved_canon.clone(), Rc::clone(&rec));
+        self.map.insert(resolved_canon.clone(), rec.clone());
 
         // Recurse into dependencies discovered by parser helper
         let imports =
@@ -402,7 +402,7 @@ impl ModuleLoader {
                                     if let Some(slot) = slot_opt {
                                         {
                                             let mut rec = rec_rc.borrow_mut();
-                                            rec.imports.insert(local.clone(), Rc::clone(&slot));
+                                            rec.imports.insert(local.clone(), slot.clone());
                                             if let Some(src_idx) = dep_module_index {
                                                 rec.import_sources
                                                     .insert(local, (src_idx, imported));
@@ -414,11 +414,11 @@ impl ModuleLoader {
                                             let mut dep_rec = dep_rec_rc.borrow_mut();
                                             dep_rec
                                                 .exports
-                                                .insert(imported.clone(), Rc::clone(&new_slot));
+                                                .insert(imported.clone(), new_slot.clone());
                                         }
                                         {
                                             let mut rec = rec_rc.borrow_mut();
-                                            rec.imports.insert(local.clone(), Rc::clone(&new_slot));
+                                            rec.imports.insert(local.clone(), new_slot.clone());
                                             if let Some(src_idx) = dep_module_index {
                                                 rec.import_sources
                                                     .insert(local, (src_idx, imported));
@@ -439,7 +439,7 @@ impl ModuleLoader {
                                     if let Some(slot) = slot_opt {
                                         {
                                             let mut rec = rec_rc.borrow_mut();
-                                            rec.imports.insert(local.clone(), Rc::clone(&slot));
+                                            rec.imports.insert(local.clone(), slot.clone());
                                             if let Some(src_idx) = dep_module_index {
                                                 rec.import_sources.insert(
                                                     local,
@@ -453,12 +453,12 @@ impl ModuleLoader {
                                             let mut dep_rec = dep_rec_rc.borrow_mut();
                                             dep_rec.exports.insert(
                                                 "default".to_string(),
-                                                Rc::clone(&new_slot),
+                                                new_slot.clone(),
                                             );
                                         }
                                         {
                                             let mut rec = rec_rc.borrow_mut();
-                                            rec.imports.insert(local.clone(), Rc::clone(&new_slot));
+                                            rec.imports.insert(local.clone(), new_slot.clone());
                                             if let Some(src_idx) = dep_module_index {
                                                 rec.import_sources.insert(
                                                     local,
@@ -796,7 +796,7 @@ pub fn evaluate_entry_shared(
             let Some(rec_rc) = loader_ref.map.get(&path).cloned() else {
                 continue;
             };
-            let rec_rc_return = Rc::clone(&rec_rc);
+            let rec_rc_return = rec_rc.clone();
             let mut rec = rec_rc.borrow_mut();
             if matches!(rec.state, ModuleState::Evaluating) {
                 None

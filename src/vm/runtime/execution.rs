@@ -51,7 +51,7 @@ impl Vm {
     /// Create a new virtual machine.
     pub fn new(globals: Rc<RefCell<ObjectData>>) -> Self {
         let intrinsics = crate::runtime_utils::install_minimal_kernel_constructors(&globals);
-        let realm = Realm::with_globals(Rc::clone(&globals));
+        let realm = Realm::with_globals(globals.clone());
         let global_env = Rc::new(RefCell::new(EnvironmentRecord::new(None)));
         let module_loader = shared_module_loader_for(&globals);
         let mut vm = Self {
@@ -60,7 +60,7 @@ impl Vm {
             ip: 0,
             stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
             locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
-            this_value: Value::Object(Rc::clone(&globals)),
+            this_value: Value::Object(globals.clone()),
             builtin_this_arg_prepended: false,
             current_closure_env: None,
             pending_closure_env: None,
@@ -84,7 +84,7 @@ impl Vm {
             dynamic_import_jobs: VecDeque::new(),
             unhandled_rejection_hook: None,
             reference_stack: ReferenceStack::new(),
-            lexical_env: Rc::clone(&global_env),
+            lexical_env: global_env.clone(),
             global_env,
             yield_star_queue: None,
             current_arguments_object: None,
@@ -107,7 +107,7 @@ impl Vm {
     /// This is used for `eval`/`Function`-style dynamic execution that must
     /// observe the same realm intrinsics and globals as the caller.
     pub(crate) fn fork_execution(&self) -> Self {
-        let globals = Rc::clone(&self.globals);
+        let globals = self.globals.clone();
         let this_value = self
             .globals
             .borrow()
@@ -139,7 +139,7 @@ impl Vm {
             bg_runtime: Arc::clone(&self.bg_runtime),
             handlers: HandlerStack::with_capacity(32),
             pending_exception: false,
-            module_loader: Rc::clone(&self.module_loader),
+            module_loader: self.module_loader.clone(),
             module_table: Vec::new(),
             construct_new_target: None,
             recent_return_value: None,
@@ -148,8 +148,8 @@ impl Vm {
             dynamic_import_jobs: VecDeque::new(),
             unhandled_rejection_hook: self.unhandled_rejection_hook.clone(),
             reference_stack: ReferenceStack::new(),
-            lexical_env: Rc::clone(&self.lexical_env),
-            global_env: Rc::clone(&self.global_env),
+            lexical_env: self.lexical_env.clone(),
+            global_env: self.global_env.clone(),
             yield_star_queue: None,
             current_arguments_object: None,
             current_arguments_mapped_count: 0,
@@ -388,7 +388,7 @@ impl Vm {
 
         let mut roots: Vec<Value> = Vec::new();
         let mut env_roots: Vec<Rc<Mutex<Vec<ValueSlot>>>> = Vec::new();
-        roots.push(Value::Object(Rc::clone(&self.globals)));
+        roots.push(Value::Object(self.globals.clone()));
         roots.extend(self.stack.iter().cloned());
         roots.extend(self.locals.iter().map(|c| c.borrow().clone()));
         roots.push(self.this_value.clone());
@@ -622,7 +622,7 @@ impl Vm {
 
     /// Return a shared handle to the module loader for this VM's realm.
     pub fn module_loader_handle(&self) -> Rc<RefCell<ModuleLoader>> {
-        Rc::clone(&self.module_loader)
+        self.module_loader.clone()
     }
 
     /// Install a module's export slot map into the VM module table at the
@@ -665,7 +665,7 @@ impl Vm {
 
     /// Returns the current globals object for the active realm.
     pub fn globals_rc(&self) -> Rc<RefCell<ObjectData>> {
-        Rc::clone(&self.globals)
+        self.globals.clone()
     }
 
     /// Returns a reference to the Realm this VM operates in.
@@ -790,7 +790,7 @@ impl Vm {
         self.current_closure_env = None;
         self.pending_closure_env = None;
         self.gc_temp_roots.clear();
-        self.lexical_env = Rc::clone(&self.global_env);
+        self.lexical_env = self.global_env.clone();
         self.yield_star_queue = None;
         self.ip = 0;
         self.chunk = Rc::new(Chunk::new(Rc::new(String::new())));
@@ -813,7 +813,7 @@ impl Vm {
     /// Returns a [`crate::errors::RuntimeError`] if the chunk execution fails.
     pub fn run(&mut self, chunk: Chunk) -> Result<Value, RuntimeError> {
         let chunk_rc = Rc::new(chunk);
-        self.root_chunk = Some(Rc::clone(&chunk_rc));
+        self.root_chunk = Some(chunk_rc.clone());
         self.chunk = chunk_rc;
         self.ip = 0;
         self.stack.clear();
@@ -825,7 +825,7 @@ impl Vm {
         self.current_closure_env = None;
         self.pending_closure_env = None;
         self.gc_temp_roots.clear();
-        self.lexical_env = Rc::clone(&self.global_env);
+        self.lexical_env = self.global_env.clone();
         self.yield_star_queue = None;
         self.this_value = self
             .globals
@@ -890,7 +890,7 @@ impl Vm {
         chunk: Chunk,
         direct_eval: bool,
     ) -> Result<Value, RuntimeError> {
-        let saved_chunk = Rc::clone(&self.chunk);
+        let saved_chunk = self.chunk.clone();
         let saved_ip = self.ip;
         let saved_stack = self.stack.snapshot();
         let saved_root_chunk = self.root_chunk.clone();
@@ -906,7 +906,7 @@ impl Vm {
         let saved_last_uncaught_exception = self.last_uncaught_exception.clone();
         let saved_pending_exception = self.pending_exception;
         let saved_lexical_env = if direct_eval {
-            Some(Rc::clone(&self.lexical_env))
+            Some(self.lexical_env.clone())
         } else {
             None
         };
@@ -927,7 +927,7 @@ impl Vm {
         };
 
         let chunk_rc = Rc::new(chunk);
-        self.root_chunk = Some(Rc::clone(&chunk_rc));
+        self.root_chunk = Some(chunk_rc.clone());
         self.chunk = chunk_rc;
         self.ip = 0;
         self.stack.clear();
@@ -1046,7 +1046,7 @@ impl Vm {
                 let initialized = !slot_tdz.get(idx).copied().unwrap_or(false);
                 root_env.borrow_mut().create_mutable_binding(
                     name.clone(),
-                    Rc::clone(&self.locals[idx]),
+                    self.locals[idx].clone(),
                     initialized,
                 );
                 if initialized {
@@ -1421,7 +1421,7 @@ impl Vm {
                             }
                         }
                         Some(PropertyDescriptor::Accessor { .. }) => {
-                            let global_obj = Value::Object(Rc::clone(&self.globals));
+                            let global_obj = Value::Object(self.globals.clone());
                             self.set_property_tracked(&global_obj, &key, v)?;
                         }
                         None if self.is_strict_mode() => {
@@ -1836,7 +1836,7 @@ impl Vm {
                 let obj = self.pop()?;
                 let obj = self.to_object_value(obj)?;
                 let env = Rc::new(RefCell::new(EnvironmentRecord::new_object(
-                    Some(Rc::clone(&self.lexical_env)),
+                    Some(self.lexical_env.clone()),
                     obj,
                     true,
                 )));
@@ -1844,7 +1844,7 @@ impl Vm {
             }
             Op::PopEnv => {
                 let outer = self.lexical_env.borrow().outer();
-                self.lexical_env = outer.unwrap_or_else(|| Rc::clone(&self.global_env));
+                self.lexical_env = outer.unwrap_or_else(|| self.global_env.clone());
             }
             Op::GetNewTarget => {
                 let new_target = self.get_new_target();
@@ -2118,12 +2118,12 @@ impl Vm {
                 let offset = self.read_short_signed()?;
                 let handler_ip = (self.ip as isize + offset) as usize;
                 self.handlers.push(HandlerRecord {
-                    chunk: Rc::clone(&self.chunk),
+                    chunk: self.chunk.clone(),
                     handler_ip,
                     saved_stack_len: self.stack.len(),
                     saved_locals_len: self.locals.len(),
                     frame_count: self.call_stack.len(),
-                    saved_lexical_env: Rc::clone(&self.lexical_env),
+                    saved_lexical_env: self.lexical_env.clone(),
                 });
                 if crate::trace::enabled() {
                     eprintln!(
@@ -2713,7 +2713,7 @@ impl Vm {
         } else {
             return Err(self.throw_type_error("DeleteIdentifier requires string constant"));
         };
-        let mut env = Some(Rc::clone(&self.lexical_env));
+        let mut env = Some(self.lexical_env.clone());
         while let Some(current) = env {
             let (has_binding, binding_object, with_environment, outer) = {
                 let borrowed = current.borrow();
@@ -2743,7 +2743,7 @@ impl Vm {
             env = outer;
         }
 
-        let global_obj = Value::Object(Rc::clone(&self.globals));
+        let global_obj = Value::Object(self.globals.clone());
         let key = PropertyKey::String(name.clone());
         let deleted = self.delete_property_host(&global_obj, &key)?;
         self.bump_object_generation(&global_obj);

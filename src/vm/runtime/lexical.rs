@@ -30,7 +30,7 @@ impl Vm {
             let Some(name) = maybe_name.as_deref() else {
                 continue;
             };
-            let mut env = Some(Rc::clone(&self.lexical_env));
+            let mut env = Some(self.lexical_env.clone());
             while let Some(current) = env {
                 let (conflict, outer) = {
                     let borrowed = current.borrow();
@@ -55,7 +55,7 @@ impl Vm {
 
     /// Adopt the caller's live bindings and slot metadata for a nested eval run.
     pub(crate) fn adopt_eval_context(&mut self, parent: &Vm) {
-        self.set_lexical_env(Rc::clone(&parent.lexical_env));
+        self.set_lexical_env(parent.lexical_env.clone());
     }
 
     pub(super) fn is_unscopable_binding(
@@ -79,7 +79,7 @@ impl Vm {
         &mut self,
         name: &str,
     ) -> Result<Option<Value>, RuntimeError> {
-        let mut env = Some(Rc::clone(&self.lexical_env));
+        let mut env = Some(self.lexical_env.clone());
         while let Some(current) = env {
             let (binding_value, binding_object, with_environment, outer) = {
                 let borrowed = current.borrow();
@@ -120,7 +120,7 @@ impl Vm {
         name: &str,
         value: Value,
     ) -> Result<bool, RuntimeError> {
-        let mut env = Some(Rc::clone(&self.lexical_env));
+        let mut env = Some(self.lexical_env.clone());
         while let Some(current) = env {
             let (has_decl_binding, binding_object, with_environment, outer) = {
                 let borrowed = current.borrow();
@@ -165,7 +165,7 @@ impl Vm {
         &mut self,
         name: &str,
     ) -> Result<Option<Value>, RuntimeError> {
-        let mut env = Some(Rc::clone(&self.lexical_env));
+        let mut env = Some(self.lexical_env.clone());
         while let Some(current) = env {
             let (binding_object, with_environment, outer) = {
                 let borrowed = current.borrow();
@@ -194,7 +194,7 @@ impl Vm {
         name: &str,
         value: Value,
     ) -> Result<bool, RuntimeError> {
-        let mut env = Some(Rc::clone(&self.lexical_env));
+        let mut env = Some(self.lexical_env.clone());
         while let Some(current) = env {
             let (binding_object, with_environment, outer) = {
                 let borrowed = current.borrow();

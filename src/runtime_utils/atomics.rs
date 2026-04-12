@@ -166,7 +166,7 @@ fn atomics_read_view_slot(
     index: usize,
 ) -> Result<Value, RuntimeError> {
     let prop_key = PropertyKey::String(index.to_string());
-    let value = vm.get_property_host(&Value::Object(Rc::clone(&info.view)), &prop_key)?;
+    let value = vm.get_property_host(&Value::Object(info.view.clone()), &prop_key)?;
     if !matches!(value, Value::Undefined) {
         return Ok(value);
     }
@@ -187,7 +187,7 @@ fn atomics_write_view_slot(
 ) -> Result<(), RuntimeError> {
     let prop_key = Value::Number(usize_to_f64(index));
     let stored = value.clone();
-    let _ = vm.set_property_host(&Value::Object(Rc::clone(&info.view)), &prop_key, value)?;
+    let _ = vm.set_property_host(&Value::Object(info.view.clone()), &prop_key, value)?;
     if let Some(slot) = info.data.borrow_mut().get_mut(index) {
         *slot = Some(stored);
     }
@@ -211,7 +211,7 @@ pub(crate) fn atomics_waiters_array(
     buffer_data.properties.insert(
         PropertyKey::String("[[AtomicsWaiters]]".to_string()),
         PropertyDescriptor::data(Value::Array(
-            Rc::clone(&arr),
+            arr.clone(),
             gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
         )),
     );

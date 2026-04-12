@@ -173,7 +173,7 @@ impl Compiler {
         let (allow_new_target, allow_super) = COMPILE_CONTEXT_OVERRIDE
             .with(|override_state| *override_state.borrow())
             .unwrap_or((false, false));
-        let mut chunk = Chunk::new(Rc::clone(&source_text));
+        let mut chunk = Chunk::new(source_text.clone());
         chunk.allow_new_target = allow_new_target;
         chunk.allow_super = allow_super;
         Self {

@@ -1296,7 +1296,7 @@ fn builtin_eval_script(globals: &Rc<RefCell<ObjectData>>, args: &[Value]) -> Res
 fn make_test_globals() -> Rc<RefCell<ObjectData>> {
     let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
 
-    let global_this = Value::Object(Rc::clone(&globals));
+    let global_this = Value::Object(globals.clone());
     globals.borrow_mut().properties.insert(
         PropertyKey::String("globalThis".to_string()),
         PropertyDescriptor::data(global_this),
@@ -1424,12 +1424,12 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     ] {
         agent_obj.borrow_mut().properties.insert(
             PropertyKey::String(name.to_string()),
-            PropertyDescriptor::data(host_builtin(Rc::clone(&noop_agent_method))),
+            PropertyDescriptor::data(host_builtin(noop_agent_method.clone())),
         );
     }
     data.properties.insert(
         PropertyKey::String("agent".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&agent_obj))),
+        PropertyDescriptor::data(Value::Object(agent_obj.clone())),
     );
 
     // createRealm: builds a FRESH realm with fresh intrinsics, NOT a heap clone.
@@ -1451,7 +1451,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
             if let Value::Object(obj) = &new_262 {
                 obj.borrow_mut().properties.insert(
                     PropertyKey::String("global".to_string()),
-                    PropertyDescriptor::data(Value::Object(Rc::clone(&realm_global))),
+                    PropertyDescriptor::data(Value::Object(realm_global.clone())),
                 );
             }
 
@@ -1707,7 +1707,7 @@ fn run_test_file(
             PropertyKey::String("__TSBLITZ_TEST_PATH".to_string()),
             PropertyDescriptor::data(Value::String(path.to_string_lossy().to_string())),
         );
-        let mut vm = Vm::new(Rc::clone(&globals));
+        let mut vm = Vm::new(globals.clone());
 
         // The harness self-test `test/harness/detachArrayBuffer.js` verifies
         // the fallback behavior when hosts do NOT provide `$262` at all.
@@ -1723,7 +1723,7 @@ fn run_test_file(
         // Async tests must signal completion through $DONE(error?).
         let done_state: Rc<RefCell<Option<Option<String>>>> = Rc::new(RefCell::new(None));
         if is_async {
-            let done_state_for_print = Rc::clone(&done_state);
+            let done_state_for_print = done_state.clone();
             let async_print: NativeFn = Rc::new(move |vm, _this, args| {
                 let s = print_args(vm, args);
                 if done_state_for_print.borrow().is_none()
@@ -2435,7 +2435,7 @@ fn main() {
     let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
 
     // Provide globalThis reference
-    let global_this = Value::Object(Rc::clone(&globals));
+    let global_this = Value::Object(globals.clone());
     globals.borrow_mut().properties.insert(
         PropertyKey::String("globalThis".to_string()),
         PropertyDescriptor::data(global_this),
@@ -2798,7 +2798,7 @@ const ok = 1;
     fn print_args_uses_js_stringification() {
         let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
         let intrinsics = runtime_utils::install_minimal_kernel_constructors(&globals);
-        let mut vm = Vm::new(Rc::clone(&globals));
+        let mut vm = Vm::new(globals.clone());
 
         let array_proto = intrinsics
             .array_prototype
@@ -2820,7 +2820,7 @@ const ok = 1;
     fn print_args_defaults_to_undefined_when_missing() {
         let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
         let _intrinsics = runtime_utils::install_minimal_kernel_constructors(&globals);
-        let mut vm = Vm::new(Rc::clone(&globals));
+        let mut vm = Vm::new(globals.clone());
 
         assert_eq!(print_args(&mut vm, &[]), "undefined");
     }

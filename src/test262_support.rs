@@ -134,12 +134,12 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>, print_native: &NativeF
     ] {
         agent_obj.borrow_mut().properties.insert(
             PropertyKey::String(name.to_string()),
-            PropertyDescriptor::data(host_builtin(Rc::clone(&noop_agent_method))),
+            PropertyDescriptor::data(host_builtin(noop_agent_method.clone())),
         );
     }
     data.properties.insert(
         PropertyKey::String("agent".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&agent_obj))),
+        PropertyDescriptor::data(Value::Object(agent_obj.clone())),
     );
 
     let print_native = Rc::clone(print_native);
@@ -149,9 +149,9 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>, print_native: &NativeF
             let realm_global = Rc::new(RefCell::new(ObjectData::new()));
             realm_global.borrow_mut().properties.insert(
                 PropertyKey::String("globalThis".to_string()),
-                PropertyDescriptor::data(Value::Object(Rc::clone(&realm_global))),
+                PropertyDescriptor::data(Value::Object(realm_global.clone())),
             );
-            define_native_global(&realm_global, "print", Rc::clone(&print_native));
+            define_native_global(&realm_global, "print", print_native.clone());
             runtime_utils::install_minimal_kernel_constructors(&realm_global);
             let new_262 = make_test262_object(&realm_global, &print_native);
             realm_global.borrow_mut().properties.insert(
@@ -161,7 +161,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>, print_native: &NativeF
             if let Value::Object(obj) = &new_262 {
                 obj.borrow_mut().properties.insert(
                     PropertyKey::String("global".to_string()),
-                    PropertyDescriptor::data(Value::Object(Rc::clone(&realm_global))),
+                    PropertyDescriptor::data(Value::Object(realm_global.clone())),
                 );
             }
             Ok(new_262)
@@ -192,10 +192,10 @@ pub fn make_test262_globals_with_print(print_native: NativeFn) -> Rc<RefCell<Obj
     let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
         PropertyKey::String("globalThis".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+        PropertyDescriptor::data(Value::Object(globals.clone())),
     );
 
-    define_native_global(&globals, "print", Rc::clone(&print_native));
+    define_native_global(&globals, "print", print_native.clone());
     globals.borrow_mut().properties.insert(
         PropertyKey::String("NaN".to_string()),
         PropertyDescriptor::data(Value::Number(f64::NAN)),

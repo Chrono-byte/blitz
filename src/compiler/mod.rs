@@ -58,7 +58,7 @@ pub fn compile(
     source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
     let source_text = Rc::new(source.to_string());
-    let mut c = Compiler::new(Rc::clone(&source_text));
+    let mut c = Compiler::new(source_text.clone());
     c.compile_oxc(program, None)
 }
 
@@ -72,7 +72,7 @@ pub fn compile_oxc(
     source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
     let source_text = Rc::new(source.to_string());
-    let mut c = Compiler::new(Rc::clone(&source_text));
+    let mut c = Compiler::new(source_text.clone());
     c.compile_oxc(program, None)
 }
 
@@ -87,7 +87,7 @@ pub fn compile_oxc_with_ctx(
     source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
     let source_text = Rc::new(source.to_string());
-    let mut c = Compiler::new(Rc::clone(&source_text));
+    let mut c = Compiler::new(source_text.clone());
     c.compile_oxc(program, ctx)
 }
 
@@ -103,7 +103,7 @@ pub fn compile_oxc_repl(
     source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
     let source_text = Rc::new(source.to_string());
-    let mut c = Compiler::new(Rc::clone(&source_text));
+    let mut c = Compiler::new(source_text.clone());
     c.compile_oxc_with_mode(program, None, true)
 }
 
@@ -989,9 +989,9 @@ fn for_of_over_array_executes() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
         crate::value::PropertyKey::String("globalThis".to_string()),
-        crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+        crate::value::PropertyDescriptor::data(Value::Object(globals.clone())),
     );
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     let _ = vm.run(chunk).expect("run ok");
 
     assert!(
@@ -1014,9 +1014,9 @@ fn computed_member_compound_assignment_evaluates_reference_once() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
         crate::value::PropertyKey::String("globalThis".to_string()),
-        crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+        crate::value::PropertyDescriptor::data(Value::Object(globals.clone())),
     );
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     let _ = vm.run(chunk).expect("run ok");
 
     assert!(
@@ -1039,9 +1039,9 @@ fn member_postfix_update_returns_old_value_and_stores_new_value() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
         crate::value::PropertyKey::String("globalThis".to_string()),
-        crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+        crate::value::PropertyDescriptor::data(Value::Object(globals.clone())),
     );
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     let _ = vm.run(chunk).expect("run ok");
 
     assert!(
@@ -1057,7 +1057,7 @@ fn block_scoped_let_does_not_escape_block() {
     let chunk = compile(program, session.source()).expect("compile ok");
 
     let globals = Rc::new(RefCell::new(ObjectData::new()));
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
 
     assert!(

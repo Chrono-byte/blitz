@@ -91,7 +91,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
-                        .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_of)));
+                        .set_prototype_value(Value::Object(array_proto_for_of.clone()));
                     props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
                         array_length_descriptor(arr_rc.borrow().len()),
@@ -159,7 +159,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
-                        .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_from)));
+                        .set_prototype_value(Value::Object(array_proto_for_from.clone()));
                     props.borrow_mut().properties.insert(
                         PKey::String("length".to_string()),
                         array_length_descriptor(arr_rc.borrow().len()),
@@ -198,8 +198,8 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                     let map_fn_for_job = map_fn;
                     let this_arg_for_job = this_arg;
                     let constructor_for_job = constructor_candidate;
-                    let array_proto_for_job = Rc::clone(&array_proto_for_from_async);
-                    let result_promise_for_job = Rc::clone(&result_promise);
+                    let array_proto_for_job = array_proto_for_from_async.clone();
+                    let result_promise_for_job = result_promise.clone();
                     vm.queue_microtask(move |vm| {
                         let outcome = execute_array_from_async_job(
                             vm,

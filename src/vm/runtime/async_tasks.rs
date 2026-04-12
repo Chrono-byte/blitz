@@ -209,10 +209,10 @@ impl Vm {
 
         let proto = Rc::clone(proto);
         let env = Rc::clone(env);
-        let promise_for_job = Rc::clone(&promise);
+        let promise_for_job = promise.clone();
         let stack_base = self.stack.len();
         let saved_stack = self.stack.snapshot();
-        let caller_chunk = Rc::clone(&self.chunk);
+        let caller_chunk = self.chunk.clone();
         let caller_ip = self.ip;
         let caller_locals = self.locals.clone();
         let caller_this = self.this_value.clone();
@@ -251,7 +251,7 @@ impl Vm {
                         Rc::as_ptr(&promise_for_job)
                     );
                 }
-                let promise_job = Rc::clone(&promise_for_job);
+                let promise_job = promise_for_job.clone();
                 let mut result_cell = Some(result);
                 self.queue_microtask(move |vm| {
                     if crate::trace::enabled() {
@@ -286,7 +286,7 @@ impl Vm {
                 let reason = thrown_value
                     .or_else(|| self.last_uncaught_exception.take())
                     .unwrap_or_else(|| Value::String(format!("{}", err)));
-                let promise_job = Rc::clone(&promise_for_job);
+                let promise_job = promise_for_job.clone();
                 let mut reason_cell = Some(reason);
                 self.queue_microtask(move |vm| {
                     if crate::trace::enabled() {
@@ -363,7 +363,7 @@ mod tests {
         let hook_calls: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
 
         vm.set_unhandled_rejection_hook({
-            let hook_calls = Rc::clone(&hook_calls);
+            let hook_calls = hook_calls.clone();
             move |_vm, promise, reason| {
                 hook_calls
                     .borrow_mut()
@@ -372,21 +372,21 @@ mod tests {
         });
 
         vm.queue_microtask({
-            let events = Rc::clone(&events);
+            let events = events.clone();
             move |_vm| {
                 events.borrow_mut().push("first".to_string());
                 Ok(())
             }
         });
         vm.queue_microtask({
-            let events = Rc::clone(&events);
+            let events = events.clone();
             move |_vm| {
                 events.borrow_mut().push("second".to_string());
                 Err(RuntimeError::from("microtask failed"))
             }
         });
         vm.queue_microtask({
-            let events = Rc::clone(&events);
+            let events = events.clone();
             move |_vm| {
                 events.borrow_mut().push("third".to_string());
                 Ok(())

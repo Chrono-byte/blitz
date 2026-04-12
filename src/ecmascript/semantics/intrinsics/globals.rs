@@ -157,7 +157,7 @@ pub(crate) fn install_global_bindings(
         ))));
         ctor_map.borrow_mut().properties.insert(
             PKey::String("prototype".to_string()),
-            PropertyDescriptor::data(Value::Object(Rc::clone(&proto_map))),
+            PropertyDescriptor::data(Value::Object(proto_map.clone())),
         );
         let name_owned = name.to_string();
         let ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
@@ -172,7 +172,7 @@ pub(crate) fn install_global_bindings(
             }
             Ok(Value::Undefined)
         });
-        let ctor_val = Value::BuiltinObject(ctor_fn, Rc::clone(&ctor_map));
+        let ctor_val = Value::BuiltinObject(ctor_fn, ctor_map.clone());
         ctor_map.borrow_mut().properties.insert(
             PKey::String("name".to_string()),
             PropertyDescriptor::data(Value::String(name.to_string())),

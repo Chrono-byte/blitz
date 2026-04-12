@@ -11,7 +11,7 @@ fn test_globals() -> Rc<RefCell<ObjectData>> {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
         PropertyKey::String("globalThis".to_string()),
-        PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+        PropertyDescriptor::data(Value::Object(globals.clone())),
     );
     runtime_utils::install_minimal_kernel_constructors(&globals);
     globals
@@ -23,7 +23,7 @@ fn run_script(src: &str) -> (Vm, Rc<RefCell<ObjectData>>) {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
     (vm, globals)
 }
@@ -100,7 +100,7 @@ fn builtin_object_property_lookup_uses_props_and_prototype() {
     );
 
     let props = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-        Rc::clone(&proto),
+        proto.clone(),
     ))));
     props.borrow_mut().properties.insert(
         PropertyKey::String("own".to_string()),
@@ -124,7 +124,7 @@ fn set_property_tracked_mutates_builtin_object_props() {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     let props = Rc::new(RefCell::new(ObjectData::new()));
-    let builtin = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), Rc::clone(&props));
+    let builtin = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), props.clone());
 
     vm.set_property_tracked(
         &builtin,
@@ -161,7 +161,7 @@ fn get_property_ic_distinguishes_keys_at_same_slot() {
         PropertyKey::String("y".to_string()),
         PropertyDescriptor::data(Value::Number(2.0)),
     );
-    let obj = Value::Object(Rc::clone(&obj_data));
+    let obj = Value::Object(obj_data.clone());
 
     vm.chunk = Rc::new(Chunk {
         code: vec![0],
@@ -200,7 +200,7 @@ fn get_property_ic_invalidates_after_mutation() {
         .borrow_mut()
         .properties
         .insert(key.clone(), PropertyDescriptor::data(Value::Number(1.0)));
-    let obj = Value::Object(Rc::clone(&obj_data));
+    let obj = Value::Object(obj_data.clone());
 
     vm.chunk = Rc::new(Chunk {
         code: vec![0],
@@ -287,11 +287,11 @@ fn object_from_entries_set_prototype_of_and_to_locale_string_work() {
     match vm.get_global("created") {
         Some(Value::Object(obj)) => {
             assert!(matches!(
-                vm.get_property_host(&Value::Object(Rc::clone(&obj)), &PropertyKey::String("a".to_string())).ok(),
+                vm.get_property_host(&Value::Object(obj.clone()), &PropertyKey::String("a".to_string())).ok(),
                 Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON
             ));
             assert!(matches!(
-                vm.get_property_host(&Value::Object(Rc::clone(&obj)), &PropertyKey::String("b".to_string())).ok(),
+                vm.get_property_host(&Value::Object(obj.clone()), &PropertyKey::String("b".to_string())).ok(),
                 Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON
             ));
         }
@@ -416,8 +416,8 @@ fn array_of_builds_array_from_arguments() {
 #[test]
 fn same_value_uses_reference_identity_for_objects() {
     let obj = Rc::new(RefCell::new(ObjectData::new()));
-    let a = Value::Object(Rc::clone(&obj));
-    let b = Value::Object(Rc::clone(&obj));
+    let a = Value::Object(obj.clone());
+    let b = Value::Object(obj.clone());
     let c = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
 
     assert!(same_value(&a, &b));
@@ -493,7 +493,7 @@ fn dense_array_index_beyond_max_doesnt_dense_resize() {
         PropertyKey::String("length".to_string()),
         PropertyDescriptor::data(Value::Number(1.0)),
     );
-    let arr = Value::Array(Rc::clone(&arr_data), Rc::clone(&props));
+    let arr = Value::Array(arr_data.clone(), props.clone());
     let key = PropertyKey::String("4294967295".to_string());
 
     set_property(&arr, &key, Value::String("x".to_string())).unwrap();
@@ -517,7 +517,7 @@ fn sparse_array_index_updates_length_without_dense_resize() {
         PropertyKey::String("length".to_string()),
         PropertyDescriptor::data(Value::Number(1.0)),
     );
-    let arr = Value::Array(Rc::clone(&arr_data), Rc::clone(&props));
+    let arr = Value::Array(arr_data.clone(), props.clone());
     let key = PropertyKey::String("4294967294".to_string());
 
     set_property(&arr, &key, Value::Number(1.0)).unwrap();
@@ -546,7 +546,7 @@ fn dense_array_element_redefinition_preserves_configurability() {
         PropertyKey::String("length".to_string()),
         PropertyDescriptor::data(Value::Number(2.0)),
     );
-    let arr = Value::Array(Rc::clone(&arr_data), Rc::clone(&props));
+    let arr = Value::Array(arr_data.clone(), props.clone());
     let getter = Value::Builtin(Rc::new(|_, _| Ok(Value::Undefined)));
     let mut desc = PartialDescriptor::default();
     desc.get = Some(getter);
@@ -595,21 +595,21 @@ fn reverse_with_length_shrink_clears_lower_index() {
         Some(Value::Array(arr, props)) => {
             assert!(
                 !vm.has_property_host(
-                    &Value::Array(Rc::clone(&arr), Rc::clone(&props)),
+                    &Value::Array(arr.clone(), props.clone()),
                     &PropertyKey::String("0".to_string())
                 )
                 .unwrap()
             );
             assert!(
                 vm.has_property_host(
-                    &Value::Array(Rc::clone(&arr), Rc::clone(&props)),
+                    &Value::Array(arr.clone(), props.clone()),
                     &PropertyKey::String("1".to_string())
                 )
                 .unwrap()
             );
             assert!(matches!(
                 vm.get_property_host(
-                    &Value::Array(Rc::clone(&arr), Rc::clone(&props)),
+                    &Value::Array(arr.clone(), props.clone()),
                     &PropertyKey::String("1".to_string())
                 )
                 .unwrap(),
@@ -627,7 +627,7 @@ fn top_level_assignment_updates_global_binding() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     let result = vm.run(chunk).expect("run ok");
 
     assert!(matches!(result, Value::Undefined));
@@ -646,7 +646,7 @@ fn eval_for_loop_completion_is_undefined() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     let result = vm.run(chunk).expect("run ok");
 
     assert!(matches!(result, Value::Undefined));
@@ -667,7 +667,7 @@ fn eval_array_spread_literal_expands_values() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     let result = vm.run(chunk).expect("run ok");
 
     assert!(matches!(result, Value::Undefined));
@@ -692,7 +692,7 @@ fn with_statement_coerces_operand_to_object() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     let err = vm.run(chunk).expect_err("with(undefined) should throw");
 
     assert!(
@@ -719,7 +719,7 @@ fn with_statement_reads_bindings_from_object_environment() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
 
     assert_eq!(
@@ -750,7 +750,7 @@ fn with_statement_inside_constructor_reads_and_writes_object_bindings() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
 
     assert_eq!(
@@ -809,7 +809,7 @@ fn with_statement_handles_common_identifier_shadowing_cases() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
 
     assert_eq!(
@@ -879,7 +879,7 @@ fn with_statement_prefers_object_bindings_over_global_nans() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
 
     assert_eq!(
@@ -969,7 +969,7 @@ fn with_statement_prefers_object_bindings_over_global_nans_in_plain_call() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
 
     assert_eq!(
@@ -998,7 +998,7 @@ fn with_statement_prefers_object_bindings_over_global_nans_after_harness() {
         PropertyKey::String("Infinity".to_string()),
         PropertyDescriptor::data(Value::Number(f64::INFINITY)),
     );
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
 
     for harness_name in ["assert.js", "sta.js"] {
         let path = std::path::Path::new("test262/harness").join(harness_name);
@@ -1092,7 +1092,7 @@ fn with_statement_var_initializer_writes_through_object_binding() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
 
     assert_eq!(vm.get_global("result"), Some(Value::Undefined));
@@ -1127,7 +1127,7 @@ fn strict_assignment_to_non_extensible_object_throws() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     let err = vm.run(chunk).expect_err("strict assignment should throw");
 
     assert!(
@@ -1155,7 +1155,7 @@ fn mapped_arguments_object_exposes_callee() {
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
     assert!(matches!(vm.get_global("result"), Some(Value::Bool(true))));
 }
@@ -1175,7 +1175,7 @@ fn strict_arguments_object_poison_pill_throws_on_callee() {
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     let err = vm
         .run(chunk)
         .expect_err("strict callee access should throw");
@@ -1204,7 +1204,7 @@ fn mapped_arguments_object_prototype_and_aliasing() {
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
     assert!(matches!(vm.get_global("result"), Some(Value::Bool(true))));
 }
@@ -1229,7 +1229,7 @@ fn arguments_object_is_iterable_with_array_iterator() {
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
 
     assert!(matches!(
@@ -1249,7 +1249,7 @@ fn void_operator_evaluates_to_undefined() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     let result = vm.run(chunk).expect("run ok");
 
     assert!(matches!(result, Value::Undefined));
@@ -1267,7 +1267,7 @@ fn logical_and_short_circuits_and_preserves_left_operand() {
     globals.borrow_mut().properties.insert(
         PropertyKey::String("bump".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new({
-            let calls = Rc::clone(&calls);
+            let calls = calls.clone();
             move |_vm, _args| {
                 *calls.borrow_mut() += 1;
                 Ok(Value::Number(99.0))
@@ -1275,7 +1275,7 @@ fn logical_and_short_circuits_and_preserves_left_operand() {
         }))),
     );
 
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     let result = vm.run(chunk).expect("run ok");
 
     assert_eq!(*calls.borrow(), 0);
@@ -1294,7 +1294,7 @@ fn logical_or_short_circuits_and_preserves_left_operand() {
     globals.borrow_mut().properties.insert(
         PropertyKey::String("bump".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new({
-            let calls = Rc::clone(&calls);
+            let calls = calls.clone();
             move |_vm, _args| {
                 *calls.borrow_mut() += 1;
                 Ok(Value::Number(99.0))
@@ -1302,7 +1302,7 @@ fn logical_or_short_circuits_and_preserves_left_operand() {
         }))),
     );
 
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     let result = vm.run(chunk).expect("run ok");
 
     assert_eq!(*calls.borrow(), 0);
@@ -1354,7 +1354,7 @@ fn try_block_lexical_shadow_does_not_escape_to_catch() {
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
     assert!(matches!(vm.get_global("out"), Some(Value::String(s)) if s == "outer"));
 }
@@ -1376,7 +1376,7 @@ fn var_binding_reads_before_init_return_undefined() {
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
     assert!(matches!(vm.get_global("out"), Some(Value::Undefined)));
 }
@@ -1395,7 +1395,7 @@ fn generator_next_yields_values_and_done() {
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
 
     let a = vm.get_global("a").expect("a exists");
@@ -1441,7 +1441,7 @@ fn harness_property_helper_works_across_multiple_runs() {
         PropertyDescriptor::data(Value::Number(f64::INFINITY)),
     );
     runtime_utils::install_minimal_kernel_constructors(&globals);
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
 
     for harness_name in ["assert.js", "sta.js", "propertyHelper.js"] {
         let path = std::path::Path::new("test262/harness").join(harness_name);
@@ -1484,7 +1484,7 @@ fn class_declaration_binds_constructor_function() {
     let session = Parser::parse_source(src).expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
     assert!(matches!(vm.get_global("A"), Some(Value::Closure { .. })));
 }
@@ -1509,7 +1509,7 @@ fn super_property_access_uses_home_object_and_lexical_this() {
     let session = Parser::parse_source(src).expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
 
     let method_result = vm.get_global("method_result");
@@ -1551,14 +1551,14 @@ fn microtasks_run_before_dynamic_import_jobs() {
     let order = Rc::new(RefCell::new(Vec::<&'static str>::new()));
 
     vm.queue_microtask({
-        let order = Rc::clone(&order);
+        let order = order.clone();
         move |_vm| {
             order.borrow_mut().push("microtask");
             Ok(())
         }
     });
     vm.queue_dynamic_import_job({
-        let order = Rc::clone(&order);
+        let order = order.clone();
         move |_vm| {
             order.borrow_mut().push("dynamic-import");
             Ok(())
@@ -1596,7 +1596,7 @@ fn object_keys_orders_indices_before_strings() {
     let session = Parser::parse_source(src).expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
-    let mut vm = Vm::new(Rc::clone(&globals));
+    let mut vm = Vm::new(globals.clone());
     vm.run(chunk).expect("run ok");
     match vm.get_global("keys") {
         Some(Value::Array(arr, _)) => {
@@ -1630,7 +1630,7 @@ fn for_in_keys_walks_prototype_chain_without_duplicates() {
     );
     let proto = Rc::new(RefCell::new(proto));
 
-    let mut obj = ObjectData::with_prototype(Value::Object(Rc::clone(&proto)));
+    let mut obj = ObjectData::with_prototype(Value::Object(proto.clone()));
     obj.properties.insert(
         PropertyKey::String("a".to_string()),
         PropertyDescriptor::data(Value::Number(3.0)),
@@ -1648,10 +1648,10 @@ fn for_in_keys_walks_prototype_chain_without_duplicates() {
 #[test]
 fn global_this_matches_ecmascript_public_surface() {
     let globals = test_globals();
-    let vm = Vm::new(Rc::clone(&globals));
+    let vm = Vm::new(globals.clone());
 
     let mut actual = vm
-        .list_own_keys_of_value(&Value::Object(Rc::clone(&globals)))
+        .list_own_keys_of_value(&Value::Object(globals.clone()))
         .expect("globalThis keys");
     actual.sort();
 
@@ -1784,7 +1784,7 @@ fn json_stringify_preserves_descriptor_fields() {
 #[test]
 fn vm_new_populates_intrinsics_table() {
     let globals = test_globals();
-    let vm = Vm::new(Rc::clone(&globals));
+    let vm = Vm::new(globals.clone());
     let intrinsics = &vm.realm().intrinsics;
     assert!(intrinsics.object_constructor.is_some());
     assert!(intrinsics.throw_type_error.is_some());

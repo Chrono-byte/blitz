@@ -290,7 +290,7 @@ pub(crate) fn build_atomics_object(
             }
 
             let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
-            let resolve_slot_capture = Rc::clone(&resolve_slot);
+            let resolve_slot_capture = resolve_slot.clone();
             let promise_ctor = vm
                 .get_global("Promise")
                 .ok_or_else(|| vm.throw_type_error("Promise constructor missing"))?;
