@@ -315,62 +315,12 @@ pub fn opcode_from_instr(instr: u32) -> u8 {
 
 /// Returns the `idx`th payload byte from `instr`, where `idx` is 0-based.
 #[inline]
-fn payload_u24(instr: u32) -> u32 {
-    (instr >> 8) & 0x00FF_FFFF
-}
-
-/// Returns the `idx`th payload byte from `instr`, where `idx` is 0-based.
-#[inline]
-fn payload_i24(instr: u32) -> i32 {
-    let payload = payload_u24(instr);
-    if (payload & 0x0080_0000) != 0 {
-        (payload | 0xFF00_0000) as i32
-    } else {
-        payload as i32
-    }
-}
-
-/// Returns the `idx`th payload byte from `instr`, where `idx` is 0-based.
-#[inline]
 pub fn payload_byte(instr: u32, idx: usize) -> u8 {
     // idx: 0 -> first payload byte (bits 8..15), 1 -> bits 16..23, 2 -> bits 24..31
     if idx > 2 {
         0
     } else {
         ((instr >> (8 * (idx + 1))) & 0xFF) as u8
-    }
-}
-
-// Local helper to compute opcode width in instruction-word units. This mirrors
-// the runtime opcode_width used by the VM disassembler. Kept local here for
-// test purposes.
-fn opcode_width(op: Op) -> usize {
-    match op {
-        Op::Const => 3,
-        Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => 3,
-        Op::GetLocal
-        | Op::SetLocal
-        | Op::CloneLocalCell
-        | Op::Call
-        | Op::CallMethod
-        | Op::CallIC
-        | Op::TailCallIC
-        | Op::TailCallMethod
-        | Op::Construct
-        | Op::PopN
-        | Op::MakeClosure
-        | Op::GetUpvalue
-        | Op::SetUpvalue
-        | Op::GetPropertyIC
-        | Op::SetPropertyIC
-        | Op::GetBuiltin
-        | Op::BuildArray
-        | Op::BuildObject
-        | Op::Spread
-        | Op::ArrayFromSpread => 2,
-        Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
-        Op::CompareJumpIfFalse => 4,
-        _ => 1,
     }
 }
 

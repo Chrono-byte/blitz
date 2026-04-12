@@ -176,13 +176,13 @@ fn json_stringify_value(
             out
         }),
         Value::BigInt(_) => {
-            return Err(RuntimeError::from("Do not know how to serialize a BigInt"));
+            return Err(vm.throw_type_error("Do not know how to serialize a BigInt"));
         }
         Value::Symbol(_, _) => None,
         Value::Array(elements, _) => {
             let identity = json_value_identity(value).expect("array has identity");
             if !seen.insert(identity) {
-                return Err(RuntimeError::from("Converting circular structure to JSON"));
+                return Err(vm.throw_type_error("Converting circular structure to JSON"));
             }
             let mut parts = Vec::with_capacity(elements.borrow().len());
             for slot in elements.borrow().iter() {
@@ -200,7 +200,7 @@ fn json_stringify_value(
         Value::Object(_) | Value::Promise(_) => {
             let identity = json_value_identity(value).expect("object-like value has identity");
             if !seen.insert(identity) {
-                return Err(RuntimeError::from("Converting circular structure to JSON"));
+                return Err(vm.throw_type_error("Converting circular structure to JSON"));
             }
             let mut parts = Vec::new();
             for key in own_enumerable_keys(value) {

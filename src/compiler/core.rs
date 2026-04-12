@@ -185,16 +185,13 @@ impl Compiler {
                 .unwrap_or(false)
         };
 
-        // Prefer exact CompareJumpIfFalse locations (those call sites already
-        // return the instruction index directly in fixed-width mode).
-        if op_at(offset) == Some(Op::CompareJumpIfFalse) {
-            offset
+        // Legacy call-sites capture `code.len()` immediately after emitting the
+        // jump opcode, which points one instruction past the jump in fixed-width
+        // mode. Prefer that interpretation first.
+        if offset > 0 && is_patchable_jump_at(offset - 1) {
+            offset - 1
         } else if is_patchable_jump_at(offset) {
             offset
-        // Most legacy call-sites captured `code.len()` *after* emitting the
-        // jump opcode; in fixed-width this points one instruction past the jump.
-        } else if offset > 0 && is_patchable_jump_at(offset - 1) {
-            offset - 1
         } else {
             offset
         }
@@ -704,7 +701,7 @@ impl Compiler {
         // into the current compilation chunk by validating the cached index
         // and, if necessary, adding a fresh constant into this chunk.
         if let Some(&idx) = self.globals.get(name) {
-            if (idx as usize) < self.chunk.constants.len() {
+            if idx  < self.chunk.constants.len() {
                 return idx;
             }
             // Cached index is out-of-range for current chunk; fall through to
@@ -830,12 +827,6 @@ impl Compiler {
             self.chunk.write_i24_payload_at(patch_idx, val)
         };
         assert!(ok, "failed to write jump payload");
-    }
-
-    pub(crate) fn patch_relative_i24(&mut self, offset: usize, rel: i32) {
-        let patch_idx = self.resolve_jump_patch_index(offset);
-        let ok = self.chunk.write_i24_payload_at(patch_idx, rel);
-        assert!(ok, "failed to write relative payload");
     }
 
     pub(crate) fn patch_jump_to_target(&mut self, offset: usize, target: usize) {
