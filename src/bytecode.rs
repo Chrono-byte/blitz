@@ -306,16 +306,20 @@ impl Chunk {
 }
 
 // Centralized instruction decoding helpers for the fixed-width u32 layout.
+
+/// Returns the opcode from `instr`.
 #[inline]
 pub fn opcode_from_instr(instr: u32) -> u8 {
     (instr & 0xFF) as u8
 }
 
+/// Returns the `idx`th payload byte from `instr`, where `idx` is 0-based.
 #[inline]
 fn payload_u24(instr: u32) -> u32 {
     (instr >> 8) & 0x00FF_FFFF
 }
 
+/// Returns the `idx`th payload byte from `instr`, where `idx` is 0-based.
 #[inline]
 fn payload_i24(instr: u32) -> i32 {
     let payload = payload_u24(instr);
@@ -326,6 +330,7 @@ fn payload_i24(instr: u32) -> i32 {
     }
 }
 
+/// Returns the `idx`th payload byte from `instr`, where `idx` is 0-based.
 #[inline]
 pub fn payload_byte(instr: u32, idx: usize) -> u8 {
     // idx: 0 -> first payload byte (bits 8..15), 1 -> bits 16..23, 2 -> bits 24..31
