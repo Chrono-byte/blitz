@@ -60,6 +60,8 @@ pub mod parser;
 pub mod realm;
 pub mod resolver;
 pub mod runtime_utils;
+/// Test262 host support helpers shared by CLI/runner integrations.
+pub mod test262_support;
 pub mod trace;
 pub mod typecheck;
 pub mod value;

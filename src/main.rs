@@ -27,8 +27,11 @@ use std::cell::RefCell;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use blitz::compiler;
+use blitz::test262_support;
 use blitz::{parser::Parser as JsParser, value::Value, vm::Vm};
 
 /// Runs source code in REPL mode (preserves expression results)
@@ -71,28 +74,53 @@ struct Cli {
     /// Start the REPL even when a file is not provided.
     #[arg(short, long, action)]
     repl: bool,
+
+    /// Run the file with Test262 host globals (`print`, `$262`, etc.).
+    #[arg(long, action)]
+    test262_harness: bool,
+
+    /// Treat the input file as an ECMAScript module.
+    #[arg(long, action)]
+    module: bool,
 }
 
 fn main() -> Result<(), blitz::errors::Error> {
-    // Public globals visible to user code (populated by the prelude)
-    let globals: Rc<RefCell<blitz::value::ObjectData>> =
-        Rc::new(RefCell::new(blitz::value::ObjectData::new()));
-
-    // Provide a `globalThis` object that reflects the VM globals map so soft
-    // layer code that writes `globalThis.x = ...` updates the VM globals.
-    // We reuse the same Rc<RefCell<HashMap>> so property ops on the object and
-    // Get/SetGlobal access the same backing map.
-    let global_this = Value::Object(Rc::clone(&globals));
-    {
-        let mut g = globals.borrow_mut();
-        g.properties.insert(
-            blitz::value::PropertyKey::String("globalThis".to_string()),
-            blitz::value::PropertyDescriptor::data(global_this),
-        );
-    }
-
     // Parse CLI early so clap can handle --help/--version before doing work.
     let cli = Cli::parse();
+
+    let async_done_state: Rc<RefCell<Option<test262_support::AsyncCompletion>>> =
+        Rc::new(RefCell::new(None));
+
+    // Public globals visible to user code (populated by the prelude)
+    let globals: Rc<RefCell<blitz::value::ObjectData>> = if cli.test262_harness {
+        let done_state = Rc::clone(&async_done_state);
+        let print_native: blitz::value::NativeFn = Rc::new(move |vm, _this, args| {
+            let value = args.first().cloned().unwrap_or(Value::Undefined);
+            let rendered = match vm.to_string(&value) {
+                Ok(s) => s,
+                Err(_) => format!("{}", value),
+            };
+            if let Some(marker) = test262_support::async_completion_marker(&rendered) {
+                *done_state.borrow_mut() = Some(marker);
+                return Ok(Value::Null);
+            }
+            println!("{}", rendered);
+            Ok(Value::Null)
+        });
+        test262_support::make_test262_globals_with_print(print_native)
+    } else {
+        let globals: Rc<RefCell<blitz::value::ObjectData>> =
+            Rc::new(RefCell::new(blitz::value::ObjectData::new()));
+        let global_this = Value::Object(Rc::clone(&globals));
+        {
+            let mut g = globals.borrow_mut();
+            g.properties.insert(
+                blitz::value::PropertyKey::String("globalThis".to_string()),
+                blitz::value::PropertyDescriptor::data(global_this),
+            );
+        }
+        globals
+    };
 
     // Create a persistent VM for the REPL and reuse it for every input so
     // we don't recompile and recreate the VM on each line.
@@ -103,20 +131,70 @@ fn main() -> Result<(), blitz::errors::Error> {
 
     // If a file was provided, run it and exit. Otherwise start REPL.
     if let Some(path) = cli.file {
-        // Use ModuleLoader to load and run the entry file (and its deps)
-        let loader_handle = repl_vm.module_loader_handle();
-        {
-            let mut loader = loader_handle.borrow_mut();
-            loader.construct(
-                path.parent().unwrap_or(Path::new(".")),
-                &format!("./{}", path.file_name().unwrap().to_string_lossy()),
-            )?;
-            loader
-                .instantiate_all()
+        if cli.module {
+            let loader_handle = repl_vm.module_loader_handle();
+            {
+                let mut loader = loader_handle.borrow_mut();
+                loader.construct(
+                    path.parent().unwrap_or(Path::new(".")),
+                    &format!("./{}", path.file_name().unwrap().to_string_lossy()),
+                )?;
+                loader
+                    .instantiate_all()
+                    .map_err(blitz::errors::Error::from)?;
+            }
+            blitz::module::evaluate_entry_shared(&loader_handle, &path, &mut repl_vm, false)
                 .map_err(blitz::errors::Error::from)?;
+        } else {
+            let source = std::fs::read_to_string(&path).map_err(|e| {
+                blitz::errors::RuntimeError::from(format!(
+                    "Failed to read {}: {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+            let session = JsParser::parse_source(&source)?;
+            let program = session.program();
+            let chunk =
+                compiler::compile_oxc(program, &source).map_err(blitz::errors::Error::from)?;
+            repl_vm.run(chunk).map_err(blitz::errors::Error::from)?;
+
+            if cli.test262_harness && repl_vm.get_global("$DONE").is_some() {
+                let start = Instant::now();
+                let timeout = Duration::from_secs(30);
+                loop {
+                    repl_vm
+                        .flush_microtasks()
+                        .map_err(blitz::errors::Error::from)?;
+
+                    if let Some(done) = async_done_state.borrow().clone() {
+                        match done {
+                            test262_support::AsyncCompletion::Complete => {
+                                println!("Test262:AsyncTestComplete");
+                                break;
+                            }
+                            test262_support::AsyncCompletion::Failure(message) => {
+                                return Err(blitz::errors::RuntimeError::from(format!(
+                                    "async test failed: {}",
+                                    message
+                                ))
+                                .into());
+                            }
+                        }
+                    }
+
+                    if start.elapsed() >= timeout {
+                        return Err(blitz::errors::RuntimeError::from(format!(
+                            "async test timed out after {}s",
+                            timeout.as_secs()
+                        ))
+                        .into());
+                    }
+
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
         }
-        blitz::module::evaluate_entry_shared(&loader_handle, &path, &mut repl_vm, false)
-            .map_err(blitz::errors::Error::from)?;
         return Ok(());
     }
 

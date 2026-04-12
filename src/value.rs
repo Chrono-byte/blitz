@@ -554,6 +554,20 @@ pub fn define_native_global(globals: &Rc<RefCell<ObjectData>>, name: &str, nativ
     );
 }
 
+fn function_display_name_from_props(props: &Rc<RefCell<ObjectData>>) -> Option<String> {
+    let props = props.borrow();
+    match props
+        .properties
+        .get(&PropertyKey::String("name".to_string()))
+    {
+        Some(PropertyDescriptor::Data {
+            value: Value::String(name),
+            ..
+        }) if !name.is_empty() => Some(name.clone()),
+        _ => None,
+    }
+}
+
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
@@ -581,7 +595,14 @@ impl std::fmt::Display for Value {
                 write!(f, "[{}]", parts.join(", "))
             }
             Value::Closure { proto, .. } => write!(f, "[Function: {}]", proto.name),
-            Value::Builtin(_) | Value::BuiltinObject(_, _) => write!(f, "[Native Function]"),
+            Value::Builtin(_) => write!(f, "[Native Function]"),
+            Value::BuiltinObject(_, props) => {
+                if let Some(name) = function_display_name_from_props(props) {
+                    write!(f, "[Function: {}]", name)
+                } else {
+                    write!(f, "[Native Function]")
+                }
+            }
             Value::Promise(_) => write!(f, "[object Promise]"),
         }
     }
@@ -630,5 +651,33 @@ impl PartialEq for Value {
             (Value::Null, Value::Null) => true,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_object_display_uses_name_property() {
+        let props = Rc::new(RefCell::new(ObjectData::new()));
+        props.borrow_mut().properties.insert(
+            PropertyKey::String("name".to_string()),
+            PropertyDescriptor::Data {
+                value: Value::String("Object".to_string()),
+                writable: false,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        let value = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), props);
+        assert_eq!(format!("{}", value), "[Function: Object]");
+    }
+
+    #[test]
+    fn builtin_object_display_falls_back_without_name() {
+        let props = Rc::new(RefCell::new(ObjectData::new()));
+        let value = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), props);
+        assert_eq!(format!("{}", value), "[Native Function]");
     }
 }
