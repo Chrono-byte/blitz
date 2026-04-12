@@ -2167,7 +2167,7 @@ impl super::Compiler {
                 let name =
                     c.id.as_ref()
                         .map_or_else(|| "<anonymous>".to_string(), |id| id.name.to_string());
-                let mut ctor_chunk = Chunk::new(self.source_text.clone());
+                let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
                 ctor_chunk.write(Op::Return as u8, LINE);
                 let proto = FunctionProto {
                     name,

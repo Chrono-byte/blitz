@@ -61,7 +61,7 @@ impl Vm {
                 );
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
-                let prev_lexical_env = self.lexical_env.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &call_args);
                 self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
@@ -90,7 +90,7 @@ impl Vm {
                 );
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
-                let prev_lexical_env = self.lexical_env.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &call_args);
                 self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
@@ -201,7 +201,7 @@ impl Vm {
                     std::mem::replace(&mut self.builtin_this_arg_prepended, false);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
-                let prev_lexical_env = self.lexical_env.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &args);
                 self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
@@ -224,7 +224,7 @@ impl Vm {
                     std::mem::replace(&mut self.builtin_this_arg_prepended, false);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
-                let prev_lexical_env = self.lexical_env.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &args);
                 self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
@@ -394,7 +394,7 @@ impl Vm {
                     std::mem::replace(&mut self.builtin_this_arg_prepended, false);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
-                let prev_lexical_env = self.lexical_env.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &flat);
                 self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
@@ -417,7 +417,7 @@ impl Vm {
                     std::mem::replace(&mut self.builtin_this_arg_prepended, false);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
-                let prev_lexical_env = self.lexical_env.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &flat);
                 self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
@@ -506,7 +506,7 @@ impl Vm {
                     std::mem::replace(&mut self.builtin_this_arg_prepended, true);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
-                let prev_lexical_env = self.lexical_env.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &call_args);
                 self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
@@ -528,7 +528,7 @@ impl Vm {
                     std::mem::replace(&mut self.builtin_this_arg_prepended, true);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
-                let prev_lexical_env = self.lexical_env.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &call_args);
                 self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
@@ -616,8 +616,8 @@ impl Vm {
             started: false,
             completed: false,
         }));
-        let next_runner = runner.clone();
-        let throw_runner = runner.clone();
+        let next_runner = Rc::clone(&runner);
+        let throw_runner = Rc::clone(&runner);
         let return_runner = runner;
         let gen_obj = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         gen_obj
@@ -982,7 +982,7 @@ impl Vm {
                     std::mem::replace(&mut self.builtin_this_arg_prepended, true);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
-                let prev_lexical_env = self.lexical_env.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &call_args);
                 self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
@@ -1021,7 +1021,7 @@ impl Vm {
                     std::mem::replace(&mut self.builtin_this_arg_prepended, true);
                 let prev_closure_env = self.current_closure_env.clone();
                 let prev_slot_types = self.current_slot_types.clone();
-                let prev_lexical_env = self.lexical_env.clone();
+                let prev_lexical_env = Rc::clone(&self.lexical_env);
                 let result = (f.as_ref())(self, &call_args);
                 self.builtin_this_arg_prepended = prev_builtin_this;
                 self.this_value = prev_this;
@@ -1082,7 +1082,7 @@ impl Vm {
                             proto.name
                         );
                     }
-                    let caller_chunk = self.chunk.clone();
+                    let caller_chunk = Rc::clone(&self.chunk);
                     let caller_ip = self.ip;
                     let caller_locals = self.locals.clone();
                     let caller_this = self.this_value.clone();
@@ -1226,7 +1226,7 @@ impl Vm {
         self.pending_closure_env = Some(Rc::clone(closure_env));
         if !proto.is_strict {
             if matches!(this_value, Value::Undefined | Value::Null) {
-                this_value = Value::Object(self.globals.clone());
+                this_value = Value::Object(Rc::clone(&self.globals));
             } else {
                 this_value = match self.to_object_value(this_value) {
                     Ok(value) => value,
@@ -1238,7 +1238,7 @@ impl Vm {
             }
         }
 
-        self.chunk = proto.chunk.clone();
+        self.chunk = Rc::clone(&proto.chunk);
         self.ip = 0;
         self.stack.clear();
         self.current_closure_env = Some(Rc::clone(closure_env));
@@ -1259,8 +1259,8 @@ impl Vm {
             Value::Closure { props, .. } => props
                 .borrow()
                 .captured_lexical_env()
-                .unwrap_or_else(|| self.lexical_env.clone()),
-            _ => self.lexical_env.clone(),
+                .unwrap_or_else(|| Rc::clone(&self.lexical_env)),
+            _ => Rc::clone(&self.lexical_env),
         };
         let fn_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(
             captured_lexical_env,
@@ -1272,7 +1272,7 @@ impl Vm {
                 let initialized = !proto.lexical_tdz.get(idx).copied().unwrap_or(false);
                 fn_env.borrow_mut().create_mutable_binding(
                     name.clone(),
-                    self.locals[idx].clone(),
+                    Rc::clone(&self.locals[idx]),
                     initialized,
                 );
             }
@@ -1399,7 +1399,7 @@ impl Vm {
         }
 
         self.call_stack.push(Frame {
-            chunk: self.chunk.clone(),
+            chunk: Rc::clone(&self.chunk),
             ip: self.ip,
             stack: caller_stack,
             locals: std::mem::replace(
@@ -1415,7 +1415,7 @@ impl Vm {
             slot_names: self.current_slot_names.take(),
             stack_base,
             is_strict: proto.is_strict,
-            lexical_env: self.lexical_env.clone(),
+            lexical_env: Rc::clone(&self.lexical_env),
             yield_star_queue: self.yield_star_queue.take(),
             arguments_object: self.current_arguments_object.take(),
             arguments_mapped_count: self.current_arguments_mapped_count,

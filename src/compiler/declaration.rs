@@ -1359,7 +1359,7 @@ impl Compiler {
             return Err(crate::errors::CompilerError::from(err));
         }
 
-        let mut ctor_chunk = Chunk::new(self.source_text.clone());
+        let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
         ctor_chunk.write(Op::Return as u8, LINE);
         let proto = FunctionProto {
             name: name.clone(),
@@ -1734,8 +1734,8 @@ impl Compiler {
         }
 
         let mut inner = Compiler {
-            chunk: Chunk::new(self.source_text.clone()),
-            source_text: self.source_text.clone(),
+            chunk: Chunk::new(Rc::clone(&self.source_text)),
+            source_text: Rc::clone(&self.source_text),
             locals: Vec::new(),
             local_types: Vec::new(),
             local_tdz: Vec::new(),
@@ -1970,8 +1970,8 @@ impl Compiler {
         }
 
         let mut inner = Compiler {
-            chunk: Chunk::new(self.source_text.clone()),
-            source_text: self.source_text.clone(),
+            chunk: Chunk::new(Rc::clone(&self.source_text)),
+            source_text: Rc::clone(&self.source_text),
             locals: Vec::new(),
             local_types: Vec::new(),
             local_tdz: Vec::new(),

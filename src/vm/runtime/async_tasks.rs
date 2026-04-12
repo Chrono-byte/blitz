@@ -209,15 +209,15 @@ impl Vm {
 
         let proto = Rc::clone(proto);
         let env = Rc::clone(env);
-        let promise_for_job = promise.clone();
+        let promise_for_job = Rc::clone(&promise);
         let stack_base = self.stack.len();
         let saved_stack = self.stack.snapshot();
-        let caller_chunk = self.chunk.clone();
+        let caller_chunk = Rc::clone(&self.chunk);
         let caller_ip = self.ip;
         let caller_locals = self.locals.clone();
         let caller_this = self.this_value.clone();
         let caller_env = self.current_closure_env.clone();
-        let caller_lexical_env = self.lexical_env.clone();
+        let caller_lexical_env = Rc::clone(&self.lexical_env);
         let caller_slot_types = self.current_slot_types.clone();
         let caller_frame_len = self.call_stack.len();
         let caller_handlers = std::mem::take(&mut self.handlers);

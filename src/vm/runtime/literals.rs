@@ -47,7 +47,8 @@ impl Vm {
         }
         self.property_get_ic_cache.clear();
 
-        self.stack.push(Value::Array(arr_rc.clone(), props.clone()));
+        self.stack
+            .push(Value::Array(Rc::clone(&arr_rc), Rc::clone(&props)));
         if crate::trace::enabled() {
             eprintln!(
                 "[trace] build_array: created Array arr_ptr={:p} props_ptr={:p} ip={}",
@@ -94,7 +95,7 @@ impl Vm {
         }
         self.property_get_ic_cache.clear();
         let obj_rc = gc::track_object(Rc::new(RefCell::new(data)));
-        self.stack.push(Value::Object(obj_rc.clone()));
+        self.stack.push(Value::Object(Rc::clone(&obj_rc)));
         if crate::trace::enabled() {
             eprintln!(
                 "[trace] build_object: created Object obj_ptr={:p} ip={}",
@@ -193,18 +194,18 @@ impl Vm {
         }
 
         let closure = Value::Closure {
-            proto: closure_proto.clone(),
+            proto: Rc::clone(&closure_proto),
             env: gc::track_env(Rc::new(Mutex::new(env_cells))),
             lexical_this: if closure_proto.captures_this {
                 Some(Box::new(self.this_value.clone()))
             } else {
                 None
             },
-            props: props.clone(),
+            props: Rc::clone(&props),
         };
         props
             .borrow_mut()
-            .set_captured_lexical_env(Some(self.lexical_env.clone()));
+            .set_captured_lexical_env(Some(Rc::clone(&self.lexical_env)));
         if closure_proto.is_generator {
             props
                 .borrow_mut()
