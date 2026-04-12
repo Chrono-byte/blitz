@@ -740,6 +740,23 @@ fn compile_for_in_uses_get_builtin() {
 }
 
 #[test]
+fn compile_rejects_calls_with_more_than_u8_arguments() {
+    let args = (0..256)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let src = format!("f({args});");
+    let session = crate::parser::Parser::parse_source(&src).expect("parse ok");
+    let program = session.program();
+    let err = compile(program, session.source()).expect_err("compile should fail");
+
+    assert!(
+        err.to_string().contains("too many arguments in call"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn compile_generator_non_simple_params_keep_later_params_tdz() {
     let src = "function* f(x = y, y) {}";
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");

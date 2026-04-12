@@ -1369,6 +1369,8 @@ impl Compiler {
             slot_types: Vec::new(),
             slot_names: Vec::new(),
             lexical_tdz: Vec::new(),
+            slot_immutable: Vec::new(),
+            slot_sloppy_immutable_silent: Vec::new(),
             upvalues: Vec::new(),
             has_rest: false,
             has_prototype_property: true,
@@ -1739,6 +1741,8 @@ impl Compiler {
             locals: Vec::new(),
             local_types: Vec::new(),
             local_tdz: Vec::new(),
+            local_immutable: Vec::new(),
+            local_sloppy_immutable_silent: Vec::new(),
             local_mirror_globals: Vec::new(),
             scopes: vec![crate::compiler::Scope {
                 kind: crate::compiler::ScopeKind::Function,
@@ -1817,6 +1821,16 @@ impl Compiler {
         }
         let self_binding_slot = self_name
             .map(|self_name| inner.add_local_with_mirror(self_name.to_string(), None, false));
+        if let Some(slot) = self_binding_slot
+            && let Some(flag) = inner.local_immutable.get_mut(slot)
+        {
+            *flag = true;
+        }
+        if let Some(slot) = self_binding_slot
+            && let Some(flag) = inner.local_sloppy_immutable_silent.get_mut(slot)
+        {
+            *flag = true;
+        }
         let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
 
         // Pre-declare nested functions inside this function body.
@@ -1862,6 +1876,8 @@ impl Compiler {
                 slot_types,
                 slot_names,
                 lexical_tdz,
+                slot_immutable: inner.local_immutable,
+                slot_sloppy_immutable_silent: inner.local_sloppy_immutable_silent,
                 upvalues: inner.captured_upvalues,
                 has_rest,
                 has_prototype_property,
@@ -1975,6 +1991,8 @@ impl Compiler {
             locals: Vec::new(),
             local_types: Vec::new(),
             local_tdz: Vec::new(),
+            local_immutable: Vec::new(),
+            local_sloppy_immutable_silent: Vec::new(),
             local_mirror_globals: Vec::new(),
             scopes: vec![crate::compiler::Scope {
                 kind: crate::compiler::ScopeKind::Function,
@@ -2124,6 +2142,8 @@ impl Compiler {
                 slot_types,
                 slot_names,
                 lexical_tdz,
+                slot_immutable: inner.local_immutable,
+                slot_sloppy_immutable_silent: inner.local_sloppy_immutable_silent,
                 upvalues: inner.captured_upvalues,
                 has_rest,
                 has_prototype_property: false,

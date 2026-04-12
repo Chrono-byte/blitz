@@ -49,6 +49,10 @@ pub struct Compiler {
     pub local_types: Vec<Option<Type>>,
     /// Per-local TDZ marker for lexical bindings.
     pub local_tdz: Vec<bool>,
+    /// Per-local immutability marker (`const` and named function-expression bindings).
+    pub local_immutable: Vec<bool>,
+    /// Per-local flag for immutable bindings that ignore sloppy writes.
+    pub local_sloppy_immutable_silent: Vec<bool>,
     /// Whether writes to this local should mirror to the global object.
     pub local_mirror_globals: Vec<bool>,
     /// Lexical scope stack for name visibility.
@@ -116,9 +120,20 @@ pub enum CaptureSource {
         slot: u8,
         /// Optional global property name mirrored by this binding.
         mirror_global_name: Option<String>,
+        /// Whether assignment to this binding must be rejected.
+        immutable: bool,
+        /// Whether writes in non-strict mode should be silently ignored.
+        sloppy_immutable_silent: bool,
     },
     /// Upvalue captured from outer closure.
-    Upvalue(u8),
+    Upvalue {
+        /// Upvalue index in the enclosing function.
+        index: u8,
+        /// Whether assignment to this binding must be rejected.
+        immutable: bool,
+        /// Whether writes in non-strict mode should be silently ignored.
+        sloppy_immutable_silent: bool,
+    },
 }
 
 /// Kind of lexical scope in the compiler.
@@ -211,6 +226,8 @@ impl Compiler {
             locals: Vec::new(),
             local_types: Vec::new(),
             local_tdz: Vec::new(),
+            local_immutable: Vec::new(),
+            local_sloppy_immutable_silent: Vec::new(),
             local_mirror_globals: Vec::new(),
             scopes: vec![Scope {
                 kind: ScopeKind::Function,
@@ -406,6 +423,8 @@ impl Compiler {
         self.locals.push(name.clone());
         self.local_types.push(type_ann);
         self.local_tdz.push(false);
+        self.local_immutable.push(false);
+        self.local_sloppy_immutable_silent.push(false);
         self.local_mirror_globals.push(mirror_global);
         self.scopes[scope_index].bindings.insert(name, slot);
         slot
@@ -584,14 +603,29 @@ impl Compiler {
                         } else {
                             None
                         },
+                        immutable: self.local_immutable.get(*slot).copied().unwrap_or(false),
+                        sloppy_immutable_silent: self
+                            .local_sloppy_immutable_silent
+                            .get(*slot)
+                            .copied()
+                            .unwrap_or(false),
                     },
                 );
             }
         }
         for (name, idx) in &self.upvalue_indices {
+            let (immutable, sloppy_immutable_silent) = self
+                .captured_upvalues
+                .get(*idx as usize)
+                .map(|spec| (spec.immutable, spec.sloppy_immutable_silent))
+                .unwrap_or((false, false));
             bindings
                 .entry(name.clone())
-                .or_insert(CaptureSource::Upvalue(*idx));
+                .or_insert(CaptureSource::Upvalue {
+                    index: *idx,
+                    immutable,
+                    sloppy_immutable_silent,
+                });
         }
         // Allow pass-through capture for grandparent bindings needed by
         // deeper nested functions. Root bindings must remain capturable so
@@ -603,7 +637,19 @@ impl Compiler {
                 continue;
             }
             if let Some(idx) = self.resolve_upvalue(&name) {
-                bindings.insert(name, CaptureSource::Upvalue(idx));
+                let (immutable, sloppy_immutable_silent) = self
+                    .captured_upvalues
+                    .get(idx as usize)
+                    .map(|spec| (spec.immutable, spec.sloppy_immutable_silent))
+                    .unwrap_or((false, false));
+                bindings.insert(
+                    name,
+                    CaptureSource::Upvalue {
+                        index: idx,
+                        immutable,
+                        sloppy_immutable_silent,
+                    },
+                );
             }
         }
         bindings
@@ -678,15 +724,25 @@ impl Compiler {
             CaptureSource::Local {
                 slot,
                 mirror_global_name,
+                immutable,
+                sloppy_immutable_silent,
             } => UpvalueSpec {
                 is_local: true,
                 index: slot,
                 mirror_global_name,
+                immutable,
+                sloppy_immutable_silent,
             },
-            CaptureSource::Upvalue(upvalue) => UpvalueSpec {
+            CaptureSource::Upvalue {
+                index: upvalue,
+                immutable,
+                sloppy_immutable_silent,
+            } => UpvalueSpec {
                 is_local: false,
                 index: upvalue,
                 mirror_global_name: None,
+                immutable,
+                sloppy_immutable_silent,
             },
         };
         self.captured_upvalues.push(spec);

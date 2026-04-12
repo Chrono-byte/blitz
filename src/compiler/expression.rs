@@ -1834,42 +1834,7 @@ impl super::Compiler {
                 }
             }
             OExpr::CallExpression(c) => {
-                // Handle spread-containing calls first so we don't prematurely lower
-                // member/call forms (which would otherwise emit CallMethod/Call
-                // before we've had a chance to expand spreads).
-                let has_spread = c
-                    .arguments
-                    .iter()
-                    .any(|arg| matches!(arg, oast::Argument::SpreadElement(_)));
-                if has_spread {
-                    self.compile_expr_oast(&c.callee)?;
-                    for arg in &c.arguments {
-                        match arg {
-                            oast::Argument::SpreadElement(s) => {
-                                self.compile_expr_oast(&s.argument)?;
-                            }
-                            _ => {
-                                if let Some(expr) = arg.as_expression() {
-                                    self.compile_expr_oast(expr)?;
-                                } else {
-                                    self.emit(Op::Undefined, LINE);
-                                }
-                            }
-                        }
-                    }
-                    self.emit(Op::BuildArray, LINE);
-                    self.emit_byte(c.arguments.len() as u8, LINE);
-                    for arg in &c.arguments {
-                        if matches!(arg, oast::Argument::SpreadElement(_)) {
-                            self.emit(Op::True, LINE);
-                        } else {
-                            self.emit(Op::False, LINE);
-                        }
-                    }
-                    self.emit(Op::BuildArray, LINE);
-                    self.emit_byte(c.arguments.len() as u8, LINE);
-                    self.emit(Op::Spread, LINE);
-                    self.emit_byte(c.arguments.len() as u8, LINE);
+                if self.compile_spread_call_tail(c)? {
                     return Ok(());
                 }
 
@@ -1893,18 +1858,8 @@ impl super::Compiler {
                         ));
                     }
                     self.emit_super_property_get_static(m.property.name.as_str(), true)?;
-                    let mut arg_count = 0usize;
-                    for arg in &c.arguments {
-                        if let Some(expr) = arg.as_expression() {
-                            self.compile_expr_oast(expr)?;
-                            arg_count += 1;
-                        } else {
-                            self.emit(Op::Undefined, LINE);
-                            arg_count += 1;
-                        }
-                    }
-                    self.emit(Op::CallMethod, LINE);
-                    self.emit_byte(arg_count as u8, LINE);
+                    let arg_count = self.compile_call_arguments(&c.arguments)?;
+                    self.emit_call_with_arg_count(Op::CallMethod, arg_count)?;
                     return Ok(());
                 }
 
@@ -1917,225 +1872,130 @@ impl super::Compiler {
                         ));
                     }
                     self.emit_super_property_get_computed(&m.expression, true)?;
-                    let mut arg_count = 0usize;
-                    for arg in &c.arguments {
-                        if let Some(expr) = arg.as_expression() {
-                            self.compile_expr_oast(expr)?;
-                            arg_count += 1;
-                        } else {
-                            self.emit(Op::Undefined, LINE);
-                            arg_count += 1;
-                        }
-                    }
-                    self.emit(Op::CallMethod, LINE);
-                    self.emit_byte(arg_count as u8, LINE);
+                    let arg_count = self.compile_call_arguments(&c.arguments)?;
+                    self.emit_call_with_arg_count(Op::CallMethod, arg_count)?;
                     return Ok(());
                 }
 
-                // No spreads: perform the usual lowering for member calls.
-
                 if let OExpr::StaticMemberExpression(m) = &c.callee {
-                    // Handle optional calls like obj.method?.()
                     let is_optional_call = c.optional;
 
-                    self.compile_expr_oast(&m.object)?;
                     if m.optional {
-                        self.emit(Op::Dup, LINE);
-                        self.emit(Op::JumpIfNullish, LINE);
-                        let skip_nullish = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-                        self.emit(Op::Pop, LINE);
-                        self.emit(Op::Null, LINE);
-                        self.emit(Op::Jump, LINE);
-                        let after_null_check = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-                        self.patch_jump(skip_nullish);
-                        self.emit(Op::Dup, LINE);
-                        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                        self.emit(Op::GetPropertyIC, LINE);
-                        let slot = self.alloc_ic_slot()?;
-                        self.emit_byte(slot, LINE);
-                        self.patch_jump(after_null_check);
+                        self.compile_optional_member_access(&m.object, |this: &mut Self| {
+                            this.emit(Op::Dup, LINE);
+                            this.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                            this.emit(Op::GetPropertyIC, LINE);
+                            let slot = this.alloc_ic_slot()?;
+                            this.emit_byte(slot, LINE);
+                            Ok(())
+                        })?;
                     } else {
+                        self.compile_expr_oast(&m.object)?;
                         self.emit(Op::Dup, LINE);
                         self.emit_constant(Value::String(m.property.name.to_string()), LINE);
                         self.emit(Op::GetPropertyIC, LINE);
                         let slot = self.alloc_ic_slot()?;
                         self.emit_byte(slot, LINE);
                     }
-                    let mut arg_count = 0usize;
-                    for arg in &c.arguments {
-                        if let Some(expr) = arg.as_expression() {
-                            self.compile_expr_oast(expr)?;
-                            arg_count += 1;
+
+                    let arg_count = self.compile_call_arguments(&c.arguments)?;
+                    self.emit_call_with_arg_count(
+                        if is_optional_call {
+                            Op::Call
                         } else {
-                            self.emit(Op::Undefined, LINE);
-                            arg_count += 1;
-                        }
-                    }
-                    if is_optional_call {
-                        self.emit(Op::Call, LINE);
-                    } else {
-                        self.emit(Op::CallMethod, LINE);
-                    }
-                    self.emit_byte(arg_count as u8, LINE);
+                            Op::CallMethod
+                        },
+                        arg_count,
+                    )?;
                     return Ok(());
                 }
 
                 if let OExpr::ComputedMemberExpression(m) = &c.callee {
                     let is_optional_call = c.optional;
 
-                    self.compile_expr_oast(&m.object)?;
                     if m.optional {
-                        self.emit(Op::Dup, LINE);
-                        self.emit(Op::JumpIfNullish, LINE);
-                        let skip_nullish = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-                        self.emit(Op::Pop, LINE);
-                        self.emit(Op::Null, LINE);
-                        self.emit(Op::Jump, LINE);
-                        let after_null_check = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-                        self.patch_jump(skip_nullish);
-                        self.compile_expr_oast(&m.expression)?;
-                        self.emit(Op::GetProperty, LINE);
-                        self.patch_jump(after_null_check);
+                        self.compile_optional_member_access(&m.object, |this: &mut Self| {
+                            this.emit(Op::Dup, LINE);
+                            this.compile_expr_oast(&m.expression)?;
+                            this.emit(Op::GetProperty, LINE);
+                            Ok(())
+                        })?;
                     } else {
+                        self.compile_expr_oast(&m.object)?;
                         self.emit(Op::Dup, LINE);
                         self.compile_expr_oast(&m.expression)?;
                         self.emit(Op::GetProperty, LINE);
                     }
-                    let mut arg_count = 0usize;
-                    for arg in &c.arguments {
-                        if let Some(expr) = arg.as_expression() {
-                            self.compile_expr_oast(expr)?;
-                            arg_count += 1;
+
+                    let arg_count = self.compile_call_arguments(&c.arguments)?;
+                    self.emit_call_with_arg_count(
+                        if is_optional_call {
+                            Op::Call
                         } else {
-                            self.emit(Op::Undefined, LINE);
-                            arg_count += 1;
-                        }
-                    }
-                    if is_optional_call {
-                        self.emit(Op::Call, LINE);
-                    } else {
-                        self.emit(Op::CallMethod, LINE);
-                    }
-                    self.emit_byte(arg_count as u8, LINE);
+                            Op::CallMethod
+                        },
+                        arg_count,
+                    )?;
                     return Ok(());
                 }
 
                 if let OExpr::PrivateFieldExpression(m) = &c.callee {
-                    // Handle optional private field calls like obj.#method?.()
                     let is_optional_call = c.optional;
 
-                    // Lower this.#private() style calls to preserve receiver.
-                    self.compile_expr_oast(&m.object)?;
                     if m.optional {
-                        self.emit(Op::Dup, LINE);
-                        self.emit(Op::JumpIfNullish, LINE);
-                        let skip_nullish = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-                        self.emit(Op::Pop, LINE);
-                        self.emit(Op::Null, LINE);
-                        self.emit(Op::Jump, LINE);
-                        let after_null_check = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-                        self.patch_jump(skip_nullish);
-                        let key = self.ensure_private_name_constant(&m.field.name);
-                        self.emit_constant(key, LINE);
-                        self.emit(Op::GetProperty, LINE);
-                        self.patch_jump(after_null_check);
+                        self.compile_optional_member_access(&m.object, |this: &mut Self| {
+                            this.emit(Op::Dup, LINE);
+                            let key = this.ensure_private_name_constant(&m.field.name);
+                            this.emit_constant(key, LINE);
+                            this.emit(Op::GetProperty, LINE);
+                            Ok(())
+                        })?;
                     } else {
+                        self.compile_expr_oast(&m.object)?;
                         self.emit(Op::Dup, LINE);
                         let key = self.ensure_private_name_constant(&m.field.name);
                         self.emit_constant(key, LINE);
                         self.emit(Op::GetProperty, LINE);
                     }
-                    let mut arg_count = 0usize;
-                    for arg in &c.arguments {
-                        if let Some(expr) = arg.as_expression() {
-                            self.compile_expr_oast(expr)?;
-                            arg_count += 1;
+
+                    let arg_count = self.compile_call_arguments(&c.arguments)?;
+                    self.emit_call_with_arg_count(
+                        if is_optional_call {
+                            Op::Call
                         } else {
-                            self.emit(Op::Undefined, LINE);
-                            arg_count += 1;
-                        }
-                    }
-                    if is_optional_call {
-                        self.emit(Op::Call, LINE);
-                    } else {
-                        self.emit(Op::CallMethod, LINE);
-                    }
-                    self.emit_byte(arg_count as u8, LINE);
+                            Op::CallMethod
+                        },
+                        arg_count,
+                    )?;
                     return Ok(());
                 }
 
-                // Handle optional call on simple identifier like fn?.()
                 if c.optional {
                     self.compile_expr_oast(&c.callee)?;
                     self.emit(Op::Dup, LINE);
                     self.emit(Op::JumpIfNullish, LINE);
                     let skip_nullish = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
+                    self.emit_jump_placeholder();
                     self.emit(Op::Pop, LINE);
                     self.emit(Op::Null, LINE);
                     self.emit(Op::Jump, LINE);
                     let end = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
+                    self.emit_jump_placeholder();
                     self.patch_jump(skip_nullish);
-                    let mut arg_count = 0usize;
-                    for arg in &c.arguments {
-                        if let Some(expr) = arg.as_expression() {
-                            self.compile_expr_oast(expr)?;
-                            arg_count += 1;
-                        } else {
-                            self.emit(Op::Undefined, LINE);
-                            arg_count += 1;
-                        }
-                    }
-                    self.emit(Op::Call, LINE);
-                    self.emit_byte(arg_count as u8, LINE);
+                    let arg_count = self.compile_call_arguments(&c.arguments)?;
+                    self.emit_call_with_arg_count(Op::Call, arg_count)?;
                     self.patch_jump(end);
                     return Ok(());
                 }
 
-                // Regular function call without spread
                 self.compile_expr_oast(&c.callee)?;
-                let mut arg_count = 0usize;
-                for arg in &c.arguments {
-                    if let Some(expr) = arg.as_expression() {
-                        self.compile_expr_oast(expr)?;
-                        arg_count += 1;
-                    } else {
-                        self.emit(Op::Undefined, LINE);
-                        arg_count += 1;
-                    }
-                }
-                self.emit(Op::CallIC, LINE);
-                self.emit_byte(arg_count as u8, LINE);
+                let arg_count = self.compile_call_arguments(&c.arguments)?;
+                self.emit_call_with_arg_count(Op::CallIC, arg_count)?;
             }
             OExpr::NewExpression(n) => {
                 self.compile_expr_oast(&n.callee)?;
-                let mut arg_count = 0usize;
-                for arg in &n.arguments {
-                    if let Some(expr) = arg.as_expression() {
-                        self.compile_expr_oast(expr)?;
-                        arg_count += 1;
-                    } else {
-                        self.emit(Op::Undefined, LINE);
-                        arg_count += 1;
-                    }
-                }
-                self.emit(Op::Construct, LINE);
-                self.emit_byte(arg_count as u8, LINE);
+                let arg_count = self.compile_call_arguments(&n.arguments)?;
+                self.emit_call_with_arg_count(Op::Construct, arg_count)?;
             }
             OExpr::ImportExpression(i) => {
                 self.emit_get_builtin_name("dynamicImport");
@@ -2177,6 +2037,8 @@ impl super::Compiler {
                     slot_types: Vec::new(),
                     slot_names: Vec::new(),
                     lexical_tdz: Vec::new(),
+                    slot_immutable: Vec::new(),
+                    slot_sloppy_immutable_silent: Vec::new(),
                     upvalues: Vec::new(),
                     has_rest: false,
                     has_prototype_property: true,

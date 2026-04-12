@@ -221,6 +221,7 @@ impl Vm {
             );
         }
 
+        // Set the `name` property
         props.borrow_mut().properties.insert(
             PropertyKey::String("name".to_string()),
             PropertyDescriptor::Data {
@@ -230,6 +231,8 @@ impl Vm {
                 configurable: true,
             },
         );
+
+        // Set the `length` property
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
             PropertyDescriptor::Data {

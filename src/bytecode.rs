@@ -51,6 +51,10 @@ pub struct UpvalueSpec {
     /// cell. Used for root `var` bindings that are also exposed on the global
     /// object.
     pub mirror_global_name: Option<String>,
+    /// Whether this captured binding is immutable (`const`/function-name binding).
+    pub immutable: bool,
+    /// Whether writes in non-strict mode should be silently ignored.
+    pub sloppy_immutable_silent: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -101,6 +105,10 @@ pub struct FunctionProto {
     /// When true, the slot must start as `Value::Uninitialized` and throw on
     /// read until initialized.
     pub lexical_tdz: Vec<bool>,
+    /// Per-slot immutability flags (`const` and named function-expression self bindings).
+    pub slot_immutable: Vec<bool>,
+    /// Per-slot flag for immutable bindings that ignore sloppy writes.
+    pub slot_sloppy_immutable_silent: Vec<bool>,
     /// Captured binding descriptors for nested closures.
     pub upvalues: Vec<UpvalueSpec>,
     /// Whether the last parameter is a rest parameter (`...args`). If true,

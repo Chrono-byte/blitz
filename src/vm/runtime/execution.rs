@@ -73,6 +73,11 @@ impl Vm {
             root_chunk: None,
             current_slot_types: None,
             current_slot_names: None,
+            current_slot_immutable: None,
+            current_slot_sloppy_immutable_silent: None,
+            direct_eval_outer_slot_names: None,
+            direct_eval_outer_slot_immutable: None,
+            direct_eval_outer_slot_sloppy_immutable_silent: None,
             obj_generations: HashMap::new(),
             property_get_ic_cache: HashMap::new(),
             bg_runtime: get_global_bg_runtime(),
@@ -138,6 +143,11 @@ impl Vm {
             root_chunk: None,
             current_slot_types: None,
             current_slot_names: None,
+            current_slot_immutable: None,
+            current_slot_sloppy_immutable_silent: None,
+            direct_eval_outer_slot_names: None,
+            direct_eval_outer_slot_immutable: None,
+            direct_eval_outer_slot_sloppy_immutable_silent: None,
             obj_generations: HashMap::new(),
             property_get_ic_cache: HashMap::new(),
             bg_runtime: Arc::clone(&self.bg_runtime),
@@ -781,6 +791,12 @@ impl Vm {
         self.handlers.clear();
         self.root_chunk = None;
         self.current_slot_types = None;
+        self.current_slot_names = None;
+        self.current_slot_immutable = None;
+        self.current_slot_sloppy_immutable_silent = None;
+        self.direct_eval_outer_slot_names = None;
+        self.direct_eval_outer_slot_immutable = None;
+        self.direct_eval_outer_slot_sloppy_immutable_silent = None;
         self.this_value = self
             .globals
             .borrow()
@@ -826,6 +842,12 @@ impl Vm {
         self.current_strict_mode = self.chunk.root_strict;
         self.handlers.clear();
         self.current_slot_types = None;
+        self.current_slot_names = None;
+        self.current_slot_immutable = None;
+        self.current_slot_sloppy_immutable_silent = None;
+        self.direct_eval_outer_slot_names = None;
+        self.direct_eval_outer_slot_immutable = None;
+        self.direct_eval_outer_slot_sloppy_immutable_silent = None;
         self.current_closure_env = None;
         self.pending_closure_env = None;
         self.gc_temp_roots.clear();
@@ -929,6 +951,38 @@ impl Vm {
         } else {
             None
         };
+        let saved_current_slot_immutable = if direct_eval {
+            self.current_slot_immutable.clone()
+        } else {
+            None
+        };
+        let saved_current_slot_sloppy_immutable_silent = if direct_eval {
+            self.current_slot_sloppy_immutable_silent.clone()
+        } else {
+            None
+        };
+        let saved_direct_eval_outer_slot_names = if direct_eval {
+            self.direct_eval_outer_slot_names.clone()
+        } else {
+            None
+        };
+        let saved_direct_eval_outer_slot_immutable = if direct_eval {
+            self.direct_eval_outer_slot_immutable.clone()
+        } else {
+            None
+        };
+        let saved_direct_eval_outer_slot_sloppy_immutable_silent = if direct_eval {
+            self.direct_eval_outer_slot_sloppy_immutable_silent.clone()
+        } else {
+            None
+        };
+
+        if direct_eval {
+            self.direct_eval_outer_slot_names = self.current_slot_names.clone();
+            self.direct_eval_outer_slot_immutable = self.current_slot_immutable.clone();
+            self.direct_eval_outer_slot_sloppy_immutable_silent =
+                self.current_slot_sloppy_immutable_silent.clone();
+        }
 
         let chunk_rc = Rc::new(chunk);
         self.root_chunk = Some(Rc::clone(&chunk_rc));
@@ -939,9 +993,13 @@ impl Vm {
         self.gc_temp_roots.clear();
         self.yield_star_queue = None;
         if self.chunk.root_slot_names.is_empty() {
-            self.locals.clear();
-            self.current_slot_types = None;
-            self.current_slot_names = None;
+            if !direct_eval {
+                self.locals.clear();
+                self.current_slot_types = None;
+                self.current_slot_names = None;
+                self.current_slot_immutable = None;
+                self.current_slot_sloppy_immutable_silent = None;
+            }
         } else {
             self.initialize_root_bindings();
         }
@@ -1017,6 +1075,12 @@ impl Vm {
             }
             self.current_slot_types = saved_current_slot_types;
             self.current_slot_names = saved_current_slot_names;
+            self.current_slot_immutable = saved_current_slot_immutable;
+            self.current_slot_sloppy_immutable_silent = saved_current_slot_sloppy_immutable_silent;
+            self.direct_eval_outer_slot_names = saved_direct_eval_outer_slot_names;
+            self.direct_eval_outer_slot_immutable = saved_direct_eval_outer_slot_immutable;
+            self.direct_eval_outer_slot_sloppy_immutable_silent =
+                saved_direct_eval_outer_slot_sloppy_immutable_silent;
         }
 
         result
@@ -1026,6 +1090,8 @@ impl Vm {
         let slot_names = self.chunk.root_slot_names.clone();
         let slot_tdz = self.chunk.root_lexical_tdz.clone();
         let slot_types = self.chunk.root_slot_types.clone();
+        let slot_immutable = vec![false; slot_names.len()];
+        let slot_sloppy_immutable_silent = vec![false; slot_names.len()];
         let slot_count = slot_names.len().max(slot_tdz.len()).max(slot_types.len());
         if slot_count == 0 {
             return;
@@ -1064,6 +1130,9 @@ impl Vm {
         }
         self.lexical_env = root_env;
         self.current_slot_types = Some(slot_types);
+        self.current_slot_names = Some(slot_names);
+        self.current_slot_immutable = Some(slot_immutable);
+        self.current_slot_sloppy_immutable_silent = Some(slot_sloppy_immutable_silent);
     }
 
     // -----------------------------------------------------------------------
@@ -1376,6 +1445,24 @@ impl Vm {
             Op::SetLocal => {
                 let slot = self.read_byte()? as usize;
                 let v = self.pop()?;
+                let slot_immutable = self
+                    .current_slot_immutable
+                    .as_ref()
+                    .and_then(|flags| flags.get(slot))
+                    .copied()
+                    .unwrap_or(false);
+                if slot_immutable {
+                    let sloppy_silent = self
+                        .current_slot_sloppy_immutable_silent
+                        .as_ref()
+                        .and_then(|flags| flags.get(slot))
+                        .copied()
+                        .unwrap_or(false);
+                    if self.is_strict_mode() || !sloppy_silent {
+                        return Err(self.throw_type_error("Assignment to constant variable"));
+                    }
+                    return Ok(StepOutcome::Continue);
+                }
                 if let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone)
                     && self.set_with_env_binding_value(&name, v.clone())?
                 {
@@ -1493,11 +1580,24 @@ impl Vm {
             Op::SetUpvalue => {
                 let idx = self.read_byte()? as usize;
                 let value = self.pop()?;
-                let mirror_global_name = self
+                let (mirror_global_name, immutable, sloppy_immutable_silent) = self
                     .call_stack
                     .last()
                     .and_then(|frame| frame.upvalues.get(idx))
-                    .and_then(|spec| spec.mirror_global_name.clone());
+                    .map(|spec| {
+                        (
+                            spec.mirror_global_name.clone(),
+                            spec.immutable,
+                            spec.sloppy_immutable_silent,
+                        )
+                    })
+                    .unwrap_or((None, false, false));
+                if immutable {
+                    if self.is_strict_mode() || !sloppy_immutable_silent {
+                        return Err(self.throw_type_error("Assignment to constant variable"));
+                    }
+                    return Ok(StepOutcome::Continue);
+                }
                 let env = self
                     .current_closure_env
                     .as_ref()
@@ -2739,6 +2839,8 @@ impl Vm {
         // Restore caller state.
         self.current_slot_types = frame.slot_types;
         self.current_slot_names = frame.slot_names;
+        self.current_slot_immutable = frame.slot_immutable;
+        self.current_slot_sloppy_immutable_silent = frame.slot_sloppy_immutable_silent;
         self.chunk = frame.chunk;
         self.ip = frame.ip;
         self.stack.restore_from(frame.stack);

@@ -569,6 +569,8 @@ mod tests {
             slot_types: Vec::new(),
             slot_names: Vec::new(),
             lexical_tdz: Vec::new(),
+            slot_immutable: Vec::new(),
+            slot_sloppy_immutable_silent: Vec::new(),
             upvalues: Vec::new(),
             has_rest: false,
             has_prototype_property: false,

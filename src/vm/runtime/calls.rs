@@ -1244,6 +1244,9 @@ impl Vm {
         self.current_closure_env = Some(Rc::clone(closure_env));
         self.current_slot_types = Some(proto.slot_types.clone());
         self.current_slot_names = Some(proto.slot_names.clone());
+        self.current_slot_immutable = Some(proto.slot_immutable.clone());
+        self.current_slot_sloppy_immutable_silent =
+            Some(proto.slot_sloppy_immutable_silent.clone());
         self.yield_star_queue = None;
         self.this_value = this_value;
 
@@ -1413,6 +1416,8 @@ impl Vm {
             upvalues: proto.upvalues.clone(),
             slot_types: self.current_slot_types.take(),
             slot_names: self.current_slot_names.take(),
+            slot_immutable: self.current_slot_immutable.take(),
+            slot_sloppy_immutable_silent: self.current_slot_sloppy_immutable_silent.take(),
             stack_base,
             is_strict: proto.is_strict,
             lexical_env: Rc::clone(&self.lexical_env),

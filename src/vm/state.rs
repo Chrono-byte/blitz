@@ -361,6 +361,16 @@ pub struct Vm {
     pub(super) current_slot_types: Option<Vec<Option<Type>>>,
     /// Slot names for the current function.
     pub(super) current_slot_names: Option<Vec<Option<String>>>,
+    /// Per-slot immutability flags for the current function.
+    pub(super) current_slot_immutable: Option<Vec<bool>>,
+    /// Per-slot flag for immutable bindings that ignore sloppy writes.
+    pub(super) current_slot_sloppy_immutable_silent: Option<Vec<bool>>,
+    /// Caller slot names visible while executing direct eval.
+    pub(super) direct_eval_outer_slot_names: Option<Vec<Option<String>>>,
+    /// Caller slot immutability visible while executing direct eval.
+    pub(super) direct_eval_outer_slot_immutable: Option<Vec<bool>>,
+    /// Caller sloppy-write-ignore immutability flags for direct eval.
+    pub(super) direct_eval_outer_slot_sloppy_immutable_silent: Option<Vec<bool>>,
     /// Per-object mutation generation counter, keyed by `Rc` pointer address.
     /// Incremented on every `SetProperty` so that stale IC entries are
     /// detected and evicted on the next lookup.

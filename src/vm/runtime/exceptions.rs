@@ -36,6 +36,8 @@ impl Vm {
                 self.current_closure_env = frame.closure_env;
                 self.current_slot_types = frame.slot_types;
                 self.current_slot_names = frame.slot_names;
+                self.current_slot_immutable = frame.slot_immutable;
+                self.current_slot_sloppy_immutable_silent = frame.slot_sloppy_immutable_silent;
                 self.current_arguments_object = frame.arguments_object;
                 self.current_arguments_mapped_count = frame.arguments_mapped_count;
             }

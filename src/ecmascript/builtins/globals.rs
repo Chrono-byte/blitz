@@ -94,11 +94,14 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
             let strict = vm.active_strict_mode();
             let (allow_new_target, allow_super) = vm.current_eval_context_flags();
             if !strict {
-                match vm.eval_expression_source(src) {
+                match vm.eval_expression_source_direct(src) {
                     Ok(value) => return Ok(value),
                     Err(err) => {
                         let msg = err.to_string();
-                        if !msg.contains("parse:") && !msg.contains("compile:") {
+                        if !msg.contains("parse:")
+                            && !msg.contains("compile:")
+                            && !msg.contains("Unexpected end of bytecode at ip 0")
+                        {
                             return Err(err);
                         }
                     }

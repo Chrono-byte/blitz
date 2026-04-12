@@ -31,6 +31,10 @@ pub(crate) struct Frame {
     pub(crate) slot_types: Option<Vec<Option<Type>>>,
     /// The names of local variables for this frame.
     pub(crate) slot_names: Option<Vec<Option<String>>>,
+    /// Per-slot immutability flags for this frame.
+    pub(crate) slot_immutable: Option<Vec<bool>>,
+    /// Per-slot sloppy-write-ignore flags for immutable bindings.
+    pub(crate) slot_sloppy_immutable_silent: Option<Vec<bool>>,
     /// Length of caller stack at call entry (diagnostic only).
     pub(crate) stack_base: usize,
     /// Whether this frame executes in strict mode.

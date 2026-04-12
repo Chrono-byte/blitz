@@ -132,6 +132,56 @@ impl Vm {
                 )
             };
             if has_decl_binding {
+                let current_slot = self.current_slot_names.as_ref().and_then(|names| {
+                    names.iter().enumerate().find_map(|(idx, maybe_name)| {
+                        maybe_name.as_deref().filter(|n| *n == name).map(|_| idx)
+                    })
+                });
+                let outer_slot = self
+                    .direct_eval_outer_slot_names
+                    .as_ref()
+                    .and_then(|names| {
+                        names.iter().enumerate().find_map(|(idx, maybe_name)| {
+                            maybe_name.as_deref().filter(|n| *n == name).map(|_| idx)
+                        })
+                    });
+                if let Some((slot, use_outer)) = current_slot
+                    .map(|slot| (slot, false))
+                    .or_else(|| outer_slot.map(|slot| (slot, true)))
+                {
+                    let immutable = if use_outer {
+                        self.direct_eval_outer_slot_immutable
+                            .as_ref()
+                            .and_then(|flags| flags.get(slot))
+                            .copied()
+                            .unwrap_or(false)
+                    } else {
+                        self.current_slot_immutable
+                            .as_ref()
+                            .and_then(|flags| flags.get(slot))
+                            .copied()
+                            .unwrap_or(false)
+                    };
+                    if immutable {
+                        let sloppy_silent = if use_outer {
+                            self.direct_eval_outer_slot_sloppy_immutable_silent
+                                .as_ref()
+                                .and_then(|flags| flags.get(slot))
+                                .copied()
+                                .unwrap_or(false)
+                        } else {
+                            self.current_slot_sloppy_immutable_silent
+                                .as_ref()
+                                .and_then(|flags| flags.get(slot))
+                                .copied()
+                                .unwrap_or(false)
+                        };
+                        if self.is_strict_mode() || !sloppy_silent {
+                            return Err(self.throw_type_error("Assignment to constant variable"));
+                        }
+                        return Ok(true);
+                    }
+                }
                 let outer_env = outer;
                 let result = current
                     .borrow_mut()
