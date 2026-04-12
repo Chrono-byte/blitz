@@ -1429,7 +1429,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     }
     data.properties.insert(
         PropertyKey::String("agent".to_string()),
-        PropertyDescriptor::data(Value::Object(agent_obj.clone())),
+        PropertyDescriptor::data(Value::Object(agent_obj)),
     );
 
     // createRealm: builds a FRESH realm with fresh intrinsics, NOT a heap clone.
@@ -1451,7 +1451,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
             if let Value::Object(obj) = &new_262 {
                 obj.borrow_mut().properties.insert(
                     PropertyKey::String("global".to_string()),
-                    PropertyDescriptor::data(Value::Object(realm_global.clone())),
+                    PropertyDescriptor::data(Value::Object(realm_global)),
                 );
             }
 

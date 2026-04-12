@@ -391,10 +391,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             let value = if matches!(receiver, Value::Array(..))
                                 && own_property_descriptor(&receiver, &key).is_none()
                             {
-                                vm.get_property_host(
-                                    &Value::Object(array_proto_map.clone()),
-                                    &key,
-                                )?
+                                vm.get_property_host(&Value::Object(array_proto_map.clone()), &key)?
                             } else {
                                 vm.get_property_host(&receiver, &key)?
                             };
@@ -2548,10 +2545,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             Ok(Value::Object(arraybuffer_obj))
         })
     };
-    let arraybuffer_ctor_val = Value::BuiltinObject(
-        arraybuffer_ctor_fn.clone(),
-        arraybuffer_ctor_map.clone(),
-    );
+    let arraybuffer_ctor_val =
+        Value::BuiltinObject(arraybuffer_ctor_fn.clone(), arraybuffer_ctor_map.clone());
     arraybuffer_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
         PropertyDescriptor::data(Value::Object(arraybuffer_proto_map.clone())),
@@ -2628,8 +2623,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             "TypeError: TypedArray constructor is not directly callable",
         ))
     });
-    let typedarray_ctor_val =
-        Value::BuiltinObject(typedarray_ctor_fn, typedarray_ctor_map.clone());
+    let typedarray_ctor_val = Value::BuiltinObject(typedarray_ctor_fn, typedarray_ctor_map.clone());
     typedarray_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(typedarray_ctor_val.clone()),
@@ -2920,8 +2914,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             if byte_offset + byte_length > buffer_byte_length {
                 return Err(vm.throw_range_error("Invalid DataView length"));
             }
-            let mut dataview_data =
-                ObjectData::with_prototype(Value::Object(proto_map_rc.clone()));
+            let mut dataview_data = ObjectData::with_prototype(Value::Object(proto_map_rc.clone()));
             dataview_data.properties.insert(
                 PropertyKey::String("[[DataViewBuffer]]".to_string()),
                 PropertyDescriptor::data(buffer.clone()),

@@ -451,10 +451,9 @@ impl ModuleLoader {
                                         let new_slot = Rc::new(Mutex::new(Value::Undefined));
                                         {
                                             let mut dep_rec = dep_rec_rc.borrow_mut();
-                                            dep_rec.exports.insert(
-                                                "default".to_string(),
-                                                new_slot.clone(),
-                                            );
+                                            dep_rec
+                                                .exports
+                                                .insert("default".to_string(), new_slot.clone());
                                         }
                                         {
                                             let mut rec = rec_rc.borrow_mut();

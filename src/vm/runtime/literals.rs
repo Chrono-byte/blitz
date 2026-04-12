@@ -47,8 +47,7 @@ impl Vm {
         }
         self.property_get_ic_cache.clear();
 
-        self.stack
-            .push(Value::Array(arr_rc.clone(), props.clone()));
+        self.stack.push(Value::Array(arr_rc.clone(), props.clone()));
         if crate::trace::enabled() {
             eprintln!(
                 "[trace] build_array: created Array arr_ptr={:p} props_ptr={:p} ip={}",
