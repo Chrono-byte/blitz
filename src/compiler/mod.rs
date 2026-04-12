@@ -597,7 +597,7 @@ fn static_member_ic_slots_are_unique_per_site() {
         if let Some(op) = Op::from_byte((chunk.code[i] & 0xFF) as u8) {
             if matches!(op, Op::GetPropertyIC) {
                 let instr = chunk.code.get(i).copied().expect("instruction word");
-                let slot = ((instr >> 8) & 0xFF) as u32;
+                let slot = (instr >> 8) & 0xFF;
                 slots.push(slot);
             }
             i += opcode_width(op);
