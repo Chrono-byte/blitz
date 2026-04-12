@@ -198,34 +198,41 @@ impl Chunk {
     /// `ip` is the index of the opcode byte. Returns `None` if `ip` is out of bounds,
     /// the opcode at `ip` is not a jump, or the computed target is out of bounds.
     pub fn jump_target_from_ip(&self, ip: usize) -> Option<usize> {
-        // need opcode + operand bytes
-        if ip >= self.code.len() {
-            return None;
-        }
-        let b = self.code[ip];
-        let op = Op::from_byte(b)?;
+        // 1. Initial bounds check for the opcode
+        let b = self.code.get(ip)?;
+        let op = Op::from_byte(*b)?;
+
         if !op.is_jump() {
             return None;
         }
-        let operand_pos = if matches!(op, Op::CompareJumpIfFalse) {
-            ip + 2
-        } else {
-            ip + 1
-        };
+
+        // 2. Determine where the i16 offset is located
+        let operand_pos = ip + op.jump_operand_offset();
+
+        // 3. Ensure we have 2 bytes to read for the i16 offset
         if operand_pos + 1 >= self.code.len() {
             return None;
         }
+
+        // 4. Calculate target using the instruction after the offset
         let offset = self.read_i16_at(operand_pos)? as i32;
         let next_instr = operand_pos + 2;
-        // offset is relative to the next instruction
-        let target = (next_instr as i32).checked_add(offset)?;
-        if target < 0_i32 {
+
+        // Use i64 for the intermediate calculation to prevent
+        // overflow issues if your bytecode is very large.
+        let target = (next_instr as i64).checked_add(offset as i64)?;
+
+        // 5. Final bounds and validity checks
+        if target < 0 || target >= (self.code.len() as i64) {
             return None;
         }
+
         let t = target as usize;
-        if t >= self.code.len() {
-            return None;
-        }
+
+        // Note: This still assumes 't' points to a valid instruction start.
+        // In a full VM, you might want a bitset or table to verify
+        // that 't' isn't landing in the middle of another instruction.
+
         Some(t)
     }
 
@@ -631,6 +638,15 @@ impl Op {
             Op::JumpIfNullish,
         ];
         &JUMPS
+    }
+
+    /// Returns the offset from the Opcode to the jump operand.
+    /// This keeps the jump logic clean if you add more instructions!
+    fn jump_operand_offset(&self) -> usize {
+        match self {
+            Op::CompareJumpIfFalse => 2,
+            _ => 1,
+        }
     }
 
     /// Returns whether this opcode is a jump (conditional or unconditional).
