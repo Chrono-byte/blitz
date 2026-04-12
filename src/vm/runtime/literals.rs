@@ -252,7 +252,7 @@ impl Vm {
                 let proto_obj_map: Rc<RefCell<ObjectData>> = gc::track_object(Rc::new(
                     RefCell::new(ObjectData::with_prototype(object_proto)),
                 ));
-                Value::Object(proto_obj_map.clone())
+                Value::Object(proto_obj_map)
             };
 
             if let Value::Object(proto_obj_map) = &proto_obj {

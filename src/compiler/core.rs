@@ -701,7 +701,7 @@ impl Compiler {
         // into the current compilation chunk by validating the cached index
         // and, if necessary, adding a fresh constant into this chunk.
         if let Some(&idx) = self.globals.get(name) {
-            if idx  < self.chunk.constants.len() {
+            if idx < self.chunk.constants.len() {
                 return idx;
             }
             // Cached index is out-of-range for current chunk; fall through to

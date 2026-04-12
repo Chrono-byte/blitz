@@ -3742,7 +3742,7 @@ impl Vm {
                 Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
             )
         {
-            let result = self.call_with_this(&method, constructor, &[value.clone()])?;
+            let result = self.call_with_this(&method, constructor, std::slice::from_ref(value))?;
             return Ok(result.is_truthy());
         }
 

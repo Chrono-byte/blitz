@@ -251,13 +251,12 @@ impl Vm {
                         Rc::as_ptr(&promise_for_job)
                     );
                 }
-                let promise_job = promise_for_job.clone();
                 let mut result_cell = Some(result);
                 self.queue_microtask(move |vm| {
                     if crate::trace::enabled() {
                         eprintln!(
                             "[trace] invoke_async_closure run_resolve promise={:p}",
-                            Rc::as_ptr(&promise_job)
+                            Rc::as_ptr(&promise_for_job)
                         );
                     }
                     let value = result_cell.take().unwrap();
@@ -267,7 +266,7 @@ impl Vm {
                             &value,
                         );
                     }
-                    if let Err(err) = resolve_promise_with_value(vm, &promise_job, value) {
+                    if let Err(err) = resolve_promise_with_value(vm, &promise_for_job, value) {
                         if crate::trace::enabled() {
                             eprintln!("[trace] invoke_async_closure resolve_error: {}", err);
                         }
@@ -286,17 +285,16 @@ impl Vm {
                 let reason = thrown_value
                     .or_else(|| self.last_uncaught_exception.take())
                     .unwrap_or_else(|| Value::String(format!("{}", err)));
-                let promise_job = promise_for_job.clone();
                 let mut reason_cell = Some(reason);
                 self.queue_microtask(move |vm| {
                     if crate::trace::enabled() {
                         eprintln!(
                             "[trace] invoke_async_closure run_reject promise={:p}",
-                            Rc::as_ptr(&promise_job)
+                            Rc::as_ptr(&promise_for_job)
                         );
                     }
                     let reason = reason_cell.take().unwrap();
-                    reject_pending_promise(vm, &promise_job, reason);
+                    reject_pending_promise(vm, &promise_for_job, reason);
                     Ok(())
                 });
             }

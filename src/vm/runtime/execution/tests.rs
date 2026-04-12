@@ -487,16 +487,14 @@ fn to_number_rejects_signed_radix_prefixed_strings() {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
 
-    assert!(
-        vm.to_number_value(&Value::String("-0x10".to_string()))
-            .unwrap()
-            .is_nan()
-    );
-    assert!(
-        vm.to_number_value(&Value::String("+0b101".to_string()))
-            .unwrap()
-            .is_nan()
-    );
+    assert!(vm
+        .to_number_value(&Value::String("-0x10".to_string()))
+        .unwrap()
+        .is_nan());
+    assert!(vm
+        .to_number_value(&Value::String("+0b101".to_string()))
+        .unwrap()
+        .is_nan());
 }
 
 #[test]
@@ -566,10 +564,9 @@ fn dense_array_element_redefinition_preserves_configurability() {
     desc.get = Some(getter);
     desc.has_get = true;
 
-    assert!(
-        vm.define_own_property(&arr, PropertyKey::String("0".to_string()), desc)
-            .unwrap()
-    );
+    assert!(vm
+        .define_own_property(&arr, PropertyKey::String("0".to_string()), desc)
+        .unwrap());
     assert!(matches!(
         props
             .borrow()
@@ -580,14 +577,12 @@ fn dense_array_element_redefinition_preserves_configurability() {
             ..
         })
     ));
-    assert!(
-        vm.delete_property_host(&arr, &PropertyKey::String("0".to_string()))
-            .unwrap()
-    );
-    assert!(
-        !vm.has_property_host(&arr, &PropertyKey::String("0".to_string()))
-            .unwrap()
-    );
+    assert!(vm
+        .delete_property_host(&arr, &PropertyKey::String("0".to_string()))
+        .unwrap());
+    assert!(!vm
+        .has_property_host(&arr, &PropertyKey::String("0".to_string()))
+        .unwrap());
 }
 
 #[test]
@@ -607,20 +602,18 @@ fn reverse_with_length_shrink_clears_lower_index() {
 
     match vm.get_global("array") {
         Some(Value::Array(arr, props)) => {
-            assert!(
-                !vm.has_property_host(
+            assert!(!vm
+                .has_property_host(
                     &Value::Array(arr.clone(), props.clone()),
                     &PropertyKey::String("0".to_string())
                 )
-                .unwrap()
-            );
-            assert!(
-                vm.has_property_host(
+                .unwrap());
+            assert!(vm
+                .has_property_host(
                     &Value::Array(arr.clone(), props.clone()),
                     &PropertyKey::String("1".to_string())
                 )
-                .unwrap()
-            );
+                .unwrap());
             assert!(matches!(
                 vm.get_property_host(
                     &Value::Array(arr.clone(), props.clone()),
@@ -641,7 +634,7 @@ fn top_level_assignment_updates_global_binding() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     let result = vm.run(chunk).expect("run ok");
 
     assert!(matches!(result, Value::Undefined));
@@ -660,7 +653,7 @@ fn eval_for_loop_completion_is_undefined() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     let result = vm.run(chunk).expect("run ok");
 
     assert!(matches!(result, Value::Undefined));
@@ -681,7 +674,7 @@ fn eval_array_spread_literal_expands_values() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     let result = vm.run(chunk).expect("run ok");
 
     assert!(matches!(result, Value::Undefined));
@@ -706,13 +699,12 @@ fn with_statement_coerces_operand_to_object() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     let err = vm.run(chunk).expect_err("with(undefined) should throw");
 
-    assert!(
-        err.to_string()
-            .contains("Cannot convert undefined or null to object")
-    );
+    assert!(err
+        .to_string()
+        .contains("Cannot convert undefined or null to object"));
     assert!(vm.get_global("x").is_none());
 }
 
@@ -733,7 +725,7 @@ fn with_statement_reads_bindings_from_object_environment() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
 
     assert_eq!(
@@ -764,7 +756,7 @@ fn with_statement_inside_constructor_reads_and_writes_object_bindings() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
 
     assert_eq!(
@@ -823,7 +815,7 @@ fn with_statement_handles_common_identifier_shadowing_cases() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
 
     assert_eq!(
@@ -893,7 +885,7 @@ fn with_statement_prefers_object_bindings_over_global_nans() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
 
     assert_eq!(
@@ -983,7 +975,7 @@ fn with_statement_prefers_object_bindings_over_global_nans_in_plain_call() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
 
     assert_eq!(
@@ -1012,7 +1004,7 @@ fn with_statement_prefers_object_bindings_over_global_nans_after_harness() {
         PropertyKey::String("Infinity".to_string()),
         PropertyDescriptor::data(Value::Number(f64::INFINITY)),
     );
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
 
     for harness_name in ["assert.js", "sta.js"] {
         let path = std::path::Path::new("test262/harness").join(harness_name);
@@ -1106,7 +1098,7 @@ fn with_statement_var_initializer_writes_through_object_binding() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
 
     assert_eq!(vm.get_global("result"), Some(Value::Undefined));
@@ -1141,13 +1133,12 @@ fn strict_assignment_to_non_extensible_object_throws() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     let err = vm.run(chunk).expect_err("strict assignment should throw");
 
-    assert!(
-        err.to_string()
-            .contains("Cannot add property to non-extensible object")
-    );
+    assert!(err
+        .to_string()
+        .contains("Cannot add property to non-extensible object"));
     assert!(vm.get_global("b").is_none());
 }
 
@@ -1169,7 +1160,7 @@ fn mapped_arguments_object_exposes_callee() {
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
     assert!(matches!(vm.get_global("result"), Some(Value::Bool(true))));
 }
@@ -1189,14 +1180,13 @@ fn strict_arguments_object_poison_pill_throws_on_callee() {
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     let err = vm
         .run(chunk)
         .expect_err("strict callee access should throw");
-    assert!(
-        err.to_string()
-            .contains("strict arguments callee/caller is forbidden")
-    );
+    assert!(err
+        .to_string()
+        .contains("strict arguments callee/caller is forbidden"));
 }
 
 #[test]
@@ -1218,7 +1208,7 @@ fn mapped_arguments_object_prototype_and_aliasing() {
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
     assert!(matches!(vm.get_global("result"), Some(Value::Bool(true))));
 }
@@ -1243,7 +1233,7 @@ fn arguments_object_is_iterable_with_array_iterator() {
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
 
     assert!(matches!(
@@ -1263,7 +1253,7 @@ fn void_operator_evaluates_to_undefined() {
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     let result = vm.run(chunk).expect("run ok");
 
     assert!(matches!(result, Value::Undefined));
@@ -1289,7 +1279,7 @@ fn logical_and_short_circuits_and_preserves_left_operand() {
         }))),
     );
 
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     let result = vm.run(chunk).expect("run ok");
 
     assert_eq!(*calls.borrow(), 0);
@@ -1316,7 +1306,7 @@ fn logical_or_short_circuits_and_preserves_left_operand() {
         }))),
     );
 
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     let result = vm.run(chunk).expect("run ok");
 
     assert_eq!(*calls.borrow(), 0);
@@ -1368,7 +1358,7 @@ fn try_block_lexical_shadow_does_not_escape_to_catch() {
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
     assert!(matches!(vm.get_global("out"), Some(Value::String(s)) if s == "outer"));
 }
@@ -1390,7 +1380,7 @@ fn var_binding_reads_before_init_return_undefined() {
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
     assert!(matches!(vm.get_global("out"), Some(Value::Undefined)));
 }
@@ -1409,7 +1399,7 @@ fn generator_next_yields_values_and_done() {
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
 
     let a = vm.get_global("a").expect("a exists");
@@ -1455,7 +1445,7 @@ fn harness_property_helper_works_across_multiple_runs() {
         PropertyDescriptor::data(Value::Number(f64::INFINITY)),
     );
     runtime_utils::install_minimal_kernel_constructors(&globals);
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
 
     for harness_name in ["assert.js", "sta.js", "propertyHelper.js"] {
         let path = std::path::Path::new("test262/harness").join(harness_name);
@@ -1498,7 +1488,7 @@ fn class_declaration_binds_constructor_function() {
     let session = Parser::parse_source(src).expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
     assert!(matches!(vm.get_global("A"), Some(Value::Closure { .. })));
 }
@@ -1523,7 +1513,7 @@ fn super_property_access_uses_home_object_and_lexical_this() {
     let session = Parser::parse_source(src).expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
 
     let method_result = vm.get_global("method_result");
@@ -1591,10 +1581,9 @@ fn array_reduce_without_initial_value_throws_on_empty_array() {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     let err = vm.run(chunk).expect_err("reduce should throw");
-    assert!(
-        err.to_string()
-            .contains("Reduce of empty array with no initial value")
-    );
+    assert!(err
+        .to_string()
+        .contains("Reduce of empty array with no initial value"));
 }
 
 #[test]
@@ -1610,7 +1599,7 @@ fn object_keys_orders_indices_before_strings() {
     let session = Parser::parse_source(src).expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
     match vm.get_global("keys") {
         Some(Value::Array(arr, _)) => {
@@ -1631,7 +1620,7 @@ fn object_keys_orders_indices_before_strings() {
 #[test]
 fn for_in_keys_walks_prototype_chain_without_duplicates() {
     let globals = test_globals();
-    let vm = Vm::new(globals);
+    let vm = Vm::new(globals.clone());
 
     let mut proto = ObjectData::new();
     proto.properties.insert(
@@ -1665,7 +1654,7 @@ fn global_this_matches_ecmascript_public_surface() {
     let vm = Vm::new(globals.clone());
 
     let mut actual = vm
-        .list_own_keys_of_value(&Value::Object(globals.clone()))
+        .list_own_keys_of_value(&Value::Object(globals))
         .expect("globalThis keys");
     actual.sort();
 
@@ -1798,7 +1787,7 @@ fn json_stringify_preserves_descriptor_fields() {
 #[test]
 fn vm_new_populates_intrinsics_table() {
     let globals = test_globals();
-    let vm = Vm::new(globals.clone());
+    let vm = Vm::new(globals);
     let intrinsics = &vm.realm().intrinsics;
     assert!(intrinsics.object_constructor.is_some());
     assert!(intrinsics.throw_type_error.is_some());

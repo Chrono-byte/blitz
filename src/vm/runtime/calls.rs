@@ -618,7 +618,7 @@ impl Vm {
         }));
         let next_runner = runner.clone();
         let throw_runner = runner.clone();
-        let return_runner = runner.clone();
+        let return_runner = runner;
         let gen_obj = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         gen_obj
             .borrow_mut()
