@@ -1912,8 +1912,16 @@ impl Vm {
                 }
             }
             Op::CompareJumpIfFalse => {
-                let compare_op = self.read_byte()?;
-                let offset = self.read_short_signed()?;
+                // CompareJumpIfFalse layout: payload byte 0 = compare opcode,
+                // payload bytes 1..2 = signed 16-bit relative offset (instruction units).
+                // Read directly from the previously-fetched instruction word so
+                // we don't mix operand_cursor-based reads with full-payload reads.
+                let instr_idx = self.ip.checked_sub(1).ok_or_else(|| RuntimeError::from("CompareJumpIfFalse: ip underflow"))?;
+                let instr = *self.chunk.code.get(instr_idx).ok_or_else(|| RuntimeError::from("CompareJumpIfFalse: out of bounds"))?;
+                let compare_op = payload_byte(instr, 0);
+                let hi = payload_byte(instr, 1) as i16;
+                let lo = payload_byte(instr, 2) as i16;
+                let offset = (((hi as i16) << 8) | (lo as i16)) as isize;
                 let b = self.pop()?;
                 let a = self.pop()?;
                 let result = match Op::from_byte(compare_op) {
@@ -2836,7 +2844,10 @@ impl Vm {
         let new_ip = (self.ip as isize) + offset;
         // Temporary debug: log large or suspicious jump offsets to locate emission sites.
         if offset.abs() > 10 {
-            eprintln!("[vm-debug] jump at ip={} offset={} next_ip_calc={}", self.ip, offset, new_ip);
+            eprintln!(
+                "[vm-debug] jump at ip={} offset={} next_ip_calc={}",
+                self.ip, offset, new_ip
+            );
         }
         if new_ip < 0 || (new_ip as usize) > self.chunk.code.len() {
             return Err(RuntimeError::from(format!(

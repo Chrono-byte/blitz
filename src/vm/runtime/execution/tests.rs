@@ -487,14 +487,16 @@ fn to_number_rejects_signed_radix_prefixed_strings() {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
 
-    assert!(vm
-        .to_number_value(&Value::String("-0x10".to_string()))
-        .unwrap()
-        .is_nan());
-    assert!(vm
-        .to_number_value(&Value::String("+0b101".to_string()))
-        .unwrap()
-        .is_nan());
+    assert!(
+        vm.to_number_value(&Value::String("-0x10".to_string()))
+            .unwrap()
+            .is_nan()
+    );
+    assert!(
+        vm.to_number_value(&Value::String("+0b101".to_string()))
+            .unwrap()
+            .is_nan()
+    );
 }
 
 #[test]
@@ -564,9 +566,10 @@ fn dense_array_element_redefinition_preserves_configurability() {
     desc.get = Some(getter);
     desc.has_get = true;
 
-    assert!(vm
-        .define_own_property(&arr, PropertyKey::String("0".to_string()), desc)
-        .unwrap());
+    assert!(
+        vm.define_own_property(&arr, PropertyKey::String("0".to_string()), desc)
+            .unwrap()
+    );
     assert!(matches!(
         props
             .borrow()
@@ -577,12 +580,14 @@ fn dense_array_element_redefinition_preserves_configurability() {
             ..
         })
     ));
-    assert!(vm
-        .delete_property_host(&arr, &PropertyKey::String("0".to_string()))
-        .unwrap());
-    assert!(!vm
-        .has_property_host(&arr, &PropertyKey::String("0".to_string()))
-        .unwrap());
+    assert!(
+        vm.delete_property_host(&arr, &PropertyKey::String("0".to_string()))
+            .unwrap()
+    );
+    assert!(
+        !vm.has_property_host(&arr, &PropertyKey::String("0".to_string()))
+            .unwrap()
+    );
 }
 
 #[test]
@@ -602,18 +607,20 @@ fn reverse_with_length_shrink_clears_lower_index() {
 
     match vm.get_global("array") {
         Some(Value::Array(arr, props)) => {
-            assert!(!vm
-                .has_property_host(
+            assert!(
+                !vm.has_property_host(
                     &Value::Array(arr.clone(), props.clone()),
                     &PropertyKey::String("0".to_string())
                 )
-                .unwrap());
-            assert!(vm
-                .has_property_host(
+                .unwrap()
+            );
+            assert!(
+                vm.has_property_host(
                     &Value::Array(arr.clone(), props.clone()),
                     &PropertyKey::String("1".to_string())
                 )
-                .unwrap());
+                .unwrap()
+            );
             assert!(matches!(
                 vm.get_property_host(
                     &Value::Array(arr.clone(), props.clone()),
@@ -702,9 +709,10 @@ fn with_statement_coerces_operand_to_object() {
     let mut vm = Vm::new(globals.clone());
     let err = vm.run(chunk).expect_err("with(undefined) should throw");
 
-    assert!(err
-        .to_string()
-        .contains("Cannot convert undefined or null to object"));
+    assert!(
+        err.to_string()
+            .contains("Cannot convert undefined or null to object")
+    );
     assert!(vm.get_global("x").is_none());
 }
 
@@ -1136,9 +1144,10 @@ fn strict_assignment_to_non_extensible_object_throws() {
     let mut vm = Vm::new(globals.clone());
     let err = vm.run(chunk).expect_err("strict assignment should throw");
 
-    assert!(err
-        .to_string()
-        .contains("Cannot add property to non-extensible object"));
+    assert!(
+        err.to_string()
+            .contains("Cannot add property to non-extensible object")
+    );
     assert!(vm.get_global("b").is_none());
 }
 
@@ -1184,9 +1193,10 @@ fn strict_arguments_object_poison_pill_throws_on_callee() {
     let err = vm
         .run(chunk)
         .expect_err("strict callee access should throw");
-    assert!(err
-        .to_string()
-        .contains("strict arguments callee/caller is forbidden"));
+    assert!(
+        err.to_string()
+            .contains("strict arguments callee/caller is forbidden")
+    );
 }
 
 #[test]
@@ -1581,9 +1591,10 @@ fn array_reduce_without_initial_value_throws_on_empty_array() {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     let err = vm.run(chunk).expect_err("reduce should throw");
-    assert!(err
-        .to_string()
-        .contains("Reduce of empty array with no initial value"));
+    assert!(
+        err.to_string()
+            .contains("Reduce of empty array with no initial value")
+    );
 }
 
 #[test]
