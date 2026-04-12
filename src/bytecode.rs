@@ -219,7 +219,7 @@ impl Chunk {
         let next_instr = operand_pos + 2;
         // offset is relative to the next instruction
         let target = (next_instr as i32).checked_add(offset)?;
-        if target < 0 {
+        if target < 0_i32 {
             return None;
         }
         let t = target as usize;
