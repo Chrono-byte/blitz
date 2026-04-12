@@ -234,11 +234,7 @@ pub(crate) fn build_atomics_object(
                 None | Some(Value::Undefined) => f64::INFINITY,
                 Some(value) => {
                     let n = vm.to_number_value(value)?;
-                    if n.is_nan() || n < 0.0 {
-                        0.0
-                    } else {
-                        n
-                    }
+                    if n.is_nan() || n < 0.0 { 0.0 } else { n }
                 }
             };
             let current = atomics_normalized_current(vm, &info, index)?;
@@ -275,11 +271,7 @@ pub(crate) fn build_atomics_object(
                 None | Some(Value::Undefined) => f64::INFINITY,
                 Some(value) => {
                     let n = vm.to_number_value(value)?;
-                    if n.is_nan() || n < 0.0 {
-                        0.0
-                    } else {
-                        n
-                    }
+                    if n.is_nan() || n < 0.0 { 0.0 } else { n }
                 }
             };
             let current = atomics_normalized_current(vm, &info, index)?;

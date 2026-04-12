@@ -364,7 +364,6 @@ impl Vm {
     }
 
     /// Run the prototype mark/sweep collector and return mark statistics.
-
     pub fn collect_garbage_prototype(&self) -> gc::GcStats {
         // The current prototype GC cannot inspect captures held inside queued
         // host-side microtask/import-job closures. Collecting while those queues
@@ -562,7 +561,6 @@ impl Vm {
     ///
     /// This keeps the prototype collector aggressive without collecting on
     /// every single bytecode step.
-
     pub(super) fn maybe_collect_garbage_prototype(&mut self) {
         let pressure = gc::allocation_pressure();
         let threshold = gc_allocation_pressure_threshold();

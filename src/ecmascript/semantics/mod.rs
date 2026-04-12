@@ -9,9 +9,12 @@ use std::rc::Rc;
 
 use crate::ecmascript::builtins;
 use crate::realm::Intrinsics;
+use crate::runtime_utils::{
+    char_index_to_byte_index, collect_iterable_values, static_builtin_arg_offset, strict_equal,
+    syntax_error, to_index, to_integer_or_infinity, to_length,
+};
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
-use crate::{Parser, Vm, compiler, RuntimeError};
-use crate::runtime_utils::{char_index_to_byte_index, collect_iterable_values, static_builtin_arg_offset, strict_equal, syntax_error, to_index, to_integer_or_infinity, to_length};
+use crate::{Parser, RuntimeError, Vm, compiler};
 
 pub mod atomics;
 pub mod intrinsics;
@@ -20,12 +23,12 @@ pub mod properties;
 pub mod shadowrealm;
 pub mod uri;
 
+pub(crate) use crate::runtime_utils::same_value_zero;
 pub(crate) use intrinsics::{
     builtin_object, install_minimal_kernel_constructors, set_builtin_length, set_builtin_name,
 };
 pub(crate) use numbers::*;
 pub(crate) use properties::*;
-pub(crate) use crate::runtime_utils::same_value_zero;
 
 fn json_value_identity(value: &Value) -> Option<usize> {
     match value {
@@ -173,17 +176,13 @@ fn json_stringify_value(
             out
         }),
         Value::BigInt(_) => {
-            return Err(RuntimeError::from(
-                "Do not know how to serialize a BigInt",
-            ));
+            return Err(RuntimeError::from("Do not know how to serialize a BigInt"));
         }
         Value::Symbol(_, _) => None,
         Value::Array(elements, _) => {
             let identity = json_value_identity(value).expect("array has identity");
             if !seen.insert(identity) {
-                return Err(RuntimeError::from(
-                    "Converting circular structure to JSON",
-                ));
+                return Err(RuntimeError::from("Converting circular structure to JSON"));
             }
             let mut parts = Vec::with_capacity(elements.borrow().len());
             for slot in elements.borrow().iter() {
@@ -201,9 +200,7 @@ fn json_stringify_value(
         Value::Object(_) | Value::Promise(_) => {
             let identity = json_value_identity(value).expect("object-like value has identity");
             if !seen.insert(identity) {
-                return Err(RuntimeError::from(
-                    "Converting circular structure to JSON",
-                ));
+                return Err(RuntimeError::from("Converting circular structure to JSON"));
             }
             let mut parts = Vec::new();
             for key in own_enumerable_keys(value) {
@@ -249,10 +246,7 @@ fn build_regex(pattern: &str, flags: &str) -> Result<regex::Regex, RuntimeError>
             build_with(simplified_harness_pattern(pattern).expect("checked is_some"))
                 .map_err(|e| RuntimeError::from(format!("RegExp build: {}", e)))
         }
-        Err(e) => Err(RuntimeError::from(format!(
-            "RegExp build: {}",
-            e
-        ))),
+        Err(e) => Err(RuntimeError::from(format!("RegExp build: {}", e))),
     }
 }
 

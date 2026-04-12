@@ -193,10 +193,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     }
 
                     let compare_pair =
-                        |vm: &mut Vm,
-                         a: &Value,
-                         b: &Value|
-                         -> Result<Ordering, RuntimeError> {
+                        |vm: &mut Vm, a: &Value, b: &Value| -> Result<Ordering, RuntimeError> {
                             if compare_is_undefined {
                                 let sa = vm.to_string(a)?;
                                 let sb = vm.to_string(b)?;

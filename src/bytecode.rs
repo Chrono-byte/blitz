@@ -177,7 +177,8 @@ impl Chunk {
         }
         let lo = self.code[pos] as u16;
         let hi = self.code[pos + 1] as u16;
-        let val = ((hi << 8) | lo) as i16;
+        // combine little-endian bytes into a u16 then interpret as i16
+        let val = ((hi << 8u16) | lo) as i16;
         Some(val)
     }
 
@@ -675,9 +676,10 @@ impl TryFrom<u8> for Op {
     type Error = ();
 
     fn try_from(b: u8) -> Result<Self, Self::Error> {
-        if b < OP_COUNT as u8 {
+        // Compare as usize to avoid truncation when OP_COUNT doesn't fit in u8
+        if (b as usize) < OP_COUNT {
             // Safety: `Op` is #[repr(u8)] and has contiguous discriminants from 0..=CompareJumpIfFalse.
-            Ok(unsafe { mem::transmute(b) })
+            Ok(unsafe { mem::transmute::<u8, Op>(b) })
         } else {
             Err(())
         }

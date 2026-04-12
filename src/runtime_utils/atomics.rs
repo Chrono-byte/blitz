@@ -1,13 +1,13 @@
-use crate::ecmascript::semantics::atomics as semantics_atomics;
 use super::*;
+use crate::ecmascript::semantics::atomics as semantics_atomics;
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use crate::gc;
+use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::{RuntimeError, Vm};
 use num_bigint::BigInt as BigIntValue;
 use num_traits::ToPrimitive;
-use crate::{RuntimeError, Vm};
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
-use crate::gc;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 // Delegate pure algorithmic helpers to the semantics module. This keeps the
 // runtime-specific code here small and avoids duplicating logic.

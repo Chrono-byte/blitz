@@ -1,11 +1,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::{RuntimeError, gc};
 use crate::Vm;
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
-use crate::runtime_utils::canonical_index_key;
 use crate::ecmascript::semantics::usize_to_f64;
+use crate::runtime_utils::canonical_index_key;
+use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::{RuntimeError, gc};
 use num_traits::ToPrimitive;
 
 pub(crate) fn own_property_descriptor(

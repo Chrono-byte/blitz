@@ -1,10 +1,9 @@
-
 #[cfg(test)]
 mod tests {
+    use crate::Vm;
     use crate::runtime_utils::*;
     use crate::value::ObjectData;
     use crate::value::Value;
-    use crate::Vm;
     use std::cell::RefCell;
     use std::rc::Rc;
 

@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
-use crate::{RuntimeError, Vm};
 use crate::value::{PropertyDescriptor, PropertyKey, Value};
+use crate::{RuntimeError, Vm};
 
 fn is_uri_component_safe(ch: char, component: bool) -> bool {
     matches!(
