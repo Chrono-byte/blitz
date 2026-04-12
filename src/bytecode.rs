@@ -198,7 +198,6 @@ impl Chunk {
     /// `ip` is the index of the opcode byte. Returns `None` if `ip` is out of bounds,
     /// the opcode at `ip` is not a jump, or the computed target is out of bounds.
     pub fn jump_target_from_ip(&self, ip: usize) -> Option<usize> {
-        // 1. Initial bounds check for the opcode
         let b = self.code.get(ip)?;
         let op = Op::from_byte(*b)?;
 
@@ -206,115 +205,86 @@ impl Chunk {
             return None;
         }
 
-        // 2. Determine where the i16 offset is located
         let operand_pos = ip + op.jump_operand_offset();
 
-        // 3. Ensure we have 2 bytes to read for the i16 offset
         if operand_pos + 1 >= self.code.len() {
             return None;
         }
 
-        // 4. Calculate target using the instruction after the offset
         let offset = self.read_i16_at(operand_pos)? as i32;
         let next_instr = operand_pos + 2;
 
-        // Use i64 for the intermediate calculation to prevent
-        // overflow issues if your bytecode is very large.
         let target = (next_instr as i64).checked_add(offset as i64)?;
 
-        // 5. Final bounds and validity checks
         if target < 0 || target >= (self.code.len() as i64) {
             return None;
         }
 
-        let t = target as usize;
-
-        // Note: This still assumes 't' points to a valid instruction start.
-        // In a full VM, you might want a bitset or table to verify
-        // that 't' isn't landing in the middle of another instruction.
-
-        Some(t)
+        Some(target as usize)
     }
 
     /// Hotwire the jump at `ip` so it jumps to the following instruction (i.e. becomes a no-op jump).
-    /// Returns the original `Op` if successful or `None` on error (non-jump opcode, OOB, etc).
-    ///
-    /// Safety: callers must ensure no concurrent execution is reading/executing this `Chunk`.
+    /// Returns the original `Op` if successful, or `None` on error.
     pub fn hotwire_jump_to_next(&mut self, ip: usize) -> Option<Op> {
-        if ip >= self.code.len() {
-            return None;
-        }
-        let byte = self.code[ip];
+        let byte = *self.code.get(ip)?;
         let op = Op::from_byte(byte)?;
         if !op.is_jump() {
             return None;
         }
-        let operand_pos = if matches!(op, Op::CompareJumpIfFalse) {
-            ip + 2
+
+        // Use the helper instead of manual matches
+        let operand_pos = ip + op.jump_operand_offset();
+
+        // Write 0 so the jump target becomes the instruction immediately after the offset
+        if self.write_i16_at(operand_pos, 0) {
+            Some(op)
         } else {
-            ip + 1
-        };
-        let ok = self.write_i16_at(operand_pos, 0);
-        if !ok {
-            return None;
+            None
         }
-        Some(op)
     }
 
     /// Convert `JumpIfFalse` at `ip` to unconditional `Jump`.
-    /// Returns the original `Op` if successful or `None` on error.
-    ///
-    /// This changes only the opcode byte; the operand layout must be identical
-    /// between the two opcodes (same size and semantics).
+    /// Returns the original `Op` if successful, or `None` on error.
     pub fn hotwire_make_unconditional(&mut self, ip: usize) -> Option<Op> {
-        if ip >= self.code.len() {
-            return None;
-        }
-        let byte = self.code[ip];
+        let byte = *self.code.get(ip)?;
         let op = Op::from_byte(byte)?;
         match op {
             Op::JumpIfFalse => {
                 self.code[ip] = Op::Jump.to_byte();
                 Some(op)
             }
-            Op::Jump => Some(op), // already unconditional
+            Op::Jump => Some(op),
             _ => None,
         }
     }
 
-    /// Redirect the jump at `ip` to a new absolute instruction index `target_ip`.
+    /// Hotwire the jump at `ip` so it jumps to `target_ip`.
     /// Returns the original `Op` if successful, or `None` on error.
-    ///
-    /// The `target_ip` must be the byte index of the instruction to jump to.
     pub fn hotwire_redirect(&mut self, ip: usize, target_ip: usize) -> Option<Op> {
-        if ip >= self.code.len() || target_ip >= self.code.len() {
+        if target_ip >= self.code.len() {
             return None;
         }
-        let byte = self.code[ip];
+
+        let byte = *self.code.get(ip)?;
         let op = Op::from_byte(byte)?;
         if !op.is_jump() {
             return None;
         }
-        let operand_pos = if matches!(op, Op::CompareJumpIfFalse) {
-            ip + 2
-        } else {
-            ip + 1
-        };
-        if operand_pos + 1 >= self.code.len() {
-            return None;
-        }
-        // offset = target_ip - next_instr
+
+        let operand_pos = ip + op.jump_operand_offset();
         let next_instr = operand_pos + 2;
-        let next_i = next_instr as i32;
-        let t = target_ip as i32;
-        let offset = t.checked_sub(next_i)?;
-        // ensure offset fits in i16
+
+        // Calculate relative offset: target - next_instruction
+        let offset = (target_ip as i64).checked_sub(next_instr as i64)?;
+
+        // Ensure the jump distance actually fits in our 16-bit operand
         let offset_i16 = i16::try_from(offset).ok()?;
-        let ok = self.write_i16_at(operand_pos, offset_i16);
-        if !ok {
-            return None;
+
+        if self.write_i16_at(operand_pos, offset_i16) {
+            Some(op)
+        } else {
+            None
         }
-        Some(op)
     }
 }
 

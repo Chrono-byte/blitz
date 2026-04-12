@@ -486,7 +486,7 @@ impl Compiler {
                 bindings.insert(
                     name.clone(),
                     CaptureSource::Local {
-                        slot: *slot as u8,
+                        slot: u8::try_from(*slot).expect("slot fits in u8"),
                         mirror_global_name: if self.local_mirrors_global(*slot) {
                             Some(name.clone())
                         } else {
@@ -527,7 +527,7 @@ impl Compiler {
     pub(crate) fn emit_get_binding(&mut self, name: &str) {
         if let Some(slot) = self.resolve_local(name) {
             self.emit(Op::GetLocal, LINE);
-            self.emit_byte(slot as u8, LINE);
+            self.emit_byte(u8::try_from(slot).expect("slot fits in u8"), LINE);
         } else if let Some(upvalue) = self.resolve_upvalue(name) {
             self.emit(Op::GetUpvalue, LINE);
             self.emit_byte(upvalue, LINE);
@@ -538,8 +538,8 @@ impl Compiler {
         {
             let cname_idx = self.chunk.add_constant(Value::String(exported_name));
             self.emit(Op::GetModuleExport, LINE);
-            self.emit_byte(src_idx as u8, LINE);
-            self.emit_byte(cname_idx as u8, LINE);
+            self.emit_byte(u8::try_from(src_idx).expect("src_idx fits in u8"), LINE);
+            self.emit_byte(u8::try_from(cname_idx).expect("cname_idx fits in u8"), LINE);
         } else {
             self.emit_get_global_name(name);
         }
@@ -558,8 +558,11 @@ impl Compiler {
             .chunk
             .add_constant(Value::String(export_name.to_string()));
         self.emit(Op::SetModuleExport, LINE);
-        self.emit_byte(module_index as u8, LINE);
-        self.emit_byte(cname_idx as u8, LINE);
+        self.emit_byte(
+            u8::try_from(module_index).expect("module_index fits in u8"),
+            LINE,
+        );
+        self.emit_byte(u8::try_from(cname_idx).expect("cname_idx fits in u8"), LINE);
         Ok(())
     }
 
@@ -624,13 +627,13 @@ impl Compiler {
     pub(crate) fn emit_get_global_name(&mut self, name: &str) {
         let idx = self.global_name_index(name);
         self.emit(Op::GetGlobalIC, LINE);
-        self.emit_u16(idx as u16, LINE);
+        self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
     }
 
     pub(crate) fn emit_get_builtin_name(&mut self, name: &str) {
         let idx = self.global_name_index(name);
         self.emit(Op::GetBuiltin, LINE);
-        self.emit_byte(idx as u8, LINE);
+        self.emit_byte(u8::try_from(idx).expect("idx fits in u8"), LINE);
     }
 
     pub(crate) fn with_compile_context_override<R>(
@@ -667,7 +670,7 @@ impl Compiler {
         self.emit(Op::Dup, LINE);
         self.emit_constant(Value::String("[[HomeObject]]".to_string()), LINE);
         self.emit(Op::GetLocal, LINE);
-        self.emit_byte(home_slot as u8, LINE);
+        self.emit_byte(u8::try_from(home_slot).expect("home_slot fits in u8"), LINE);
         self.emit(Op::SetPropertyIC, LINE);
         let slot = self.alloc_ic_slot()?;
         self.emit_byte(slot, LINE);
@@ -678,12 +681,12 @@ impl Compiler {
     pub(crate) fn emit_typeof_identifier(&mut self, name: &str) {
         if let Some(slot) = self.resolve_local(name) {
             self.emit(Op::GetLocal, LINE);
-            self.emit_byte(slot as u8, LINE);
+            self.emit_byte(u8::try_from(slot).expect("slot fits in u8"), LINE);
             self.emit(Op::Typeof, LINE);
         } else {
             let idx = self.global_name_index(name);
             self.emit(Op::TypeofIdentifier, LINE);
-            self.emit_u16(idx as u16, LINE);
+            self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
         }
     }
 
@@ -700,7 +703,7 @@ impl Compiler {
     }
 
     pub(crate) fn emit_short_signed(&mut self, val: isize, line: u32) {
-        let v = val as i16;
+        let v = i16::try_from(val).expect("val fits in i16");
         let bytes = v.to_le_bytes();
         self.emit_byte(bytes[0], line);
         self.emit_byte(bytes[1], line);
@@ -709,7 +712,7 @@ impl Compiler {
     pub(crate) fn patch_jump_list(&mut self, patches: Vec<usize>, target: usize) {
         for patch_pos in patches {
             let offset = target as isize - (patch_pos as isize) - 2;
-            let v = offset as i16;
+            let v = i16::try_from(offset).expect("offset fits in i16");
             self.chunk.write_i16_at(patch_pos, v);
         }
     }
