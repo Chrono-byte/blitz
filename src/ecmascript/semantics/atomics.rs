@@ -6,12 +6,85 @@ use crate::runtime_utils::{
     atomics_binary_update, atomics_coerce_view_value, atomics_compare_exchange,
     atomics_exchange_current, atomics_load_current, atomics_make_wait_result,
     atomics_make_waiter_record, atomics_normalized_current, atomics_register_waiter,
-    atomics_store_current, atomics_view_index, atomics_view_info, atomics_wait_kind,
-    atomics_waiters_array, atomics_wake_waiters, builtin_object, set_builtin_length,
-    set_builtin_name, usize_to_f64,
+    atomics_store_current, atomics_view_index, atomics_view_info, atomics_waiters_array,
+    atomics_wake_waiters, builtin_object, set_builtin_length, set_builtin_name, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use num_traits::ToPrimitive;
+
+// Pure algorithmic helpers for Atomics. These were previously defined in
+// runtime_utils/atomics.rs but are language semantics and belong with the
+// other ECMAScript algorithms. Keep them minimal and host-independent.
+pub(crate) fn atomics_value_kind(
+    kind_name: &str,
+) -> Option<crate::runtime_utils::AtomicsValueKind> {
+    use crate::runtime_utils::AtomicsValueKind;
+    match kind_name {
+        "Int8Array" => Some(AtomicsValueKind::Number {
+            bits: 8,
+            signed: true,
+        }),
+        "Uint8Array" => Some(AtomicsValueKind::Number {
+            bits: 8,
+            signed: false,
+        }),
+        "Int16Array" => Some(AtomicsValueKind::Number {
+            bits: 16,
+            signed: true,
+        }),
+        "Uint16Array" => Some(AtomicsValueKind::Number {
+            bits: 16,
+            signed: false,
+        }),
+        "Int32Array" => Some(AtomicsValueKind::Number {
+            bits: 32,
+            signed: true,
+        }),
+        "Uint32Array" => Some(AtomicsValueKind::Number {
+            bits: 32,
+            signed: false,
+        }),
+        "BigInt64Array" => Some(AtomicsValueKind::BigInt { signed: true }),
+        "BigUint64Array" => Some(AtomicsValueKind::BigInt { signed: false }),
+        _ => None,
+    }
+}
+
+pub(crate) fn atomics_wait_kind(kind_name: &str) -> bool {
+    matches!(kind_name, "Int32Array" | "BigInt64Array")
+}
+
+pub(crate) fn atomics_normalize_integer(value: i128, bits: u32, signed: bool) -> i128 {
+    let modulus = 1i128 << bits;
+    let mut v = value % modulus;
+    if v < 0 {
+        v += modulus;
+    }
+    if signed {
+        let sign_bit = 1i128 << (bits - 1);
+        if v >= sign_bit {
+            v -= modulus;
+        }
+    }
+    v
+}
+
+pub(crate) fn atomics_normalize_bigint(
+    value: num_bigint::BigInt,
+    signed: bool,
+) -> num_bigint::BigInt {
+    use num_bigint::{BigInt as BigIntValue, Sign};
+    let modulus = BigIntValue::from(1u8) << 64u32;
+    let half = BigIntValue::from(1u8) << 63u32;
+    let mut v = value % &modulus;
+    if v.sign() == Sign::Minus {
+        v += &modulus;
+    }
+    if signed && v >= half {
+        v -= &modulus;
+    }
+    v
+}
 
 pub(crate) fn build_atomics_object(
     object_proto_map: &Rc<RefCell<ObjectData>>,
@@ -161,7 +234,11 @@ pub(crate) fn build_atomics_object(
                 None | Some(Value::Undefined) => f64::INFINITY,
                 Some(value) => {
                     let n = vm.to_number_value(value)?;
-                    if n.is_nan() || n < 0.0 { 0.0 } else { n }
+                    if n.is_nan() || n < 0.0 {
+                        0.0
+                    } else {
+                        n
+                    }
                 }
             };
             let current = atomics_normalized_current(vm, &info, index)?;
@@ -198,7 +275,11 @@ pub(crate) fn build_atomics_object(
                 None | Some(Value::Undefined) => f64::INFINITY,
                 Some(value) => {
                     let n = vm.to_number_value(value)?;
-                    if n.is_nan() || n < 0.0 { 0.0 } else { n }
+                    if n.is_nan() || n < 0.0 {
+                        0.0
+                    } else {
+                        n
+                    }
                 }
             };
             let current = atomics_normalized_current(vm, &info, index)?;

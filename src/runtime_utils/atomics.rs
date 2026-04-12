@@ -1,67 +1,18 @@
+use crate::ecmascript::semantics::atomics as semantics_atomics;
 use super::*;
 
+// Delegate pure algorithmic helpers to the semantics module. This keeps the
+// runtime-specific code here small and avoids duplicating logic.
 fn atomics_value_kind(kind_name: &str) -> Option<AtomicsValueKind> {
-    match kind_name {
-        "Int8Array" => Some(AtomicsValueKind::Number {
-            bits: 8,
-            signed: true,
-        }),
-        "Uint8Array" => Some(AtomicsValueKind::Number {
-            bits: 8,
-            signed: false,
-        }),
-        "Int16Array" => Some(AtomicsValueKind::Number {
-            bits: 16,
-            signed: true,
-        }),
-        "Uint16Array" => Some(AtomicsValueKind::Number {
-            bits: 16,
-            signed: false,
-        }),
-        "Int32Array" => Some(AtomicsValueKind::Number {
-            bits: 32,
-            signed: true,
-        }),
-        "Uint32Array" => Some(AtomicsValueKind::Number {
-            bits: 32,
-            signed: false,
-        }),
-        "BigInt64Array" => Some(AtomicsValueKind::BigInt { signed: true }),
-        "BigUint64Array" => Some(AtomicsValueKind::BigInt { signed: false }),
-        _ => None,
-    }
-}
-
-pub(crate) fn atomics_wait_kind(kind_name: &str) -> bool {
-    matches!(kind_name, "Int32Array" | "BigInt64Array")
+    semantics_atomics::atomics_value_kind(kind_name)
 }
 
 fn atomics_normalize_integer(value: i128, bits: u32, signed: bool) -> i128 {
-    let modulus = 1i128 << bits;
-    let mut v = value % modulus;
-    if v < 0 {
-        v += modulus;
-    }
-    if signed {
-        let sign_bit = 1i128 << (bits - 1);
-        if v >= sign_bit {
-            v -= modulus;
-        }
-    }
-    v
+    semantics_atomics::atomics_normalize_integer(value, bits, signed)
 }
 
 fn atomics_normalize_bigint(value: BigIntValue, signed: bool) -> BigIntValue {
-    let modulus = BigIntValue::from(1u8) << 64u32;
-    let half = BigIntValue::from(1u8) << 63u32;
-    let mut v = value % &modulus;
-    if v.sign() == Sign::Minus {
-        v += &modulus;
-    }
-    if signed && v >= half {
-        v -= &modulus;
-    }
-    v
+    semantics_atomics::atomics_normalize_bigint(value, signed)
 }
 
 fn atomics_value_to_integer(
