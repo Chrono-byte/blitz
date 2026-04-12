@@ -1905,10 +1905,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             target, bound_this, bound_args
                         );
                     }
-                    let bound_target = target;
-                    let bound_this_arg = bound_this;
-                    let prefix_args = bound_args;
-                    Ok(builtin_object(
+                    let bound_target = target.clone();
+                    let bound_this_arg = bound_this.clone();
+                    let prefix_args = bound_args.clone();
+                    let bound_fn = builtin_object(
                         Rc::new(move |vm, call_args| {
                             if crate::trace::enabled() {
                                 eprintln!(
@@ -1925,7 +1925,22 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             vm.call_value_with_this(&bound_target, &bound_this_arg, &combined)
                         }),
                         &function_proto_map,
-                    ))
+                    );
+                    if let Value::BuiltinObject(_, props) = &bound_fn {
+                        props.borrow_mut().properties.insert(
+                            PKey::String("[[BoundTargetFunction]]".to_string()),
+                            PropertyDescriptor::data(target.clone()),
+                        );
+                        props.borrow_mut().properties.insert(
+                            PKey::String("[[BoundThis]]".to_string()),
+                            PropertyDescriptor::data(bound_this.clone()),
+                        );
+                        props.borrow_mut().properties.insert(
+                            PKey::String("[[BoundArguments]]".to_string()),
+                            PropertyDescriptor::data(array_from_values(bound_args.clone())),
+                        );
+                    }
+                    Ok(bound_fn)
                 }
             }),
             &function_proto_map,

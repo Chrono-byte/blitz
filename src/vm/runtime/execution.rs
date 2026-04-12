@@ -1546,6 +1546,11 @@ impl Vm {
             }
             // New op: GetThis
             Op::GetThis => {
+                if matches!(self.this_value, Value::Uninitialized) {
+                    return Err(self.throw_reference_error(
+                        "Must call super constructor before accessing 'this'",
+                    ));
+                }
                 self.stack.push(self.get_this());
             }
             Op::GetUpvalue => {
@@ -1980,11 +1985,13 @@ impl Vm {
                 let receiver = self.pop()?;
                 self.set_super_property(&receiver, &key, value)?;
             }
+            Op::GeneratorInitDone => {}
             Op::CallMethod => self.execute_call_method()?,
             Op::TailCallMethod => self.execute_tail_call_method()?,
             Op::Spread => self.execute_spread()?,
             Op::ArrayFromSpread => self.execute_array_from_spread()?,
             Op::Construct => self.execute_construct()?,
+            Op::SuperConstruct => self.execute_super_construct()?,
             Op::Return => {
                 if self.call_stack.is_empty() {
                     let result = self.stack.pop().unwrap_or(Value::Undefined);
@@ -2937,20 +2944,79 @@ impl Vm {
         let next_fn =
             self.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
         let result = self.call_value_with_this(&next_fn, &iterator, &[])?;
+        let done = self.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+        if self.to_boolean(&done) {
+            let done_key = PropertyKey::String("__tsblitz_iter_done".to_string());
+            match &iterator {
+                Value::Object(obj) => {
+                    obj.borrow_mut()
+                        .properties
+                        .insert(done_key, PropertyDescriptor::data(Value::Bool(true)));
+                }
+                Value::Array(_, props)
+                | Value::Closure { props, .. }
+                | Value::BuiltinObject(_, props) => {
+                    props
+                        .borrow_mut()
+                        .properties
+                        .insert(done_key, PropertyDescriptor::data(Value::Bool(true)));
+                }
+                _ => {}
+            }
+        }
         self.stack.push(result);
         Ok(())
     }
 
     fn iterator_close_op(&mut self) -> Result<(), RuntimeError> {
         let iterator = self.pop()?;
+        if matches!(iterator, Value::Undefined | Value::Null) {
+            self.stack.push(iterator);
+            return Ok(());
+        }
+        let done_key = PropertyKey::String("__tsblitz_iter_done".to_string());
+        let already_done = match &iterator {
+            Value::Object(obj) => obj
+                .borrow()
+                .properties
+                .get(&done_key)
+                .is_some_and(|desc| matches!(desc, PropertyDescriptor::Data { value: Value::Bool(true), .. })),
+            Value::Array(_, props)
+            | Value::Closure { props, .. }
+            | Value::BuiltinObject(_, props) => props
+                .borrow()
+                .properties
+                .get(&done_key)
+                .is_some_and(|desc| matches!(desc, PropertyDescriptor::Data { value: Value::Bool(true), .. })),
+            _ => false,
+        };
+        if already_done {
+            self.stack.push(iterator);
+            return Ok(());
+        }
         let return_fn =
             self.get_property_host(&iterator, &PropertyKey::String("return".to_string()))?;
+        if matches!(return_fn, Value::Undefined) {
+            self.stack.push(iterator);
+            return Ok(());
+        }
         let is_callable = matches!(
             return_fn,
             Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
         );
-        if is_callable {
-            let _ = self.call_value_with_this(&return_fn, &iterator, &[])?;
+        if !is_callable {
+            return Err(self.throw_type_error("Iterator return is not callable"));
+        }
+        let ret = self.call_value_with_this(&return_fn, &iterator, &[])?;
+        if !matches!(
+            ret,
+            Value::Object(_)
+                | Value::Array(..)
+                | Value::Closure { .. }
+                | Value::BuiltinObject(_, _)
+                | Value::Promise(_)
+        ) {
+            return Err(self.throw_type_error("Iterator return result is not an object"));
         }
         self.stack.push(iterator);
         Ok(())
@@ -3981,6 +4047,7 @@ fn opcode_width(op: Op) -> usize {
         | Op::TailCallIC
         | Op::TailCallMethod
         | Op::Construct
+        | Op::SuperConstruct
         | Op::PopN
         | Op::MakeClosure
         | Op::GetUpvalue

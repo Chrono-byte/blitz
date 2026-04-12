@@ -76,7 +76,182 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
         })),
     );
     intrinsics.hidden_builtins.insert(
+        "iteratorToArray".to_string(),
+        Value::Builtin(Rc::new(|vm, args| {
+            let iterator = args.first().cloned().unwrap_or(Value::Undefined);
+            let mut out = Vec::new();
+            loop {
+                let next =
+                    vm.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
+                let step = vm.call_value_with_this(&next, &iterator, &[])?;
+                let done = vm.get_property_host(&step, &PropertyKey::String("done".to_string()))?;
+                if vm.to_boolean(&done) {
+                    break;
+                }
+                let value =
+                    vm.get_property_host(&step, &PropertyKey::String("value".to_string()))?;
+                out.push(value);
+            }
+            Ok(array_from_values(out))
+        })),
+    );
+    intrinsics.hidden_builtins.insert(
+        "setFunctionNameIfAnonymous".to_string(),
+        Value::Builtin(Rc::new(|_vm, args| {
+            if args.len() < 2 {
+                return Ok(args.first().cloned().unwrap_or(Value::Undefined));
+            }
+            let value = args[0].clone();
+            let name = match &args[1] {
+                Value::String(s) => s.clone(),
+                _ => return Ok(value),
+            };
+            match &value {
+                Value::Closure { props, .. } => {
+                    let (has_name, current) = {
+                        let props_ref = props.borrow();
+                        let key = PropertyKey::String("name".to_string());
+                        let current = props_ref.properties.get(&key).and_then(|desc| match desc {
+                            PropertyDescriptor::Data {
+                                value: Value::String(s),
+                                ..
+                            } => Some(s.clone()),
+                            _ => None,
+                        });
+                        (props_ref.properties.contains_key(&key), current)
+                    };
+                    if !has_name
+                        || current
+                            .as_deref()
+                            .is_some_and(|s| s == "<anonymous>" || s == "<arrow>")
+                    {
+                        props.borrow_mut().properties.insert(
+                            PropertyKey::String("name".to_string()),
+                            PropertyDescriptor::Data {
+                                value: Value::String(name),
+                                writable: false,
+                                enumerable: false,
+                                configurable: true,
+                            },
+                        );
+                    }
+                }
+                Value::BuiltinObject(_, props) => {
+                    let (has_name, current) = {
+                        let props_ref = props.borrow();
+                        let key = PropertyKey::String("name".to_string());
+                        let current = props_ref.properties.get(&key).and_then(|desc| match desc {
+                            PropertyDescriptor::Data {
+                                value: Value::String(s),
+                                ..
+                            } => Some(s.clone()),
+                            _ => None,
+                        });
+                        (props_ref.properties.contains_key(&key), current)
+                    };
+                    if !has_name
+                        || current
+                            .as_deref()
+                            .is_some_and(|s| s == "<anonymous>" || s == "<arrow>")
+                    {
+                        props.borrow_mut().properties.insert(
+                            PropertyKey::String("name".to_string()),
+                            PropertyDescriptor::Data {
+                                value: Value::String(name),
+                                writable: false,
+                                enumerable: false,
+                                configurable: true,
+                            },
+                        );
+                    }
+                }
+                _ => {}
+            }
+            Ok(value)
+        })),
+    );
+    intrinsics.hidden_builtins.insert(
         "objectDefineProperty".to_string(),
         Value::Builtin(Rc::new(Vm::define_property_builtin)),
+    );
+    intrinsics.hidden_builtins.insert(
+        "objectSetPrototypeOf".to_string(),
+        Value::Builtin(Rc::new(|vm, args| {
+            if args.len() < 2 {
+                return Ok(Value::Undefined);
+            }
+            let target = args[0].clone();
+            let proto = args[1].clone();
+            match &target {
+                Value::Object(obj) => {
+                    obj.borrow_mut().set_prototype_value(proto);
+                    Ok(target)
+                }
+                Value::Array(_, props)
+                | Value::Closure { props, .. }
+                | Value::BuiltinObject(_, props) => {
+                    props.borrow_mut().set_prototype_value(proto);
+                    Ok(target)
+                }
+                _ => Err(vm.throw_type_error("Object.setPrototypeOf called on non-object")),
+            }
+        })),
+    );
+    intrinsics.hidden_builtins.insert(
+        "classInitExtends".to_string(),
+        Value::Builtin(Rc::new(|vm, args| {
+            if args.len() < 2 {
+                return Ok(Value::Undefined);
+            }
+            let ctor = args[0].clone();
+            let superclass = args[1].clone();
+
+            let super_proto = if matches!(superclass, Value::Null) {
+                Value::Null
+            } else {
+                if !superclass.is_constructable() {
+                    return Err(
+                        vm.throw_type_error("Class extends value is not a constructor or null")
+                    );
+                }
+                let proto = vm.get_property_host(
+                    &superclass,
+                    &PropertyKey::String("prototype".to_string()),
+                )?;
+                if !matches!(proto, Value::Null | Value::Object(_) | Value::Array(..)) {
+                    return Err(
+                        vm.throw_type_error("Superclass prototype must be an object or null")
+                    );
+                }
+                proto
+            };
+
+            match &ctor {
+                Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+                    props.borrow_mut().properties.insert(
+                        PropertyKey::String("[[SuperConstructor]]".to_string()),
+                        PropertyDescriptor::data(superclass.clone()),
+                    );
+                    if !matches!(superclass, Value::Null) {
+                        props.borrow_mut().set_prototype_value(superclass);
+                    }
+                    let ctor_proto =
+                        vm.get_property_host(&ctor, &PropertyKey::String("prototype".to_string()))?;
+                    match ctor_proto {
+                        Value::Object(obj) => {
+                            obj.borrow_mut().set_prototype_value(super_proto);
+                        }
+                        Value::Array(_, props)
+                        | Value::Closure { props, .. }
+                        | Value::BuiltinObject(_, props) => {
+                            props.borrow_mut().set_prototype_value(super_proto);
+                        }
+                        _ => {}
+                    }
+                    Ok(ctor)
+                }
+                _ => Err(vm.throw_type_error("Class constructor value must be callable")),
+            }
+        })),
     );
 }

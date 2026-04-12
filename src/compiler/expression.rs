@@ -16,11 +16,10 @@
 //! This module is part of the compiler's multi-phase compilation process.
 //! Expression compilation is recursive and produces stack-based bytecode.
 
-use crate::bytecode::{Chunk, FunctionProto, Op};
+use crate::bytecode::Op;
 use crate::value::Value;
 use oxc_ast::ast as oast;
 use oxc_syntax::number::NumberBase;
-use std::rc::Rc;
 
 const LINE: u32 = 1;
 
@@ -1844,9 +1843,9 @@ impl super::Compiler {
                             "SyntaxError: super used outside of a method",
                         ));
                     }
-                    return Err(crate::errors::CompilerError::from(
-                        "direct super() calls are not supported yet",
-                    ));
+                    let arg_count = self.compile_call_arguments(&c.arguments)?;
+                    self.emit_call_with_arg_count(Op::SuperConstruct, arg_count)?;
+                    return Ok(());
                 }
 
                 if let OExpr::StaticMemberExpression(m) = &c.callee
@@ -2019,75 +2018,7 @@ impl super::Compiler {
                 self.compile_expr_oast(&p.expression)?;
             }
             OExpr::ClassExpression(c) => {
-                // Minimal class expression support: emit a trivial constructor
-                // function and push it on the stack. Full class element
-                // initialization is not implemented yet; this prevents
-                // class-expressions from lowering to `Undefined` which breaks
-                // usages like `var C = class {}` followed by `new C()`.
-                let name =
-                    c.id.as_ref()
-                        .map_or_else(|| "<anonymous>".to_string(), |id| id.name.to_string());
-                let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
-                ctor_chunk.write(Op::Return as u8, LINE);
-                let proto = FunctionProto {
-                    name,
-                    span: c.span,
-                    arity: 0,
-                    chunk: Rc::new(ctor_chunk),
-                    slot_types: Vec::new(),
-                    slot_names: Vec::new(),
-                    lexical_tdz: Vec::new(),
-                    slot_immutable: Vec::new(),
-                    slot_sloppy_immutable_silent: Vec::new(),
-                    upvalues: Vec::new(),
-                    has_rest: false,
-                    has_prototype_property: true,
-                    captures_this: false,
-                    arguments_slot: None,
-                    self_binding_slot: None,
-                    has_simple_parameter_list: true,
-                    return_type: None,
-                    is_strict: true,
-                    is_constructor: true,
-                    is_async: false,
-                    is_generator: false,
-                };
-                let idx = self.chunk.add_function(proto);
-                self.emit(Op::MakeClosure, LINE);
-                self.emit_byte(idx as u8, LINE);
-                // To initialize class elements we need a local slot to hold the
-                // constructor while we install methods.
-                let temp_name = format!("__class_ctor_{}", self.locals.len());
-                let temp_slot = self.add_local_with_mirror(temp_name, None, false);
-                self.emit(Op::Dup, LINE);
-                self.emit(Op::SetLocal, LINE);
-                self.emit_byte(temp_slot as u8, LINE);
-
-                // Emit class elements (methods) similar to declaration lowering.
-                let instance_home_slot = if c.body.body.iter().any(|element| {
-                    matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static)
-                }) {
-                    self.emit(Op::GetLocal, LINE);
-                    self.emit_byte(temp_slot as u8, LINE);
-                    self.emit_constant(Value::String("prototype".to_string()), LINE);
-                    self.emit(Op::GetProperty, LINE);
-                    let home_slot = self.alloc_temp_local("class_home");
-                    self.emit(Op::SetLocal, LINE);
-                    self.emit_byte(home_slot as u8, LINE);
-                    Some(home_slot)
-                } else {
-                    None
-                };
-                for element in &c.body.body {
-                    if let oast::ClassElement::MethodDefinition(md) = element {
-                        let target_slot = if md.r#static {
-                            temp_slot
-                        } else {
-                            instance_home_slot.expect("instance home slot")
-                        };
-                        self.emit_class_member_installation(target_slot, md)?;
-                    }
-                }
+                self.emit_class_from_oast(c, None)?;
             }
             OExpr::AwaitExpression(a) => {
                 self.compile_expr_oast(&a.argument)?;

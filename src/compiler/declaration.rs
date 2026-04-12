@@ -661,6 +661,16 @@ impl Compiler {
                 self.loop_depth += 1;
                 self.continue_patches.push(Vec::new());
                 self.break_patches.push(Vec::new());
+                let owns_completion_slot = completion_slot.is_none();
+                let loop_completion_slot = if let Some(slot) = completion_slot {
+                    slot
+                } else {
+                    let slot = self.alloc_temp_local("loop_result");
+                    self.emit(Op::Undefined, LINE);
+                    self.emit(Op::SetLocal, LINE);
+                    self.emit_byte(slot as u8, LINE);
+                    slot
+                };
 
                 // iterable -> iterator via iterable[Symbol.iterator]()
                 self.compile_expr_oast(&f.right)?;
@@ -774,7 +784,7 @@ impl Compiler {
                 }
 
                 self.enter_block_scope();
-                self.compile_statement_oast_with_mode(&f.body, false, completion_slot)?;
+                self.compile_statement_oast_with_mode(&f.body, false, Some(loop_completion_slot))?;
                 self.exit_scope();
 
                 let update_start = loop_start;
@@ -789,7 +799,15 @@ impl Compiler {
                 self.emit_short_signed(back_offset, LINE);
 
                 self.patch_jump(exit_jump);
+                // Normal iterator exhaustion should not perform IteratorClose.
+                // Also discard the final iterator result object left on stack.
+                self.emit(Op::Pop, LINE);
                 self.emit(Op::PopHandler, LINE);
+                self.emit(Op::Jump, LINE);
+                let done_end_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+
                 let break_cleanup = self.chunk.code.len();
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
@@ -831,7 +849,12 @@ impl Compiler {
                 self.emit(Op::GetLocal, LINE);
                 self.emit_byte(thrown_slot as u8, LINE);
                 self.emit(Op::Throw, LINE);
+                self.patch_jump(done_end_jump);
                 self.patch_jump(end_jump);
+                if owns_completion_slot {
+                    self.emit(Op::GetLocal, LINE);
+                    self.emit_byte(loop_completion_slot as u8, LINE);
+                }
                 self.loop_depth = self.loop_depth.saturating_sub(1);
             }
             OStmt::ForInStatement(f) => {
@@ -1359,34 +1382,7 @@ impl Compiler {
             return Err(crate::errors::CompilerError::from(err));
         }
 
-        let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
-        ctor_chunk.write(Op::Return as u8, LINE);
-        let proto = FunctionProto {
-            name: name.clone(),
-            span: c.span,
-            arity: 0,
-            chunk: Rc::new(ctor_chunk),
-            slot_types: Vec::new(),
-            slot_names: Vec::new(),
-            lexical_tdz: Vec::new(),
-            slot_immutable: Vec::new(),
-            slot_sloppy_immutable_silent: Vec::new(),
-            upvalues: Vec::new(),
-            has_rest: false,
-            has_prototype_property: true,
-            captures_this: false,
-            arguments_slot: None,
-            self_binding_slot: None,
-            has_simple_parameter_list: true,
-            return_type: None,
-            is_strict: true,
-            is_constructor: true,
-            is_async: false,
-            is_generator: false,
-        };
-        let idx = self.chunk.add_function(proto);
-        self.emit(Op::MakeClosure, LINE);
-        self.emit_byte(idx as u8, LINE);
+        self.emit_class_from_oast(c, Some(&name))?;
         let slot = self
             .resolve_local(&name)
             .unwrap_or_else(|| self.add_local_with_mirror(name.clone(), None, self.is_root));
@@ -1562,13 +1558,14 @@ impl Compiler {
         };
 
         let self_name = md.value.id.as_ref().map(|id| id.name.as_str());
-        let (proto, _env_len) = self.compile_function(
+        let (mut proto, _env_len) = self.compile_function(
             method_name.as_deref().unwrap_or("<method>"),
             self_name,
             &md.value,
             None,
             true,
         )?;
+        proto.is_strict = true;
         let fidx = self.chunk.add_function(proto);
 
         self.emit(Op::GetLocal, LINE);
@@ -1635,6 +1632,192 @@ impl Compiler {
         self.emit_byte(3, LINE);
         self.emit(Op::Pop, LINE);
         self.emit(Op::Pop, LINE);
+        Ok(())
+    }
+
+    pub(super) fn emit_class_from_oast(
+        &mut self,
+        c: &oast::Class<'_>,
+        declaration_name: Option<&str>,
+    ) -> Result<(), crate::errors::CompilerError> {
+        let class_name =
+            c.id.as_ref()
+                .map(|id| id.name.to_string())
+                .or_else(|| declaration_name.map(ToString::to_string))
+                .unwrap_or_else(|| "<anonymous>".to_string());
+
+        let constructor_method = c.body.body.iter().find_map(|element| {
+            if let oast::ClassElement::MethodDefinition(md) = element
+                && matches!(md.kind, oast::MethodDefinitionKind::Constructor)
+            {
+                return Some(md);
+            }
+            None
+        });
+        let class_has_super = c.super_class.is_some();
+        let proto = if let Some(md) = constructor_method {
+            let (mut proto, _env_len) =
+                self.compile_function(&class_name, None, &md.value, None, class_has_super)?;
+            proto.is_strict = true;
+            proto.is_derived_constructor = class_has_super;
+            proto.is_class_constructor = true;
+            proto
+        } else {
+            let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
+            if class_has_super {
+                ctor_chunk.allow_new_target = true;
+                ctor_chunk.allow_super = true;
+                let mut inner = Compiler {
+                    chunk: ctor_chunk,
+                    source_text: Rc::clone(&self.source_text),
+                    locals: Vec::new(),
+                    local_types: Vec::new(),
+                    local_tdz: Vec::new(),
+                    local_immutable: Vec::new(),
+                    local_sloppy_immutable_silent: Vec::new(),
+                    local_mirror_globals: Vec::new(),
+                    scopes: vec![crate::compiler::Scope {
+                        kind: crate::compiler::ScopeKind::Function,
+                        bindings: HashMap::new(),
+                        lexical_bindings: HashSet::new(),
+                        block_var_names: HashSet::new(),
+                    }],
+                    globals: HashMap::new(),
+                    is_root: false,
+                    strict_context: true,
+                    loop_depth: 0,
+                    with_depth: 0,
+                    continue_patches: Vec::new(),
+                    break_patches: Vec::new(),
+                    finally_patches: Vec::new(),
+                    label_patches: Vec::new(),
+                    current_module: self.current_module.clone(),
+                    next_ic_slot: 0,
+                    pending_operand_bytes: 0,
+                    allow_new_target: true,
+                    allow_super: true,
+                    outer_bindings: self.visible_bindings_snapshot(),
+                    upvalue_indices: HashMap::new(),
+                    captured_upvalues: Vec::new(),
+                    private_names: self.private_names.clone(),
+                    object_expr_had_set_property: false,
+                };
+                inner.add_local_with_mirror("arguments".to_string(), None, false);
+                inner.emit(Op::GetGlobal, LINE);
+                let global_idx = inner.global_name_index("Array");
+                inner.emit_u16(global_idx as u16, LINE);
+                inner.emit_constant(Value::String("from".to_string()), LINE);
+                inner.emit(Op::GetPropertyIC, LINE);
+                let from_slot = inner.alloc_ic_slot()?;
+                inner.emit_byte(from_slot, LINE);
+                inner.emit(Op::GetLocal, LINE);
+                inner.emit_byte(0, LINE);
+                inner.emit(Op::SuperConstruct, LINE);
+                inner.emit_byte(1, LINE);
+                inner.emit(Op::Pop, LINE);
+                inner.emit(Op::GetThis, LINE);
+                inner.emit(Op::Return, LINE);
+                ctor_chunk = std::mem::take(&mut inner.chunk);
+                FunctionProto {
+                    name: class_name.clone(),
+                    span: c.span,
+                    arity: 0,
+                    chunk: Rc::new(ctor_chunk),
+                    slot_types: inner.local_types,
+                    slot_names: inner.locals.into_iter().map(Some).collect(),
+                    lexical_tdz: inner.local_tdz,
+                    slot_immutable: inner.local_immutable,
+                    slot_sloppy_immutable_silent: inner.local_sloppy_immutable_silent,
+                    upvalues: inner.captured_upvalues,
+                    has_rest: false,
+                    has_prototype_property: true,
+                    captures_this: false,
+                    arguments_slot: Some(0),
+                    self_binding_slot: None,
+                    has_simple_parameter_list: true,
+                    return_type: None,
+                    is_strict: true,
+                    is_constructor: true,
+                    is_derived_constructor: true,
+                    is_class_constructor: true,
+                    is_async: false,
+                    is_generator: false,
+                }
+            } else {
+                ctor_chunk.write(Op::GetThis as u8, LINE);
+                ctor_chunk.write(Op::Return as u8, LINE);
+                FunctionProto {
+                    name: class_name.clone(),
+                    span: c.span,
+                    arity: 0,
+                    chunk: Rc::new(ctor_chunk),
+                    slot_types: Vec::new(),
+                    slot_names: Vec::new(),
+                    lexical_tdz: Vec::new(),
+                    slot_immutable: Vec::new(),
+                    slot_sloppy_immutable_silent: Vec::new(),
+                    upvalues: Vec::new(),
+                    has_rest: false,
+                    has_prototype_property: true,
+                    captures_this: false,
+                    arguments_slot: None,
+                    self_binding_slot: None,
+                    has_simple_parameter_list: true,
+                    return_type: None,
+                    is_strict: true,
+                    is_constructor: true,
+                    is_derived_constructor: false,
+                    is_class_constructor: true,
+                    is_async: false,
+                    is_generator: false,
+                }
+            }
+        };
+
+        let idx = self.chunk.add_function(proto);
+        self.emit(Op::MakeClosure, LINE);
+        self.emit_byte(idx as u8, LINE);
+        if let Some(super_class) = &c.super_class {
+            self.emit_get_builtin_name("classInitExtends");
+            self.emit(Op::Swap, LINE);
+            self.compile_expr_oast(super_class)?;
+            self.emit(Op::CallIC, LINE);
+            self.emit_byte(2, LINE);
+        }
+
+        let ctor_slot = self.alloc_temp_local("class_ctor_tmp");
+        self.emit(Op::Dup, LINE);
+        self.emit(Op::SetLocal, LINE);
+        self.emit_byte(ctor_slot as u8, LINE);
+
+        let instance_home_slot = if c.body.body.iter().any(
+            |element| matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static),
+        ) {
+            self.emit(Op::GetLocal, LINE);
+            self.emit_byte(ctor_slot as u8, LINE);
+            self.emit_constant(Value::String("prototype".to_string()), LINE);
+            self.emit(Op::GetProperty, LINE);
+            let home_slot = self.alloc_temp_local("class_home");
+            self.emit(Op::SetLocal, LINE);
+            self.emit_byte(home_slot as u8, LINE);
+            Some(home_slot)
+        } else {
+            None
+        };
+
+        for element in &c.body.body {
+            if let oast::ClassElement::MethodDefinition(md) = element {
+                let target_slot = if md.r#static {
+                    ctor_slot
+                } else {
+                    instance_home_slot.expect("instance home slot")
+                };
+                self.emit_class_member_installation(target_slot, md)?;
+            }
+        }
+
+        self.emit(Op::GetLocal, LINE);
+        self.emit_byte(ctor_slot as u8, LINE);
         Ok(())
     }
 
@@ -1845,6 +2028,9 @@ impl Compiler {
         } else {
             inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
         }
+        if func.generator {
+            inner.emit(Op::GeneratorInitDone, LINE);
+        }
 
         // Compile function body statements into inner compiler.
         if let Some(body) = &func.body {
@@ -1888,6 +2074,8 @@ impl Compiler {
                 return_type,
                 is_strict: function_is_strict,
                 is_constructor,
+                is_derived_constructor: false,
+                is_class_constructor: false,
                 is_async: func.r#async,
                 is_generator: func.generator,
             },
@@ -2156,6 +2344,8 @@ impl Compiler {
                 return_type,
                 is_strict: function_is_strict,
                 is_constructor: false,
+                is_derived_constructor: false,
+                is_class_constructor: false,
                 is_async: func.r#async,
                 is_generator: false,
             },

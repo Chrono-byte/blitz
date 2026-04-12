@@ -581,6 +581,8 @@ mod tests {
             return_type: None,
             is_strict: false,
             is_constructor: false,
+            is_derived_constructor: false,
+            is_class_constructor: false,
             is_async: false,
             is_generator: false,
         });

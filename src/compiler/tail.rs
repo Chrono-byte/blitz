@@ -153,9 +153,9 @@ impl super::Compiler {
                     "SyntaxError: super used outside of a method",
                 ));
             }
-            return Err(crate::errors::CompilerError::from(
-                "direct super() calls are not supported yet",
-            ));
+            let arg_count = self.compile_call_arguments(&c.arguments)?;
+            self.emit_call_with_arg_count(Op::SuperConstruct, arg_count)?;
+            return Ok(());
         }
 
         if let OExpr::StaticMemberExpression(m) = &c.callee

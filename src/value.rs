@@ -525,10 +525,22 @@ impl Value {
     pub fn is_constructable(&self) -> bool {
         match self {
             Value::Closure { proto, .. } => proto.has_prototype_property && proto.is_constructor,
-            Value::BuiltinObject(_, props) => props
-                .borrow()
-                .properties
-                .contains_key(&PropertyKey::String("prototype".to_string())),
+            Value::BuiltinObject(_, props) => {
+                let props_ref = props.borrow();
+                if props_ref
+                    .properties
+                    .contains_key(&PropertyKey::String("prototype".to_string()))
+                {
+                    return true;
+                }
+                if let Some(PropertyDescriptor::Data { value, .. }) = props_ref
+                    .properties
+                    .get(&PropertyKey::String("[[BoundTargetFunction]]".to_string()))
+                {
+                    return value.is_constructable();
+                }
+                false
+            }
             _ => false,
         }
     }

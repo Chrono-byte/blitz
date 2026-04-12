@@ -134,6 +134,11 @@ pub struct FunctionProto {
     pub is_strict: bool,
     /// Whether this function may be used as a constructor (per ECMAScript `Construct`).
     pub is_constructor: bool,
+    /// Whether this constructor is a derived class constructor.
+    pub is_derived_constructor: bool,
+    /// Whether this function was created from a `class` constructor definition.
+    /// Such functions are only constructable with `new` and must throw on direct call.
+    pub is_class_constructor: bool,
     /// Whether this function was declared as `async`.
     pub is_async: bool,
     /// Whether this function was declared as a generator (`function*`).
@@ -530,6 +535,10 @@ pub enum Op {
     GetSuperProperty,
     /// Set super property (compiles to Object.getPrototypeOf(this).property = value).
     SetSuperProperty,
+    /// Construct via direct `super(...)` in derived constructors.
+    SuperConstruct,
+    /// Marker separating generator parameter init from generator body.
+    GeneratorInitDone,
     /// Compare two values and jump if the comparison is false.
     /// Operand 1 encodes the comparison opcode (`Eq`, `Neq`, `Lt`, `Le`, `Gt`, `Ge`,
     /// `StrictEq`, or `StrictNeq`).
@@ -639,6 +648,8 @@ impl Op {
             Op::GetNewTarget => "GetNewTarget",
             Op::GetSuperProperty => "GetSuperProperty",
             Op::SetSuperProperty => "SetSuperProperty",
+            Op::SuperConstruct => "SuperConstruct",
+            Op::GeneratorInitDone => "GeneratorInitDone",
         }
     }
 

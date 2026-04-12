@@ -13,6 +13,13 @@ use std::rc::Rc;
 use std::sync::Mutex;
 
 impl Vm {
+    fn throw_class_constructor_call_error(&mut self, proto: &FunctionProto) -> RuntimeError {
+        self.throw_type_error(&format!(
+            "Class constructor {} cannot be invoked without 'new'",
+            proto.name
+        ))
+    }
+
     fn prune_handlers_for_tail_call(&mut self) {
         let active_frames = self.call_stack.len();
         while self
@@ -108,6 +115,9 @@ impl Vm {
             Value::Closure {
                 ref proto, ref env, ..
             } => {
+                if proto.is_class_constructor && self.construct_new_target.is_none() {
+                    return Err(self.throw_class_constructor_call_error(proto));
+                }
                 let call_args = self.prepare_call_args(&args, proto)?;
                 let this_value = match &callee {
                     Value::Closure {
@@ -244,6 +254,9 @@ impl Vm {
             Value::Closure {
                 ref proto, ref env, ..
             } => {
+                if proto.is_class_constructor && self.construct_new_target.is_none() {
+                    return Err(self.throw_class_constructor_call_error(proto));
+                }
                 let call_args = self.prepare_call_args(&args, proto)?;
                 // Argument validation removed in JS-first mode.
                 let this_arg = Self::closure_lexical_this(&callee).unwrap_or(Value::Undefined);
@@ -301,6 +314,55 @@ impl Vm {
         args.reverse();
         let callee = self.pop()?;
         let result = self.construct_value(&callee, &args)?;
+        self.stack.push(result);
+        Ok(())
+    }
+
+    pub(super) fn execute_super_construct(&mut self) -> Result<(), RuntimeError> {
+        let nargs = self.read_byte()? as usize;
+        let mut args: Vec<Value> = Vec::with_capacity(nargs);
+        for _ in 0..nargs {
+            args.push(self.pop()?);
+        }
+        args.reverse();
+
+        let frame = self
+            .call_stack
+            .last()
+            .ok_or_else(|| RuntimeError::from("super() outside function frame"))?;
+        let (callee, is_derived_constructor) = match &frame.callee {
+            Value::Closure { proto, .. } => (frame.callee.clone(), proto.is_derived_constructor),
+            _ => (frame.callee.clone(), false),
+        };
+        if !is_derived_constructor {
+            return Err(
+                self.throw_type_error("super() is only valid in derived class constructors")
+            );
+        }
+
+        let super_ctor = self
+            .get_property_value(
+                &callee,
+                &PropertyKey::String("[[SuperConstructor]]".to_string()),
+            )
+            .unwrap_or_else(|_| self.get_prototype(&callee));
+        if matches!(super_ctor, Value::Null | Value::Undefined) {
+            return Err(
+                self.throw_type_error("Class extends value does not have a valid constructor")
+            );
+        }
+        if !super_ctor.is_constructable() {
+            return Err(self.throw_type_error("Super constructor is not a constructor"));
+        }
+
+        let new_target = self.current_new_target().unwrap_or(callee);
+        let prev_new_target = self.construct_new_target.clone();
+        self.construct_new_target = Some(new_target);
+        let result = self.construct_value(&super_ctor, &args);
+        self.construct_new_target = prev_new_target;
+        let result = result?;
+        self.this_value = result.clone();
+        self.recent_return_value = Some(result.clone());
         self.stack.push(result);
         Ok(())
     }
@@ -437,6 +499,9 @@ impl Vm {
             Value::Closure {
                 ref proto, ref env, ..
             } => {
+                if proto.is_class_constructor && self.construct_new_target.is_none() {
+                    return Err(self.throw_class_constructor_call_error(proto));
+                }
                 let call_args = self.prepare_call_args(&flat, proto)?;
                 let this_arg = Self::closure_lexical_this(&callee).unwrap_or(Value::Undefined);
                 if proto.is_generator {
@@ -544,6 +609,9 @@ impl Vm {
             Value::Closure {
                 ref proto, ref env, ..
             } => {
+                if proto.is_class_constructor && self.construct_new_target.is_none() {
+                    return Err(self.throw_class_constructor_call_error(proto));
+                }
                 let call_args = self.prepare_call_args(&args, proto)?;
                 // Argument validation removed in JS-first mode.
                 let receiver = Self::closure_lexical_this(&callee).unwrap_or(receiver);
@@ -611,6 +679,43 @@ impl Vm {
     ) -> Result<Value, RuntimeError> {
         let mut child = self.fork_execution();
         child.push_call_frame(proto, closure_env, call_args, this_value, callee.clone())?;
+        loop {
+            let Some(instr) = child.chunk.code.get(child.ip).copied() else {
+                break;
+            };
+            let Some(op) = crate::bytecode::Op::from_byte((instr & 0xFF) as u8) else {
+                break;
+            };
+            if matches!(op, crate::bytecode::Op::GeneratorInitDone) {
+                child.ip += 1;
+                break;
+            }
+            match child.step(Some(1)) {
+                Ok(StepOutcome::Continue) => {
+                    if child.pending_exception {
+                        child.pending_exception = false;
+                    }
+                }
+                Ok(StepOutcome::Return(_)) => break,
+                Ok(StepOutcome::Yield(_)) => break,
+                Err(err) => {
+                    if child.pending_exception {
+                        if child.call_stack.is_empty() {
+                            if let Some(thrown) = child.last_uncaught_exception.take() {
+                                return Err(self.throw_exception(thrown));
+                            }
+                            return Err(err);
+                        }
+                        child.pending_exception = false;
+                        continue;
+                    }
+                    if let Some(thrown) = child.last_uncaught_exception.take() {
+                        return Err(self.throw_exception(thrown));
+                    }
+                    return Err(err);
+                }
+            }
+        }
         let runner = Rc::new(RefCell::new(GeneratorRunner {
             vm: child,
             started: false,
@@ -655,7 +760,16 @@ impl Vm {
                                 runner.completed = true;
                                 break Ok(Self::make_iterator_result(v, true));
                             }
-                            Err(err) => break Err(err),
+                            Err(err) => {
+                                if runner.vm.pending_exception {
+                                    if runner.vm.call_stack.is_empty() {
+                                        break Err(err);
+                                    }
+                                    runner.vm.pending_exception = false;
+                                    continue;
+                                }
+                                break Err(err);
+                            }
                         }
                     }
                 }
@@ -695,6 +809,14 @@ impl Vm {
                                     break Ok(Self::make_iterator_result(v, true));
                                 }
                                 Err(e) => {
+                                    if runner.vm.pending_exception {
+                                        if runner.vm.call_stack.is_empty() {
+                                            runner.completed = true;
+                                            break Err(e);
+                                        }
+                                        runner.vm.pending_exception = false;
+                                        continue;
+                                    }
                                     runner.completed = true;
                                     break Err(e);
                                 }
@@ -818,30 +940,49 @@ impl Vm {
         }
         match callee {
             Value::Closure { .. } => {
-                let proto = self
-                    .get_property_value(callee, &PropertyKey::String("prototype".to_string()))
-                    .unwrap_or(Value::Null);
-                let instance_proto = match proto {
-                    Value::Object(_)
-                    | Value::Array(..)
-                    | Value::Closure { .. }
-                    | Value::BuiltinObject(_, _) => proto,
-                    _ => Value::Null,
+                let is_derived_constructor = match callee {
+                    Value::Closure { proto, .. } => proto.is_derived_constructor,
+                    _ => false,
                 };
-                let instance_obj = gc::track_object(Rc::new(RefCell::new(
-                    ObjectData::with_prototype(instance_proto),
-                )));
-                self.property_get_ic_cache.clear();
-                instance_obj.borrow_mut().properties.insert(
-                    PropertyKey::String("constructor".to_string()),
-                    PropertyDescriptor::data(callee.clone()),
-                );
-                let instance = Value::Object(instance_obj);
+
+                let instance = if is_derived_constructor {
+                    Value::Undefined
+                } else {
+                    let proto_source = self
+                        .construct_new_target
+                        .clone()
+                        .unwrap_or_else(|| callee.clone());
+                    let proto = self
+                        .get_property_value(
+                            &proto_source,
+                            &PropertyKey::String("prototype".to_string()),
+                        )
+                        .unwrap_or(Value::Null);
+                    let instance_proto = match proto {
+                        Value::Object(_)
+                        | Value::Array(..)
+                        | Value::Closure { .. }
+                        | Value::BuiltinObject(_, _) => proto,
+                        _ => Value::Null,
+                    };
+                    let instance_obj = gc::track_object(Rc::new(RefCell::new(
+                        ObjectData::with_prototype(instance_proto),
+                    )));
+                    self.property_get_ic_cache.clear();
+                    instance_obj.borrow_mut().properties.insert(
+                        PropertyKey::String("constructor".to_string()),
+                        PropertyDescriptor::data(callee.clone()),
+                    );
+                    Value::Object(instance_obj)
+                };
                 let prev_new_target = self.construct_new_target.clone();
+                let prev_recent_return = self.recent_return_value.take();
                 self.construct_new_target = Some(callee.clone());
                 let result = self.call_with_this(callee, &instance, args);
                 self.construct_new_target = prev_new_target;
                 let result = result?;
+                let initialized_this = self.recent_return_value.take();
+                self.recent_return_value = prev_recent_return;
                 let result = match result {
                     Value::Object(_)
                     | Value::Array(..)
@@ -850,6 +991,15 @@ impl Vm {
                     | Value::Promise(_) => {
                         let _ = set_constructor_property(&result, callee);
                         result
+                    }
+                    _ if is_derived_constructor => {
+                        let Some(this_obj) = initialized_this else {
+                            self.gc_temp_roots.truncate(temp_root_base);
+                            return Err(self.throw_reference_error(
+                                "Must call super constructor before returning from derived constructor",
+                            ));
+                        };
+                        this_obj
                     }
                     _ => instance,
                 };
@@ -869,9 +1019,52 @@ impl Vm {
                 self.gc_temp_roots.truncate(temp_root_base);
                 Ok(result)
             }
-            Value::BuiltinObject(_, _) => {
+            Value::BuiltinObject(_, props) => {
+                let bound_target = props
+                    .borrow()
+                    .properties
+                    .get(&PropertyKey::String("[[BoundTargetFunction]]".to_string()))
+                    .and_then(|desc| match desc {
+                        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+                        _ => None,
+                    });
+                if let Some(target) = bound_target {
+                    let bound_args = props
+                        .borrow()
+                        .properties
+                        .get(&PropertyKey::String("[[BoundArguments]]".to_string()))
+                        .and_then(|desc| match desc {
+                            PropertyDescriptor::Data {
+                                value: Value::Array(arr, _),
+                                ..
+                            } => Some(
+                                arr.borrow()
+                                    .iter()
+                                    .filter_map(Clone::clone)
+                                    .collect::<Vec<Value>>(),
+                            ),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    let mut combined = bound_args;
+                    combined.extend_from_slice(args);
+                    let prev_new_target = self.construct_new_target.clone();
+                    self.construct_new_target = Some(target.clone());
+                    let result = self.construct_value(&target, &combined);
+                    self.construct_new_target = prev_new_target;
+                    self.gc_temp_roots.truncate(temp_root_base);
+                    return result;
+                }
+
+                let proto_source = self
+                    .construct_new_target
+                    .clone()
+                    .unwrap_or_else(|| callee.clone());
                 let proto = self
-                    .get_property_value(callee, &PropertyKey::String("prototype".to_string()))
+                    .get_property_value(
+                        &proto_source,
+                        &PropertyKey::String("prototype".to_string()),
+                    )
                     .unwrap_or(Value::Null);
                 let instance_proto = match proto {
                     Value::Object(_)
@@ -1052,6 +1245,9 @@ impl Vm {
                 Ok(result)
             }
             Value::Closure { proto, .. } => {
+                if proto.is_class_constructor && self.construct_new_target.is_none() {
+                    return Err(self.throw_class_constructor_call_error(proto));
+                }
                 let mut call_args: Vec<Value> = Vec::with_capacity(args.len());
                 call_args.extend_from_slice(args);
                 let call_args = self.prepare_call_args(&call_args, proto)?;
@@ -1061,6 +1257,11 @@ impl Vm {
                     _ => unreachable!(),
                 };
                 let this_arg = Self::closure_lexical_this(callee).unwrap_or(this_arg.clone());
+                let this_arg = if proto.is_derived_constructor {
+                    Value::Uninitialized
+                } else {
+                    this_arg
+                };
                 if proto.is_generator {
                     Ok(self.create_generator_object(
                         proto,
@@ -1119,7 +1320,7 @@ impl Vm {
                     }
                 }
                 self.dump_diag("CallWithThis failed: callee not callable", callee);
-                Err(RuntimeError::from("CallWithThis: not a function"))
+                Err(self.throw_type_error(&format!("{} is not a function", callee.type_name())))
             }
         })();
         self.gc_temp_roots.truncate(temp_root_base);
@@ -1248,7 +1449,11 @@ impl Vm {
         self.current_slot_sloppy_immutable_silent =
             Some(proto.slot_sloppy_immutable_silent.clone());
         self.yield_star_queue = None;
-        self.this_value = this_value;
+        self.this_value = if proto.is_derived_constructor {
+            Value::Uninitialized
+        } else {
+            this_value
+        };
 
         self.locals = std::iter::repeat_with(|| Rc::new(Mutex::new(Value::Undefined)))
             .take(proto.slot_types.len().max(proto.arity))
