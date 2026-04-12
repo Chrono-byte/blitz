@@ -20,7 +20,6 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 impl Vm {
-
     fn gc_trace_enabled() -> bool {
         std::env::var_os("TSBLITZ_GC_TRACE").is_some() || crate::trace::enabled()
     }
