@@ -4,10 +4,6 @@ version = "0.1.2"
 edition = "2024"
 description = "ECMAScript VM: Rust base layer"
 
-[features]
-default = ["gc_mark_sweep_prototype"]
-gc_mark_sweep_prototype = []
-
 [[bin]]
 name = "blitz"
 path = "src/main.rs"
@@ -33,6 +29,7 @@ regex = "1"
 num-bigint = "0.4"
 num-traits = "0.2"
 indexmap = "2"
+futures = "0.3"
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

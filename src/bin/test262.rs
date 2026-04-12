@@ -41,6 +41,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser as ClapParser;
+use futures::future::join_all;
 use oxc_span::SourceType;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Builder;
@@ -119,26 +120,22 @@ impl TestResult {
 /// prototype collector benefit from an explicit sweep once a test is fully
 /// finished and all test-owned roots have gone out of scope.
 fn force_runner_gc() {
-    #[cfg(feature = "gc_mark_sweep_prototype")]
-    {
-        if env::var_os("TSBLITZ_GC_TRACE").is_some() {
-            eprintln!(
-                "[gc] runner force gc before={:?}",
-                blitz::gc::heap_snapshot()
-            );
-        }
-        let stats = blitz::gc::collect(&[]);
-        if env::var_os("TSBLITZ_GC_TRACE").is_some() {
-            eprintln!(
-                "[gc] runner force gc stats={:?} after={:?}",
-                stats,
-                blitz::gc::heap_snapshot()
-            );
-        }
+    if env::var_os("TSBLITZ_GC_TRACE").is_some() {
+        eprintln!(
+            "[gc] runner force gc before={:?}",
+            blitz::gc::heap_snapshot()
+        );
+    }
+    let stats = blitz::gc::collect(&[]);
+    if env::var_os("TSBLITZ_GC_TRACE").is_some() {
+        eprintln!(
+            "[gc] runner force gc stats={:?} after={:?}",
+            stats,
+            blitz::gc::heap_snapshot()
+        );
     }
 }
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn maybe_trim_allocator() {
     if env::var_os("TSBLITZ_TRIM_ALLOCATOR").is_none() {
         return;
@@ -154,14 +151,6 @@ fn maybe_trim_allocator() {
     let trimmed = unsafe { malloc_trim(0) };
     if env::var_os("TSBLITZ_GC_TRACE").is_some() {
         eprintln!("[gc] allocator trim requested result={}", trimmed);
-    }
-}
-
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-fn maybe_trim_allocator() {
-    if env::var_os("TSBLITZ_TRIM_ALLOCATOR").is_some() && env::var_os("TSBLITZ_GC_TRACE").is_some()
-    {
-        eprintln!("[gc] allocator trim requested but unsupported on this target");
     }
 }
 
@@ -304,9 +293,13 @@ fn run_selected_tests(
             }));
         }
 
+        // Collect the results of all test runs concurrently.
+        // The spawned tasks are already running; use join_all to await all
+        // dispatch tasks and preserve the original panic message on join error.
         let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            results.push(handle.await.expect("test262 dispatch task panicked"));
+        let collected = join_all(handles).await;
+        for res in collected {
+            results.push(res.expect("test262 dispatch task panicked"));
         }
         results
     })
@@ -641,108 +634,115 @@ fn run_selected_tests_via_subprocess_batches(
         let queue = Arc::clone(&chunk_queue);
         let shared_results = Arc::clone(&results);
         let shared_errors = Arc::clone(&worker_errors);
-        handles.push(thread::spawn(move || loop {
-            let Some((chunk_start, chunk_files)) = ({
-                let mut guard = queue.lock().expect("subprocess chunk queue poisoned");
-                guard.pop_front()
-            }) else {
-                break;
-            };
+        handles.push(thread::spawn(move || {
+            loop {
+                let Some((chunk_start, chunk_files)) = ({
+                    let mut guard = queue.lock().expect("subprocess chunk queue poisoned");
+                    guard.pop_front()
+                }) else {
+                    break;
+                };
 
-            let file_list_path = unique_temp_path("files", "txt");
-            let report_path = unique_temp_path("report", "json");
-            let file_list_contents = chunk_files
-                .iter()
-                .map(|path| path.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("\n");
+                let file_list_path = unique_temp_path("files", "txt");
+                let report_path = unique_temp_path("report", "json");
+                let file_list_contents = chunk_files
+                    .iter()
+                    .map(|path| path.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("\n");
 
-            if let Err(e) = fs::write(&file_list_path, file_list_contents) {
-                shared_errors.lock().expect("subprocess errors poisoned").push(
-                    format!(
-                        "Failed to write subprocess file list {}: {}",
-                        file_list_path.display(),
-                        e
-                    ),
+                if let Err(e) = fs::write(&file_list_path, file_list_contents) {
+                    shared_errors
+                        .lock()
+                        .expect("subprocess errors poisoned")
+                        .push(format!(
+                            "Failed to write subprocess file list {}: {}",
+                            file_list_path.display(),
+                            e
+                        ));
+                    break;
+                }
+
+                let mut command = Command::new(&exe);
+                command.arg("--file-list").arg(&file_list_path);
+                command.arg("--report-json").arg(&report_path);
+                command.arg("--no-subprocess");
+                command.arg("--workers").arg("1");
+                if log_tests {
+                    command.arg("--log-tests");
+                }
+
+                let status = command.status();
+                let _ = fs::remove_file(&file_list_path);
+
+                match status {
+                    Ok(status) if status.success() || status.code() == Some(1) => {}
+                    Ok(status) => {
+                        let _ = fs::remove_file(&report_path);
+                        shared_errors
+                            .lock()
+                            .expect("subprocess errors poisoned")
+                            .push(format!(
+                                "Subprocess batch failed with status {} for {} tests",
+                                status,
+                                chunk_files.len()
+                            ));
+                        break;
+                    }
+                    Err(e) => {
+                        let _ = fs::remove_file(&report_path);
+                        shared_errors
+                            .lock()
+                            .expect("subprocess errors poisoned")
+                            .push(format!(
+                                "Failed to launch subprocess batch for {} tests: {}",
+                                chunk_files.len(),
+                                e
+                            ));
+                        break;
+                    }
+                }
+
+                let report_contents = match fs::read_to_string(&report_path) {
+                    Ok(contents) => contents,
+                    Err(e) => {
+                        let _ = fs::remove_file(&report_path);
+                        shared_errors
+                            .lock()
+                            .expect("subprocess errors poisoned")
+                            .push(format!(
+                                "Failed to read subprocess report {}: {}",
+                                report_path.display(),
+                                e
+                            ));
+                        break;
+                    }
+                };
+                let _ = fs::remove_file(&report_path);
+
+                let report: SubprocessBatchReport = match serde_json::from_str(&report_contents) {
+                    Ok(report) => report,
+                    Err(e) => {
+                        shared_errors
+                            .lock()
+                            .expect("subprocess errors poisoned")
+                            .push(format!(
+                                "Failed to parse subprocess report {}: {}",
+                                report_path.display(),
+                                e
+                            ));
+                        break;
+                    }
+                };
+
+                let mut out = shared_results.lock().expect("subprocess results poisoned");
+                out.extend(
+                    report
+                        .results
+                        .into_iter()
+                        .map(|(idx, file, result)| (chunk_start + idx, file, result)),
                 );
-                break;
             }
-
-            let mut command = Command::new(&exe);
-            command.arg("--file-list").arg(&file_list_path);
-            command.arg("--report-json").arg(&report_path);
-            command.arg("--no-subprocess");
-            command.arg("--workers").arg("1");
-            if log_tests {
-                command.arg("--log-tests");
-            }
-
-            let status = command.status();
-            let _ = fs::remove_file(&file_list_path);
-
-            match status {
-                Ok(status) if status.success() || status.code() == Some(1) => {}
-                Ok(status) => {
-                    let _ = fs::remove_file(&report_path);
-                    shared_errors.lock().expect("subprocess errors poisoned").push(
-                        format!(
-                            "Subprocess batch failed with status {} for {} tests",
-                            status,
-                            chunk_files.len()
-                        ),
-                    );
-                    break;
-                }
-                Err(e) => {
-                    let _ = fs::remove_file(&report_path);
-                    shared_errors.lock().expect("subprocess errors poisoned").push(
-                        format!(
-                            "Failed to launch subprocess batch for {} tests: {}",
-                            chunk_files.len(),
-                            e
-                        ),
-                    );
-                    break;
-                }
-            }
-
-            let report_contents = match fs::read_to_string(&report_path) {
-                Ok(contents) => contents,
-                Err(e) => {
-                    let _ = fs::remove_file(&report_path);
-                    shared_errors.lock().expect("subprocess errors poisoned").push(
-                        format!(
-                            "Failed to read subprocess report {}: {}",
-                            report_path.display(),
-                            e
-                        ),
-                    );
-                    break;
-                }
-            };
-            let _ = fs::remove_file(&report_path);
-
-            let report: SubprocessBatchReport = match serde_json::from_str(&report_contents) {
-                Ok(report) => report,
-                Err(e) => {
-                    shared_errors.lock().expect("subprocess errors poisoned").push(
-                        format!(
-                            "Failed to parse subprocess report {}: {}",
-                            report_path.display(),
-                            e
-                        ),
-                    );
-                    break;
-                }
-            };
-
-            let mut out = shared_results.lock().expect("subprocess results poisoned");
-            out.extend(
-                report
-                    .results
-                    .into_iter()
-                    .map(|(idx, file, result)| (chunk_start + idx, file, result)),
-            );
         }));
     }
 
@@ -1403,18 +1403,8 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     data.properties.insert(
         PropertyKey::String("gc".to_string()),
         PropertyDescriptor::data(host_builtin(Rc::new(|_vm, _args| {
-            #[cfg(feature = "gc_mark_sweep_prototype")]
-            {
-                let _ = _vm.collect_garbage_prototype();
-            }
-            #[cfg(feature = "gc_mark_sweep_prototype")]
-            {
-                Ok(Value::Undefined)
-            }
-            #[cfg(not(feature = "gc_mark_sweep_prototype"))]
-            {
-                Err("gc not supported".into())
-            }
+            let _ = _vm.collect_garbage_prototype();
+            Ok(Value::Undefined)
         }))),
     );
     data.properties.insert(

@@ -114,15 +114,8 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>, print_native: &NativeF
     data.properties.insert(
         PropertyKey::String("gc".to_string()),
         PropertyDescriptor::data(host_builtin(Rc::new(|vm, _args| {
-            #[cfg(feature = "gc_mark_sweep_prototype")]
-            {
-                let _ = vm.collect_garbage_prototype();
-                Ok(Value::Undefined)
-            }
-            #[cfg(not(feature = "gc_mark_sweep_prototype"))]
-            {
-                Err("gc not supported".into())
-            }
+            let _ = vm.collect_garbage_prototype();
+            Ok(Value::Undefined)
         }))),
     );
     data.properties.insert(

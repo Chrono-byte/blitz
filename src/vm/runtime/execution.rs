@@ -20,7 +20,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 impl Vm {
-    #[cfg(feature = "gc_mark_sweep_prototype")]
+
     fn gc_trace_enabled() -> bool {
         std::env::var_os("TSBLITZ_GC_TRACE").is_some() || crate::trace::enabled()
     }
@@ -365,7 +365,7 @@ impl Vm {
     }
 
     /// Run the prototype mark/sweep collector and return mark statistics.
-    #[cfg(feature = "gc_mark_sweep_prototype")]
+
     pub fn collect_garbage_prototype(&self) -> gc::GcStats {
         // The current prototype GC cannot inspect captures held inside queued
         // host-side microtask/import-job closures. Collecting while those queues
@@ -563,7 +563,7 @@ impl Vm {
     ///
     /// This keeps the prototype collector aggressive without collecting on
     /// every single bytecode step.
-    #[cfg(feature = "gc_mark_sweep_prototype")]
+
     pub(super) fn maybe_collect_garbage_prototype(&mut self) {
         let pressure = gc::allocation_pressure();
         let threshold = gc_allocation_pressure_threshold();
@@ -594,11 +594,6 @@ impl Vm {
         }
         self.gc_step_counter = 0;
         let _ = self.collect_garbage_prototype();
-    }
-
-    #[cfg(not(feature = "gc_mark_sweep_prototype"))]
-    pub(super) fn maybe_collect_garbage_prototype(&mut self) {
-        let _ = self.gc_step_counter;
     }
 
     /// Install the minimal kernel helpers and populate intrinsics before use.
@@ -863,7 +858,7 @@ impl Vm {
                 Ok(StepOutcome::Return(result)) => {
                     self.pending_exception = false;
                     self.run_microtasks_if_needed()?;
-                    #[cfg(feature = "gc_mark_sweep_prototype")]
+
                     {
                         let _ = self.collect_garbage_prototype();
                     }
@@ -878,7 +873,7 @@ impl Vm {
                         self.pending_exception = false;
                         continue;
                     }
-                    #[cfg(feature = "gc_mark_sweep_prototype")]
+
                     {
                         let _ = self.collect_garbage_prototype();
                     }
@@ -972,7 +967,7 @@ impl Vm {
                 Ok(StepOutcome::Return(result)) => {
                     self.pending_exception = false;
                     self.run_microtasks_if_needed()?;
-                    #[cfg(feature = "gc_mark_sweep_prototype")]
+
                     {
                         let _ = self.collect_garbage_prototype();
                     }
@@ -987,7 +982,7 @@ impl Vm {
                         self.pending_exception = false;
                         continue;
                     }
-                    #[cfg(feature = "gc_mark_sweep_prototype")]
+
                     {
                         let _ = self.collect_garbage_prototype();
                     }

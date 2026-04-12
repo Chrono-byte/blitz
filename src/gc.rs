@@ -52,7 +52,6 @@ pub struct GcHeapSnapshot {
     pub allocation_pressure: usize,
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 #[derive(Default)]
 struct HeapRegistry {
     objects: Vec<Weak<RefCell<ObjectData>>>,
@@ -61,18 +60,15 @@ struct HeapRegistry {
     promises: Vec<Weak<RefCell<PromiseState>>>,
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 thread_local! {
     static HEAP: RefCell<HeapRegistry> = RefCell::new(HeapRegistry::default());
     static ALLOCATION_PRESSURE: Cell<usize> = const { Cell::new(0) };
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 fn push_weak<T>(slot: &mut Vec<Weak<T>>, value: &Rc<T>) {
     slot.push(Rc::downgrade(value));
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 fn bump_allocation_pressure() {
     ALLOCATION_PRESSURE.with(|pressure| {
         pressure.set(pressure.get().saturating_add(1));
@@ -81,26 +77,16 @@ fn bump_allocation_pressure() {
 
 /// Returns the number of tracked heap allocations since the last collection.
 pub fn allocation_pressure() -> usize {
-    #[cfg(feature = "gc_mark_sweep_prototype")]
-    {
-        ALLOCATION_PRESSURE.with(Cell::get)
-    }
-
-    #[cfg(not(feature = "gc_mark_sweep_prototype"))]
-    {
-        0
-    }
+    ALLOCATION_PRESSURE.with(Cell::get)
 }
 
 /// Reset the tracked allocation pressure back to zero.
 pub fn reset_allocation_pressure() {
-    #[cfg(feature = "gc_mark_sweep_prototype")]
     ALLOCATION_PRESSURE.with(|pressure| pressure.set(0));
 }
 
 /// Register an object property bag with the collector.
 pub fn track_object(obj: Rc<RefCell<ObjectData>>) -> Rc<RefCell<ObjectData>> {
-    #[cfg(feature = "gc_mark_sweep_prototype")]
     {
         HEAP.with(|heap| push_weak(&mut heap.borrow_mut().objects, &obj));
         bump_allocation_pressure();
@@ -110,7 +96,6 @@ pub fn track_object(obj: Rc<RefCell<ObjectData>>) -> Rc<RefCell<ObjectData>> {
 
 /// Register an array backing store with the collector.
 pub fn track_array(arr: Rc<RefCell<Vec<Option<Value>>>>) -> Rc<RefCell<Vec<Option<Value>>>> {
-    #[cfg(feature = "gc_mark_sweep_prototype")]
     {
         HEAP.with(|heap| push_weak(&mut heap.borrow_mut().arrays, &arr));
         bump_allocation_pressure();
@@ -120,7 +105,6 @@ pub fn track_array(arr: Rc<RefCell<Vec<Option<Value>>>>) -> Rc<RefCell<Vec<Optio
 
 /// Register a closure environment vector with the collector.
 pub fn track_env(env: Rc<Mutex<Vec<ValueSlot>>>) -> Rc<Mutex<Vec<ValueSlot>>> {
-    #[cfg(feature = "gc_mark_sweep_prototype")]
     {
         HEAP.with(|heap| push_weak(&mut heap.borrow_mut().envs, &env));
         bump_allocation_pressure();
@@ -130,7 +114,6 @@ pub fn track_env(env: Rc<Mutex<Vec<ValueSlot>>>) -> Rc<Mutex<Vec<ValueSlot>>> {
 
 /// Register a promise state with the collector.
 pub fn track_promise(promise: Rc<RefCell<PromiseState>>) -> Rc<RefCell<PromiseState>> {
-    #[cfg(feature = "gc_mark_sweep_prototype")]
     {
         HEAP.with(|heap| push_weak(&mut heap.borrow_mut().promises, &promise));
         bump_allocation_pressure();
@@ -140,32 +123,24 @@ pub fn track_promise(promise: Rc<RefCell<PromiseState>>) -> Rc<RefCell<PromiseSt
 
 /// Return a snapshot of tracked heap usage for the prototype collector.
 pub fn heap_snapshot() -> GcHeapSnapshot {
-    #[cfg(feature = "gc_mark_sweep_prototype")]
-    {
-        let mut snapshot = GcHeapSnapshot::default();
-        HEAP.with(|heap| {
-            let heap = heap.borrow();
-            snapshot.tracked_object_slots = heap.objects.len();
-            snapshot.tracked_array_slots = heap.arrays.len();
-            snapshot.tracked_env_slots = heap.envs.len();
-            snapshot.tracked_promise_slots = heap.promises.len();
-            snapshot.live_objects = heap.objects.iter().filter(|w| w.strong_count() > 0).count();
-            snapshot.live_arrays = heap.arrays.iter().filter(|w| w.strong_count() > 0).count();
-            snapshot.live_envs = heap.envs.iter().filter(|w| w.strong_count() > 0).count();
-            snapshot.live_promises = heap
-                .promises
-                .iter()
-                .filter(|w| w.strong_count() > 0)
-                .count();
-        });
-        snapshot.allocation_pressure = allocation_pressure();
-        snapshot
-    }
-
-    #[cfg(not(feature = "gc_mark_sweep_prototype"))]
-    {
-        GcHeapSnapshot::default()
-    }
+    let mut snapshot = GcHeapSnapshot::default();
+    HEAP.with(|heap| {
+        let heap = heap.borrow();
+        snapshot.tracked_object_slots = heap.objects.len();
+        snapshot.tracked_array_slots = heap.arrays.len();
+        snapshot.tracked_env_slots = heap.envs.len();
+        snapshot.tracked_promise_slots = heap.promises.len();
+        snapshot.live_objects = heap.objects.iter().filter(|w| w.strong_count() > 0).count();
+        snapshot.live_arrays = heap.arrays.iter().filter(|w| w.strong_count() > 0).count();
+        snapshot.live_envs = heap.envs.iter().filter(|w| w.strong_count() > 0).count();
+        snapshot.live_promises = heap
+            .promises
+            .iter()
+            .filter(|w| w.strong_count() > 0)
+            .count();
+    });
+    snapshot.allocation_pressure = allocation_pressure();
+    snapshot
 }
 
 /// Prototype collector entry point.
@@ -180,7 +155,6 @@ pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSl
         {
             let clear_envs_aggressively = false;
 
-            #[cfg(feature = "gc_mark_sweep_prototype")]
             {
                 let mut marked_objects: HashSet<usize> = HashSet::new();
                 let mut marked_arrays: HashSet<usize> = HashSet::new();
@@ -300,7 +274,6 @@ pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSl
     }
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 fn mark_value(
     value: &Value,
     marked_objects: &mut HashSet<usize>,
@@ -433,7 +406,6 @@ fn mark_value(
     }
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 fn mark_object(
     obj: &Rc<RefCell<ObjectData>>,
     marked_objects: &mut HashSet<usize>,
@@ -498,7 +470,6 @@ fn mark_object(
     }
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 fn mark_env(
     env: &Rc<Mutex<Vec<ValueSlot>>>,
     marked_objects: &mut HashSet<usize>,
@@ -526,7 +497,6 @@ fn mark_env(
     }
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 fn mark_environment_record(
     env: &Rc<RefCell<crate::environment::EnvironmentRecord>>,
     marked_objects: &mut HashSet<usize>,
@@ -551,7 +521,6 @@ fn mark_environment_record(
     }
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 fn clear_object(obj: &Rc<RefCell<ObjectData>>) {
     let mut obj = obj.borrow_mut();
     obj.properties.clear();
@@ -561,24 +530,20 @@ fn clear_object(obj: &Rc<RefCell<ObjectData>>) {
     obj.extensible = true;
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 fn clear_array(arr: &Rc<RefCell<Vec<Option<Value>>>>) {
     arr.borrow_mut().clear();
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 fn clear_env(env: &Rc<Mutex<Vec<ValueSlot>>>) {
     // Break closure cycles by dropping the captured values once the
     // environment is determined to be unreachable.
     env.borrow_mut().clear();
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 fn clear_env_aggressively(env: &Rc<Mutex<Vec<ValueSlot>>>) {
     clear_env(env);
 }
 
-#[cfg(feature = "gc_mark_sweep_prototype")]
 fn clear_promise(state: &Rc<RefCell<PromiseState>>) {
     *state.borrow_mut() = PromiseState::Fulfilled(Value::Undefined);
 }
@@ -587,16 +552,14 @@ fn clear_promise(state: &Rc<RefCell<PromiseState>>) {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "gc_mark_sweep_prototype")]
     use crate::bytecode::{Chunk, FunctionProto};
-    #[cfg(feature = "gc_mark_sweep_prototype")]
+
     use crate::value::ValueSlot;
-    #[cfg(feature = "gc_mark_sweep_prototype")]
+
     use oxc_span::Span;
-    #[cfg(feature = "gc_mark_sweep_prototype")]
+
     use std::sync::Mutex;
 
-    #[cfg(feature = "gc_mark_sweep_prototype")]
     fn make_dummy_closure(env: Rc<Mutex<Vec<ValueSlot>>>) -> Value {
         let proto = Rc::new(FunctionProto {
             name: "gc_test".to_string(),
@@ -628,7 +591,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "gc_mark_sweep_prototype")]
     #[test]
     fn sweep_breaks_object_cycles() {
         let a = track_object(Rc::new(RefCell::new(ObjectData::new())));
@@ -655,7 +617,6 @@ mod tests {
         assert!(weak_b.upgrade().is_none());
     }
 
-    #[cfg(feature = "gc_mark_sweep_prototype")]
     #[test]
     fn regular_collect_breaks_closure_env_cycles() {
         let env = track_env(Rc::new(Mutex::new(Vec::new())));
@@ -679,7 +640,6 @@ mod tests {
         assert!(weak_props.upgrade().is_none());
     }
 
-    #[cfg(feature = "gc_mark_sweep_prototype")]
     #[test]
     fn aggressive_collect_breaks_closure_env_cycles() {
         let env = track_env(Rc::new(Mutex::new(Vec::new())));
@@ -702,7 +662,6 @@ mod tests {
         assert!(weak_props.upgrade().is_none());
     }
 
-    #[cfg(feature = "gc_mark_sweep_prototype")]
     #[test]
     fn aggressive_collect_respects_roots() {
         let env = track_env(Rc::new(Mutex::new(Vec::new())));
@@ -724,7 +683,6 @@ mod tests {
         assert!(weak_props.upgrade().is_some());
     }
 
-    #[cfg(feature = "gc_mark_sweep_prototype")]
     #[test]
     fn allocation_pressure_tracks_heap_allocations() {
         reset_allocation_pressure();
