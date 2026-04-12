@@ -378,19 +378,19 @@ impl Compiler {
                 for (case_idx, jump_pos) in case_body_jumps {
                     // patch at jump_pos: rel = target - (patch_ip + 1)
                     let rel = case_starts[case_idx] as isize - (jump_pos as isize) - 1;
-                    self.chunk.write_i24_payload_at(jump_pos, rel as i32);
+                    self.patch_relative_i24(jump_pos, rel as i32);
                 }
 
                 // Patch no-match jump to default start or end.
                 let default_target = default_index.map_or(switch_end, |idx| case_starts[idx]);
                 let rel = default_target as isize - (no_match_jump as isize) - 1;
-                self.chunk.write_i24_payload_at(no_match_jump, rel as i32);
+                self.patch_relative_i24(no_match_jump, rel as i32);
 
                 // Patch `break` statements emitted within this switch.
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let rel = switch_end as isize - (patch_pos as isize) - 1;
-                        self.chunk.write_i24_payload_at(patch_pos, rel as i32);
+                        self.patch_relative_i24(patch_pos, rel as i32);
                     }
                 }
             }
@@ -425,7 +425,7 @@ impl Compiler {
                 if let Some(patches) = self.continue_patches.pop() {
                     for patch_pos in patches {
                         let rel = loop_start as isize - (patch_pos as isize) - 1;
-                        self.chunk.write_i24_payload_at(patch_pos, rel as i32);
+                        self.patch_relative_i24(patch_pos, rel as i32);
                     }
                 }
                 let cleanup_start = self.chunk.code.len();
@@ -433,14 +433,14 @@ impl Compiler {
                     self.emit(Op::GetLocal, LINE);
                     self.emit_byte(loop_completion_slot as u8, LINE);
                     let rel = cleanup_start as isize - (exit_jump as isize) - 1;
-                    self.chunk.write_i24_payload_at(exit_jump, rel as i32);
+                    self.patch_relative_i24(exit_jump, rel as i32);
                 } else {
                     self.patch_jump(exit_jump);
                 }
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let rel = cleanup_start as isize - (patch_pos as isize) - 1;
-                        self.chunk.write_i24_payload_at(patch_pos, rel as i32);
+                        self.patch_relative_i24(patch_pos, rel as i32);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -493,7 +493,7 @@ impl Compiler {
                 if let Some(patches) = self.continue_patches.pop() {
                     for patch_pos in patches {
                         let rel = test_start as isize - (patch_pos as isize) - 1;
-                        self.chunk.write_i24_payload_at(patch_pos, rel as i32);
+                        self.patch_relative_i24(patch_pos, rel as i32);
                     }
                 }
                 let cleanup_start = self.chunk.code.len();
@@ -501,14 +501,14 @@ impl Compiler {
                     self.emit(Op::GetLocal, LINE);
                     self.emit_byte(loop_completion_slot as u8, LINE);
                     let rel = cleanup_start as isize - (exit_jump as isize) - 1;
-                    self.chunk.write_i24_payload_at(exit_jump, rel as i32);
+                    self.patch_relative_i24(exit_jump, rel as i32);
                 } else {
                     self.patch_jump(exit_jump);
                 }
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let rel = cleanup_start as isize - (patch_pos as isize) - 1;
-                        self.chunk.write_i24_payload_at(patch_pos, rel as i32);
+                        self.patch_relative_i24(patch_pos, rel as i32);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -622,7 +622,7 @@ impl Compiler {
                 if let Some(patches) = self.continue_patches.pop() {
                     for patch_pos in patches {
                         let rel = update_start as isize - (patch_pos as isize) - 1;
-                        self.chunk.write_i24_payload_at(patch_pos, rel as i32);
+                        self.patch_relative_i24(patch_pos, rel as i32);
                     }
                 }
 
@@ -646,7 +646,7 @@ impl Compiler {
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let rel = self.chunk.code.len() as isize - (patch_pos as isize) - 1;
-                        self.chunk.write_i24_payload_at(patch_pos, rel as i32);
+                        self.patch_relative_i24(patch_pos, rel as i32);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -792,7 +792,7 @@ impl Compiler {
                 if let Some(patches) = self.continue_patches.pop() {
                     for patch_pos in patches {
                         let rel = update_start as isize - (patch_pos as isize) - 1;
-                        self.chunk.write_i24_payload_at(patch_pos, rel as i32);
+                        self.patch_relative_i24(patch_pos, rel as i32);
                     }
                 }
 
@@ -806,7 +806,7 @@ impl Compiler {
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let rel = break_cleanup as isize - (patch_pos as isize) - 1;
-                        self.chunk.write_i24_payload_at(patch_pos, rel as i32);
+                        self.patch_relative_i24(patch_pos, rel as i32);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -993,7 +993,7 @@ impl Compiler {
                 if let Some(patches) = self.continue_patches.pop() {
                     for patch_pos in patches {
                         let rel = update_start as isize - (patch_pos as isize) - 1;
-                        self.chunk.write_i24_payload_at(patch_pos, rel as i32);
+                        self.patch_relative_i24(patch_pos, rel as i32);
                     }
                 }
 
@@ -1012,7 +1012,7 @@ impl Compiler {
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let rel = self.chunk.code.len() as isize - (patch_pos as isize) - 1;
-                        self.chunk.write_i24_payload_at(patch_pos, rel as i32);
+                        self.patch_relative_i24(patch_pos, rel as i32);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -1203,18 +1203,21 @@ impl Compiler {
                         self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
                     }
                     self.exit_scope();
-                    let (did_return_slot, return_slot) = {
+                    let (did_return_slot, return_slot, return_jumps) = {
                         let state = self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
                             crate::errors::CompilerError::from("finally state missing")
                         })?;
                         state.in_finalizer = false;
-                        let return_jumps = std::mem::take(&mut state.return_jumps);
-                        for patch_pos in return_jumps {
-                            let rel = body_start as isize - (patch_pos as isize) - 1;
-                            self.chunk.write_i24_payload_at(patch_pos, rel as i32);
-                        }
-                        (state.did_return_slot, state.return_slot)
+                        (
+                            state.did_return_slot,
+                            state.return_slot,
+                            std::mem::take(&mut state.return_jumps),
+                        )
                     };
+                    for patch_pos in return_jumps {
+                        let rel = body_start as isize - (patch_pos as isize) - 1;
+                        self.patch_relative_i24(patch_pos, rel as i32);
+                    }
                     self.emit(Op::GetLocal, LINE);
                     self.emit_byte(did_return_slot as u8, LINE);
                     self.emit(Op::JumpIfFalse, LINE);

@@ -267,12 +267,14 @@ impl super::Compiler {
 
         self.compile_expr_oast(&binary.left)?;
         self.compile_expr_oast(&binary.right)?;
-        self.emit(Op::CompareJumpIfFalse, LINE);
-        self.emit_byte(compare_op as u8, LINE);
+        // Payload layout for CompareJumpIfFalse:
+        // - payload byte 0: comparison opcode
+        // - payload bytes 1..2: signed i16 relative jump offset (patched later)
+        self.emit_with_payload(Op::CompareJumpIfFalse, compare_op as u32, LINE);
 
-        // Return the start of the i16 offset field so callers can patch it.
-        let patch_addr = self.chunk.code.len();
-        self.emit_u16(0, LINE);
+        // Return the instruction index containing the compare+jump payload so
+        // callers can patch the i16 jump offset while preserving compare_op.
+        let patch_addr = self.chunk.code.len().saturating_sub(1);
 
         Ok(Some(patch_addr))
     }

@@ -580,33 +580,8 @@ fn compile_for_with_continue() {
 
 #[cfg(test)]
 fn opcode_width(op: Op) -> usize {
-    match op {
-        Op::Const => 3,
-        Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => 3,
-        Op::GetLocal
-        | Op::SetLocal
-        | Op::CloneLocalCell
-        | Op::Call
-        | Op::CallMethod
-        | Op::CallIC
-        | Op::TailCallIC
-        | Op::TailCallMethod
-        | Op::Construct
-        | Op::PopN
-        | Op::MakeClosure
-        | Op::GetUpvalue
-        | Op::SetUpvalue
-        | Op::GetPropertyIC
-        | Op::SetPropertyIC
-        | Op::GetBuiltin
-        | Op::BuildArray
-        | Op::BuildObject
-        | Op::Spread
-        | Op::ArrayFromSpread => 2,
-        Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
-        Op::CompareJumpIfFalse => 4,
-        _ => 1,
-    }
+    let _ = op;
+    1
 }
 
 #[test]
@@ -621,7 +596,9 @@ fn static_member_ic_slots_are_unique_per_site() {
     while i < chunk.code.len() {
         if let Some(op) = Op::from_byte((chunk.code[i] & 0xFF) as u8) {
             if matches!(op, Op::GetPropertyIC) {
-                slots.push(chunk.code.get(i + 1).copied().expect("slot byte"));
+                let instr = chunk.code.get(i).copied().expect("instruction word");
+                let slot = ((instr >> 8) & 0xFF) as u32;
+                slots.push(slot);
             }
             i += opcode_width(op);
         } else {

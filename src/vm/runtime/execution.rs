@@ -1901,11 +1901,29 @@ impl Vm {
                 }
             }
             Op::Jump => {
-                let offset = self.read_short_signed()?;
+                // Read signed 24-bit payload directly from fetched instruction
+                // word (previous instruction index = ip - 1).
+                let idx = self
+                    .ip
+                    .checked_sub(1)
+                    .ok_or_else(|| RuntimeError::from("Jump: ip underflow"))?;
+                let offset = self
+                    .chunk
+                    .read_i24_payload_at(idx)
+                    .ok_or_else(|| RuntimeError::from("Jump: payload out of bounds"))?
+                    as isize;
                 self.jump(offset)?;
             }
             Op::JumpIfFalse => {
-                let offset = self.read_short_signed()?;
+                let idx = self
+                    .ip
+                    .checked_sub(1)
+                    .ok_or_else(|| RuntimeError::from("JumpIfFalse: ip underflow"))?;
+                let offset = self
+                    .chunk
+                    .read_i24_payload_at(idx)
+                    .ok_or_else(|| RuntimeError::from("JumpIfFalse: payload out of bounds"))?
+                    as isize;
                 let v = self.pop()?;
                 if !v.is_truthy() {
                     self.jump(offset)?;
@@ -1916,12 +1934,21 @@ impl Vm {
                 // payload bytes 1..2 = signed 16-bit relative offset (instruction units).
                 // Read directly from the previously-fetched instruction word so
                 // we don't mix operand_cursor-based reads with full-payload reads.
-                let instr_idx = self.ip.checked_sub(1).ok_or_else(|| RuntimeError::from("CompareJumpIfFalse: ip underflow"))?;
-                let instr = *self.chunk.code.get(instr_idx).ok_or_else(|| RuntimeError::from("CompareJumpIfFalse: out of bounds"))?;
+                let instr_idx = self
+                    .ip
+                    .checked_sub(1)
+                    .ok_or_else(|| RuntimeError::from("CompareJumpIfFalse: ip underflow"))?;
+                let instr = *self
+                    .chunk
+                    .code
+                    .get(instr_idx)
+                    .ok_or_else(|| RuntimeError::from("CompareJumpIfFalse: out of bounds"))?;
                 let compare_op = payload_byte(instr, 0);
-                let hi = payload_byte(instr, 1) as i16;
-                let lo = payload_byte(instr, 2) as i16;
-                let offset = (((hi as i16) << 8) | (lo as i16)) as isize;
+                // offset is stored little-endian in payload bytes 1 (low) and 2 (high)
+                let off_lo = payload_byte(instr, 1) as u16;
+                let off_hi = payload_byte(instr, 2) as u16;
+                let offset16 = ((off_hi << 8) | off_lo) as i16;
+                let offset = offset16 as isize;
                 let b = self.pop()?;
                 let a = self.pop()?;
                 let result = match Op::from_byte(compare_op) {
@@ -1940,14 +1967,30 @@ impl Vm {
                 }
             }
             Op::JumpIfTrue => {
-                let offset = self.read_short_signed()?;
+                let idx = self
+                    .ip
+                    .checked_sub(1)
+                    .ok_or_else(|| RuntimeError::from("JumpIfTrue: ip underflow"))?;
+                let offset = self
+                    .chunk
+                    .read_i24_payload_at(idx)
+                    .ok_or_else(|| RuntimeError::from("JumpIfTrue: payload out of bounds"))?
+                    as isize;
                 let v = self.pop()?;
                 if v.is_truthy() {
                     self.jump(offset)?;
                 }
             }
             Op::JumpIfNullish => {
-                let offset = self.read_short_signed()?;
+                let idx = self
+                    .ip
+                    .checked_sub(1)
+                    .ok_or_else(|| RuntimeError::from("JumpIfNullish: ip underflow"))?;
+                let offset = self
+                    .chunk
+                    .read_i24_payload_at(idx)
+                    .ok_or_else(|| RuntimeError::from("JumpIfNullish: payload out of bounds"))?
+                    as isize;
                 let v = self.pop()?;
                 if matches!(v, Value::Null | Value::Undefined) {
                     self.jump(offset)?;
@@ -2842,13 +2885,6 @@ impl Vm {
 
     fn jump(&mut self, offset: isize) -> Result<(), RuntimeError> {
         let new_ip = (self.ip as isize) + offset;
-        // Temporary debug: log large or suspicious jump offsets to locate emission sites.
-        if offset.abs() > 10 {
-            eprintln!(
-                "[vm-debug] jump at ip={} offset={} next_ip_calc={}",
-                self.ip, offset, new_ip
-            );
-        }
         if new_ip < 0 || (new_ip as usize) > self.chunk.code.len() {
             return Err(RuntimeError::from(format!(
                 "Jump target out of bounds (ip={} offset={})",
@@ -2958,9 +2994,86 @@ impl Vm {
 
     #[inline(always)]
     fn string_constant(&self, idx: usize) -> Result<String, RuntimeError> {
-        match self.chunk.constants.get(idx) {
+        if let Some(Value::String(s)) = self.chunk.constants.get(idx) {
+            return Ok(s.clone());
+        }
+
+        // If the index is not present in the current chunk's constant pool,
+        // it may refer to a function prototype's own chunk (MakeClosure
+        // migration artifact). Try to find a proto chunk that contains the
+        // index and return the string from there.
+        for (i, proto) in self.chunk.functions.iter().enumerate() {
+            if let Some(Value::String(s)) = proto.chunk.constants.get(idx) {
+                eprintln!(
+                    "[diag] string_constant: resolved idx={} from proto[{}] '{}' proto_chunk_ptr={:p}",
+                    idx,
+                    i,
+                    proto.name,
+                    Rc::as_ptr(&proto.chunk)
+                );
+                return Ok(s.clone());
+            }
+        }
+
+        // Fallback: emit diagnostics and error
+        let other = self.chunk.constants.get(idx);
+        match other {
             Some(Value::String(s)) => Ok(s.clone()),
-            _ => Err(RuntimeError::from("Constant not a string")),
+            other => {
+                // Emit targeted diagnostics to help map the failing constant
+                // index back to the emitting chunk or a function proto's
+                // constant pool. Keep output concise but informative.
+                eprintln!(
+                    "[diag] string_constant: requested idx={} current_chunk_ptr={:p} current_consts_len={}",
+                    idx,
+                    Rc::as_ptr(&self.chunk),
+                    self.chunk.constants.len()
+                );
+                if let Some(v) = other {
+                    eprintln!(
+                        "[diag] string_constant: actual constant at idx exists and is type={}",
+                        v.type_name()
+                    );
+                } else {
+                    eprintln!("[diag] string_constant: no constant at idx in current chunk");
+                }
+                // Print brief summary of function protos referenced by this chunk
+                for (i, proto) in self.chunk.functions.iter().enumerate().take(16) {
+                    eprintln!(
+                        "[diag] proto[{}] name='{}' proto_chunk_ptr={:p} proto_consts_len={}",
+                        i,
+                        proto.name,
+                        Rc::as_ptr(&proto.chunk),
+                        proto.chunk.constants.len()
+                    );
+                    if idx < proto.chunk.constants.len() {
+                        eprintln!(
+                            "[diag]   -> const[{}] in proto[{}] = {:?}",
+                            idx,
+                            i,
+                            proto.chunk.constants.get(idx)
+                        );
+                    }
+                }
+                // Try to locate an owning proto whose constant pool contains idx
+                for (i, proto) in self.chunk.functions.iter().enumerate().take(32) {
+                    if idx < proto.chunk.constants.len() {
+                        eprintln!(
+                            "[diag] candidate owner proto[{}] '{}' proto_chunk_ptr={:p} proto_consts_len={} const_at_idx={:?}",
+                            i,
+                            proto.name,
+                            Rc::as_ptr(&proto.chunk),
+                            proto.chunk.constants.len(),
+                            proto.chunk.constants.get(idx)
+                        );
+                    }
+                }
+                // Delegate to the more comprehensive diagnostic dump when tracing
+                if crate::trace::enabled() {
+                    self.dump_diag("string_constant", &Value::Undefined);
+                }
+                Err(RuntimeError::from("Constant not a string"))
+            }
         }
     }
 
