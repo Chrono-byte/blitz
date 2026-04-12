@@ -378,20 +378,21 @@ impl Compiler {
                 for (case_idx, jump_pos) in case_body_jumps {
                     let target = case_starts[case_idx] as isize - (jump_pos as isize) - 2;
                     let v = target as i16;
-                    self.chunk.write_i16_at(jump_pos, v);
+                    self.chunk.write_i24_payload_at(jump_pos, v as i32);
                 }
 
                 // Patch no-match jump to default start or end.
                 let default_target = default_index.map_or(switch_end, |idx| case_starts[idx]);
                 let no_match_off = default_target as isize - (no_match_jump as isize) - 2;
                 let no_match_v = no_match_off as i16;
-                self.chunk.write_i16_at(no_match_jump, no_match_v);
+                self.chunk
+                    .write_i24_payload_at(no_match_jump, no_match_v as i32);
 
                 // Patch `break` statements emitted within this switch.
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let target = switch_end - patch_pos - 2;
-                        self.chunk.write_i16_at(patch_pos, target as i16);
+                        self.chunk.write_i24_payload_at(patch_pos, target as i32);
                     }
                 }
             }
@@ -426,7 +427,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = loop_start as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
-                        self.chunk.write_i16_at(patch_pos, v);
+                        self.chunk.write_i24_payload_at(patch_pos, v as i32);
                     }
                 }
                 let cleanup_start = self.chunk.code.len();
@@ -434,14 +435,14 @@ impl Compiler {
                     self.emit(Op::GetLocal, LINE);
                     self.emit_byte(loop_completion_slot as u8, LINE);
                     let target = cleanup_start as isize - (exit_jump as isize) - 2;
-                    self.chunk.write_i16_at(exit_jump, target as i16);
+                    self.chunk.write_i24_payload_at(exit_jump, target as i32);
                 } else {
                     self.patch_jump(exit_jump);
                 }
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let target = cleanup_start - patch_pos - 2;
-                        self.chunk.write_i16_at(patch_pos, target as i16);
+                        self.chunk.write_i24_payload_at(patch_pos, target as i32);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -495,7 +496,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = test_start as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
-                        self.chunk.write_i16_at(patch_pos, v);
+                        self.chunk.write_i24_payload_at(patch_pos, v as i32);
                     }
                 }
                 let cleanup_start = self.chunk.code.len();
@@ -503,7 +504,7 @@ impl Compiler {
                     self.emit(Op::GetLocal, LINE);
                     self.emit_byte(loop_completion_slot as u8, LINE);
                     let target = cleanup_start as isize - (exit_jump as isize) - 2;
-                    self.chunk.write_i16_at(exit_jump, target as i16);
+                    self.chunk.write_i24_payload_at(exit_jump, target as i32);
                 } else {
                     self.patch_jump(exit_jump);
                 }
@@ -511,7 +512,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = cleanup_start - patch_pos - 2;
                         let v = target as i16;
-                        self.chunk.write_i16_at(patch_pos, v);
+                        self.chunk.write_i24_payload_at(patch_pos, v as i32);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -626,7 +627,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = update_start as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
-                        self.chunk.write_i16_at(patch_pos, v);
+                        self.chunk.write_i24_payload_at(patch_pos, v as i32);
                     }
                 }
 
@@ -797,7 +798,7 @@ impl Compiler {
                     for patch_pos in patches {
                         let target = update_start as isize - (patch_pos as isize) - 2;
                         let v = target as i16;
-                        self.chunk.write_i16_at(patch_pos, v);
+                        self.chunk.write_i24_payload_at(patch_pos, v as i32);
                     }
                 }
 
@@ -1019,7 +1020,7 @@ impl Compiler {
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
                         let target = self.chunk.code.len() - patch_pos - 2;
-                        self.chunk.write_i16_at(patch_pos, target as i16);
+                        self.chunk.write_i24_payload_at(patch_pos, target as i32);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -1219,7 +1220,7 @@ impl Compiler {
                         for patch_pos in return_jumps {
                             let target = body_start as isize - (patch_pos as isize) - 2;
                             let v = target as i16;
-                            self.chunk.write_i16_at(patch_pos, v);
+                            self.chunk.write_i24_payload_at(patch_pos, v as i32);
                         }
                         (state.did_return_slot, state.return_slot)
                     };
@@ -1777,6 +1778,7 @@ impl Compiler {
             label_patches: Vec::new(),
             current_module: self.current_module.clone(),
             next_ic_slot: 0,
+            pending_operand_bytes: 0,
             allow_new_target: true,
             allow_super,
             outer_bindings: self.visible_bindings_snapshot(),
@@ -2012,6 +2014,7 @@ impl Compiler {
             label_patches: Vec::new(),
             current_module: self.current_module.clone(),
             next_ic_slot: 0,
+            pending_operand_bytes: 0,
             allow_new_target: self.allow_new_target,
             allow_super: self.allow_super,
             outer_bindings: self.visible_bindings_snapshot(),

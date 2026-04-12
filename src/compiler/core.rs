@@ -80,6 +80,10 @@ pub struct Compiler {
     pub current_module: Option<ModuleContext>,
     /// Monotonic inline-cache slot allocator for the current chunk.
     pub next_ic_slot: u8,
+    /// Number of operand bytes already emitted into the last instruction's payload.
+    /// This lets the old emit()/emit_byte() caller pattern pack subsequent operand
+    /// bytes into the single 24-bit payload of the instruction word.
+    pub pending_operand_bytes: usize,
     /// Whether `new.target` is valid in the current compilation context.
     pub allow_new_target: bool,
     /// Whether `super` property access/calls are valid in the current context.
@@ -200,6 +204,7 @@ impl Compiler {
             label_patches: Vec::new(),
             current_module: None,
             next_ic_slot: 0,
+            pending_operand_bytes: 0,
             allow_new_target,
             allow_super,
             outer_bindings: HashMap::new(),
@@ -211,14 +216,34 @@ impl Compiler {
     }
 
     pub(crate) fn emit(&mut self, op: Op, line: u32) {
-        self.chunk.write(op as u8, line);
+        // Emit an instruction word with opcode in low 8 bits and zero payload.
+        let instr = (op.to_byte() as u32) & 0xFF;
+        self.chunk.write_instr(instr, line);
+        // Reset pending operand byte counter for this new instruction.
+        self.pending_operand_bytes = 0;
     }
 
     pub(crate) fn emit_byte(&mut self, byte: u8, line: u32) {
-        self.chunk.write(byte, line);
+        // Pack a single operand byte into the previous instruction's 24-bit payload
+        // using little-endian order: first emitted byte occupies bits 8..15, next 16..23, etc.
+        if self.chunk.code.is_empty() {
+            panic!("emit_byte with empty chunk");
+        }
+        let idx = self.chunk.code.len() - 1;
+        if self.pending_operand_bytes >= 3 {
+            panic!("too many operand bytes for instruction payload");
+        }
+        let shift = 8 + (self.pending_operand_bytes * 8);
+        let instr = self.chunk.code[idx];
+        let new = instr | ((byte as u32) << shift);
+        self.chunk.code[idx] = new;
+        self.pending_operand_bytes += 1;
+        // Record line info for operand emissions as well (keep same line for alignment)
+        self.chunk.lines.push(line);
     }
 
     pub(crate) fn emit_u16(&mut self, value: u16, line: u32) {
+        // little-endian across two payload bytes
         self.emit_byte((value & 0xff) as u8, line);
         self.emit_byte((value >> 8) as u8, line);
     }
@@ -697,12 +722,19 @@ impl Compiler {
     }
 
     pub(crate) fn patch_jump(&mut self, offset: usize) {
-        let jump = self.chunk.code.len() - offset - 2;
-        let jump = i16::try_from(jump).expect("jump offset overflow");
-        self.chunk.write_i16_at(offset, jump);
+        // `offset` is the instruction index where the jump instruction resides
+        // (this follows the previous emitter pattern of recording `code.len()`
+        // before adding operand bytes). The relative offset is computed in
+        // instruction units: target - (offset + 1)
+        let target = self.chunk.code.len() as isize;
+        let rel = target - (offset as isize) - 1;
+        let val = i32::try_from(rel).expect("jump offset overflow");
+        let ok = self.chunk.write_i24_payload_at(offset, val);
+        assert!(ok, "failed to write jump payload");
     }
 
     pub(crate) fn emit_short_signed(&mut self, val: isize, line: u32) {
+        // Pack a signed 16-bit little-endian value into two payload bytes.
         let v = i16::try_from(val).expect("val fits in i16");
         let bytes = v.to_le_bytes();
         self.emit_byte(bytes[0], line);
@@ -711,9 +743,11 @@ impl Compiler {
 
     pub(crate) fn patch_jump_list(&mut self, patches: Vec<usize>, target: usize) {
         for patch_pos in patches {
-            let offset = target as isize - (patch_pos as isize) - 2;
-            let v = i16::try_from(offset).expect("offset fits in i16");
-            self.chunk.write_i16_at(patch_pos, v);
+            // compute relative offset in instruction units
+            let rel = (target as isize) - (patch_pos as isize) - 1;
+            let v = i32::try_from(rel).expect("offset overflow");
+            let ok = self.chunk.write_i24_payload_at(patch_pos, v);
+            assert!(ok, "failed to write jump payload");
         }
     }
 }

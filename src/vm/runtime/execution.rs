@@ -58,6 +58,7 @@ impl Vm {
             realm,
             chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
             ip: 0,
+            operand_cursor: 0,
             stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
             locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
             this_value: Value::Object(globals.clone()),
@@ -122,6 +123,7 @@ impl Vm {
             realm: self.realm.clone(),
             chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
             ip: 0,
+            operand_cursor: 0,
             stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
             locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
             this_value,
@@ -1271,7 +1273,22 @@ impl Vm {
         &mut self,
         stop_at_frame_depth: Option<usize>,
     ) -> Result<StepOutcome, RuntimeError> {
-        let op_byte = self.read_byte()?;
+        // In fixed-width mode `ip` is an instruction index. Read the current
+        // instruction word and extract the opcode byte.
+        let op_byte = {
+            if self.ip >= self.chunk.code.len() {
+                return Err(RuntimeError::from(format!(
+                    "Unexpected end of bytecode at ip {}",
+                    self.ip
+                )));
+            }
+            let instr = self.chunk.code[self.ip];
+            // advance to next instruction index (next = ip + 1)
+            self.ip += 1;
+            // reset operand cursor for the newly fetched instruction
+            self.operand_cursor = 0;
+            (instr & 0xFF) as u8
+        };
         if crate::trace::enabled() {
             eprintln!(
                 "[trace] step ip={} stack_size={} op_byte=0x{:02x}",
@@ -2830,6 +2847,12 @@ impl Vm {
     // -----------------------------------------------------------------------
 
     #[inline(always)]
+    /// Deprecated: in fixed-width instruction mode callers should read the
+    /// opcode by inspecting the current instruction word. This helper is kept
+    /// for limited use by other modules that expect a single-byte read; it
+    /// will read the opcode byte from the current instruction and advance by
+    /// one instruction.
+
     pub(super) fn read_byte(&mut self) -> Result<u8, RuntimeError> {
         if self.ip >= self.chunk.code.len() {
             return Err(RuntimeError::from(format!(
@@ -2837,24 +2860,63 @@ impl Vm {
                 self.ip
             )));
         }
-        let b = self.chunk.code[self.ip];
-        self.ip += 1;
+        // Return the next operand byte from the previously fetched instruction.
+        // This helper is retained for compatibility with existing modules that
+        // expect to consume operand bytes sequentially. It reads from the
+        // instruction at ip - 1 (the last fetched instruction) and advances
+        // an operand cursor.
+        let instr_idx = self
+            .ip
+            .checked_sub(1)
+            .ok_or_else(|| RuntimeError::from("read_byte: no current instruction"))?;
+        let instr = *self
+            .chunk
+            .code
+            .get(instr_idx)
+            .ok_or_else(|| RuntimeError::from("read_byte: out of bounds"))?;
+        if self.operand_cursor >= 3 {
+            return Err(RuntimeError::from("read_byte: too many operand bytes"));
+        }
+        let shift = 8 + (self.operand_cursor * 8);
+        let b = ((instr >> shift) & 0xFF) as u8;
+        self.operand_cursor += 1;
         Ok(b)
     }
 
     #[inline(always)]
     fn read_short_signed(&mut self) -> Result<isize, RuntimeError> {
-        let lo = self.read_byte()? as u16;
-        let hi = self.read_byte()? as u16;
-        let u = (hi << 8) | lo;
-        Ok((u as i16) as isize)
+        // Read signed 24-bit payload from the *previously consumed* instruction
+        // index. Because instruction reads advance ip, callers that expect to
+        // read operands should instead have captured the instruction word or
+        // rely on the chunk helpers. To maintain compatibility, treat this as
+        // reading the 24-bit payload from the instruction immediately before
+        // the current ip (i.e., ip - 1).
+        let idx = self
+            .ip
+            .checked_sub(1)
+            .ok_or_else(|| RuntimeError::from("read_short_signed: ip underflow"))?;
+        let val = self
+            .chunk
+            .read_i24_payload_at(idx)
+            .ok_or_else(|| RuntimeError::from("read_short_signed: payload out of bounds"))?;
+        Ok(val as isize)
     }
 
     #[inline(always)]
     fn read_short(&mut self) -> Result<u16, RuntimeError> {
-        let lo = self.read_byte()? as u16;
-        let hi = self.read_byte()? as u16;
-        Ok((hi << 8) | lo)
+        // Return the unsigned 24-bit payload (truncated to u16 when callers
+        // expect it). Use the payload from the previous instruction.
+        let idx = self
+            .ip
+            .checked_sub(1)
+            .ok_or_else(|| RuntimeError::from("read_short: ip underflow"))?;
+        let w = *self
+            .chunk
+            .code
+            .get(idx)
+            .ok_or_else(|| RuntimeError::from("read_short: out of bounds"))?;
+        let payload = (w >> 8) & 0x00FF_FFFF;
+        Ok((payload & 0xFFFF) as u16)
     }
 
     // -----------------------------------------------------------------------
@@ -2978,15 +3040,18 @@ impl Vm {
                 let fstart = frame.ip.saturating_sub(8);
                 let fend = usize::min(frame.ip + 8, frame.chunk.code.len());
                 eprintln!("[diag]  frame[{}] disasm ({}..{}):", fi, fstart, fend);
-                let mut k = fstart;
+                    let mut k = fstart;
                 while k < fend {
-                    let b = frame.chunk.code[k];
-                    if let Some(op) = Op::from_byte(b) {
+                        let instr = frame.chunk.code[k];
+                        let b = (instr & 0xFF) as u8;
+                        if let Some(op) = Op::from_byte(b) {
                         let width = opcode_width(op);
                         match op {
                             Op::Const => {
-                                let hi = frame.chunk.code.get(k + 1).cloned().unwrap_or(0) as u16;
-                                let lo = frame.chunk.code.get(k + 2).cloned().unwrap_or(0) as u16;
+                                let instr_hi = *frame.chunk.code.get(k + 1).unwrap_or(&0u32);
+                                let instr_lo = *frame.chunk.code.get(k + 2).unwrap_or(&0u32);
+                                let hi = ((instr_hi >> 8) & 0xFF) as u16;
+                                let lo = ((instr_lo >> 8) & 0xFF) as u16;
                                 let arg = (hi << 8) | lo;
                                 eprintln!("[diag]    {:#06}  Const       {}", k, arg);
                             }
@@ -2995,20 +3060,26 @@ impl Vm {
                             | Op::JumpIfTrue
                             | Op::JumpIfNullish
                             | Op::PushHandler => {
-                                let hi = frame.chunk.code.get(k + 1).cloned().unwrap_or(0);
-                                let lo = frame.chunk.code.get(k + 2).cloned().unwrap_or(0);
+                                let instr_hi = *frame.chunk.code.get(k + 1).unwrap_or(&0u32);
+                                let instr_lo = *frame.chunk.code.get(k + 2).unwrap_or(&0u32);
+                                let hi = ((instr_hi >> 8) & 0xFF) as i16;
+                                let lo = ((instr_lo >> 8) & 0xFF) as i16;
                                 let offset = ((hi as i16) << 8) | (lo as i16);
                                 eprintln!("[diag]    {:#06}  {:?} {}", k, op, offset);
                             }
                             Op::CompareJumpIfFalse => {
-                                let cmp = frame.chunk.code.get(k + 1).cloned().unwrap_or(0);
-                                let hi = frame.chunk.code.get(k + 2).cloned().unwrap_or(0);
-                                let lo = frame.chunk.code.get(k + 3).cloned().unwrap_or(0);
+                                let instr_cmp = *frame.chunk.code.get(k + 1).unwrap_or(&0u32);
+                                let instr_hi = *frame.chunk.code.get(k + 2).unwrap_or(&0u32);
+                                let instr_lo = *frame.chunk.code.get(k + 3).unwrap_or(&0u32);
+                                let cmp = (instr_cmp & 0xFF) as u8;
+                                let hi = ((instr_hi >> 8) & 0xFF) as i16;
+                                let lo = ((instr_lo >> 8) & 0xFF) as i16;
                                 let offset = ((hi as i16) << 8) | (lo as i16);
                                 eprintln!("[diag]    {:#06}  {:?} cmp={} {}", k, op, cmp, offset);
                             }
                             _ if width == 2 => {
-                                let arg = frame.chunk.code.get(k + 1).cloned().unwrap_or(0);
+                                let instr = *frame.chunk.code.get(k + 1).unwrap_or(&0u32);
+                                let arg = ((instr >> 8) & 0xFF) as u32;
                                 eprintln!("[diag]    {:#06}  {:?} {}", k, op, arg);
                             }
                             _ => eprintln!("[diag]    {:#06}  {:?}", k, op),
@@ -3042,13 +3113,16 @@ impl Vm {
                 eprintln!("[diag] disasm window ({}..{}):", start, end);
                 let mut j = start;
                 while j < end {
-                    let b = self.chunk.code[j];
+                    let instr = self.chunk.code[j];
+                    let b = (instr & 0xFF) as u8;
                     if let Some(op) = Op::from_byte(b) {
                         let width = opcode_width(op);
                         match op {
                             Op::Const => {
-                                let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
-                                let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                                let instr_hi = *self.chunk.code.get(j + 1).unwrap_or(&0u32);
+                                let instr_lo = *self.chunk.code.get(j + 2).unwrap_or(&0u32);
+                                let hi = ((instr_hi >> 8) & 0xFF) as u16;
+                                let lo = ((instr_lo >> 8) & 0xFF) as u16;
                                 let arg = (hi << 8) | lo;
                                 if let Some(c) = self.chunk.constants.get(arg as usize) {
                                     eprintln!("[diag]   {}: {:?} {:?}", j, op, c);
@@ -3061,15 +3135,20 @@ impl Vm {
                             | Op::JumpIfTrue
                             | Op::JumpIfNullish
                             | Op::PushHandler => {
-                                let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
-                                let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0);
+                                let instr_hi = *self.chunk.code.get(j + 1).unwrap_or(&0u32);
+                                let instr_lo = *self.chunk.code.get(j + 2).unwrap_or(&0u32);
+                                let hi = ((instr_hi >> 8) & 0xFF) as i16;
+                                let lo = ((instr_lo >> 8) & 0xFF) as i16;
                                 let offset = ((hi as i16) << 8) | (lo as i16);
                                 eprintln!("[diag]   {}: {:?} {}", j, op, offset);
                             }
                             Op::CompareJumpIfFalse => {
-                                let cmp = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
-                                let hi = self.chunk.code.get(j + 2).cloned().unwrap_or(0);
-                                let lo = self.chunk.code.get(j + 3).cloned().unwrap_or(0);
+                                let instr_cmp = *self.chunk.code.get(j + 1).unwrap_or(&0u32);
+                                let instr_hi = *self.chunk.code.get(j + 2).unwrap_or(&0u32);
+                                let instr_lo = *self.chunk.code.get(j + 3).unwrap_or(&0u32);
+                                let cmp = (instr_cmp & 0xFF) as u8;
+                                let hi = ((instr_hi >> 8) & 0xFF) as i16;
+                                let lo = ((instr_lo >> 8) & 0xFF) as i16;
                                 let offset = ((hi as i16) << 8) | (lo as i16);
                                 eprintln!("[diag]   {}: {:?} cmp={} {}", j, op, cmp, offset);
                             }
@@ -3084,12 +3163,15 @@ impl Vm {
                             | Op::GetPropertyIC
                             | Op::SetPropertyIC
                             | Op::MakeClosure => {
-                                let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                let instr = *self.chunk.code.get(j + 1).unwrap_or(&0u32);
+                                let arg = ((instr >> 8) & 0xFF) as u32;
                                 eprintln!("[diag]   {}: {:?} {}", j, op, arg);
                             }
                             Op::SetGlobal | Op::GetGlobal | Op::GetGlobalIC => {
-                                let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
-                                let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                                let instr_hi = *self.chunk.code.get(j + 1).unwrap_or(&0u32);
+                                let instr_lo = *self.chunk.code.get(j + 2).unwrap_or(&0u32);
+                                let hi = ((instr_hi >> 8) & 0xFF) as u16;
+                                let lo = ((instr_lo >> 8) & 0xFF) as u16;
                                 let arg = ((hi << 8) | lo) as usize;
                                 eprintln!("[diag]   {}: {:?} {}", j, op, arg);
                             }
@@ -3105,7 +3187,8 @@ impl Vm {
                     eprintln!("[diag] full current-chunk disasm:");
                     let mut full = 0usize;
                     while full < self.chunk.code.len() {
-                        let b = self.chunk.code[full];
+                        let instr = self.chunk.code[full];
+                        let b = (instr & 0xFF) as u8;
                         if let Some(op) = Op::from_byte(b) {
                             let width = opcode_width(op);
                             match op {
@@ -3149,13 +3232,17 @@ impl Vm {
                 let raw_end = usize::min(56usize, self.chunk.code.len());
                 eprintln!("[diag] raw bytes ({}..{}):", raw_start, raw_end);
                 for i in raw_start..raw_end {
-                    eprintln!("[diag]   {:>5}: 0x{:02x}", i, self.chunk.code[i]);
+                    let instr = self.chunk.code[i];
+                    let b = (instr & 0xFF) as u8;
+                    eprintln!("[diag]   {:>5}: 0x{:02x}", i, b);
                 }
                 let raw_start2 = 188usize;
                 let raw_end2 = usize::min(196usize, self.chunk.code.len());
                 eprintln!("[diag] raw bytes ({}..{}):", raw_start2, raw_end2);
                 for i in raw_start2..raw_end2 {
-                    eprintln!("[diag]   {:>5}: 0x{:02x}", i, self.chunk.code[i]);
+                    let instr = self.chunk.code[i];
+                    let b = (instr & 0xFF) as u8;
+                    eprintln!("[diag]   {:>5}: 0x{:02x}", i, b);
                 }
                 eprintln!("[diag] Stack size: {}", self.stack.len());
                 if let Some(&line_no) = self.chunk.lines.get(self.ip.saturating_sub(1)) {
@@ -3287,13 +3374,16 @@ impl Vm {
                 eprintln!("[diag] proto[{}] disasm (0..{}):", i, end);
                 let mut j = 0usize;
                 while j < end {
-                    let b = proto.chunk.code[j];
+                    let instr = proto.chunk.code[j];
+                    let b = (instr & 0xFF) as u8;
                     if let Some(op) = Op::from_byte(b) {
                         let width = opcode_width(op);
                         match op {
                             Op::Const => {
-                                let hi = proto.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
-                                let lo = proto.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                                let instr_hi = *proto.chunk.code.get(j + 1).unwrap_or(&0u32);
+                                let instr_lo = *proto.chunk.code.get(j + 2).unwrap_or(&0u32);
+                                let hi = ((instr_hi >> 8) & 0xFF) as u16;
+                                let lo = ((instr_lo >> 8) & 0xFF) as u16;
                                 let arg = (hi << 8) | lo;
                                 let repr = match proto.chunk.constants.get(arg as usize) {
                                     Some(Value::String(s)) => format!("'{}'", s),
@@ -3303,8 +3393,10 @@ impl Vm {
                                 eprintln!("[diag] {:#06}  Const       {} ({})", j, arg, repr);
                             }
                             Op::GetGlobal | Op::SetGlobal => {
-                                let hi = proto.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
-                                let lo = proto.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                                let instr_hi = *proto.chunk.code.get(j + 1).unwrap_or(&0u32);
+                                let instr_lo = *proto.chunk.code.get(j + 2).unwrap_or(&0u32);
+                                let hi = ((instr_hi >> 8) & 0xFF) as u16;
+                                let lo = ((instr_lo >> 8) & 0xFF) as u16;
                                 let arg = ((hi << 8) | lo) as usize;
                                 let name = match proto.chunk.constants.get(arg) {
                                     Some(Value::String(s)) => s.clone(),
@@ -3317,20 +3409,26 @@ impl Vm {
                             | Op::JumpIfTrue
                             | Op::JumpIfNullish
                             | Op::PushHandler => {
-                                let hi = proto.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
-                                let lo = proto.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
+                                let instr_hi = *proto.chunk.code.get(j + 1).unwrap_or(&0u32);
+                                let instr_lo = *proto.chunk.code.get(j + 2).unwrap_or(&0u32);
+                                let hi = ((instr_hi >> 8) & 0xFF) as u16;
+                                let lo = ((instr_lo >> 8) & 0xFF) as u16;
                                 let val = ((hi << 8) | lo) as i16;
                                 eprintln!("[diag] {:#06}  {:12?} {}", j, op, val);
                             }
                             Op::CompareJumpIfFalse => {
-                                let cmp = proto.chunk.code.get(j + 1).cloned().unwrap_or(0);
-                                let hi = proto.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
-                                let lo = proto.chunk.code.get(j + 3).cloned().unwrap_or(0) as u16;
+                                let instr_cmp = *proto.chunk.code.get(j + 1).unwrap_or(&0u32);
+                                let instr_hi = *proto.chunk.code.get(j + 2).unwrap_or(&0u32);
+                                let instr_lo = *proto.chunk.code.get(j + 3).unwrap_or(&0u32);
+                                let cmp = (instr_cmp & 0xFF) as u8;
+                                let hi = ((instr_hi >> 8) & 0xFF) as u16;
+                                let lo = ((instr_lo >> 8) & 0xFF) as u16;
                                 let val = ((hi << 8) | lo) as i16;
                                 eprintln!("[diag] {:#06}  {:12?} cmp={} {}", j, op, cmp, val);
                             }
                             _ if opcode_width(op) == 2 => {
-                                let arg = proto.chunk.code.get(j + 1).cloned().unwrap_or(0);
+                                let instr = *proto.chunk.code.get(j + 1).unwrap_or(&0u32);
+                                let arg = ((instr >> 8) & 0xFF) as u32;
                                 eprintln!("[diag] {:#06}  {:12?} {}", j, op, arg);
                             }
                             _ => {
@@ -3349,7 +3447,7 @@ impl Vm {
         let mut j = start;
         while j < end {
             let b = self.chunk.code[j];
-            if let Some(op) = Op::from_byte(b) {
+            if let Some(op) = Op::from_byte((b & 0xFF) as u8) {
                 let width = opcode_width(op);
                 match op {
                     Op::Const => {
@@ -3455,7 +3553,7 @@ impl Vm {
             let mut k = fstart;
             while k < fend {
                 let b = frame.chunk.code[k];
-                if let Some(op) = Op::from_byte(b) {
+                if let Some(op) = Op::from_byte((b & 0xFF) as u8) {
                     let width = opcode_width(op);
                     match op {
                         Op::Const => {

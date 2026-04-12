@@ -800,7 +800,9 @@ impl Vm {
                 let end = (cur_ip + 16).min(self.chunk.code.len());
                 eprintln!("[trace]   bytecode window ({}..{}):", start, end);
                 for i in start..end {
-                    eprintln!("[trace]     {:04} 0x{:02x}", i, self.chunk.code[i]);
+                    let instr = self.chunk.code[i];
+                    let b = (instr & 0xFF) as u8;
+                    eprintln!("[trace]     {:04} 0x{:02x}", i, b);
                 }
                 // Print a short constant pool summary
                 eprintln!("[trace]   constants (len={}):", self.chunk.constants.len());

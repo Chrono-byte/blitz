@@ -330,6 +330,10 @@ pub struct Vm {
     pub(super) chunk: Rc<Chunk>,
     /// Instruction pointer within the chunk.
     pub(super) ip: usize,
+    /// How many operand bytes have been consumed from the most recently fetched
+    /// instruction (0..3). This supports legacy read_byte/read_short helpers
+    /// that sequentially consume operand bytes from the last instruction word.
+    pub(super) operand_cursor: usize,
     /// Operand stack. Shared across all frames; each frame records its base
     /// offset so the stack is truncated correctly on return.
     pub(super) stack: OperandStack,

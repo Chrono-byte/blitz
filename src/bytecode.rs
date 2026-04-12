@@ -56,8 +56,9 @@ pub struct UpvalueSpec {
 #[derive(Clone, Debug)]
 /// A chunk of bytecode containing opcodes, constants, and metadata
 pub struct Chunk {
-    /// Bytecode instructions
-    pub code: Vec<u8>,
+    /// Instructions stored as fixed-width 32-bit words. Each u32 contains
+    /// opcode in the low 8 bits and a 24-bit payload in the upper bits.
+    pub code: Vec<u32>,
     /// Constant pool values
     pub constants: Vec<Value>,
     /// Function prototypes
@@ -149,10 +150,19 @@ impl Chunk {
         }
     }
 
-    /// Writes a byte to the chunk with line number information
-    pub fn write(&mut self, byte: u8, line: u32) {
-        self.code.push(byte);
+    /// Writes a packed instruction word to the chunk with line number info.
+    /// The instruction layout: low 8 bits = opcode, upper 24 bits = payload.
+    pub fn write_instr(&mut self, instr: u32, line: u32) {
+        self.code.push(instr);
         self.lines.push(line);
+    }
+
+    /// Compatibility helper: write a single opcode byte as an instruction word
+    /// with empty payload. This mirrors the old `write(opcode, line)` helper
+    /// used during the migration and keeps callsites simple.
+    pub fn write(&mut self, opcode: u8, line: u32) {
+        let instr = opcode as u32;
+        self.write_instr(instr, line);
     }
 
     /// Adds a constant to the constant pool and returns its index
@@ -169,74 +179,81 @@ impl Chunk {
 
     // --- Helpers for reading/writing 16-bit operands (little-endian) ---
 
-    /// Reads a signed 16-bit little-endian value from `code` at `pos`.
-    /// Returns `None` if the two bytes are out of bounds.
-    pub fn read_i16_at(&self, pos: usize) -> Option<i16> {
-        if pos + 1 >= self.code.len() {
-            return None;
-        }
-        let lo = self.code[pos] as u16;
-        let hi = self.code[pos + 1] as u16;
-        // combine little-endian bytes into a u16 then interpret as i16
-        let val = ((hi << 8u16) | lo) as i16;
-        Some(val)
+    /// Read the 24-bit signed payload (bits 8..31) from instruction at `idx`.
+    /// Returns None if out of bounds.
+    pub fn read_i24_payload_at(&self, idx: usize) -> Option<i32> {
+        let w = *self.code.get(idx)?;
+        // interpret upper 24 bits as signed i32 with sign extension
+        let payload = (w >> 8) & 0x00FF_FFFF;
+        // sign-extend 24-bit to 32-bit signed
+        let signed = if (payload & 0x0080_0000) != 0 {
+            (payload | 0xFF00_0000) as i32
+        } else {
+            payload as i32
+        };
+        Some(signed)
     }
 
-    /// Writes a signed 16-bit little-endian value into `code` at `pos`.
-    /// Returns `false` if out of bounds.
-    pub fn write_i16_at(&mut self, pos: usize, val: i16) -> bool {
-        if pos + 1 >= self.code.len() {
+    /// Write a 24-bit signed payload into instruction at `idx`.
+    /// Returns false if out of bounds or payload doesn't fit in 24 bits.
+    pub fn write_i24_payload_at(&mut self, idx: usize, val: i32) -> bool {
+        if idx >= self.code.len() {
             return false;
         }
-        let bytes = val.to_le_bytes();
-        self.code[pos] = bytes[0];
-        self.code[pos + 1] = bytes[1];
+        // ensure fits in signed 24-bit
+        if val < -(1 << 23) || val >= (1 << 23) {
+            return false;
+        }
+        let instr = self.code[idx];
+        // clear upper 24 bits then or in new payload
+        let payload_u32 = ((val as u32) & 0x00FF_FFFF) << 8;
+        let new = (instr & 0x0000_00FF) | payload_u32;
+        self.code[idx] = new;
         true
+    }
+
+    /// Compatibility helper: write a signed 16-bit payload into the
+    /// instruction at `idx`. During the fixed-width migration most callers
+    /// now expect to patch a 24-bit payload; however some remaining code still
+    /// emits 16-bit patches. Implement this by sign-extending the i16 into
+    /// the 24-bit payload field.
+    pub fn write_i16_at(&mut self, idx: usize, val: i16) -> bool {
+        self.write_i24_payload_at(idx, val as i32)
     }
 
     /// Helper: returns the instruction index of the jump target for a jump located at `ip`.
     /// `ip` is the index of the opcode byte. Returns `None` if `ip` is out of bounds,
     /// the opcode at `ip` is not a jump, or the computed target is out of bounds.
+    /// Given an instruction-index `ip`, return the instruction index of the
+    /// jump target if the instruction at `ip` is a jump. In the new fixed
+    /// width layout the next instruction is always `ip + 1` and the signed
+    /// 24-bit payload is the relative offset.
     pub fn jump_target_from_ip(&self, ip: usize) -> Option<usize> {
-        let b = self.code.get(ip)?;
-        let op = Op::from_byte(*b)?;
-
+        let instr = *self.code.get(ip)?;
+        let op_byte = (instr & 0xFF) as u8;
+        let op = Op::from_byte(op_byte)?;
         if !op.is_jump() {
             return None;
         }
-
-        let operand_pos = ip + op.jump_operand_offset();
-
-        if operand_pos + 1 >= self.code.len() {
-            return None;
-        }
-
-        let offset = self.read_i16_at(operand_pos)? as i32;
-        let next_instr = operand_pos + 2;
-
-        let target = (next_instr as i64).checked_add(offset as i64)?;
-
+        let offset = self.read_i24_payload_at(ip)?;
+        let next = ip as i64 + 1;
+        let target = next.checked_add(offset as i64)?;
         if target < 0 || target >= (self.code.len() as i64) {
             return None;
         }
-
         Some(target as usize)
     }
 
     /// Hotwire the jump at `ip` so it jumps to the following instruction (i.e. becomes a no-op jump).
     /// Returns the original `Op` if successful, or `None` on error.
     pub fn hotwire_jump_to_next(&mut self, ip: usize) -> Option<Op> {
-        let byte = *self.code.get(ip)?;
-        let op = Op::from_byte(byte)?;
+        let instr = *self.code.get(ip)?;
+        let op = Op::from_byte((instr & 0xFF) as u8)?;
         if !op.is_jump() {
             return None;
         }
-
-        // Use the helper instead of manual matches
-        let operand_pos = ip + op.jump_operand_offset();
-
-        // Write 0 so the jump target becomes the instruction immediately after the offset
-        if self.write_i16_at(operand_pos, 0) {
+        // set payload to 0
+        if self.write_i24_payload_at(ip, 0) {
             Some(op)
         } else {
             None
@@ -246,11 +263,13 @@ impl Chunk {
     /// Convert `JumpIfFalse` at `ip` to unconditional `Jump`.
     /// Returns the original `Op` if successful, or `None` on error.
     pub fn hotwire_make_unconditional(&mut self, ip: usize) -> Option<Op> {
-        let byte = *self.code.get(ip)?;
-        let op = Op::from_byte(byte)?;
+        let instr = *self.code.get(ip)?;
+        let op = Op::from_byte((instr & 0xFF) as u8)?;
         match op {
             Op::JumpIfFalse => {
-                self.code[ip] = Op::Jump.to_byte();
+                // replace opcode byte
+                let new = (instr & 0xFFFF_FF00) | (Op::Jump.to_byte() as u32);
+                self.code[ip] = new;
                 Some(op)
             }
             Op::Jump => Some(op),
@@ -264,23 +283,19 @@ impl Chunk {
         if target_ip >= self.code.len() {
             return None;
         }
-
-        let byte = *self.code.get(ip)?;
-        let op = Op::from_byte(byte)?;
+        let instr = *self.code.get(ip)?;
+        let op = Op::from_byte((instr & 0xFF) as u8)?;
         if !op.is_jump() {
             return None;
         }
-
-        let operand_pos = ip + op.jump_operand_offset();
-        let next_instr = operand_pos + 2;
-
-        // Calculate relative offset: target - next_instruction
-        let offset = (target_ip as i64).checked_sub(next_instr as i64)?;
-
-        // Ensure the jump distance actually fits in our 16-bit operand
-        let offset_i16 = i16::try_from(offset).ok()?;
-
-        if self.write_i16_at(operand_pos, offset_i16) {
+        // next instruction is ip + 1
+        let next = (ip as i64) + 1;
+        let offset = (target_ip as i64).checked_sub(next)?;
+        // ensure fits in signed 24-bit
+        if offset < -(1 << 23) || offset >= (1 << 23) {
+            return None;
+        }
+        if self.write_i24_payload_at(ip, offset as i32) {
             Some(op)
         } else {
             None
@@ -701,15 +716,14 @@ mod tests {
         let mut c = Chunk::new(Rc::new(String::new()));
         // reserve some code so indices are meaningful
         // instruction at 0: Jump -> target will be at instruction index 6 (for example)
+        // Build u32 instruction words. Each u32: low 8 bits = opcode, next bytes are payload
         c.code = vec![
-            Op::Jump.to_byte(),
-            0x03,
-            0x00, // offset = 3 (little-endian) => target = next_instr (0+1+2=3) + 3 = 6
-            // filler bytes for instructions at indices 3..6
-            0xFF,
-            0xFF,
-            0xFF,
-            0x00,
+            (Op::Jump.to_byte() as u32) | ((0x03u32) << 8) | ((0x00u32) << 16),
+            // filler instructions (single-byte invalid ops encoded similarly)
+            0xFFu32,
+            0xFFu32,
+            0xFFu32,
+            0x00u32,
         ];
         // verify jump_target_from_ip
         let target = c.jump_target_from_ip(0).expect("target");

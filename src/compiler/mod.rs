@@ -516,7 +516,7 @@ fn walk_chunk_ops(chunk: &Chunk) -> Vec<(usize, Op)> {
     let mut ops = Vec::new();
     let mut ip = 0usize;
     while ip < chunk.code.len() {
-        if let Some(op) = Op::from_byte(chunk.code[ip]) {
+        if let Some(op) = Op::from_byte((chunk.code[ip] & 0xFF) as u8) {
             ops.push((ip, op));
             ip += opcode_width(op);
         } else {
@@ -618,7 +618,7 @@ fn static_member_ic_slots_are_unique_per_site() {
     let mut slots = Vec::new();
     let mut i = 0usize;
     while i < chunk.code.len() {
-        if let Some(op) = Op::from_byte(chunk.code[i]) {
+        if let Some(op) = Op::from_byte((chunk.code[i] & 0xFF) as u8) {
             if matches!(op, Op::GetPropertyIC) {
                 slots.push(chunk.code.get(i + 1).copied().expect("slot byte"));
             }
@@ -641,7 +641,7 @@ fn compile_less_than_uses_lt_opcode() {
     let saw_lt = chunk
         .code
         .iter()
-        .filter_map(|b| Op::from_byte(*b))
+        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
         .any(|op| matches!(op, Op::Lt));
 
     assert!(
@@ -687,7 +687,7 @@ fn compile_new_expression_lowers_to_construct() {
     let saw_construct = chunk
         .code
         .iter()
-        .filter_map(|b| Op::from_byte(*b))
+        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
         .any(|op| matches!(op, Op::Construct));
 
     assert!(
@@ -706,12 +706,12 @@ fn compile_update_expression_emits_store() {
     let saw_add = chunk
         .code
         .iter()
-        .filter_map(|b| Op::from_byte(*b))
+        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
         .any(|op| matches!(op, Op::Add));
     let saw_set_local = chunk
         .code
         .iter()
-        .filter_map(|b| Op::from_byte(*b))
+        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
         .any(|op| matches!(op, Op::SetLocal));
 
     assert!(saw_add, "expected i++ to emit Add");
@@ -736,7 +736,7 @@ fn compile_member_call_uses_call_method() {
     let saw_call_method = chunk
         .code
         .iter()
-        .filter_map(|b| Op::from_byte(*b))
+        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
         .any(|op| matches!(op, Op::CallMethod));
 
     assert!(saw_call_method, "expected member call to emit CallMethod");
@@ -752,7 +752,7 @@ fn compile_for_in_uses_get_builtin() {
     let saw_get_builtin = chunk
         .code
         .iter()
-        .filter_map(|b| Op::from_byte(*b))
+        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
         .any(|op| matches!(op, Op::GetBuiltin));
 
     assert!(
@@ -794,7 +794,7 @@ fn compile_generator_non_simple_params_keep_later_params_tdz() {
     let mut ops = Vec::new();
     let mut ip = 0usize;
     while ip < proto.chunk.code.len() && ops.len() < 16 {
-        let op = Op::from_byte(proto.chunk.code[ip]).expect("valid opcode");
+        let op = Op::from_byte((proto.chunk.code[ip] & 0xFF) as u8).expect("valid opcode");
         let width = opcode_width(op);
         let operand = if matches!(op, Op::GetLocal | Op::SetLocal | Op::CloneLocalCell) {
             proto.chunk.code.get(ip + 1).copied()
@@ -838,7 +838,7 @@ fn compile_object_generator_method_emits_body() {
     let mut ops = Vec::new();
     let mut ip = 0usize;
     while ip < proto.chunk.code.len() && ops.len() < 24 {
-        let op = Op::from_byte(proto.chunk.code[ip]).expect("valid opcode");
+        let op = Op::from_byte((proto.chunk.code[ip] & 0xFF) as u8).expect("valid opcode");
         let width = opcode_width(op);
         ops.push(op.name());
         ip += width;
@@ -861,7 +861,7 @@ fn compile_dynamic_import_uses_get_builtin() {
     let saw_get_builtin = chunk
         .code
         .iter()
-        .filter_map(|b| Op::from_byte(*b))
+        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
         .any(|op| matches!(op, Op::GetBuiltin));
 
     assert!(
@@ -881,7 +881,7 @@ fn compile_sequence_expression_keeps_last_value() {
     let saw_pop = chunk
         .code
         .iter()
-        .filter_map(|b| Op::from_byte(*b))
+        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
         .any(|op| matches!(op, Op::Pop));
 
     assert!(
@@ -937,7 +937,7 @@ fn nullish_coalescing_is_supported() {
     let saw_coalesce = chunk
         .code
         .iter()
-        .filter_map(|b| Op::from_byte(*b))
+        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
         .any(|op| matches!(op, Op::JumpIfNullish));
     assert!(
         saw_coalesce,
@@ -955,7 +955,7 @@ fn comparison_branches_use_compare_jump() {
     let saw_compare_jump = chunk
         .code
         .iter()
-        .filter_map(|b| Op::from_byte(*b))
+        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
         .any(|op| matches!(op, Op::CompareJumpIfFalse));
     assert!(
         saw_compare_jump,
@@ -973,7 +973,7 @@ fn compile_for_of_emits_iterator_ops() {
     let ops: Vec<_> = chunk
         .code
         .iter()
-        .filter_map(|b| Op::from_byte(*b))
+        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
         .collect();
     assert!(ops.iter().any(|op| matches!(op, Op::IteratorNext)));
     assert!(ops.iter().any(|op| matches!(op, Op::GetPropertyIC)));
