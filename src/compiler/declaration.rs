@@ -376,21 +376,17 @@ impl Compiler {
 
                 // Patch successful-case jumps to case body starts.
                 for (case_idx, jump_pos) in case_body_jumps {
-                    // patch at jump_pos: rel = target - (patch_ip + 1)
-                    let rel = case_starts[case_idx] as isize - (jump_pos as isize) - 1;
-                    self.patch_relative_i24(jump_pos, rel as i32);
+                    self.patch_jump_to_target(jump_pos, case_starts[case_idx]);
                 }
 
                 // Patch no-match jump to default start or end.
                 let default_target = default_index.map_or(switch_end, |idx| case_starts[idx]);
-                let rel = default_target as isize - (no_match_jump as isize) - 1;
-                self.patch_relative_i24(no_match_jump, rel as i32);
+                self.patch_jump_to_target(no_match_jump, default_target);
 
                 // Patch `break` statements emitted within this switch.
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
-                        let rel = switch_end as isize - (patch_pos as isize) - 1;
-                        self.patch_relative_i24(patch_pos, rel as i32);
+                        self.patch_jump_to_target(patch_pos, switch_end);
                     }
                 }
             }
@@ -424,23 +420,20 @@ impl Compiler {
                 self.emit_short_signed(back_offset, LINE);
                 if let Some(patches) = self.continue_patches.pop() {
                     for patch_pos in patches {
-                        let rel = loop_start as isize - (patch_pos as isize) - 1;
-                        self.patch_relative_i24(patch_pos, rel as i32);
+                        self.patch_jump_to_target(patch_pos, loop_start);
                     }
                 }
                 let cleanup_start = self.chunk.code.len();
                 if owns_completion_slot {
                     self.emit(Op::GetLocal, LINE);
                     self.emit_byte(loop_completion_slot as u8, LINE);
-                    let rel = cleanup_start as isize - (exit_jump as isize) - 1;
-                    self.patch_relative_i24(exit_jump, rel as i32);
+                    self.patch_jump_to_target(exit_jump, cleanup_start);
                 } else {
                     self.patch_jump(exit_jump);
                 }
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
-                        let rel = cleanup_start as isize - (patch_pos as isize) - 1;
-                        self.patch_relative_i24(patch_pos, rel as i32);
+                        self.patch_jump_to_target(patch_pos, cleanup_start);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -492,23 +485,20 @@ impl Compiler {
                 self.emit_short_signed(back_offset, LINE);
                 if let Some(patches) = self.continue_patches.pop() {
                     for patch_pos in patches {
-                        let rel = test_start as isize - (patch_pos as isize) - 1;
-                        self.patch_relative_i24(patch_pos, rel as i32);
+                        self.patch_jump_to_target(patch_pos, test_start);
                     }
                 }
                 let cleanup_start = self.chunk.code.len();
                 if owns_completion_slot {
                     self.emit(Op::GetLocal, LINE);
                     self.emit_byte(loop_completion_slot as u8, LINE);
-                    let rel = cleanup_start as isize - (exit_jump as isize) - 1;
-                    self.patch_relative_i24(exit_jump, rel as i32);
+                    self.patch_jump_to_target(exit_jump, cleanup_start);
                 } else {
                     self.patch_jump(exit_jump);
                 }
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
-                        let rel = cleanup_start as isize - (patch_pos as isize) - 1;
-                        self.patch_relative_i24(patch_pos, rel as i32);
+                        self.patch_jump_to_target(patch_pos, cleanup_start);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -621,8 +611,7 @@ impl Compiler {
                 let update_start = self.chunk.code.len();
                 if let Some(patches) = self.continue_patches.pop() {
                     for patch_pos in patches {
-                        let rel = update_start as isize - (patch_pos as isize) - 1;
-                        self.patch_relative_i24(patch_pos, rel as i32);
+                        self.patch_jump_to_target(patch_pos, update_start);
                     }
                 }
 
@@ -643,10 +632,10 @@ impl Compiler {
                 if let Some(exit_jump) = exit_jump {
                     self.patch_jump(exit_jump);
                 }
+                let loop_end = self.chunk.code.len();
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
-                        let rel = self.chunk.code.len() as isize - (patch_pos as isize) - 1;
-                        self.patch_relative_i24(patch_pos, rel as i32);
+                        self.patch_jump_to_target(patch_pos, loop_end);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -731,7 +720,7 @@ impl Compiler {
                 let done_slot = self.alloc_ic_slot()?;
                 self.emit_byte(done_slot, LINE);
                 self.emit(Op::JumpIfTrue, LINE);
-                let exit_jump = self.chunk.code.len();
+                let exit_jump = self.chunk.code.len() - 1;
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
                 self.emit_constant(Value::String("value".to_string()), LINE);
@@ -791,8 +780,7 @@ impl Compiler {
                 let update_start = loop_start;
                 if let Some(patches) = self.continue_patches.pop() {
                     for patch_pos in patches {
-                        let rel = update_start as isize - (patch_pos as isize) - 1;
-                        self.patch_relative_i24(patch_pos, rel as i32);
+                        self.patch_jump_to_target(patch_pos, update_start);
                     }
                 }
 
@@ -805,8 +793,7 @@ impl Compiler {
                 let break_cleanup = self.chunk.code.len();
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
-                        let rel = break_cleanup as isize - (patch_pos as isize) - 1;
-                        self.patch_relative_i24(patch_pos, rel as i32);
+                        self.patch_jump_to_target(patch_pos, break_cleanup);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -992,8 +979,7 @@ impl Compiler {
                 let update_start = self.chunk.code.len();
                 if let Some(patches) = self.continue_patches.pop() {
                     for patch_pos in patches {
-                        let rel = update_start as isize - (patch_pos as isize) - 1;
-                        self.patch_relative_i24(patch_pos, rel as i32);
+                        self.patch_jump_to_target(patch_pos, update_start);
                     }
                 }
 
@@ -1009,10 +995,10 @@ impl Compiler {
                 self.emit_short_signed(back_offset, LINE);
 
                 self.patch_jump(exit_jump);
+                let loop_end = self.chunk.code.len();
                 if let Some(patches) = self.break_patches.pop() {
                     for patch_pos in patches {
-                        let rel = self.chunk.code.len() as isize - (patch_pos as isize) - 1;
-                        self.patch_relative_i24(patch_pos, rel as i32);
+                        self.patch_jump_to_target(patch_pos, loop_end);
                     }
                 }
                 let label_patches = if let Some(state) = self.label_patches.last_mut() {
@@ -1215,8 +1201,7 @@ impl Compiler {
                         )
                     };
                     for patch_pos in return_jumps {
-                        let rel = body_start as isize - (patch_pos as isize) - 1;
-                        self.patch_relative_i24(patch_pos, rel as i32);
+                        self.patch_jump_to_target(patch_pos, body_start);
                     }
                     self.emit(Op::GetLocal, LINE);
                     self.emit_byte(did_return_slot as u8, LINE);

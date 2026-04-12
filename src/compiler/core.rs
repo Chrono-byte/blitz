@@ -173,17 +173,26 @@ pub struct LabelPatchState {
 
 impl Compiler {
     fn resolve_jump_patch_index(&self, offset: usize) -> usize {
-        let is_patchable_jump_at = |idx: usize| {
+        let op_at = |idx: usize| {
             self.chunk
                 .code
                 .get(idx)
                 .and_then(|instr| Op::from_byte((instr & 0xFF) as u8))
+        };
+        let is_patchable_jump_at = |idx: usize| {
+            op_at(idx)
                 .map(|op| op.is_jump() || matches!(op, Op::PushHandler))
                 .unwrap_or(false)
         };
 
-        if is_patchable_jump_at(offset) {
+        // Prefer exact CompareJumpIfFalse locations (those call sites already
+        // return the instruction index directly in fixed-width mode).
+        if op_at(offset) == Some(Op::CompareJumpIfFalse) {
             offset
+        } else if is_patchable_jump_at(offset) {
+            offset
+        // Most legacy call-sites captured `code.len()` *after* emitting the
+        // jump opcode; in fixed-width this points one instruction past the jump.
         } else if offset > 0 && is_patchable_jump_at(offset - 1) {
             offset - 1
         } else {
@@ -827,6 +836,16 @@ impl Compiler {
         let patch_idx = self.resolve_jump_patch_index(offset);
         let ok = self.chunk.write_i24_payload_at(patch_idx, rel);
         assert!(ok, "failed to write relative payload");
+    }
+
+    pub(crate) fn patch_jump_to_target(&mut self, offset: usize, target: usize) {
+        let patch_idx = self.resolve_jump_patch_index(offset);
+        let rel = (target as isize) - (patch_idx as isize) - 1;
+        let ok = self.chunk.write_i24_payload_at(
+            patch_idx,
+            i32::try_from(rel).expect("jump target offset overflow"),
+        );
+        assert!(ok, "failed to write jump target payload");
     }
 
     pub(crate) fn emit_short_signed(&mut self, val: isize, line: u32) {
