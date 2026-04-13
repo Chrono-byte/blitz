@@ -2976,18 +2976,30 @@ impl Vm {
         }
         let done_key = PropertyKey::String("__tsblitz_iter_done".to_string());
         let already_done = match &iterator {
-            Value::Object(obj) => obj
-                .borrow()
-                .properties
-                .get(&done_key)
-                .is_some_and(|desc| matches!(desc, PropertyDescriptor::Data { value: Value::Bool(true), .. })),
+            Value::Object(obj) => obj.borrow().properties.get(&done_key).is_some_and(|desc| {
+                matches!(
+                    desc,
+                    PropertyDescriptor::Data {
+                        value: Value::Bool(true),
+                        ..
+                    }
+                )
+            }),
             Value::Array(_, props)
             | Value::Closure { props, .. }
             | Value::BuiltinObject(_, props) => props
                 .borrow()
                 .properties
                 .get(&done_key)
-                .is_some_and(|desc| matches!(desc, PropertyDescriptor::Data { value: Value::Bool(true), .. })),
+                .is_some_and(|desc| {
+                    matches!(
+                        desc,
+                        PropertyDescriptor::Data {
+                            value: Value::Bool(true),
+                            ..
+                        }
+                    )
+                }),
             _ => false,
         };
         if already_done {

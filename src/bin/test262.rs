@@ -1111,7 +1111,7 @@ fn feature_edition(feature: &str) -> Option<u8> {
         "Intl.Locale-info" => Some(99),
         "Intl.NumberFormat-v3" => Some(99),
         "legacy-regexp" => Some(99),
-        "Temporal" => Some(99),
+        "Temporal" => Some(17),
         "ShadowRealm" => Some(99),
         "decorators" => Some(99),
         "regexp-duplicate-named-groups" => Some(99),
