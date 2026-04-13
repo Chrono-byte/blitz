@@ -656,6 +656,16 @@ pub enum Op {
     /// SetModuleExport: modules[module_idx].exports[name_idx] = rd
     SetModuleExport,
 
+    // === Semantic Operations (4) ===
+    /// CloneLocalCell: clone a local cell for closure capture. Aux: slot_idx (u8)
+    CloneLocalCell,
+    /// SetSuperProperty: super.property = value
+    SetSuperProperty,
+    /// DeleteIdentifier: delete identifier reference. Aux: name_idx (u8)
+    DeleteIdentifier,
+    /// GetBuiltin: rd = builtin[name_idx]. Aux: name_idx (u8)
+    GetBuiltin,
+
     // === Miscellaneous (2) ===
     /// InstanceOf: rd = rs1 instanceof rs2
     InstanceOf,
@@ -748,6 +758,10 @@ impl Op {
             Op::GeneratorInitDone => "GeneratorInitDone",
             Op::GetModuleExport => "GetModuleExport",
             Op::SetModuleExport => "SetModuleExport",
+            Op::CloneLocalCell => "CloneLocalCell",
+            Op::SetSuperProperty => "SetSuperProperty",
+            Op::DeleteIdentifier => "DeleteIdentifier",
+            Op::GetBuiltin => "GetBuiltin",
             Op::InstanceOf => "InstanceOf",
             Op::Spread => "Spread",
         }
@@ -812,7 +826,7 @@ impl TryFrom<u8> for Op {
     fn try_from(b: u8) -> Result<Self, Self::Error> {
         // Compare as usize to avoid truncation when OP_COUNT doesn't fit in u8
         if (b as usize) < OP_COUNT {
-            // Safety: `Op` is #[repr(u8)] and has contiguous discriminants from 0..=CompareJumpIfFalse.
+            // Safety: `Op` is #[repr(u8)] and has contiguous discriminants from 0..=CompareJump.
             Ok(unsafe { mem::transmute::<u8, Op>(b) })
         } else {
             Err(())

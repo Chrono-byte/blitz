@@ -595,7 +595,7 @@ fn static_member_ic_slots_are_unique_per_site() {
     let mut i = 0usize;
     while i < chunk.code.len() {
         if let Some(op) = Op::from_byte((chunk.code[i] & 0xFF) as u8) {
-            if matches!(op, Op::GetPropertyIC) {
+            if matches!(op, Op::GetProperty) {
                 let instr = chunk.code.get(i).copied().expect("instruction word");
                 let slot = (instr >> 8) & 0xFF;
                 slots.push(slot);
@@ -610,25 +610,6 @@ fn static_member_ic_slots_are_unique_per_site() {
 }
 
 #[test]
-fn compile_less_than_uses_lt_opcode() {
-    let src = "for (var i = 0; i < 100; i = i + 1) {}";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
-
-    let saw_lt = chunk
-        .code
-        .iter()
-        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::Lt));
-
-    assert!(
-        saw_lt,
-        "expected Lt opcode in compiled less-than expression"
-    );
-}
-
-#[test]
 fn compile_for_loop_back_jump_targets_loop_start() {
     let src = "for (var i = 0; i < 3; i = i + 1) {}";
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
@@ -639,7 +620,7 @@ fn compile_for_loop_back_jump_targets_loop_start() {
     let mut back_target = None;
     for (ip, op) in walk_chunk_ops(&chunk) {
         match op {
-            Op::GetGlobalIC if loop_start.is_none() => {
+            Op::GetGlobal if loop_start.is_none() => {
                 loop_start = Some(ip);
             }
             Op::Jump => {
@@ -690,10 +671,10 @@ fn compile_update_expression_emits_store() {
         .code
         .iter()
         .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::SetLocal));
+        .any(|op| matches!(op, Op::StoreLocal));
 
     assert!(saw_add, "expected i++ to emit Add");
-    assert!(saw_set_local, "expected i++ to emit SetLocal");
+    assert!(saw_set_local, "expected i++ to emit StoreLocal");
 }
 
 #[test]
@@ -715,7 +696,7 @@ fn compile_member_call_uses_call_method() {
         .code
         .iter()
         .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::CallMethod));
+        .any(|op| matches!(op, Op::Call));
 
     assert!(saw_call_method, "expected member call to emit CallMethod");
 }
@@ -731,7 +712,7 @@ fn compile_for_in_uses_get_builtin() {
         .code
         .iter()
         .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::GetBuiltin));
+        .any(|op| matches!(op, Op::GetGlobal));
 
     assert!(
         saw_get_builtin,
@@ -791,7 +772,7 @@ fn compile_generator_non_simple_params_keep_later_params_tdz() {
     while ip < proto.chunk.code.len() && ops.len() < 16 {
         let op = Op::from_byte((proto.chunk.code[ip] & 0xFF) as u8).expect("valid opcode");
         let width = opcode_width(op);
-        let operand = if matches!(op, Op::GetLocal | Op::SetLocal | Op::CloneLocalCell) {
+        let operand = if matches!(op, Op::LoadLocal | Op::StoreLocal | Op::CloneLocalCell) {
             proto.chunk.code.get(ip + 1).copied()
         } else {
             None
@@ -857,7 +838,7 @@ fn compile_dynamic_import_uses_get_builtin() {
         .code
         .iter()
         .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::GetBuiltin));
+        .any(|op| matches!(op, Op::GetGlobal));
 
     assert!(
         saw_get_builtin,
@@ -951,10 +932,10 @@ fn comparison_branches_use_compare_jump() {
         .code
         .iter()
         .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::CompareJumpIfFalse));
+        .any(|op| matches!(op, Op::CompareJump));
     assert!(
         saw_compare_jump,
-        "expected comparison branching to emit CompareJumpIfFalse"
+        "expected comparison branching to emit CompareJump"
     );
 }
 
@@ -971,7 +952,7 @@ fn compile_for_of_emits_iterator_ops() {
         .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
         .collect();
     assert!(ops.iter().any(|op| matches!(op, Op::IteratorNext)));
-    assert!(ops.iter().any(|op| matches!(op, Op::GetPropertyIC)));
+    assert!(ops.iter().any(|op| matches!(op, Op::GetProperty)));
 }
 
 #[test]

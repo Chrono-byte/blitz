@@ -171,13 +171,13 @@ impl Compiler {
                         if self.is_root {
                             self.emit(Op::Dup, LINE);
                         }
-                        self.emit(Op::SetLocal, LINE);
+                        self.emit(Op::StoreLocal, LINE);
                         self.emit_byte(slot as u8, LINE);
                         if self.is_root {
                             self.emit_set_global_name(&fname);
                         }
                         if self.current_module.is_some() {
-                            self.emit(Op::GetLocal, LINE);
+                            self.emit(Op::LoadLocal, LINE);
                             self.emit_byte(slot as u8, LINE);
                             self.emit_set_own_module_export(&fname)?;
                         }
@@ -201,13 +201,13 @@ impl Compiler {
                         if self.is_root {
                             self.emit(Op::Dup, LINE);
                         }
-                        self.emit(Op::SetLocal, LINE);
+                        self.emit(Op::StoreLocal, LINE);
                         self.emit_byte(slot as u8, LINE);
                         if self.is_root {
                             self.emit_set_global_name(&fname);
                         }
                         if self.current_module.is_some() {
-                            self.emit(Op::GetLocal, LINE);
+                            self.emit(Op::LoadLocal, LINE);
                             self.emit_byte(slot as u8, LINE);
                             self.emit_set_own_module_export(&fname)?;
                         }
@@ -232,13 +232,13 @@ impl Compiler {
                             if self.is_root {
                                 self.emit(Op::Dup, LINE);
                             }
-                            self.emit(Op::SetLocal, LINE);
+                            self.emit(Op::StoreLocal, LINE);
                             self.emit_byte(slot as u8, LINE);
                             if self.is_root {
                                 self.emit_set_global_name(&fname);
                             }
                             if self.current_module.is_some() {
-                                self.emit(Op::GetLocal, LINE);
+                                self.emit(Op::LoadLocal, LINE);
                                 self.emit_byte(slot as u8, LINE);
                                 self.emit_set_own_module_export("default")?;
                             }

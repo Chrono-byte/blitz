@@ -664,7 +664,7 @@ impl Compiler {
 
     pub(crate) fn emit_get_binding(&mut self, name: &str) {
         if let Some(slot) = self.resolve_local(name) {
-            self.emit(Op::GetLocal, LINE);
+            self.emit(Op::LoadLocal, LINE);
             self.emit_byte(u8::try_from(slot).expect("slot fits in u8"), LINE);
         } else if let Some(upvalue) = self.resolve_upvalue(name) {
             self.emit(Op::GetUpvalue, LINE);
@@ -783,14 +783,14 @@ impl Compiler {
 
     pub(crate) fn emit_get_global_name(&mut self, name: &str) {
         let idx = self.global_name_index(name);
-        self.emit(Op::GetGlobalIC, LINE);
+        self.emit(Op::GetGlobal, LINE);
         self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
     }
 
     pub(crate) fn emit_get_builtin_name(&mut self, name: &str) {
         let idx = self.global_name_index(name);
-        self.emit(Op::GetBuiltin, LINE);
-        self.emit_byte(u8::try_from(idx).expect("idx fits in u8"), LINE);
+        self.emit(Op::GetGlobal, LINE);
+        self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
     }
 
     pub(crate) fn with_compile_context_override<R>(
@@ -826,9 +826,9 @@ impl Compiler {
     ) -> Result<(), CompilerError> {
         self.emit(Op::Dup, LINE);
         self.emit_constant(Value::String("[[HomeObject]]".to_string()), LINE);
-        self.emit(Op::GetLocal, LINE);
+        self.emit(Op::LoadLocal, LINE);
         self.emit_byte(u8::try_from(home_slot).expect("home_slot fits in u8"), LINE);
-        self.emit(Op::SetPropertyIC, LINE);
+        self.emit(Op::SetProperty, LINE);
         let slot = self.alloc_ic_slot()?;
         self.emit_byte(slot, LINE);
         self.emit(Op::Pop, LINE);
@@ -837,13 +837,14 @@ impl Compiler {
 
     pub(crate) fn emit_typeof_identifier(&mut self, name: &str) {
         if let Some(slot) = self.resolve_local(name) {
-            self.emit(Op::GetLocal, LINE);
+            self.emit(Op::LoadLocal, LINE);
             self.emit_byte(u8::try_from(slot).expect("slot fits in u8"), LINE);
             self.emit(Op::Typeof, LINE);
         } else {
             let idx = self.global_name_index(name);
-            self.emit(Op::TypeofIdentifier, LINE);
+            self.emit(Op::GetGlobal, LINE);
             self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
+            self.emit(Op::Typeof, LINE);
         }
     }
 
@@ -866,7 +867,7 @@ impl Compiler {
             .chunk
             .code
             .get(patch_idx)
-            .map(|instr| Op::from_byte((instr & 0xFF) as u8) == Some(Op::CompareJumpIfFalse))
+            .map(|instr| Op::from_byte((instr & 0xFF) as u8) == Some(Op::CompareJump))
             .unwrap_or(false)
         {
             // Preserve compare-op byte in payload byte 0 and patch signed i16
@@ -918,7 +919,7 @@ impl Compiler {
                 .chunk
                 .code
                 .get(patch_idx)
-                .map(|instr| Op::from_byte((instr & 0xFF) as u8) == Some(Op::CompareJumpIfFalse))
+                .map(|instr| Op::from_byte((instr & 0xFF) as u8) == Some(Op::CompareJump))
                 .unwrap_or(false)
             {
                 let rel16 = i16::try_from(v).expect("compare jump offset overflow");

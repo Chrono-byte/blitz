@@ -1390,14 +1390,14 @@ impl Vm {
             Op::Undefined => self.stack.push(Value::Undefined),
             Op::True => self.stack.push(Value::Bool(true)),
             Op::False => self.stack.push(Value::Bool(false)),
-            Op::GetLocal => {
+            Op::LoadLocal => {
                 let slot = self.read_byte()? as usize;
                 if let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone)
                     && let Some(v) = self.get_with_env_binding_value(&name)?
                 {
                     if crate::trace::enabled() && name.starts_with("st_") {
                         eprintln!(
-                            "[trace] GetLocal '{}' via with-env -> {}",
+                            "[trace] LoadLocal '{}' via with-env -> {}",
                             name,
                             v.type_name()
                         );
@@ -1415,7 +1415,7 @@ impl Vm {
                     && matches!(v, Value::Uninitialized)
                     && let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone)
                 {
-                    eprintln!("[trace] GetLocal TDZ name='{}' slot={}", name, slot);
+                    eprintln!("[trace] LoadLocal TDZ name='{}' slot={}", name, slot);
                 }
                 if matches!(v, Value::Uninitialized) {
                     return Err(self.throw_reference_error(
@@ -1437,12 +1437,12 @@ impl Vm {
                         .get(slot)
                         .and_then(Clone::clone)
                         .unwrap();
-                    eprintln!("[trace] GetLocal '{}' -> {}", name, v.type_name());
+                    eprintln!("[trace] LoadLocal '{}' -> {}", name, v.type_name());
                     crate::trace::value_string("[trace]   value", &v);
                 }
                 self.stack.push(v);
             }
-            Op::SetLocal => {
+            Op::StoreLocal => {
                 let slot = self.read_byte()? as usize;
                 let v = self.pop()?;
                 let slot_immutable = self
@@ -1675,15 +1675,6 @@ impl Vm {
                     self.stack.push(Value::Number(na + nb));
                 }
             }
-            Op::AddNumber => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                match (a, b) {
-                    (Value::BigInt(x), Value::BigInt(y)) => self.stack.push(Value::BigInt(x + y)),
-                    (Value::Number(x), Value::Number(y)) => self.stack.push(Value::Number(x + y)),
-                    _ => return Err("AddNumber: number expected".into()),
-                }
-            }
             Op::Sub => self.binary_num_bigint(|a, b| a - b, |a, b| Ok(a - b))?,
             Op::Mul => self.binary_num_bigint(|a, b| a * b, |a, b| Ok(a * b))?,
             Op::Div => {
@@ -1836,38 +1827,6 @@ impl Vm {
                     }
                 }
             }
-            Op::Eq => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                let result = self.abstract_equality(&a, &b)?;
-                self.stack.push(Value::Bool(result));
-            }
-            Op::Neq => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                let result = self.abstract_equality(&a, &b)?;
-                self.stack.push(Value::Bool(!result));
-            }
-            Op::Lt => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                self.stack.push(Value::Bool(a < b));
-            }
-            Op::Le => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                self.stack.push(Value::Bool(a <= b));
-            }
-            Op::Gt => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                self.stack.push(Value::Bool(a > b));
-            }
-            Op::Ge => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                self.stack.push(Value::Bool(a >= b));
-            }
             Op::And => {
                 let b = self.pop()?;
                 let a = self.pop()?;
@@ -1942,20 +1901,7 @@ impl Vm {
                 let v = self.pop()?;
                 self.stack.push(Value::String(v.type_name().to_string()));
             }
-            Op::TypeofIdentifier => {
-                let name_idx = self.read_short()? as usize;
-                let name = self.string_constant(name_idx)?;
-                let value = if let Some(binding) = self.resolve_identifier_value(&name)? {
-                    binding
-                } else {
-                    Value::Undefined
-                };
-                self.stack
-                    .push(Value::String(value.type_name().to_string()));
-            }
             Op::Call => self.execute_call()?,
-            Op::CallIC => self.execute_call_ic()?,
-            Op::TailCallIC => self.execute_tail_call()?,
             Op::PushWithEnv => {
                 let obj = self.pop()?;
                 let obj = self.to_object_value(obj)?;
@@ -1986,8 +1932,6 @@ impl Vm {
                 self.set_super_property(&receiver, &key, value)?;
             }
             Op::GeneratorInitDone => {}
-            Op::CallMethod => self.execute_call_method()?,
-            Op::TailCallMethod => self.execute_tail_call_method()?,
             Op::Spread => self.execute_spread()?,
             Op::ArrayFromSpread => self.execute_array_from_spread()?,
             Op::Construct => self.execute_construct()?,
@@ -2036,20 +1980,20 @@ impl Vm {
                     self.jump(offset)?;
                 }
             }
-            Op::CompareJumpIfFalse => {
-                // CompareJumpIfFalse layout: payload byte 0 = compare opcode,
+            Op::CompareJump => {
+                // CompareJump layout: payload byte 0 = compare opcode,
                 // payload bytes 1..2 = signed 16-bit relative offset (instruction units).
                 // Read directly from the previously-fetched instruction word so
                 // we don't mix operand_cursor-based reads with full-payload reads.
                 let instr_idx = self
                     .ip
                     .checked_sub(1)
-                    .ok_or_else(|| RuntimeError::from("CompareJumpIfFalse: ip underflow"))?;
+                    .ok_or_else(|| RuntimeError::from("CompareJump: ip underflow"))?;
                 let instr = *self
                     .chunk
                     .code
                     .get(instr_idx)
-                    .ok_or_else(|| RuntimeError::from("CompareJumpIfFalse: out of bounds"))?;
+                    .ok_or_else(|| RuntimeError::from("CompareJump: out of bounds"))?;
                 let compare_op = payload_byte(instr, 0);
                 // offset is stored little-endian in payload bytes 1 (low) and 2 (high)
                 let off_lo = payload_byte(instr, 1) as u16;
@@ -2148,8 +2092,6 @@ impl Vm {
                 }
                 self.stack.push(v);
             }
-            Op::GetPropertyIC => self.get_property_ic()?,
-            Op::GetGlobalIC => self.get_global_ic()?,
             Op::DeleteProperty => self.delete_property_op()?,
             Op::DeleteIdentifier => self.delete_identifier_op()?,
             Op::HasProperty => self.has_property_op()?,
@@ -2226,7 +2168,7 @@ impl Vm {
                 result?;
                 self.stack.push(value);
             }
-            Op::SetPropertyIC => self.set_property_ic()?,
+            Op::SetProperty => self.set_property_ic()?,
             Op::IteratorNext => self.iterator_next_op()?,
             Op::IteratorClose => self.iterator_close_op()?,
             Op::Swap => {
@@ -2328,16 +2270,6 @@ impl Vm {
                     );
                 }
                 self.throw_value(thrown)?;
-            }
-            Op::StrictEq => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                self.stack.push(Value::Bool(values_equal(&a, &b)));
-            }
-            Op::StrictNeq => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                self.stack.push(Value::Bool(!values_equal(&a, &b)));
             }
             Op::Yield => {
                 let yielded = self.pop()?;
@@ -3380,7 +3312,7 @@ impl Vm {
                                 let offset = (((hi << 8) | lo) as i32) as i16;
                                 eprintln!("[diag]    {:#06}  {:?} {}", k, op, offset);
                             }
-                            Op::CompareJumpIfFalse => {
+                            Op::CompareJump => {
                                 let cmp = payload_byte(instr, 0);
                                 let hi = payload_byte(instr, 1) as i32;
                                 let lo = payload_byte(instr, 2) as i32;
@@ -3447,23 +3379,22 @@ impl Vm {
                                 let offset = (((hi << 8) | lo) as i32) as i16;
                                 eprintln!("[diag]   {}: {:?} {}", j, op, offset);
                             }
-                            Op::CompareJumpIfFalse => {
+                            Op::CompareJump => {
                                 let cmp = payload_byte(instr, 0);
                                 let hi = payload_byte(instr, 1) as i16;
                                 let lo = payload_byte(instr, 2) as i16;
                                 let offset = ((hi as i16) << 8) | (lo as i16);
                                 eprintln!("[diag]   {}: {:?} cmp={} {}", j, op, cmp, offset);
                             }
-                            Op::SetLocal
-                            | Op::GetLocal
+                            Op::StoreLocal
+                            | Op::LoadLocal
                             | Op::Call
                             | Op::Construct
                             | Op::PopN
                             | Op::GetBuiltin
                             | Op::GetProperty
                             | Op::SetProperty
-                            | Op::GetPropertyIC
-                            | Op::SetPropertyIC
+                            | Op::SetProperty
                             | Op::MakeClosure => {
                                 let arg = payload_byte(instr, 0) as u32;
                                 eprintln!("[diag]   {}: {:?} {}", j, op, arg);
@@ -3509,7 +3440,7 @@ impl Vm {
                                     let offset = ((hi as i16) << 8) | (lo as i16);
                                     eprintln!("[diag]   {:#06}  {:?} {}", full, op, offset);
                                 }
-                                Op::CompareJumpIfFalse => {
+                                Op::CompareJump => {
                                     let instr = self.chunk.code[full];
                                     let cmp = payload_byte(instr, 0);
                                     let hi = payload_byte(instr, 1) as i16;
@@ -3716,7 +3647,7 @@ impl Vm {
                                 let val = ((hi << 8) | lo) as i16;
                                 eprintln!("[diag] {:#06}  {:12?} {}", j, op, val);
                             }
-                            Op::CompareJumpIfFalse => {
+                            Op::CompareJump => {
                                 let instr = proto.chunk.code[j];
                                 let cmp = payload_byte(instr, 0);
                                 let hi = payload_byte(instr, 1) as u16;
@@ -3865,7 +3796,7 @@ impl Vm {
                             };
                             eprintln!("[diag]    {:#06}  Const       {} ({})", k, arg, repr);
                         }
-                        Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => {
+                        Op::GetGlobal | Op::SetGlobal => {
                             let hi = frame.chunk.code.get(k + 1).cloned().unwrap_or(0) as u16;
                             let lo = frame.chunk.code.get(k + 2).cloned().unwrap_or(0) as u16;
                             let arg = ((hi << 8) | lo) as usize;
@@ -4049,30 +3980,23 @@ impl Vm {
 fn opcode_width(op: Op) -> usize {
     match op {
         Op::Const => 3,
-        Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => 3,
-        Op::GetLocal
-        | Op::SetLocal
-        | Op::CloneLocalCell
+        Op::GetGlobal | Op::SetGlobal => 3,
+        Op::LoadLocal
+        | Op::StoreLocal
         | Op::Call
-        | Op::CallMethod
-        | Op::CallIC
-        | Op::TailCallIC
-        | Op::TailCallMethod
         | Op::Construct
         | Op::SuperConstruct
         | Op::PopN
         | Op::MakeClosure
         | Op::GetUpvalue
         | Op::SetUpvalue
-        | Op::GetPropertyIC
-        | Op::SetPropertyIC
-        | Op::GetBuiltin
+        | Op::SetProperty
         | Op::BuildArray
         | Op::BuildObject
         | Op::Spread
         | Op::ArrayFromSpread => 2,
         Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
-        Op::CompareJumpIfFalse => 4,
+        Op::CompareJump => 4,
         _ => 1,
     }
 }
