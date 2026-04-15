@@ -296,13 +296,13 @@ pub(crate) fn build_atomics_object(
             }
 
             let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
-            let resolve_slot_capture = resolve_slot.clone();
+            let resolve_slot_capture = Rc::clone(&resolve_slot);
             let promise_ctor = vm
                 .get_global("Promise")
                 .ok_or_else(|| vm.throw_type_error("Promise constructor missing"))?;
             let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                 let off = if executor_args.len() > 2 { 1 } else { 0 };
-                *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();
+                *resolve_slot_capture.lock().expect("Mutex poisoned") = executor_args.get(off).cloned();
                 Ok(Value::Undefined)
             }));
             let promise = vm.construct_value(&promise_ctor, &[executor])?;

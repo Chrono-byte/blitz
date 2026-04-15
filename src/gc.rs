@@ -700,11 +700,11 @@ mod tests {
 
         a.borrow_mut().properties.insert(
             crate::value::PropertyKey::String("peer".to_string()),
-            PropertyDescriptor::data(Value::Object(b.clone())),
+            PropertyDescriptor::data(Value::Object(Rc::clone(&b))),
         );
         b.borrow_mut().properties.insert(
             crate::value::PropertyKey::String("peer".to_string()),
-            PropertyDescriptor::data(Value::Object(a.clone())),
+            PropertyDescriptor::data(Value::Object(Rc::clone(&a))),
         );
 
         let weak_a = Rc::downgrade(&a);
@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn regular_collect_breaks_closure_env_cycles() {
         let env = track_env(Rc::new(Mutex::new(Vec::new())));
-        let closure = make_dummy_closure(env.clone());
+        let closure = make_dummy_closure(Rc::clone(&env));
         let weak_props = match &closure {
             Value::Closure { props, .. } => Rc::downgrade(props),
             _ => unreachable!("dummy closure must be a closure"),
@@ -745,7 +745,7 @@ mod tests {
     #[test]
     fn aggressive_collect_breaks_closure_env_cycles() {
         let env = track_env(Rc::new(Mutex::new(Vec::new())));
-        let closure = make_dummy_closure(env.clone());
+        let closure = make_dummy_closure(Rc::clone(&env));
         let weak_props = match &closure {
             Value::Closure { props, .. } => Rc::downgrade(props),
             _ => unreachable!("dummy closure must be a closure"),
@@ -767,7 +767,7 @@ mod tests {
     #[test]
     fn aggressive_collect_respects_roots() {
         let env = track_env(Rc::new(Mutex::new(Vec::new())));
-        let closure = make_dummy_closure(env.clone());
+        let closure = make_dummy_closure(Rc::clone(&env));
         let weak_props = match &closure {
             Value::Closure { props, .. } => Rc::downgrade(props),
             _ => unreachable!("dummy closure must be a closure"),

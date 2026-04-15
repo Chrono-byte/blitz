@@ -158,8 +158,8 @@ fn resolve_promise_with_value_inner(
 
             vm.queue_microtask(move |vm| {
                 // Build resolve and reject callbacks that will settle res_p
-                let resolve_called_inner = resolve_called.clone();
-                let res_p_inner = res_p.clone();
+                let resolve_called_inner = Rc::clone(&resolve_called);
+                let res_p_inner = Rc::clone(&res_p);
                 let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
                     if *resolve_called_inner.borrow() {
                         return Ok(Value::Undefined);
@@ -171,8 +171,8 @@ fn resolve_promise_with_value_inner(
                     Ok(Value::Undefined)
                 }));
 
-                let reject_called_inner = resolve_called.clone();
-                let res_p2_inner = res_p.clone();
+                let reject_called_inner = Rc::clone(&resolve_called);
+                let res_p2_inner = Rc::clone(&res_p);
                 let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
                     if *reject_called_inner.borrow() {
                         return Ok(Value::Undefined);
@@ -296,7 +296,7 @@ pub(crate) fn reject_pending_promise(
                 };
                 if still_unhandled {
                     vm.call_unhandled_rejection(
-                        Value::Promise(promise_ref.clone()),
+                        Value::Promise(Rc::clone(&promise_ref)),
                         stored_reason.clone(),
                     );
                 }
@@ -406,7 +406,7 @@ pub(crate) fn shadowrealm_import_value(vm: &mut Vm, args: &[Value]) -> Result<Va
         on_fulfilled: Vec::new(),
         on_rejected: Vec::new(),
     })));
-    let promise_value = Value::Promise(promise.clone());
+    let promise_value = Value::Promise(Rc::clone(&promise));
 
     // Parse transfer list argument (third argument) if present. For importValue
     // the signature is (shadowRealm, specifier, exportName, [transferList]) so
@@ -418,7 +418,7 @@ pub(crate) fn shadowrealm_import_value(vm: &mut Vm, args: &[Value]) -> Result<Va
         transfer_set_arg = args.get(2).cloned();
     }
 
-    let record_handle = record.clone();
+    let record_handle = Rc::clone(&record);
     let base_dir = record.base_dir();
     let specifier_clone = specifier_str;
     let export_clone = export_name;
@@ -557,7 +557,7 @@ pub(crate) fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value,
         on_fulfilled: Vec::new(),
         on_rejected: Vec::new(),
     })));
-    let promise_value = Value::Promise(promise.clone());
+    let promise_value = Value::Promise(Rc::clone(&promise));
 
     let specifier_str = match vm.to_string(specifier) {
         Ok(s) => s,
@@ -631,7 +631,7 @@ pub(crate) fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value,
 
     match result {
         Ok(value) => {
-            let promise_for_fulfill = promise.clone();
+            let promise_for_fulfill = Rc::clone(&promise);
             let value_for_fulfill = value;
             vm.queue_dynamic_import_job(move |vm| {
                 fulfill_pending_promise(vm, &promise_for_fulfill, value_for_fulfill.clone());
@@ -639,7 +639,7 @@ pub(crate) fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value,
             });
         }
         Err(reason) => {
-            let promise_for_reject = promise.clone();
+            let promise_for_reject = Rc::clone(&promise);
             let reason_for_reject = reason;
             vm.queue_dynamic_import_job(move |vm| {
                 reject_pending_promise(vm, &promise_for_reject, reason_for_reject.clone());

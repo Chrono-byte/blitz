@@ -171,7 +171,7 @@ impl ModuleLoader {
             resolved_canon.clone(),
             session,
         )));
-        self.map.insert(resolved_canon.clone(), rec.clone());
+        self.map.insert(resolved_canon.clone(), Rc::clone(&rec));
 
         // Recurse into dependencies discovered by parser helper
         let imports =
@@ -410,7 +410,7 @@ impl ModuleLoader {
                                     if let Some(slot) = slot_opt {
                                         {
                                             let mut rec = rec_rc.borrow_mut();
-                                            rec.imports.insert(local.clone(), slot.clone());
+                                            rec.imports.insert(local.clone(), Rc::clone(&slot));
                                             if let Some(src_idx) = dep_module_index {
                                                 rec.import_sources
                                                     .insert(local, (src_idx, imported));
@@ -422,11 +422,11 @@ impl ModuleLoader {
                                             let mut dep_rec = dep_rec_rc.borrow_mut();
                                             dep_rec
                                                 .exports
-                                                .insert(imported.clone(), new_slot.clone());
+                                                .insert(imported.clone(), Rc::clone(&new_slot));
                                         }
                                         {
                                             let mut rec = rec_rc.borrow_mut();
-                                            rec.imports.insert(local.clone(), new_slot.clone());
+                                            rec.imports.insert(local.clone(), Rc::clone(&new_slot));
                                             if let Some(src_idx) = dep_module_index {
                                                 rec.import_sources
                                                     .insert(local, (src_idx, imported));
@@ -447,7 +447,7 @@ impl ModuleLoader {
                                     if let Some(slot) = slot_opt {
                                         {
                                             let mut rec = rec_rc.borrow_mut();
-                                            rec.imports.insert(local.clone(), slot.clone());
+                                            rec.imports.insert(local.clone(), Rc::clone(&slot));
                                             if let Some(src_idx) = dep_module_index {
                                                 rec.import_sources.insert(
                                                     local,
@@ -459,13 +459,14 @@ impl ModuleLoader {
                                         let new_slot = Rc::new(Mutex::new(Value::Undefined));
                                         {
                                             let mut dep_rec = dep_rec_rc.borrow_mut();
-                                            dep_rec
-                                                .exports
-                                                .insert("default".to_string(), new_slot.clone());
+                                            dep_rec.exports.insert(
+                                                "default".to_string(),
+                                                Rc::clone(&new_slot),
+                                            );
                                         }
                                         {
                                             let mut rec = rec_rc.borrow_mut();
-                                            rec.imports.insert(local.clone(), new_slot.clone());
+                                            rec.imports.insert(local.clone(), Rc::clone(&new_slot));
                                             if let Some(src_idx) = dep_module_index {
                                                 rec.import_sources.insert(
                                                     local,
@@ -842,7 +843,7 @@ pub fn evaluate_entry_shared(
             let Some(rec_rc) = loader_ref.map.get(&path).cloned() else {
                 continue;
             };
-            let rec_rc_return = rec_rc.clone();
+            let rec_rc_return = Rc::clone(&rec_rc);
             let mut rec = rec_rc.borrow_mut();
             if matches!(rec.state, ModuleState::Evaluating) {
                 None

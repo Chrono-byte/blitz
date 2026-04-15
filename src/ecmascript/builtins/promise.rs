@@ -36,9 +36,9 @@ pub(crate) fn create_promise_intrinsics(
                 on_rejected: Vec::new(),
             })));
 
-            let promise_for_resolve = promise.clone();
+            let promise_for_resolve = Rc::clone(&promise);
             let resolve_called = Rc::new(RefCell::new(false));
-            let resolve_called_for_resolve = resolve_called.clone();
+            let resolve_called_for_resolve = Rc::clone(&resolve_called);
             let resolve_fn = Value::Builtin(Rc::new(move |vm, args| {
                 if *resolve_called_for_resolve.borrow() {
                     return Ok(Value::Undefined);
@@ -61,7 +61,7 @@ pub(crate) fn create_promise_intrinsics(
                 Ok(Value::Undefined)
             }));
 
-            let promise_for_reject = promise.clone();
+            let promise_for_reject = Rc::clone(&promise);
             let reject_called = resolve_called;
             let reject_fn = Value::Builtin(Rc::new(move |vm, args| {
                 if *reject_called.borrow() {
@@ -96,9 +96,9 @@ pub(crate) fn create_promise_intrinsics(
 
     promise_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(promise_proto_map.clone())),
+        PropertyDescriptor::data(Value::Object(Rc::clone(&promise_proto_map))),
     );
-    let promise_ctor_val = Value::BuiltinObject(promise_ctor_fn, promise_ctor_map.clone());
+    let promise_ctor_val = Value::BuiltinObject(promise_ctor_fn, Rc::clone(&promise_ctor_map));
 
     promise_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
@@ -129,7 +129,7 @@ pub(crate) fn create_promise_intrinsics(
                             on_fulfilled: Vec::new(),
                             on_rejected: Vec::new(),
                         })));
-                    let result_promise_value = Value::Promise(result_promise.clone());
+                    let result_promise_value = Value::Promise(Rc::clone(&result_promise));
 
                     let mut state = promise_rc.borrow_mut();
                     match &mut *state {
@@ -138,7 +138,7 @@ pub(crate) fn create_promise_intrinsics(
                             on_rejected: existing_rejected,
                         } => {
                             let user_on_fulfilled = on_fulfilled;
-                            let res_p_f = result_promise.clone();
+                            let res_p_f = Rc::clone(&result_promise);
                             let on_fulfilled_fn = Value::Builtin(Rc::new(move |vm, args| {
                                 let off = if args.len() > 1 { 1 } else { 0 };
                                 let value = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -297,12 +297,13 @@ pub(crate) fn create_promise_intrinsics(
 
                 let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
-                let resolve_slot_capture = resolve_slot.clone();
+                let resolve_slot_capture = Rc::clone(&resolve_slot);
                 let reject_slot_capture = reject_slot;
                 let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                     let off = if executor_args.len() > 2 { 1 } else { 0 };
-                    *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();
-                    *reject_slot_capture.lock().unwrap() = executor_args.get(off + 1).cloned();
+                    *resolve_slot_capture.lock().expect("Mutex poisoned") =
+                        executor_args.get(off).cloned();
+                    *reject_slot_capture.lock().expect("Mutex poisoned") = executor_args.get(off + 1).cloned();
                     Ok(Value::Undefined)
                 }));
 
@@ -345,12 +346,13 @@ pub(crate) fn create_promise_intrinsics(
 
                 let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
-                let resolve_slot_capture = resolve_slot.clone();
-                let reject_slot_capture = reject_slot.clone();
+                let resolve_slot_capture = Rc::clone(&resolve_slot);
+                let reject_slot_capture = Rc::clone(&reject_slot);
                 let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                     let off = if executor_args.len() > 2 { 1 } else { 0 };
-                    *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();
-                    *reject_slot_capture.lock().unwrap() = executor_args.get(off + 1).cloned();
+                    *resolve_slot_capture.lock().expect("Mutex poisoned") =
+                        executor_args.get(off).cloned();
+                    *reject_slot_capture.lock().expect("Mutex poisoned") = executor_args.get(off + 1).cloned();
                     Ok(Value::Undefined)
                 }));
 
@@ -395,32 +397,32 @@ pub(crate) fn create_promise_intrinsics(
                     let then_val =
                         vm.get_property_host(&item, &PropertyKey::String("then".to_string()))?;
                     if Vm::is_callable_value(&then_val) {
-                        let results_rc = results.clone();
-                        let remaining_rc = remaining.clone();
-                        let settled_rc = settled.clone();
+                        let results_rc = Rc::clone(&results);
+                        let remaining_rc = Rc::clone(&remaining);
+                        let settled_rc = Rc::clone(&settled);
                         let resolve_fn_rc = resolve_fn.clone();
                         let reject_fn_rc = reject_fn.clone();
                         let resolve_slot_resolved = Rc::new(Mutex::new(false));
                         let reject_slot_resolved = Rc::new(Mutex::new(false));
 
-                        let resolve_slot_resolved_cb = resolve_slot_resolved.clone();
+                        let resolve_slot_resolved_cb = Rc::clone(&resolve_slot_resolved);
                         let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
-                            if *settled_rc.lock().unwrap()
-                                || *resolve_slot_resolved_cb.lock().unwrap()
+                            if *settled_rc.lock().expect("Mutex poisoned")
+                                || *resolve_slot_resolved_cb.lock().expect("Mutex poisoned")
                             {
                                 return Ok(Value::Undefined);
                             }
-                            *resolve_slot_resolved_cb.lock().unwrap() = true;
+                            *resolve_slot_resolved_cb.lock().expect("Mutex poisoned") = true;
                             let off = if args.len() > 1 { 1 } else { 0 };
                             let value = args.get(off).cloned().unwrap_or(Value::Undefined);
-                            results_rc.lock().unwrap()[idx] = Some(value);
-                            let mut remaining_ref = remaining_rc.lock().unwrap();
+                            results_rc.lock().expect("Mutex poisoned")[idx] = Some(value);
+                            let mut remaining_ref = remaining_rc.lock().expect("Mutex poisoned");
                             if *remaining_ref > 0 {
                                 *remaining_ref -= 1;
                             }
-                            if *remaining_ref == 0 && !*settled_rc.lock().unwrap() {
-                                *settled_rc.lock().unwrap() = true;
-                                let array = vm.new_array(results_rc.lock().unwrap().clone());
+                            if *remaining_ref == 0 && !*settled_rc.lock().expect("Mutex poisoned") {
+                                *settled_rc.lock().expect("Mutex poisoned") = true;
+                                let array = vm.new_array(results_rc.lock().expect("Mutex poisoned").clone());
                                 let _ = vm.call_value_with_this(
                                     &resolve_fn_rc,
                                     &Value::Undefined,
@@ -430,16 +432,16 @@ pub(crate) fn create_promise_intrinsics(
                             Ok(Value::Undefined)
                         }));
 
-                        let reject_slot_resolved_cb = reject_slot_resolved.clone();
-                        let settled_rc = settled.clone();
+                        let reject_slot_resolved_cb = Rc::clone(&reject_slot_resolved);
+                        let settled_rc = Rc::clone(&settled);
                         let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
-                            if *settled_rc.lock().unwrap()
-                                || *reject_slot_resolved_cb.lock().unwrap()
+                            if *settled_rc.lock().expect("Mutex poisoned")
+                                || *reject_slot_resolved_cb.lock().expect("Mutex poisoned")
                             {
                                 return Ok(Value::Undefined);
                             }
-                            *reject_slot_resolved_cb.lock().unwrap() = true;
-                            *settled_rc.lock().unwrap() = true;
+                            *reject_slot_resolved_cb.lock().expect("Mutex poisoned") = true;
+                            *settled_rc.lock().expect("Mutex poisoned") = true;
                             let off = if args.len() > 1 { 1 } else { 0 };
                             let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
                             let _ = vm.call_value_with_this(
@@ -453,7 +455,7 @@ pub(crate) fn create_promise_intrinsics(
                         if let Err(err) =
                             vm.call_value_with_this(&then_val, &item, &[resolve_cb, reject_cb])
                         {
-                            *settled.lock().unwrap() = true;
+                            *settled.lock().expect("Mutex poisoned") = true;
                             let reason = vm
                                 .last_uncaught_exception
                                 .take()
@@ -463,14 +465,14 @@ pub(crate) fn create_promise_intrinsics(
                             return Ok(promise);
                         }
                     } else {
-                        results.lock().unwrap()[idx] = Some(item);
-                        let mut remaining_ref = remaining.lock().unwrap();
+                        results.lock().expect("Mutex poisoned")[idx] = Some(item);
+                        let mut remaining_ref = remaining.lock().expect("Mutex poisoned");
                         if *remaining_ref > 0 {
                             *remaining_ref -= 1;
                         }
-                        if *remaining_ref == 0 && !*settled.lock().unwrap() {
-                            *settled.lock().unwrap() = true;
-                            let array = vm.new_array(results.lock().unwrap().clone());
+                        if *remaining_ref == 0 && !*settled.lock().expect("Mutex poisoned") {
+                            *settled.lock().expect("Mutex poisoned") = true;
+                            let array = vm.new_array(results.lock().expect("Mutex poisoned").clone());
                             let _ =
                                 vm.call_value_with_this(&resolve_fn, &Value::Undefined, &[array]);
                         }
@@ -498,11 +500,12 @@ pub(crate) fn create_promise_intrinsics(
                 let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let resolve_slot_capture = resolve_slot;
-                let reject_slot_capture = reject_slot.clone();
+                let reject_slot_capture = Rc::clone(&reject_slot);
                 let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                     let off = if executor_args.len() > 2 { 1 } else { 0 };
-                    *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();
-                    *reject_slot_capture.lock().unwrap() = executor_args.get(off + 1).cloned();
+                    *resolve_slot_capture.lock().expect("Mutex poisoned") =
+                        executor_args.get(off).cloned();
+                    *reject_slot_capture.lock().expect("Mutex poisoned") = executor_args.get(off + 1).cloned();
                     Ok(Value::Undefined)
                 }));
 

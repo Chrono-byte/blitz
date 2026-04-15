@@ -195,7 +195,7 @@ pub(crate) fn install_global_bindings(
         ))));
         ctor_map.borrow_mut().properties.insert(
             PKey::String("prototype".to_string()),
-            PropertyDescriptor::data(Value::Object(proto_map.clone())),
+            PropertyDescriptor::data(Value::Object(Rc::clone(&proto_map))),
         );
         let name_owned = name.to_string();
         let ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
@@ -210,7 +210,7 @@ pub(crate) fn install_global_bindings(
             }
             Ok(Value::Undefined)
         });
-        let ctor_val = Value::BuiltinObject(ctor_fn, ctor_map.clone());
+        let ctor_val = Value::BuiltinObject(ctor_fn, Rc::clone(&ctor_map));
         ctor_map.borrow_mut().properties.insert(
             PKey::String("name".to_string()),
             PropertyDescriptor::data(Value::String(name.to_string())),
@@ -267,7 +267,8 @@ pub(crate) fn install_global_bindings(
         let proxy = crate::gc::track_proxy(Rc::new(RefCell::new(ProxyData::new(target, handler))));
         Ok(Value::Proxy(proxy))
     });
-    let proxy_ctor_val = Value::BuiltinObject(proxy_ctor_fn.clone(), proxy_ctor_map.clone());
+    let proxy_ctor_val =
+        Value::BuiltinObject(Rc::clone(&proxy_ctor_fn), Rc::clone(&proxy_ctor_map));
     proxy_ctor_map.borrow_mut().properties.insert(
         PKey::String("name".to_string()),
         PropertyDescriptor::data(Value::String("Proxy".to_string())),
@@ -291,7 +292,7 @@ pub(crate) fn install_global_bindings(
                     let proxy = crate::gc::track_proxy(Rc::new(RefCell::new(ProxyData::new(
                         target, handler,
                     ))));
-                    let revoke_state = proxy.clone();
+                    let revoke_state = Rc::clone(&proxy);
                     let revoke_fn = builtin_object(
                         Rc::new(move |_vm, _args| {
                             revoke_state.borrow_mut().revoke();

@@ -377,7 +377,7 @@ mod tests {
         let hook_calls: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
 
         vm.set_unhandled_rejection_hook({
-            let hook_calls = hook_calls.clone();
+            let hook_calls = Rc::clone(&hook_calls);
             move |_vm, promise, reason| {
                 hook_calls
                     .borrow_mut()
@@ -386,21 +386,21 @@ mod tests {
         });
 
         vm.queue_microtask({
-            let events = events.clone();
+            let events = Rc::clone(&events);
             move |_vm| {
                 events.borrow_mut().push("first".to_string());
                 Ok(())
             }
         });
         vm.queue_microtask({
-            let events = events.clone();
+            let events = Rc::clone(&events);
             move |_vm| {
                 events.borrow_mut().push("second".to_string());
                 Err(RuntimeError::from("microtask failed"))
             }
         });
         vm.queue_microtask({
-            let events = events.clone();
+            let events = Rc::clone(&events);
             move |_vm| {
                 events.borrow_mut().push("third".to_string());
                 Ok(())

@@ -42,7 +42,7 @@ pub(crate) fn install_map_set_constructors(
             let _ = vm.set_property_host(
                 &receiver,
                 &Value::String("__map_entries".to_string()),
-                Value::Array(arr_rc.clone(), arr_props),
+                Value::Array(Rc::clone(&arr_rc), arr_props),
             )?;
             let _ = vm.set_property_host(
                 &receiver,
@@ -104,10 +104,10 @@ pub(crate) fn install_map_set_constructors(
         }
         Ok(Value::Object(Rc::new(RefCell::new(ObjectData::new()))))
     });
-    let map_ctor_val = Value::BuiltinObject(map_ctor_fn.clone(), map_ctor_map.clone());
+    let map_ctor_val = Value::BuiltinObject(Rc::clone(&map_ctor_fn), Rc::clone(&map_ctor_map));
     map_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(map_proto_map.clone())),
+        PropertyDescriptor::data(Value::Object(Rc::clone(&map_proto_map))),
     );
     map_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
@@ -282,7 +282,7 @@ pub(crate) fn install_map_set_constructors(
                     PropertyKey::String("__iter_index".to_string()),
                     PropertyDescriptor::data(Value::Number(0.0)),
                 );
-                let function_proto_for_next = function_proto_for_map_iter.clone();
+                let function_proto_for_next = Rc::clone(&function_proto_for_map_iter);
                 let next_fn = builtin_object(
                     Rc::new(|vm, args| {
                         let undefined = Value::Undefined;
@@ -373,7 +373,7 @@ pub(crate) fn install_map_set_constructors(
             let _ = vm.set_property_host(
                 receiver,
                 &Value::String("__set_values".to_string()),
-                Value::Array(arr_rc.clone(), arr_props),
+                Value::Array(Rc::clone(&arr_rc), arr_props),
             )?;
             let _ = vm.set_property_host(
                 receiver,
@@ -404,10 +404,10 @@ pub(crate) fn install_map_set_constructors(
         }
         Ok(Value::Object(Rc::new(RefCell::new(ObjectData::new()))))
     });
-    let set_ctor_val = Value::BuiltinObject(set_ctor_fn.clone(), set_ctor_map.clone());
+    let set_ctor_val = Value::BuiltinObject(Rc::clone(&set_ctor_fn), Rc::clone(&set_ctor_map));
     set_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(set_proto_map.clone())),
+        PropertyDescriptor::data(Value::Object(Rc::clone(&set_proto_map))),
     );
     set_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
@@ -488,7 +488,7 @@ pub(crate) fn install_map_set_constructors(
                     PropertyKey::String("__iter_index".to_string()),
                     PropertyDescriptor::data(Value::Number(0.0)),
                 );
-                let function_proto_for_next = function_proto_for_set_iter.clone();
+                let function_proto_for_next = Rc::clone(&function_proto_for_set_iter);
                 let next_fn = builtin_object(
                     Rc::new(|vm, args| {
                         let it = args.first().cloned().unwrap_or(Value::Undefined);
