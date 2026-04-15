@@ -1271,6 +1271,7 @@ fn normalize_es_version(input: &str) -> Option<String> {
   Some(label)
 }
 
+/// Normalize a list of ES version labels (e.g. "ES2021", "ESNext") into a list of unique labels.
 fn normalize_es_versions(values: &[String]) -> Result<Vec<String>, String> {
   let mut normalized = Vec::new();
   for value in values {
@@ -1287,6 +1288,7 @@ fn normalize_es_versions(values: &[String]) -> Result<Vec<String>, String> {
   Ok(normalized)
 }
 
+/// Return the edition label for a given file, if it has one.
 fn file_edition_label(file: &Path) -> Option<String> {
   let src = fs::read_to_string(file).ok()?;
   let meta = parse_meta(&src)?;
@@ -1308,10 +1310,12 @@ fn parse_meta(src: &str) -> Option<Meta> {
   }
 }
 
+/// Read the harness source for a given path.
 fn read_harness_source(path: &Path) -> Result<String, String> {
   fs::read_to_string(path).map_err(|e| format!("Failed to read harness {}: {}", path.display(), e))
 }
 
+/// Parse a source file for a given path.
 fn parse_source_for_path(
   source: &str,
   path: &Path,
@@ -1331,12 +1335,19 @@ fn parse_source_for_path(
   Parser::parse_source_with_type(source, source_type)
 }
 
-fn is_async_done_marker(s: &str) -> Option<Option<String>> {
+/// Return `true` if the given string is an async done marker.
+enum AsyncDoneMarker {
+  Complete,
+  Failure(String),
+}
+
+fn is_async_done_marker(s: &str) -> Option<AsyncDoneMarker> {
   if s == "Test262:AsyncTestComplete" {
-    Some(None)
+    Some(AsyncDoneMarker::Complete)
+  } else if let Some(rest) = s.strip_prefix("Test262:AsyncTestFailure:") {
+    Some(AsyncDoneMarker::Failure(rest.to_string()))
   } else {
-    s.strip_prefix("Test262:AsyncTestFailure:")
-      .map(|rest| Some(rest.to_string()))
+    None
   }
 }
 
@@ -1818,13 +1829,20 @@ fn run_test_file(
     // Async tests must signal completion through $DONE(error?).
     let done_state: Rc<RefCell<Option<Option<String>>>> = Rc::new(RefCell::new(None));
     if is_async {
-      let done_state_for_print = done_state.clone();
+      let done_state_for_print = Clone::clone(&done_state);
       let async_print: NativeFn = Rc::new(move |vm, _this, args| {
         let s = print_args(vm, args);
         if done_state_for_print.borrow().is_none()
           && let Some(marker) = is_async_done_marker(&s)
         {
-          *done_state_for_print.borrow_mut() = Some(marker);
+          match marker {
+            AsyncDoneMarker::Complete => {
+              *done_state_for_print.borrow_mut() = Some(None);
+            }
+            AsyncDoneMarker::Failure(err) => {
+              *done_state_for_print.borrow_mut() = Some(Some(err));
+            }
+          }
           return Ok(Value::Null);
         }
         eprintln!("[test262 print] {}", s);
@@ -2560,7 +2578,7 @@ fn main() {
     PropertyDescriptor::data(test262_obj),
   );
 
-  let _vm = Vm::new(globals.clone());
+  let _vm = Vm::new(Clone::clone(&globals));
 
   // Snapshot the bootstrapped globals for test isolation.
   // Each test restores from this snapshot instead of deep-cloning.
