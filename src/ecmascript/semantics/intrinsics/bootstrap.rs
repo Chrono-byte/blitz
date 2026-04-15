@@ -82,6 +82,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
 
                 let len = array_like_length(vm, &receiver)?;
+                if len > u32::MAX as usize {
+                    return Err(vm.throw_range_error("Invalid array length"));
+                }
                 let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
                 for i in 0..len {
                     let key = PKey::String(i.to_string());
@@ -1106,6 +1109,23 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             Rc::new({
                 let array_proto_for_slice = array_proto_map.clone();
                 move |vm, args| {
+                    fn is_array_value(value: &Value) -> bool {
+                        match value {
+                            Value::Array(..) => true,
+                            Value::Proxy(proxy) => {
+                                let target = {
+                                    let proxy = proxy.borrow();
+                                    if proxy.is_revoked() {
+                                        return false;
+                                    }
+                                    proxy.target.clone()
+                                };
+                                is_array_value(&target)
+                            }
+                            _ => false,
+                        }
+                    }
+
                     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
                     let len = array_like_length(vm, &receiver)?;
                     let start_raw =
@@ -1118,39 +1138,117 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     } else {
                         start_raw.trunc().to_usize().unwrap_or(len).min(len)
                     };
-                    let end = if let Some(end_arg) = args.get(2) {
-                        let end_raw = vm.to_number_value(end_arg)?;
-                        if end_raw.is_nan() {
-                            0usize
-                        } else if end_raw < 0.0 {
-                            let back = end_raw.trunc().abs().to_usize().unwrap_or(len);
-                            len.saturating_sub(back)
-                        } else {
-                            end_raw.trunc().to_usize().unwrap_or(len).min(len)
+                    let end = match args.get(2) {
+                        None | Some(Value::Undefined) => len,
+                        Some(end_arg) => {
+                            let end_raw = vm.to_number_value(end_arg)?;
+                            if end_raw.is_nan() {
+                                0usize
+                            } else if end_raw < 0.0 {
+                                let back = end_raw.trunc().abs().to_usize().unwrap_or(len);
+                                len.saturating_sub(back)
+                            } else {
+                                end_raw.trunc().to_usize().unwrap_or(len).min(len)
+                            }
                         }
-                    } else {
-                        len
                     };
                     let end = end.max(start);
-                    let mut out: Vec<Option<Value>> = Vec::with_capacity(end.saturating_sub(start));
+                    let slice_len = end.saturating_sub(start);
+                    if slice_len > u32::MAX as usize {
+                        return Err(vm.throw_range_error("Invalid array length"));
+                    }
+                    let array_ctor = vm.get_global("Array").unwrap_or(Value::Undefined);
+                    let species_ctor = if is_array_value(&receiver) {
+                        let ctor = vm.get_property_host(
+                            &receiver,
+                            &PKey::String("constructor".to_string()),
+                        )?;
+                        match ctor {
+                            Value::Undefined | Value::Null => array_ctor.clone(),
+                            v if !matches!(
+                                v,
+                                Value::Object(..)
+                                    | Value::Array(..)
+                                    | Value::Closure { .. }
+                                    | Value::BuiltinObject(_, _)
+                                    | Value::Proxy(_)
+                            ) =>
+                            {
+                                return Err(
+                                    vm.throw_type_error("constructor property is not an object")
+                                );
+                            }
+                            ctor_obj => {
+                                let species = vm.get_property_host(
+                                    &ctor_obj,
+                                    &PKey::Symbol(SymbolId::well_known_species()),
+                                )?;
+                                match species {
+                                    Value::Undefined | Value::Null => array_ctor.clone(),
+                                    _ if !species.is_constructable() => {
+                                        return Err(vm.throw_type_error(
+                                            "constructor[Symbol.species] is not a constructor",
+                                        ));
+                                    }
+                                    _ => species,
+                                }
+                            }
+                        }
+                    } else {
+                        array_ctor.clone()
+                    };
+                    let result =
+                        vm.construct_value(&species_ctor, &[Value::Number(slice_len as f64)])?;
+                    if let Ok(proto) =
+                        vm.get_property_host(&species_ctor, &PKey::String("prototype".to_string()))
+                        && matches!(
+                            proto,
+                            Value::Object(..)
+                                | Value::Array(..)
+                                | Value::Closure { .. }
+                                | Value::BuiltinObject(_, _)
+                        )
+                    {
+                        match &result {
+                            Value::Object(data) => {
+                                data.borrow_mut().set_prototype_value(proto.clone());
+                            }
+                            Value::Array(_, props) => {
+                                props.borrow_mut().set_prototype_value(proto.clone());
+                            }
+                            Value::Closure { props, .. } => {
+                                props.borrow_mut().set_prototype_value(proto.clone());
+                            }
+                            Value::BuiltinObject(_, props) => {
+                                props.borrow_mut().set_prototype_value(proto.clone());
+                            }
+                            _ => {}
+                        }
+                    };
                     for i in start..end {
                         let key = PKey::String(i.to_string());
+                        let out_key = Value::String((i - start).to_string());
                         if vm.has_property_host(&receiver, &key)? {
-                            out.push(Some(vm.get_property_host(&receiver, &key)?));
+                            let item = vm.get_property_host(&receiver, &key)?;
+                            vm.set_property_host(&result, &out_key, item)?;
                         } else {
-                            out.push(None);
+                            let _ = vm.delete_property_host(
+                                &result,
+                                &PKey::String((i - start).to_string()),
+                            )?;
                         }
                     }
-                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
-                    let props = Rc::new(RefCell::new(ObjectData::new()));
-                    props
-                        .borrow_mut()
-                        .set_prototype_value(Value::Object(array_proto_for_slice.clone()));
-                    props.borrow_mut().properties.insert(
-                        PKey::String("length".to_string()),
-                        array_length_descriptor(arr_rc.borrow().len()),
-                    );
-                    Ok(Value::Array(arr_rc, props))
+                    vm.set_property_host(
+                        &result,
+                        &Value::String("length".to_string()),
+                        Value::Number(slice_len as f64),
+                    )?;
+                    if let Value::Array(_, props) = &result {
+                        props
+                            .borrow_mut()
+                            .set_prototype_value(Value::Object(array_proto_for_slice.clone()));
+                    }
+                    Ok(result)
                 }
             }),
             &function_proto_map,
@@ -1292,10 +1390,16 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     to_integer_or_infinity(vm, args.get(2).unwrap_or(&Value::Undefined))?,
                     len,
                 );
-                let final_ = clamp_relative_index(
-                    to_integer_or_infinity(vm, args.get(3).unwrap_or(&Value::Undefined))?,
-                    len,
-                );
+                let final_ = if let Some(end_arg) = args.get(3) {
+                    clamp_relative_index(to_integer_or_infinity(vm, end_arg)?, len)
+                } else {
+                    len
+                };
+                if let Value::Array(arr, _) = &receiver
+                    && arr.borrow_mut().copy_within_dense_numbers(to, from, final_)
+                {
+                    return Ok(receiver);
+                }
                 let count = final_.saturating_sub(from).min(len.saturating_sub(to));
                 let mut snapshot: Vec<Option<Value>> = Vec::with_capacity(count);
                 for i in 0..count {
@@ -1363,6 +1467,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 } else {
                     len
                 };
+                if let Value::Array(arr, _) = &receiver
+                    && let Value::Number(n) = &fill_value
+                    && arr.borrow_mut().fill_dense_numbers(start, end, *n)
+                {
+                    return Ok(receiver);
+                }
                 for i in start..end {
                     let key = Value::String(i.to_string());
                     vm.set_property_host(&receiver, &key, fill_value.clone())?;
@@ -2506,11 +2616,24 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         let proto_map_rc = arraybuffer_proto_map.clone();
         Rc::new(move |_vm, args| {
             // Get length argument with ToLength semantics (RangeError on Infinity).
+            let instance_proto = _vm
+                .current_new_target()
+                .and_then(|new_target| {
+                    _vm.get_property_host(&new_target, &PKey::String("prototype".to_string()))
+                        .ok()
+                })
+                .and_then(|proto| match proto {
+                    Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::BuiltinObject(_, _) => Some(proto),
+                    _ => None,
+                })
+                .unwrap_or_else(|| Value::Object(proto_map_rc.clone()));
             let length_value = args.get(1).cloned().unwrap_or(Value::Undefined);
             let length = to_length(_vm, &length_value)?;
 
-            let mut arraybuffer_obj_data =
-                ObjectData::with_prototype(Value::Object(proto_map_rc.clone()));
+            let mut arraybuffer_obj_data = ObjectData::with_prototype(instance_proto);
             arraybuffer_obj_data.properties.insert(
                 PropertyKey::String("[[ArrayBufferData]]".to_string()),
                 PropertyDescriptor::data(Value::Array(
@@ -2554,11 +2677,24 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     let sharedarraybuffer_ctor_fn: BuiltinFn = {
         let proto_map_rc = sharedarraybuffer_proto_map.clone();
         Rc::new(move |vm, args| {
+            let instance_proto = vm
+                .current_new_target()
+                .and_then(|new_target| {
+                    vm.get_property_host(&new_target, &PKey::String("prototype".to_string()))
+                        .ok()
+                })
+                .and_then(|proto| match proto {
+                    Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::BuiltinObject(_, _) => Some(proto),
+                    _ => None,
+                })
+                .unwrap_or_else(|| Value::Object(proto_map_rc.clone()));
             let length_value = args.get(1).cloned().unwrap_or(Value::Undefined);
             let length = to_length(vm, &length_value)?;
 
-            let mut arraybuffer_obj_data =
-                ObjectData::with_prototype(Value::Object(proto_map_rc.clone()));
+            let mut arraybuffer_obj_data = ObjectData::with_prototype(instance_proto);
             arraybuffer_obj_data.properties.insert(
                 PropertyKey::String("[[ArrayBufferData]]".to_string()),
                 PropertyDescriptor::data(Value::Array(
@@ -2674,6 +2810,23 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     let init = args.get(off).cloned().unwrap_or(Value::Undefined);
                     let byte_offset_arg = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
                     let length_arg = args.get(off + 2).cloned().unwrap_or(Value::Undefined);
+                    let instance_proto = vm
+                        .current_new_target()
+                        .and_then(|new_target| {
+                            vm.get_property_host(
+                                &new_target,
+                                &PKey::String("prototype".to_string()),
+                            )
+                            .ok()
+                        })
+                        .and_then(|proto| match proto {
+                            Value::Object(_)
+                            | Value::Array(..)
+                            | Value::Closure { .. }
+                            | Value::BuiltinObject(_, _) => Some(proto),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| Value::Object(proto_map_rc.clone()));
                     let (length, initial_values, byte_offset, view_byte_length, buffer_slot): (
                         usize,
                         Vec<Value>,
@@ -2721,53 +2874,76 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         }
                         Value::Object(_) => {
                             let buffer_value = init.clone();
-                            vm.get_property_host(
+                            let has_arraybuffer_data = vm.has_property_host(
                                 &buffer_value,
                                 &PropertyKey::String("[[ArrayBufferData]]".to_string()),
                             )?;
-                            let byte_length_value = vm.get_property_host(
-                                &buffer_value,
-                                &PropertyKey::String("byteLength".to_string()),
-                            )?;
-                            let buffer_byte_length = vm.to_number_value(&byte_length_value)?;
-                            if !buffer_byte_length.is_finite() || buffer_byte_length < 0.0 {
-                                return Err(vm.throw_range_error("Invalid typed array length"));
-                            }
-                            let buffer_byte_length =
-                                buffer_byte_length.trunc().to_usize().unwrap_or(0);
-                            let byte_offset = if matches!(byte_offset_arg, Value::Undefined) {
-                                0
-                            } else {
-                                to_index(vm, &byte_offset_arg)?
-                            };
-                            if !is_byte_offset_aligned(byte_offset, $element_count) {
-                                return Err(vm.throw_range_error("Invalid typed array offset"));
-                            }
-                            let length_from_spec = if matches!(length_arg, Value::Undefined) {
-                                if buffer_byte_length < byte_offset {
+                            if has_arraybuffer_data {
+                                let byte_length_value = vm.get_property_host(
+                                    &buffer_value,
+                                    &PropertyKey::String("byteLength".to_string()),
+                                )?;
+                                let buffer_byte_length = vm.to_number_value(&byte_length_value)?;
+                                if !buffer_byte_length.is_finite() || buffer_byte_length < 0.0 {
                                     return Err(vm.throw_range_error("Invalid typed array length"));
                                 }
-                                (buffer_byte_length - byte_offset) / $element_count
+                                let buffer_byte_length =
+                                    buffer_byte_length.trunc().to_usize().unwrap_or(0);
+                                let byte_offset = if matches!(byte_offset_arg, Value::Undefined) {
+                                    0
+                                } else {
+                                    to_index(vm, &byte_offset_arg)?
+                                };
+                                if !is_byte_offset_aligned(byte_offset, $element_count) {
+                                    return Err(vm.throw_range_error("Invalid typed array offset"));
+                                }
+                                let length_from_spec = if matches!(length_arg, Value::Undefined) {
+                                    if buffer_byte_length < byte_offset {
+                                        return Err(
+                                            vm.throw_range_error("Invalid typed array length")
+                                        );
+                                    }
+                                    (buffer_byte_length - byte_offset) / $element_count
+                                } else {
+                                    to_index(vm, &length_arg)?
+                                };
+                                let expected_byte_length = length_from_spec * $element_count;
+                                if byte_offset + expected_byte_length > buffer_byte_length {
+                                    return Err(vm.throw_range_error("Invalid typed array length"));
+                                }
+                                (
+                                    length_from_spec,
+                                    Vec::<Value>::new(),
+                                    byte_offset,
+                                    expected_byte_length,
+                                    buffer_value,
+                                )
                             } else {
-                                to_index(vm, &length_arg)?
-                            };
-                            let expected_byte_length = length_from_spec * $element_count;
-                            if byte_offset + expected_byte_length > buffer_byte_length {
-                                return Err(vm.throw_range_error("Invalid typed array length"));
+                                let length_value = vm.get_property_host(
+                                    &buffer_value,
+                                    &PropertyKey::String("length".to_string()),
+                                )?;
+                                let length = to_length(vm, &length_value)?;
+                                let mut initial_values = Vec::with_capacity(length);
+                                for idx in 0..length {
+                                    initial_values.push(vm.get_property_host(
+                                        &buffer_value,
+                                        &PropertyKey::String(usize_to_decimal_string(idx)),
+                                    )?);
+                                }
+                                (
+                                    length,
+                                    initial_values,
+                                    0usize,
+                                    length * $element_count,
+                                    Value::Undefined,
+                                )
                             }
-                            (
-                                length_from_spec,
-                                Vec::<Value>::new(),
-                                byte_offset,
-                                expected_byte_length,
-                                buffer_value,
-                            )
                         }
                         _ => (0, Vec::<Value>::new(), 0usize, 0usize, Value::Undefined),
                     };
 
-                    let mut typed_array_data =
-                        ObjectData::with_prototype(Value::Object(proto_map_rc.clone()));
+                    let mut typed_array_data = ObjectData::with_prototype(instance_proto);
                     typed_array_data.properties.insert(
                         PropertyKey::String("[[TypedArrayData]]".to_string()),
                         PropertyDescriptor::data(Value::Array(

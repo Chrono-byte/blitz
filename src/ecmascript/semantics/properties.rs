@@ -14,6 +14,14 @@ pub(crate) fn own_property_descriptor(
 ) -> Option<PropertyDescriptor> {
     match obj {
         Value::Object(data) => data.borrow().properties.get(key).cloned(),
+        Value::Proxy(proxy) => {
+            let proxy = proxy.borrow();
+            if proxy.is_revoked() {
+                None
+            } else {
+                own_property_descriptor(&proxy.target, key)
+            }
+        }
         Value::Array(arr, props) => {
             let props_ref = props.borrow();
             if let Some(desc) = props_ref.properties.get(key).cloned() {
@@ -96,6 +104,12 @@ pub(crate) fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
     let mut keys = Vec::new();
     match obj {
         Value::Object(data) => keys.extend(enumerable_prop_keys(data, false)),
+        Value::Proxy(proxy) => {
+            let proxy = proxy.borrow();
+            if !proxy.is_revoked() {
+                keys.extend(own_enumerable_keys(&proxy.target));
+            }
+        }
         Value::Array(arr, props) => {
             for (idx, slot) in arr.borrow().iter().enumerate() {
                 if slot.is_some() {
@@ -238,6 +252,12 @@ pub(crate) fn own_property_keys(obj: &Value) -> Vec<PropertyKey> {
         Value::Object(data) => {
             for key in data.borrow().properties.keys() {
                 keys.push(key.clone());
+            }
+        }
+        Value::Proxy(proxy) => {
+            let proxy = proxy.borrow();
+            if !proxy.is_revoked() {
+                keys.extend(own_property_keys(&proxy.target));
             }
         }
         Value::Array(arr, props) => {

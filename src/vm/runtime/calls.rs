@@ -1,8 +1,10 @@
 use crate::bytecode::FunctionProto;
+use crate::ecmascript::semantics::properties::own_property_descriptor;
 use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::mutex_compat::MutexBorrowExt;
+use crate::runtime_utils::to_length;
 use crate::runtime_utils::{array_from_values, usize_to_decimal_string};
 use crate::value::{
     ArrayData, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value, ValueSlot,
@@ -198,6 +200,7 @@ impl Vm {
         }
         self.tail_call_value(callee, args, receiver, true)
     }
+
     pub(super) fn execute_call_with_nargs(
         &mut self,
         nargs_override: Option<usize>,
@@ -331,6 +334,22 @@ impl Vm {
             args.push(self.pop()?);
         }
         args.reverse();
+        if nargs == 1
+            && let Some(arg0) = args.first()
+            && matches!(
+                own_property_descriptor(arg0, &PropertyKey::String("callee".to_string())),
+                Some(PropertyDescriptor::Accessor { .. })
+            )
+            && let Ok(len_val) =
+                self.get_property_host(arg0, &PropertyKey::String("length".to_string()))
+            && let Ok(len) = to_length(self, &len_val)
+        {
+            let mut flat = Vec::with_capacity(len);
+            for idx in 0..len {
+                flat.push(self.get_property_host(arg0, &PropertyKey::String(idx.to_string()))?);
+            }
+            args = flat;
+        }
 
         let frame = self
             .call_stack
@@ -902,6 +921,7 @@ impl Vm {
                         crate::runtime_utils::non_enum_data(ctor.clone()),
                     );
                 }
+                Value::Proxy(_) => {}
                 _ => {}
             }
             Ok(())
@@ -983,7 +1003,8 @@ impl Vm {
                 };
                 let prev_new_target = self.construct_new_target.clone();
                 let prev_recent_return = self.recent_return_value.take();
-                self.construct_new_target = Some(callee.clone());
+                let active_new_target = prev_new_target.clone().unwrap_or_else(|| callee.clone());
+                self.construct_new_target = Some(active_new_target);
                 let result = self.call_with_this(callee, &instance, args);
                 self.construct_new_target = prev_new_target;
                 let result = result?;
@@ -994,6 +1015,7 @@ impl Vm {
                     | Value::Array(..)
                     | Value::Closure { .. }
                     | Value::BuiltinObject(_, _)
+                    | Value::Proxy(_)
                     | Value::Promise(_) => {
                         let _ = set_constructor_property(&result, callee);
                         result
@@ -1016,6 +1038,7 @@ impl Vm {
                         | Value::Array(..)
                         | Value::Closure { .. }
                         | Value::BuiltinObject(_, _)
+                        | Value::Proxy(_)
                         | Value::Promise(_)
                 ) {
                     self.recent_return_value = Some(result.clone());
@@ -1055,7 +1078,9 @@ impl Vm {
                     let mut combined = bound_args;
                     combined.extend_from_slice(args);
                     let prev_new_target = self.construct_new_target.clone();
-                    self.construct_new_target = Some(target.clone());
+                    let active_new_target =
+                        prev_new_target.clone().unwrap_or_else(|| target.clone());
+                    self.construct_new_target = Some(active_new_target);
                     let result = self.construct_value(&target, &combined);
                     self.construct_new_target = prev_new_target;
                     self.gc_temp_roots.truncate(temp_root_base);
@@ -1094,7 +1119,8 @@ impl Vm {
                 // Keep [[NewTarget]] in VM state so builtins can inspect it
                 // without perturbing user-visible argument positions.
                 let prev_new_target = self.construct_new_target.clone();
-                self.construct_new_target = Some(callee.clone());
+                let active_new_target = prev_new_target.clone().unwrap_or_else(|| callee.clone());
+                self.construct_new_target = Some(active_new_target);
                 let result = self.call_with_this(callee, &instance, args);
                 self.construct_new_target = prev_new_target;
                 let result = result?;
@@ -1103,6 +1129,7 @@ impl Vm {
                     | Value::Array(..)
                     | Value::Closure { .. }
                     | Value::BuiltinObject(_, _)
+                    | Value::Proxy(_)
                     | Value::Promise(_) => {
                         let _ = set_constructor_property(&result, callee);
                         result
@@ -1116,6 +1143,7 @@ impl Vm {
                         | Value::Array(..)
                         | Value::Closure { .. }
                         | Value::BuiltinObject(_, _)
+                        | Value::Proxy(_)
                         | Value::Promise(_)
                 ) {
                     self.recent_return_value = Some(result.clone());

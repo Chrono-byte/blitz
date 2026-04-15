@@ -32,6 +32,13 @@ impl Vm {
                 obj.type_name()
             )));
         }
+        if let Value::Proxy(proxy) = obj {
+            let proxy = proxy.borrow();
+            if proxy.is_revoked() {
+                return Err(self.throw_type_error("Cannot read property of revoked proxy"));
+            }
+            return self.get_property_value(&proxy.target, key);
+        }
         if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
             return match desc {
                 PropertyDescriptor::Data { value, .. } => Ok(value),
@@ -170,6 +177,7 @@ impl Vm {
                 | Value::Closure { .. }
                 | Value::BuiltinObject(_, _)
                 | Value::Promise(_)
+                | Value::Proxy(_)
         ) {
             return Err(self.throw_type_error("Object.defineProperty called on non-object"));
         }
@@ -201,6 +209,13 @@ impl Vm {
     ///
     /// Returns a [`crate::errors::RuntimeError`] if the property lookup fails.
     pub fn has_property_host(&self, obj: &Value, key: &PropertyKey) -> Result<bool, RuntimeError> {
+        if let Value::Proxy(proxy) = obj {
+            let proxy = proxy.borrow();
+            if proxy.is_revoked() {
+                return Err(RuntimeError::from("Cannot operate on revoked proxy"));
+            }
+            return self.has_property_host(&proxy.target, key);
+        }
         Ok(self.lookup_property_descriptor(obj, key, 0)?.is_some())
     }
 
@@ -215,6 +230,13 @@ impl Vm {
         key: &PropertyKey,
     ) -> Result<bool, RuntimeError> {
         let deleted_res: Result<bool, RuntimeError> = match obj {
+            Value::Proxy(proxy) => {
+                let proxy = proxy.borrow();
+                if proxy.is_revoked() {
+                    return Err(self.throw_type_error("Cannot operate on revoked proxy"));
+                }
+                return self.delete_property_host(&proxy.target, key);
+            }
             Value::Object(data) => {
                 let mut d = data.borrow_mut();
                 match d.properties.get(key) {
@@ -409,6 +431,7 @@ impl Vm {
                 | Value::Array(..)
                 | Value::Closure { .. }
                 | Value::BuiltinObject(_, _)
+                | Value::Proxy(_)
         ) {
             return Err(self.throw_type_error("Property description must be an object"));
         }
@@ -478,6 +501,13 @@ impl Vm {
         key: PropertyKey,
         desc: PartialDescriptor,
     ) -> Result<bool, RuntimeError> {
+        if let Value::Proxy(proxy) = obj {
+            let proxy = proxy.borrow();
+            if proxy.is_revoked() {
+                return Err(self.throw_type_error("Cannot operate on revoked proxy"));
+            }
+            return self.define_own_property(&proxy.target, key, desc);
+        }
         if let Value::Array(arr, props) = obj
             && matches!(key, PropertyKey::String(ref name) if name == "length")
         {
@@ -735,6 +765,13 @@ impl Vm {
                 obj.type_name()
             )));
         }
+        if let Value::Proxy(proxy) = obj {
+            let proxy = proxy.borrow();
+            if proxy.is_revoked() {
+                return Err(self.throw_type_error("Cannot read property of revoked proxy"));
+            }
+            return self.get_property_value(&proxy.target, key);
+        }
         if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
             return match desc {
                 PropertyDescriptor::Data { value, .. } => Ok(value),
@@ -888,6 +925,13 @@ impl Vm {
                 if !matches!(proto, Value::Null) {
                     return self.lookup_property_descriptor(&proto, key, depth + 1);
                 }
+            }
+            Value::Proxy(proxy) => {
+                let proxy = proxy.borrow();
+                if proxy.is_revoked() {
+                    return Ok(None);
+                }
+                return self.lookup_property_descriptor(&proxy.target, key, depth + 1);
             }
             Value::Closure { props, .. } => {
                 let p = props.borrow();
@@ -1119,6 +1163,13 @@ impl Vm {
                 key,
                 obj.type_name()
             )));
+        }
+        if let Value::Proxy(proxy) = obj {
+            let proxy = proxy.borrow();
+            if proxy.is_revoked() {
+                return Err(self.throw_type_error("Cannot operate on revoked proxy"));
+            }
+            return self.set_property_tracked(&proxy.target, key, value);
         }
         if let Value::Array(arr, props) = obj
             && matches!(key, PropertyKey::String(s) if s == "length")

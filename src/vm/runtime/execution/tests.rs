@@ -74,6 +74,59 @@ fn object_get_own_property_descriptor_works_when_extracted() {
 }
 
 #[test]
+fn array_copy_within_handles_negative_target() {
+    let (vm, _globals) = run_script(
+        r#"
+        var arr = [0, 1, 2, 3];
+        arr.copyWithin(-1, 0);
+        globalThis.result = arr;
+        "#,
+    );
+
+    match vm.get_global("result") {
+        Some(Value::Array(arr, _)) => {
+            let arr = arr.borrow();
+            assert_eq!(arr.len(), 4);
+            assert!(matches!(arr[0], Some(Value::Number(n)) if n == 0.0));
+            assert!(matches!(arr[1], Some(Value::Number(n)) if n == 1.0));
+            assert!(matches!(arr[2], Some(Value::Number(n)) if n == 2.0));
+            assert!(matches!(arr[3], Some(Value::Number(n)) if n == 0.0));
+        }
+        other => panic!("unexpected result: {:?}", other),
+    }
+}
+
+#[test]
+fn constructor_species_property_round_trips() {
+    let (vm, _globals) = run_script(
+        r#"
+        var array = [];
+        array.constructor = function() {};
+        var Ctor = function() {};
+        array.constructor[Symbol.species] = Ctor;
+        globalThis.species_value = array.constructor[Symbol.species];
+        "#,
+    );
+
+    assert!(matches!(
+        vm.get_global("species_value"),
+        Some(Value::Closure { .. })
+    ));
+}
+
+#[test]
+fn proxy_wrapping_array_is_array() {
+    let (vm, _globals) = run_script(
+        r#"
+        var proxy = new Proxy([], {});
+        globalThis.is_array = Array.isArray(proxy);
+        "#,
+    );
+
+    assert_eq!(vm.get_global("is_array"), Some(Value::Bool(true)));
+}
+
+#[test]
 fn reflect_own_keys_matches_get_own_property_descriptor() {
     let (vm, _globals) = run_script(
         r#"

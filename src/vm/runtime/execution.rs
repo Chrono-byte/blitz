@@ -300,6 +300,14 @@ impl Vm {
             | Value::Array(_, obj)
             | Value::Closure { props: obj, .. }
             | Value::BuiltinObject(_, obj) => obj.borrow().get_prototype(),
+            Value::Proxy(proxy) => {
+                let proxy = proxy.borrow();
+                if proxy.is_revoked() {
+                    Value::Null
+                } else {
+                    self.get_prototype(&proxy.target)
+                }
+            }
             Value::Promise(_) => self.promise_prototype_value(),
             Value::String(_) => self
                 .realm
@@ -1176,6 +1184,7 @@ impl Vm {
         match v {
             Value::Object(_)
             | Value::Array(..)
+            | Value::Proxy(_)
             | Value::Closure { .. }
             | Value::BuiltinObject(_, _)
             | Value::Promise(_) => Ok(v),
@@ -2186,7 +2195,6 @@ impl Vm {
                 result?;
                 self.stack.push(value);
             }
-            Op::SetProperty => self.set_property_ic()?,
             Op::IteratorNext => self.iterator_next_op()?,
             Op::IteratorClose => self.iterator_close_op()?,
             Op::Swap => {
@@ -2382,6 +2390,7 @@ impl Vm {
         match v {
             Value::Object(_)
             | Value::Array(..)
+            | Value::Proxy(_)
             | Value::Closure { .. }
             | Value::Builtin(_)
             | Value::BuiltinObject(_, _)
@@ -2431,6 +2440,7 @@ impl Vm {
                         rv,
                         Value::Object(_)
                             | Value::Array(..)
+                            | Value::Proxy(_)
                             | Value::Closure { .. }
                             | Value::Builtin(_)
                             | Value::BuiltinObject(_, _)
@@ -2485,6 +2495,7 @@ impl Vm {
                             rv,
                             Value::Object(_)
                                 | Value::Array(..)
+                                | Value::Proxy(_)
                                 | Value::Closure { .. }
                                 | Value::Builtin(_)
                                 | Value::BuiltinObject(_, _)
@@ -4044,6 +4055,14 @@ fn list_own_keys_of_value(v: &Value) -> Option<Vec<String>> {
                 })
                 .collect(),
         ),
+        Value::Proxy(proxy) => {
+            let proxy = proxy.borrow();
+            if proxy.is_revoked() {
+                Some(Vec::new())
+            } else {
+                list_own_keys_of_value(&proxy.target)
+            }
+        }
         _ => None,
     }
 }
@@ -4062,6 +4081,7 @@ pub(super) fn object_identity(obj: &Value) -> Option<usize> {
         // Use the array's props object identity so IC keys remain stable across
         // dense storage reallocations.
         Value::Array(_, props) => Some(props.borrow().identity as usize),
+        Value::Proxy(proxy) => Some(Rc::as_ptr(proxy) as usize),
         Value::Closure { props, .. } => Some(props.borrow().identity as usize),
         Value::BuiltinObject(_, props) => Some(props.borrow().identity as usize),
         _ => None,
@@ -4085,6 +4105,7 @@ pub(super) fn values_equal(a: &Value, b: &Value) -> bool {
         // Reference equality for heap objects.
         (Value::Object(am), Value::Object(bm)) => Rc::ptr_eq(am, bm),
         (Value::Array(ar, _), Value::Array(br, _)) => Rc::ptr_eq(ar, br),
+        (Value::Proxy(ap), Value::Proxy(bp)) => Rc::ptr_eq(ap, bp),
         (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
         (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
         (Value::Promise(ap), Value::Promise(bp)) => Rc::ptr_eq(ap, bp),
@@ -4113,6 +4134,7 @@ pub fn same_value(a: &Value, b: &Value) -> bool {
         }
         (Value::Object(am), Value::Object(bm)) => Rc::ptr_eq(am, bm),
         (Value::Array(ar, _), Value::Array(br, _)) => Rc::ptr_eq(ar, br),
+        (Value::Proxy(ap), Value::Proxy(bp)) => Rc::ptr_eq(ap, bp),
         (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
         (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
         (Value::Promise(ap), Value::Promise(bp)) => Rc::ptr_eq(ap, bp),

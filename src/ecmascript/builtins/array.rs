@@ -15,6 +15,23 @@ use crate::value::{
 };
 use crate::vm::Vm;
 
+fn is_array_value(value: &Value) -> bool {
+    match value {
+        Value::Array(..) => true,
+        Value::Proxy(proxy) => {
+            let target = {
+                let proxy = proxy.borrow();
+                if proxy.is_revoked() {
+                    return false;
+                }
+                proxy.target.clone()
+            };
+            is_array_value(&target)
+        }
+        _ => false,
+    }
+}
+
 /// 23.1 Array Objects
 pub(crate) fn install_array_constructor_and_late_prototype_methods(
     array_ctor_map: &Rc<RefCell<ObjectData>>,
@@ -74,7 +91,11 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
         PKey::String("isArray".to_string()),
         PropertyDescriptor::data({
             let builtin = builtin_object(
-                Rc::new(|_vm, args| Ok(Value::Bool(matches!(args.get(1), Some(Value::Array(..)))))),
+                Rc::new(|_vm, args| {
+                    Ok(Value::Bool(
+                        matches!(args.get(1), Some(v) if is_array_value(v)),
+                    ))
+                }),
                 function_proto_map,
             );
             set_builtin_length(&builtin, 1.0);
