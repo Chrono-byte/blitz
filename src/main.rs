@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn run_source_executes_basic_program() {
         let globals = Rc::new(RefCell::new(ObjectData::new()));
-        let mut vm = Vm::new(globals.clone());
+        let mut vm = Vm::new(globals);
 
         run_source(&mut vm, "var answer = 1 + 2; answer;").expect("run");
 
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn run_source_returns_expression_result() {
         let globals = test_globals();
-        let mut vm = Vm::new(globals.clone());
+        let mut vm = Vm::new(globals);
 
         let result = run_source_repl(&mut vm, "1 + 2").expect("run");
         assert!(

@@ -212,7 +212,7 @@ mod tests {
     fn immutable_binding_cannot_be_reassigned() {
         let mut env = EnvironmentRecord::new(None);
         let cell = Rc::new(Mutex::new(Value::Number(1.0)));
-        env.create_immutable_binding("x".to_string(), cell.clone(), true);
+        env.create_immutable_binding("x".to_string(), cell, true);
         let err = env
             .set_mutable_binding("x", Value::Number(2.0))
             .expect_err("const assignment should throw");

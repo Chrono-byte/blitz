@@ -1164,7 +1164,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             &PKey::String("constructor".to_string()),
                         )?;
                         match ctor {
-                            Value::Undefined | Value::Null => array_ctor.clone(),
+                            Value::Undefined | Value::Null => array_ctor,
                             v if !matches!(
                                 v,
                                 Value::Object(..)
@@ -1184,7 +1184,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                                     &PKey::Symbol(SymbolId::well_known_species()),
                                 )?;
                                 match species {
-                                    Value::Undefined | Value::Null => array_ctor.clone(),
+                                    Value::Undefined | Value::Null => array_ctor,
                                     _ if !species.is_constructable() => {
                                         return Err(vm.throw_type_error(
                                             "constructor[Symbol.species] is not a constructor",
@@ -1195,7 +1195,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             }
                         }
                     } else {
-                        array_ctor.clone()
+                        array_ctor
                     };
                     let result = vm.construct_value(
                         &species_ctor,
@@ -1213,16 +1213,16 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     {
                         match &result {
                             Value::Object(data) => {
-                                data.borrow_mut().set_prototype_value(proto.clone());
+                                data.borrow_mut().set_prototype_value(proto);
                             }
                             Value::Array(_, props) => {
-                                props.borrow_mut().set_prototype_value(proto.clone());
+                                props.borrow_mut().set_prototype_value(proto);
                             }
                             Value::Closure { props, .. } => {
-                                props.borrow_mut().set_prototype_value(proto.clone());
+                                props.borrow_mut().set_prototype_value(proto);
                             }
                             Value::BuiltinObject(_, props) => {
-                                props.borrow_mut().set_prototype_value(proto.clone());
+                                props.borrow_mut().set_prototype_value(proto);
                             }
                             _ => {}
                         }
@@ -1935,8 +1935,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         }
         Ok(result)
     });
-    let function_ctor_val =
-        Value::BuiltinObject(function_ctor_fn.clone(), function_ctor_map.clone());
+    let function_ctor_val = Value::BuiltinObject(function_ctor_fn, function_ctor_map);
     let function_call_val = builtin_object(
         Rc::new(|vm, args| {
             let callee = args.first().cloned().unwrap_or(Value::Undefined);
@@ -2011,15 +2010,15 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     if let Value::BuiltinObject(_, props) = &bound_fn {
                         props.borrow_mut().properties.insert(
                             PKey::String("[[BoundTargetFunction]]".to_string()),
-                            PropertyDescriptor::data(target.clone()),
+                            PropertyDescriptor::data(target),
                         );
                         props.borrow_mut().properties.insert(
                             PKey::String("[[BoundThis]]".to_string()),
-                            PropertyDescriptor::data(bound_this.clone()),
+                            PropertyDescriptor::data(bound_this),
                         );
                         props.borrow_mut().properties.insert(
                             PKey::String("[[BoundArguments]]".to_string()),
-                            PropertyDescriptor::data(array_from_values(bound_args.clone())),
+                            PropertyDescriptor::data(array_from_values(bound_args)),
                         );
                     }
                     Ok(bound_fn)
@@ -2752,7 +2751,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             "TypeError: TypedArray constructor is not directly callable",
         ))
     });
-    let typedarray_ctor_val = Value::BuiltinObject(typedarray_ctor_fn, typedarray_ctor_map.clone());
+    let typedarray_ctor_val = Value::BuiltinObject(typedarray_ctor_fn, typedarray_ctor_map);
     typedarray_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(typedarray_ctor_val.clone()),
@@ -4136,7 +4135,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
 
         Ok(inst)
     });
-    let regexp_ctor_val = Value::BuiltinObject(regexp_ctor_fn, regexp_ctor_map.clone());
+    let regexp_ctor_val = Value::BuiltinObject(regexp_ctor_fn, regexp_ctor_map);
     set_builtin_name(&regexp_ctor_val, "RegExp");
     set_builtin_length(&regexp_ctor_val, 2.0);
     regexp_proto_map.borrow_mut().properties.insert(
@@ -4466,7 +4465,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         error_proto_map.clone(),
     ))));
     let uri_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-        error_proto_map.clone(),
+        error_proto_map,
     ))));
 
     let (_eval_error_name, eval_error_ctor_val) =
@@ -4726,9 +4725,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         shared_array_buffer_constructor: get_ctor("SharedArrayBuffer"),
         data_view_constructor: get_ctor("DataView"),
         typed_array_constructor: get_ctor("TypedArray"),
-        object_prototype: Some(Value::Object(object_proto_map.clone())),
-        array_prototype: Some(Value::Object(array_proto_map.clone())),
-        function_prototype: Some(Value::Object(function_proto_map.clone())),
+        object_prototype: Some(Value::Object(object_proto_map)),
+        array_prototype: Some(Value::Object(array_proto_map)),
+        function_prototype: Some(Value::Object(function_proto_map)),
         string_prototype: get_ctor("String").and_then(|ctor| get_proto(&ctor)),
         symbol_prototype: get_ctor("Symbol").and_then(|ctor| get_proto(&ctor)),
         boolean_prototype: get_ctor("Boolean").and_then(|ctor| get_proto(&ctor)),
@@ -4740,20 +4739,20 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         regexp_prototype: get_ctor("RegExp").and_then(|ctor| get_proto(&ctor)),
         map_prototype: get_ctor("Map").and_then(|ctor| get_proto(&ctor)),
         set_prototype: get_ctor("Set").and_then(|ctor| get_proto(&ctor)),
-        typed_array_prototype: Some(Value::Object(typedarray_proto_map.clone())),
+        typed_array_prototype: Some(Value::Object(typedarray_proto_map)),
         arraybuffer_prototype: get_ctor("ArrayBuffer").and_then(|ctor| get_proto(&ctor)),
         shared_array_buffer_prototype: get_ctor("SharedArrayBuffer")
             .and_then(|ctor| get_proto(&ctor)),
         data_view_prototype: get_ctor("DataView").and_then(|ctor| get_proto(&ctor)),
         iterator_prototype: None,
         async_iterator_prototype: None,
-        array_iterator_prototype: Some(Value::Object(array_iterator_proto.clone())),
+        array_iterator_prototype: Some(Value::Object(array_iterator_proto)),
         map_iterator_prototype: None,
         set_iterator_prototype: None,
         string_iterator_prototype: None,
         regexp_string_iterator_prototype: None,
-        generator_prototype: Some(Value::Object(generator_proto_map.clone())),
-        generator_function_prototype: Some(Value::Object(generator_function_proto_map.clone())),
+        generator_prototype: Some(Value::Object(generator_proto_map)),
+        generator_function_prototype: Some(Value::Object(generator_function_proto_map)),
         async_generator_prototype: None,
         async_from_sync_iterator_prototype: None,
         throw_type_error: Some(throw_type_error_val),

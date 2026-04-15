@@ -677,7 +677,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         }
         Ok(prim)
     });
-    let boolean_ctor_val = Value::BuiltinObject(boolean_ctor_fn, boolean_ctor_map.clone());
+    let boolean_ctor_val = Value::BuiltinObject(boolean_ctor_fn, boolean_ctor_map);
     set_builtin_length(&boolean_ctor_val, 1.0);
     set_builtin_name(&boolean_ctor_val, "Boolean");
     boolean_proto_map.borrow_mut().properties.insert(

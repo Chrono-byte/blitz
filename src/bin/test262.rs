@@ -53,6 +53,13 @@ use blitz::value::{
 };
 use blitz::{parser::Parser, runtime_utils, typecheck, vm::Vm};
 
+/// Calculates a percentage from two i64 values.
+/// This intentionally loses precision when converting i64 to f64 for display purposes.
+#[inline]
+fn calculate_percentage(numerator: i64, denominator: i64) -> f64 {
+    (numerator as f64) / (denominator as f64) * 100.0_f64
+}
+
 #[derive(Clone, Copy, Default)]
 /// Result statistics for a test bucket (pass/fail/skip counts).
 struct BucketStats {
@@ -79,9 +86,9 @@ impl BucketStats {
     fn pass_pct(self) -> f64 {
         let attempted = self.attempted();
         if attempted == 0 {
-            0.0
+            0.0_f64
         } else {
-            ((self.pass as i64) as f64) / ((attempted as i64) as f64) * 100.0
+            calculate_percentage(self.pass as i64, attempted as i64)
         }
     }
 }
@@ -2597,9 +2604,9 @@ fn main() {
 
     let passed = ran.saturating_sub(failed.len());
     let pass_pct = if ran == 0 {
-        0.0
+        0.0_f64
     } else {
-        ((passed as i64) as f64) / ((ran as i64) as f64) * 100.0
+        calculate_percentage(passed as i64, ran as i64)
     };
 
     let exit_code = if failed.is_empty() { 0 } else { 1 };
@@ -2794,7 +2801,7 @@ const ok = 1;
         write_file(&builtin_file, "const ok = 1;\n");
 
         let selected = select_files_to_run(
-            vec![builtin_file.clone(), es2024_file.clone(), es5_file.clone()],
+            vec![builtin_file, es2024_file, es5_file.clone()],
             &[],
             &[],
             &[],
@@ -2809,7 +2816,7 @@ const ok = 1;
     fn print_args_uses_js_stringification() {
         let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
         let intrinsics = runtime_utils::install_minimal_kernel_constructors(&globals);
-        let mut vm = Vm::new(globals.clone());
+        let mut vm = Vm::new(globals);
 
         let array_proto = intrinsics
             .array_prototype
@@ -2831,7 +2838,7 @@ const ok = 1;
     fn print_args_defaults_to_undefined_when_missing() {
         let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
         let _intrinsics = runtime_utils::install_minimal_kernel_constructors(&globals);
-        let mut vm = Vm::new(globals.clone());
+        let mut vm = Vm::new(globals);
 
         assert_eq!(print_args(&mut vm, &[]), "undefined");
     }
@@ -2917,7 +2924,7 @@ const x = 1;
         write_file(&excluded_dir.join("ignored.js"), "const nope = 1;\n");
 
         let mut out = Vec::new();
-        collect_tests(&root, &mut out, &[excluded_dir.clone()]);
+        collect_tests(&root, &mut out, &[excluded_dir]);
         out.sort();
 
         assert_eq!(out, vec![include_dir.join("good.js")]);

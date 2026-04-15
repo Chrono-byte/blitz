@@ -215,7 +215,7 @@ pub(crate) fn install_global_bindings(
     ));
     proxy_ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(proxy_proto_map.clone())),
+        PropertyDescriptor::data(Value::Object(proxy_proto_map)),
     );
     let proxy_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Proxy");

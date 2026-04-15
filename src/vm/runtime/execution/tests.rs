@@ -154,7 +154,7 @@ fn builtin_object_property_lookup_uses_props_and_prototype() {
     );
 
     let props = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-        proto.clone(),
+        proto,
     ))));
     props.borrow_mut().properties.insert(
         PropertyKey::String("own".to_string()),
@@ -215,7 +215,7 @@ fn get_property_ic_distinguishes_keys_at_same_slot() {
         PropertyKey::String("y".to_string()),
         PropertyDescriptor::data(Value::Number(2.0)),
     );
-    let obj = Value::Object(obj_data.clone());
+    let obj = Value::Object(obj_data);
 
     vm.chunk = Rc::new(Chunk {
         code: vec![0],
@@ -252,7 +252,7 @@ fn get_property_ic_invalidates_after_mutation() {
         .borrow_mut()
         .properties
         .insert(key.clone(), PropertyDescriptor::data(Value::Number(1.0)));
-    let obj = Value::Object(obj_data.clone());
+    let obj = Value::Object(obj_data);
 
     vm.chunk = Rc::new(Chunk {
         code: vec![0],
@@ -341,7 +341,7 @@ fn object_from_entries_set_prototype_of_and_to_locale_string_work() {
                 Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON
             ));
             assert!(matches!(
-                vm.get_property_host(&Value::Object(obj.clone()), &PropertyKey::String("b".to_string())).ok(),
+                vm.get_property_host(&Value::Object(obj), &PropertyKey::String("b".to_string())).ok(),
                 Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON
             ));
         }
@@ -456,9 +456,9 @@ fn array_at_returns_negative_index_and_slice_preserves_holes() {
         Some(Value::Array(arr, _)) => {
             let slots = arr.borrow();
             assert!(
-                matches!(slots.get(0).cloned().flatten(), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON)
+                matches!(slots.first().cloned().flatten(), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON)
             );
-            assert!(slots.get(1).is_some_and(|slot| slot.is_none()));
+            assert!(slots.get(1).is_some_and(Option::is_none));
         }
         other => panic!("expected array, got {:?}", other),
     }
@@ -476,7 +476,7 @@ fn array_of_builds_array_from_arguments() {
         Some(Value::Array(arr, props)) => {
             assert_eq!(arr.borrow().len(), 3);
             assert!(
-                matches!(arr.borrow().get(0).cloned().flatten(), Some(Value::Number(n)) if (n - 4.0).abs() < f64::EPSILON)
+                matches!(arr.borrow().first().cloned().flatten(), Some(Value::Number(n)) if (n - 4.0).abs() < f64::EPSILON)
             );
             assert!(
                 matches!(arr.borrow().get(1).cloned().flatten(), Some(Value::Number(n)) if (n - 5.0).abs() < f64::EPSILON)
@@ -500,7 +500,7 @@ fn array_of_builds_array_from_arguments() {
 fn same_value_uses_reference_identity_for_objects() {
     let obj = Rc::new(RefCell::new(ObjectData::new()));
     let a = Value::Object(obj.clone());
-    let b = Value::Object(obj.clone());
+    let b = Value::Object(obj);
     let c = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
 
     assert!(same_value(&a, &b));
@@ -578,7 +578,7 @@ fn dense_array_index_beyond_max_doesnt_dense_resize() {
         PropertyKey::String("length".to_string()),
         PropertyDescriptor::data(Value::Number(1.0)),
     );
-    let arr = Value::Array(arr_data.clone(), props.clone());
+    let arr = Value::Array(arr_data.clone(), props);
     let key = PropertyKey::String("4294967295".to_string());
 
     set_property(&arr, &key, Value::String("x".to_string())).unwrap();
@@ -604,7 +604,7 @@ fn sparse_array_index_updates_length_without_dense_resize() {
         PropertyKey::String("length".to_string()),
         PropertyDescriptor::data(Value::Number(1.0)),
     );
-    let arr = Value::Array(arr_data.clone(), props.clone());
+    let arr = Value::Array(arr_data.clone(), props);
     let key = PropertyKey::String("4294967294".to_string());
 
     set_property(&arr, &key, Value::Number(1.0)).unwrap();
@@ -633,7 +633,7 @@ fn dense_array_element_redefinition_preserves_configurability() {
         PropertyKey::String("length".to_string()),
         PropertyDescriptor::data(Value::Number(2.0)),
     );
-    let arr = Value::Array(arr_data.clone(), props.clone());
+    let arr = Value::Array(arr_data, props.clone());
     let getter = Value::Builtin(Rc::new(|_, _| Ok(Value::Undefined)));
     let mut desc = PartialDescriptor::default();
     desc.get = Some(getter);
@@ -685,21 +685,21 @@ fn reverse_with_length_shrink_clears_lower_index() {
                     &Value::Array(arr.clone(), props.clone()),
                     &PropertyKey::String("0".to_string())
                 )
-                .unwrap()
+                .expect("expected false, got true")
             );
             assert!(
                 vm.has_property_host(
                     &Value::Array(arr.clone(), props.clone()),
                     &PropertyKey::String("1".to_string())
                 )
-                .unwrap()
+                .expect("expected true, got false")
             );
             assert!(matches!(
                 vm.get_property_host(
-                    &Value::Array(arr.clone(), props.clone()),
+                    &Value::Array(arr, props),
                     &PropertyKey::String("1".to_string())
                 )
-                .unwrap(),
+                .expect("expected 'first', got something else"),
                 Value::String(ref s) if s == "first"
             ));
         }
@@ -1704,7 +1704,7 @@ fn object_keys_orders_indices_before_strings() {
 #[test]
 fn for_in_keys_walks_prototype_chain_without_duplicates() {
     let globals = test_globals();
-    let vm = Vm::new(globals.clone());
+    let vm = Vm::new(globals);
 
     let mut proto = ObjectData::new();
     proto.properties.insert(
@@ -1717,7 +1717,7 @@ fn for_in_keys_walks_prototype_chain_without_duplicates() {
     );
     let proto = Rc::new(RefCell::new(proto));
 
-    let mut obj = ObjectData::with_prototype(Value::Object(proto.clone()));
+    let mut obj = ObjectData::with_prototype(Value::Object(proto));
     obj.properties.insert(
         PropertyKey::String("a".to_string()),
         PropertyDescriptor::data(Value::Number(3.0)),

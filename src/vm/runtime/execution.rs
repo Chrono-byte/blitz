@@ -1605,14 +1605,13 @@ impl Vm {
                     .call_stack
                     .last()
                     .and_then(|frame| frame.upvalues.get(idx))
-                    .map(|spec| {
+                    .map_or((None, false, false), |spec| {
                         (
                             spec.mirror_global_name.clone(),
                             spec.immutable,
                             spec.sloppy_immutable_silent,
                         )
-                    })
-                    .unwrap_or((None, false, false));
+                    });
                 if immutable {
                     if self.is_strict_mode() || !sloppy_immutable_silent {
                         return Err(self.throw_type_error("Assignment to constant variable"));

@@ -27,13 +27,6 @@ use oxc_ast::ast as oast;
 use std::collections::HashSet;
 use std::rc::Rc;
 
-#[cfg(test)]
-use {
-    crate::{ObjectData, Value, Vm},
-    std::cell::RefCell,
-    std::collections::HashMap,
-};
-
 pub mod core;
 pub(crate) use core::{
     Compiler, FinallyPatchState, LabelPatchState, ModuleContext, Scope, ScopeKind,
@@ -450,6 +443,9 @@ impl Compiler {
     /// Transitional compiler entry that accepts an `oast::Program` reference.
     ///
     /// Uses a direct walker over `oast`.
+    ///
+    /// # Errors
+    /// Returns a `CompilerError` if compilation fails.
     pub fn compile_oxc(
         &mut self,
         program: &oast::Program<'_>,
@@ -461,6 +457,9 @@ impl Compiler {
     /// Compile with explicit mode control.
     /// In REPL mode, the last expression statement does not emit Pop,
     /// allowing the result to be returned.
+    ///
+    /// # Errors
+    /// Returns a `CompilerError` if compilation fails.
     pub fn compile_oxc_with_mode(
         &mut self,
         program: &oast::Program<'_>,
@@ -512,562 +511,574 @@ impl Compiler {
 }
 
 #[cfg(test)]
-fn walk_chunk_ops(chunk: &Chunk) -> Vec<(usize, Op)> {
-    let mut ops = Vec::new();
-    let mut ip = 0usize;
-    while ip < chunk.code.len() {
-        if let Some(op) = Op::from_byte((chunk.code[ip] & 0xFF) as u8) {
-            ops.push((ip, op));
-            // fixed-width model: one u32 per instruction
-            ip += 1;
-        } else {
-            ip += 1;
-        }
-    }
-    ops
-}
+mod test {
+    #![allow(clippy::as_conversions)]
+    #![allow(clippy::unwrap_used)]
+    use std::cell::RefCell;
+    use std::collections::{HashMap, HashSet};
+    use std::rc::Rc;
 
-#[test]
-fn compile_simple_for_loop() {
-    let src = "for (var i = 0; i < 3; i = i + 1) { console.log(i); }";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
+    use crate::{Chunk, ModuleContext, ObjectData, Value, Vm, compile_oxc_with_ctx};
+    use crate::{Op, compile};
 
-    // Ensure we emitted a conditional branch for the test and at least one
-    // unconditional Jump (back-jump / jump-over).
-    let mut saw_conditional_branch = false;
-    let mut saw_jump = false;
-    for (_, op) in walk_chunk_ops(&chunk) {
-        match op {
-            Op::JumpIfFalse | Op::CompareJump => saw_conditional_branch = true,
-            Op::Jump => saw_jump = true,
-            _ => {}
-        }
-    }
-
-    assert!(
-        saw_conditional_branch,
-        "expected conditional branch in compiled for-loop"
-    );
-    assert!(saw_jump, "expected Jump in compiled for-loop");
-}
-
-#[test]
-fn compile_for_with_continue() {
-    let src = "for (var i = 0; i < 3; i = i + 1) { if (i == 1) { continue; } console.log(i); }";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
-
-    // Expect multiple control-flow ops: one for the test exit, one for the
-    // back-jump, and at least one emitted for 'continue' which should be
-    // patched to jump to update.
-    let mut conditional_branch = 0usize;
-    let mut jump = 0usize;
-    for (_, op) in walk_chunk_ops(&chunk) {
-        match op {
-            Op::JumpIfFalse | Op::CompareJump => conditional_branch += 1,
-            Op::Jump => jump += 1,
-            _ => {}
-        }
-    }
-
-    assert!(
-        conditional_branch >= 1,
-        "expected at least one conditional branch"
-    );
-    assert!(
-        jump >= 2,
-        "expected at least two Jump opcodes (back-jump and continue)"
-    );
-}
-
-#[cfg(test)]
-fn opcode_width(op: Op) -> usize {
-    let _ = op;
-    1
-}
-
-#[test]
-fn static_member_ic_slots_are_unique_per_site() {
-    let src = "a.x; a.y; a.x;";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
-
-    let mut slots = Vec::new();
-    let mut i = 0usize;
-    while i < chunk.code.len() {
-        if let Some(op) = Op::from_byte((chunk.code[i] & 0xFF) as u8) {
-            if matches!(op, Op::GetProperty) {
-                let instr = chunk.code.get(i).copied().expect("instruction word");
-                let slot = (instr >> 8) & 0xFF;
-                slots.push(slot);
+    #[cfg(test)]
+    fn walk_chunk_ops(chunk: &Chunk) -> Vec<(usize, Op)> {
+        let mut ops = Vec::new();
+        let mut ip = 0usize;
+        while ip < chunk.code.len() {
+            if let Some(op) = Op::from_byte((chunk.code[ip] & 0xFF) as u8) {
+                ops.push((ip, op));
+                // fixed-width model: one u32 per instruction
+                ip += 1;
+            } else {
+                ip += 1;
             }
-            i += opcode_width(op);
-        } else {
-            i += 1;
         }
+        ops
     }
 
-    assert_eq!(slots, vec![0, 1, 2]);
-}
+    #[test]
+    fn compile_simple_for_loop() {
+        let src = "for (var i = 0; i < 3; i = i + 1) { console.log(i); }";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
 
-#[test]
-fn compile_for_loop_back_jump_targets_loop_start() {
-    let src = "for (var i = 0; i < 3; i = i + 1) {}";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
-
-    let mut loop_start = None;
-    let mut back_target = None;
-    for (ip, op) in walk_chunk_ops(&chunk) {
-        match op {
-            Op::GetGlobal if loop_start.is_none() => {
-                loop_start = Some(ip);
+        // Ensure we emitted a conditional branch for the test and at least one
+        // unconditional Jump (back-jump / jump-over).
+        let mut saw_conditional_branch = false;
+        let mut saw_jump = false;
+        for (_, op) in walk_chunk_ops(&chunk) {
+            match op {
+                Op::JumpIfFalse | Op::CompareJump => saw_conditional_branch = true,
+                Op::Jump => saw_jump = true,
+                _ => {}
             }
-            Op::Jump => {
-                let target = chunk.jump_target_from_ip(ip).map(|target| target as isize);
-                if target == loop_start.map(|v| v as isize) {
-                    back_target = target;
+        }
+
+        assert!(
+            saw_conditional_branch,
+            "expected conditional branch in compiled for-loop"
+        );
+        assert!(saw_jump, "expected Jump in compiled for-loop");
+    }
+
+    #[test]
+    fn compile_for_with_continue() {
+        let src = "for (var i = 0; i < 3; i = i + 1) { if (i == 1) { continue; } console.log(i); }";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
+
+        // Expect multiple control-flow ops: one for the test exit, one for the
+        // back-jump, and at least one emitted for 'continue' which should be
+        // patched to jump to update.
+        let mut conditional_branch = 0usize;
+        let mut jump = 0usize;
+        for (_, op) in walk_chunk_ops(&chunk) {
+            match op {
+                Op::JumpIfFalse | Op::CompareJump => conditional_branch += 1,
+                Op::Jump => jump += 1,
+                _ => {}
+            }
+        }
+
+        assert!(
+            conditional_branch >= 1,
+            "expected at least one conditional branch"
+        );
+        assert!(
+            jump >= 2,
+            "expected at least two Jump opcodes (back-jump and continue)"
+        );
+    }
+
+    #[cfg(test)]
+    fn opcode_width(op: Op) -> usize {
+        let _ = op;
+        1
+    }
+
+    #[test]
+    fn static_member_ic_slots_are_unique_per_site() {
+        let src = "a.x; a.y; a.x;";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
+
+        let mut slots = Vec::new();
+        let mut i = 0usize;
+        while i < chunk.code.len() {
+            if let Some(op) = Op::from_byte((chunk.code[i] & 0xFF) as u8) {
+                if matches!(op, Op::GetProperty) {
+                    let instr = chunk.code.get(i).copied().expect("instruction word");
+                    let slot = (instr >> 8_u32) & 0xFF;
+                    slots.push(slot);
                 }
+                i += opcode_width(op);
+            } else {
+                i += 1;
             }
-            _ => {}
         }
+
+        assert_eq!(slots, vec![0, 1, 2]);
     }
 
-    assert_eq!(back_target, loop_start.map(|v| v as isize));
-}
+    #[test]
+    fn compile_for_loop_back_jump_targets_loop_start() {
+        let src = "for (var i = 0; i < 3; i = i + 1) {}";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
 
-#[test]
-fn compile_new_expression_lowers_to_construct() {
-    let src = "new Array(1, 2, 3);";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
+        let mut loop_start = None;
+        let mut back_target = None;
+        for (ip, op) in walk_chunk_ops(&chunk) {
+            match op {
+                Op::GetGlobal if loop_start.is_none() => {
+                    loop_start = Some(ip);
+                }
+                Op::Jump => {
+                    let target = chunk.jump_target_from_ip(ip).map(|target| target as isize);
+                    if target == loop_start.map(|v| v as isize) {
+                        back_target = target;
+                    }
+                }
+                _ => {}
+            }
+        }
 
-    let saw_construct = chunk
-        .code
-        .iter()
-        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::Construct));
+        assert_eq!(back_target, loop_start.map(|v| v as isize));
+    }
 
-    assert!(
-        saw_construct,
-        "expected Construct opcode for lowered new expression"
-    );
-}
+    #[test]
+    fn compile_new_expression_lowers_to_construct() {
+        let src = "new Array(1, 2, 3);";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
 
-#[test]
-fn compile_update_expression_emits_store() {
-    let src = "for (var i = 0; i < 3; i++) {}";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
-
-    let saw_add = chunk
-        .code
-        .iter()
-        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::Add));
-    let saw_set_local = chunk
-        .code
-        .iter()
-        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::StoreLocal));
-
-    assert!(saw_add, "expected i++ to emit Add");
-    assert!(saw_set_local, "expected i++ to emit StoreLocal");
-}
-
-#[test]
-fn compile_member_call_uses_call_method() {
-    let src = "obj.method(1);";
-    let session = match crate::parser::Parser::parse_source(src) {
-        Ok(s) => s,
-        // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
-        Err(e) => panic!("parse_source failed: {:?}", e),
-    };
-    let program = session.program();
-    let chunk = match compile(program, session.source()) {
-        Ok(c) => c,
-        // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
-        Err(e) => panic!("compile failed: {:?}", e),
-    };
-
-    let saw_call_method = chunk
-        .code
-        .iter()
-        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::Call | Op::CallBuiltin));
-
-    assert!(saw_call_method, "expected member call to emit CallMethod");
-}
-
-#[test]
-fn compile_for_in_uses_get_builtin() {
-    let src = "for (var k in obj) {}";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
-
-    let saw_get_builtin = chunk
-        .code
-        .iter()
-        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::GetGlobal));
-
-    assert!(
-        saw_get_builtin,
-        "expected for-in lowering to emit GetBuiltin"
-    );
-}
-
-#[test]
-fn compile_rejects_calls_with_more_than_u8_arguments() {
-    let args = (0..256)
-        .map(|i| i.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let src = format!("f({args});");
-    let session = crate::parser::Parser::parse_source(&src).expect("parse ok");
-    let program = session.program();
-    let err = compile(program, session.source()).expect_err("compile should fail");
-
-    assert!(
-        err.to_string().contains("too many arguments in call"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn compile_generator_non_simple_params_keep_later_params_tdz() {
-    let src = "function* f(x = y, y) {}";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
-
-    let proto = chunk
-        .functions
-        .iter()
-        .find(|p| p.name == "f")
-        .expect("generator proto exists");
-
-    assert!(
-        proto
-            .slot_names
+        let saw_construct = chunk
+            .code
             .iter()
-            .any(|name| name.as_deref() == Some("y")),
-        "expected generator parameter y to have a local slot"
-    );
-    let y_slot = proto
-        .slot_names
-        .iter()
-        .position(|name| name.as_deref() == Some("y"))
-        .expect("y slot");
-    assert!(
-        proto.lexical_tdz.get(y_slot).copied().unwrap_or(false),
-        "later generator parameter y should start in TDZ"
-    );
+            .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
+            .any(|op| matches!(op, Op::Construct));
 
-    let mut ops = Vec::new();
-    let mut ip = 0usize;
-    while ip < proto.chunk.code.len() && ops.len() < 16 {
-        let op = Op::from_byte((proto.chunk.code[ip] & 0xFF) as u8).expect("valid opcode");
-        let width = opcode_width(op);
-        let operand = if matches!(op, Op::LoadLocal | Op::StoreLocal | Op::CloneLocalCell) {
-            proto.chunk.code.get(ip + 1).copied()
-        } else {
-            None
-        };
-        ops.push((op.name(), operand));
-        ip += width;
+        assert!(
+            saw_construct,
+            "expected Construct opcode for lowered new expression"
+        );
     }
-    eprintln!("generator proto ops: {:?}", ops);
-}
 
-#[test]
-fn compile_object_generator_method_emits_body() {
-    let src = "var o = { *m() { let x; eval(\"var x;\"); } };";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
+    #[test]
+    fn compile_update_expression_emits_store() {
+        let src = "for (var i = 0; i < 3; i++) {}";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
 
-    eprintln!(
-        "object generator function names: {:?}",
-        chunk
+        let saw_add = chunk
+            .code
+            .iter()
+            .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
+            .any(|op| matches!(op, Op::Add));
+        let saw_set_local = chunk
+            .code
+            .iter()
+            .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
+            .any(|op| matches!(op, Op::StoreLocal));
+
+        assert!(saw_add, "expected i++ to emit Add");
+        assert!(saw_set_local, "expected i++ to emit StoreLocal");
+    }
+
+    #[test]
+    fn compile_member_call_uses_call_method() {
+        let src = "obj.method(1);";
+        let session = match crate::parser::Parser::parse_source(src) {
+            Ok(s) => s,
+            // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
+            Err(e) => panic!("parse_source failed: {:?}", e),
+        };
+        let program = session.program();
+        let chunk = match compile(program, session.source()) {
+            Ok(c) => c,
+            // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
+            Err(e) => panic!("compile failed: {:?}", e),
+        };
+
+        let saw_call_method = chunk
+            .code
+            .iter()
+            .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
+            .any(|op| matches!(op, Op::Call | Op::CallBuiltin));
+
+        assert!(saw_call_method, "expected member call to emit CallMethod");
+    }
+
+    #[test]
+    fn compile_for_in_uses_get_builtin() {
+        let src = "for (var k in obj) {}";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
+
+        let saw_get_builtin = chunk
+            .code
+            .iter()
+            .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
+            .any(|op| matches!(op, Op::GetGlobal));
+
+        assert!(
+            saw_get_builtin,
+            "expected for-in lowering to emit GetBuiltin"
+        );
+    }
+
+    #[test]
+    fn compile_rejects_calls_with_more_than_u8_arguments() {
+        let args = (0..256)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let src = format!("f({args});");
+        let session = crate::parser::Parser::parse_source(&src).expect("parse ok");
+        let program = session.program();
+        let err = compile(program, session.source()).expect_err("compile should fail");
+
+        assert!(
+            err.to_string().contains("too many arguments in call"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn compile_generator_non_simple_params_keep_later_params_tdz() {
+        let src = "function* f(x = y, y) {}";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
+
+        let proto = chunk
             .functions
             .iter()
-            .map(|p| (p.name.clone(), p.chunk.code.len(), p.is_generator))
-            .collect::<Vec<_>>()
-    );
-    let proto = chunk
-        .functions
-        .iter()
-        .find(|p| p.is_generator)
-        .expect("object generator proto exists");
+            .find(|p| p.name == "f")
+            .expect("generator proto exists");
 
-    eprintln!(
-        "object generator proto: code_len={} consts={} slots={} tdz={:?}",
-        proto.chunk.code.len(),
-        proto.chunk.constants.len(),
-        proto.slot_names.len(),
-        proto.lexical_tdz
-    );
-    let mut ops = Vec::new();
-    let mut ip = 0usize;
-    while ip < proto.chunk.code.len() && ops.len() < 24 {
-        let op = Op::from_byte((proto.chunk.code[ip] & 0xFF) as u8).expect("valid opcode");
-        let width = opcode_width(op);
-        ops.push(op.name());
-        ip += width;
+        assert!(
+            proto
+                .slot_names
+                .iter()
+                .any(|name| name.as_deref() == Some("y")),
+            "expected generator parameter y to have a local slot"
+        );
+        let y_slot = proto
+            .slot_names
+            .iter()
+            .position(|name| name.as_deref() == Some("y"))
+            .expect("y slot");
+        assert!(
+            proto.lexical_tdz.get(y_slot).copied().unwrap_or(false),
+            "later generator parameter y should start in TDZ"
+        );
+
+        let mut ops = Vec::new();
+        let mut ip = 0usize;
+        while ip < proto.chunk.code.len() && ops.len() < 16 {
+            let op = Op::from_byte((proto.chunk.code[ip] & 0xFF) as u8).expect("valid opcode");
+            let width = opcode_width(op);
+            let operand = if matches!(op, Op::LoadLocal | Op::StoreLocal | Op::CloneLocalCell) {
+                proto.chunk.code.get(ip + 1).copied()
+            } else {
+                None
+            };
+            ops.push((op.name(), operand));
+            ip += width;
+        }
+        eprintln!("generator proto ops: {:?}", ops);
     }
-    eprintln!("object generator proto ops: {:?}", ops);
 
-    assert!(
-        !proto.chunk.code.is_empty(),
-        "object generator method should emit bytecode"
-    );
-}
+    #[test]
+    fn compile_object_generator_method_emits_body() {
+        let src = "var o = { *m() { let x; eval(\"var x;\"); } };";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
 
-#[test]
-fn compile_dynamic_import_uses_get_builtin() {
-    let src = "import('./dep.js');";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
+        eprintln!(
+            "object generator function names: {:?}",
+            chunk
+                .functions
+                .iter()
+                .map(|p| (p.name.clone(), p.chunk.code.len(), p.is_generator))
+                .collect::<Vec<_>>()
+        );
+        let proto = chunk
+            .functions
+            .iter()
+            .find(|p| p.is_generator)
+            .expect("object generator proto exists");
 
-    let saw_get_builtin = chunk
-        .code
-        .iter()
-        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::GetBuiltin));
+        eprintln!(
+            "object generator proto: code_len={} consts={} slots={} tdz={:?}",
+            proto.chunk.code.len(),
+            proto.chunk.constants.len(),
+            proto.slot_names.len(),
+            proto.lexical_tdz
+        );
+        let mut ops = Vec::new();
+        let mut ip = 0usize;
+        while ip < proto.chunk.code.len() && ops.len() < 24 {
+            let op = Op::from_byte((proto.chunk.code[ip] & 0xFF) as u8).expect("valid opcode");
+            let width = opcode_width(op);
+            ops.push(op.name());
+            ip += width;
+        }
+        eprintln!("object generator proto ops: {:?}", ops);
 
-    assert!(
-        saw_get_builtin,
-        "expected dynamic import to emit GetBuiltin"
-    );
-}
+        assert!(
+            !proto.chunk.code.is_empty(),
+            "object generator method should emit bytecode"
+        );
+    }
 
-#[test]
-fn compile_sequence_expression_keeps_last_value() {
-    let src = "var x = (a = 1, 2);";
-    let session = crate::parser::Parser::parse_source(src)
-        .unwrap_or_else(|e| panic!("parse_source failed: {:?}", e));
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
+    #[test]
+    fn compile_dynamic_import_uses_get_builtin() {
+        let src = "import('./dep.js');";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
 
-    let saw_pop = chunk
-        .code
-        .iter()
-        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::Pop));
+        let saw_get_builtin = chunk
+            .code
+            .iter()
+            .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
+            .any(|op| matches!(op, Op::GetBuiltin));
 
-    assert!(
-        saw_pop,
-        "expected sequence expression to emit Pop for intermediate values"
-    );
-}
+        assert!(
+            saw_get_builtin,
+            "expected dynamic import to emit GetBuiltin"
+        );
+    }
 
-#[test]
-fn imported_binding_assignment_is_rejected() {
-    let src = "a = 1;";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let ctx = ModuleContext {
-        module_index: 0,
-        imports: HashMap::from([(String::from("a"), (1usize, String::from("value")))]),
-        exports: HashSet::new(),
-    };
+    #[test]
+    fn compile_sequence_expression_keeps_last_value() {
+        let src = "var x = (a = 1, 2);";
+        let session = crate::parser::Parser::parse_source(src)
+            .unwrap_or_else(|e| panic!("parse_source failed: {:?}", e));
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
 
-    let err = compile_oxc_with_ctx(program, Some(&ctx), session.source())
-        .expect_err("compile should fail");
-    assert!(
-        err.to_string().contains("imported binding"),
-        "unexpected error: {err}"
-    );
-}
+        let saw_pop = chunk
+            .code
+            .iter()
+            .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
+            .any(|op| matches!(op, Op::Pop));
 
-#[test]
-fn strict_assignment_to_arguments_is_rejected() {
-    let src = r#"
+        assert!(
+            saw_pop,
+            "expected sequence expression to emit Pop for intermediate values"
+        );
+    }
+
+    #[test]
+    fn imported_binding_assignment_is_rejected() {
+        let src = "a = 1;";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let ctx = ModuleContext {
+            module_index: 0,
+            imports: HashMap::from([(String::from("a"), (1usize, String::from("value")))]),
+            exports: HashSet::new(),
+        };
+
+        let err = compile_oxc_with_ctx(program, Some(&ctx), session.source())
+            .expect_err("compile should fail");
+        assert!(
+            err.to_string().contains("imported binding"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn strict_assignment_to_arguments_is_rejected() {
+        let src = r#"
         function testcase() {
             'use strict';
             arguments = 7;
         }
     "#;
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
 
-    let err = compile(program, session.source()).expect_err("compile should fail");
-    assert!(
-        err.to_string().contains("not allowed in strict mode"),
-        "unexpected error: {err}"
-    );
-}
+        let err = compile(program, session.source()).expect_err("compile should fail");
+        assert!(
+            err.to_string().contains("not allowed in strict mode"),
+            "unexpected error: {err}"
+        );
+    }
 
-#[test]
-fn nullish_coalescing_is_supported() {
-    let src = "1 ?? 2;";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
+    #[test]
+    fn nullish_coalescing_is_supported() {
+        let src = "1 ?? 2;";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
 
-    let chunk = compile(program, session.source()).expect("compile ok");
-    let saw_coalesce = chunk
-        .code
-        .iter()
-        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::JumpIfNullish));
-    assert!(
-        saw_coalesce,
-        "expected nullish coalescing lowering to emit JumpIfNullish"
-    );
-}
+        let chunk = compile(program, session.source()).expect("compile ok");
+        let saw_coalesce = chunk
+            .code
+            .iter()
+            .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
+            .any(|op| matches!(op, Op::JumpIfNullish));
+        assert!(
+            saw_coalesce,
+            "expected nullish coalescing lowering to emit JumpIfNullish"
+        );
+    }
 
-#[test]
-fn comparison_branches_use_compare_jump() {
-    let src = "if (a === b) { 1; } else { 2; } a === b ? 1 : 2;";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
+    #[test]
+    fn comparison_branches_use_compare_jump() {
+        let src = "if (a === b) { 1; } else { 2; } a === b ? 1 : 2;";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
 
-    let chunk = compile(program, session.source()).expect("compile ok");
-    let saw_compare_jump = chunk
-        .code
-        .iter()
-        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::CompareJump));
-    assert!(
-        saw_compare_jump,
-        "expected comparison branching to emit CompareJump"
-    );
-}
+        let chunk = compile(program, session.source()).expect("compile ok");
+        let saw_compare_jump = chunk
+            .code
+            .iter()
+            .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
+            .any(|op| matches!(op, Op::CompareJump));
+        assert!(
+            saw_compare_jump,
+            "expected comparison branching to emit CompareJump"
+        );
+    }
 
-#[test]
-fn while_compare_jump_preserves_compare_opcode_payload() {
-    let src = "var s = \"\"; while (s.length < 4) { s = \"0\" + s; }";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
+    #[test]
+    fn while_compare_jump_preserves_compare_opcode_payload() {
+        let src = "var s = \"\"; while (s.length < 4) { s = \"0\" + s; }";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
 
-    let chunk = compile(program, session.source()).expect("compile ok");
-    let compare = chunk
-        .code
-        .iter()
-        .find_map(|instr| {
-            let op = Op::from_byte((*instr & 0xFF) as u8)?;
-            if matches!(op, Op::CompareJump) {
-                Some((instr >> 8) & 0xFF)
-            } else {
-                None
-            }
-        })
-        .expect("expected CompareJump in while loop");
-    assert_eq!(
-        compare, 2,
-        "while condition should preserve LessThan compare op"
-    );
-}
+        let chunk = compile(program, session.source()).expect("compile ok");
+        let compare = chunk
+            .code
+            .iter()
+            .find_map(|instr| {
+                let op = Op::from_byte((*instr & 0xFF) as u8)?;
+                if matches!(op, Op::CompareJump) {
+                    Some((instr >> 8) & 0xFF)
+                } else {
+                    None
+                }
+            })
+            .expect("expected CompareJump in while loop");
+        assert_eq!(
+            compare, 2,
+            "while condition should preserve LessThan compare op"
+        );
+    }
 
-#[test]
-fn compile_for_of_emits_iterator_ops() {
-    let src = "for (var x of [1, 2, 3]) {}";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
+    #[test]
+    fn compile_for_of_emits_iterator_ops() {
+        let src = "for (var x of [1, 2, 3]) {}";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
 
-    let ops: Vec<_> = chunk
-        .code
-        .iter()
-        .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .collect();
-    assert!(ops.iter().any(|op| matches!(op, Op::IteratorNext)));
-    assert!(ops.iter().any(|op| matches!(op, Op::GetProperty)));
-}
+        let ops: Vec<_> = chunk
+            .code
+            .iter()
+            .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
+            .collect();
+        assert!(ops.iter().any(|op| matches!(op, Op::IteratorNext)));
+        assert!(ops.iter().any(|op| matches!(op, Op::GetProperty)));
+    }
 
-#[test]
-fn for_of_over_array_executes() {
-    let src = "var sum = 0; for (var x of [1, 2, 3]) { sum = sum + x; } sum;";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
+    #[test]
+    fn for_of_over_array_executes() {
+        let src = "var sum = 0; for (var x of [1, 2, 3]) { sum = sum + x; } sum;";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
 
-    let globals = Rc::new(RefCell::new(ObjectData::new()));
-    globals.borrow_mut().properties.insert(
-        crate::value::PropertyKey::String("globalThis".to_string()),
-        crate::value::PropertyDescriptor::data(Value::Object(globals.clone())),
-    );
-    let mut vm = Vm::new(globals);
-    let _ = vm.run(chunk).expect("run ok");
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        globals.borrow_mut().properties.insert(
+            crate::value::PropertyKey::String("globalThis".to_string()),
+            crate::value::PropertyDescriptor::data(Value::Object(globals.clone())),
+        );
+        let mut vm = Vm::new(globals);
+        let _ = vm.run(chunk).expect("run ok");
 
-    assert!(
-        matches!(vm.get_global("sum"), Some(Value::Number(n)) if (n - 6.0).abs() < f64::EPSILON)
-    );
-}
+        assert!(
+            matches!(vm.get_global("sum"), Some(Value::Number(n)) if (n - 6.0).abs() < f64::EPSILON)
+        );
+    }
 
-#[test]
-fn computed_member_compound_assignment_evaluates_reference_once() {
-    let src = r#"
+    #[test]
+    fn computed_member_compound_assignment_evaluates_reference_once() {
+        let src = r#"
         globalThis.hits = 0;
         var obj = { value: 1 };
         function key() { globalThis.hits = globalThis.hits + 1; return "value"; }
         obj[key()] += 2;
     "#;
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
 
-    let globals = Rc::new(RefCell::new(ObjectData::new()));
-    globals.borrow_mut().properties.insert(
-        crate::value::PropertyKey::String("globalThis".to_string()),
-        crate::value::PropertyDescriptor::data(Value::Object(globals.clone())),
-    );
-    let mut vm = Vm::new(globals);
-    let _ = vm.run(chunk).expect("run ok");
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        globals.borrow_mut().properties.insert(
+            crate::value::PropertyKey::String("globalThis".to_string()),
+            crate::value::PropertyDescriptor::data(Value::Object(globals.clone())),
+        );
+        let mut vm = Vm::new(globals);
+        let _ = vm.run(chunk).expect("run ok");
 
-    assert!(
-        matches!(vm.get_global("hits"), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON),
-        "unexpected hits value: {:?}",
-        vm.get_global("hits")
-    );
-}
+        assert!(
+            matches!(vm.get_global("hits"), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON),
+            "unexpected hits value: {:?}",
+            vm.get_global("hits")
+        );
+    }
 
-#[test]
-fn member_postfix_update_returns_old_value_and_stores_new_value() {
-    let src = r#"
+    #[test]
+    fn member_postfix_update_returns_old_value_and_stores_new_value() {
+        let src = r#"
         var obj = { value: 1 };
         var old = obj.value++;
     "#;
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
 
-    let globals = Rc::new(RefCell::new(ObjectData::new()));
-    globals.borrow_mut().properties.insert(
-        crate::value::PropertyKey::String("globalThis".to_string()),
-        crate::value::PropertyDescriptor::data(Value::Object(globals.clone())),
-    );
-    let mut vm = Vm::new(globals);
-    let _ = vm.run(chunk).expect("run ok");
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        globals.borrow_mut().properties.insert(
+            crate::value::PropertyKey::String("globalThis".to_string()),
+            crate::value::PropertyDescriptor::data(Value::Object(globals.clone())),
+        );
+        let mut vm = Vm::new(globals);
+        let _ = vm.run(chunk).expect("run ok");
 
-    assert!(
-        matches!(vm.get_global("old"), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON)
-    );
-}
+        assert!(
+            matches!(vm.get_global("old"), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON)
+        );
+    }
 
-#[test]
-fn block_scoped_let_does_not_escape_block() {
-    let src = "{ let x = 1; } x = 2;";
-    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
-    let program = session.program();
-    let chunk = compile(program, session.source()).expect("compile ok");
+    #[test]
+    fn block_scoped_let_does_not_escape_block() {
+        let src = "{ let x = 1; } x = 2;";
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+        let program = session.program();
+        let chunk = compile(program, session.source()).expect("compile ok");
 
-    let globals = Rc::new(RefCell::new(ObjectData::new()));
-    let mut vm = Vm::new(globals);
-    vm.run(chunk).expect("run ok");
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        let mut vm = Vm::new(globals);
+        vm.run(chunk).expect("run ok");
 
-    assert!(
-        matches!(vm.get_global("x"), Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON),
-        "block-local binding should not leak past its block"
-    );
+        assert!(
+            matches!(vm.get_global("x"), Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON),
+            "block-local binding should not leak past its block"
+        );
+    }
 }
