@@ -405,11 +405,17 @@ impl Compiler {
                     slot
                 };
                 let loop_start = self.chunk.code.len();
-                self.compile_expr_oast(&w.test)?;
-                self.emit(Op::JumpIfFalse, LINE);
-                let exit_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
+                let exit_jump =
+                    if let Some(jump_over) = self.try_emit_compare_jump_if_false(&w.test)? {
+                        Some(jump_over)
+                    } else {
+                        self.compile_expr_oast(&w.test)?;
+                        self.emit(Op::JumpIfFalse, LINE);
+                        let exit_jump = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        Some(exit_jump)
+                    };
                 self.enter_block_scope();
                 self.compile_statement_oast_with_mode(&w.body, false, Some(loop_completion_slot))?;
                 self.exit_scope();
@@ -427,8 +433,10 @@ impl Compiler {
                 if owns_completion_slot {
                     self.emit(Op::LoadLocal, LINE);
                     self.emit_byte(loop_completion_slot as u8, LINE);
-                    self.patch_jump_to_target(exit_jump, cleanup_start);
-                } else {
+                    if let Some(exit_jump) = exit_jump {
+                        self.patch_jump_to_target(exit_jump, cleanup_start);
+                    }
+                } else if let Some(exit_jump) = exit_jump {
                     self.patch_jump(exit_jump);
                 }
                 if let Some(patches) = self.break_patches.pop() {
@@ -474,11 +482,17 @@ impl Compiler {
                 self.compile_statement_oast_with_mode(&d.body, false, Some(loop_completion_slot))?;
                 self.exit_scope();
                 let test_start = self.chunk.code.len();
-                self.compile_expr_oast(&d.test)?;
-                self.emit(Op::JumpIfFalse, LINE);
-                let exit_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
+                let exit_jump =
+                    if let Some(jump_over) = self.try_emit_compare_jump_if_false(&d.test)? {
+                        Some(jump_over)
+                    } else {
+                        self.compile_expr_oast(&d.test)?;
+                        self.emit(Op::JumpIfFalse, LINE);
+                        let exit_jump = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        Some(exit_jump)
+                    };
                 self.emit(Op::Jump, LINE);
                 let _back_jump_pos = self.chunk.code.len();
                 let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
@@ -492,8 +506,10 @@ impl Compiler {
                 if owns_completion_slot {
                     self.emit(Op::LoadLocal, LINE);
                     self.emit_byte(loop_completion_slot as u8, LINE);
-                    self.patch_jump_to_target(exit_jump, cleanup_start);
-                } else {
+                    if let Some(exit_jump) = exit_jump {
+                        self.patch_jump_to_target(exit_jump, cleanup_start);
+                    }
+                } else if let Some(exit_jump) = exit_jump {
                     self.patch_jump(exit_jump);
                 }
                 if let Some(patches) = self.break_patches.pop() {
@@ -594,12 +610,16 @@ impl Compiler {
 
                 let loop_start = self.chunk.code.len();
                 let exit_jump = if let Some(test) = &f.test {
-                    self.compile_expr_oast(test)?;
-                    self.emit(Op::JumpIfFalse, LINE);
-                    let exit_jump = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
-                    Some(exit_jump)
+                    if let Some(jump_over) = self.try_emit_compare_jump_if_false(test)? {
+                        Some(jump_over)
+                    } else {
+                        self.compile_expr_oast(test)?;
+                        self.emit(Op::JumpIfFalse, LINE);
+                        let exit_jump = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        Some(exit_jump)
+                    }
                 } else {
                     None
                 };

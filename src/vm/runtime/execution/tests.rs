@@ -4,6 +4,7 @@ use crate::parser::Parser;
 use crate::runtime_utils;
 use crate::runtime_utils::strict_equal;
 use crate::typecheck;
+use crate::value::ArrayData;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -355,6 +356,9 @@ fn array_includes_uses_same_value_zero_and_index_of_uses_strict_equality() {
             var arr = [NaN, 1];
             var includes_nan = arr.includes(NaN);
             var index_of_nan = arr.indexOf(NaN);
+            globalThis.arr_len = arr.length;
+            globalThis.arr_0 = arr[0];
+            globalThis.arr_1 = arr[1];
         "#,
     );
 
@@ -365,6 +369,36 @@ fn array_includes_uses_same_value_zero_and_index_of_uses_strict_equality() {
     assert!(matches!(
         vm.get_global("index_of_nan"),
         Some(Value::Number(n)) if (n + 1.0).abs() < f64::EPSILON
+    ));
+}
+
+#[test]
+fn dense_array_property_lookup_sees_index_and_length() {
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    let arr_data = Rc::new(RefCell::new(ArrayData::from(vec![
+        Some(Value::Number(f64::NAN)),
+        Some(Value::Number(1.0)),
+    ])));
+    let props = Rc::new(RefCell::new(ObjectData::new()));
+    props.borrow_mut().properties.insert(
+        PropertyKey::String("length".to_string()),
+        PropertyDescriptor::data(Value::Number(2.0)),
+    );
+    let arr = Value::Array(arr_data, props);
+
+    assert!(
+        vm.has_property_host(&arr, &PropertyKey::String("length".to_string()))
+            .unwrap()
+    );
+    assert!(
+        vm.has_property_host(&arr, &PropertyKey::String("0".to_string()))
+            .unwrap()
+    );
+    assert!(matches!(
+        vm.get_property_host(&arr, &PropertyKey::String("0".to_string()))
+            .unwrap(),
+        Value::Number(n) if n.is_nan()
     ));
 }
 
@@ -501,7 +535,9 @@ fn to_number_rejects_signed_radix_prefixed_strings() {
 
 #[test]
 fn dense_array_index_beyond_max_doesnt_dense_resize() {
-    let arr_data = Rc::new(RefCell::new(vec![Some(Value::Number(0.0))]));
+    let arr_data = Rc::new(RefCell::new(ArrayData::from(vec![Some(Value::Number(
+        0.0,
+    ))])));
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
         PropertyKey::String("length".to_string()),
@@ -525,7 +561,9 @@ fn dense_array_index_beyond_max_doesnt_dense_resize() {
 
 #[test]
 fn sparse_array_index_updates_length_without_dense_resize() {
-    let arr_data = Rc::new(RefCell::new(vec![Some(Value::Number(0.0))]));
+    let arr_data = Rc::new(RefCell::new(ArrayData::from(vec![Some(Value::Number(
+        0.0,
+    ))])));
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
         PropertyKey::String("length".to_string()),
@@ -551,10 +589,10 @@ fn sparse_array_index_updates_length_without_dense_resize() {
 fn dense_array_element_redefinition_preserves_configurability() {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    let arr_data = Rc::new(RefCell::new(vec![
+    let arr_data = Rc::new(RefCell::new(ArrayData::from(vec![
         Some(Value::Number(1.0)),
         Some(Value::Number(2.0)),
-    ]));
+    ])));
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
         PropertyKey::String("length".to_string()),

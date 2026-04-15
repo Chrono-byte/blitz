@@ -4,7 +4,7 @@ use std::rc::Rc;
 use crate::Vm;
 use crate::ecmascript::semantics::usize_to_f64;
 use crate::runtime_utils::canonical_index_key;
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::{RuntimeError, gc};
 use num_traits::ToPrimitive;
 
@@ -307,9 +307,9 @@ pub(crate) fn usize_to_decimal_string(value: usize) -> String {
 }
 
 pub(crate) fn array_from_values(values: Vec<Value>) -> Value {
-    let arr_rc = Rc::new(RefCell::new(
+    let arr_rc = Rc::new(RefCell::new(ArrayData::from(
         values.into_iter().map(Some).collect::<Vec<_>>(),
-    ));
+    )));
     let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     props.borrow_mut().properties.insert(
         PropertyKey::String("length".to_string()),

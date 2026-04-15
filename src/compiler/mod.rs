@@ -534,20 +534,21 @@ fn compile_simple_for_loop() {
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
 
-    // Ensure we emitted a JumpIfFalse (test) and at least one Jump (back/jump-over)
-    let mut saw_jump_if_false = false;
+    // Ensure we emitted a conditional branch for the test and at least one
+    // unconditional Jump (back-jump / jump-over).
+    let mut saw_conditional_branch = false;
     let mut saw_jump = false;
     for (_, op) in walk_chunk_ops(&chunk) {
         match op {
-            Op::JumpIfFalse => saw_jump_if_false = true,
+            Op::JumpIfFalse | Op::CompareJump => saw_conditional_branch = true,
             Op::Jump => saw_jump = true,
             _ => {}
         }
     }
 
     assert!(
-        saw_jump_if_false,
-        "expected JumpIfFalse in compiled for-loop"
+        saw_conditional_branch,
+        "expected conditional branch in compiled for-loop"
     );
     assert!(saw_jump, "expected Jump in compiled for-loop");
 }
@@ -559,19 +560,23 @@ fn compile_for_with_continue() {
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
 
-    // Expect multiple Jump opcodes: one for the test exit, one for the back-jump,
-    // and at least one emitted for 'continue' which should be patched to jump to update.
-    let mut jump_if_false = 0usize;
+    // Expect multiple control-flow ops: one for the test exit, one for the
+    // back-jump, and at least one emitted for 'continue' which should be
+    // patched to jump to update.
+    let mut conditional_branch = 0usize;
     let mut jump = 0usize;
     for (_, op) in walk_chunk_ops(&chunk) {
         match op {
-            Op::JumpIfFalse => jump_if_false += 1,
+            Op::JumpIfFalse | Op::CompareJump => conditional_branch += 1,
             Op::Jump => jump += 1,
             _ => {}
         }
     }
 
-    assert!(jump_if_false >= 1, "expected at least one JumpIfFalse");
+    assert!(
+        conditional_branch >= 1,
+        "expected at least one conditional branch"
+    );
     assert!(
         jump >= 2,
         "expected at least two Jump opcodes (back-jump and continue)"
@@ -696,7 +701,7 @@ fn compile_member_call_uses_call_method() {
         .code
         .iter()
         .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::Call));
+        .any(|op| matches!(op, Op::Call | Op::CallBuiltin));
 
     assert!(saw_call_method, "expected member call to emit CallMethod");
 }
@@ -838,7 +843,7 @@ fn compile_dynamic_import_uses_get_builtin() {
         .code
         .iter()
         .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-        .any(|op| matches!(op, Op::GetGlobal));
+        .any(|op| matches!(op, Op::GetBuiltin));
 
     assert!(
         saw_get_builtin,

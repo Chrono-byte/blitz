@@ -1437,21 +1437,37 @@ impl super::Compiler {
                     self.emit(Op::HasProperty, LINE);
                     return Ok(());
                 }
+                let compare_cond_type = match b.operator {
+                    oast::BinaryOperator::Equality => Some(0),
+                    oast::BinaryOperator::Inequality => Some(1),
+                    oast::BinaryOperator::LessThan => Some(2),
+                    oast::BinaryOperator::LessEqualThan => Some(3),
+                    oast::BinaryOperator::GreaterThan => Some(4),
+                    oast::BinaryOperator::GreaterEqualThan => Some(5),
+                    oast::BinaryOperator::StrictEquality => Some(6),
+                    oast::BinaryOperator::StrictInequality => Some(7),
+                    _ => None,
+                };
+                if let Some(cond_type) = compare_cond_type {
+                    self.compile_expr_oast(&b.left)?;
+                    self.compile_expr_oast(&b.right)?;
+                    self.emit_with_payload(Op::CompareJump, cond_type as u32, LINE);
+                    let jump_false = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.emit(Op::True, LINE);
+                    self.emit(Op::Jump, LINE);
+                    let jump_end = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.patch_jump(jump_false);
+                    self.emit(Op::False, LINE);
+                    self.patch_jump(jump_end);
+                    return Ok(());
+                }
                 self.compile_expr_oast(&b.left)?;
                 self.compile_expr_oast(&b.right)?;
                 match b.operator {
-                    oast::BinaryOperator::Equality
-                    | oast::BinaryOperator::StrictEquality
-                    | oast::BinaryOperator::Inequality
-                    | oast::BinaryOperator::StrictInequality
-                    | oast::BinaryOperator::LessThan
-                    | oast::BinaryOperator::LessEqualThan
-                    | oast::BinaryOperator::GreaterThan
-                    | oast::BinaryOperator::GreaterEqualThan => {
-                        return Err(crate::errors::CompilerError::from(
-                            "comparison operators must be used in conditional contexts (if, while, etc.)",
-                        ));
-                    }
                     oast::BinaryOperator::Addition => self.emit(Op::Add, LINE),
                     oast::BinaryOperator::Subtraction => self.emit(Op::Sub, LINE),
                     oast::BinaryOperator::Multiplication => self.emit(Op::Mul, LINE),
@@ -1864,7 +1880,7 @@ impl super::Compiler {
                     }
                     self.emit_super_property_get_static(m.property.name.as_str(), true)?;
                     let arg_count = self.compile_call_arguments(&c.arguments)?;
-                    self.emit_call_with_arg_count(Op::Call, arg_count)?;
+                    self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
                     return Ok(());
                 }
 
@@ -1878,12 +1894,12 @@ impl super::Compiler {
                     }
                     self.emit_super_property_get_computed(&m.expression, true)?;
                     let arg_count = self.compile_call_arguments(&c.arguments)?;
-                    self.emit_call_with_arg_count(Op::Call, arg_count)?;
+                    self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
                     return Ok(());
                 }
 
                 if let OExpr::StaticMemberExpression(m) = &c.callee {
-                    let is_optional_call = c.optional;
+                    let _is_optional_call = c.optional;
 
                     if m.optional {
                         self.compile_optional_member_access(&m.object, |this: &mut Self| {
@@ -1904,15 +1920,12 @@ impl super::Compiler {
                     }
 
                     let arg_count = self.compile_call_arguments(&c.arguments)?;
-                    self.emit_call_with_arg_count(
-                        if is_optional_call { Op::Call } else { Op::Call },
-                        arg_count,
-                    )?;
+                    self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
                     return Ok(());
                 }
 
                 if let OExpr::ComputedMemberExpression(m) = &c.callee {
-                    let is_optional_call = c.optional;
+                    let _is_optional_call = c.optional;
 
                     if m.optional {
                         self.compile_optional_member_access(&m.object, |this: &mut Self| {
@@ -1929,15 +1942,12 @@ impl super::Compiler {
                     }
 
                     let arg_count = self.compile_call_arguments(&c.arguments)?;
-                    self.emit_call_with_arg_count(
-                        if is_optional_call { Op::Call } else { Op::Call },
-                        arg_count,
-                    )?;
+                    self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
                     return Ok(());
                 }
 
                 if let OExpr::PrivateFieldExpression(m) = &c.callee {
-                    let is_optional_call = c.optional;
+                    let _is_optional_call = c.optional;
 
                     if m.optional {
                         self.compile_optional_member_access(&m.object, |this: &mut Self| {
@@ -1956,10 +1966,7 @@ impl super::Compiler {
                     }
 
                     let arg_count = self.compile_call_arguments(&c.arguments)?;
-                    self.emit_call_with_arg_count(
-                        if is_optional_call { Op::Call } else { Op::Call },
-                        arg_count,
-                    )?;
+                    self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
                     return Ok(());
                 }
 

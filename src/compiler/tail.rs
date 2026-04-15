@@ -168,7 +168,7 @@ impl super::Compiler {
             }
             self.emit_super_property_get_static(m.property.name.as_str(), true)?;
             let arg_count = self.compile_call_arguments(&c.arguments)?;
-            self.emit_call_with_arg_count(Op::Call, arg_count)?;
+            self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
             return Ok(());
         }
 
@@ -182,12 +182,12 @@ impl super::Compiler {
             }
             self.emit_super_property_get_computed(&m.expression, true)?;
             let arg_count = self.compile_call_arguments(&c.arguments)?;
-            self.emit_call_with_arg_count(Op::Call, arg_count)?;
+            self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
             return Ok(());
         }
 
         if let oast::Expression::StaticMemberExpression(m) = &c.callee {
-            let is_optional_call = c.optional;
+            let _is_optional_call = c.optional;
 
             if m.optional {
                 self.compile_optional_member_access(&m.object, |this| {
@@ -208,15 +208,12 @@ impl super::Compiler {
             }
 
             let arg_count = self.compile_call_arguments(&c.arguments)?;
-            self.emit_call_with_arg_count(
-                if is_optional_call { Op::Call } else { Op::Call },
-                arg_count,
-            )?;
+            self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
             return Ok(());
         }
 
         if let oast::Expression::ComputedMemberExpression(m) = &c.callee {
-            let is_optional_call = c.optional;
+            let _is_optional_call = c.optional;
 
             if m.optional {
                 self.compile_optional_member_access(&m.object, |this| {
@@ -233,15 +230,12 @@ impl super::Compiler {
             }
 
             let arg_count = self.compile_call_arguments(&c.arguments)?;
-            self.emit_call_with_arg_count(
-                if is_optional_call { Op::Call } else { Op::Call },
-                arg_count,
-            )?;
+            self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
             return Ok(());
         }
 
         if let oast::Expression::PrivateFieldExpression(m) = &c.callee {
-            let is_optional_call = c.optional;
+            let _is_optional_call = c.optional;
 
             if m.optional {
                 self.compile_optional_member_access(&m.object, |this| {
@@ -260,10 +254,7 @@ impl super::Compiler {
             }
 
             let arg_count = self.compile_call_arguments(&c.arguments)?;
-            self.emit_call_with_arg_count(
-                if is_optional_call { Op::Call } else { Op::Call },
-                arg_count,
-            )?;
+            self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
             return Ok(());
         }
 

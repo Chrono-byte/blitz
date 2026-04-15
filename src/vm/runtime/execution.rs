@@ -8,8 +8,8 @@ use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
 use crate::runtime_utils::{array_length_descriptor, js_number_to_string};
 use crate::value::{
-    BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
-    ValueSlot,
+    ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId,
+    Value, ValueSlot,
 };
 use crate::vm::runtime::coercions::{parse_js_bigint_string, parse_js_number_string, to_number};
 use crate::vm::state::*;
@@ -362,7 +362,7 @@ impl Vm {
 
     /// Create a new Array object with the given elements and correct prototype.
     pub fn new_array(&self, elems: Vec<Option<Value>>) -> Value {
-        let arr_rc = gc::track_array(Rc::new(RefCell::new(elems)));
+        let arr_rc = gc::track_array(Rc::new(RefCell::new(ArrayData::from(elems))));
         let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         let len = arr_rc.borrow().len();
         props.borrow_mut().properties.insert(
@@ -1902,6 +1902,7 @@ impl Vm {
                 self.stack.push(Value::String(v.type_name().to_string()));
             }
             Op::Call => self.execute_call()?,
+            Op::TailCall => self.execute_tail_call()?,
             Op::PushWithEnv => {
                 let obj = self.pop()?;
                 let obj = self.to_object_value(obj)?;
@@ -1932,6 +1933,14 @@ impl Vm {
                 self.set_super_property(&receiver, &key, value)?;
             }
             Op::GeneratorInitDone => {}
+            Op::Move => {
+                return Err(RuntimeError::from(
+                    "Move opcode is not implemented in this VM",
+                ));
+            }
+            Op::CallBuiltin => {
+                self.execute_call_method()?;
+            }
             Op::Spread => self.execute_spread()?,
             Op::ArrayFromSpread => self.execute_array_from_spread()?,
             Op::Construct => self.execute_construct()?,
@@ -2002,15 +2011,15 @@ impl Vm {
                 let offset = offset16 as isize;
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = match Op::from_byte(compare_op) {
-                    Some(Op::Eq) => self.abstract_equality(&a, &b)?,
-                    Some(Op::Neq) => !self.abstract_equality(&a, &b)?,
-                    Some(Op::StrictEq) => values_equal(&a, &b),
-                    Some(Op::StrictNeq) => !values_equal(&a, &b),
-                    Some(Op::Lt) => a < b,
-                    Some(Op::Le) => a <= b,
-                    Some(Op::Gt) => a > b,
-                    Some(Op::Ge) => a >= b,
+                let result = match compare_op {
+                    0 => self.abstract_equality(&a, &b)?,
+                    1 => !self.abstract_equality(&a, &b)?,
+                    2 => a < b,
+                    3 => a <= b,
+                    4 => a > b,
+                    5 => a >= b,
+                    6 => values_equal(&a, &b),
+                    7 => !values_equal(&a, &b),
                     _ => return Err(RuntimeError::from("Invalid compare-jump opcode")),
                 };
                 if !result {
@@ -3399,7 +3408,7 @@ impl Vm {
                                 let arg = payload_byte(instr, 0) as u32;
                                 eprintln!("[diag]   {}: {:?} {}", j, op, arg);
                             }
-                            Op::SetGlobal | Op::GetGlobal | Op::GetGlobalIC => {
+                            Op::SetGlobal | Op::GetGlobal => {
                                 let hi = payload_byte(instr, 0) as u16;
                                 let lo = payload_byte(instr, 1) as u16;
                                 let arg = ((hi << 8) | lo) as usize;
@@ -3726,7 +3735,7 @@ impl Vm {
                             }
                         }
                     }
-                    Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => {
+                    Op::GetGlobal | Op::SetGlobal => {
                         let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
                         let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
                         let arg = ((hi << 8) | lo) as usize;
@@ -3984,6 +3993,7 @@ fn opcode_width(op: Op) -> usize {
         Op::LoadLocal
         | Op::StoreLocal
         | Op::Call
+        | Op::CallBuiltin
         | Op::Construct
         | Op::SuperConstruct
         | Op::PopN

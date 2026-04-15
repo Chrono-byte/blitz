@@ -81,9 +81,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
 
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
                 let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
                 for i in 0..len {
                     let key = PKey::String(i.to_string());
@@ -103,7 +101,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     }
                 }
 
-                let arr_rc = Rc::new(RefCell::new(out));
+                let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                 let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
                 props
                     .borrow_mut()
@@ -256,9 +254,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let array_proto_map = array_proto_map.clone();
                 move |vm, args| {
                     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                    let len_val =
-                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                    let len = to_length(vm, &len_val)?;
+                    let len = array_like_length(vm, &receiver)?;
                     let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
                     for k in 0..len {
                         let from = len - 1 - k;
@@ -269,7 +265,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             out.push(None);
                         }
                     }
-                    let arr_rc = Rc::new(RefCell::new(out));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -296,9 +292,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         compare_fn,
                         Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. }
                     );
-                    let len_val =
-                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                    let len = to_length(vm, &len_val)?;
+                    let len = array_like_length(vm, &receiver)?;
                     let mut values: Vec<Value> = Vec::new();
                     let mut undefined_count = 0usize;
                     let mut hole_count = 0usize;
@@ -341,7 +335,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     }
                     let mut out: Vec<Option<Value>> = values.into_iter().map(Some).collect();
                     out.extend((0..hole_count).map(|_| None));
-                    let arr_rc = Rc::new(RefCell::new(out));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -364,9 +358,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     let array_proto_map = array_proto_map.clone();
                     move |vm, args| {
                         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                        let len_val =
-                            vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                        let len = to_length(vm, &len_val)?;
+                        let len = array_like_length(vm, &receiver)?;
                         let relative_index =
                             to_integer_or_infinity(vm, args.get(1).unwrap_or(&Value::Undefined))?;
                         let actual_index = if relative_index < 0 {
@@ -397,7 +389,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             };
                             out.push(Some(value));
                         }
-                        let arr_rc = Rc::new(RefCell::new(out));
+                        let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                         let props = Rc::new(RefCell::new(ObjectData::new()));
                         props
                             .borrow_mut()
@@ -492,7 +484,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         for i in 0..actual_delete_count {
                             removed.push(snapshot.get(&(start + i)).cloned());
                         }
-                        let removed_arr = Rc::new(RefCell::new(removed));
+                        let removed_arr = Rc::new(RefCell::new(ArrayData::from(removed)));
                         let removed_props = Rc::new(RefCell::new(ObjectData::new()));
                         removed_props
                             .borrow_mut()
@@ -667,18 +659,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let array_proto_map = array_proto_map.clone();
                 move |vm, args| {
                     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                    let len_val =
-                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                    let len_num = vm.to_number_value(&len_val)?;
+                    let len = array_like_length(vm, &receiver)?;
                     let max_safe_len = 9_007_199_254_740_991u128;
-                    let len = if !len_num.is_finite() || len_num <= 0.0 {
+                    let len = if len == 0 {
                         0usize
                     } else {
-                        len_num
-                            .trunc()
-                            .to_u128()
-                            .unwrap_or(max_safe_len)
-                            .min(max_safe_len) as usize
+                        len.min(max_safe_len as usize)
                     };
                     let insert_count = args.len().saturating_sub(3);
                     let start_raw =
@@ -729,7 +715,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             out.push(None);
                         }
                     }
-                    let arr_rc = Rc::new(RefCell::new(out));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -766,7 +752,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         append(arg)?;
                     }
 
-                    let arr_rc = Rc::new(RefCell::new(out));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                     let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -951,9 +937,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
 
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
                 let mut out: Vec<Option<Value>> = Vec::new();
 
                 for i in 0..len {
@@ -976,7 +960,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     }
                 }
 
-                let arr_rc = Rc::new(RefCell::new(out));
+                let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                 let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
                 props
                     .borrow_mut()
@@ -999,9 +983,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
 
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
 
                 for i in 0..len {
                     let key = PKey::String(i.to_string());
@@ -1032,9 +1014,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PropertyDescriptor::data(builtin_object(
             Rc::new(move |vm, args| {
                 let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
                 let index = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
                 if index.is_nan() {
                     return Ok(Value::Undefined);
@@ -1064,9 +1044,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             Rc::new(move |vm, args| {
                 let receiver = args.first().cloned().unwrap_or(Value::Undefined);
                 let search = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
                 let from_index = args.get(2).cloned().unwrap_or(Value::Number(0.0));
                 let mut k = match vm.to_number_value(&from_index)? {
                     n if n.is_nan() => 0isize,
@@ -1097,9 +1075,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             Rc::new(move |vm, args| {
                 let receiver = args.first().cloned().unwrap_or(Value::Undefined);
                 let search = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
                 let from_index = args.get(2).cloned().unwrap_or(Value::Number(0.0));
                 let mut k = match vm.to_number_value(&from_index)? {
                     n if n.is_nan() => 0isize,
@@ -1131,9 +1107,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let array_proto_for_slice = array_proto_map.clone();
                 move |vm, args| {
                     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                    let len_val =
-                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                    let len = to_length(vm, &len_val)?;
+                    let len = array_like_length(vm, &receiver)?;
                     let start_raw =
                         vm.to_number_value(args.get(1).unwrap_or(&Value::Number(0.0)))?;
                     let start = if start_raw.is_nan() {
@@ -1167,7 +1141,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             out.push(None);
                         }
                     }
-                    let arr_rc = Rc::new(RefCell::new(out));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -1190,9 +1164,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let receiver = args.first().cloned().unwrap_or(Value::Undefined);
                 let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
 
                 let mut i = 0;
                 let mut accumulator = if args.len() > 2 {
@@ -1258,9 +1230,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     1
                 };
 
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
                 let mut out: Vec<Option<Value>> = Vec::new();
 
                 for i in 0..len {
@@ -1294,7 +1264,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     }
                 }
 
-                let arr_rc = Rc::new(RefCell::new(out));
+                let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                 let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
                 props
                     .borrow_mut()
@@ -1543,7 +1513,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             }
                         }
                     }
-                    let arr_rc = Rc::new(RefCell::new(out));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -2544,7 +2514,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             arraybuffer_obj_data.properties.insert(
                 PropertyKey::String("[[ArrayBufferData]]".to_string()),
                 PropertyDescriptor::data(Value::Array(
-                    Rc::new(RefCell::new(vec![Some(Value::Number(0.0)); length])),
+                    Rc::new(RefCell::new(ArrayData::from(vec![
+                        Some(Value::Number(0.0));
+                        length
+                    ]))),
                     Rc::new(RefCell::new(ObjectData::new())),
                 )),
             );
@@ -2589,7 +2562,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             arraybuffer_obj_data.properties.insert(
                 PropertyKey::String("[[ArrayBufferData]]".to_string()),
                 PropertyDescriptor::data(Value::Array(
-                    Rc::new(RefCell::new(vec![Some(Value::Number(0.0)); length])),
+                    Rc::new(RefCell::new(ArrayData::from(vec![
+                        Some(Value::Number(0.0));
+                        length
+                    ]))),
                     Rc::new(RefCell::new(ObjectData::new())),
                 )),
             );
@@ -2795,7 +2771,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     typed_array_data.properties.insert(
                         PropertyKey::String("[[TypedArrayData]]".to_string()),
                         PropertyDescriptor::data(Value::Array(
-                            Rc::new(RefCell::new(vec![Some($zero_value.clone()); length])),
+                            Rc::new(RefCell::new(ArrayData::from(vec![
+                                Some($zero_value.clone());
+                                length
+                            ]))),
                             Rc::new(RefCell::new(ObjectData::new())),
                         )),
                     );
@@ -3438,12 +3417,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             names.push(name);
                         }
                     }
-                    let arr_rc = Rc::new(RefCell::new(
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(
                         names
                             .into_iter()
                             .map(|s| Some(Value::String(s)))
                             .collect::<Vec<_>>(),
-                    ));
+                    )));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props.borrow_mut().properties.insert(
                         PropertyKey::String("length".to_string()),

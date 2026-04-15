@@ -2806,10 +2806,10 @@ const ok = 1;
         let array_props = Rc::new(RefCell::new(ObjectData::new()));
         array_props.borrow_mut().set_prototype_value(array_proto);
         let array = Value::Array(
-            Rc::new(RefCell::new(vec![
+            Rc::new(RefCell::new(blitz::value::ArrayData::from(vec![
                 Some(Value::Number(1.0)),
                 Some(Value::Number(2.0)),
-            ])),
+            ]))),
             array_props,
         );
 

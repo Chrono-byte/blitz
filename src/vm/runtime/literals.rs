@@ -2,7 +2,7 @@ use crate::errors::RuntimeError;
 use crate::gc;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::runtime_utils::array_length_descriptor;
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 use crate::vm::runtime::execution::{ensure_slot, get_property};
 use std::cell::RefCell;
@@ -22,7 +22,7 @@ impl Vm {
         }
         elems.reverse();
 
-        let arr_rc = Rc::new(RefCell::new(elems));
+        let arr_rc = Rc::new(RefCell::new(ArrayData::from(elems)));
         let props: Rc<RefCell<ObjectData>> =
             gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         props.borrow_mut().properties.insert(

@@ -10,7 +10,8 @@ use crate::runtime_utils::{
     static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string, usize_to_f64,
 };
 use crate::value::{
-    BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
+    ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId,
+    Value,
 };
 use crate::vm::Vm;
 
@@ -31,7 +32,10 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                 Value::Number(n)
                     if n.is_finite() && n >= 0.0 && n.fract() == 0.0 && n <= 4_294_967_295.0 =>
                 {
-                    (Rc::new(RefCell::new(Vec::new())), n as usize)
+                    (
+                        Rc::new(RefCell::new(ArrayData::from(Vec::<Option<Value>>::new()))),
+                        n as usize,
+                    )
                 }
                 Value::Number(_) => {
                     return Err(vm.throw_range_error("Invalid array length"));
@@ -39,13 +43,13 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                 _ => {
                     let elems: Vec<Option<Value>> = tail.iter().map(|v| Some(v.clone())).collect();
                     let len = elems.len();
-                    (Rc::new(RefCell::new(elems)), len)
+                    (Rc::new(RefCell::new(ArrayData::from(elems))), len)
                 }
             }
         } else {
             let elems: Vec<Option<Value>> = tail.iter().map(|v| Some(v.clone())).collect();
             let len = elems.len();
-            (Rc::new(RefCell::new(elems)), len)
+            (Rc::new(RefCell::new(ArrayData::from(elems))), len)
         };
         let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
         props.borrow_mut().properties.insert(
@@ -87,7 +91,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                     let off = static_builtin_arg_offset(vm, args, "Array");
                     let elems: Vec<Option<Value>> =
                         args.iter().skip(off).cloned().map(Some).collect();
-                    let arr_rc = Rc::new(RefCell::new(elems));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(elems)));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -155,7 +159,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                         out.push(Some(v));
                     }
 
-                    let arr_rc = Rc::new(RefCell::new(out));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -442,7 +446,7 @@ fn execute_array_from_async_job(
             PropertyKey::String("length".to_string()),
             array_length_descriptor(len),
         );
-        Value::Array(Rc::new(RefCell::new(out)), props)
+        Value::Array(Rc::new(RefCell::new(ArrayData::from(out))), props)
     };
 
     if is_iterable_source(vm, source)? {

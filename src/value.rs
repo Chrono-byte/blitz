@@ -52,6 +52,7 @@
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::rc::Weak;
 use std::sync::Mutex;
@@ -224,6 +225,47 @@ pub enum PropertyDescriptor {
     },
 }
 
+/// Backing store for dense array elements.
+///
+/// This wrapper keeps the storage layout centralized so the runtime can evolve
+/// beyond a plain `Vec<Option<Value>>` without changing every array consumer.
+#[derive(Clone, Debug)]
+pub struct ArrayData {
+    elements: Vec<Option<Value>>,
+}
+
+impl ArrayData {
+    /// Create backing storage from dense elements.
+    pub fn new(elements: Vec<Option<Value>>) -> Self {
+        Self { elements }
+    }
+
+    /// Return a cloned copy of the dense elements.
+    pub fn clone_elements(&self) -> Vec<Option<Value>> {
+        self.elements.clone()
+    }
+}
+
+impl From<Vec<Option<Value>>> for ArrayData {
+    fn from(elements: Vec<Option<Value>>) -> Self {
+        Self::new(elements)
+    }
+}
+
+impl Deref for ArrayData {
+    type Target = Vec<Option<Value>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.elements
+    }
+}
+
+impl DerefMut for ArrayData {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.elements
+    }
+}
+
 impl PropertyDescriptor {
     /// Create a default data descriptor with full attributes.
     pub fn data(value: Value) -> Self {
@@ -389,7 +431,7 @@ pub enum Value {
     /// elements; the second is a property map used for `__proto__` and arbitrary
     /// named properties (so arrays can behave like objects for non-index keys).
     /// Holes are represented as `None` values.
-    Array(Rc<RefCell<Vec<Option<Value>>>>, Rc<RefCell<ObjectData>>),
+    Array(Rc<RefCell<ArrayData>>, Rc<RefCell<ObjectData>>),
     /// Function closure with prototype and captured environment
     Closure {
         /// Function prototype

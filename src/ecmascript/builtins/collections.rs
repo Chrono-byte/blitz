@@ -4,7 +4,9 @@ use std::rc::Rc;
 use num_traits::ToPrimitive;
 
 use crate::runtime_utils::{builtin_object, strict_equal, usize_to_f64};
-use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
+use crate::value::{
+    ArrayData, BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value,
+};
 
 /// 24 Keyed Collections
 pub(crate) fn install_map_set_constructors(
@@ -28,7 +30,7 @@ pub(crate) fn install_map_set_constructors(
                 | Value::Closure { .. }
                 | Value::BuiltinObject(_, _)
         ) {
-            let arr_rc = Rc::new(RefCell::new(Vec::<Option<Value>>::new()));
+            let arr_rc = Rc::new(RefCell::new(ArrayData::from(Vec::<Option<Value>>::new())));
             let arr_props = Rc::new(RefCell::new(ObjectData::new()));
             arr_props.borrow_mut().properties.insert(
                 PropertyKey::String("length".to_string()),
@@ -73,7 +75,10 @@ pub(crate) fn install_map_set_constructors(
                                 }
                             }
                             if !updated {
-                                let pair_rc = Rc::new(RefCell::new(vec![Some(key), Some(val)]));
+                                let pair_rc = Rc::new(RefCell::new(ArrayData::from(vec![
+                                    Some(key),
+                                    Some(val),
+                                ])));
                                 let pair_props = Rc::new(RefCell::new(ObjectData::new()));
                                 pair_props.borrow_mut().properties.insert(
                                     PropertyKey::String("length".to_string()),
@@ -229,7 +234,8 @@ pub(crate) fn install_map_set_constructors(
                         }
                     }
                     if !updated {
-                        let pair_rc = Rc::new(RefCell::new(vec![Some(key), Some(value)]));
+                        let pair_rc =
+                            Rc::new(RefCell::new(ArrayData::from(vec![Some(key), Some(value)])));
                         let pair_props = Rc::new(RefCell::new(ObjectData::new()));
                         pair_props.borrow_mut().properties.insert(
                             PropertyKey::String("length".to_string()),
@@ -355,7 +361,7 @@ pub(crate) fn install_map_set_constructors(
                 | Value::Closure { .. }
                 | Value::BuiltinObject(_, _)
         ) {
-            let arr_rc = Rc::new(RefCell::new(Vec::<Option<Value>>::new()));
+            let arr_rc = Rc::new(RefCell::new(ArrayData::from(Vec::<Option<Value>>::new())));
             let arr_props = Rc::new(RefCell::new(ObjectData::new()));
             arr_props.borrow_mut().properties.insert(
                 PropertyKey::String("length".to_string()),

@@ -12,7 +12,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Mutex;
 
 use crate::mutex_compat::MutexBorrowExt;
-use crate::value::{ObjectData, PromiseState, PropertyDescriptor, Value, ValueSlot};
+use crate::value::{ArrayData, ObjectData, PromiseState, PropertyDescriptor, Value, ValueSlot};
 
 /// Result of a prototype GC collection cycle.
 #[derive(Debug, Clone, Copy, Default)]
@@ -55,7 +55,7 @@ pub struct GcHeapSnapshot {
 #[derive(Default)]
 struct HeapRegistry {
     objects: Vec<Weak<RefCell<ObjectData>>>,
-    arrays: Vec<Weak<RefCell<Vec<Option<Value>>>>>,
+    arrays: Vec<Weak<RefCell<ArrayData>>>,
     envs: Vec<Weak<Mutex<Vec<ValueSlot>>>>,
     promises: Vec<Weak<RefCell<PromiseState>>>,
 }
@@ -95,7 +95,7 @@ pub fn track_object(obj: Rc<RefCell<ObjectData>>) -> Rc<RefCell<ObjectData>> {
 }
 
 /// Register an array backing store with the collector.
-pub fn track_array(arr: Rc<RefCell<Vec<Option<Value>>>>) -> Rc<RefCell<Vec<Option<Value>>>> {
+pub fn track_array(arr: Rc<RefCell<ArrayData>>) -> Rc<RefCell<ArrayData>> {
     {
         HEAP.with(|heap| push_weak(&mut heap.borrow_mut().arrays, &arr));
         bump_allocation_pressure();
@@ -530,7 +530,7 @@ fn clear_object(obj: &Rc<RefCell<ObjectData>>) {
     obj.extensible = true;
 }
 
-fn clear_array(arr: &Rc<RefCell<Vec<Option<Value>>>>) {
+fn clear_array(arr: &Rc<RefCell<ArrayData>>) {
     arr.borrow_mut().clear();
 }
 
@@ -585,6 +585,7 @@ mod tests {
             is_class_constructor: false,
             is_async: false,
             is_generator: false,
+            ic_table: Vec::new(),
         });
         let props = track_object(Rc::new(RefCell::new(ObjectData::new())));
         Value::Closure {
@@ -693,7 +694,9 @@ mod tests {
         assert_eq!(allocation_pressure(), 0);
 
         let _obj = track_object(Rc::new(RefCell::new(ObjectData::new())));
-        let _arr = track_array(Rc::new(RefCell::new(Vec::new())));
+        let _arr = track_array(Rc::new(RefCell::new(ArrayData::from(
+            Vec::<Option<Value>>::new(),
+        ))));
         let _env = track_env(Rc::new(Mutex::new(Vec::new())));
         let _promise = track_promise(Rc::new(RefCell::new(PromiseState::Pending {
             on_fulfilled: Vec::new(),

@@ -4,7 +4,9 @@ use crate::errors::RuntimeError;
 use crate::gc;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::runtime_utils::{array_from_values, usize_to_decimal_string};
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value, ValueSlot};
+use crate::value::{
+    ArrayData, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value, ValueSlot,
+};
 use crate::vm::Vm;
 use crate::vm::runtime::execution::get_property;
 use crate::vm::state::{Frame, GeneratorRunner, LOCALS_INITIAL_CAPACITY, StepOutcome};
@@ -174,7 +176,11 @@ impl Vm {
         }
         args.reverse();
         let callee = self.pop()?;
-        let receiver = self.pop()?;
+        let receiver = if self.stack.len() == 0 {
+            Value::Undefined
+        } else {
+            self.pop()?
+        };
         let receiver = match &callee {
             Value::Closure {
                 lexical_this: Some(this),
@@ -392,11 +398,11 @@ impl Vm {
         mask: Value,
     ) -> Result<Vec<Value>, RuntimeError> {
         let values_vec = match values {
-            Value::Array(arr, _) => arr.borrow().clone(),
+            Value::Array(arr, _) => arr.borrow().clone_elements(),
             _ => Vec::new(),
         };
         let mask_vec = match mask {
-            Value::Array(arr, _) => arr.borrow().clone(),
+            Value::Array(arr, _) => arr.borrow().clone_elements(),
             _ => Vec::new(),
         };
 
@@ -1353,7 +1359,7 @@ impl Vm {
             Vec::new()
         };
 
-        let arr_rc = Rc::new(RefCell::new(rest_slice));
+        let arr_rc = Rc::new(RefCell::new(ArrayData::from(rest_slice)));
         let props: Rc<RefCell<ObjectData>> =
             gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         props.borrow_mut().properties.insert(

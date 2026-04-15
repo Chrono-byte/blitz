@@ -789,7 +789,7 @@ impl Compiler {
 
     pub(crate) fn emit_get_builtin_name(&mut self, name: &str) {
         let idx = self.global_name_index(name);
-        self.emit(Op::GetGlobal, LINE);
+        self.emit(Op::GetBuiltin, LINE);
         self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
     }
 

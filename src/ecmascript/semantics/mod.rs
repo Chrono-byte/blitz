@@ -24,6 +24,7 @@ pub mod shadowrealm;
 pub mod uri;
 
 pub(crate) use crate::runtime_utils::same_value_zero;
+pub(crate) use crate::value::ArrayData;
 pub(crate) use intrinsics::{
     builtin_object, install_minimal_kernel_constructors, set_builtin_length, set_builtin_name,
 };
@@ -74,6 +75,31 @@ fn own_properties_frozen(value: &Value) -> bool {
 }
 
 fn array_like_length(vm: &mut Vm, receiver: &Value) -> Result<usize, RuntimeError> {
+    if let Value::Array(_, props) = receiver {
+        let props_ref = props.borrow();
+        if let Some(PropertyDescriptor::Data {
+            value: Value::Number(len_num),
+            ..
+        }) = props_ref
+            .properties
+            .get(&PropertyKey::String("length".to_string()))
+        {
+            let max_safe_len = 9_007_199_254_740_991u128;
+            if len_num.is_nan() || *len_num <= 0.0 {
+                return Ok(0);
+            }
+            if !len_num.is_finite() {
+                return Ok(max_safe_len as usize);
+            }
+            let len = len_num
+                .trunc()
+                .to_u128()
+                .unwrap_or(max_safe_len)
+                .min(max_safe_len);
+            return Ok(len as usize);
+        }
+    }
+
     let len_val = vm.get_property_host(receiver, &PropertyKey::String("length".to_string()))?;
     let len_num = vm.to_number_value(&len_val)?;
     let max_safe_len = 9_007_199_254_740_991u128;
