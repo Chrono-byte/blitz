@@ -1213,6 +1213,7 @@ fn feature_edition(feature: &str) -> Option<u8> {
   }
 }
 
+/// Returns the language feature group for a given set of features.
 fn language_feature_group(features: Option<&[String]>) -> Option<String> {
   let mut best_edition: Option<u8> = None;
 
@@ -1229,6 +1230,7 @@ fn language_feature_group(features: Option<&[String]>) -> Option<String> {
   best_edition.and_then(|edition| edition_label(edition).map(str::to_string))
 }
 
+/// Returns the normalized ES version for a given input string.
 fn normalize_es_version(input: &str) -> Option<String> {
   let raw = input.trim();
   if raw.is_empty() {
@@ -1391,10 +1393,11 @@ fn builtin_eval_script(
     .map_err(|e| format!("evalScript runtime: {}", e))
 }
 
+/// Returns a new test globals object with the default global properties set.
 fn make_test_globals() -> Rc<RefCell<ObjectData>> {
   let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
 
-  let global_this = Value::Object(globals.clone());
+  let global_this = Value::Object(Clone::clone(&globals));
   globals.borrow_mut().properties.insert(
     PropertyKey::String("globalThis".to_string()),
     PropertyDescriptor::data(global_this),
@@ -1522,7 +1525,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
   ] {
     agent_obj.borrow_mut().properties.insert(
       PropertyKey::String(name.to_string()),
-      PropertyDescriptor::data(host_builtin(noop_agent_method.clone())),
+      PropertyDescriptor::data(host_builtin(Clone::clone(&noop_agent_method))),
     );
   }
   data.properties.insert(
@@ -1821,7 +1824,7 @@ fn run_test_file(
       PropertyKey::String("__TSBLITZ_TEST_PATH".to_string()),
       PropertyDescriptor::data(Value::String(path.to_string_lossy().to_string())),
     );
-    let mut vm = Vm::new(globals.clone());
+    let mut vm = Vm::new(Clone::clone(&globals));
 
     // The harness self-test `test/harness/detachArrayBuffer.js` verifies
     // the fallback behavior when hosts do NOT provide `$262` at all.
@@ -2060,7 +2063,7 @@ fn run_test_file(
       let loader_handle = vm.module_loader_handle();
       {
         let mut loader = loader_handle.borrow_mut();
-        let base_dir = path.parent().unwrap_or(Path::new("."));
+        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
         loader
           .construct(
             base_dir,
@@ -2272,6 +2275,7 @@ fn run_test_file(
   Ok(())
 }
 
+/// Resolves a test segment path to a full path within the test root.
 fn resolve_segment(
   test_root: &Path,
   segment: &str,
@@ -2294,6 +2298,7 @@ fn resolve_segment(
   }
 }
 
+/// Prints VM diagnostics including preserved globals and their values.
 fn print_vm_diag(
   vm: &Vm,
   keep_globals: &HashSet<String>,
@@ -2327,6 +2332,9 @@ fn print_vm_diag(
   eprintln!("--- END DIAGNOSTICS ---");
 }
 
+/// Runs the test262 harness-only tests.
+///
+/// Used to verify that the harness itself is able to be parsed correctly.
 fn run_harness_only(
   test262_root: &Path,
   globals: &Rc<RefCell<ObjectData>>,
@@ -2442,8 +2450,10 @@ fn run_harness_only(
   result
 }
 
+/// Random test from the suite used to ensure that all proper test harness tools are being put into scope correctly.
 const SCOPE_DUMP_TEST: &str = "language/expressions/object/11.1.5-0-1.js";
 
+/// Runs a test to verify that all proper test harness tools are being put into scope correctly.
 fn run_scope_dump_test(
   test262_root: &Path,
   globals: &Rc<RefCell<ObjectData>>,
@@ -2524,6 +2534,7 @@ fn run_scope_dump_test(
   result
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() {
   let opts = parse_args();
 
@@ -2569,7 +2580,7 @@ fn main() {
   let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
 
   // Provide globalThis reference
-  let global_this = Value::Object(globals.clone());
+  let global_this = Value::Object(Clone::clone(&globals));
   globals.borrow_mut().properties.insert(
     PropertyKey::String("globalThis".to_string()),
     PropertyDescriptor::data(global_this),
@@ -2740,7 +2751,7 @@ fn main() {
     calculate_percentage(passed as i64, ran as i64)
   };
 
-  let exit_code = if failed.is_empty() { 0 } else { 1 };
+  let exit_code = if failed.is_empty() { 0_i32 } else { 1_i32 };
 
   if !internal_report_mode {
     eprintln!(
