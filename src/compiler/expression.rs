@@ -32,7 +32,7 @@ impl super::Compiler {
             oast::Expression::NumericLiteral(n) if self.strict_context => {
                 let raw = n.raw.as_ref().map_or_else(
                     || n.span.source_text(self.source_text.as_str()),
-                    oxc_span::Str::as_str,
+                    oxc_str::Str::as_str,
                 );
                 let leading_zero = {
                     let mut bytes = raw.bytes();

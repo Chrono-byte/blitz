@@ -207,7 +207,9 @@ struct TypeContext {
 
 impl TypeContext {
     fn scope_mut(&mut self) -> &mut Scope {
-        self.scopes.last_mut().unwrap()
+        self.scopes.last_mut().expect(
+            "scope stack is empty: attempted to borrow mutable scope but no scopes are present",
+        )
     }
 
     fn lookup(&self, name: &str) -> Option<Type> {
@@ -219,6 +221,11 @@ impl TypeContext {
         None
     }
 
+    /// Checks a single OAST statement and updates the type context accordingly.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TypeCheckerError` if the statement cannot be typechecked.
     fn check_statement_oast(&mut self, stmt: &oast::Statement) -> Result<(), TypeCheckerError> {
         use oast::{BindingPattern as OPat, Statement as OStmt};
         if matches!(stmt, oxc_ast::match_module_declaration!(OStmt)) {
@@ -381,6 +388,11 @@ impl TypeContext {
         Ok(())
     }
 
+    /// Returns the type of the given OAST expression.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `TypeCheckerError` if the expression cannot be typechecked.
     fn type_of_expr_oast(&self, expr: &oast::Expression) -> Result<Type, TypeCheckerError> {
         use oast::Expression as OExpr;
         match expr {
@@ -562,10 +574,20 @@ impl TypeContext {
     }
 }
 
-fn convert_type_ann(_ty: &oast::TSTypeAnnotation<'_>) -> Result<Type, TypeCheckerError> {
-    convert_ts_type(&_ty.type_annotation)
+/// Converts an OAST `TSTypeAnnotation` into a `Type` value.
+///
+/// # Errors
+///
+/// Returns a `TypeCheckerError` if the type cannot be converted.
+fn convert_type_ann(ty: &oast::TSTypeAnnotation<'_>) -> Result<Type, TypeCheckerError> {
+    convert_ts_type(&ty.type_annotation)
 }
 
+/// Converts an OAST `TSType` into a `Type` value.
+///
+/// # Errors
+///
+/// Returns a `TypeCheckerError` if the type cannot be converted.
 fn convert_ts_type(ty: &oast::TSType<'_>) -> Result<Type, TypeCheckerError> {
     use oast::TSType::*;
 

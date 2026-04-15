@@ -181,11 +181,11 @@ impl ModuleLoader {
                 })?;
         for spec in imports {
             if spec.starts_with('.') || spec.starts_with('/') {
-                let base_dir = resolved_canon.parent().unwrap_or(Path::new("."));
+                let base_dir = resolved_canon.parent().unwrap_or_else(|| Path::new("."));
                 self.construct(base_dir, &spec)?;
             } else {
                 // Bare specifiers handled via resolver; attempt to construct too
-                let base_dir = resolved_canon.parent().unwrap_or(Path::new("."));
+                let base_dir = resolved_canon.parent().unwrap_or_else(|| Path::new("."));
                 let _ = self.construct(base_dir, &spec);
             }
         }
@@ -521,7 +521,10 @@ impl ModuleLoader {
             let (base_dir, indirect_exports) = {
                 let rec = rec_rc.borrow();
                 (
-                    rec.path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                    rec.path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .to_path_buf(),
                     rec.indirect_exports.clone(),
                 )
             };
@@ -553,9 +556,13 @@ impl ModuleLoader {
     /// # Errors
     ///
     /// Returns a [`crate::errors::BundlerError`] if the entry cannot be resolved.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entry cannot be resolved to a canonical path.
     pub fn evaluation_order_from(&mut self, entry: &Path) -> Result<Vec<PathBuf>, BundlerError> {
         let resolved = resolve_specifier(
-            entry.parent().unwrap_or(Path::new(".")),
+            entry.parent().unwrap_or_else(|| Path::new(".")),
             &format!("./{}", entry.file_name().unwrap().to_string_lossy()),
         )?;
         let resolved_canon = std::fs::canonicalize(&resolved).unwrap_or(resolved);
@@ -589,7 +596,7 @@ impl ModuleLoader {
             )
             .map_err(|e| BundlerError::from(format!("Parse error {}: {}", path.display(), e)))?;
             for spec in imports {
-                let base_dir = path.parent().unwrap_or(Path::new("."));
+                let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
                 // attempt to ensure dependency constructed
                 let dep = loader.construct(base_dir, &spec)?;
                 let dep_path = dep.borrow().path.clone();
@@ -604,7 +611,7 @@ impl ModuleLoader {
 
         if !self.map.contains_key(&resolved_canon) {
             // ensure constructed
-            let base_dir = entry.parent().unwrap_or(Path::new("."));
+            let base_dir = entry.parent().unwrap_or_else(|| Path::new("."));
             self.construct(
                 base_dir,
                 &format!("./{}", entry.file_name().unwrap().to_string_lossy()),
@@ -640,7 +647,10 @@ impl ModuleLoader {
         let (base_dir, direct_slot, indirect_exports, star_exports) = {
             let rec = rec_rc.borrow();
             (
-                rec.path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                rec.path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf(),
                 rec.exports.get(export_name).cloned(),
                 rec.indirect_exports.clone(),
                 rec.star_exports.clone(),
@@ -684,6 +694,10 @@ impl ModuleLoader {
     /// # Errors
     ///
     /// Returns a [`crate::errors::RuntimeError`] if evaluation fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entry cannot be resolved to a canonical path.
     pub fn evaluate_entry(
         &mut self,
         entry: &Path,
@@ -790,6 +804,14 @@ impl ModuleLoader {
 ///
 /// This helper borrows the loader only for short phases so nested dynamic
 /// imports can re-enter the same cache while module code is running.
+///
+/// # Errors
+///
+/// Returns a [`crate::errors::RuntimeError`] if evaluation fails.
+///
+/// # Panics
+///
+/// Panics if the entry cannot be resolved to a canonical path.
 pub fn evaluate_entry_shared(
     loader: &Rc<RefCell<ModuleLoader>>,
     entry: &Path,

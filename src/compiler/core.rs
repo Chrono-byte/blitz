@@ -342,6 +342,15 @@ impl Compiler {
         self.emit_with_payload(Op::Const, idx, line);
     }
 
+    /// Safely converts a slot index (usize) to u8, checking that it doesn't exceed 255.
+    /// This prevents silent truncation of local variable indices that would cause
+    /// bytecode referring to the wrong slots.
+    pub(crate) fn slot_to_u8(&self, slot: usize) -> Result<u8, CompilerError> {
+        u8::try_from(slot).map_err(|_| {
+            CompilerError::from(format!("Too many local variables (max 255, got {})", slot))
+        })
+    }
+
     /// Returns a compiler error for a strict binding name (eval/arguments).
     pub(crate) fn strict_binding_name_error(
         strict_context: bool,
