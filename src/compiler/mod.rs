@@ -1036,7 +1036,7 @@ mod test {
       crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = Vm::new(globals);
-    let _ = vm.run(chunk).expect("run ok");
+    drop(vm.run(chunk).expect("run ok"));
 
     assert!(
       matches!(vm.get_global("hits"), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON),
@@ -1061,7 +1061,7 @@ mod test {
       crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = Vm::new(globals);
-    let _ = vm.run(chunk).expect("run ok");
+    drop(vm.run(chunk).expect("run ok"));
 
     assert!(
       matches!(vm.get_global("old"), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON)
