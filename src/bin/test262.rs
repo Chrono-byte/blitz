@@ -60,7 +60,8 @@ fn calculate_percentage(
   numerator: i64,
   denominator: i64,
 ) -> f64 {
-  (numerator as f64) / (denominator as f64) * 100.0_f64
+  let var_name = numerator as f64 / denominator as f64;
+  var_name * 100.0_f64
 }
 
 #[derive(Clone, Copy, Default)]
@@ -304,8 +305,7 @@ fn run_selected_tests(
     let mut handles = Vec::with_capacity(files_to_run.len());
 
     for (idx, file) in files_to_run.into_iter().enumerate() {
-      let permit = semaphore
-        .clone()
+      let permit = Clone::clone(&semaphore)
         .acquire_owned()
         .await
         .expect("test262 semaphore unexpectedly closed");
@@ -662,6 +662,7 @@ fn should_use_subprocess_batches(
 }
 
 /// Runs selected tests via subprocess batches and returns the results.
+#[allow(clippy::too_many_lines)]
 fn run_selected_tests_via_subprocess_batches(
   files_to_run: Vec<PathBuf>,
   job_count: usize,
@@ -1337,17 +1338,20 @@ fn parse_source_for_path(
 
 /// Return `true` if the given string is an async done marker.
 enum AsyncDoneMarker {
+  /// The async test has completed successfully.
   Complete,
+  /// The async test has failed with the given error message.
   Failure(String),
 }
 
+/// Return `Some(marker)` if the given string is an async done marker,
+/// otherwise `None`.
 fn is_async_done_marker(s: &str) -> Option<AsyncDoneMarker> {
   if s == "Test262:AsyncTestComplete" {
     Some(AsyncDoneMarker::Complete)
-  } else if let Some(rest) = s.strip_prefix("Test262:AsyncTestFailure:") {
-    Some(AsyncDoneMarker::Failure(rest.to_string()))
   } else {
-    None
+    s.strip_prefix("Test262:AsyncTestFailure:")
+      .map(|rest| AsyncDoneMarker::Failure(rest.to_string()))
   }
 }
 
