@@ -551,7 +551,14 @@ impl Vm {
         if truncated != len_num || truncated > u32::MAX as f64 {
           return Err(self.throw_range_error("Invalid array length"));
         }
-        Some(truncated as usize)
+        // Convert the verified integer `truncated` into a `usize` via `u32`.
+        // We first cast to `i64` (safe because we've checked bounds) and then
+        // use `u32::try_from` to avoid any unchecked truncation. Propagate a
+        // RangeError if conversion unexpectedly fails.
+        let truncated_i64 = truncated as i64;
+        let truncated_u32 = u32::try_from(truncated_i64)
+          .map_err(|_| self.throw_range_error("Invalid array length"))?;
+        Some(truncated_u32 as usize)
       } else {
         None
       };
@@ -1034,7 +1041,15 @@ impl Vm {
       let new_len = if new_len_f.is_nan() || new_len_f < 0.0 {
         0usize
       } else {
-        new_len_f as usize
+        // Ensure the float is an integer within the u32 range before conversion.
+        let truncated = new_len_f.trunc();
+        if !truncated.is_finite() || truncated < 0.0 || truncated > u32::MAX as f64 {
+          return Err(self.throw_range_error("Invalid array length"));
+        }
+        let truncated_i64 = truncated as i64;
+        let truncated_u32 = u32::try_from(truncated_i64)
+          .map_err(|_| self.throw_range_error("Invalid array length"))?;
+        truncated_u32 as usize
       };
       let mut a = arr.borrow_mut();
       if new_len < a.len() {

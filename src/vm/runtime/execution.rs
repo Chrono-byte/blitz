@@ -1021,6 +1021,7 @@ impl Vm {
   ///
   /// This is used for direct `eval`, where the evaluated code must observe
   /// and update the current execution context.
+  #[allow(clippy::too_many_lines)]
   pub(crate) fn run_nested(
     &mut self,
     chunk: Chunk,

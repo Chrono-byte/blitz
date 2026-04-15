@@ -148,6 +148,10 @@ impl EnvironmentRecord {
   }
 
   /// Read a binding from this record without walking outer environments.
+  ///
+  /// # Errors
+  ///
+  /// Returns a [`crate::errors::RuntimeError`] if the binding is not initialized.
   pub fn get_own_binding_value(
     &self,
     name: &str,
@@ -164,6 +168,10 @@ impl EnvironmentRecord {
   }
 
   /// Resolve and read a binding value from this record chain.
+  ///
+  /// # Errors
+  ///
+  /// Returns a [`crate::errors::RuntimeError`] if the binding is not initialized.
   pub fn get_binding_value(
     &self,
     name: &str,
@@ -180,6 +188,10 @@ impl EnvironmentRecord {
   }
 
   /// Assign through the environment chain.
+  ///
+  /// # Errors
+  ///
+  /// Returns a [`crate::errors::RuntimeError`] if the binding is not initialized.
   pub fn set_mutable_binding(
     &mut self,
     name: &str,

@@ -208,6 +208,7 @@ impl ModuleLoader {
   /// # Errors
   ///
   /// Returns a [`crate::errors::BundlerError`] if a module fails to instantiate.
+  #[allow(clippy::too_many_lines)]
   pub fn instantiate_all(&mut self) -> Result<(), BundlerError> {
     // For each module, examine its AST for exported names and allocate slots.
     for rec_rc in self.map.values() {
@@ -405,8 +406,7 @@ impl ModuleLoader {
                     .get("imported")
                     .and_then(|i| i.get("name"))
                     .and_then(|n| n.as_str())
-                    .map(ToString::to_string)
-                    .unwrap_or(local.clone());
+                    .map_or_else(|| Clone::clone(&local), ToString::to_string);
                   let slot_opt = {
                     dep_rec_rc
                       .borrow()

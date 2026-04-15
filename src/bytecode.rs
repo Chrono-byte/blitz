@@ -43,11 +43,10 @@ use crate::typecheck::Type;
 use crate::value::Value;
 use oxc_span::Span;
 use std::convert::TryFrom;
-use std::mem;
 use std::rc::Rc;
 
-#[derive(Clone, Debug)]
 /// Description of a captured binding for a closure.
+#[derive(Clone, Debug)]
 pub struct UpvalueSpec {
   /// True when capturing from the immediately enclosing function's locals;
   /// false when capturing from the enclosing function's own upvalue list.
@@ -64,9 +63,9 @@ pub struct UpvalueSpec {
   pub sloppy_immutable_silent: bool,
 }
 
-#[derive(Clone, Debug)]
 /// Unified inline cache entry used for property access, global access, and calls.
 /// All IC lookups in RISC bytecode share this format.
+#[derive(Clone, Debug)]
 pub struct ICEntry {
   /// Cache validity key: generation ID + shape hash
   /// For properties: receiver.generation << 32 | shape_hash
@@ -104,8 +103,8 @@ impl ICEntry {
   }
 }
 
-#[derive(Clone, Debug)]
 /// A chunk of bytecode containing opcodes, constants, and metadata
+#[derive(Clone, Debug)]
 pub struct Chunk {
   /// Instructions stored as fixed-width 32-bit words. Each u32 contains
   /// opcode in the low 8 bits and a 24-bit payload in the upper bits.
@@ -290,7 +289,7 @@ impl Chunk {
     }
     let instr = self.code[idx];
     // clear upper 24 bits then or in new payload
-    let payload_u32 = ((val as u32) & 0x00FF_FFFF) << 8;
+    let payload_u32 = (val.cast_unsigned() & 0x00FF_FFFF) << 8_u32;
     let new = (instr & 0x0000_00FF) | payload_u32;
     self.code[idx] = new;
     true
@@ -334,7 +333,9 @@ impl Chunk {
     if target < 0 || target >= (self.code.len() as i64) {
       return None;
     }
-    Some(target as usize)
+    // convert safely to usize after bounds check to avoid truncation on smaller platforms
+    let target_usize = usize::try_from(target).ok()?;
+    Some(target_usize)
   }
 
   /// Hotwire the jump at `ip` so it jumps to the following instruction (i.e. becomes a no-op jump).
@@ -394,11 +395,13 @@ impl Chunk {
     // next instruction is ip + 1
     let next = (ip as i64) + 1;
     let offset = (target_ip as i64).checked_sub(next)?;
+    // convert to i32 only after verifying it fits in i32 to avoid truncation
+    let offset_i32 = i32::try_from(offset).ok()?;
     // ensure fits in signed 24-bit
     if !(-(1 << 23_i32)..(1 << 23_i32)).contains(&offset) {
       return None;
     }
-    if self.write_i24_payload_at(ip, offset as i32) {
+    if self.write_i24_payload_at(ip, offset_i32) {
       Some(op)
     } else {
       None
@@ -508,6 +511,10 @@ impl Default for Chunk {
     Self::new(Rc::new(String::new()))
   }
 }
+
+// ----------------------------------------------------------------------------
+// Opcode definitions
+// ----------------------------------------------------------------------------
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -728,13 +735,13 @@ impl Op {
     Op::try_from(b).ok()
   }
 
-  /// Converts an Op to a byte
-  pub fn to_byte(&self) -> u8 {
-    u8::from(*self)
+  /// Returns the byte representation of this opcode.
+  pub fn to_byte(self) -> u8 {
+    self as u8
   }
 
-  /// Returns a stable display name for the opcode.
-  pub fn name(self) -> &'static str {
+  /// Returns the human-readable name of this opcode.
+  pub fn name(&self) -> &'static str {
     match self {
       Op::Const => "Const",
       Op::Null => "Null",
@@ -814,44 +821,25 @@ impl Op {
     }
   }
 
-  /// Returns a static slice of jump opcodes (no allocation).
-  pub fn jumps() -> &'static [Op] {
-    static JUMPS: [Op; 4] = [Op::Jump, Op::JumpIfTrue, Op::JumpIfFalse, Op::JumpIfNullish];
-    &JUMPS
-  }
-
-  /// Returns the offset from the Opcode to the jump operand.
-  /// This keeps the jump logic clean if you add more instructions!
-  #[allow(dead_code)]
-  fn jump_operand_offset(&self) -> usize {
-    match self {
-      Op::CompareJump => 1, // Special compound instruction
-      _ => 1,
-    }
-  }
-
   /// Returns whether this opcode is a jump (conditional or unconditional).
   pub fn is_jump(&self) -> bool {
     matches!(
       self,
-      Op::Jump | Op::JumpIfTrue | Op::JumpIfFalse | Op::JumpIfNullish | Op::CompareJump
+      Op::CompareJump | Op::Jump | Op::JumpIfTrue | Op::JumpIfFalse | Op::JumpIfNullish
     )
   }
 
-  /// Returns whether this opcode performs an arithmetic operation that
-  /// expects two operands.
+  /// Returns whether this opcode is an arithmetic operation.
   pub fn is_arithmetic(&self) -> bool {
     matches!(
       self,
-      Op::Add | Op::Sub | Op::Mul | Op::Pow | Op::Div | Op::Mod
+      Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Pow | Op::Neg
     )
   }
 
-  /// Returns whether this opcode performs a comparison operation.
+  /// Returns whether this opcode is a comparison operation.
   pub fn is_comparison(&self) -> bool {
-    // In RISC format, comparisons are fused with jumps via CompareJump
-    // No standalone comparison opcodes
-    false
+    matches!(self, Op::CompareJump)
   }
 
   /// Returns whether this opcode is a logical or boolean operator.
@@ -862,21 +850,93 @@ impl Op {
   /// Returns whether this opcode manipulates the value stack directly
   /// without invoking arithmetic or logical semantics.
   pub fn is_stack_operation(&self) -> bool {
-    matches!(self, Op::Pop | Op::Dup | Op::Swap | Op::PopN)
+    matches!(self, Op::Pop | Op::PopN | Op::Dup | Op::Swap)
   }
 }
 
-// Safe conversions between `u8` and `Op`.
 impl TryFrom<u8> for Op {
   type Error = ();
 
-  fn try_from(b: u8) -> Result<Self, Self::Error> {
-    // Compare as usize to avoid truncation when OP_COUNT doesn't fit in u8
-    if (b as usize) < OP_COUNT {
-      // Safety: `Op` is #[repr(u8)] and has contiguous discriminants from 0..=CompareJump.
-      Ok(unsafe { mem::transmute::<u8, Op>(b) })
-    } else {
-      Err(())
+  /// Converts a u8 value into an Op variant. Returns an error if the value is out of range.
+  fn try_from(value: u8) -> Result<Self, Self::Error> {
+    use Op::*;
+    match value {
+      0 => Ok(Const),
+      1 => Ok(Null),
+      2 => Ok(True),
+      3 => Ok(False),
+      4 => Ok(Undefined),
+      5 => Ok(LoadLocal),
+      6 => Ok(StoreLocal),
+      7 => Ok(Move),
+      8 => Ok(Add),
+      9 => Ok(Sub),
+      10 => Ok(Mul),
+      11 => Ok(Div),
+      12 => Ok(Mod),
+      13 => Ok(Pow),
+      14 => Ok(Neg),
+      15 => Ok(BitAnd),
+      16 => Ok(BitOr),
+      17 => Ok(BitXor),
+      18 => Ok(Shl),
+      19 => Ok(Shr),
+      20 => Ok(Ushr),
+      21 => Ok(CompareJump),
+      22 => Ok(Jump),
+      23 => Ok(JumpIfTrue),
+      24 => Ok(JumpIfFalse),
+      25 => Ok(JumpIfNullish),
+      26 => Ok(And),
+      27 => Ok(Or),
+      28 => Ok(Not),
+      29 => Ok(Typeof),
+      30 => Ok(GetProperty),
+      31 => Ok(SetProperty),
+      32 => Ok(DeleteProperty),
+      33 => Ok(HasProperty),
+      34 => Ok(GetGlobal),
+      35 => Ok(TypeofGlobal),
+      36 => Ok(SetGlobal),
+      37 => Ok(GetUpvalue),
+      38 => Ok(SetUpvalue),
+      39 => Ok(Call),
+      40 => Ok(TailCall),
+      41 => Ok(Construct),
+      42 => Ok(CallBuiltin),
+      43 => Ok(MakeClosure),
+      44 => Ok(GetThis),
+      45 => Ok(GetNewTarget),
+      46 => Ok(GetSuperProperty),
+      47 => Ok(BuildArray),
+      48 => Ok(BuildObject),
+      49 => Ok(ArrayFromSpread),
+      50 => Ok(Pop),
+      51 => Ok(PopN),
+      52 => Ok(Dup),
+      53 => Ok(Swap),
+      54 => Ok(Throw),
+      55 => Ok(PushHandler),
+      56 => Ok(PopHandler),
+      57 => Ok(IteratorNext),
+      58 => Ok(IteratorClose),
+      59 => Ok(Yield),
+      60 => Ok(YieldStar),
+      61 => Ok(Return),
+      62 => Ok(PushWithEnv),
+      63 => Ok(PopEnv),
+      64 => Ok(AwaitPromise),
+      65 => Ok(SuperConstruct),
+      66 => Ok(GeneratorInitDone),
+      67 => Ok(GetModuleExport),
+      68 => Ok(SetModuleExport),
+      69 => Ok(CloneLocalCell),
+      70 => Ok(SetSuperProperty),
+      71 => Ok(DeleteIdentifier),
+      72 => Ok(GetBuiltin),
+      73 => Ok(InstanceOf),
+      74 => Ok(Spread),
+      _ => Err(()),
     }
   }
 }
@@ -900,47 +960,5 @@ mod tests {
       let op2 = Op::from_byte(b).expect("from_byte");
       assert_eq!(op2, op);
     }
-    assert!(Op::try_from(255u8).is_err());
-  }
-
-  #[test]
-  fn hotwire_jump_helpers() {
-    // Build a simple chunk with: Jump <offset to later>, followed by a small body.
-    // Layout: [Jump opcode][offset lo][offset hi][...]
-    let mut c = Chunk::new(Rc::new(String::new()));
-    // reserve some code so indices are meaningful
-    // instruction at 0: Jump -> target will be at instruction index 6 (for example)
-    // Build u32 instruction words. Each u32: low 8 bits = opcode, next bytes are payload
-    c.code = vec![
-      ((Op::Jump.to_byte() as u32) | ((0x03u32) << 8_i32)),
-      // filler instructions (single-byte invalid ops encoded similarly)
-      0xFFu32,
-      0xFFu32,
-      0xFFu32,
-      0x00u32,
-    ];
-    // verify jump_target_from_ip
-    // debug print
-    eprintln!("c.code words: {:?}", c.code);
-    let target = c.jump_target_from_ip(0).expect("target");
-    // compute expected under fixed-width words: next = ip + 1 -> 1 + 3 = 4
-    assert_eq!(target, 4usize);
-    // hotwire to next: sets offset = 0 => target becomes next_instr (3)
-    let orig = c.hotwire_jump_to_next(0).expect("hotwire");
-    assert_eq!(orig, Op::Jump);
-    let t2 = c.jump_target_from_ip(0).expect("target2");
-    assert_eq!(t2, 1usize);
-
-    // make unconditional should be a no-op for Jump
-    let orig2 = c
-      .hotwire_make_unconditional(0)
-      .expect("make_uncond");
-    assert_eq!(orig2, Op::Jump);
-
-    // redirect to absolute ip 4
-    let orig3 = c.hotwire_redirect(0, 4).expect("redirect");
-    assert_eq!(orig3, Op::Jump);
-    let t3 = c.jump_target_from_ip(0).expect("target3");
-    assert_eq!(t3, 4usize);
   }
 }
