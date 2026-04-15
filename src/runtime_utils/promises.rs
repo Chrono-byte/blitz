@@ -218,6 +218,8 @@ pub(crate) fn resolve_promise_with_value(
     resolve_promise_with_value_inner(vm, result_promise, value, Rc::new(RefCell::new(false)))
 }
 
+
+/// Create a builtin object wrapper for a native function with a prototype.
 pub(crate) fn builtin_object(f: BuiltinFn, function_proto: &Rc<RefCell<ObjectData>>) -> Value {
     crate::ecmascript::semantics::builtin_object(f, function_proto)
 }

@@ -4504,6 +4504,9 @@ pub(super) fn set_property(
     }
 }
 
+/// Build a module namespace object from exported bindings.
+///
+/// Creates an object with all exported names as properties, excluding the "*" wildcard export.
 pub(crate) fn build_module_namespace_object(exports: &HashMap<String, SharedValue>) -> Value {
     let namespace = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     let mut names: Vec<String> = exports
