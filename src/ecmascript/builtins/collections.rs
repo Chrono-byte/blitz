@@ -8,7 +8,8 @@ use crate::value::{
     ArrayData, BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value,
 };
 
-/// 24 Keyed Collections
+/// Installs the Map and Set constructors on the given object and function prototypes.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn install_map_set_constructors(
     object_proto_map: &Rc<RefCell<ObjectData>>,
     function_proto_map: &Rc<RefCell<ObjectData>>,

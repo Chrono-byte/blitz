@@ -60,6 +60,7 @@ const STRESS_EXEC_FIXTURES: [&str; 2] = ["recursive_fib", "large_array_creation"
 /// Extra fixtures for benchmarking (executed once per benchmark).
 const EXTRA_FIXTURES: [&str; 3] = ["dom_like_access", "array_iteration", "config_lookup"];
 
+/// Returns a new `ObjectData` instance with `globalThis` property installed.
 fn benchmark_globals() -> Rc<RefCell<ObjectData>> {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
@@ -70,6 +71,7 @@ fn benchmark_globals() -> Rc<RefCell<ObjectData>> {
     globals
 }
 
+/// Returns a source string for the unicode comment hotpath benchmark.
 fn unicode_comment_hotpath_source() -> String {
     r#"
         var hex = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F"];
@@ -84,6 +86,7 @@ fn unicode_comment_hotpath_source() -> String {
     .to_string()
 }
 
+/// Returns a source string for the comment-only eval benchmark.
 fn comment_only_eval_source() -> String {
     r#"
         for (var i = 0; i < 4096; i++) {
@@ -93,10 +96,12 @@ fn comment_only_eval_source() -> String {
     .to_string()
 }
 
+/// Returns a `Value` for the hotpath number value.
 fn hotpath_number_value() -> Value {
     Value::String("0x1234".to_string())
 }
 
+/// Compiles a benchmark fixture from the given path.
 fn compile_fixture(path: &str) -> blitz::bytecode::Chunk {
     let source =
         std::fs::read_to_string(Path::new(path)).expect("benchmark fixture should be readable");
@@ -104,10 +109,12 @@ fn compile_fixture(path: &str) -> blitz::bytecode::Chunk {
     compiler::compile_oxc(session.program(), &source).expect("benchmark fixture should compile")
 }
 
+/// Returns the source text for the given benchmark fixture path.
 fn fixture_source(path: &str) -> String {
     std::fs::read_to_string(Path::new(path)).expect("benchmark fixture should be readable")
 }
 
+/// Returns the baseline set of global names from the given globals object.
 fn baseline_global_names(globals: &Rc<RefCell<ObjectData>>) -> HashSet<String> {
     globals
         .borrow()
@@ -120,6 +127,7 @@ fn baseline_global_names(globals: &Rc<RefCell<ObjectData>>) -> HashSet<String> {
         .collect()
 }
 
+/// Benchmarks the compilation of benchmark fixtures.
 fn bench_compile(c: &mut Criterion) {
     let mut group = c.benchmark_group("compile");
     group.sample_size(30);
@@ -150,6 +158,7 @@ fn bench_compile(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks the execution of benchmark fixtures in cold start scenarios.
 fn bench_execute_cold(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_cold");
     group.sample_size(10);
@@ -171,6 +180,7 @@ fn bench_execute_cold(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks the execution of benchmark fixtures in fast execution scenarios.
 fn bench_execute_fast(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_fast");
     group.sample_size(10);
@@ -199,6 +209,7 @@ fn bench_execute_fast(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks the execution of benchmark fixtures in slow execution scenarios.
 fn bench_execute_slow(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_slow");
     group.sample_size(10);
@@ -227,6 +238,7 @@ fn bench_execute_slow(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks the execution of benchmark fixtures in stress scenarios.
 fn bench_execute_stress(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_stress");
     group.sample_size(10);
@@ -255,6 +267,7 @@ fn bench_execute_stress(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks the execution of unicode hotpath fixtures.
 fn bench_execute_unicode_hotpaths(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute_unicode_hotpaths");
     group.sample_size(10);

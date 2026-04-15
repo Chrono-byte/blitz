@@ -1655,6 +1655,8 @@ impl Compiler {
         Ok(())
     }
 
+    /// Emits a class declaration from an OAST class node.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn emit_class_from_oast(
         &mut self,
         c: &oast::Class<'_>,
@@ -1725,7 +1727,7 @@ impl Compiler {
                 inner.add_local_with_mirror("arguments".to_string(), None, false);
                 inner.emit(Op::GetGlobal, LINE);
                 let global_idx = inner.global_name_index("Array");
-                inner.emit_u16(global_idx as u16, LINE);
+                inner.emit_u16(inner.global_index_to_u16(global_idx)?, LINE);
                 inner.emit_constant(Value::String("from".to_string()), LINE);
                 inner.emit(Op::GetProperty, LINE);
                 let from_slot = inner.alloc_ic_slot()?;

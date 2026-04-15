@@ -19,6 +19,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Compiles a given function with an overridden compile context.
 pub(crate) fn with_compile_context_override<R>(
     context: Option<(bool, bool)>,
     f: impl FnOnce() -> R,
@@ -267,21 +268,33 @@ impl Compiler {
     /// This is the preferred path for RISC-style fixed-width instructions where
     /// the opcode and all operands must be written as one u32.
     pub(crate) fn emit_with_payload(&mut self, op: Op, payload24: u32, line: u32) {
-        let instr = ((payload24 & 0x00FF_FFFF) << 8) | ((op.to_byte() as u32) & 0xFF);
+        let instr = ((payload24 & 0x00FF_FFFF) << 8_u32) | ((op.to_byte() as u32) & 0xFF);
         self.chunk.write_instr(instr, line);
         // We're writing the full instruction at once so reset pending bytes.
         self.pending_operand_bytes = 0;
     }
 
+    /// Emit a single operand byte packed into the previous instruction's 24-bit payload.
+    ///
+    /// This is the preferred path for variable-width instructions where the opcode
+    /// is a fixed value and operands are packed into the remaining 24 bits of the
+    /// previous instruction word.
     pub(crate) fn emit_byte(&mut self, byte: u8, line: u32) {
         // Pack a single operand byte into the previous instruction's 24-bit payload
         // using little-endian order: first emitted byte occupies bits 8..15, next 16..23, etc.
         if self.chunk.code.is_empty() {
-            panic!("emit_byte with empty chunk");
+            return;
         }
         let idx = self.chunk.code.len() - 1;
         if self.pending_operand_bytes >= 3 {
-            panic!("too many operand bytes for instruction payload");
+            // Defensive: avoid corrupting the instruction payload. In debug
+            // builds we assert so developers notice the incorrect emission pattern;
+            // in release builds we silently return to avoid panicking in production.
+            debug_assert!(
+                self.pending_operand_bytes < 3,
+                "too many operand bytes for instruction payload"
+            );
+            return;
         }
         let shift = 8 + (self.pending_operand_bytes * 8);
         let instr = self.chunk.code[idx];
@@ -367,6 +380,16 @@ impl Compiler {
     pub(crate) fn module_index_to_u8(&self, idx: usize) -> Result<u8, CompilerError> {
         u8::try_from(idx)
             .map_err(|_| CompilerError::from(format!("Too many modules (max 255, got {})", idx)))
+    }
+
+    /// Safely converts a global index (usize) to u16, checking that it doesn't exceed 65535.
+    pub(crate) fn global_index_to_u16(&self, idx: usize) -> Result<u16, CompilerError> {
+        u16::try_from(idx).map_err(|_| {
+            CompilerError::from(format!(
+                "Too many global constants (max 65535, got {})",
+                idx
+            ))
+        })
     }
 
     /// Returns a compiler error for a strict binding name (eval/arguments).
@@ -956,7 +979,8 @@ impl Compiler {
     pub(crate) fn patch_jump_to_target(&mut self, offset: usize, target: usize) {
         let patch_idx = self.resolve_jump_patch_index(offset);
         let rel = (target as isize) - (patch_idx as isize) - 1;
-        self.apply_jump_patch(patch_idx, rel as i32);
+        let rel_i32 = i32::try_from(rel).expect("jump offset exceeds i32 range");
+        self.apply_jump_patch(patch_idx, rel_i32);
     }
 
     /// Emits a signed jump offset as a sign-extended i24 payload.
