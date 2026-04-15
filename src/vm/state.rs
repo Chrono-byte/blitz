@@ -36,7 +36,7 @@ use crate::environment::EnvironmentRecord;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
 use crate::typecheck::Type;
-use crate::value::{ObjectData, Value, ValueSlot};
+use crate::value::{ObjectData, SharedValue, Value};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::env;
@@ -324,16 +324,16 @@ pub struct Vm {
     /// offset so the stack is truncated correctly on return.
     pub(super) stack: OperandStack,
     /// Local variables for the current frame.
-    pub(super) locals: Vec<ValueSlot>,
+    pub(super) locals: Vec<SharedValue>,
     /// Current `this` binding.
     pub(super) this_value: Value,
     /// Whether the current builtin call received an explicit receiver in args[0].
     pub(super) builtin_this_arg_prepended: bool,
     /// Upvalue environment for the currently executing closure, if any.
-    pub(super) current_closure_env: Option<Rc<Mutex<Vec<ValueSlot>>>>,
+    pub(super) current_closure_env: Option<Rc<Mutex<Vec<SharedValue>>>>,
     /// Temporary root for a callee closure environment while a call frame is
     /// being prepared.
-    pub(super) pending_closure_env: Option<Rc<Mutex<Vec<ValueSlot>>>>,
+    pub(super) pending_closure_env: Option<Rc<Mutex<Vec<SharedValue>>>>,
     /// Temporary roots for values that are in flight through host helpers or
     /// call setup and are not yet anchored in the VM state.
     pub(super) gc_temp_roots: Vec<Value>,
@@ -370,7 +370,7 @@ pub struct Vm {
     /// Shared module loader for this realm, reused across VMs with the same globals.
     pub(super) module_loader: Rc<RefCell<ModuleLoader>>,
     /// Per-VM module table: vector indexed by module index, each mapping export name -> shared slot
-    pub(super) module_table: Vec<HashMap<String, ValueSlot>>,
+    pub(super) module_table: Vec<HashMap<String, SharedValue>>,
     /// Current [[NewTarget]] while evaluating a constructor call.
     pub(super) construct_new_target: Option<Value>,
     /// Recently returned heap value, kept alive across the return boundary

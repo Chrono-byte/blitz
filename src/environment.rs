@@ -11,13 +11,13 @@ use std::rc::Weak;
 
 use crate::errors::RuntimeError;
 use crate::mutex_compat::MutexBorrowExt;
-use crate::value::{Value, ValueSlot};
+use crate::value::{SharedValue, Value};
 
 #[derive(Clone, Debug)]
 /// A single lexical binding entry inside an environment record.
 pub struct Binding {
     /// Shared storage cell for the binding value.
-    pub cell: ValueSlot,
+    pub cell: SharedValue,
     /// Whether assignment is permitted after initialization.
     pub mutable: bool,
     /// Whether the binding has been initialized.
@@ -74,7 +74,7 @@ impl EnvironmentRecord {
     }
 
     /// Create a mutable binding in this record.
-    pub fn create_mutable_binding(&mut self, name: String, cell: ValueSlot, initialized: bool) {
+    pub fn create_mutable_binding(&mut self, name: String, cell: SharedValue, initialized: bool) {
         self.bindings.insert(
             name,
             Binding {
@@ -86,7 +86,7 @@ impl EnvironmentRecord {
     }
 
     /// Create an immutable binding in this record.
-    pub fn create_immutable_binding(&mut self, name: String, cell: ValueSlot, initialized: bool) {
+    pub fn create_immutable_binding(&mut self, name: String, cell: SharedValue, initialized: bool) {
         self.bindings.insert(
             name,
             Binding {

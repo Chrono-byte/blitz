@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use crate::mutex_compat::MutexBorrowExt;
 use crate::value::{
-    ArrayData, ObjectData, PromiseState, PropertyDescriptor, ProxyData, Value, ValueSlot,
+    ArrayData, ObjectData, PromiseState, PropertyDescriptor, ProxyData, SharedValue, Value,
 };
 
 /// Result of a prototype GC collection cycle.
@@ -65,7 +65,7 @@ struct HeapRegistry {
     objects: Vec<Weak<RefCell<ObjectData>>>,
     arrays: Vec<Weak<RefCell<ArrayData>>>,
     proxies: Vec<Weak<RefCell<ProxyData>>>,
-    envs: Vec<Weak<Mutex<Vec<ValueSlot>>>>,
+    envs: Vec<Weak<Mutex<Vec<SharedValue>>>>,
     promises: Vec<Weak<RefCell<PromiseState>>>,
 }
 
@@ -122,7 +122,7 @@ pub fn track_proxy(proxy: Rc<RefCell<ProxyData>>) -> Rc<RefCell<ProxyData>> {
 }
 
 /// Register a closure environment vector with the collector.
-pub fn track_env(env: Rc<Mutex<Vec<ValueSlot>>>) -> Rc<Mutex<Vec<ValueSlot>>> {
+pub fn track_env(env: Rc<Mutex<Vec<SharedValue>>>) -> Rc<Mutex<Vec<SharedValue>>> {
     {
         HEAP.with(|heap| push_weak(&mut heap.borrow_mut().envs, &env));
         bump_allocation_pressure();
@@ -165,12 +165,15 @@ pub fn heap_snapshot() -> GcHeapSnapshot {
 
 /// Prototype collector entry point.
 pub fn collect(roots: &[Value]) -> GcStats {
-    let env_roots: &[Rc<Mutex<Vec<ValueSlot>>>] = &[];
+    let env_roots: &[Rc<Mutex<Vec<SharedValue>>>] = &[];
     collect_with_env_roots(roots, env_roots)
 }
 
 /// Prototype collector entry point with explicit closure-environment roots.
-pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSlot>>>]) -> GcStats {
+pub fn collect_with_env_roots(
+    roots: &[Value],
+    env_roots: &[Rc<Mutex<Vec<SharedValue>>>],
+) -> GcStats {
     {
         {
             let clear_envs_aggressively = false;
@@ -555,7 +558,7 @@ fn mark_object(
 }
 
 fn mark_env(
-    env: &Rc<Mutex<Vec<ValueSlot>>>,
+    env: &Rc<Mutex<Vec<SharedValue>>>,
     marked_objects: &mut HashSet<usize>,
     marked_arrays: &mut HashSet<usize>,
     marked_proxies: &mut HashSet<usize>,
@@ -628,13 +631,13 @@ fn clear_array(arr: &Rc<RefCell<ArrayData>>) {
     arr.borrow_mut().clear();
 }
 
-fn clear_env(env: &Rc<Mutex<Vec<ValueSlot>>>) {
+fn clear_env(env: &Rc<Mutex<Vec<SharedValue>>>) {
     // Break closure cycles by dropping the captured values once the
     // environment is determined to be unreachable.
     env.borrow_mut().clear();
 }
 
-fn clear_env_aggressively(env: &Rc<Mutex<Vec<ValueSlot>>>) {
+fn clear_env_aggressively(env: &Rc<Mutex<Vec<SharedValue>>>) {
     clear_env(env);
 }
 
@@ -648,13 +651,13 @@ mod tests {
 
     use crate::bytecode::{Chunk, FunctionProto};
 
-    use crate::value::ValueSlot;
+    use crate::value::SharedValue;
 
     use oxc_span::Span;
 
     use std::sync::Mutex;
 
-    fn make_dummy_closure(env: Rc<Mutex<Vec<ValueSlot>>>) -> Value {
+    fn make_dummy_closure(env: Rc<Mutex<Vec<SharedValue>>>) -> Value {
         let proto = Rc::new(FunctionProto {
             name: "gc_test".to_string(),
             span: Span::new(0, 0),

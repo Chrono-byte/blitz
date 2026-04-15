@@ -201,11 +201,6 @@ pub fn check(program: &oast::Program<'_>) -> Result<(), TypeCheckerError> {
     Ok(())
 }
 
-/// Compatibility entry: kept for callers that still call `check_oxc`.
-pub fn check_oxc(program: &oast::Program<'_>) -> Result<(), TypeCheckerError> {
-    check(program)
-}
-
 struct TypeContext {
     scopes: Vec<Scope>,
 }
@@ -666,6 +661,6 @@ mod tests {
         "#;
         let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        assert!(check_oxc(program).is_ok());
+        assert!(check(program).is_ok());
     }
 }

@@ -7,7 +7,7 @@ use crate::mutex_compat::MutexBorrowExt;
 use crate::runtime_utils::to_length;
 use crate::runtime_utils::{array_from_values, usize_to_decimal_string};
 use crate::value::{
-    ArrayData, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value, ValueSlot,
+    ArrayData, ObjectData, PropertyDescriptor, PropertyKey, SharedValue, SymbolId, Value,
 };
 use crate::vm::Vm;
 use crate::vm::runtime::execution::get_property;
@@ -653,7 +653,7 @@ impl Vm {
     pub(super) fn create_generator_object(
         &mut self,
         proto: &Rc<FunctionProto>,
-        closure_env: &Rc<Mutex<Vec<ValueSlot>>>,
+        closure_env: &Rc<Mutex<Vec<SharedValue>>>,
         call_args: Vec<Value>,
         this_value: Value,
         callee: &Value,
@@ -1407,7 +1407,7 @@ impl Vm {
     pub(super) fn configure_call_frame(
         &mut self,
         proto: &Rc<FunctionProto>,
-        closure_env: &Rc<Mutex<Vec<ValueSlot>>>,
+        closure_env: &Rc<Mutex<Vec<SharedValue>>>,
         call_args: Vec<Value>,
         mut this_value: Value,
         callee: Value,
@@ -1576,7 +1576,7 @@ impl Vm {
     pub(super) fn push_call_frame(
         &mut self,
         proto: &Rc<FunctionProto>,
-        closure_env: &Rc<Mutex<Vec<ValueSlot>>>,
+        closure_env: &Rc<Mutex<Vec<SharedValue>>>,
         call_args: Vec<Value>,
         this_value: Value,
         callee: Value,

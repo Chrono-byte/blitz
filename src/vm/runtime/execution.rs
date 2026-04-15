@@ -8,8 +8,8 @@ use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
 use crate::runtime_utils::{array_length_descriptor, js_number_to_string};
 use crate::value::{
-    ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId,
-    Value, ValueSlot,
+    ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SharedValue,
+    SymbolId, Value,
 };
 use crate::vm::runtime::coercions::{parse_js_bigint_string, parse_js_number_string, to_number};
 use crate::vm::state::*;
@@ -405,7 +405,7 @@ impl Vm {
         };
 
         let mut roots: Vec<Value> = Vec::new();
-        let mut env_roots: Vec<Rc<Mutex<Vec<ValueSlot>>>> = Vec::new();
+        let mut env_roots: Vec<Rc<Mutex<Vec<SharedValue>>>> = Vec::new();
         roots.push(Value::Object(Rc::clone(&self.globals)));
         roots.extend(self.stack.iter().cloned());
         roots.extend(self.locals.iter().map(|c| c.borrow().clone()));
@@ -650,7 +650,7 @@ impl Vm {
     pub fn install_module_exports(
         &mut self,
         module_index: usize,
-        mut exports: HashMap<String, ValueSlot>,
+        mut exports: HashMap<String, SharedValue>,
     ) {
         let namespace = build_module_namespace_object(&exports);
         exports.insert("*".to_string(), Rc::new(Mutex::new(namespace)));
@@ -4050,7 +4050,7 @@ fn list_own_keys_of_value(v: &Value) -> Option<Vec<String>> {
 
 /// Grow a locals vector so that `slot` is a valid index.
 #[inline(always)]
-pub(super) fn ensure_slot(locals: &mut Vec<ValueSlot>, slot: usize) {
+pub(super) fn ensure_slot(locals: &mut Vec<SharedValue>, slot: usize) {
     if slot >= locals.len() {
         locals.resize_with(slot + 1, || Rc::new(Mutex::new(Value::Undefined)));
     }
@@ -4488,7 +4488,7 @@ pub(super) fn set_property(
     }
 }
 
-pub(crate) fn build_module_namespace_object(exports: &HashMap<String, ValueSlot>) -> Value {
+pub(crate) fn build_module_namespace_object(exports: &HashMap<String, SharedValue>) -> Value {
     let namespace = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     let mut names: Vec<String> = exports
         .keys()

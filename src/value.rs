@@ -61,8 +61,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use num_bigint::BigInt as BigIntValue;
 use num_traits::Zero;
 
-/// Shared mutable slot for live bindings and captured values.
-pub type ValueSlot = Rc<Mutex<Value>>;
+/// Shared, reference-counted, mutable handle to a `Value`.
+/// Note: `Rc<Mutex<_>>` is for single-threaded shared mutation and is not `Send`/`Sync`.
+pub type SharedValue = Rc<Mutex<Value>>;
 
 /// A weak reference to an ObjectData that can be upgraded when needed.
 /// This helps prevent reference cycles in prototype chains.
@@ -186,6 +187,12 @@ impl SymbolId {
     /// Well-known symbol for `@@unscopables`.
     pub fn well_known_unscopables() -> Self {
         Self::well_known(13)
+    }
+}
+
+impl Default for SymbolId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -546,7 +553,7 @@ pub enum Value {
         /// Function prototype
         proto: Rc<FunctionProto>,
         /// Captured / closed-over binding cells
-        env: Rc<Mutex<Vec<ValueSlot>>>,
+        env: Rc<Mutex<Vec<SharedValue>>>,
         /// Lexically captured `this` value for arrow functions.
         lexical_this: Option<Box<Value>>,
         /// Mutable property bag for function object properties (e.g., `prototype`).
@@ -880,7 +887,10 @@ mod tests {
             Some(Value::Number(4.0)),
         ]);
 
-        assert_eq!(arr.dense_numbers(), Some(vec![1.0, 2.0, 3.0, 4.0]));
+        assert_eq!(
+            arr.dense_numbers(),
+            Some(vec![1.0_f64, 2.0_f64, 3.0_f64, 4.0_f64])
+        );
         assert!(arr.fill_dense_numbers(1, 3, 9.0));
         assert_eq!(
             arr.clone_elements(),

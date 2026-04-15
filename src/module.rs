@@ -55,7 +55,7 @@ use crate::compiler::ModuleContext;
 use crate::errors::BundlerError;
 use crate::parser::ParserSession;
 use crate::resolver::resolve_specifier;
-use crate::value::{Value, ValueSlot};
+use crate::value::{SharedValue, Value};
 use crate::vm::Vm;
 
 use oxc_span::SourceType;
@@ -90,9 +90,9 @@ pub struct ModuleRecord {
     /// Assigned numeric module index used by the VM module table. Set during instantiation.
     pub module_index: Option<usize>,
     /// Export slots: mapping export name -> shared slot.
-    pub exports: HashMap<String, ValueSlot>,
+    pub exports: HashMap<String, SharedValue>,
     /// Import bindings: local name -> exporter slot
-    pub imports: HashMap<String, ValueSlot>,
+    pub imports: HashMap<String, SharedValue>,
     /// Import metadata: local name -> (module_index, exported_name)
     pub import_sources: HashMap<String, (usize, String)>,
     /// Indirect export metadata: exported name -> (imported name, source specifier)
@@ -140,6 +140,10 @@ impl ModuleLoader {
     }
 
     /// Construct (fetch & parse) a module and its dependencies.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::BundlerError`] if the module or any of its dependencies cannot be constructed.
     pub fn construct(
         &mut self,
         base: &Path,
@@ -192,6 +196,10 @@ impl ModuleLoader {
     /// Instantiate modules by allocating export slots. This is a simple
     /// implementation that creates shared value slots for exported names so
     /// importers can hold live bindings to the same slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::BundlerError`] if a module fails to instantiate.
     pub fn instantiate_all(&mut self) -> Result<(), BundlerError> {
         // For each module, examine its AST for exported names and allocate slots.
         for rec_rc in self.map.values() {
@@ -541,6 +549,10 @@ impl ModuleLoader {
     }
 
     /// Compute depth-first, post-order evaluation order starting from `entry`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::BundlerError`] if the entry cannot be resolved.
     pub fn evaluation_order_from(&mut self, entry: &Path) -> Result<Vec<PathBuf>, BundlerError> {
         let resolved = resolve_specifier(
             entry.parent().unwrap_or(Path::new(".")),
@@ -603,12 +615,17 @@ impl ModuleLoader {
         Ok(order)
     }
 
+    /// Resolve an export from a module.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if evaluation fails.
     fn resolve_export(
         &mut self,
         module_path: &Path,
         export_name: &str,
         resolve_set: &mut std::collections::HashSet<(PathBuf, String)>,
-    ) -> Result<Option<ValueSlot>, BundlerError> {
+    ) -> Result<Option<SharedValue>, BundlerError> {
         let module_path =
             std::fs::canonicalize(module_path).unwrap_or_else(|_| module_path.to_path_buf());
         let key = (module_path.clone(), export_name.to_string());
@@ -642,7 +659,7 @@ impl ModuleLoader {
             }
         }
 
-        let mut found: Option<ValueSlot> = None;
+        let mut found: Option<SharedValue> = None;
         for source_spec in star_exports {
             let dep_rec_rc = self.construct(&base_dir, &source_spec)?;
             let dep_path = dep_rec_rc.borrow().path.clone();
@@ -663,6 +680,10 @@ impl ModuleLoader {
     }
 
     /// Evaluate a module graph starting from entry in DFS post-order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if evaluation fails.
     pub fn evaluate_entry(
         &mut self,
         entry: &Path,
@@ -697,7 +718,7 @@ impl ModuleLoader {
                     rec.state = ModuleState::Evaluating;
                     let program = rec.session.program();
                     if enable_typecheck {
-                        crate::typecheck::check_oxc(program).map_err(|e| {
+                        crate::typecheck::check(program).map_err(|e| {
                             crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
                         })?;
                     }
@@ -728,6 +749,10 @@ impl ModuleLoader {
     }
 
     /// Evaluate module graph in depth-first, post-order. For now synchronous.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if evaluation fails.
     pub fn evaluate_all(
         &mut self,
         vm: &mut Vm,
@@ -741,7 +766,7 @@ impl ModuleLoader {
                 // Compile program
                 let program = rec.session.program();
                 if enable_typecheck {
-                    crate::typecheck::check_oxc(program).map_err(|e| {
+                    crate::typecheck::check(program).map_err(|e| {
                         crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
                     })?;
                 }
@@ -803,7 +828,7 @@ pub fn evaluate_entry_shared(
                 rec.state = ModuleState::Evaluating;
                 let program = rec.session.program();
                 if enable_typecheck {
-                    crate::typecheck::check_oxc(program).map_err(|e| {
+                    crate::typecheck::check(program).map_err(|e| {
                         crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
                     })?;
                 }
