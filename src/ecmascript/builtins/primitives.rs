@@ -13,6 +13,7 @@ use crate::runtime_utils::{builtin_object, js_number_to_string, non_enum_data, s
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 /// Fundamental primitive wrapper builtins currently migrated from runtime_utils.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn install_bigint_and_number_builtins(
     globals: &mut ObjectData,
     object_proto_map: &Rc<RefCell<ObjectData>>,

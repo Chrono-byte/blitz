@@ -1,3 +1,5 @@
+//! Promise builtin functions and prototype methods
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Mutex;

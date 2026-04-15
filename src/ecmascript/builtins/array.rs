@@ -1,3 +1,5 @@
+//! Array builtin functions and prototype methods
+
 use std::cell::RefCell;
 use std::env;
 use std::rc::Rc;

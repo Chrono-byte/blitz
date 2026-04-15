@@ -1,3 +1,5 @@
+//! Global builtin functions and prototype methods
+
 use std::rc::Rc;
 
 use crate::compiler;

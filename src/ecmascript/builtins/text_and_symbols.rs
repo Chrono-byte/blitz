@@ -1,3 +1,5 @@
+//! Text and symbol builtin functions and prototype methods
+
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
