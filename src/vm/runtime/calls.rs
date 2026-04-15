@@ -947,7 +947,7 @@ impl Vm {
           | Value::BuiltinObject(_, _)
           | Value::Proxy(_)
           | Value::Promise(_) => {
-            let _ = set_constructor_property(&result, callee);
+            drop(set_constructor_property(&result, callee));
             result
           }
           _ if is_derived_constructor => {
@@ -961,7 +961,7 @@ impl Vm {
           }
           _ => instance,
         };
-        let _ = set_constructor_property(&result, callee);
+        drop(set_constructor_property(&result, callee));
         if matches!(
           result,
           Value::Object(_)
@@ -1061,12 +1061,12 @@ impl Vm {
           | Value::BuiltinObject(_, _)
           | Value::Proxy(_)
           | Value::Promise(_) => {
-            let _ = set_constructor_property(&result, callee);
+            drop(set_constructor_property(&result, callee));
             result
           }
           _ => instance,
         };
-        let _ = set_constructor_property(&result, callee);
+        drop(set_constructor_property(&result, callee));
         if matches!(
           result,
           Value::Object(_)

@@ -1011,7 +1011,7 @@ mod test {
       crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = Vm::new(globals);
-    let _ = vm.run(chunk).expect("run ok");
+    drop(vm.run(chunk).expect("run ok"));
 
     assert!(
       matches!(vm.get_global("sum"), Some(Value::Number(n)) if (n - 6.0).abs() < f64::EPSILON)

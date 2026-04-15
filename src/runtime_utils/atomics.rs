@@ -203,7 +203,7 @@ fn atomics_write_view_slot(
 ) -> Result<(), RuntimeError> {
   let prop_key = Value::Number(usize_to_f64(index));
   let stored = value.clone();
-  let _ = vm.set_property_host(&Value::Object(Rc::clone(&info.view)), &prop_key, value)?;
+  drop(vm.set_property_host(&Value::Object(Rc::clone(&info.view)), &prop_key, value)?);
   if let Some(slot) = info.data.borrow_mut().get_mut(index) {
     *slot = Some(stored);
   }
@@ -320,11 +320,11 @@ pub(crate) fn atomics_wake_waiters(
     if let Ok(resolve) = vm.get_property_host(waiter, &PropertyKey::String("resolve".to_string()))
       && !matches!(resolve, Value::Undefined)
     {
-      let _ = vm.call_value_with_this(
+      drop(vm.call_value_with_this(
         &resolve,
         &Value::Undefined,
         &[Value::String("ok".to_string())],
-      );
+      ));
     }
   }
 

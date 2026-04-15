@@ -213,7 +213,7 @@ fn main() -> Result<(), blitz::errors::Error> {
   let mut rl = rustyline::Editor::<(), rustyline::history::DefaultHistory>::new()
     .map_err(|e| blitz::errors::RuntimeError::from(format!("Readline init error: {}", e)))?;
   let history_path = env::temp_dir().join("blitz_repl_history");
-  let _ = rl.load_history(&history_path);
+  drop(rl.load_history(&history_path));
   loop {
     match rl.readline("> ") {
       Ok(input) => {
@@ -221,8 +221,8 @@ fn main() -> Result<(), blitz::errors::Error> {
         if line.is_empty() {
           continue;
         }
-        let _ = rl.add_history_entry(line);
-        let _ = rl.save_history(&history_path);
+        drop(rl.add_history_entry(line));
+        drop(rl.save_history(&history_path));
         if line.eq_ignore_ascii_case("exit") || line.eq_ignore_ascii_case("quit") {
           break;
         }

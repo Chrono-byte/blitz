@@ -79,7 +79,7 @@ impl Vm {
       match desc {
         PropertyDescriptor::Accessor { set, .. } => {
           if let Some(setter) = set {
-            let _ = self.call_with_this(&setter, receiver, &[value])?;
+            drop(self.call_with_this(&setter, receiver, &[value])?);
             self.bump_object_generation(receiver);
             return Ok(());
           }
@@ -395,7 +395,7 @@ impl Vm {
         match desc {
           PropertyDescriptor::Accessor { set, .. } => {
             if let Some(setter) = set {
-              let _ = self.call_with_this(&setter, &receiver, &[value])?;
+              drop(self.call_with_this(&setter, &receiver, &[value])?);
               self.bump_object_generation(&receiver);
               return Ok(true);
             }
@@ -1051,7 +1051,7 @@ impl Vm {
       match desc {
         PropertyDescriptor::Accessor { set, .. } => {
           if let Some(setter) = set {
-            let _ = self.call_with_this(&setter, obj, &[value])?;
+            drop(self.call_with_this(&setter, obj, &[value])?);
             self.bump_object_generation(obj);
             return Ok(());
           }

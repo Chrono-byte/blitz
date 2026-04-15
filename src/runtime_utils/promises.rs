@@ -253,7 +253,7 @@ pub(crate) fn fulfill_pending_promise(
       let callback_value = stored_value.clone();
       vm.queue_microtask(move |vm| {
         let args = std::slice::from_ref(&callback_value);
-        let _ = vm.call_value_with_this(&callback, &Value::Undefined, args);
+        drop(vm.call_value_with_this(&callback, &Value::Undefined, args));
         Ok(())
       });
     }
@@ -308,7 +308,7 @@ pub(crate) fn reject_pending_promise(
         let callback_reason = stored_reason.clone();
         vm.queue_microtask(move |vm| {
           let args = std::slice::from_ref(&callback_reason);
-          let _ = vm.call_value_with_this(&callback, &Value::Undefined, args);
+          drop(vm.call_value_with_this(&callback, &Value::Undefined, args));
           Ok(())
         });
       }

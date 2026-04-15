@@ -437,7 +437,7 @@ fn close_iterator(
 ) -> Result<(), crate::errors::RuntimeError> {
   let return_fn = vm.get_property_host(iter_obj, &PropertyKey::String("return".to_string()))?;
   if Vm::is_callable_value(&return_fn) {
-    let _ = vm.call_value_with_this(&return_fn, iter_obj, &[])?;
+    drop(vm.call_value_with_this(&return_fn, iter_obj, &[])?);
   }
   Ok(())
 }

@@ -2856,7 +2856,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           };
           for i in 0..len {
             let key = Value::String(i.to_string());
-            let _ = vm.set_property_host(&receiver, &key, fill_value.clone())?;
+            drop(vm.set_property_host(&receiver, &key, fill_value.clone())?);
           }
           Ok(receiver)
         }),
@@ -4267,11 +4267,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       let start_byte = char_index_to_byte_index(&subject, last_index);
       if sticky && !sticky_caret_allows(&subject, last_index, &pattern, flags.contains('m')) {
         if global {
-          let _ = vm.set_property_host(
+          drop(vm.set_property_host(
             &this,
             &Value::String("lastIndex".to_string()),
             Value::Number(0.0),
-          )?;
+          )?);
         }
         return Ok(Value::Null);
       }
@@ -4296,11 +4296,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
 
       let Some(caps) = caps else {
         if global {
-          let _ = vm.set_property_host(
+          drop(vm.set_property_host(
             &this,
             &Value::String("lastIndex".to_string()),
             Value::Number(0.0),
-          )?;
+          )?);
         }
         return Ok(Value::Null);
       };
@@ -4310,11 +4310,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         .ok_or_else(|| RuntimeError::from("RegExp exec missing match"))?;
       if global {
         let end_char = subject[..m.end()].chars().count();
-        let _ = vm.set_property_host(
+        drop(vm.set_property_host(
           &this,
           &Value::String("lastIndex".to_string()),
           Value::Number(usize_to_f64(end_char)),
-        )?;
+        )?);
       }
 
       let mut entries = Vec::with_capacity(caps.len());
@@ -4325,16 +4325,16 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         }
       }
       let result = array_from_values(entries);
-      let _ = vm.set_property_host(
+      drop(vm.set_property_host(
         &result,
         &Value::String("index".to_string()),
         Value::Number(usize_to_f64(subject[..m.start()].chars().count())),
-      )?;
-      let _ = vm.set_property_host(
+      )?);
+      drop(vm.set_property_host(
         &result,
         &Value::String("input".to_string()),
         Value::String(subject),
-      )?;
+      )?);
       Ok(result)
     }),
     &function_proto_map,
@@ -4371,11 +4371,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       let start_byte = char_index_to_byte_index(&subject, last_index);
       if sticky && !sticky_caret_allows(&subject, last_index, &pattern, flags.contains('m')) {
         if global {
-          let _ = vm.set_property_host(
+          drop(vm.set_property_host(
             &this,
             &Value::String("lastIndex".to_string()),
             Value::Number(0.0),
-          )?;
+          )?);
         }
         return Ok(Value::Bool(false));
       }
@@ -4387,11 +4387,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         regex.find_at(&subject, start_byte).is_some()
       };
       if !found && global {
-        let _ = vm.set_property_host(
+        drop(vm.set_property_host(
           &this,
           &Value::String("lastIndex".to_string()),
           Value::Number(0.0),
-        )?;
+        )?);
       }
       Ok(Value::Bool(found))
     }),

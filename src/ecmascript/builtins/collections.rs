@@ -36,16 +36,16 @@ pub(crate) fn install_map_set_constructors(
         PropertyKey::String("length".to_string()),
         PropertyDescriptor::data(Value::Number(0.0)),
       );
-      let _ = vm.set_property_host(
+      drop(vm.set_property_host(
         &receiver,
         &Value::String("__map_entries".to_string()),
         Value::Array(Rc::clone(&arr_rc), arr_props),
-      )?;
-      let _ = vm.set_property_host(
+      )?);
+      drop(vm.set_property_host(
         &receiver,
         &Value::String("size".to_string()),
         Value::Number(0.0),
-      )?;
+      )?);
       let iterable = args.get(1).cloned().unwrap_or(Value::Undefined);
       if let Value::Array(items, _) = iterable {
         for item in items.borrow().iter().flatten() {
@@ -85,11 +85,11 @@ pub(crate) fn install_map_set_constructors(
             }
           }
         }
-        let _ = vm.set_property_host(
+        drop(vm.set_property_host(
           &receiver,
           &Value::String("size".to_string()),
           Value::Number(usize_to_f64(arr_rc.borrow().len())),
-        )?;
+        )?);
       }
       return Ok(receiver);
     }
@@ -182,11 +182,11 @@ pub(crate) fn install_map_set_constructors(
             PropertyKey::String("length".to_string()),
             PropertyDescriptor::data(Value::Number(new_len)),
           );
-          let _ = vm.set_property_host(
+          drop(vm.set_property_host(
             this,
             &Value::String("size".to_string()),
             Value::Number(new_len),
-          )?;
+          )?);
           return Ok(Value::Bool(removed));
         }
         Ok(Value::Bool(false))
@@ -235,11 +235,11 @@ pub(crate) fn install_map_set_constructors(
               PropertyDescriptor::data(Value::Number(usize_to_f64(arr.borrow().len()))),
             );
           }
-          let _ = vm.set_property_host(
+          drop(vm.set_property_host(
             this,
             &Value::String("size".to_string()),
             Value::Number(usize_to_f64(arr.borrow().len())),
-          )?;
+          )?);
         }
         Ok(this.clone())
       }),
@@ -292,11 +292,11 @@ pub(crate) fn install_map_set_constructors(
               idx += 1;
               done = false;
             }
-            let _ = vm.set_property_host(
+            drop(vm.set_property_host(
               it,
               &Value::String("__iter_index".to_string()),
               Value::Number(usize_to_f64(idx)),
-            )?;
+            )?);
             let mut result = ObjectData::new();
             result.properties.insert(
               PropertyKey::String("value".to_string()),
@@ -346,16 +346,16 @@ pub(crate) fn install_map_set_constructors(
         PropertyKey::String("length".to_string()),
         PropertyDescriptor::data(Value::Number(0.0)),
       );
-      let _ = vm.set_property_host(
+      drop(vm.set_property_host(
         receiver,
         &Value::String("__set_values".to_string()),
         Value::Array(Rc::clone(&arr_rc), arr_props),
-      )?;
-      let _ = vm.set_property_host(
+      )?);
+      drop(vm.set_property_host(
         receiver,
         &Value::String("size".to_string()),
         Value::Number(0.0),
-      )?;
+      )?);
       let iterable = args.get(1).cloned().unwrap_or(Value::Undefined);
       if let Value::Array(items, _) = iterable {
         for item in items.borrow().iter().flatten() {
@@ -370,11 +370,11 @@ pub(crate) fn install_map_set_constructors(
             arr_rc.borrow_mut().push(Some(item.clone()));
           }
         }
-        let _ = vm.set_property_host(
+        drop(vm.set_property_host(
           receiver,
           &Value::String("size".to_string()),
           Value::Number(usize_to_f64(arr_rc.borrow().len())),
-        )?;
+        )?);
       }
       return Ok(receiver.clone());
     }
@@ -413,11 +413,11 @@ pub(crate) fn install_map_set_constructors(
               PropertyDescriptor::data(Value::Number(usize_to_f64(arr.borrow().len()))),
             );
           }
-          let _ = vm.set_property_host(
+          drop(vm.set_property_host(
             this,
             &Value::String("size".to_string()),
             Value::Number(usize_to_f64(arr.borrow().len())),
-          )?;
+          )?);
         }
         Ok(this.clone())
       }),
@@ -489,11 +489,11 @@ pub(crate) fn install_map_set_constructors(
               idx += 1;
               done = false;
             }
-            let _ = vm.set_property_host(
+            drop(vm.set_property_host(
               &it,
               &Value::String("__iter_index".to_string()),
               Value::Number(usize_to_f64(idx)),
-            )?;
+            )?);
             let mut result = ObjectData::new();
             result.properties.insert(
               PropertyKey::String("value".to_string()),

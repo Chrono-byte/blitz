@@ -194,7 +194,7 @@ impl ModuleLoader {
         let base_dir = resolved_canon
           .parent()
           .unwrap_or_else(|| Path::new("."));
-        let _ = self.construct(base_dir, &spec);
+        drop(self.construct(base_dir, &spec));
       }
     }
 

@@ -384,7 +384,7 @@ impl Vm {
   ) where
     Fut: Future<Output = ()> + Send + 'static,
   {
-    let _ = self.bg_runtime.spawn(fut);
+    drop(self.bg_runtime.spawn(fut));
   }
 }
 

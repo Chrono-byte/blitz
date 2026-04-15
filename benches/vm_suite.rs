@@ -149,7 +149,7 @@ fn bench_compile(c: &mut Criterion) {
       |b, source| {
         b.iter(|| {
           let session = Parser::parse_source(source).expect("fixture should parse as JS");
-          let _ = compiler::compile_oxc(session.program(), source).expect("fixture should compile");
+          drop(compiler::compile_oxc(session.program(), source).expect("fixture should compile"));
         });
       },
     );
@@ -172,9 +172,10 @@ fn bench_execute_cold(c: &mut Criterion) {
       b.iter(|| {
         let globals = benchmark_globals();
         let mut vm = Vm::new(globals);
-        let _ = vm
-          .run(chunk.clone())
-          .expect("fixture should execute");
+        drop(
+          vm.run(chunk.clone())
+            .expect("fixture should execute"),
+        );
       });
     });
   }
@@ -200,7 +201,7 @@ fn bench_execute_fast(c: &mut Criterion) {
       b.iter_batched(
         || chunk.clone(),
         |chunk| {
-          let _ = vm.run(chunk).expect("fixture should execute");
+          drop(vm.run(chunk).expect("fixture should execute"));
           vm.reset(&keep_globals);
         },
         BatchSize::SmallInput,
@@ -229,7 +230,7 @@ fn bench_execute_slow(c: &mut Criterion) {
       b.iter_batched(
         || chunk.clone(),
         |chunk| {
-          let _ = vm.run(chunk).expect("fixture should execute");
+          drop(vm.run(chunk).expect("fixture should execute"));
           vm.reset(&keep_globals);
         },
         BatchSize::SmallInput,
@@ -258,7 +259,7 @@ fn bench_execute_stress(c: &mut Criterion) {
       b.iter_batched(
         || chunk.clone(),
         |chunk| {
-          let _ = vm.run(chunk).expect("fixture should execute");
+          drop(vm.run(chunk).expect("fixture should execute"));
           vm.reset(&keep_globals);
         },
         BatchSize::SmallInput,
@@ -291,9 +292,10 @@ fn bench_execute_unicode_hotpaths(c: &mut Criterion) {
       b.iter_batched(
         || chunk.clone(),
         |chunk| {
-          let _ = vm
-            .run(chunk)
-            .expect("benchmark source should execute");
+          drop(
+            vm.run(chunk)
+              .expect("benchmark source should execute"),
+          );
           vm.reset(&keep_globals);
         },
         BatchSize::SmallInput,
@@ -334,13 +336,14 @@ fn bench_micro_hotpaths(c: &mut Criterion) {
   group.bench_function("from_char_code_dispatch", |b| {
     b.iter(|| {
       let value = hotpath_number_value();
-      let _ = vm
-        .call_value_with_this(
+      drop(
+        vm.call_value_with_this(
           &from_char_code,
           &string_ctor,
           &[value, Value::String("1".to_string())],
         )
-        .expect("builtin dispatch");
+        .expect("builtin dispatch"),
+      );
     });
   });
 

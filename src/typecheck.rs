@@ -375,7 +375,7 @@ impl TypeContext {
         }
       }
       OStmt::ExpressionStatement(e) => {
-        let _ = self.type_of_expr_oast(&e.expression)?;
+        drop(self.type_of_expr_oast(&e.expression)?);
       }
       OStmt::BlockStatement(b) => {
         for s in &b.body {
@@ -383,19 +383,19 @@ impl TypeContext {
         }
       }
       OStmt::IfStatement(i) => {
-        let _ = self.type_of_expr_oast(&i.test)?;
+        drop(self.type_of_expr_oast(&i.test)?);
         self.check_statement_oast(&i.consequent)?;
         if let Some(alt) = &i.alternate {
           self.check_statement_oast(alt)?;
         }
       }
       OStmt::WhileStatement(w) => {
-        let _ = self.type_of_expr_oast(&w.test)?;
+        drop(self.type_of_expr_oast(&w.test)?);
         self.check_statement_oast(&w.body)?;
       }
       OStmt::ReturnStatement(r) => {
         if let Some(arg) = &r.argument {
-          let _ = self.type_of_expr_oast(arg)?;
+          drop(self.type_of_expr_oast(arg)?);
         }
       }
       _ => {}
@@ -471,8 +471,8 @@ impl TypeContext {
         }
       }
       OExpr::LogicalExpression(l) => {
-        let _ = self.type_of_expr_oast(&l.left)?;
-        let _ = self.type_of_expr_oast(&l.right)?;
+        drop(self.type_of_expr_oast(&l.left)?);
+        drop(self.type_of_expr_oast(&l.right)?);
         match l.operator {
           oast::LogicalOperator::Coalesce => Ok(Type::Unknown),
           oast::LogicalOperator::And | oast::LogicalOperator::Or => Ok(Type::Unknown),

@@ -2366,7 +2366,7 @@ impl Vm {
             }
             eprintln!("[trace]   reference strict={}", reference.strict);
           }
-          let _ = self.reference_stack.pop();
+          drop(self.reference_stack.pop());
           result?;
           self.bump_object_generation(&obj);
           self.stack.push(value);
@@ -2392,7 +2392,7 @@ impl Vm {
           }
           eprintln!("[trace]   reference strict={}", reference.strict);
         }
-        let _ = self.reference_stack.pop();
+        drop(self.reference_stack.pop());
         result?;
         self.stack.push(value);
       }

@@ -95,7 +95,7 @@ mod test {
         assert!(matches!(arr[2], Some(Value::Number(n)) if n == 2.0));
         assert!(matches!(arr[3], Some(Value::Number(n)) if n == 0.0));
       }
-      other => assert!(false, "unexpected result: {:?}", other),
+      other => panic!("unexpected result: {:?}", other),
     }
   }
 
@@ -167,11 +167,13 @@ mod test {
     let builtin = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), props);
 
     assert!(matches!(
-      get_property(&builtin, &PropertyKey::String("own".to_string()), 0).unwrap(),
+      get_property(&builtin, &PropertyKey::String("own".to_string()), 0)
+        .expect("test should not fail"),
       Value::Number(3.0)
     ));
     assert!(matches!(
-      get_property(&builtin, &PropertyKey::String("inherited".to_string()), 0).unwrap(),
+      get_property(&builtin, &PropertyKey::String("inherited".to_string()), 0)
+        .expect("test should not fail"),
       Value::Number(7.0)
     ));
   }
@@ -232,13 +234,13 @@ mod test {
     assert!(strict_equal(&target, &result));
     let a = vm
       .get_property_host(&target, &PropertyKey::String("a".to_string()))
-      .unwrap();
+      .expect("test should not fail");
     let b = vm
       .get_property_host(&target, &PropertyKey::String("b".to_string()))
-      .unwrap();
+      .expect("test should not fail");
     let c = vm
       .get_property_host(&target, &PropertyKey::String("c".to_string()))
-      .unwrap();
+      .expect("test should not fail");
     assert!(matches!(a, Value::Number(n) if (n - 1.0).abs() < f64::EPSILON));
     assert!(matches!(b, Value::Number(n) if (n - 2.0).abs() < f64::EPSILON));
     assert!(matches!(c, Value::Number(n) if (n - 3.0).abs() < f64::EPSILON));
@@ -268,7 +270,7 @@ mod test {
             Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON
         ));
       }
-      other => assert!(false, "expected object, got {:?}", other),
+      other => panic!("expected object, got {:?}", other),
     }
 
     let target = vm.get_global("target").expect("target");
@@ -349,15 +351,15 @@ mod test {
 
     assert!(
       vm.has_property_host(&arr, &PropertyKey::String("length".to_string()))
-        .unwrap()
+        .expect("test should not fail")
     );
     assert!(
       vm.has_property_host(&arr, &PropertyKey::String("0".to_string()))
-        .unwrap()
+        .expect("test should not fail")
     );
     assert!(matches!(
         vm.get_property_host(&arr, &PropertyKey::String("0".to_string()))
-            .unwrap(),
+            .expect("test should not fail"),
         Value::Number(n) if n.is_nan()
     ));
   }
@@ -390,7 +392,7 @@ mod test {
             }) if (*n - 3.0).abs() < f64::EPSILON
         ));
       }
-      other => assert!(false, "expected array, got {:?}", other),
+      other => panic!("expected array, got {:?}", other),
     }
   }
 
@@ -414,7 +416,11 @@ mod test {
       on_rejected: Vec::new(),
     })));
 
-    assert_eq!(vm.to_string(&promise).unwrap(), "[object Promise]");
+    assert_eq!(
+      vm.to_string(&promise)
+        .expect("test should not fail"),
+      "[object Promise]"
+    );
   }
 
   #[test]
@@ -422,9 +428,21 @@ mod test {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
 
-    assert_eq!(vm.to_string(&Value::Number(1.0)).unwrap(), "1");
-    assert_eq!(vm.to_string(&Value::Number(2.0)).unwrap(), "2");
-    assert_eq!(vm.to_string(&Value::Number(-0.0)).unwrap(), "0");
+    assert_eq!(
+      vm.to_string(&Value::Number(1.0))
+        .expect("test should not fail"),
+      "1"
+    );
+    assert_eq!(
+      vm.to_string(&Value::Number(2.0))
+        .expect("test should not fail"),
+      "2"
+    );
+    assert_eq!(
+      vm.to_string(&Value::Number(-0.0))
+        .expect("test should not fail"),
+      "0"
+    );
   }
 
   #[test]
@@ -434,17 +452,17 @@ mod test {
 
     assert_eq!(
       vm.to_number_value(&Value::String("0x10".to_string()))
-        .unwrap(),
+        .expect("test should not fail"),
       16.0
     );
     assert_eq!(
       vm.to_number_value(&Value::String("0b101".to_string()))
-        .unwrap(),
+        .expect("test should not fail"),
       5.0
     );
     assert_eq!(
       vm.to_number_value(&Value::String("0o10".to_string()))
-        .unwrap(),
+        .expect("test should not fail"),
       8.0
     );
   }
@@ -456,12 +474,12 @@ mod test {
 
     assert!(
       vm.to_number_value(&Value::String("-0x10".to_string()))
-        .unwrap()
+        .expect("test should not fail")
         .is_nan()
     );
     assert!(
       vm.to_number_value(&Value::String("+0b101".to_string()))
-        .unwrap()
+        .expect("test should not fail")
         .is_nan()
     );
   }
@@ -479,15 +497,15 @@ mod test {
     let arr = Value::Array(arr_data.clone(), props);
     let key = PropertyKey::String("4294967295".to_string());
 
-    set_property(&arr, &key, Value::String("x".to_string())).unwrap();
+    set_property(&arr, &key, Value::String("x".to_string())).expect("test should not fail");
 
     assert_eq!(arr_data.borrow().len(), 1);
     assert!(matches!(
-        get_property(&arr, &key, 0).unwrap(),
+        get_property(&arr, &key, 0).expect("test should not fail"),
         Value::String(ref s) if s == "x"
     ));
     assert!(matches!(
-        get_property(&arr, &PropertyKey::String("length".to_string()), 0).unwrap(),
+        get_property(&arr, &PropertyKey::String("length".to_string()), 0).expect("test should not fail"),
         Value::Number(n) if (n - 1.0).abs() < f64::EPSILON
     ));
   }
@@ -505,15 +523,15 @@ mod test {
     let arr = Value::Array(arr_data.clone(), props);
     let key = PropertyKey::String("4294967294".to_string());
 
-    set_property(&arr, &key, Value::Number(1.0)).unwrap();
+    set_property(&arr, &key, Value::Number(1.0)).expect("test should not fail");
 
     assert_eq!(arr_data.borrow().len(), 1);
     assert!(matches!(
-        get_property(&arr, &key, 0).unwrap(),
+        get_property(&arr, &key, 0).expect("test should not fail"),
         Value::Number(n) if (n - 1.0).abs() < f64::EPSILON
     ));
     assert!(matches!(
-        get_property(&arr, &PropertyKey::String("length".to_string()), 0).unwrap(),
+        get_property(&arr, &PropertyKey::String("length".to_string()), 0).expect("test should not fail"),
         Value::Number(n) if (n - 4294967295.0).abs() < f64::EPSILON
     ));
   }
@@ -539,7 +557,7 @@ mod test {
 
     assert!(
       vm.define_own_property(&arr, PropertyKey::String("0".to_string()), desc)
-        .unwrap()
+        .expect("test should not fail")
     );
     assert!(matches!(
       props
@@ -553,12 +571,12 @@ mod test {
     ));
     assert!(
       vm.delete_property_host(&arr, &PropertyKey::String("0".to_string()))
-        .unwrap()
+        .expect("test should not fail")
     );
     assert!(
       !vm
         .has_property_host(&arr, &PropertyKey::String("0".to_string()))
-        .unwrap()
+        .expect("test should not fail")
     );
   }
 
@@ -603,7 +621,7 @@ mod test {
             Value::String(ref s) if s == "first"
         ));
       }
-      other => assert!(false, "expected array, got {:?}", other),
+      other => panic!("expected array, got {:?}", other),
     }
   }
 
@@ -672,7 +690,7 @@ mod test {
         assert!(matches!(values[3], Value::Number(n) if (n - 4.0).abs() < f64::EPSILON));
         assert!(matches!(values[4], Value::Number(n) if (n - 5.0).abs() < f64::EPSILON));
       }
-      other => assert!(false, "expected evaluated array, got {:?}", other),
+      other => panic!("expected evaluated array, got {:?}", other),
     }
   }
 
@@ -894,7 +912,7 @@ mod test {
     );
     match vm.get_global("st_eval") {
       Some(Value::Closure { .. }) => {}
-      other => assert!(false, "expected function object for eval, got {:?}", other),
+      other => panic!("expected function object for eval, got {:?}", other),
     }
     match vm.get_global("st_parseFloat") {
       Some(Value::Closure { .. }) => {}
@@ -906,7 +924,7 @@ mod test {
     }
     match vm.get_global("st_isNaN") {
       Some(Value::Closure { .. }) => {}
-      other => assert!(false, "expected function object for isNaN, got {:?}", other),
+      other => panic!("expected function object for isNaN, got {:?}", other),
     }
     match vm.get_global("st_isFinite") {
       Some(Value::Closure { .. }) => {}
@@ -1121,7 +1139,7 @@ mod test {
           ),
         }
       }
-      other => assert!(false, "expected object for myObj, got {:?}", other),
+      other => panic!("expected object for myObj, got {:?}", other),
     }
   }
 
@@ -1424,27 +1442,27 @@ mod test {
     let d = vm.get_global("d").expect("d exists");
 
     assert!(matches!(
-        get_property(&a, &PropertyKey::String("value".to_string()), 0).unwrap(),
+        get_property(&a, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
         Value::Number(n) if n == 1.0
     ));
     assert!(matches!(
-      get_property(&a, &PropertyKey::String("done".to_string()), 0).unwrap(),
+      get_property(&a, &PropertyKey::String("done".to_string()), 0).expect("test should not fail"),
       Value::Bool(false)
     ));
     assert!(matches!(
-        get_property(&b, &PropertyKey::String("value".to_string()), 0).unwrap(),
+        get_property(&b, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
         Value::Number(n) if n == 2.0
     ));
     assert!(matches!(
-        get_property(&c, &PropertyKey::String("value".to_string()), 0).unwrap(),
+        get_property(&c, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
         Value::Number(n) if n == 3.0
     ));
     assert!(matches!(
-      get_property(&c, &PropertyKey::String("done".to_string()), 0).unwrap(),
+      get_property(&c, &PropertyKey::String("done".to_string()), 0).expect("test should not fail"),
       Value::Bool(true)
     ));
     assert!(matches!(
-      get_property(&d, &PropertyKey::String("done".to_string()), 0).unwrap(),
+      get_property(&d, &PropertyKey::String("done".to_string()), 0).expect("test should not fail"),
       Value::Bool(true)
     ));
   }
@@ -1631,7 +1649,7 @@ mod test {
           .collect();
         assert_eq!(values, vec!["1", "2", "b", "a"]);
       }
-      other => assert!(false, "expected keys array, got {:?}", other),
+      other => panic!("expected keys array, got {:?}", other),
     }
   }
 
@@ -1783,7 +1801,7 @@ mod test {
       Some(Value::String(s)) => {
         assert_eq!(s, "value,writable,enumerable,configurable");
       }
-      other => assert!(false, "expected descriptor keys string, got {:?}", other),
+      other => panic!("expected descriptor keys string, got {:?}", other),
     }
     match vm.get_global("enumerableValue") {
       Some(Value::String(s)) => {

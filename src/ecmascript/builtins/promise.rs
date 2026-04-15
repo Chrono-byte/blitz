@@ -199,7 +199,7 @@ pub(crate) fn create_promise_intrinsics(
                   match vm.call_value_with_this(
                     &user_on_fulfilled,
                     &Value::Undefined,
-                    &[value.clone()],
+                    std::slice::from_ref(&value),
                   ) {
                     Ok(out) => resolve_promise_with_value(vm, &res_p_f, out)?,
                     Err(err) => {
@@ -227,7 +227,7 @@ pub(crate) fn create_promise_intrinsics(
                   match vm.call_value_with_this(
                     &user_on_rejected,
                     &Value::Undefined,
-                    &[reason.clone()],
+                    std::slice::from_ref(&reason),
                   ) {
                     Ok(out) => resolve_promise_with_value(vm, &res_p_r, out)?,
                     Err(err) => {
@@ -370,14 +370,14 @@ pub(crate) fn create_promise_intrinsics(
             let reason = vm
               .create_intrinsic_error("TypeError", &format!("Promise.all iterable error: {}", err))
               .unwrap_or(Value::String(format!("{}", err)));
-            let _ = vm.call_value_with_this(&reject_fn, &Value::Undefined, &[reason]);
+            drop(vm.call_value_with_this(&reject_fn, &Value::Undefined, &[reason]));
             return Ok(promise);
           }
         };
 
         if items.is_empty() {
           let array = vm.new_array(Vec::new());
-          let _ = vm.call_value_with_this(&resolve_fn, &Value::Undefined, &[array]);
+          drop(vm.call_value_with_this(&resolve_fn, &Value::Undefined, &[array]));
           return Ok(promise);
         }
 
@@ -418,7 +418,7 @@ pub(crate) fn create_promise_intrinsics(
               if *remaining_ref == 0 && !*settled_rc.lock().expect("Mutex poisoned") {
                 *settled_rc.lock().expect("Mutex poisoned") = true;
                 let array = vm.new_array(results_rc.lock().expect("Mutex poisoned").clone());
-                let _ = vm.call_value_with_this(&resolve_fn_rc, &Value::Undefined, &[array]);
+                drop(vm.call_value_with_this(&resolve_fn_rc, &Value::Undefined, &[array]));
               }
               Ok(Value::Undefined)
             }));
@@ -439,7 +439,7 @@ pub(crate) fn create_promise_intrinsics(
               *settled_rc.lock().expect("Mutex poisoned") = true;
               let off = if args.len() > 1 { 1 } else { 0 };
               let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
-              let _ = vm.call_value_with_this(&reject_fn_rc, &Value::Undefined, &[reason]);
+              drop(vm.call_value_with_this(&reject_fn_rc, &Value::Undefined, &[reason]));
               Ok(Value::Undefined)
             }));
 
@@ -449,7 +449,7 @@ pub(crate) fn create_promise_intrinsics(
                 .last_uncaught_exception
                 .take()
                 .unwrap_or(Value::String(format!("{}", err)));
-              let _ = vm.call_value_with_this(&reject_fn, &Value::Undefined, &[reason]);
+              drop(vm.call_value_with_this(&reject_fn, &Value::Undefined, &[reason]));
               return Ok(promise);
             }
           } else {
@@ -461,7 +461,7 @@ pub(crate) fn create_promise_intrinsics(
             if *remaining_ref == 0 && !*settled.lock().expect("Mutex poisoned") {
               *settled.lock().expect("Mutex poisoned") = true;
               let array = vm.new_array(results.lock().expect("Mutex poisoned").clone());
-              let _ = vm.call_value_with_this(&resolve_fn, &Value::Undefined, &[array]);
+              drop(vm.call_value_with_this(&resolve_fn, &Value::Undefined, &[array]));
             }
           }
         }

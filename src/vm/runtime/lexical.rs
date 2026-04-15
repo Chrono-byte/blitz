@@ -232,7 +232,7 @@ impl Vm {
         let key = PropertyKey::String(name_str.clone());
         let found = self.has_property_host(&binding_object, &key)?;
         if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
-          let _ = self.set_property_host(&binding_object, &Value::String(name_str), value)?;
+          drop(self.set_property_host(&binding_object, &Value::String(name_str), value)?);
           return Ok(true);
         }
       }
@@ -287,7 +287,7 @@ impl Vm {
         let key = PropertyKey::String(name_str.clone());
         let found = self.has_property_host(&binding_object, &key)?;
         if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
-          let _ = self.set_property_host(&binding_object, &Value::String(name_str), value)?;
+          drop(self.set_property_host(&binding_object, &Value::String(name_str), value)?);
           self.bump_object_generation(&binding_object);
           return Ok(true);
         }
@@ -362,8 +362,7 @@ impl Vm {
         self.lookup_property_descriptor(&arguments_object, &key, 0)?
       {
         let value = self.locals[slot].borrow().clone();
-        let _ =
-          self.set_property_host(&arguments_object, &Value::String(slot.to_string()), value)?;
+        drop(self.set_property_host(&arguments_object, &Value::String(slot.to_string()), value)?);
         self.bump_object_generation(&arguments_object);
       }
     }

@@ -414,7 +414,7 @@ fn run_test_in_thread(
         );
       }
 
-      let _ = tx.send(test_result);
+      drop(tx.send(test_result));
     }) {
     Ok(handle) => handle,
     Err(e) => {
@@ -605,6 +605,7 @@ fn parse_usize_env(name: &str) -> Option<usize> {
     .and_then(|s| s.parse::<usize>().ok())
 }
 
+/// Parses a boolean environment variable.
 fn parse_bool_env(name: &str) -> Option<bool> {
   env::var(name).ok().map(|v| {
     matches!(
@@ -728,12 +729,12 @@ fn run_selected_tests_via_subprocess_batches(
         }
 
         let status = command.status();
-        let _ = fs::remove_file(&file_list_path);
+        drop(fs::remove_file(&file_list_path));
 
         match status {
           Ok(status) if status.success() || status.code() == Some(1) => {}
           Ok(status) => {
-            let _ = fs::remove_file(&report_path);
+            drop(fs::remove_file(&report_path));
             shared_errors
               .lock()
               .expect("subprocess errors poisoned")
@@ -745,7 +746,7 @@ fn run_selected_tests_via_subprocess_batches(
             break;
           }
           Err(e) => {
-            let _ = fs::remove_file(&report_path);
+            drop(fs::remove_file(&report_path));
             shared_errors
               .lock()
               .expect("subprocess errors poisoned")
@@ -761,7 +762,7 @@ fn run_selected_tests_via_subprocess_batches(
         let report_contents = match fs::read_to_string(&report_path) {
           Ok(contents) => contents,
           Err(e) => {
-            let _ = fs::remove_file(&report_path);
+            drop(fs::remove_file(&report_path));
             shared_errors
               .lock()
               .expect("subprocess errors poisoned")
@@ -773,7 +774,7 @@ fn run_selected_tests_via_subprocess_batches(
             break;
           }
         };
-        let _ = fs::remove_file(&report_path);
+        drop(fs::remove_file(&report_path));
 
         let report: SubprocessBatchReport = match serde_json::from_str(&report_contents) {
           Ok(report) => report,
@@ -2345,7 +2346,7 @@ fn run_harness_only(
       .collect();
 
     restore_globals(globals, baseline_snapshot);
-    let _ = runtime_utils::install_minimal_kernel_constructors(globals);
+    drop(runtime_utils::install_minimal_kernel_constructors(globals));
     let mut vm = Vm::new(Rc::clone(globals));
     for h in &harness_files {
       let p = test262_root.join("harness").join(h);
@@ -2465,7 +2466,7 @@ fn run_scope_dump_test(
       let prog = session.program();
       let chunk = compiler::compile_oxc(prog, FIX_SCRIPT)
         .map_err(|e| format!("Failed to compile Test262Error fixer: {}", e))?;
-      let _ = vm.run(chunk);
+      drop(vm.run(chunk));
     }
 
     let test_path = test262_root.join("test").join(SCOPE_DUMP_TEST);
@@ -2778,7 +2779,7 @@ mod tests {
 
   impl Drop for TempDirGuard {
     fn drop(&mut self) {
-      let _ = fs::remove_dir_all(&self.0);
+      drop(fs::remove_dir_all(&self.0));
     }
   }
 
