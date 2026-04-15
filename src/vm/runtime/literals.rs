@@ -105,6 +105,8 @@ impl Vm {
     Ok(())
   }
 
+  /// Creates a closure value from a function index.
+  #[allow(clippy::too_many_lines)]
   pub(super) fn make_closure(&mut self) -> Result<(), RuntimeError> {
     let idx = self.read_byte()? as usize;
     let proto = self

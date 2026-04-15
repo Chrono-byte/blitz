@@ -22,25 +22,35 @@ pub(super) fn to_number(v: &Value) -> Result<f64, RuntimeError> {
   }
 }
 
+/// Convert a runtime value with ECMAScript `ToInt32` semantics.
+///
+/// # Errors
+///
+/// Returns a `RuntimeError` if the value cannot be converted to an `i32`.
 pub(super) fn to_int32_with_vm(
   vm: &mut Vm,
   v: &Value,
 ) -> Result<i32, RuntimeError> {
   let u = to_uint32_with_vm(vm, v)?;
   if u & 0x8000_0000 != 0 {
-    Ok(((u as i64) - 0x1_0000_0000) as i32)
+    Ok(((u as i64) - 0x100000000) as i32)
   } else {
     Ok(u as i32)
   }
 }
 
+/// Convert a runtime value with ECMAScript `ToUint32` semantics.
+///
+/// # Errors
+///
+/// Returns a `RuntimeError` if the value cannot be converted to a `u32`.
 pub(super) fn to_uint32_with_vm(
   vm: &mut Vm,
   v: &Value,
 ) -> Result<u32, RuntimeError> {
   let n = vm.to_number_value(v)?;
 
-  if n.is_nan() || n == 0.0 || n.is_infinite() {
+  if n.is_nan() || n == 0.0_f64 || n.is_infinite() {
     return Ok(0);
   }
 
@@ -50,6 +60,7 @@ pub(super) fn to_uint32_with_vm(
   Ok(vmod as u32)
 }
 
+/// Parse a JavaScript number string into a `f64`.
 pub(super) fn parse_js_number_string(s: &str) -> f64 {
   let s = s.trim();
   if s.is_empty() {
@@ -82,14 +93,15 @@ pub(super) fn parse_js_number_string(s: &str) -> f64 {
   }
 
   let (sign, body) = match s.as_bytes().first() {
-    Some(b'+') => (1.0, &s[1..]),
-    Some(b'-') => (-1.0, &s[1..]),
-    _ => (1.0, s),
+    Some(b'+') => (1.0_f64, &s[1..]),
+    Some(b'-') => (-1.0_f64, &s[1..]),
+    _ => (1.0_f64, s),
   };
 
   sign * body.parse::<f64>().unwrap_or(f64::NAN)
 }
 
+/// Parse a radix number string into a `f64`.
 fn parse_radix_number_string(
   body: &str,
   radix: u32,
@@ -98,7 +110,7 @@ fn parse_radix_number_string(
     return None;
   }
 
-  let mut value = 0.0;
+  let mut value = 0.0_f64;
   let radix_f = radix as f64;
 
   for byte in body.bytes() {
@@ -153,6 +165,10 @@ pub(super) fn parse_js_bigint_string(s: &str) -> Option<BigIntValue> {
 
 impl Vm {
   /// Convert a runtime value with ECMAScript `ToInt32` semantics.
+  ///
+  /// # Errors
+  ///
+  /// Returns a `RuntimeError` if the value cannot be converted to an `i32`.
   pub fn to_int32_value(
     &mut self,
     v: &Value,
@@ -161,6 +177,10 @@ impl Vm {
   }
 
   /// Convert a runtime value with ECMAScript `ToUint32` semantics.
+  ///
+  /// # Errors
+  ///
+  /// Returns a `RuntimeError` if the value cannot be converted to a `u32`.
   pub fn to_uint32_value(
     &mut self,
     v: &Value,

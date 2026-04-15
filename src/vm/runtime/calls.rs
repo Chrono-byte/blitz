@@ -626,6 +626,7 @@ impl Vm {
   }
 
   /// Creates a generator object for the given function and arguments.
+  #[allow(clippy::too_many_lines)]
   pub(super) fn create_generator_object(
     &mut self,
     proto: &Rc<FunctionProto>,
@@ -822,6 +823,7 @@ impl Vm {
   /// # Errors
   ///
   /// Returns a [`crate::errors::RuntimeError`] if the construction fails.
+  #[allow(clippy::too_many_lines)]
   pub fn construct_value(
     &mut self,
     callee: &Value,
@@ -1114,6 +1116,8 @@ impl Vm {
     }
   }
 
+  /// Calls a function with an explicit `this` value and arguments.
+  #[allow(clippy::too_many_lines)]
   pub(super) fn call_with_this(
     &mut self,
     callee: &Value,
@@ -1125,165 +1129,169 @@ impl Vm {
     let this_arg_owned = this_arg.clone();
     self.gc_temp_roots.push(this_arg_owned.clone());
     self.gc_temp_roots.extend(args.iter().cloned());
-    let result = (|| match callee {
-      Value::Builtin(f) => {
-        // For builtins invoked with an explicit `this`, pass the receiver
-        // as the first argument so native functions that expect the
-        // receiver can access it (used by accessor getters/setters).
-        let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-        call_args.push(this_arg_owned.clone());
-        call_args.extend_from_slice(args);
-        let prev_this = std::mem::replace(&mut self.this_value, this_arg_owned);
-        let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, true);
-        let prev_closure_env = self.current_closure_env.clone();
-        let prev_slot_types = self.current_slot_types.clone();
-        let prev_lexical_env = Rc::clone(&self.lexical_env);
-        let result = (f.as_ref())(self, &call_args);
-        self.builtin_this_arg_prepended = prev_builtin_this;
-        self.this_value = prev_this;
-        self.current_closure_env = prev_closure_env;
-        self.current_slot_types = prev_slot_types;
-        self.lexical_env = prev_lexical_env;
-        let result = result?;
-        let result_root_base = self.gc_temp_roots.len();
-        self.gc_temp_roots.push(result.clone());
-        let post_call = (|| {
-          self.run_microtasks_if_needed()?;
-          Ok::<(), RuntimeError>(())
-        })();
-        self.gc_temp_roots.truncate(result_root_base);
-        post_call?;
-        if matches!(
-          result,
-          Value::Object(_)
-            | Value::Array(..)
-            | Value::Closure { .. }
-            | Value::BuiltinObject(_, _)
-            | Value::Promise(_)
-        ) {
-          self.recent_return_value = Some(result.clone());
-        } else {
-          self.recent_return_value = None;
+    let result = (|| -> Result<Value, RuntimeError> {
+      match callee {
+        Value::Builtin(f) => {
+          // For builtins invoked with an explicit `this`, pass the receiver
+          // as the first argument so native functions that expect the
+          // receiver can access it (used by accessor getters/setters).
+          let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
+          call_args.push(this_arg_owned.clone());
+          call_args.extend_from_slice(args);
+          let prev_this = std::mem::replace(&mut self.this_value, this_arg_owned);
+          let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, true);
+          let prev_closure_env = self.current_closure_env.clone();
+          let prev_slot_types = self.current_slot_types.clone();
+          let prev_lexical_env = Rc::clone(&self.lexical_env);
+          let result = (f.as_ref())(self, &call_args);
+          self.builtin_this_arg_prepended = prev_builtin_this;
+          self.this_value = prev_this;
+          self.current_closure_env = prev_closure_env;
+          self.current_slot_types = prev_slot_types;
+          self.lexical_env = prev_lexical_env;
+          let result = result?;
+          let result_root_base = self.gc_temp_roots.len();
+          self.gc_temp_roots.push(result.clone());
+          let post_call = (|| {
+            self.run_microtasks_if_needed()?;
+            Ok::<(), RuntimeError>(())
+          })();
+          self.gc_temp_roots.truncate(result_root_base);
+          post_call?;
+          if matches!(
+            result,
+            Value::Object(_)
+              | Value::Array(..)
+              | Value::Closure { .. }
+              | Value::BuiltinObject(_, _)
+              | Value::Promise(_)
+          ) {
+            self.recent_return_value = Some(result.clone());
+          } else {
+            self.recent_return_value = None;
+          }
+          Ok(result)
         }
-        Ok(result)
-      }
-      Value::BuiltinObject(f, _props) => {
-        let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-        call_args.push(this_arg_owned.clone());
-        call_args.extend_from_slice(args);
-        let prev_this = std::mem::replace(&mut self.this_value, this_arg_owned);
-        let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, true);
-        let prev_closure_env = self.current_closure_env.clone();
-        let prev_slot_types = self.current_slot_types.clone();
-        let prev_lexical_env = Rc::clone(&self.lexical_env);
-        let result = (f.as_ref())(self, &call_args);
-        self.builtin_this_arg_prepended = prev_builtin_this;
-        self.this_value = prev_this;
-        self.current_closure_env = prev_closure_env;
-        self.current_slot_types = prev_slot_types;
-        self.lexical_env = prev_lexical_env;
-        let result = result?;
-        let result_root_base = self.gc_temp_roots.len();
-        self.gc_temp_roots.push(result.clone());
-        let post_call = (|| {
-          self.run_microtasks_if_needed()?;
-          Ok::<(), RuntimeError>(())
-        })();
-        self.gc_temp_roots.truncate(result_root_base);
-        post_call?;
-        if matches!(
-          result,
-          Value::Object(_)
-            | Value::Array(..)
-            | Value::Closure { .. }
-            | Value::BuiltinObject(_, _)
-            | Value::Promise(_)
-        ) {
-          self.recent_return_value = Some(result.clone());
-        } else {
-          self.recent_return_value = None;
+        Value::BuiltinObject(f, _props) => {
+          let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
+          call_args.push(this_arg_owned.clone());
+          call_args.extend_from_slice(args);
+          let prev_this = std::mem::replace(&mut self.this_value, this_arg_owned);
+          let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, true);
+          let prev_closure_env = self.current_closure_env.clone();
+          let prev_slot_types = self.current_slot_types.clone();
+          let prev_lexical_env = Rc::clone(&self.lexical_env);
+          let result = (f.as_ref())(self, &call_args);
+          self.builtin_this_arg_prepended = prev_builtin_this;
+          self.this_value = prev_this;
+          self.current_closure_env = prev_closure_env;
+          self.current_slot_types = prev_slot_types;
+          self.lexical_env = prev_lexical_env;
+          let result = result?;
+          let result_root_base = self.gc_temp_roots.len();
+          self.gc_temp_roots.push(result.clone());
+          let post_call = (|| {
+            self.run_microtasks_if_needed()?;
+            Ok::<(), RuntimeError>(())
+          })();
+          self.gc_temp_roots.truncate(result_root_base);
+          post_call?;
+          if matches!(
+            result,
+            Value::Object(_)
+              | Value::Array(..)
+              | Value::Closure { .. }
+              | Value::BuiltinObject(_, _)
+              | Value::Promise(_)
+          ) {
+            self.recent_return_value = Some(result.clone());
+          } else {
+            self.recent_return_value = None;
+          }
+          Ok(result)
         }
-        Ok(result)
-      }
-      Value::Closure { proto, .. } => {
-        if proto.is_class_constructor && self.construct_new_target.is_none() {
-          return Err(self.throw_class_constructor_call_error(proto));
+        Value::Closure { proto, .. } => {
+          if proto.is_class_constructor && self.construct_new_target.is_none() {
+            return Err(self.throw_class_constructor_call_error(proto));
+          }
+          let mut call_args: Vec<Value> = Vec::with_capacity(args.len());
+          call_args.extend_from_slice(args);
+          let call_args = self.prepare_call_args(&call_args, proto)?;
+          let closure_env = match callee {
+            Value::Closure { env, .. } => Rc::clone(env),
+            _ => {
+              return Err(self.throw_type_error("callee is not a closure"));
+            }
+          };
+          let this_arg = Self::closure_lexical_this(callee).unwrap_or_else(|| this_arg.clone());
+          let this_arg = if proto.is_derived_constructor {
+            Value::Uninitialized
+          } else {
+            this_arg
+          };
+          if proto.is_generator {
+            Ok(self.create_generator_object(proto, &closure_env, call_args, this_arg, callee)?)
+          } else if proto.is_async {
+            self.invoke_async_closure(proto, &closure_env, call_args, this_arg, callee)
+          } else {
+            let stack_base = self.stack.len();
+            let saved_stack = self.stack.snapshot();
+            if crate::trace::enabled() {
+              eprintln!(
+                "[trace] call_with_this closure stack_base={} stack_len={} proto='{}'",
+                stack_base,
+                self.stack.len(),
+                proto.name
+              );
+            }
+            let caller_chunk = Rc::clone(&self.chunk);
+            let caller_ip = self.ip;
+            let caller_locals = self.locals.clone();
+            let caller_this = self.this_value.clone();
+            let caller_env = self.current_closure_env.clone();
+            let caller_slot_types = self.current_slot_types.clone();
+            let caller_frame_len = self.call_stack.len();
+            let caller_handler_len = self.handlers.len();
+            self.push_call_frame(proto, &closure_env, call_args, this_arg, callee.clone())?;
+            let result = self.run_until_return(stack_base, true);
+            if result.is_ok() || !self.pending_exception {
+              // Restore caller state (run_until_return already truncated stack)
+              self.chunk = caller_chunk;
+              self.ip = caller_ip;
+              self.locals = caller_locals;
+              self.this_value = caller_this;
+              self.current_closure_env = caller_env;
+              self.current_slot_types = caller_slot_types;
+              self.stack.restore_from(saved_stack);
+              self.call_stack.truncate(caller_frame_len);
+              self.current_strict_mode = self
+                .call_stack
+                .last()
+                .is_some_and(|f| f.is_strict);
+              self.handlers.truncate(caller_handler_len);
+            }
+            result
+          }
         }
-        let mut call_args: Vec<Value> = Vec::with_capacity(args.len());
-        call_args.extend_from_slice(args);
-        let call_args = self.prepare_call_args(&call_args, proto)?;
-        self.validate_call_args(&call_args, proto)?;
-        let closure_env = match callee {
-          Value::Closure { env, .. } => Rc::clone(env),
-          _ => unreachable!(),
-        };
-        let this_arg = Self::closure_lexical_this(callee).unwrap_or(this_arg.clone());
-        let this_arg = if proto.is_derived_constructor {
-          Value::Uninitialized
-        } else {
-          this_arg
-        };
-        if proto.is_generator {
-          Ok(self.create_generator_object(proto, &closure_env, call_args, this_arg, callee)?)
-        } else if proto.is_async {
-          self.invoke_async_closure(proto, &closure_env, call_args, this_arg, callee)
-        } else {
-          let stack_base = self.stack.len();
-          let saved_stack = self.stack.snapshot();
+        _ => {
           if crate::trace::enabled() {
-            eprintln!(
-              "[trace] call_with_this closure stack_base={} stack_len={} proto='{}'",
-              stack_base,
-              self.stack.len(),
-              proto.name
-            );
+            eprintln!("[trace] call_with_this: callee not callable (final fallback)");
+            crate::trace::value_string("[trace]   callee", callee);
+            crate::trace::value_string("[trace]   this_arg", this_arg);
+            for (i, v) in self.stack.iter_rev().take(8).enumerate() {
+              crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
+            }
           }
-          let caller_chunk = Rc::clone(&self.chunk);
-          let caller_ip = self.ip;
-          let caller_locals = self.locals.clone();
-          let caller_this = self.this_value.clone();
-          let caller_env = self.current_closure_env.clone();
-          let caller_slot_types = self.current_slot_types.clone();
-          let caller_frame_len = self.call_stack.len();
-          let caller_handler_len = self.handlers.len();
-          self.push_call_frame(proto, &closure_env, call_args, this_arg, callee.clone())?;
-          let result = self.run_until_return(stack_base, true);
-          if result.is_ok() || !self.pending_exception {
-            // Restore caller state (run_until_return already truncated stack)
-            self.chunk = caller_chunk;
-            self.ip = caller_ip;
-            self.locals = caller_locals;
-            self.this_value = caller_this;
-            self.current_closure_env = caller_env;
-            self.current_slot_types = caller_slot_types;
-            self.stack.restore_from(saved_stack);
-            self.call_stack.truncate(caller_frame_len);
-            self.current_strict_mode = self
-              .call_stack
-              .last()
-              .is_some_and(|f| f.is_strict);
-            self.handlers.truncate(caller_handler_len);
-          }
-          result
+          self.dump_diag("CallWithThis failed: callee not callable", callee);
+          Err(self.throw_type_error(&format!("{} is not a function", callee.type_name())))
         }
-      }
-      _ => {
-        if crate::trace::enabled() {
-          eprintln!("[trace] call_with_this: callee not callable (final fallback)");
-          crate::trace::value_string("[trace]   callee", callee);
-          crate::trace::value_string("[trace]   this_arg", this_arg);
-          for (i, v) in self.stack.iter_rev().take(8).enumerate() {
-            crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
-          }
-        }
-        self.dump_diag("CallWithThis failed: callee not callable", callee);
-        Err(self.throw_type_error(&format!("{} is not a function", callee.type_name())))
       }
     })();
     self.gc_temp_roots.truncate(temp_root_base);
     result
   }
 
+  /// Prepares the arguments for a function call, handling rest parameters.
   pub(super) fn prepare_call_args(
     &self,
     args: &[Value],
@@ -1364,18 +1372,8 @@ impl Vm {
     Ok(fixed)
   }
 
-  fn validate_call_args(
-    &self,
-    _call_args: &[Value],
-    _proto: &FunctionProto,
-  ) -> Result<(), RuntimeError> {
-    // Argument type validation is intentionally disabled in JS-first mode.
-    // TypeScript annotations are treated as comments and should not affect
-    // runtime behaviour. Keep this function for tooling and future opt-in
-    // checked modes.
-    Ok(())
-  }
-
+  /// Configures the call frame for a function call, setting up the stack and local variables.
+  #[allow(clippy::too_many_lines)]
   pub(super) fn configure_call_frame(
     &mut self,
     proto: &Rc<FunctionProto>,
@@ -1606,6 +1604,7 @@ impl Vm {
     Ok(())
   }
 
+  /// Builds an arguments object for a function call, mapping arguments to local slots.
   fn build_mapped_arguments_object(
     &mut self,
     proto: &FunctionProto,

@@ -520,6 +520,7 @@ impl Vm {
   /// # Errors
   ///
   /// Returns a [`crate::errors::RuntimeError`] if the operation fails.
+  #[allow(clippy::too_many_lines)]
   pub(super) fn define_own_property(
     &mut self,
     obj: &Value,

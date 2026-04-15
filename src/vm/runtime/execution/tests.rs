@@ -12,7 +12,7 @@ fn test_globals() -> Rc<RefCell<ObjectData>> {
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
     PropertyKey::String("globalThis".to_string()),
-    PropertyDescriptor::data(Value::Object(globals.clone())),
+    PropertyDescriptor::data(Value::Object(Clone::clone(&globals))),
   );
   runtime_utils::install_minimal_kernel_constructors(&globals);
   globals
@@ -24,12 +24,13 @@ fn run_script(src: &str) -> (Vm, Rc<RefCell<ObjectData>>) {
   let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
   let globals = test_globals();
-  let mut vm = Vm::new(globals.clone());
+  let mut vm = Vm::new(Clone::clone(&globals));
   vm.run(chunk).expect("run ok");
   (vm, globals)
 }
 
 mod test {
+  #![allow(clippy::panic)]
   use super::*;
 
   #[test]
@@ -90,10 +91,10 @@ mod test {
       Some(Value::Array(arr, _)) => {
         let arr = arr.borrow();
         assert_eq!(arr.len(), 4);
-        assert!(matches!(arr[0], Some(Value::Number(n)) if n == 0.0));
-        assert!(matches!(arr[1], Some(Value::Number(n)) if n == 1.0));
-        assert!(matches!(arr[2], Some(Value::Number(n)) if n == 2.0));
-        assert!(matches!(arr[3], Some(Value::Number(n)) if n == 0.0));
+        assert!(matches!(arr[0], Some(Value::Number(n)) if (n - 0.0).abs() < f64::EPSILON));
+        assert!(matches!(arr[1], Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON));
+        assert!(matches!(arr[2], Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON));
+        assert!(matches!(arr[3], Some(Value::Number(n)) if (n - 0.0).abs() < f64::EPSILON));
       }
       other => panic!("unexpected result: {:?}", other),
     }
@@ -169,12 +170,12 @@ mod test {
     assert!(matches!(
       get_property(&builtin, &PropertyKey::String("own".to_string()), 0)
         .expect("test should not fail"),
-      Value::Number(3.0)
+      Value::Number(3.0_f64)
     ));
     assert!(matches!(
       get_property(&builtin, &PropertyKey::String("inherited".to_string()), 0)
         .expect("test should not fail"),
-      Value::Number(7.0)
+      Value::Number(7.0_f64)
     ));
   }
 
@@ -183,7 +184,7 @@ mod test {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
     let props = Rc::new(RefCell::new(ObjectData::new()));
-    let builtin = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), props.clone());
+    let builtin = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), Clone::clone(&props));
 
     vm.set_property_tracked(
       &builtin,
@@ -262,11 +263,11 @@ mod test {
     match vm.get_global("created") {
       Some(Value::Object(obj)) => {
         assert!(matches!(
-            vm.get_property_host(&Value::Object(obj.clone()), &PropertyKey::String("a".to_string())).ok(),
+            vm.get_property_host(&Value::Object(Clone::clone(&obj)), &PropertyKey::String("a".to_string())).ok(),
             Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON
         ));
         assert!(matches!(
-            vm.get_property_host(&Value::Object(obj), &PropertyKey::String("b".to_string())).ok(),
+            vm.get_property_host(&Value::Object(Clone::clone(&obj)), &PropertyKey::String("b".to_string())).ok(),
             Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON
         ));
       }
@@ -399,7 +400,7 @@ mod test {
   #[test]
   fn same_value_uses_reference_identity_for_objects() {
     let obj = Rc::new(RefCell::new(ObjectData::new()));
-    let a = Value::Object(obj.clone());
+    let a = Value::Object(Clone::clone(&obj));
     let b = Value::Object(obj);
     let c = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
 
@@ -450,21 +451,18 @@ mod test {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
 
-    assert_eq!(
-      vm.to_number_value(&Value::String("0x10".to_string()))
-        .expect("test should not fail"),
-      16.0
-    );
-    assert_eq!(
-      vm.to_number_value(&Value::String("0b101".to_string()))
-        .expect("test should not fail"),
-      5.0
-    );
-    assert_eq!(
-      vm.to_number_value(&Value::String("0o10".to_string()))
-        .expect("test should not fail"),
-      8.0
-    );
+    let n = vm
+      .to_number_value(&Value::String("0x10".to_string()))
+      .expect("test should not fail");
+    assert!((n - 16.0).abs() < f64::EPSILON);
+    let n = vm
+      .to_number_value(&Value::String("0b101".to_string()))
+      .expect("test should not fail");
+    assert!((n - 5.0).abs() < f64::EPSILON);
+    let n = vm
+      .to_number_value(&Value::String("0o10".to_string()))
+      .expect("test should not fail");
+    assert!((n - 8.0).abs() < f64::EPSILON);
   }
 
   #[test]
@@ -494,7 +492,7 @@ mod test {
       PropertyKey::String("length".to_string()),
       PropertyDescriptor::data(Value::Number(1.0)),
     );
-    let arr = Value::Array(arr_data.clone(), props);
+    let arr = Value::Array(Clone::clone(&arr_data), props);
     let key = PropertyKey::String("4294967295".to_string());
 
     set_property(&arr, &key, Value::String("x".to_string())).expect("test should not fail");
@@ -520,7 +518,7 @@ mod test {
       PropertyKey::String("length".to_string()),
       PropertyDescriptor::data(Value::Number(1.0)),
     );
-    let arr = Value::Array(arr_data.clone(), props);
+    let arr = Value::Array(Clone::clone(&arr_data), props);
     let key = PropertyKey::String("4294967294".to_string());
 
     set_property(&arr, &key, Value::Number(1.0)).expect("test should not fail");
@@ -549,9 +547,14 @@ mod test {
       PropertyKey::String("length".to_string()),
       PropertyDescriptor::data(Value::Number(2.0)),
     );
-    let arr = Value::Array(arr_data, props.clone());
+    let arr = Value::Array(arr_data, Clone::clone(&props));
     let getter = Value::Builtin(Rc::new(|_, _| Ok(Value::Undefined)));
-    let mut desc = PartialDescriptor::default();
+    let mut desc: PartialDescriptor = PartialDescriptor {
+      get: Some(getter.clone()),
+      has_get: true,
+      ..Default::default()
+    };
+
     desc.get = Some(getter);
     desc.has_get = true;
 
@@ -597,24 +600,20 @@ mod test {
 
     match vm.get_global("array") {
       Some(Value::Array(arr, props)) => {
+        let array_val = Value::Array(arr, props);
+
         assert!(
           !vm
-            .has_property_host(
-              &Value::Array(arr.clone(), props.clone()),
-              &PropertyKey::String("0".to_string())
-            )
+            .has_property_host(&array_val, &PropertyKey::String("0".to_string()))
             .expect("expected false, got true")
         );
         assert!(
-          vm.has_property_host(
-            &Value::Array(arr.clone(), props.clone()),
-            &PropertyKey::String("1".to_string())
-          )
-          .expect("expected true, got false")
+          vm.has_property_host(&array_val, &PropertyKey::String("1".to_string()))
+            .expect("expected true, got false")
         );
         assert!(matches!(
             vm.get_property_host(
-                &Value::Array(arr, props),
+                &array_val,
                 &PropertyKey::String("1".to_string())
             )
             .expect("expected 'first', got something else"),
@@ -834,19 +833,11 @@ mod test {
     );
     match vm.get_global("st_parseInt") {
       Some(Value::Closure { .. }) => {}
-      other => assert!(
-        false,
-        "expected function object for parseInt, got {:?}",
-        other
-      ),
+      other => panic!("expected function object for parseInt, got {:?}", other),
     }
     match vm.get_global("st_parseFloat") {
       Some(Value::Closure { .. }) => {}
-      other => assert!(
-        false,
-        "expected function object for parseFloat, got {:?}",
-        other
-      ),
+      other => panic!("expected function object for parseFloat, got {:?}", other),
     }
   }
 
@@ -916,11 +907,7 @@ mod test {
     }
     match vm.get_global("st_parseFloat") {
       Some(Value::Closure { .. }) => {}
-      other => assert!(
-        false,
-        "expected function object for parseFloat, got {:?}",
-        other
-      ),
+      other => panic!("expected function object for parseFloat, got {:?}", other),
     }
     match vm.get_global("st_isNaN") {
       Some(Value::Closure { .. }) => {}
@@ -928,11 +915,7 @@ mod test {
     }
     match vm.get_global("st_isFinite") {
       Some(Value::Closure { .. }) => {}
-      other => assert!(
-        false,
-        "expected function object for isFinite, got {:?}",
-        other
-      ),
+      other => panic!("expected function object for isFinite, got {:?}", other),
     }
   }
 
@@ -1132,11 +1115,7 @@ mod test {
           Some(PropertyDescriptor::Data { value, .. }) => {
             assert_eq!(value, &Value::String("value".into()))
           }
-          other => assert!(
-            false,
-            "expected data property for myObj.value, got {:?}",
-            other
-          ),
+          other => panic!("expected data property for myObj.value, got {:?}", other),
         }
       }
       other => panic!("expected object for myObj, got {:?}", other),
@@ -1303,7 +1282,7 @@ mod test {
     globals.borrow_mut().properties.insert(
       PropertyKey::String("bump".to_string()),
       PropertyDescriptor::data(Value::Builtin(Rc::new({
-        let calls = calls.clone();
+        let calls = Clone::clone(&calls);
         move |_vm, _args| {
           *calls.borrow_mut() += 1;
           Ok(Value::Number(99.0))
@@ -1316,7 +1295,7 @@ mod test {
 
     assert_eq!(*calls.borrow(), 0);
     assert!(matches!(result, Value::Undefined));
-    assert!(matches!(vm.get_global("x"), Some(Value::Number(n)) if n == 0.0));
+    assert!(matches!(vm.get_global("x"), Some(Value::Number(n)) if n == 0.0_f64));
   }
 
   #[test]
@@ -1330,7 +1309,7 @@ mod test {
     globals.borrow_mut().properties.insert(
       PropertyKey::String("bump".to_string()),
       PropertyDescriptor::data(Value::Builtin(Rc::new({
-        let calls = calls.clone();
+        let calls = Clone::clone(&calls);
         move |_vm, _args| {
           *calls.borrow_mut() += 1;
           Ok(Value::Number(99.0))
@@ -1343,7 +1322,7 @@ mod test {
 
     assert_eq!(*calls.borrow(), 0);
     assert!(matches!(result, Value::Undefined));
-    assert!(matches!(vm.get_global("x"), Some(Value::Number(n)) if n == 1.0));
+    assert!(matches!(vm.get_global("x"), Some(Value::Number(n)) if n == 1.0_f64));
   }
 
   #[test]
@@ -1443,7 +1422,7 @@ mod test {
 
     assert!(matches!(
         get_property(&a, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
-        Value::Number(n) if n == 1.0
+        Value::Number(n) if (n - 1.0).abs() < f64::EPSILON
     ));
     assert!(matches!(
       get_property(&a, &PropertyKey::String("done".to_string()), 0).expect("test should not fail"),
@@ -1451,11 +1430,11 @@ mod test {
     ));
     assert!(matches!(
         get_property(&b, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
-        Value::Number(n) if n == 2.0
+        Value::Number(n) if (n - 2.0).abs() < f64::EPSILON
     ));
     assert!(matches!(
         get_property(&c, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
-        Value::Number(n) if n == 3.0
+        Value::Number(n) if (n - 3.0).abs() < f64::EPSILON
     ));
     assert!(matches!(
       get_property(&c, &PropertyKey::String("done".to_string()), 0).expect("test should not fail"),
@@ -1589,14 +1568,14 @@ mod test {
     let order = Rc::new(RefCell::new(Vec::<&'static str>::new()));
 
     vm.queue_microtask({
-      let order = order.clone();
+      let order = Clone::clone(&order);
       move |_vm| {
         order.borrow_mut().push("microtask");
         Ok(())
       }
     });
     vm.queue_dynamic_import_job({
-      let order = order.clone();
+      let order = Clone::clone(&order);
       move |_vm| {
         order.borrow_mut().push("dynamic-import");
         Ok(())
@@ -1687,7 +1666,7 @@ mod test {
   #[test]
   fn global_this_matches_ecmascript_public_surface() {
     let globals = test_globals();
-    let vm = Vm::new(globals.clone());
+    let vm = Vm::new(Clone::clone(&globals));
 
     let mut actual = vm
       .list_own_keys_of_value(&Value::Object(globals))
@@ -1807,11 +1786,7 @@ mod test {
       Some(Value::String(s)) => {
         assert_eq!(s, "false");
       }
-      other => assert!(
-        false,
-        "expected descriptor enumerable value, got {:?}",
-        other
-      ),
+      other => panic!("expected descriptor enumerable value, got {:?}", other),
     }
     match vm.get_global("text") {
       Some(Value::String(s)) => {
@@ -1820,11 +1795,7 @@ mod test {
           r#"{"configurable":true,"enumerable":false,"writable":true,"value":{}}"#
         );
       }
-      other => assert!(
-        false,
-        "expected serialized descriptor string, got {:?}",
-        other
-      ),
+      other => panic!("expected serialized descriptor string, got {:?}", other),
     }
   }
 
