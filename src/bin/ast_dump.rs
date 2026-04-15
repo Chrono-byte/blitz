@@ -1,4 +1,6 @@
 //! Temporary binary used to dump AST for debugging.
+#![allow(missing_docs)]
+
 use blitz::parser::Parser;
 use clap::Parser as ClapParser;
 use std::fs;

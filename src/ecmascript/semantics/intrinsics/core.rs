@@ -1,6 +1,7 @@
 use super::*;
 use crate::gc;
 
+/// Creates a builtin object value with the given function and prototype chain.
 pub(crate) fn builtin_object(f: BuiltinFn, function_proto: &Rc<RefCell<ObjectData>>) -> Value {
     let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     props
@@ -9,6 +10,7 @@ pub(crate) fn builtin_object(f: BuiltinFn, function_proto: &Rc<RefCell<ObjectDat
     Value::BuiltinObject(f, props)
 }
 
+/// Sets the `length` property on a builtin function object.
 pub(crate) fn set_builtin_length(target: &Value, length: f64) {
     let desc = PropertyDescriptor::Data {
         value: Value::Number(length),
@@ -30,6 +32,7 @@ pub(crate) fn set_builtin_length(target: &Value, length: f64) {
     }
 }
 
+/// Sets the `name` property on a builtin function object.
 pub(crate) fn set_builtin_name(target: &Value, name: &str) {
     let desc = PropertyDescriptor::Data {
         value: Value::String(name.to_string()),

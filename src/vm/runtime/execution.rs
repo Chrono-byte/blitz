@@ -706,10 +706,12 @@ impl Vm {
         self.current_strict_mode
     }
 
+    /// Returns whether the current execution context is in strict mode.
     pub(crate) fn active_strict_mode(&self) -> bool {
         self.call_stack.last().is_some_and(|f| f.is_strict)
     }
 
+    /// Sets the current strict mode flag.
     pub(crate) fn set_current_strict_mode(&mut self, strict: bool) {
         self.current_strict_mode = strict;
     }

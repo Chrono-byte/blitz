@@ -22,6 +22,14 @@ impl Vm {
         }
     }
 
+    /// Check if any root-level slot names in a chunk conflict with the current lexical environment.
+    ///
+    /// Used during direct eval to detect whether any declarations in the code being evaluated
+    /// would shadow existing lexical bindings, which is disallowed in strict mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if no conflicts are found, or `Some(name)` if a conflicting binding name is detected.
     pub(crate) fn direct_eval_lexical_conflict_name(
         &self,
         chunk: &crate::bytecode::Chunk,
@@ -357,6 +365,10 @@ impl Vm {
     }
 
     /// Resolve a bare identifier against the current lexical/global environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`RuntimeError`] if the identifier lookup fails during binding resolution.
     pub fn resolve_identifier_value(&mut self, name: &str) -> Result<Option<Value>, RuntimeError> {
         if let Some(value) = self.resolve_lexical_identifier_value(name)? {
             return Ok(Some(value));

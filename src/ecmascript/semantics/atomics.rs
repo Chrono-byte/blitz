@@ -15,6 +15,8 @@ use num_traits::ToPrimitive;
 // Pure algorithmic helpers for Atomics. These were previously defined in
 // runtime_utils/atomics.rs but are language semantics and belong with the
 // other ECMAScript algorithms. Keep them minimal and host-independent.
+
+/// Returns the `AtomicsValueKind` for a typed array kind name, or `None` if not supported.
 pub(crate) fn atomics_value_kind(
     kind_name: &str,
 ) -> Option<crate::runtime_utils::AtomicsValueKind> {
@@ -50,10 +52,12 @@ pub(crate) fn atomics_value_kind(
     }
 }
 
+/// Checks if Atomics.wait is supported for the given typed array kind.
 pub(crate) fn atomics_wait_kind(kind_name: &str) -> bool {
     matches!(kind_name, "Int32Array" | "BigInt64Array")
 }
 
+/// Normalizes an integer value to the range for a given bit width and signedness.
 pub(crate) fn atomics_normalize_integer(value: i128, bits: u32, signed: bool) -> i128 {
     let modulus = 1i128 << bits;
     let mut v = value % modulus;
@@ -69,6 +73,7 @@ pub(crate) fn atomics_normalize_integer(value: i128, bits: u32, signed: bool) ->
     v
 }
 
+/// Normalizes a BigInt value to the range for a 64-bit signed or unsigned integer.
 pub(crate) fn atomics_normalize_bigint(
     value: num_bigint::BigInt,
     signed: bool,
@@ -86,6 +91,7 @@ pub(crate) fn atomics_normalize_bigint(
     v
 }
 
+/// Builds the Atomics object with all its methods (load, store, compareExchange, wait, notify, etc.).
 pub(crate) fn build_atomics_object(
     object_proto_map: &Rc<RefCell<ObjectData>>,
     function_proto_map: &Rc<RefCell<ObjectData>>,

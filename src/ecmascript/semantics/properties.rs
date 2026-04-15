@@ -8,6 +8,7 @@ use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value
 use crate::{RuntimeError, gc};
 use num_traits::ToPrimitive;
 
+/// Gets the own property descriptor for a key on an object.
 pub(crate) fn own_property_descriptor(
     obj: &Value,
     key: &PropertyKey,
@@ -63,6 +64,7 @@ fn array_length(props: &ObjectData) -> usize {
         .unwrap_or(0)
 }
 
+/// Gets all enumerable own property keys of an object.
 pub(crate) fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
     fn enumerable_prop_keys(props: &RefCell<ObjectData>, skip_length: bool) -> Vec<PropertyKey> {
         let mut index_keys: Vec<u64> = Vec::new();
@@ -133,6 +135,7 @@ pub(crate) fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
     keys
 }
 
+/// Creates a non-enumerable data property descriptor.
 pub(crate) fn non_enum_data(value: Value) -> PropertyDescriptor {
     PropertyDescriptor::Data {
         value,
@@ -180,6 +183,7 @@ pub(crate) fn this_boolean_value(vm: &mut Vm, value: &Value) -> Result<bool, Run
     }
 }
 
+/// Validates that a value can be coerced to an object.
 pub(crate) fn require_object_coercible(vm: &mut Vm, value: &Value) -> Result<(), RuntimeError> {
     match value {
         Value::Undefined | Value::Null => {
@@ -189,6 +193,7 @@ pub(crate) fn require_object_coercible(vm: &mut Vm, value: &Value) -> Result<(),
     }
 }
 
+/// Extracts the value field from a property descriptor.
 pub(crate) fn descriptor_value_from_descriptor(
     object_proto: &Rc<RefCell<ObjectData>>,
     desc: &PropertyDescriptor,
@@ -278,6 +283,7 @@ pub(crate) fn own_property_keys(obj: &Value) -> Vec<PropertyKey> {
     keys
 }
 
+/// Converts a PropertyKey to its corresponding Value.
 pub(crate) fn property_key_to_value(key: &PropertyKey) -> Value {
     match key {
         PropertyKey::String(name) => Value::String(name.clone()),
@@ -302,10 +308,12 @@ fn decimal_u64_string(value: u64) -> String {
     out
 }
 
+/// Converts a u64 to a decimal string representation.
 pub(crate) fn u64_to_decimal_string(value: u64) -> String {
     decimal_u64_string(value)
 }
 
+/// Checks if a u64 equals the value represented by a decimal string.
 pub(crate) fn decimal_u64_eq_str(value: u64, s: &str) -> bool {
     let mut buf = [0u8; 20];
     let mut n = value;
@@ -322,10 +330,12 @@ pub(crate) fn decimal_u64_eq_str(value: u64, s: &str) -> bool {
     digits.len() == s.len() && digits.iter().zip(s.as_bytes()).all(|(a, b)| a == b)
 }
 
+/// Converts a usize to a decimal string representation.
 pub(crate) fn usize_to_decimal_string(value: usize) -> String {
     decimal_u64_string(value as u64)
 }
 
+/// Creates an array Value from a vector of values.
 pub(crate) fn array_from_values(values: Vec<Value>) -> Value {
     let arr_rc = Rc::new(RefCell::new(ArrayData::from(
         values.into_iter().map(Some).collect::<Vec<_>>(),

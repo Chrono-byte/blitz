@@ -108,6 +108,7 @@ fn is_decode_uri_reserved_byte(byte: u8) -> bool {
     )
 }
 
+/// Implements the global decodeURI function.
 pub(crate) fn global_decode_uri(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let undefined = Value::Undefined;
     let value = args.first().unwrap_or(&undefined);
@@ -121,6 +122,8 @@ pub(crate) fn global_decode_uri(vm: &mut Vm, args: &[Value]) -> Result<Value, Ru
     Ok(Value::String(percent_decode(vm, s, false)?))
 }
 
+/// Implements the global decodeURI function.
+/// Implements the global decodeURIComponent function.
 pub(crate) fn global_decode_uri_component(
     vm: &mut Vm,
     args: &[Value],
@@ -137,6 +140,7 @@ pub(crate) fn global_decode_uri_component(
     Ok(Value::String(percent_decode(vm, s, true)?))
 }
 
+/// Implements the global encodeURI function.
 pub(crate) fn global_encode_uri(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let undefined = Value::Undefined;
     let value = args.first().unwrap_or(&undefined);
@@ -150,6 +154,8 @@ pub(crate) fn global_encode_uri(vm: &mut Vm, args: &[Value]) -> Result<Value, Ru
     Ok(Value::String(percent_encode(s, false)))
 }
 
+/// Implements the global encodeURI function.
+/// Implements the global encodeURIComponent function.
 pub(crate) fn global_encode_uri_component(
     vm: &mut Vm,
     args: &[Value],
@@ -166,6 +172,7 @@ pub(crate) fn global_encode_uri_component(
     Ok(Value::String(percent_encode(s, true)))
 }
 
+/// Gets a string value reference from the String prototype methods.
 pub(crate) fn this_string_value_ref<'a>(
     vm: &mut Vm,
     value: &'a Value,

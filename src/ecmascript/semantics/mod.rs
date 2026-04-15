@@ -16,11 +16,17 @@ use crate::runtime_utils::{
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{Parser, RuntimeError, Vm, compiler};
 
+/// Atomics operations for shared array buffers.
 pub mod atomics;
+/// ECMAScript intrinsic objects and global bindings.
 pub mod intrinsics;
+/// Numeric parsing and coercion operations.
 pub mod numbers;
+/// Property descriptor and enumeration helpers.
 pub mod properties;
+/// ShadowRealm implementation.
 pub mod shadowrealm;
+/// URI encoding/decoding functions.
 pub mod uri;
 
 pub(crate) use crate::runtime_utils::same_value_zero;

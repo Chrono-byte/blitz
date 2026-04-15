@@ -11,18 +11,22 @@ use std::rc::Rc;
 
 // Delegate pure algorithmic helpers to the semantics module. This keeps the
 // runtime-specific code here small and avoids duplicating logic.
+/// Gets the atomics value kind for the given TypedArray kind name.
 fn atomics_value_kind(kind_name: &str) -> Option<AtomicsValueKind> {
     semantics_atomics::atomics_value_kind(kind_name)
 }
 
+/// Normalizes an integer value according to the bit width and signedness for atomics operations.
 fn atomics_normalize_integer(value: i128, bits: u32, signed: bool) -> i128 {
     semantics_atomics::atomics_normalize_integer(value, bits, signed)
 }
 
+/// Normalizes a BigInt value according to its signedness for atomics operations.
 fn atomics_normalize_bigint(value: BigIntValue, signed: bool) -> BigIntValue {
     semantics_atomics::atomics_normalize_bigint(value, signed)
 }
 
+/// Converts a value to an integer for atomics operations.
 fn atomics_value_to_integer(
     vm: &mut Vm,
     value: &Value,
@@ -41,6 +45,7 @@ fn atomics_value_to_integer(
     Ok(Value::Number(int.to_f64().unwrap_or(f64::NAN)))
 }
 
+/// Converts a value to a BigInt for atomics operations.
 fn atomics_value_to_bigint(
     vm: &mut Vm,
     value: &Value,
@@ -72,6 +77,7 @@ fn atomics_value_to_bigint(
     Ok(Value::BigInt(atomics_normalize_bigint(bigint, signed)))
 }
 
+/// Extracts atomics view information from a TypedArray value.
 pub(crate) fn atomics_view_info(
     vm: &mut Vm,
     view: &Value,
@@ -148,6 +154,7 @@ pub(crate) fn atomics_view_info(
     })
 }
 
+/// Validates and normalizes an index for atomics operations on a view.
 pub(crate) fn atomics_view_index(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
@@ -160,6 +167,7 @@ pub(crate) fn atomics_view_index(
     Ok(index)
 }
 
+/// Reads a value from a TypedArray view at the given index.
 fn atomics_read_view_slot(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
@@ -179,6 +187,7 @@ fn atomics_read_view_slot(
         .unwrap_or(Value::Undefined))
 }
 
+/// Writes a value to a TypedArray view at the given index.
 fn atomics_write_view_slot(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
@@ -194,6 +203,7 @@ fn atomics_write_view_slot(
     Ok(())
 }
 
+/// Gets or creates the waiters array for an ArrayBuffer.
 pub(crate) fn atomics_waiters_array(buffer: &Rc<RefCell<ObjectData>>) -> Rc<RefCell<ArrayData>> {
     let mut buffer_data = buffer.borrow_mut();
     if let Some(PropertyDescriptor::Data {
@@ -218,6 +228,7 @@ pub(crate) fn atomics_waiters_array(buffer: &Rc<RefCell<ObjectData>>) -> Rc<RefC
     arr
 }
 
+/// Create a waiter record object for an Atomics.wait() operation with index and resolver.
 pub(crate) fn atomics_make_waiter_record(index: usize, resolve: Option<Value>) -> Value {
     let mut data = ObjectData::new();
     data.properties.insert(
@@ -231,6 +242,7 @@ pub(crate) fn atomics_make_waiter_record(index: usize, resolve: Option<Value>) -
     Value::Object(gc::track_object(Rc::new(RefCell::new(data))))
 }
 
+/// Create a result object for an Atomics.wait operation with async and value properties.
 pub(crate) fn atomics_make_wait_result(async_flag: bool, value: Value) -> Value {
     let result = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     result.borrow_mut().properties.insert(
@@ -244,6 +256,11 @@ pub(crate) fn atomics_make_wait_result(async_flag: bool, value: Value) -> Value 
     Value::Object(result)
 }
 
+/// Wake up waiting agents on a specific index of a SharedArrayBuffer.
+///
+/// # Errors
+///
+/// Returns a [`RuntimeError`] if the operation fails.
 pub(crate) fn atomics_wake_waiters(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
@@ -303,6 +320,11 @@ pub(crate) fn atomics_wake_waiters(
     Ok(to_wake.len())
 }
 
+/// Register a waiter on a SharedArrayBuffer for Atomics.wait() operations.
+///
+/// # Errors
+///
+/// Returns a [`RuntimeError`] if the registration fails.
 pub(crate) fn atomics_register_waiter(
     _vm: &mut Vm,
     info: &AtomicsViewInfo,
@@ -316,6 +338,11 @@ pub(crate) fn atomics_register_waiter(
     Ok(())
 }
 
+/// Coerce a value to the appropriate type for the typed array view (Number or BigInt).
+///
+/// # Errors
+///
+/// Returns a [`RuntimeError`] if type conversion fails.
 pub(crate) fn atomics_coerce_view_value(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
@@ -329,6 +356,11 @@ pub(crate) fn atomics_coerce_view_value(
     }
 }
 
+/// Read and normalize the current value at an index in the typed array.
+///
+/// # Errors
+///
+/// Returns a [`RuntimeError`] if the read or normalization fails.
 pub(crate) fn atomics_normalized_current(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
@@ -338,6 +370,11 @@ pub(crate) fn atomics_normalized_current(
     atomics_coerce_view_value(vm, info, &current)
 }
 
+/// Read the current value at an index in the typed array, equivalent to `Atomics.load()`.
+///
+/// # Errors
+///
+/// Returns a [`RuntimeError`] if the read fails.
 pub(crate) fn atomics_load_current(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
@@ -346,6 +383,11 @@ pub(crate) fn atomics_load_current(
     atomics_normalized_current(vm, info, index)
 }
 
+/// Store a coerced value at an index in the typed array, equivalent to `Atomics.store()`.
+///
+/// # Errors
+///
+/// Returns a [`RuntimeError`] if the write fails.
 pub(crate) fn atomics_store_current(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
@@ -357,6 +399,11 @@ pub(crate) fn atomics_store_current(
     Ok(stored)
 }
 
+/// Exchange the current value at an index with a new value, returning the old value.
+///
+/// # Errors
+///
+/// Returns a [`RuntimeError`] if the operation fails.
 pub(crate) fn atomics_exchange_current(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
@@ -369,6 +416,11 @@ pub(crate) fn atomics_exchange_current(
     Ok(current)
 }
 
+/// Perform a binary operation (add, sub, and, or, xor) at an index and return the old value.
+///
+/// # Errors
+///
+/// Returns a [`RuntimeError`] if the operation fails.
 pub(crate) fn atomics_binary_update(
     vm: &mut Vm,
     info: &AtomicsViewInfo,
@@ -433,6 +485,11 @@ pub(crate) fn atomics_binary_update(
     Ok(current)
 }
 
+/// Compare and exchange the value at an index, returning the old value.
+///
+/// # Errors
+///
+/// Returns a [`RuntimeError`] if the operation fails.
 pub(crate) fn atomics_compare_exchange(
     vm: &mut Vm,
     info: &AtomicsViewInfo,

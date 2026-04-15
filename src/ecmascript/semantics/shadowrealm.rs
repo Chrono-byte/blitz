@@ -8,6 +8,7 @@ use crate::runtime_utils::{
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 
+/// Builds the ShadowRealm constructor function.
 pub(crate) fn build_shadowrealm_constructor(
     object_proto_map: &Rc<RefCell<ObjectData>>,
     function_proto_map: &Rc<RefCell<ObjectData>>,

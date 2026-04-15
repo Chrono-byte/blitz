@@ -88,10 +88,12 @@ pub use promises::install_minimal_kernel_constructors;
 pub(crate) use promises::*;
 pub(crate) use shadowrealm::*;
 
+/// Sets the "length" property of a builtin function or object.
 pub(crate) fn set_builtin_length(target: &Value, length: f64) {
     crate::ecmascript::semantics::set_builtin_length(target, length)
 }
 
+/// Sets the "name" property of a builtin function or object.
 pub(crate) fn set_builtin_name(target: &Value, name: &str) {
     crate::ecmascript::semantics::set_builtin_name(target, name)
 }
@@ -146,6 +148,7 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
     Rc::try_unwrap(rc_cleared).unwrap_or_else(|rc| (*rc).clone())
 }
 
+/// Determines if two values are strictly equal according to ES6 semantics.
 pub(crate) fn strict_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Undefined, Value::Undefined) => true,
@@ -166,6 +169,7 @@ pub(crate) fn strict_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Determines if two values are equal using SameValueZero semantics (for use in collection operations).
 pub(crate) fn same_value_zero(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => x == y || (x.is_nan() && y.is_nan()),
@@ -173,6 +177,7 @@ pub(crate) fn same_value_zero(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Computes the argument offset for static builtin functions based on current call context.
 pub(crate) fn static_builtin_arg_offset(vm: &Vm, args: &[Value], global_name: &str) -> usize {
     let has_new_target = vm.current_new_target().is_some();
     let prepended_this = vm.builtin_this_arg_prepended();
@@ -195,6 +200,7 @@ pub(crate) fn static_builtin_arg_offset(vm: &Vm, args: &[Value], global_name: &s
     offset
 }
 
+/// Converts a value to a length property value, returning a non-negative integer index.
 pub(crate) fn to_length(vm: &mut Vm, value: &Value) -> Result<usize, RuntimeError> {
     let num = vm.to_number_value(value)?;
     if num.is_nan() || num <= 0.0_f64 {
@@ -213,6 +219,7 @@ pub(crate) fn to_length(vm: &mut Vm, value: &Value) -> Result<usize, RuntimeErro
         .ok_or_else(|| vm.throw_range_error("Invalid array length"))
 }
 
+/// Converts a value to an array index, returning a non-negative integer index.
 pub(crate) fn to_index(vm: &mut Vm, value: &Value) -> Result<usize, RuntimeError> {
     let num = vm.to_number_value(value)?;
     if num.is_nan() {
@@ -249,28 +256,49 @@ pub(crate) fn to_integer_or_infinity(vm: &mut Vm, value: &Value) -> Result<isize
         .ok_or_else(|| vm.throw_range_error("Invalid array index"))
 }
 
+/// Indicates the type of value handled by Atomics operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AtomicsValueKind {
-    Number { bits: u32, signed: bool },
-    BigInt { signed: bool },
+    /// A numeric value with specified bit width and signedness.
+    Number {
+        /// The bit width of the numeric value (8, 16, or 32).
+        bits: u32,
+        /// Whether the numeric value is signed.
+        signed: bool,
+    },
+    /// A BigInt value with specified signedness.
+    BigInt {
+        /// Whether the BigInt value is signed.
+        signed: bool,
+    },
 }
 
+/// Information about a TypedArray view for Atomics operations.
 #[derive(Clone)]
 pub(crate) struct AtomicsViewInfo {
+    /// The TypedArray view object.
     pub(crate) view: Rc<RefCell<ObjectData>>,
+    /// The underlying array data.
     pub(crate) data: Rc<RefCell<ArrayData>>,
+    /// The underlying ArrayBuffer or SharedArrayBuffer.
     pub(crate) buffer: Rc<RefCell<ObjectData>>,
+    /// The name of the kind of view (e.g., "Uint8Array").
     pub(crate) kind_name: String,
+    /// The value kind for this view.
     pub(crate) value_kind: AtomicsValueKind,
+    /// The number of elements in the view.
     pub(crate) length: usize,
+    /// Whether the buffer is shared (SharedArrayBuffer).
     pub(crate) is_shared: bool,
 }
 
+/// Creates a syntax error exception with the given message.
 pub(crate) fn syntax_error(vm: &mut Vm, message: String) -> RuntimeError {
     let err_val = host_error_object(vm, "SyntaxError", &message);
     vm.throw_exception(err_val)
 }
 
+/// Creates an error object for a given error type and message.
 pub(crate) fn host_error_object(vm: &mut Vm, name: &str, message: &str) -> Value {
     let mut obj = ObjectData::new();
     let proto = vm
@@ -295,6 +323,7 @@ pub(crate) fn host_error_object(vm: &mut Vm, name: &str, message: &str) -> Value
     Value::Object(gc::track_object(Rc::new(RefCell::new(obj))))
 }
 
+/// Parses a string as a canonical array index, returning the numeric index if valid.
 pub(crate) fn canonical_index_key(s: &str) -> Option<u64> {
     if s.is_empty() {
         return None;

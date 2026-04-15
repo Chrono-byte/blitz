@@ -1,5 +1,6 @@
 use super::*;
 
+/// Installs hidden internal builtins required for ECMAScript semantics.
 pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
     intrinsics.hidden_builtins.insert(
         "dynamicImport".to_string(),

@@ -160,6 +160,7 @@ fn parse_float_prefix_len(s: &str) -> Option<usize> {
     Some(end_index)
 }
 
+/// Checks if a byte offset is properly aligned for a given element count.
 pub(crate) fn is_byte_offset_aligned(byte_offset: usize, element_count: usize) -> bool {
     element_count == 1 || byte_offset.is_multiple_of(element_count)
 }
@@ -204,6 +205,7 @@ fn parse_float_string(text: &str) -> f64 {
     }
 }
 
+/// Implements the global parseInt function.
 pub(crate) fn global_parse_int(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let undefined = Value::Undefined;
     let value = args.first().unwrap_or(&undefined);
@@ -225,6 +227,7 @@ pub(crate) fn global_parse_int(vm: &mut Vm, args: &[Value]) -> Result<Value, Run
     Ok(Value::Number(parsed))
 }
 
+/// Implements the global parseFloat function.
 pub(crate) fn global_parse_float(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let undefined = Value::Undefined;
     let value = args.first().unwrap_or(&undefined);

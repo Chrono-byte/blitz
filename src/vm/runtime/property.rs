@@ -360,6 +360,14 @@ impl Vm {
         Ok(result)
     }
 
+    /// Host hook: set a property with Reflect semantics, returning success/failure as a boolean.
+    ///
+    /// Unlike `set_property_host`, this operation returns `false` on failure instead of throwing
+    /// an error, implementing the semantics of `Reflect.set()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if the operation encounters a runtime error during lookup.
     pub(crate) fn reflect_set_property_host(
         &mut self,
         target: &Value,

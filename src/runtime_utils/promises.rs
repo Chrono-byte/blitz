@@ -1,5 +1,6 @@
 use super::*;
 
+/// Checks if a promise's constructor matches the given constructor value.
 pub(crate) fn promise_constructor_matches(
     vm: &mut Vm,
     promise: &Value,
@@ -10,6 +11,7 @@ pub(crate) fn promise_constructor_matches(
     Ok(strict_equal(&promise_constructor, constructor))
 }
 
+/// Collects values from an iterable into a vector.
 pub(crate) fn collect_iterable_values(
     vm: &mut Vm,
     iterable: &Value,
@@ -225,6 +227,7 @@ pub fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) ->
     crate::ecmascript::semantics::install_minimal_kernel_constructors(globals)
 }
 
+/// Fulfills a pending promise with a given value, invoking all pending callbacks.
 pub(crate) fn fulfill_pending_promise(
     vm: &mut Vm,
     promise: &Rc<RefCell<PromiseState>>,
@@ -312,6 +315,7 @@ pub(crate) fn reject_pending_promise(
     }
 }
 
+/// Evaluates code in a ShadowRealm and returns the result.
 pub(crate) fn shadowrealm_evaluate(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let undefined = Value::Undefined;
     let target = args.first().unwrap_or(&undefined);
@@ -382,6 +386,7 @@ pub(crate) fn shadowrealm_evaluate(vm: &mut Vm, args: &[Value]) -> Result<Value,
         .map_err(|s| vm.throw_type_error(&s))
 }
 
+/// Imports a value from a module in a ShadowRealm and returns it.
 pub(crate) fn shadowrealm_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let undefined = Value::Undefined;
     let target = args.first().unwrap_or(&undefined);
@@ -542,6 +547,7 @@ pub(crate) fn shadowrealm_import_value(vm: &mut Vm, args: &[Value]) -> Result<Va
     Ok(promise_value)
 }
 
+/// Dynamically imports a module and returns a promise resolving to the module namespace.
 pub(crate) fn dynamic_import_value(vm: &mut Vm, args: &[Value]) -> Result<Value, RuntimeError> {
     let undefined = Value::Undefined;
     let specifier = args.first().unwrap_or(&undefined);

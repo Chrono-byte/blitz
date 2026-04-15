@@ -102,11 +102,14 @@ type DynamicImportJob = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::Runt
 
 #[derive(Default)]
 pub(crate) struct OperandStack {
+    /// The main stack of values.
     inner: Vec<Value>,
+    /// A register holding the top-of-stack value for performance.
     register: Option<Value>,
 }
 
 impl OperandStack {
+    /// Creates a new operand stack with the specified capacity.
     pub(crate) fn with_capacity(cap: usize) -> Self {
         Self {
             inner: Vec::with_capacity(cap),
@@ -114,21 +117,25 @@ impl OperandStack {
         }
     }
 
+    /// Clears all values from the stack.
     pub(crate) fn clear(&mut self) {
         self.inner.clear();
         self.register = None;
     }
 
+    /// Returns the total number of values on the stack.
     pub(crate) fn len(&self) -> usize {
         self.inner.len() + self.register.is_some() as usize
     }
 
+    /// Pushes a value onto the stack.
     pub(crate) fn push(&mut self, value: Value) {
         if let Some(top) = self.register.replace(value) {
             self.inner.push(top);
         }
     }
 
+    /// Pops and returns the top value from the stack.
     pub(crate) fn pop(&mut self) -> Option<Value> {
         if let Some(top) = self.register.take() {
             Some(top)
@@ -137,10 +144,12 @@ impl OperandStack {
         }
     }
 
+    /// Returns a reference to the top value without removing it.
     pub(crate) fn last(&self) -> Option<&Value> {
         self.register.as_ref().or_else(|| self.inner.last())
     }
 
+    /// Returns an iterator over all values in the stack.
     pub(crate) fn iter(&self) -> OperandStackIter<'_> {
         OperandStackIter {
             inner: self.inner.iter(),
@@ -149,6 +158,7 @@ impl OperandStack {
         }
     }
 
+    /// Returns a reverse iterator over all values in the stack.
     pub(crate) fn iter_rev(&self) -> OperandStackRevIter<'_> {
         OperandStackRevIter {
             inner: self.inner.iter().rev(),
@@ -157,6 +167,7 @@ impl OperandStack {
         }
     }
 
+    /// Returns a copy of all values currently on the stack.
     pub(crate) fn snapshot(&self) -> Vec<Value> {
         let mut values = self.inner.clone();
         if let Some(top) = self.register.as_ref() {
@@ -165,6 +176,7 @@ impl OperandStack {
         values
     }
 
+    /// Takes all values from the stack, leaving it empty.
     pub(crate) fn take_all(&mut self) -> Vec<Value> {
         let mut values = std::mem::take(&mut self.inner);
         if let Some(top) = self.register.take() {
@@ -173,6 +185,7 @@ impl OperandStack {
         values
     }
 
+    /// Restores the stack to a previously saved state.
     pub(crate) fn restore_from(&mut self, mut values: Vec<Value>) {
         if let Some(last) = values.pop() {
             self.inner = values;
@@ -183,6 +196,7 @@ impl OperandStack {
         }
     }
 
+    /// Truncates the stack to the specified length.
     pub(crate) fn truncate(&mut self, new_len: usize) {
         let total = self.len();
         if new_len >= total {
@@ -200,6 +214,7 @@ impl OperandStack {
         }
     }
 
+    /// Swaps the values at two positions in the stack.
     pub(crate) fn swap(&mut self, a: usize, b: usize) {
         let total = self.len();
         if a >= total || b >= total {
@@ -211,9 +226,13 @@ impl OperandStack {
     }
 }
 
+/// Forward iterator over operand stack values.
 pub(crate) struct OperandStackIter<'a> {
+    /// Inner iterator over the stack vector.
     inner: std::slice::Iter<'a, Value>,
+    /// Reference to the register (top-of-stack).
     register: Option<&'a Value>,
+    /// Whether the register has been emitted by the iterator.
     register_emitted: bool,
 }
 
@@ -232,9 +251,13 @@ impl<'a> Iterator for OperandStackIter<'a> {
     }
 }
 
+/// Reverse iterator over operand stack values.
 pub(crate) struct OperandStackRevIter<'a> {
+    /// Inner reverse iterator over the stack vector.
     inner: std::iter::Rev<std::slice::Iter<'a, Value>>,
+    /// Reference to the register (top-of-stack).
     register: Option<&'a Value>,
+    /// Whether the register has been emitted by the iterator.
     register_emitted: bool,
 }
 

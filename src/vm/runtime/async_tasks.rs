@@ -96,6 +96,15 @@ impl Vm {
         Ok(())
     }
 
+    /// Drain all pending microtasks, executing them in FIFO order and continuing on errors.
+    ///
+    /// # Errors
+    ///
+    /// Microtask callbacks are executed to completion. If a microtask returns
+    /// an error, the VM records it on `last_uncaught_exception` and continues
+    /// draining the remaining microtasks. This mirrors the common host policy
+    /// of running microtasks to completion while surfacing exceptions via a
+    /// host hook instead of aborting the queue on first error.
     pub(crate) fn drain_microtasks(&mut self) -> Result<(), crate::errors::RuntimeError> {
         while let Some(mut job) = self.microtasks.pop_front() {
             let caller_handlers = std::mem::take(&mut self.handlers);
@@ -121,6 +130,13 @@ impl Vm {
         Ok(())
     }
 
+    /// Run all pending microtasks and dynamic import jobs until the queues are empty.
+    ///
+    /// Prioritizes microtasks over dynamic import jobs, processing them in rounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if any microtask or job fails.
     pub(crate) fn run_microtasks_if_needed(&mut self) -> Result<(), crate::errors::RuntimeError> {
         while !self.microtasks.is_empty() || !self.dynamic_import_jobs.is_empty() {
             if !self.microtasks.is_empty() {

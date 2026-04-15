@@ -63,6 +63,7 @@ fn source_is_whitespace_and_comments_only(src: &str) -> bool {
     }
 }
 
+/// Installs global function builtins such as eval, parseInt, parseFloat, etc.
 pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
     use PropertyKey as PKey;
 

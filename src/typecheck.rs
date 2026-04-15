@@ -226,6 +226,7 @@ impl TypeContext {
     /// # Errors
     ///
     /// Returns a `TypeCheckerError` if the statement cannot be typechecked.
+    #[allow(clippy::too_many_lines)]
     fn check_statement_oast(&mut self, stmt: &oast::Statement) -> Result<(), TypeCheckerError> {
         use oast::{BindingPattern as OPat, Statement as OStmt};
         if matches!(stmt, oxc_ast::match_module_declaration!(OStmt)) {
@@ -393,6 +394,7 @@ impl TypeContext {
     /// # Errors
     ///
     /// Returns a `TypeCheckerError` if the expression cannot be typechecked.
+    #[allow(clippy::too_many_lines)]
     fn type_of_expr_oast(&self, expr: &oast::Expression) -> Result<Type, TypeCheckerError> {
         use oast::Expression as OExpr;
         match expr {
