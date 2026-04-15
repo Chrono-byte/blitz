@@ -1445,7 +1445,7 @@ impl Vm {
                         .root_slot_names
                         .get(slot)
                         .and_then(Clone::clone)
-                        .unwrap();
+                        .expect("name should exist after is_some_and check");
                     eprintln!("[trace] LoadLocal '{}' -> {}", name, v.type_name());
                     crate::trace::value_string("[trace]   value", &v);
                 }

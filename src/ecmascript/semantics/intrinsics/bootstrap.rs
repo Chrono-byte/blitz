@@ -463,7 +463,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             len.saturating_sub(start)
                         } else {
                             let delete_count = vm
-                                .to_number_value(args.get(2).expect("args.get(2) should exist when arg_count >= 2"))?
+                                .to_number_value(
+                                    args.get(2)
+                                        .expect("args.get(2) should exist when arg_count >= 2"),
+                                )?
                                 .max(0.0)
                                 .trunc()
                                 .to_usize()

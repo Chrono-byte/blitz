@@ -138,7 +138,12 @@ fn main() -> Result<(), blitz::errors::Error> {
                 let mut loader = loader_handle.borrow_mut();
                 loader.construct(
                     path.parent().unwrap_or_else(|| Path::new(".")),
-                    &format!("./{}", path.file_name().unwrap().to_string_lossy()),
+                    &format!(
+                        "./{}",
+                        path.file_name()
+                            .expect("path must have a file name")
+                            .to_string_lossy()
+                    ),
                 )?;
                 loader
                     .instantiate_all()

@@ -564,7 +564,13 @@ impl ModuleLoader {
     pub fn evaluation_order_from(&mut self, entry: &Path) -> Result<Vec<PathBuf>, BundlerError> {
         let resolved = resolve_specifier(
             entry.parent().unwrap_or_else(|| Path::new(".")),
-            &format!("./{}", entry.file_name().unwrap().to_string_lossy()),
+            &format!(
+                "./{}",
+                entry
+                    .file_name()
+                    .expect("entry must have a file name")
+                    .to_string_lossy()
+            ),
         )?;
         let resolved_canon = std::fs::canonicalize(&resolved).unwrap_or(resolved);
         let mut temp: HashMap<PathBuf, bool> = HashMap::new();
@@ -615,7 +621,13 @@ impl ModuleLoader {
             let base_dir = entry.parent().unwrap_or_else(|| Path::new("."));
             self.construct(
                 base_dir,
-                &format!("./{}", entry.file_name().unwrap().to_string_lossy()),
+                &format!(
+                    "./{}",
+                    entry
+                        .file_name()
+                        .expect("entry must have a file name")
+                        .to_string_lossy()
+                ),
             )?;
         }
 

@@ -275,7 +275,7 @@ impl Vm {
                             Rc::as_ptr(&promise_for_job)
                         );
                     }
-                    let value = result_cell.take().unwrap();
+                    let value = result_cell.take().expect("result_cell must be Some");
                     if crate::trace::enabled() {
                         crate::trace::value_string(
                             "[trace] invoke_async_closure resolve_value",
@@ -309,7 +309,7 @@ impl Vm {
                             Rc::as_ptr(&promise_for_job)
                         );
                     }
-                    let reason = reason_cell.take().unwrap();
+                    let reason = reason_cell.take().expect("reason_cell must be Some");
                     reject_pending_promise(vm, &promise_for_job, reason);
                     Ok(())
                 });

@@ -302,13 +302,14 @@ pub(crate) fn build_atomics_object(
                 .ok_or_else(|| vm.throw_type_error("Promise constructor missing"))?;
             let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                 let off = if executor_args.len() > 2 { 1 } else { 0 };
-                *resolve_slot_capture.lock().expect("Mutex poisoned") = executor_args.get(off).cloned();
+                *resolve_slot_capture.lock().expect("Mutex poisoned") =
+                    executor_args.get(off).cloned();
                 Ok(Value::Undefined)
             }));
             let promise = vm.construct_value(&promise_ctor, &[executor])?;
             let resolve_fn = resolve_slot
                 .lock()
-                .unwrap()
+                .expect("Mutex poisoned")
                 .clone()
                 .ok_or_else(|| vm.throw_type_error("Atomics.waitAsync resolve missing"))?;
             atomics_waiters_array(&info.buffer)
