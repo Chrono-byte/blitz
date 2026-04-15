@@ -247,7 +247,7 @@ impl Chunk {
     pub fn read_i24_payload_at(&self, idx: usize) -> Option<i32> {
         let w = *self.code.get(idx)?;
         // interpret upper 24 bits as signed i32 with sign extension
-        let payload = (w >> 8) & 0x00FF_FFFF;
+        let payload = (w >> 8_i32) & 0x00FF_FFFF;
         // sign-extend 24-bit to 32-bit signed
         let signed = if (payload & 0x0080_0000) != 0 {
             (payload | 0xFF00_0000) as i32
@@ -868,7 +868,7 @@ mod tests {
         // instruction at 0: Jump -> target will be at instruction index 6 (for example)
         // Build u32 instruction words. Each u32: low 8 bits = opcode, next bytes are payload
         c.code = vec![
-            (Op::Jump.to_byte() as u32) | ((0x03u32) << 8) | ((0x00u32) << 16),
+            ((Op::Jump.to_byte() as u32) | ((0x03u32) << 8_i32)),
             // filler instructions (single-byte invalid ops encoded similarly)
             0xFFu32,
             0xFFu32,
