@@ -16,11 +16,10 @@
 //! This module is part of the compiler's multi-phase compilation process.
 //! Expression compilation is recursive and produces stack-based bytecode.
 
-use crate::bytecode::{Chunk, FunctionProto, Op};
+use crate::bytecode::Op;
 use crate::value::Value;
 use oxc_ast::ast as oast;
 use oxc_syntax::number::NumberBase;
-use std::rc::Rc;
 
 const LINE: u32 = 1;
 
@@ -33,7 +32,7 @@ impl super::Compiler {
             oast::Expression::NumericLiteral(n) if self.strict_context => {
                 let raw = n.raw.as_ref().map_or_else(
                     || n.span.source_text(self.source_text.as_str()),
-                    oxc_span::Str::as_str,
+                    oxc_str::Str::as_str,
                 );
                 let leading_zero = {
                     let mut bytes = raw.bytes();
@@ -161,7 +160,7 @@ impl super::Compiler {
     ) -> Result<(usize, usize), crate::errors::CompilerError> {
         self.compile_expr_oast(&m.object)?;
         let object_slot = self.alloc_temp_local("ref_obj");
-        self.emit(Op::SetLocal, LINE);
+        self.emit(Op::StoreLocal, LINE);
         self.emit_byte(
             u8::try_from(object_slot).expect("object_slot fits in u8"),
             LINE,
@@ -169,7 +168,7 @@ impl super::Compiler {
 
         self.emit_constant(Value::String(m.property.name.to_string()), LINE);
         let key_slot = self.alloc_temp_local("ref_key");
-        self.emit(Op::SetLocal, LINE);
+        self.emit(Op::StoreLocal, LINE);
         self.emit_byte(u8::try_from(key_slot).expect("key_slot fits in u8"), LINE);
         Ok((object_slot, key_slot))
     }
@@ -180,13 +179,13 @@ impl super::Compiler {
     ) -> Result<(usize, usize), crate::errors::CompilerError> {
         self.compile_expr_oast(&m.object)?;
         let object_slot = self.alloc_temp_local("ref_obj");
-        self.emit(Op::SetLocal, LINE);
-        self.emit_byte(object_slot as u8, LINE);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
 
         self.compile_expr_oast(&m.expression)?;
         let key_slot = self.alloc_temp_local("ref_key");
-        self.emit(Op::SetLocal, LINE);
-        self.emit_byte(key_slot as u8, LINE);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
         Ok((object_slot, key_slot))
     }
 
@@ -196,12 +195,12 @@ impl super::Compiler {
         key_slot: usize,
         use_ic: bool,
     ) -> Result<(), crate::errors::CompilerError> {
-        self.emit(Op::GetLocal, LINE);
-        self.emit_byte(object_slot as u8, LINE);
-        self.emit(Op::GetLocal, LINE);
-        self.emit_byte(key_slot as u8, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
         if use_ic {
-            self.emit(Op::GetPropertyIC, LINE);
+            self.emit(Op::GetProperty, LINE);
             let slot = self.alloc_ic_slot()?;
             self.emit_byte(slot, LINE);
         } else {
@@ -217,25 +216,25 @@ impl super::Compiler {
         use_ic: bool,
     ) -> Result<(), crate::errors::CompilerError> {
         let value_slot = self.alloc_temp_local("ref_value");
-        self.emit(Op::SetLocal, LINE);
+        self.emit(Op::StoreLocal, LINE);
         self.emit_byte(
             u8::try_from(value_slot).expect("value_slot fits in u8"),
             LINE,
         );
-        self.emit(Op::GetLocal, LINE);
+        self.emit(Op::LoadLocal, LINE);
         self.emit_byte(
             u8::try_from(object_slot).expect("object_slot fits in u8"),
             LINE,
         );
-        self.emit(Op::GetLocal, LINE);
+        self.emit(Op::LoadLocal, LINE);
         self.emit_byte(u8::try_from(key_slot).expect("key_slot fits in u8"), LINE);
-        self.emit(Op::GetLocal, LINE);
+        self.emit(Op::LoadLocal, LINE);
         self.emit_byte(
             u8::try_from(value_slot).expect("value_slot fits in u8"),
             LINE,
         );
         if use_ic {
-            self.emit(Op::SetPropertyIC, LINE);
+            self.emit(Op::SetProperty, LINE);
             let slot = self.alloc_ic_slot()?;
             self.emit_byte(slot, LINE);
         } else {
@@ -253,27 +252,29 @@ impl super::Compiler {
             return Ok(None);
         };
 
-        let compare_op = match binary.operator {
-            oast::BinaryOperator::Equality => Op::Eq,
-            oast::BinaryOperator::StrictEquality => Op::StrictEq,
-            oast::BinaryOperator::Inequality => Op::Neq,
-            oast::BinaryOperator::StrictInequality => Op::StrictNeq,
-            oast::BinaryOperator::LessThan => Op::Lt,
-            oast::BinaryOperator::LessEqualThan => Op::Le,
-            oast::BinaryOperator::GreaterThan => Op::Gt,
-            oast::BinaryOperator::GreaterEqualThan => Op::Ge,
+        // CompareJump cond_type values:
+        // 0=Eq, 1=Neq, 2=Lt, 3=Lte, 4=Gt, 5=Gte, 6=StrictEq, 7=StrictNeq
+        let cond_type = match binary.operator {
+            oast::BinaryOperator::Equality => 0,
+            oast::BinaryOperator::Inequality => 1,
+            oast::BinaryOperator::LessThan => 2,
+            oast::BinaryOperator::LessEqualThan => 3,
+            oast::BinaryOperator::GreaterThan => 4,
+            oast::BinaryOperator::GreaterEqualThan => 5,
+            oast::BinaryOperator::StrictEquality => 6,
+            oast::BinaryOperator::StrictInequality => 7,
             _ => return Ok(None),
         };
 
         self.compile_expr_oast(&binary.left)?;
         self.compile_expr_oast(&binary.right)?;
-        // Payload layout for CompareJumpIfFalse:
-        // - payload byte 0: comparison opcode
+        // Payload layout for CompareJump:
+        // - payload byte 0: cond_type (3 bits, rest unused)
         // - payload bytes 1..2: signed i16 relative jump offset (patched later)
-        self.emit_with_payload(Op::CompareJumpIfFalse, compare_op as u32, LINE);
+        self.emit_with_payload(Op::CompareJump, cond_type as u32, LINE);
 
         // Return the instruction index containing the compare+jump payload so
-        // callers can patch the i16 jump offset while preserving compare_op.
+        // callers can patch the i16 jump offset while preserving cond_type.
         let patch_addr = self.chunk.code.len().saturating_sub(1);
 
         Ok(Some(patch_addr))
@@ -456,7 +457,7 @@ impl super::Compiler {
                     u8::try_from(t.quasi.quasis.len()).expect("quasis.len fits in u8"),
                     LINE,
                 );
-                self.emit(Op::SetPropertyIC, LINE);
+                self.emit(Op::SetProperty, LINE);
                 let slot = self.alloc_ic_slot()?;
                 self.emit_byte(slot, LINE);
                 self.emit(Op::Pop, LINE);
@@ -465,7 +466,7 @@ impl super::Compiler {
                     self.compile_expr_oast(sub)?;
                     arg_count += 1;
                 }
-                self.emit(Op::CallIC, LINE);
+                self.emit(Op::Call, LINE);
                 self.emit_byte(u8::try_from(arg_count).expect("arg_count fits in u8"), LINE);
             }
             OExpr::BooleanLiteral(b) => {
@@ -485,7 +486,7 @@ impl super::Compiler {
                 let (proto, _env_len) = self.compile_arrow_function(name, a, None)?;
                 let idx = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
-                self.emit_byte(idx as u8, LINE);
+                self.emit_byte(self.function_index_to_u8(idx)?, LINE);
             }
             OExpr::FunctionExpression(f) => {
                 let name = "<anonymous>";
@@ -493,7 +494,7 @@ impl super::Compiler {
                 let (proto, _env_len) = self.compile_function(name, self_name, f, None, false)?;
                 let idx = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
-                self.emit_byte(idx as u8, LINE);
+                self.emit_byte(self.function_index_to_u8(idx)?, LINE);
             }
             OExpr::ObjectExpression(obj) => {
                 let mut count = 0usize;
@@ -567,7 +568,7 @@ impl super::Compiler {
                     }
                 }
                 self.emit(Op::BuildObject, LINE);
-                self.emit_byte(count as u8, LINE);
+                self.emit_byte(self.constant_index_to_u8(count)?, LINE);
 
                 for idx in computed_indices {
                     if let oast::ObjectPropertyKind::ObjectProperty(p) = &obj.properties[idx] {
@@ -660,7 +661,7 @@ impl super::Compiler {
                             )?;
                             let idx = self.chunk.add_function(proto);
                             self.emit(Op::MakeClosure, LINE);
-                            self.emit_byte(idx as u8, LINE);
+                            self.emit_byte(self.function_index_to_u8(idx)?, LINE);
                         } else {
                             self.compile_expr_oast(&p.value)?;
                         }
@@ -670,7 +671,7 @@ impl super::Compiler {
                         self.emit_constant(Value::Bool(true), LINE);
                         self.emit(Op::BuildObject, LINE);
                         self.emit_byte(3, LINE);
-                        self.emit(Op::CallIC, LINE);
+                        self.emit(Op::Call, LINE);
                         self.emit_byte(3, LINE);
                     }
                 }
@@ -700,7 +701,7 @@ impl super::Compiler {
                         }
                     }
                     self.emit(Op::BuildArray, LINE);
-                    self.emit_byte(arr.elements.len() as u8, LINE);
+                    self.emit_byte(self.constant_index_to_u8(arr.elements.len())?, LINE);
                     for el in &arr.elements {
                         if matches!(el, oast::ArrayExpressionElement::SpreadElement(_)) {
                             self.emit(Op::True, LINE);
@@ -709,9 +710,9 @@ impl super::Compiler {
                         }
                     }
                     self.emit(Op::BuildArray, LINE);
-                    self.emit_byte(arr.elements.len() as u8, LINE);
+                    self.emit_byte(self.constant_index_to_u8(arr.elements.len())?, LINE);
                     self.emit(Op::ArrayFromSpread, LINE);
-                    self.emit_byte(arr.elements.len() as u8, LINE);
+                    self.emit_byte(self.constant_index_to_u8(arr.elements.len())?, LINE);
                 } else {
                     for el in &arr.elements {
                         if let Some(expr) = el.as_expression() {
@@ -721,7 +722,7 @@ impl super::Compiler {
                         }
                     }
                     self.emit(Op::BuildArray, LINE);
-                    self.emit_byte(arr.elements.len() as u8, LINE);
+                    self.emit_byte(self.constant_index_to_u8(arr.elements.len())?, LINE);
                 }
             }
             OExpr::Identifier(id) => {
@@ -751,11 +752,11 @@ impl super::Compiler {
                             self.compile_expr_oast(&a.right)?;
                             self.emit(Op::Dup, LINE);
                             if let Some(slot) = self.resolve_local(name) {
-                                self.emit(Op::SetLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::StoreLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 if self.local_mirrors_global(slot) {
-                                    self.emit(Op::GetLocal, LINE);
-                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit(Op::LoadLocal, LINE);
+                                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                     self.emit_set_global_name(name);
                                 }
                                 // Check export membership without holding a borrow
@@ -772,8 +773,8 @@ impl super::Compiler {
                                     let cname_idx =
                                         self.chunk.add_constant(Value::String(name.to_string()));
                                     self.emit(Op::SetModuleExport, LINE);
-                                    self.emit_byte(module_index as u8, LINE);
-                                    self.emit_byte(cname_idx as u8, LINE);
+                                    self.emit_byte(self.module_index_to_u8(module_index)?, LINE);
+                                    self.emit_byte(self.constant_index_to_u8(cname_idx)?, LINE);
                                 }
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
                                 self.emit(Op::SetUpvalue, LINE);
@@ -795,7 +796,7 @@ impl super::Compiler {
                                     LINE,
                                 );
                                 self.compile_expr_oast(&a.right)?;
-                                self.emit(Op::SetPropertyIC, LINE);
+                                self.emit(Op::SetProperty, LINE);
                                 let slot = self.alloc_ic_slot()?;
                                 self.emit_byte(slot, LINE);
                             }
@@ -843,8 +844,8 @@ impl super::Compiler {
                                 return Err(Self::imported_binding_assignment_error());
                             }
                             if let Some(slot) = self.resolve_local(name) {
-                                self.emit(Op::GetLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::LoadLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
                                 self.emit(Op::GetUpvalue, LINE);
                                 self.emit_byte(upvalue, LINE);
@@ -873,11 +874,11 @@ impl super::Compiler {
                             }
                             self.emit(Op::Dup, LINE);
                             if let Some(slot) = self.resolve_local(name) {
-                                self.emit(Op::SetLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::StoreLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 if self.local_mirrors_global(slot) {
-                                    self.emit(Op::GetLocal, LINE);
-                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit(Op::LoadLocal, LINE);
+                                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                     self.emit_set_global_name(name);
                                 }
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
@@ -920,21 +921,21 @@ impl super::Compiler {
                                 let key_slot = self.alloc_temp_local("super_key");
                                 let receiver_slot = self.alloc_temp_local("super_receiver");
                                 self.emit(Op::GetThis, LINE);
-                                self.emit(Op::SetLocal, LINE);
-                                self.emit_byte(receiver_slot as u8, LINE);
-                                self.emit(Op::GetLocal, LINE);
-                                self.emit_byte(receiver_slot as u8, LINE);
+                                self.emit(Op::StoreLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+                                self.emit(Op::LoadLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
                                 self.emit(Op::Dup, LINE);
                                 self.compile_expr_oast(&m.expression)?;
-                                self.emit(Op::SetLocal, LINE);
-                                self.emit_byte(key_slot as u8, LINE);
-                                self.emit(Op::GetLocal, LINE);
-                                self.emit_byte(key_slot as u8, LINE);
+                                self.emit(Op::StoreLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+                                self.emit(Op::LoadLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
                                 self.emit(Op::GetSuperProperty, LINE);
                                 self.compile_expr_oast(&a.right)?;
                                 self.emit_compound_assignment_op(a.operator);
-                                self.emit(Op::GetLocal, LINE);
-                                self.emit_byte(key_slot as u8, LINE);
+                                self.emit(Op::LoadLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
                                 self.emit(Op::Swap, LINE);
                                 self.emit(Op::SetSuperProperty, LINE);
                                 self.emit(Op::Swap, LINE);
@@ -962,8 +963,8 @@ impl super::Compiler {
                         oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
                             let name = id.name.as_str();
                             if let Some(slot) = self.resolve_local(name) {
-                                self.emit(Op::GetLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::LoadLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 self.emit(Op::Dup, LINE);
                                 self.emit(Op::JumpIfFalse, LINE);
                                 let jump_end = self.chunk.code.len();
@@ -972,11 +973,11 @@ impl super::Compiler {
                                 self.emit(Op::Pop, LINE);
                                 self.compile_expr_oast(&a.right)?;
                                 self.emit(Op::Dup, LINE);
-                                self.emit(Op::SetLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::StoreLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 if self.local_mirrors_global(slot) {
-                                    self.emit(Op::GetLocal, LINE);
-                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit(Op::LoadLocal, LINE);
+                                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                     self.emit_set_global_name(name);
                                 }
                                 self.patch_jump(jump_end);
@@ -1046,8 +1047,8 @@ impl super::Compiler {
                         oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
                             let name = id.name.as_str();
                             if let Some(slot) = self.resolve_local(name) {
-                                self.emit(Op::GetLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::LoadLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 self.emit(Op::Dup, LINE);
                                 self.emit(Op::JumpIfTrue, LINE);
                                 let jump_end = self.chunk.code.len();
@@ -1056,11 +1057,11 @@ impl super::Compiler {
                                 self.emit(Op::Pop, LINE);
                                 self.compile_expr_oast(&a.right)?;
                                 self.emit(Op::Dup, LINE);
-                                self.emit(Op::SetLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::StoreLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 if self.local_mirrors_global(slot) {
-                                    self.emit(Op::GetLocal, LINE);
-                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit(Op::LoadLocal, LINE);
+                                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                     self.emit_set_global_name(name);
                                 }
                                 self.patch_jump(jump_end);
@@ -1130,8 +1131,8 @@ impl super::Compiler {
                         oast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
                             let name = id.name.as_str();
                             if let Some(slot) = self.resolve_local(name) {
-                                self.emit(Op::GetLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::LoadLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 self.emit(Op::Dup, LINE);
                                 self.emit(Op::JumpIfNullish, LINE);
                                 let jump_end = self.chunk.code.len();
@@ -1145,11 +1146,11 @@ impl super::Compiler {
                                 self.emit(Op::Pop, LINE);
                                 self.compile_expr_oast(&a.right)?;
                                 self.emit(Op::Dup, LINE);
-                                self.emit(Op::SetLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::StoreLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 if self.local_mirrors_global(slot) {
-                                    self.emit(Op::GetLocal, LINE);
-                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit(Op::LoadLocal, LINE);
+                                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                     self.emit_set_global_name(name);
                                 }
                                 self.patch_jump(after_store);
@@ -1300,8 +1301,8 @@ impl super::Compiler {
                     OTarget::AssignmentTargetIdentifier(id) => {
                         let name = id.name.as_str();
                         if let Some(slot) = self.resolve_local(name) {
-                            self.emit(Op::GetLocal, LINE);
-                            self.emit_byte(slot as u8, LINE);
+                            self.emit(Op::LoadLocal, LINE);
+                            self.emit_byte(self.slot_to_u8(slot)?, LINE);
                             self.emit(Op::Neg, LINE);
                             self.emit(Op::Neg, LINE);
                             if !u.prefix {
@@ -1315,11 +1316,11 @@ impl super::Compiler {
                             if u.prefix {
                                 self.emit(Op::Dup, LINE);
                             }
-                            self.emit(Op::SetLocal, LINE);
-                            self.emit_byte(slot as u8, LINE);
+                            self.emit(Op::StoreLocal, LINE);
+                            self.emit_byte(self.slot_to_u8(slot)?, LINE);
                             if self.local_mirrors_global(slot) {
-                                self.emit(Op::GetLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::LoadLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 self.emit_set_global_name(name);
                             }
                         } else if let Some(upvalue) = self.resolve_upvalue(name) {
@@ -1362,10 +1363,10 @@ impl super::Compiler {
                         let (object_slot, key_slot) = self.compile_static_member_reference(m)?;
                         self.emit_reference_get(object_slot, key_slot, true)?;
                         let old_slot = self.alloc_temp_local("ref_old");
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(old_slot as u8, LINE);
-                        self.emit(Op::GetLocal, LINE);
-                        self.emit_byte(old_slot as u8, LINE);
+                        self.emit(Op::StoreLocal, LINE);
+                        self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
+                        self.emit(Op::LoadLocal, LINE);
+                        self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
                         self.emit(Op::Neg, LINE);
                         self.emit(Op::Neg, LINE);
                         if !u.prefix {
@@ -1385,10 +1386,10 @@ impl super::Compiler {
                         let (object_slot, key_slot) = self.compile_computed_member_reference(m)?;
                         self.emit_reference_get(object_slot, key_slot, false)?;
                         let old_slot = self.alloc_temp_local("ref_old");
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(old_slot as u8, LINE);
-                        self.emit(Op::GetLocal, LINE);
-                        self.emit_byte(old_slot as u8, LINE);
+                        self.emit(Op::StoreLocal, LINE);
+                        self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
+                        self.emit(Op::LoadLocal, LINE);
+                        self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
                         self.emit(Op::Neg, LINE);
                         self.emit(Op::Neg, LINE);
                         if !u.prefix {
@@ -1436,17 +1437,37 @@ impl super::Compiler {
                     self.emit(Op::HasProperty, LINE);
                     return Ok(());
                 }
+                let compare_cond_type = match b.operator {
+                    oast::BinaryOperator::Equality => Some(0),
+                    oast::BinaryOperator::Inequality => Some(1),
+                    oast::BinaryOperator::LessThan => Some(2),
+                    oast::BinaryOperator::LessEqualThan => Some(3),
+                    oast::BinaryOperator::GreaterThan => Some(4),
+                    oast::BinaryOperator::GreaterEqualThan => Some(5),
+                    oast::BinaryOperator::StrictEquality => Some(6),
+                    oast::BinaryOperator::StrictInequality => Some(7),
+                    _ => None,
+                };
+                if let Some(cond_type) = compare_cond_type {
+                    self.compile_expr_oast(&b.left)?;
+                    self.compile_expr_oast(&b.right)?;
+                    self.emit_with_payload(Op::CompareJump, cond_type as u32, LINE);
+                    let jump_false = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.emit(Op::True, LINE);
+                    self.emit(Op::Jump, LINE);
+                    let jump_end = self.chunk.code.len();
+                    self.emit_byte(0, LINE);
+                    self.emit_byte(0, LINE);
+                    self.patch_jump(jump_false);
+                    self.emit(Op::False, LINE);
+                    self.patch_jump(jump_end);
+                    return Ok(());
+                }
                 self.compile_expr_oast(&b.left)?;
                 self.compile_expr_oast(&b.right)?;
                 match b.operator {
-                    oast::BinaryOperator::Equality => self.emit(Op::Eq, LINE),
-                    oast::BinaryOperator::StrictEquality => self.emit(Op::StrictEq, LINE),
-                    oast::BinaryOperator::Inequality => self.emit(Op::Neq, LINE),
-                    oast::BinaryOperator::StrictInequality => self.emit(Op::StrictNeq, LINE),
-                    oast::BinaryOperator::LessThan => self.emit(Op::Lt, LINE),
-                    oast::BinaryOperator::LessEqualThan => self.emit(Op::Le, LINE),
-                    oast::BinaryOperator::GreaterThan => self.emit(Op::Gt, LINE),
-                    oast::BinaryOperator::GreaterEqualThan => self.emit(Op::Ge, LINE),
                     oast::BinaryOperator::Addition => self.emit(Op::Add, LINE),
                     oast::BinaryOperator::Subtraction => self.emit(Op::Sub, LINE),
                     oast::BinaryOperator::Multiplication => self.emit(Op::Mul, LINE),
@@ -1571,13 +1592,13 @@ impl super::Compiler {
                         self.emit_byte(0, LINE);
                         self.patch_jump(skip_nullish);
                         self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                        self.emit(Op::GetPropertyIC, LINE);
+                        self.emit(Op::GetProperty, LINE);
                         let slot = self.alloc_ic_slot()?;
                         self.emit_byte(slot, LINE);
                         self.patch_jump(end);
                     } else {
                         self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                        self.emit(Op::GetPropertyIC, LINE);
+                        self.emit(Op::GetProperty, LINE);
                         let slot = self.alloc_ic_slot()?;
                         self.emit_byte(slot, LINE);
                     }
@@ -1645,7 +1666,7 @@ impl super::Compiler {
                                     Value::String(m.property.name.to_string()),
                                     LINE,
                                 );
-                                self.emit(Op::GetPropertyIC, LINE);
+                                self.emit(Op::GetProperty, LINE);
                                 let slot = self.alloc_ic_slot()?;
                                 self.emit_byte(slot, LINE);
                                 self.patch_jump(end);
@@ -1654,7 +1675,7 @@ impl super::Compiler {
                                     Value::String(m.property.name.to_string()),
                                     LINE,
                                 );
-                                self.emit(Op::GetPropertyIC, LINE);
+                                self.emit(Op::GetProperty, LINE);
                                 let slot = self.alloc_ic_slot()?;
                                 self.emit_byte(slot, LINE);
                             }
@@ -1712,8 +1733,8 @@ impl super::Compiler {
                                     arg_count += 1;
                                 }
                             }
-                            self.emit(Op::CallMethod, LINE);
-                            self.emit_byte(arg_count as u8, LINE);
+                            self.emit(Op::Call, LINE);
+                            self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
                             return Ok(());
                         }
                         if let OExpr::ComputedMemberExpression(m) = &c.callee
@@ -1735,8 +1756,8 @@ impl super::Compiler {
                                     arg_count += 1;
                                 }
                             }
-                            self.emit(Op::CallMethod, LINE);
-                            self.emit_byte(arg_count as u8, LINE);
+                            self.emit(Op::Call, LINE);
+                            self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
                             return Ok(());
                         }
                         let is_optional_call = c.optional;
@@ -1771,13 +1792,13 @@ impl super::Compiler {
                         }
                         if is_optional_call {
                             self.emit(Op::Call, LINE);
-                            self.emit_byte(arg_count as u8, LINE);
+                            self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
                             if let Some(end) = end {
                                 self.patch_jump(end);
                             }
                         } else {
-                            self.emit(Op::CallMethod, LINE);
-                            self.emit_byte(arg_count as u8, LINE);
+                            self.emit(Op::Call, LINE);
+                            self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
                         }
                     }
                     CE::PrivateFieldExpression(m) => {
@@ -1844,9 +1865,9 @@ impl super::Compiler {
                             "SyntaxError: super used outside of a method",
                         ));
                     }
-                    return Err(crate::errors::CompilerError::from(
-                        "direct super() calls are not supported yet",
-                    ));
+                    let arg_count = self.compile_call_arguments(&c.arguments)?;
+                    self.emit_call_with_arg_count(Op::SuperConstruct, arg_count)?;
+                    return Ok(());
                 }
 
                 if let OExpr::StaticMemberExpression(m) = &c.callee
@@ -1859,7 +1880,7 @@ impl super::Compiler {
                     }
                     self.emit_super_property_get_static(m.property.name.as_str(), true)?;
                     let arg_count = self.compile_call_arguments(&c.arguments)?;
-                    self.emit_call_with_arg_count(Op::CallMethod, arg_count)?;
+                    self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
                     return Ok(());
                 }
 
@@ -1873,18 +1894,18 @@ impl super::Compiler {
                     }
                     self.emit_super_property_get_computed(&m.expression, true)?;
                     let arg_count = self.compile_call_arguments(&c.arguments)?;
-                    self.emit_call_with_arg_count(Op::CallMethod, arg_count)?;
+                    self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
                     return Ok(());
                 }
 
                 if let OExpr::StaticMemberExpression(m) = &c.callee {
-                    let is_optional_call = c.optional;
+                    let _is_optional_call = c.optional;
 
                     if m.optional {
                         self.compile_optional_member_access(&m.object, |this: &mut Self| {
                             this.emit(Op::Dup, LINE);
                             this.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                            this.emit(Op::GetPropertyIC, LINE);
+                            this.emit(Op::GetProperty, LINE);
                             let slot = this.alloc_ic_slot()?;
                             this.emit_byte(slot, LINE);
                             Ok(())
@@ -1893,25 +1914,18 @@ impl super::Compiler {
                         self.compile_expr_oast(&m.object)?;
                         self.emit(Op::Dup, LINE);
                         self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                        self.emit(Op::GetPropertyIC, LINE);
+                        self.emit(Op::GetProperty, LINE);
                         let slot = self.alloc_ic_slot()?;
                         self.emit_byte(slot, LINE);
                     }
 
                     let arg_count = self.compile_call_arguments(&c.arguments)?;
-                    self.emit_call_with_arg_count(
-                        if is_optional_call {
-                            Op::Call
-                        } else {
-                            Op::CallMethod
-                        },
-                        arg_count,
-                    )?;
+                    self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
                     return Ok(());
                 }
 
                 if let OExpr::ComputedMemberExpression(m) = &c.callee {
-                    let is_optional_call = c.optional;
+                    let _is_optional_call = c.optional;
 
                     if m.optional {
                         self.compile_optional_member_access(&m.object, |this: &mut Self| {
@@ -1928,19 +1942,12 @@ impl super::Compiler {
                     }
 
                     let arg_count = self.compile_call_arguments(&c.arguments)?;
-                    self.emit_call_with_arg_count(
-                        if is_optional_call {
-                            Op::Call
-                        } else {
-                            Op::CallMethod
-                        },
-                        arg_count,
-                    )?;
+                    self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
                     return Ok(());
                 }
 
                 if let OExpr::PrivateFieldExpression(m) = &c.callee {
-                    let is_optional_call = c.optional;
+                    let _is_optional_call = c.optional;
 
                     if m.optional {
                         self.compile_optional_member_access(&m.object, |this: &mut Self| {
@@ -1959,14 +1966,7 @@ impl super::Compiler {
                     }
 
                     let arg_count = self.compile_call_arguments(&c.arguments)?;
-                    self.emit_call_with_arg_count(
-                        if is_optional_call {
-                            Op::Call
-                        } else {
-                            Op::CallMethod
-                        },
-                        arg_count,
-                    )?;
+                    self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
                     return Ok(());
                 }
 
@@ -1990,7 +1990,7 @@ impl super::Compiler {
 
                 self.compile_expr_oast(&c.callee)?;
                 let arg_count = self.compile_call_arguments(&c.arguments)?;
-                self.emit_call_with_arg_count(Op::CallIC, arg_count)?;
+                self.emit_call_with_arg_count(Op::Call, arg_count)?;
             }
             OExpr::NewExpression(n) => {
                 self.compile_expr_oast(&n.callee)?;
@@ -2005,89 +2005,21 @@ impl super::Compiler {
                 } else {
                     self.emit(Op::Undefined, LINE);
                 }
-                self.emit(Op::CallIC, LINE);
+                self.emit(Op::Call, LINE);
                 self.emit_byte(2, LINE);
             }
             OExpr::RegExpLiteral(re) => {
                 self.emit_get_global_name("RegExp");
                 self.emit_constant(Value::String(re.regex.pattern.text.to_string()), LINE);
                 self.emit_constant(Value::String(re.regex.flags.to_string()), LINE);
-                self.emit(Op::CallIC, LINE);
+                self.emit(Op::Call, LINE);
                 self.emit_byte(2, LINE);
             }
             OExpr::ParenthesizedExpression(p) => {
                 self.compile_expr_oast(&p.expression)?;
             }
             OExpr::ClassExpression(c) => {
-                // Minimal class expression support: emit a trivial constructor
-                // function and push it on the stack. Full class element
-                // initialization is not implemented yet; this prevents
-                // class-expressions from lowering to `Undefined` which breaks
-                // usages like `var C = class {}` followed by `new C()`.
-                let name =
-                    c.id.as_ref()
-                        .map_or_else(|| "<anonymous>".to_string(), |id| id.name.to_string());
-                let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
-                ctor_chunk.write(Op::Return as u8, LINE);
-                let proto = FunctionProto {
-                    name,
-                    span: c.span,
-                    arity: 0,
-                    chunk: Rc::new(ctor_chunk),
-                    slot_types: Vec::new(),
-                    slot_names: Vec::new(),
-                    lexical_tdz: Vec::new(),
-                    slot_immutable: Vec::new(),
-                    slot_sloppy_immutable_silent: Vec::new(),
-                    upvalues: Vec::new(),
-                    has_rest: false,
-                    has_prototype_property: true,
-                    captures_this: false,
-                    arguments_slot: None,
-                    self_binding_slot: None,
-                    has_simple_parameter_list: true,
-                    return_type: None,
-                    is_strict: true,
-                    is_constructor: true,
-                    is_async: false,
-                    is_generator: false,
-                };
-                let idx = self.chunk.add_function(proto);
-                self.emit(Op::MakeClosure, LINE);
-                self.emit_byte(idx as u8, LINE);
-                // To initialize class elements we need a local slot to hold the
-                // constructor while we install methods.
-                let temp_name = format!("__class_ctor_{}", self.locals.len());
-                let temp_slot = self.add_local_with_mirror(temp_name, None, false);
-                self.emit(Op::Dup, LINE);
-                self.emit(Op::SetLocal, LINE);
-                self.emit_byte(temp_slot as u8, LINE);
-
-                // Emit class elements (methods) similar to declaration lowering.
-                let instance_home_slot = if c.body.body.iter().any(|element| {
-                    matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static)
-                }) {
-                    self.emit(Op::GetLocal, LINE);
-                    self.emit_byte(temp_slot as u8, LINE);
-                    self.emit_constant(Value::String("prototype".to_string()), LINE);
-                    self.emit(Op::GetProperty, LINE);
-                    let home_slot = self.alloc_temp_local("class_home");
-                    self.emit(Op::SetLocal, LINE);
-                    self.emit_byte(home_slot as u8, LINE);
-                    Some(home_slot)
-                } else {
-                    None
-                };
-                for element in &c.body.body {
-                    if let oast::ClassElement::MethodDefinition(md) = element {
-                        let target_slot = if md.r#static {
-                            temp_slot
-                        } else {
-                            instance_home_slot.expect("instance home slot")
-                        };
-                        self.emit_class_member_installation(target_slot, md)?;
-                    }
-                }
+                self.emit_class_from_oast(c, None)?;
             }
             OExpr::AwaitExpression(a) => {
                 self.compile_expr_oast(&a.argument)?;

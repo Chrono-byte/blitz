@@ -12,7 +12,9 @@ use std::rc::{Rc, Weak};
 use std::sync::Mutex;
 
 use crate::mutex_compat::MutexBorrowExt;
-use crate::value::{ObjectData, PromiseState, PropertyDescriptor, Value, ValueSlot};
+use crate::value::{
+    ArrayData, ObjectData, PromiseState, PropertyDescriptor, ProxyData, SharedValue, Value,
+};
 
 /// Result of a prototype GC collection cycle.
 #[derive(Debug, Clone, Copy, Default)]
@@ -23,6 +25,8 @@ pub struct GcStats {
     pub swept_objects: usize,
     /// Number of array backing stores reclaimed.
     pub swept_arrays: usize,
+    /// Number of proxy backing stores reclaimed.
+    pub swept_proxies: usize,
     /// Number of closure environments reclaimed.
     pub swept_envs: usize,
     /// Number of promise states reclaimed.
@@ -36,6 +40,8 @@ pub struct GcHeapSnapshot {
     pub live_objects: usize,
     /// Tracked array backing stores still strongly alive.
     pub live_arrays: usize,
+    /// Tracked proxy backing stores still strongly alive.
+    pub live_proxies: usize,
     /// Tracked closure environments still strongly alive.
     pub live_envs: usize,
     /// Tracked promise states still strongly alive.
@@ -44,6 +50,8 @@ pub struct GcHeapSnapshot {
     pub tracked_object_slots: usize,
     /// Weak registry slots for arrays, including dead weak entries.
     pub tracked_array_slots: usize,
+    /// Weak registry slots for proxies, including dead weak entries.
+    pub tracked_proxy_slots: usize,
     /// Weak registry slots for environments, including dead weak entries.
     pub tracked_env_slots: usize,
     /// Weak registry slots for promises, including dead weak entries.
@@ -55,8 +63,9 @@ pub struct GcHeapSnapshot {
 #[derive(Default)]
 struct HeapRegistry {
     objects: Vec<Weak<RefCell<ObjectData>>>,
-    arrays: Vec<Weak<RefCell<Vec<Option<Value>>>>>,
-    envs: Vec<Weak<Mutex<Vec<ValueSlot>>>>,
+    arrays: Vec<Weak<RefCell<ArrayData>>>,
+    proxies: Vec<Weak<RefCell<ProxyData>>>,
+    envs: Vec<Weak<Mutex<Vec<SharedValue>>>>,
     promises: Vec<Weak<RefCell<PromiseState>>>,
 }
 
@@ -95,7 +104,7 @@ pub fn track_object(obj: Rc<RefCell<ObjectData>>) -> Rc<RefCell<ObjectData>> {
 }
 
 /// Register an array backing store with the collector.
-pub fn track_array(arr: Rc<RefCell<Vec<Option<Value>>>>) -> Rc<RefCell<Vec<Option<Value>>>> {
+pub fn track_array(arr: Rc<RefCell<ArrayData>>) -> Rc<RefCell<ArrayData>> {
     {
         HEAP.with(|heap| push_weak(&mut heap.borrow_mut().arrays, &arr));
         bump_allocation_pressure();
@@ -103,8 +112,17 @@ pub fn track_array(arr: Rc<RefCell<Vec<Option<Value>>>>) -> Rc<RefCell<Vec<Optio
     arr
 }
 
+/// Register a proxy backing store with the collector.
+pub fn track_proxy(proxy: Rc<RefCell<ProxyData>>) -> Rc<RefCell<ProxyData>> {
+    {
+        HEAP.with(|heap| push_weak(&mut heap.borrow_mut().proxies, &proxy));
+        bump_allocation_pressure();
+    }
+    proxy
+}
+
 /// Register a closure environment vector with the collector.
-pub fn track_env(env: Rc<Mutex<Vec<ValueSlot>>>) -> Rc<Mutex<Vec<ValueSlot>>> {
+pub fn track_env(env: Rc<Mutex<Vec<SharedValue>>>) -> Rc<Mutex<Vec<SharedValue>>> {
     {
         HEAP.with(|heap| push_weak(&mut heap.borrow_mut().envs, &env));
         bump_allocation_pressure();
@@ -128,10 +146,12 @@ pub fn heap_snapshot() -> GcHeapSnapshot {
         let heap = heap.borrow();
         snapshot.tracked_object_slots = heap.objects.len();
         snapshot.tracked_array_slots = heap.arrays.len();
+        snapshot.tracked_proxy_slots = heap.proxies.len();
         snapshot.tracked_env_slots = heap.envs.len();
         snapshot.tracked_promise_slots = heap.promises.len();
         snapshot.live_objects = heap.objects.iter().filter(|w| w.strong_count() > 0).count();
         snapshot.live_arrays = heap.arrays.iter().filter(|w| w.strong_count() > 0).count();
+        snapshot.live_proxies = heap.proxies.iter().filter(|w| w.strong_count() > 0).count();
         snapshot.live_envs = heap.envs.iter().filter(|w| w.strong_count() > 0).count();
         snapshot.live_promises = heap
             .promises
@@ -145,12 +165,15 @@ pub fn heap_snapshot() -> GcHeapSnapshot {
 
 /// Prototype collector entry point.
 pub fn collect(roots: &[Value]) -> GcStats {
-    let env_roots: &[Rc<Mutex<Vec<ValueSlot>>>] = &[];
+    let env_roots: &[Rc<Mutex<Vec<SharedValue>>>] = &[];
     collect_with_env_roots(roots, env_roots)
 }
 
 /// Prototype collector entry point with explicit closure-environment roots.
-pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSlot>>>]) -> GcStats {
+pub fn collect_with_env_roots(
+    roots: &[Value],
+    env_roots: &[Rc<Mutex<Vec<SharedValue>>>],
+) -> GcStats {
     {
         {
             let clear_envs_aggressively = false;
@@ -158,6 +181,7 @@ pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSl
             {
                 let mut marked_objects: HashSet<usize> = HashSet::new();
                 let mut marked_arrays: HashSet<usize> = HashSet::new();
+                let mut marked_proxies: HashSet<usize> = HashSet::new();
                 let mut marked_envs: HashSet<usize> = HashSet::new();
                 let mut marked_promises: HashSet<usize> = HashSet::new();
 
@@ -166,6 +190,7 @@ pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSl
                         root,
                         &mut marked_objects,
                         &mut marked_arrays,
+                        &mut marked_proxies,
                         &mut marked_envs,
                         &mut marked_promises,
                     );
@@ -175,6 +200,7 @@ pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSl
                         env,
                         &mut marked_objects,
                         &mut marked_arrays,
+                        &mut marked_proxies,
                         &mut marked_envs,
                         &mut marked_promises,
                     );
@@ -183,6 +209,7 @@ pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSl
                 let mut stats = GcStats {
                     marked_nodes: marked_objects.len()
                         + marked_arrays.len()
+                        + marked_proxies.len()
                         + marked_envs.len()
                         + marked_promises.len(),
                     ..GcStats::default()
@@ -225,6 +252,24 @@ pub fn collect_with_env_roots(roots: &[Value], env_roots: &[Rc<Mutex<Vec<ValueSl
                         clear_array(&arr);
                     }
                     heap.arrays = new_arrays;
+
+                    let mut new_proxies = Vec::with_capacity(heap.proxies.len());
+                    let mut swept_proxies = Vec::new();
+                    for weak in heap.proxies.drain(..) {
+                        if let Some(proxy) = weak.upgrade() {
+                            let ptr = Rc::as_ptr(&proxy) as usize;
+                            if marked_proxies.contains(&ptr) {
+                                new_proxies.push(weak);
+                            } else {
+                                stats.swept_proxies += 1;
+                                swept_proxies.push(proxy);
+                            }
+                        }
+                    }
+                    for proxy in swept_proxies {
+                        clear_proxy(&proxy);
+                    }
+                    heap.proxies = new_proxies;
 
                     let mut new_envs = Vec::with_capacity(heap.envs.len());
                     let mut swept_envs = Vec::new();
@@ -278,6 +323,7 @@ fn mark_value(
     value: &Value,
     marked_objects: &mut HashSet<usize>,
     marked_arrays: &mut HashSet<usize>,
+    marked_proxies: &mut HashSet<usize>,
     marked_envs: &mut HashSet<usize>,
     marked_promises: &mut HashSet<usize>,
 ) {
@@ -286,6 +332,7 @@ fn mark_value(
             obj,
             marked_objects,
             marked_arrays,
+            marked_proxies,
             marked_envs,
             marked_promises,
         ),
@@ -297,6 +344,7 @@ fn mark_value(
                         elem,
                         marked_objects,
                         marked_arrays,
+                        marked_proxies,
                         marked_envs,
                         marked_promises,
                     );
@@ -306,9 +354,34 @@ fn mark_value(
                 props,
                 marked_objects,
                 marked_arrays,
+                marked_proxies,
                 marked_envs,
                 marked_promises,
             );
+        }
+        Value::Proxy(proxy) => {
+            let ptr = Rc::as_ptr(proxy) as usize;
+            if marked_objects.insert(ptr) {
+                let proxy = proxy.borrow();
+                mark_value(
+                    &proxy.target,
+                    marked_objects,
+                    marked_arrays,
+                    marked_proxies,
+                    marked_envs,
+                    marked_promises,
+                );
+                if let Some(handler) = &proxy.handler {
+                    mark_value(
+                        handler,
+                        marked_objects,
+                        marked_arrays,
+                        marked_proxies,
+                        marked_envs,
+                        marked_promises,
+                    );
+                }
+            }
         }
         Value::Closure {
             env,
@@ -328,6 +401,7 @@ fn mark_value(
                         &cell,
                         marked_objects,
                         marked_arrays,
+                        marked_proxies,
                         marked_envs,
                         marked_promises,
                     );
@@ -338,6 +412,7 @@ fn mark_value(
                     this_val,
                     marked_objects,
                     marked_arrays,
+                    marked_proxies,
                     marked_envs,
                     marked_promises,
                 );
@@ -346,6 +421,7 @@ fn mark_value(
                 props,
                 marked_objects,
                 marked_arrays,
+                marked_proxies,
                 marked_envs,
                 marked_promises,
             );
@@ -354,6 +430,7 @@ fn mark_value(
             props,
             marked_objects,
             marked_arrays,
+            marked_proxies,
             marked_envs,
             marked_promises,
         ),
@@ -372,6 +449,7 @@ fn mark_value(
                             &cb,
                             marked_objects,
                             marked_arrays,
+                            marked_proxies,
                             marked_envs,
                             marked_promises,
                         );
@@ -381,6 +459,7 @@ fn mark_value(
                             &cb,
                             marked_objects,
                             marked_arrays,
+                            marked_proxies,
                             marked_envs,
                             marked_promises,
                         );
@@ -390,6 +469,7 @@ fn mark_value(
                     &v,
                     marked_objects,
                     marked_arrays,
+                    marked_proxies,
                     marked_envs,
                     marked_promises,
                 ),
@@ -397,6 +477,7 @@ fn mark_value(
                     &reason,
                     marked_objects,
                     marked_arrays,
+                    marked_proxies,
                     marked_envs,
                     marked_promises,
                 ),
@@ -410,6 +491,7 @@ fn mark_object(
     obj: &Rc<RefCell<ObjectData>>,
     marked_objects: &mut HashSet<usize>,
     marked_arrays: &mut HashSet<usize>,
+    marked_proxies: &mut HashSet<usize>,
     marked_envs: &mut HashSet<usize>,
     marked_promises: &mut HashSet<usize>,
 ) {
@@ -423,6 +505,7 @@ fn mark_object(
             env,
             marked_objects,
             marked_arrays,
+            marked_proxies,
             marked_envs,
             marked_promises,
         );
@@ -433,6 +516,7 @@ fn mark_object(
                 value,
                 marked_objects,
                 marked_arrays,
+                marked_proxies,
                 marked_envs,
                 marked_promises,
             ),
@@ -442,6 +526,7 @@ fn mark_object(
                         v,
                         marked_objects,
                         marked_arrays,
+                        marked_proxies,
                         marked_envs,
                         marked_promises,
                     );
@@ -451,6 +536,7 @@ fn mark_object(
                         v,
                         marked_objects,
                         marked_arrays,
+                        marked_proxies,
                         marked_envs,
                         marked_promises,
                     );
@@ -464,6 +550,7 @@ fn mark_object(
             &prototype,
             marked_objects,
             marked_arrays,
+            marked_proxies,
             marked_envs,
             marked_promises,
         );
@@ -471,9 +558,10 @@ fn mark_object(
 }
 
 fn mark_env(
-    env: &Rc<Mutex<Vec<ValueSlot>>>,
+    env: &Rc<Mutex<Vec<SharedValue>>>,
     marked_objects: &mut HashSet<usize>,
     marked_arrays: &mut HashSet<usize>,
+    marked_proxies: &mut HashSet<usize>,
     marked_envs: &mut HashSet<usize>,
     marked_promises: &mut HashSet<usize>,
 ) {
@@ -491,6 +579,7 @@ fn mark_env(
             &cell,
             marked_objects,
             marked_arrays,
+            marked_proxies,
             marked_envs,
             marked_promises,
         );
@@ -501,6 +590,7 @@ fn mark_environment_record(
     env: &Rc<RefCell<crate::environment::EnvironmentRecord>>,
     marked_objects: &mut HashSet<usize>,
     marked_arrays: &mut HashSet<usize>,
+    marked_proxies: &mut HashSet<usize>,
     marked_envs: &mut HashSet<usize>,
     marked_promises: &mut HashSet<usize>,
 ) {
@@ -515,6 +605,7 @@ fn mark_environment_record(
             &value,
             marked_objects,
             marked_arrays,
+            marked_proxies,
             marked_envs,
             marked_promises,
         );
@@ -530,17 +621,23 @@ fn clear_object(obj: &Rc<RefCell<ObjectData>>) {
     obj.extensible = true;
 }
 
-fn clear_array(arr: &Rc<RefCell<Vec<Option<Value>>>>) {
+fn clear_proxy(proxy: &Rc<RefCell<ProxyData>>) {
+    let mut proxy = proxy.borrow_mut();
+    proxy.target = Value::Undefined;
+    proxy.handler = None;
+}
+
+fn clear_array(arr: &Rc<RefCell<ArrayData>>) {
     arr.borrow_mut().clear();
 }
 
-fn clear_env(env: &Rc<Mutex<Vec<ValueSlot>>>) {
+fn clear_env(env: &Rc<Mutex<Vec<SharedValue>>>) {
     // Break closure cycles by dropping the captured values once the
     // environment is determined to be unreachable.
     env.borrow_mut().clear();
 }
 
-fn clear_env_aggressively(env: &Rc<Mutex<Vec<ValueSlot>>>) {
+fn clear_env_aggressively(env: &Rc<Mutex<Vec<SharedValue>>>) {
     clear_env(env);
 }
 
@@ -554,13 +651,13 @@ mod tests {
 
     use crate::bytecode::{Chunk, FunctionProto};
 
-    use crate::value::ValueSlot;
+    use crate::value::SharedValue;
 
     use oxc_span::Span;
 
     use std::sync::Mutex;
 
-    fn make_dummy_closure(env: Rc<Mutex<Vec<ValueSlot>>>) -> Value {
+    fn make_dummy_closure(env: Rc<Mutex<Vec<SharedValue>>>) -> Value {
         let proto = Rc::new(FunctionProto {
             name: "gc_test".to_string(),
             span: Span::new(0, 0),
@@ -581,8 +678,11 @@ mod tests {
             return_type: None,
             is_strict: false,
             is_constructor: false,
+            is_derived_constructor: false,
+            is_class_constructor: false,
             is_async: false,
             is_generator: false,
+            ic_table: Vec::new(),
         });
         let props = track_object(Rc::new(RefCell::new(ObjectData::new())));
         Value::Closure {
@@ -691,7 +791,9 @@ mod tests {
         assert_eq!(allocation_pressure(), 0);
 
         let _obj = track_object(Rc::new(RefCell::new(ObjectData::new())));
-        let _arr = track_array(Rc::new(RefCell::new(Vec::new())));
+        let _arr = track_array(Rc::new(RefCell::new(ArrayData::from(
+            Vec::<Option<Value>>::new(),
+        ))));
         let _env = track_env(Rc::new(Mutex::new(Vec::new())));
         let _promise = track_promise(Rc::new(RefCell::new(PromiseState::Pending {
             on_fulfilled: Vec::new(),

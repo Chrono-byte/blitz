@@ -1,5 +1,5 @@
 # Duplicate code detection
-allowed-duplicate-crates = ["bitflags", "heck"]
+allowed-duplicate-crates = ["bitflags", "heck", "hashbrown"]
 
 # Maximum complexity before warning
 cognitive-complexity-threshold = 25

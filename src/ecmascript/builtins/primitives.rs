@@ -81,7 +81,7 @@ pub(crate) fn install_bigint_and_number_builtins(
             Ok(Value::BigInt(bigint))
         }
     });
-    let bigint_ctor_val = Value::BuiltinObject(bigint_ctor_fn, bigint_ctor_map.clone());
+    let bigint_ctor_val = Value::BuiltinObject(bigint_ctor_fn, bigint_ctor_map);
     bigint_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(bigint_ctor_val.clone()),

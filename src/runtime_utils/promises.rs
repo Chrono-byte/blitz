@@ -83,7 +83,7 @@ fn resolve_promise_with_value_inner(
                 on_fulfilled,
                 on_rejected,
             } => {
-                let resolve_called = already_resolved.clone();
+                let resolve_called = Rc::clone(&already_resolved);
                 let res_p = Rc::clone(result_promise);
                 on_fulfilled.push(Value::Builtin(Rc::new(move |vm, args| {
                     if *resolve_called.borrow() {
@@ -96,7 +96,7 @@ fn resolve_promise_with_value_inner(
                     Ok(Value::Undefined)
                 })));
 
-                let reject_called = already_resolved.clone();
+                let reject_called = Rc::clone(&already_resolved);
                 let res_p2 = Rc::clone(result_promise);
                 on_rejected.push(Value::Builtin(Rc::new(move |vm, args| {
                     if *reject_called.borrow() {
@@ -112,7 +112,7 @@ fn resolve_promise_with_value_inner(
             }
             PromiseState::Fulfilled(v) => {
                 let v = v.clone();
-                let resolve_called = already_resolved.clone();
+                let resolve_called = Rc::clone(&already_resolved);
                 let res_p = Rc::clone(result_promise);
                 vm.queue_microtask(move |vm| {
                     if *resolve_called.borrow() {
@@ -126,7 +126,7 @@ fn resolve_promise_with_value_inner(
             }
             PromiseState::Rejected { reason, .. } => {
                 let reason = reason.clone();
-                let reject_called = already_resolved.clone();
+                let reject_called = Rc::clone(&already_resolved);
                 let res_p = Rc::clone(result_promise);
                 vm.queue_microtask(move |vm| {
                     if *reject_called.borrow() {
@@ -149,7 +149,7 @@ fn resolve_promise_with_value_inner(
             // schedule a microtask that will invoke `then` with resolve/reject
             // callbacks. This preserves observable job ordering when a thenable
             // calls back synchronously.
-            let resolve_called = already_resolved.clone();
+            let resolve_called = Rc::clone(&already_resolved);
             let res_p = Rc::clone(result_promise);
             let thenable = value;
             let then_func = then_val;

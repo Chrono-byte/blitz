@@ -13,13 +13,12 @@
       "initialization_options": {
         "checkOnSave": true,
         "check": {
-          "command": "check"
+          "command": "clippy"
         }
       },
     },
   },
   "language_servers": [
-    "!tombi",
     "..."
   ]
 }

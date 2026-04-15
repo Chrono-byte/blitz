@@ -6,10 +6,10 @@ use crate::errors::RuntimeError;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
-use crate::runtime_utils::{array_length_descriptor, js_number_to_string};
+use crate::runtime_utils::{array_length_descriptor, js_number_to_string, usize_to_f64};
 use crate::value::{
-    BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
-    ValueSlot,
+    ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SharedValue,
+    SymbolId, Value,
 };
 use crate::vm::runtime::coercions::{parse_js_bigint_string, parse_js_number_string, to_number};
 use crate::vm::state::*;
@@ -42,9 +42,7 @@ impl Vm {
     /// This is a blunt invalidation used when allocating fresh objects whose
     /// addresses may be recycled by `Rc`. It avoids stale cache hits across
     /// distinct allocations that happen to reuse the same pointer value.
-    pub(crate) fn clear_property_get_ic_cache(&mut self) {
-        self.property_get_ic_cache.clear();
-    }
+    pub(crate) fn clear_property_get_ic_cache(&mut self) {}
 
     // -----------------------------------------------------------------------
     // Construction & public helpers
@@ -79,7 +77,6 @@ impl Vm {
             direct_eval_outer_slot_immutable: None,
             direct_eval_outer_slot_sloppy_immutable_silent: None,
             obj_generations: HashMap::new(),
-            property_get_ic_cache: HashMap::new(),
             bg_runtime: get_global_bg_runtime(),
             handlers: HandlerStack::with_capacity(32),
             pending_exception: false,
@@ -149,7 +146,6 @@ impl Vm {
             direct_eval_outer_slot_immutable: None,
             direct_eval_outer_slot_sloppy_immutable_silent: None,
             obj_generations: HashMap::new(),
-            property_get_ic_cache: HashMap::new(),
             bg_runtime: Arc::clone(&self.bg_runtime),
             handlers: HandlerStack::with_capacity(32),
             pending_exception: false,
@@ -215,14 +211,18 @@ impl Vm {
                 if count == 0 {
                     None
                 } else {
-                    Op::from_byte(index as u8).map(|op| (op, count))
+                    // Safe: index is from 0..OP_COUNT which is guaranteed <= u8::MAX
+                    let index =
+                        u8::try_from(index).expect("index from opcode_counts exceeds u8::MAX");
+                    Op::from_byte(index).map(|op| (op, count))
                 }
             })
             .collect();
         ranked.sort_by(|a, b| b.1.cmp(&a.1));
 
         for (op, count) in ranked.into_iter().take(16) {
-            let pct = (count as f64 / total as f64) * 100.0;
+            // Precision loss acceptable for percentage display calculation
+            let pct = ((count as i64) as f64 / (total as i64) as f64) * 100.0;
             eprintln!("[vm-profile] {:>16} {:>12} {:>6.2}%", op.name(), count, pct);
         }
     }
@@ -300,6 +300,14 @@ impl Vm {
             | Value::Array(_, obj)
             | Value::Closure { props: obj, .. }
             | Value::BuiltinObject(_, obj) => obj.borrow().get_prototype(),
+            Value::Proxy(proxy) => {
+                let proxy = proxy.borrow();
+                if proxy.is_revoked() {
+                    Value::Null
+                } else {
+                    self.get_prototype(&proxy.target)
+                }
+            }
             Value::Promise(_) => self.promise_prototype_value(),
             Value::String(_) => self
                 .realm
@@ -362,7 +370,7 @@ impl Vm {
 
     /// Create a new Array object with the given elements and correct prototype.
     pub fn new_array(&self, elems: Vec<Option<Value>>) -> Value {
-        let arr_rc = gc::track_array(Rc::new(RefCell::new(elems)));
+        let arr_rc = gc::track_array(Rc::new(RefCell::new(ArrayData::from(elems))));
         let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         let len = arr_rc.borrow().len();
         props.borrow_mut().properties.insert(
@@ -401,7 +409,7 @@ impl Vm {
         };
 
         let mut roots: Vec<Value> = Vec::new();
-        let mut env_roots: Vec<Rc<Mutex<Vec<ValueSlot>>>> = Vec::new();
+        let mut env_roots: Vec<Rc<Mutex<Vec<SharedValue>>>> = Vec::new();
         roots.push(Value::Object(Rc::clone(&self.globals)));
         roots.extend(self.stack.iter().cloned());
         roots.extend(self.locals.iter().map(|c| c.borrow().clone()));
@@ -646,7 +654,7 @@ impl Vm {
     pub fn install_module_exports(
         &mut self,
         module_index: usize,
-        mut exports: HashMap<String, ValueSlot>,
+        mut exports: HashMap<String, SharedValue>,
     ) {
         let namespace = build_module_namespace_object(&exports);
         exports.insert("*".to_string(), Rc::new(Mutex::new(namespace)));
@@ -815,7 +823,6 @@ impl Vm {
         self.ip = 0;
         self.chunk = Rc::new(Chunk::new(Rc::new(String::new())));
         self.obj_generations.clear();
-        self.property_get_ic_cache.clear();
         gc::reset_allocation_pressure();
         let mut g = self.globals.borrow_mut();
         g.properties
@@ -866,7 +873,6 @@ impl Vm {
         self.initialize_root_bindings();
         gc::reset_allocation_pressure();
         self.begin_opcode_profile_run();
-        self.property_get_ic_cache.clear();
 
         loop {
             match self.step(None) {
@@ -1176,6 +1182,7 @@ impl Vm {
         match v {
             Value::Object(_)
             | Value::Array(..)
+            | Value::Proxy(_)
             | Value::Closure { .. }
             | Value::BuiltinObject(_, _)
             | Value::Promise(_) => Ok(v),
@@ -1390,14 +1397,14 @@ impl Vm {
             Op::Undefined => self.stack.push(Value::Undefined),
             Op::True => self.stack.push(Value::Bool(true)),
             Op::False => self.stack.push(Value::Bool(false)),
-            Op::GetLocal => {
+            Op::LoadLocal => {
                 let slot = self.read_byte()? as usize;
                 if let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone)
                     && let Some(v) = self.get_with_env_binding_value(&name)?
                 {
                     if crate::trace::enabled() && name.starts_with("st_") {
                         eprintln!(
-                            "[trace] GetLocal '{}' via with-env -> {}",
+                            "[trace] LoadLocal '{}' via with-env -> {}",
                             name,
                             v.type_name()
                         );
@@ -1415,7 +1422,7 @@ impl Vm {
                     && matches!(v, Value::Uninitialized)
                     && let Some(name) = self.chunk.root_slot_names.get(slot).and_then(Clone::clone)
                 {
-                    eprintln!("[trace] GetLocal TDZ name='{}' slot={}", name, slot);
+                    eprintln!("[trace] LoadLocal TDZ name='{}' slot={}", name, slot);
                 }
                 if matches!(v, Value::Uninitialized) {
                     return Err(self.throw_reference_error(
@@ -1437,12 +1444,12 @@ impl Vm {
                         .get(slot)
                         .and_then(Clone::clone)
                         .unwrap();
-                    eprintln!("[trace] GetLocal '{}' -> {}", name, v.type_name());
+                    eprintln!("[trace] LoadLocal '{}' -> {}", name, v.type_name());
                     crate::trace::value_string("[trace]   value", &v);
                 }
                 self.stack.push(v);
             }
-            Op::SetLocal => {
+            Op::StoreLocal => {
                 let slot = self.read_byte()? as usize;
                 let v = self.pop()?;
                 let slot_immutable = self
@@ -1505,6 +1512,15 @@ impl Vm {
                 };
                 self.stack.push(v);
             }
+            Op::TypeofGlobal => {
+                let idx = self.read_short()? as usize;
+                let name = self.string_constant(idx)?;
+                let value = self.resolve_identifier_value(&name)?;
+                let ty = value
+                    .as_ref()
+                    .map_or_else(|| "undefined".to_string(), |v| self.typeof_value(v));
+                self.stack.push(Value::String(ty));
+            }
             Op::SetGlobal => {
                 let idx = self.read_short()? as usize;
                 let name = self.string_constant(idx)?;
@@ -1546,6 +1562,11 @@ impl Vm {
             }
             // New op: GetThis
             Op::GetThis => {
+                if matches!(self.this_value, Value::Uninitialized) {
+                    return Err(self.throw_reference_error(
+                        "Must call super constructor before accessing 'this'",
+                    ));
+                }
                 self.stack.push(self.get_this());
             }
             Op::GetUpvalue => {
@@ -1584,14 +1605,13 @@ impl Vm {
                     .call_stack
                     .last()
                     .and_then(|frame| frame.upvalues.get(idx))
-                    .map(|spec| {
+                    .map_or((None, false, false), |spec| {
                         (
                             spec.mirror_global_name.clone(),
                             spec.immutable,
                             spec.sloppy_immutable_silent,
                         )
-                    })
-                    .unwrap_or((None, false, false));
+                    });
                 if immutable {
                     if self.is_strict_mode() || !sloppy_immutable_silent {
                         return Err(self.throw_type_error("Assignment to constant variable"));
@@ -1668,15 +1688,6 @@ impl Vm {
                     let na = self.to_number_value(&a_prim)?;
                     let nb = self.to_number_value(&b_prim)?;
                     self.stack.push(Value::Number(na + nb));
-                }
-            }
-            Op::AddNumber => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                match (a, b) {
-                    (Value::BigInt(x), Value::BigInt(y)) => self.stack.push(Value::BigInt(x + y)),
-                    (Value::Number(x), Value::Number(y)) => self.stack.push(Value::Number(x + y)),
-                    _ => return Err("AddNumber: number expected".into()),
                 }
             }
             Op::Sub => self.binary_num_bigint(|a, b| a - b, |a, b| Ok(a - b))?,
@@ -1831,38 +1842,6 @@ impl Vm {
                     }
                 }
             }
-            Op::Eq => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                let result = self.abstract_equality(&a, &b)?;
-                self.stack.push(Value::Bool(result));
-            }
-            Op::Neq => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                let result = self.abstract_equality(&a, &b)?;
-                self.stack.push(Value::Bool(!result));
-            }
-            Op::Lt => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                self.stack.push(Value::Bool(a < b));
-            }
-            Op::Le => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                self.stack.push(Value::Bool(a <= b));
-            }
-            Op::Gt => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                self.stack.push(Value::Bool(a > b));
-            }
-            Op::Ge => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                self.stack.push(Value::Bool(a >= b));
-            }
             Op::And => {
                 let b = self.pop()?;
                 let a = self.pop()?;
@@ -1890,6 +1869,8 @@ impl Vm {
                 let ai = self.to_int32_value(&a)?;
                 let bi = self.to_int32_value(&b)?;
                 let r = ai & bi;
+                // JS bitwise ops produce i32; convert to f64 for Number type.
+                // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
                 self.stack.push(Value::Number(r as f64));
             }
             Op::BitOr => {
@@ -1898,6 +1879,8 @@ impl Vm {
                 let ai = self.to_int32_value(&a)?;
                 let bi = self.to_int32_value(&b)?;
                 let r = ai | bi;
+                // JS bitwise ops produce i32; convert to f64 for Number type.
+                // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
                 self.stack.push(Value::Number(r as f64));
             }
             Op::BitXor => {
@@ -1906,6 +1889,8 @@ impl Vm {
                 let ai = self.to_int32_value(&a)?;
                 let bi = self.to_int32_value(&b)?;
                 let r = ai ^ bi;
+                // JS bitwise ops produce i32; convert to f64 for Number type.
+                // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
                 self.stack.push(Value::Number(r as f64));
             }
             Op::Shl => {
@@ -1914,6 +1899,8 @@ impl Vm {
                 let ai = self.to_int32_value(&a)?;
                 let shift = self.to_uint32_value(&b)? & 0x1f;
                 let r = ai.wrapping_shl(shift);
+                // JS bitwise ops produce i32; convert to f64 for Number type.
+                // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
                 self.stack.push(Value::Number(r as f64));
             }
             Op::Shr => {
@@ -1922,6 +1909,8 @@ impl Vm {
                 let ai = self.to_int32_value(&a)?;
                 let shift = self.to_uint32_value(&b)? & 0x1f;
                 let r = ai.wrapping_shr(shift);
+                // JS bitwise ops produce i32; convert to f64 for Number type.
+                // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
                 self.stack.push(Value::Number(r as f64));
             }
             Op::Ushr => {
@@ -1930,27 +1919,16 @@ impl Vm {
                 let au = self.to_uint32_value(&a)?;
                 let shift = self.to_uint32_value(&b)? & 0x1f;
                 let r = au.wrapping_shr(shift);
-                // JavaScript >>> yields an unsigned 32-bit number, represent as Number
+                // JavaScript >>> yields an unsigned 32-bit number, represent as Number.
+                // u32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
                 self.stack.push(Value::Number(r as f64));
             }
             Op::Typeof => {
                 let v = self.pop()?;
                 self.stack.push(Value::String(v.type_name().to_string()));
             }
-            Op::TypeofIdentifier => {
-                let name_idx = self.read_short()? as usize;
-                let name = self.string_constant(name_idx)?;
-                let value = if let Some(binding) = self.resolve_identifier_value(&name)? {
-                    binding
-                } else {
-                    Value::Undefined
-                };
-                self.stack
-                    .push(Value::String(value.type_name().to_string()));
-            }
             Op::Call => self.execute_call()?,
-            Op::CallIC => self.execute_call_ic()?,
-            Op::TailCallIC => self.execute_tail_call()?,
+            Op::TailCall => self.execute_tail_call()?,
             Op::PushWithEnv => {
                 let obj = self.pop()?;
                 let obj = self.to_object_value(obj)?;
@@ -1980,11 +1958,19 @@ impl Vm {
                 let receiver = self.pop()?;
                 self.set_super_property(&receiver, &key, value)?;
             }
-            Op::CallMethod => self.execute_call_method()?,
-            Op::TailCallMethod => self.execute_tail_call_method()?,
+            Op::GeneratorInitDone => {}
+            Op::Move => {
+                return Err(RuntimeError::from(
+                    "Move opcode is not implemented in this VM",
+                ));
+            }
+            Op::CallBuiltin => {
+                self.execute_call_method()?;
+            }
             Op::Spread => self.execute_spread()?,
             Op::ArrayFromSpread => self.execute_array_from_spread()?,
             Op::Construct => self.execute_construct()?,
+            Op::SuperConstruct => self.execute_super_construct()?,
             Op::Return => {
                 if self.call_stack.is_empty() {
                     let result = self.stack.pop().unwrap_or(Value::Undefined);
@@ -2029,20 +2015,20 @@ impl Vm {
                     self.jump(offset)?;
                 }
             }
-            Op::CompareJumpIfFalse => {
-                // CompareJumpIfFalse layout: payload byte 0 = compare opcode,
+            Op::CompareJump => {
+                // CompareJump layout: payload byte 0 = compare opcode,
                 // payload bytes 1..2 = signed 16-bit relative offset (instruction units).
                 // Read directly from the previously-fetched instruction word so
                 // we don't mix operand_cursor-based reads with full-payload reads.
                 let instr_idx = self
                     .ip
                     .checked_sub(1)
-                    .ok_or_else(|| RuntimeError::from("CompareJumpIfFalse: ip underflow"))?;
+                    .ok_or_else(|| RuntimeError::from("CompareJump: ip underflow"))?;
                 let instr = *self
                     .chunk
                     .code
                     .get(instr_idx)
-                    .ok_or_else(|| RuntimeError::from("CompareJumpIfFalse: out of bounds"))?;
+                    .ok_or_else(|| RuntimeError::from("CompareJump: out of bounds"))?;
                 let compare_op = payload_byte(instr, 0);
                 // offset is stored little-endian in payload bytes 1 (low) and 2 (high)
                 let off_lo = payload_byte(instr, 1) as u16;
@@ -2051,15 +2037,15 @@ impl Vm {
                 let offset = offset16 as isize;
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = match Op::from_byte(compare_op) {
-                    Some(Op::Eq) => self.abstract_equality(&a, &b)?,
-                    Some(Op::Neq) => !self.abstract_equality(&a, &b)?,
-                    Some(Op::StrictEq) => values_equal(&a, &b),
-                    Some(Op::StrictNeq) => !values_equal(&a, &b),
-                    Some(Op::Lt) => a < b,
-                    Some(Op::Le) => a <= b,
-                    Some(Op::Gt) => a > b,
-                    Some(Op::Ge) => a >= b,
+                let result = match compare_op {
+                    0 => self.abstract_equality(&a, &b)?,
+                    1 => !self.abstract_equality(&a, &b)?,
+                    2 => a < b,
+                    3 => a <= b,
+                    4 => a > b,
+                    5 => a >= b,
+                    6 => values_equal(&a, &b),
+                    7 => !values_equal(&a, &b),
                     _ => return Err(RuntimeError::from("Invalid compare-jump opcode")),
                 };
                 if !result {
@@ -2141,8 +2127,6 @@ impl Vm {
                 }
                 self.stack.push(v);
             }
-            Op::GetPropertyIC => self.get_property_ic()?,
-            Op::GetGlobalIC => self.get_global_ic()?,
             Op::DeleteProperty => self.delete_property_op()?,
             Op::DeleteIdentifier => self.delete_identifier_op()?,
             Op::HasProperty => self.has_property_op()?,
@@ -2219,7 +2203,6 @@ impl Vm {
                 result?;
                 self.stack.push(value);
             }
-            Op::SetPropertyIC => self.set_property_ic()?,
             Op::IteratorNext => self.iterator_next_op()?,
             Op::IteratorClose => self.iterator_close_op()?,
             Op::Swap => {
@@ -2322,16 +2305,6 @@ impl Vm {
                 }
                 self.throw_value(thrown)?;
             }
-            Op::StrictEq => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                self.stack.push(Value::Bool(values_equal(&a, &b)));
-            }
-            Op::StrictNeq => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                self.stack.push(Value::Bool(!values_equal(&a, &b)));
-            }
             Op::Yield => {
                 let yielded = self.pop()?;
                 return Ok(StepOutcome::Yield(yielded));
@@ -2425,6 +2398,7 @@ impl Vm {
         match v {
             Value::Object(_)
             | Value::Array(..)
+            | Value::Proxy(_)
             | Value::Closure { .. }
             | Value::Builtin(_)
             | Value::BuiltinObject(_, _)
@@ -2474,6 +2448,7 @@ impl Vm {
                         rv,
                         Value::Object(_)
                             | Value::Array(..)
+                            | Value::Proxy(_)
                             | Value::Closure { .. }
                             | Value::Builtin(_)
                             | Value::BuiltinObject(_, _)
@@ -2528,6 +2503,7 @@ impl Vm {
                             rv,
                             Value::Object(_)
                                 | Value::Array(..)
+                                | Value::Proxy(_)
                                 | Value::Closure { .. }
                                 | Value::Builtin(_)
                                 | Value::BuiltinObject(_, _)
@@ -2937,34 +2913,93 @@ impl Vm {
         let next_fn =
             self.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
         let result = self.call_value_with_this(&next_fn, &iterator, &[])?;
+        let done = self.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+        if self.to_boolean(&done) {
+            let done_key = PropertyKey::String("__tsblitz_iter_done".to_string());
+            match &iterator {
+                Value::Object(obj) => {
+                    obj.borrow_mut()
+                        .properties
+                        .insert(done_key, PropertyDescriptor::data(Value::Bool(true)));
+                }
+                Value::Array(_, props)
+                | Value::Closure { props, .. }
+                | Value::BuiltinObject(_, props) => {
+                    props
+                        .borrow_mut()
+                        .properties
+                        .insert(done_key, PropertyDescriptor::data(Value::Bool(true)));
+                }
+                _ => {}
+            }
+        }
         self.stack.push(result);
         Ok(())
     }
 
     fn iterator_close_op(&mut self) -> Result<(), RuntimeError> {
         let iterator = self.pop()?;
+        if matches!(iterator, Value::Undefined | Value::Null) {
+            self.stack.push(iterator);
+            return Ok(());
+        }
+        let done_key = PropertyKey::String("__tsblitz_iter_done".to_string());
+        let already_done = match &iterator {
+            Value::Object(obj) => obj.borrow().properties.get(&done_key).is_some_and(|desc| {
+                matches!(
+                    desc,
+                    PropertyDescriptor::Data {
+                        value: Value::Bool(true),
+                        ..
+                    }
+                )
+            }),
+            Value::Array(_, props)
+            | Value::Closure { props, .. }
+            | Value::BuiltinObject(_, props) => props
+                .borrow()
+                .properties
+                .get(&done_key)
+                .is_some_and(|desc| {
+                    matches!(
+                        desc,
+                        PropertyDescriptor::Data {
+                            value: Value::Bool(true),
+                            ..
+                        }
+                    )
+                }),
+            _ => false,
+        };
+        if already_done {
+            self.stack.push(iterator);
+            return Ok(());
+        }
         let return_fn =
             self.get_property_host(&iterator, &PropertyKey::String("return".to_string()))?;
+        if matches!(return_fn, Value::Undefined) {
+            self.stack.push(iterator);
+            return Ok(());
+        }
         let is_callable = matches!(
             return_fn,
             Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
         );
-        if is_callable {
-            let _ = self.call_value_with_this(&return_fn, &iterator, &[])?;
+        if !is_callable {
+            return Err(self.throw_type_error("Iterator return is not callable"));
+        }
+        let ret = self.call_value_with_this(&return_fn, &iterator, &[])?;
+        if !matches!(
+            ret,
+            Value::Object(_)
+                | Value::Array(..)
+                | Value::Closure { .. }
+                | Value::BuiltinObject(_, _)
+                | Value::Promise(_)
+        ) {
+            return Err(self.throw_type_error("Iterator return result is not an object"));
         }
         self.stack.push(iterator);
-        Ok(())
-    }
-
-    fn get_global_ic(&mut self) -> Result<(), RuntimeError> {
-        let idx = self.read_short()? as usize;
-        let name = self.string_constant(idx)?;
-        let value = if let Some(value) = self.resolve_identifier_value(&name)? {
-            value
-        } else {
-            return Err(self.throw_reference_error(&format!("{name} is not defined")));
-        };
-        self.stack.push(value);
         Ok(())
     }
 
@@ -3302,7 +3337,7 @@ impl Vm {
                                 let offset = (((hi << 8) | lo) as i32) as i16;
                                 eprintln!("[diag]    {:#06}  {:?} {}", k, op, offset);
                             }
-                            Op::CompareJumpIfFalse => {
+                            Op::CompareJump => {
                                 let cmp = payload_byte(instr, 0);
                                 let hi = payload_byte(instr, 1) as i32;
                                 let lo = payload_byte(instr, 2) as i32;
@@ -3369,28 +3404,26 @@ impl Vm {
                                 let offset = (((hi << 8) | lo) as i32) as i16;
                                 eprintln!("[diag]   {}: {:?} {}", j, op, offset);
                             }
-                            Op::CompareJumpIfFalse => {
+                            Op::CompareJump => {
                                 let cmp = payload_byte(instr, 0);
                                 let hi = payload_byte(instr, 1) as i16;
                                 let lo = payload_byte(instr, 2) as i16;
                                 let offset = ((hi as i16) << 8) | (lo as i16);
                                 eprintln!("[diag]   {}: {:?} cmp={} {}", j, op, cmp, offset);
                             }
-                            Op::SetLocal
-                            | Op::GetLocal
+                            Op::StoreLocal
+                            | Op::LoadLocal
                             | Op::Call
                             | Op::Construct
                             | Op::PopN
                             | Op::GetBuiltin
                             | Op::GetProperty
                             | Op::SetProperty
-                            | Op::GetPropertyIC
-                            | Op::SetPropertyIC
                             | Op::MakeClosure => {
                                 let arg = payload_byte(instr, 0) as u32;
                                 eprintln!("[diag]   {}: {:?} {}", j, op, arg);
                             }
-                            Op::SetGlobal | Op::GetGlobal | Op::GetGlobalIC => {
+                            Op::SetGlobal | Op::GetGlobal => {
                                 let hi = payload_byte(instr, 0) as u16;
                                 let lo = payload_byte(instr, 1) as u16;
                                 let arg = ((hi << 8) | lo) as usize;
@@ -3431,7 +3464,7 @@ impl Vm {
                                     let offset = ((hi as i16) << 8) | (lo as i16);
                                     eprintln!("[diag]   {:#06}  {:?} {}", full, op, offset);
                                 }
-                                Op::CompareJumpIfFalse => {
+                                Op::CompareJump => {
                                     let instr = self.chunk.code[full];
                                     let cmp = payload_byte(instr, 0);
                                     let hi = payload_byte(instr, 1) as i16;
@@ -3616,7 +3649,7 @@ impl Vm {
                                 };
                                 eprintln!("[diag] {:#06}  Const       {} ({})", j, arg, repr);
                             }
-                            Op::GetGlobal | Op::SetGlobal => {
+                            Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => {
                                 let instr = proto.chunk.code[j];
                                 let hi = payload_byte(instr, 0) as u16;
                                 let lo = payload_byte(instr, 1) as u16;
@@ -3638,7 +3671,7 @@ impl Vm {
                                 let val = ((hi << 8) | lo) as i16;
                                 eprintln!("[diag] {:#06}  {:12?} {}", j, op, val);
                             }
-                            Op::CompareJumpIfFalse => {
+                            Op::CompareJump => {
                                 let instr = proto.chunk.code[j];
                                 let cmp = payload_byte(instr, 0);
                                 let hi = payload_byte(instr, 1) as u16;
@@ -3717,7 +3750,7 @@ impl Vm {
                             }
                         }
                     }
-                    Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => {
+                    Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => {
                         let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
                         let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
                         let arg = ((hi << 8) | lo) as usize;
@@ -3787,7 +3820,7 @@ impl Vm {
                             };
                             eprintln!("[diag]    {:#06}  Const       {} ({})", k, arg, repr);
                         }
-                        Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => {
+                        Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => {
                             let hi = frame.chunk.code.get(k + 1).cloned().unwrap_or(0) as u16;
                             let lo = frame.chunk.code.get(k + 2).cloned().unwrap_or(0) as u16;
                             let arg = ((hi << 8) | lo) as usize;
@@ -3971,29 +4004,24 @@ impl Vm {
 fn opcode_width(op: Op) -> usize {
     match op {
         Op::Const => 3,
-        Op::GetGlobal | Op::SetGlobal | Op::GetGlobalIC => 3,
-        Op::GetLocal
-        | Op::SetLocal
-        | Op::CloneLocalCell
+        Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => 3,
+        Op::LoadLocal
+        | Op::StoreLocal
         | Op::Call
-        | Op::CallMethod
-        | Op::CallIC
-        | Op::TailCallIC
-        | Op::TailCallMethod
+        | Op::CallBuiltin
         | Op::Construct
+        | Op::SuperConstruct
         | Op::PopN
         | Op::MakeClosure
         | Op::GetUpvalue
         | Op::SetUpvalue
-        | Op::GetPropertyIC
-        | Op::SetPropertyIC
-        | Op::GetBuiltin
+        | Op::SetProperty
         | Op::BuildArray
         | Op::BuildObject
         | Op::Spread
         | Op::ArrayFromSpread => 2,
         Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
-        Op::CompareJumpIfFalse => 4,
+        Op::CompareJump => 4,
         _ => 1,
     }
 }
@@ -4022,13 +4050,21 @@ fn list_own_keys_of_value(v: &Value) -> Option<Vec<String>> {
                 })
                 .collect(),
         ),
+        Value::Proxy(proxy) => {
+            let proxy = proxy.borrow();
+            if proxy.is_revoked() {
+                Some(Vec::new())
+            } else {
+                list_own_keys_of_value(&proxy.target)
+            }
+        }
         _ => None,
     }
 }
 
 /// Grow a locals vector so that `slot` is a valid index.
 #[inline(always)]
-pub(super) fn ensure_slot(locals: &mut Vec<ValueSlot>, slot: usize) {
+pub(super) fn ensure_slot(locals: &mut Vec<SharedValue>, slot: usize) {
     if slot >= locals.len() {
         locals.resize_with(slot + 1, || Rc::new(Mutex::new(Value::Undefined)));
     }
@@ -4040,6 +4076,7 @@ pub(super) fn object_identity(obj: &Value) -> Option<usize> {
         // Use the array's props object identity so IC keys remain stable across
         // dense storage reallocations.
         Value::Array(_, props) => Some(props.borrow().identity as usize),
+        Value::Proxy(proxy) => Some(Rc::as_ptr(proxy) as usize),
         Value::Closure { props, .. } => Some(props.borrow().identity as usize),
         Value::BuiltinObject(_, props) => Some(props.borrow().identity as usize),
         _ => None,
@@ -4063,6 +4100,7 @@ pub(super) fn values_equal(a: &Value, b: &Value) -> bool {
         // Reference equality for heap objects.
         (Value::Object(am), Value::Object(bm)) => Rc::ptr_eq(am, bm),
         (Value::Array(ar, _), Value::Array(br, _)) => Rc::ptr_eq(ar, br),
+        (Value::Proxy(ap), Value::Proxy(bp)) => Rc::ptr_eq(ap, bp),
         (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
         (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
         (Value::Promise(ap), Value::Promise(bp)) => Rc::ptr_eq(ap, bp),
@@ -4091,6 +4129,7 @@ pub fn same_value(a: &Value, b: &Value) -> bool {
         }
         (Value::Object(am), Value::Object(bm)) => Rc::ptr_eq(am, bm),
         (Value::Array(ar, _), Value::Array(br, _)) => Rc::ptr_eq(ar, br),
+        (Value::Proxy(ap), Value::Proxy(bp)) => Rc::ptr_eq(ap, bp),
         (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
         (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
         (Value::Promise(ap), Value::Promise(bp)) => Rc::ptr_eq(ap, bp),
@@ -4156,7 +4195,7 @@ fn set_array_index_property(obj: &Value, index: usize, value: Value) -> Result<(
         let next_len = next_len.max(a.len());
         p.properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(next_len as f64)),
+            PropertyDescriptor::data(Value::Number(usize_to_f64(next_len))),
         );
     } else {
         p.properties.insert(
@@ -4165,7 +4204,7 @@ fn set_array_index_property(obj: &Value, index: usize, value: Value) -> Result<(
         );
         p.properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(next_len as f64)),
+            PropertyDescriptor::data(Value::Number(usize_to_f64(next_len))),
         );
     }
     Ok(())
@@ -4339,14 +4378,14 @@ pub(super) fn set_property(
                     a[i] = Some(value);
                     p.properties.insert(
                         PropertyKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(a.len() as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(a.len()))),
                     );
                 } else {
                     p.properties
                         .insert(key.clone(), PropertyDescriptor::data(value));
                     p.properties.insert(
                         PropertyKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(next_len as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(next_len))),
                     );
                 }
                 return Ok(());
@@ -4367,7 +4406,7 @@ pub(super) fn set_property(
                 let mut p = props.borrow_mut();
                 p.properties.insert(
                     PropertyKey::String("length".to_string()),
-                    PropertyDescriptor::data(Value::Number(new_len as f64)),
+                    PropertyDescriptor::data(Value::Number(usize_to_f64(new_len))),
                 );
                 return Ok(());
             }
@@ -4463,7 +4502,7 @@ pub(super) fn set_property(
     }
 }
 
-pub(crate) fn build_module_namespace_object(exports: &HashMap<String, ValueSlot>) -> Value {
+pub(crate) fn build_module_namespace_object(exports: &HashMap<String, SharedValue>) -> Value {
     let namespace = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     let mut names: Vec<String> = exports
         .keys()

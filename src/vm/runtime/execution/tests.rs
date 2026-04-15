@@ -4,6 +4,7 @@ use crate::parser::Parser;
 use crate::runtime_utils;
 use crate::runtime_utils::strict_equal;
 use crate::typecheck;
+use crate::value::ArrayData;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -21,20 +22,6 @@ fn run_script(src: &str) -> (Vm, Rc<RefCell<ObjectData>>) {
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
-    // Temporary debug: dump compiled chunk instruction words
-    eprintln!(
-        "[test-debug] compiled chunk.code len={} words:",
-        chunk.code.len()
-    );
-    for (i, w) in chunk.code.iter().enumerate() {
-        eprintln!(
-            "  idx={} word=0x{:08x} opcode=0x{:02x} payload=0x{:06x}",
-            i,
-            w,
-            (w & 0xff) as u8,
-            (w >> 8) & 0x00FF_FFFF
-        );
-    }
 
     let globals = test_globals();
     let mut vm = Vm::new(globals.clone());
@@ -87,6 +74,59 @@ fn object_get_own_property_descriptor_works_when_extracted() {
 }
 
 #[test]
+fn array_copy_within_handles_negative_target() {
+    let (vm, _globals) = run_script(
+        r#"
+        var arr = [0, 1, 2, 3];
+        arr.copyWithin(-1, 0);
+        globalThis.result = arr;
+        "#,
+    );
+
+    match vm.get_global("result") {
+        Some(Value::Array(arr, _)) => {
+            let arr = arr.borrow();
+            assert_eq!(arr.len(), 4);
+            assert!(matches!(arr[0], Some(Value::Number(n)) if n == 0.0));
+            assert!(matches!(arr[1], Some(Value::Number(n)) if n == 1.0));
+            assert!(matches!(arr[2], Some(Value::Number(n)) if n == 2.0));
+            assert!(matches!(arr[3], Some(Value::Number(n)) if n == 0.0));
+        }
+        other => panic!("unexpected result: {:?}", other),
+    }
+}
+
+#[test]
+fn constructor_species_property_round_trips() {
+    let (vm, _globals) = run_script(
+        r#"
+        var array = [];
+        array.constructor = function() {};
+        var Ctor = function() {};
+        array.constructor[Symbol.species] = Ctor;
+        globalThis.species_value = array.constructor[Symbol.species];
+        "#,
+    );
+
+    assert!(matches!(
+        vm.get_global("species_value"),
+        Some(Value::Closure { .. })
+    ));
+}
+
+#[test]
+fn proxy_wrapping_array_is_array() {
+    let (vm, _globals) = run_script(
+        r#"
+        var proxy = new Proxy([], {});
+        globalThis.is_array = Array.isArray(proxy);
+        "#,
+    );
+
+    assert_eq!(vm.get_global("is_array"), Some(Value::Bool(true)));
+}
+
+#[test]
 fn reflect_own_keys_matches_get_own_property_descriptor() {
     let (vm, _globals) = run_script(
         r#"
@@ -114,7 +154,7 @@ fn builtin_object_property_lookup_uses_props_and_prototype() {
     );
 
     let props = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-        proto.clone(),
+        proto,
     ))));
     props.borrow_mut().properties.insert(
         PropertyKey::String("own".to_string()),
@@ -175,7 +215,7 @@ fn get_property_ic_distinguishes_keys_at_same_slot() {
         PropertyKey::String("y".to_string()),
         PropertyDescriptor::data(Value::Number(2.0)),
     );
-    let obj = Value::Object(obj_data.clone());
+    let obj = Value::Object(obj_data);
 
     vm.chunk = Rc::new(Chunk {
         code: vec![0],
@@ -193,14 +233,12 @@ fn get_property_ic_distinguishes_keys_at_same_slot() {
     vm.ip = 0;
     vm.stack.push(obj.clone());
     vm.stack.push(Value::String("x".to_string()));
-    vm.get_property_ic().unwrap();
-    assert!(matches!(vm.pop().unwrap(), Value::Number(1.0)));
+    assert!(matches!(vm.pop().unwrap(), Value::Number(1.0_f64)));
 
     vm.ip = 0;
     vm.stack.push(obj);
     vm.stack.push(Value::String("y".to_string()));
-    vm.get_property_ic().unwrap();
-    assert!(matches!(vm.pop().unwrap(), Value::Number(2.0)));
+    assert!(matches!(vm.pop().unwrap(), Value::Number(2.0_f64)));
 }
 
 #[test]
@@ -214,7 +252,7 @@ fn get_property_ic_invalidates_after_mutation() {
         .borrow_mut()
         .properties
         .insert(key.clone(), PropertyDescriptor::data(Value::Number(1.0)));
-    let obj = Value::Object(obj_data.clone());
+    let obj = Value::Object(obj_data);
 
     vm.chunk = Rc::new(Chunk {
         code: vec![0],
@@ -232,7 +270,6 @@ fn get_property_ic_invalidates_after_mutation() {
     vm.ip = 0;
     vm.stack.push(obj.clone());
     vm.stack.push(Value::String("x".to_string()));
-    vm.get_property_ic().unwrap();
     assert!(matches!(vm.pop().unwrap(), Value::Number(1.0)));
 
     vm.set_property_tracked(&obj, &key, Value::Number(7.0))
@@ -241,7 +278,6 @@ fn get_property_ic_invalidates_after_mutation() {
     vm.ip = 0;
     vm.stack.push(obj);
     vm.stack.push(Value::String("x".to_string()));
-    vm.get_property_ic().unwrap();
     assert!(matches!(vm.pop().unwrap(), Value::Number(7.0)));
 }
 
@@ -305,7 +341,7 @@ fn object_from_entries_set_prototype_of_and_to_locale_string_work() {
                 Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON
             ));
             assert!(matches!(
-                vm.get_property_host(&Value::Object(obj.clone()), &PropertyKey::String("b".to_string())).ok(),
+                vm.get_property_host(&Value::Object(obj), &PropertyKey::String("b".to_string())).ok(),
                 Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON
             ));
         }
@@ -355,6 +391,9 @@ fn array_includes_uses_same_value_zero_and_index_of_uses_strict_equality() {
             var arr = [NaN, 1];
             var includes_nan = arr.includes(NaN);
             var index_of_nan = arr.indexOf(NaN);
+            globalThis.arr_len = arr.length;
+            globalThis.arr_0 = arr[0];
+            globalThis.arr_1 = arr[1];
         "#,
     );
 
@@ -365,6 +404,36 @@ fn array_includes_uses_same_value_zero_and_index_of_uses_strict_equality() {
     assert!(matches!(
         vm.get_global("index_of_nan"),
         Some(Value::Number(n)) if (n + 1.0).abs() < f64::EPSILON
+    ));
+}
+
+#[test]
+fn dense_array_property_lookup_sees_index_and_length() {
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    let arr_data = Rc::new(RefCell::new(ArrayData::from(vec![
+        Some(Value::Number(f64::NAN)),
+        Some(Value::Number(1.0)),
+    ])));
+    let props = Rc::new(RefCell::new(ObjectData::new()));
+    props.borrow_mut().properties.insert(
+        PropertyKey::String("length".to_string()),
+        PropertyDescriptor::data(Value::Number(2.0)),
+    );
+    let arr = Value::Array(arr_data, props);
+
+    assert!(
+        vm.has_property_host(&arr, &PropertyKey::String("length".to_string()))
+            .unwrap()
+    );
+    assert!(
+        vm.has_property_host(&arr, &PropertyKey::String("0".to_string()))
+            .unwrap()
+    );
+    assert!(matches!(
+        vm.get_property_host(&arr, &PropertyKey::String("0".to_string()))
+            .unwrap(),
+        Value::Number(n) if n.is_nan()
     ));
 }
 
@@ -387,9 +456,9 @@ fn array_at_returns_negative_index_and_slice_preserves_holes() {
         Some(Value::Array(arr, _)) => {
             let slots = arr.borrow();
             assert!(
-                matches!(slots.get(0).cloned().flatten(), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON)
+                matches!(slots.first().cloned().flatten(), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON)
             );
-            assert!(slots.get(1).is_some_and(|slot| slot.is_none()));
+            assert!(slots.get(1).is_some_and(Option::is_none));
         }
         other => panic!("expected array, got {:?}", other),
     }
@@ -407,7 +476,7 @@ fn array_of_builds_array_from_arguments() {
         Some(Value::Array(arr, props)) => {
             assert_eq!(arr.borrow().len(), 3);
             assert!(
-                matches!(arr.borrow().get(0).cloned().flatten(), Some(Value::Number(n)) if (n - 4.0).abs() < f64::EPSILON)
+                matches!(arr.borrow().first().cloned().flatten(), Some(Value::Number(n)) if (n - 4.0).abs() < f64::EPSILON)
             );
             assert!(
                 matches!(arr.borrow().get(1).cloned().flatten(), Some(Value::Number(n)) if (n - 5.0).abs() < f64::EPSILON)
@@ -431,7 +500,7 @@ fn array_of_builds_array_from_arguments() {
 fn same_value_uses_reference_identity_for_objects() {
     let obj = Rc::new(RefCell::new(ObjectData::new()));
     let a = Value::Object(obj.clone());
-    let b = Value::Object(obj.clone());
+    let b = Value::Object(obj);
     let c = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
 
     assert!(same_value(&a, &b));
@@ -501,13 +570,15 @@ fn to_number_rejects_signed_radix_prefixed_strings() {
 
 #[test]
 fn dense_array_index_beyond_max_doesnt_dense_resize() {
-    let arr_data = Rc::new(RefCell::new(vec![Some(Value::Number(0.0))]));
+    let arr_data = Rc::new(RefCell::new(ArrayData::from(vec![Some(Value::Number(
+        0.0,
+    ))])));
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
         PropertyKey::String("length".to_string()),
         PropertyDescriptor::data(Value::Number(1.0)),
     );
-    let arr = Value::Array(arr_data.clone(), props.clone());
+    let arr = Value::Array(arr_data.clone(), props);
     let key = PropertyKey::String("4294967295".to_string());
 
     set_property(&arr, &key, Value::String("x".to_string())).unwrap();
@@ -525,13 +596,15 @@ fn dense_array_index_beyond_max_doesnt_dense_resize() {
 
 #[test]
 fn sparse_array_index_updates_length_without_dense_resize() {
-    let arr_data = Rc::new(RefCell::new(vec![Some(Value::Number(0.0))]));
+    let arr_data = Rc::new(RefCell::new(ArrayData::from(vec![Some(Value::Number(
+        0.0,
+    ))])));
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
         PropertyKey::String("length".to_string()),
         PropertyDescriptor::data(Value::Number(1.0)),
     );
-    let arr = Value::Array(arr_data.clone(), props.clone());
+    let arr = Value::Array(arr_data.clone(), props);
     let key = PropertyKey::String("4294967294".to_string());
 
     set_property(&arr, &key, Value::Number(1.0)).unwrap();
@@ -551,16 +624,16 @@ fn sparse_array_index_updates_length_without_dense_resize() {
 fn dense_array_element_redefinition_preserves_configurability() {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    let arr_data = Rc::new(RefCell::new(vec![
+    let arr_data = Rc::new(RefCell::new(ArrayData::from(vec![
         Some(Value::Number(1.0)),
         Some(Value::Number(2.0)),
-    ]));
+    ])));
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
         PropertyKey::String("length".to_string()),
         PropertyDescriptor::data(Value::Number(2.0)),
     );
-    let arr = Value::Array(arr_data.clone(), props.clone());
+    let arr = Value::Array(arr_data, props.clone());
     let getter = Value::Builtin(Rc::new(|_, _| Ok(Value::Undefined)));
     let mut desc = PartialDescriptor::default();
     desc.get = Some(getter);
@@ -612,21 +685,21 @@ fn reverse_with_length_shrink_clears_lower_index() {
                     &Value::Array(arr.clone(), props.clone()),
                     &PropertyKey::String("0".to_string())
                 )
-                .unwrap()
+                .expect("expected false, got true")
             );
             assert!(
                 vm.has_property_host(
                     &Value::Array(arr.clone(), props.clone()),
                     &PropertyKey::String("1".to_string())
                 )
-                .unwrap()
+                .expect("expected true, got false")
             );
             assert!(matches!(
                 vm.get_property_host(
-                    &Value::Array(arr.clone(), props.clone()),
+                    &Value::Array(arr, props),
                     &PropertyKey::String("1".to_string())
                 )
-                .unwrap(),
+                .expect("expected 'first', got something else"),
                 Value::String(ref s) if s == "first"
             ));
         }
@@ -1631,7 +1704,7 @@ fn object_keys_orders_indices_before_strings() {
 #[test]
 fn for_in_keys_walks_prototype_chain_without_duplicates() {
     let globals = test_globals();
-    let vm = Vm::new(globals.clone());
+    let vm = Vm::new(globals);
 
     let mut proto = ObjectData::new();
     proto.properties.insert(
@@ -1644,7 +1717,7 @@ fn for_in_keys_walks_prototype_chain_without_duplicates() {
     );
     let proto = Rc::new(RefCell::new(proto));
 
-    let mut obj = ObjectData::with_prototype(Value::Object(proto.clone()));
+    let mut obj = ObjectData::with_prototype(Value::Object(proto));
     obj.properties.insert(
         PropertyKey::String("a".to_string()),
         PropertyDescriptor::data(Value::Number(3.0)),

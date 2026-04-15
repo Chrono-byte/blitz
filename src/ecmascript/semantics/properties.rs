@@ -4,7 +4,7 @@ use std::rc::Rc;
 use crate::Vm;
 use crate::ecmascript::semantics::usize_to_f64;
 use crate::runtime_utils::canonical_index_key;
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::{RuntimeError, gc};
 use num_traits::ToPrimitive;
 
@@ -14,6 +14,14 @@ pub(crate) fn own_property_descriptor(
 ) -> Option<PropertyDescriptor> {
     match obj {
         Value::Object(data) => data.borrow().properties.get(key).cloned(),
+        Value::Proxy(proxy) => {
+            let proxy = proxy.borrow();
+            if proxy.is_revoked() {
+                None
+            } else {
+                own_property_descriptor(&proxy.target, key)
+            }
+        }
         Value::Array(arr, props) => {
             let props_ref = props.borrow();
             if let Some(desc) = props_ref.properties.get(key).cloned() {
@@ -96,6 +104,12 @@ pub(crate) fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
     let mut keys = Vec::new();
     match obj {
         Value::Object(data) => keys.extend(enumerable_prop_keys(data, false)),
+        Value::Proxy(proxy) => {
+            let proxy = proxy.borrow();
+            if !proxy.is_revoked() {
+                keys.extend(own_enumerable_keys(&proxy.target));
+            }
+        }
         Value::Array(arr, props) => {
             for (idx, slot) in arr.borrow().iter().enumerate() {
                 if slot.is_some() {
@@ -240,6 +254,12 @@ pub(crate) fn own_property_keys(obj: &Value) -> Vec<PropertyKey> {
                 keys.push(key.clone());
             }
         }
+        Value::Proxy(proxy) => {
+            let proxy = proxy.borrow();
+            if !proxy.is_revoked() {
+                keys.extend(own_property_keys(&proxy.target));
+            }
+        }
         Value::Array(arr, props) => {
             for idx in 0..arr.borrow().len() {
                 keys.push(PropertyKey::String(usize_to_decimal_string(idx)));
@@ -307,9 +327,9 @@ pub(crate) fn usize_to_decimal_string(value: usize) -> String {
 }
 
 pub(crate) fn array_from_values(values: Vec<Value>) -> Value {
-    let arr_rc = Rc::new(RefCell::new(
+    let arr_rc = Rc::new(RefCell::new(ArrayData::from(
         values.into_iter().map(Some).collect::<Vec<_>>(),
-    ));
+    )));
     let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     props.borrow_mut().properties.insert(
         PropertyKey::String("length".to_string()),

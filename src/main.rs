@@ -93,7 +93,8 @@ fn main() -> Result<(), blitz::errors::Error> {
 
     // Public globals visible to user code (populated by the prelude)
     let globals: Rc<RefCell<blitz::value::ObjectData>> = if cli.test262_harness {
-        let done_state = async_done_state.clone();
+        let done_state =
+            Rc::<RefCell<Option<test262_support::AsyncCompletion>>>::clone(&async_done_state);
         let print_native: blitz::value::NativeFn = Rc::new(move |vm, _this, args| {
             let value = args.first().cloned().unwrap_or(Value::Undefined);
             let rendered = match vm.to_string(&value) {
@@ -136,7 +137,7 @@ fn main() -> Result<(), blitz::errors::Error> {
             {
                 let mut loader = loader_handle.borrow_mut();
                 loader.construct(
-                    path.parent().unwrap_or(Path::new(".")),
+                    path.parent().unwrap_or_else(|| Path::new(".")),
                     &format!("./{}", path.file_name().unwrap().to_string_lossy()),
                 )?;
                 loader
@@ -252,7 +253,7 @@ mod tests {
     #[test]
     fn run_source_executes_basic_program() {
         let globals = Rc::new(RefCell::new(ObjectData::new()));
-        let mut vm = Vm::new(globals.clone());
+        let mut vm = Vm::new(globals);
 
         run_source(&mut vm, "var answer = 1 + 2; answer;").expect("run");
 
@@ -264,7 +265,7 @@ mod tests {
     #[test]
     fn run_source_returns_expression_result() {
         let globals = test_globals();
-        let mut vm = Vm::new(globals.clone());
+        let mut vm = Vm::new(globals);
 
         let result = run_source_repl(&mut vm, "1 + 2").expect("run");
         assert!(

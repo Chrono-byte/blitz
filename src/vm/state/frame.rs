@@ -1,7 +1,7 @@
 use crate::bytecode::{Chunk, UpvalueSpec};
 use crate::environment::EnvironmentRecord;
 use crate::typecheck::Type;
-use crate::value::{Value, ValueSlot};
+use crate::value::{SharedValue, Value};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -16,7 +16,7 @@ pub(crate) struct Frame {
     /// The stack of values for this frame.
     pub(crate) stack: Vec<Value>,
     /// The local variable slots for this frame.
-    pub(crate) locals: Vec<ValueSlot>,
+    pub(crate) locals: Vec<SharedValue>,
     /// The `this` value for this frame.
     pub(crate) this_value: Value,
     /// The callee value used to enter this frame.
@@ -24,7 +24,7 @@ pub(crate) struct Frame {
     /// The `[[NewTarget]]` value in effect for this frame, if any.
     pub(crate) new_target: Option<Value>,
     /// The closure environment for this frame.
-    pub(crate) closure_env: Option<Rc<Mutex<Vec<ValueSlot>>>>,
+    pub(crate) closure_env: Option<Rc<Mutex<Vec<SharedValue>>>>,
     /// Upvalue metadata for the current function.
     pub(crate) upvalues: Vec<UpvalueSpec>,
     /// The types of local variables for this frame.

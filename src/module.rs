@@ -55,7 +55,7 @@ use crate::compiler::ModuleContext;
 use crate::errors::BundlerError;
 use crate::parser::ParserSession;
 use crate::resolver::resolve_specifier;
-use crate::value::{Value, ValueSlot};
+use crate::value::{SharedValue, Value};
 use crate::vm::Vm;
 
 use oxc_span::SourceType;
@@ -90,9 +90,9 @@ pub struct ModuleRecord {
     /// Assigned numeric module index used by the VM module table. Set during instantiation.
     pub module_index: Option<usize>,
     /// Export slots: mapping export name -> shared slot.
-    pub exports: HashMap<String, ValueSlot>,
+    pub exports: HashMap<String, SharedValue>,
     /// Import bindings: local name -> exporter slot
-    pub imports: HashMap<String, ValueSlot>,
+    pub imports: HashMap<String, SharedValue>,
     /// Import metadata: local name -> (module_index, exported_name)
     pub import_sources: HashMap<String, (usize, String)>,
     /// Indirect export metadata: exported name -> (imported name, source specifier)
@@ -140,6 +140,10 @@ impl ModuleLoader {
     }
 
     /// Construct (fetch & parse) a module and its dependencies.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::BundlerError`] if the module or any of its dependencies cannot be constructed.
     pub fn construct(
         &mut self,
         base: &Path,
@@ -177,11 +181,11 @@ impl ModuleLoader {
                 })?;
         for spec in imports {
             if spec.starts_with('.') || spec.starts_with('/') {
-                let base_dir = resolved_canon.parent().unwrap_or(Path::new("."));
+                let base_dir = resolved_canon.parent().unwrap_or_else(|| Path::new("."));
                 self.construct(base_dir, &spec)?;
             } else {
                 // Bare specifiers handled via resolver; attempt to construct too
-                let base_dir = resolved_canon.parent().unwrap_or(Path::new("."));
+                let base_dir = resolved_canon.parent().unwrap_or_else(|| Path::new("."));
                 let _ = self.construct(base_dir, &spec);
             }
         }
@@ -192,6 +196,10 @@ impl ModuleLoader {
     /// Instantiate modules by allocating export slots. This is a simple
     /// implementation that creates shared value slots for exported names so
     /// importers can hold live bindings to the same slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::BundlerError`] if a module fails to instantiate.
     pub fn instantiate_all(&mut self) -> Result<(), BundlerError> {
         // For each module, examine its AST for exported names and allocate slots.
         for rec_rc in self.map.values() {
@@ -513,7 +521,10 @@ impl ModuleLoader {
             let (base_dir, indirect_exports) = {
                 let rec = rec_rc.borrow();
                 (
-                    rec.path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                    rec.path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .to_path_buf(),
                     rec.indirect_exports.clone(),
                 )
             };
@@ -541,9 +552,17 @@ impl ModuleLoader {
     }
 
     /// Compute depth-first, post-order evaluation order starting from `entry`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::BundlerError`] if the entry cannot be resolved.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entry cannot be resolved to a canonical path.
     pub fn evaluation_order_from(&mut self, entry: &Path) -> Result<Vec<PathBuf>, BundlerError> {
         let resolved = resolve_specifier(
-            entry.parent().unwrap_or(Path::new(".")),
+            entry.parent().unwrap_or_else(|| Path::new(".")),
             &format!("./{}", entry.file_name().unwrap().to_string_lossy()),
         )?;
         let resolved_canon = std::fs::canonicalize(&resolved).unwrap_or(resolved);
@@ -577,7 +596,7 @@ impl ModuleLoader {
             )
             .map_err(|e| BundlerError::from(format!("Parse error {}: {}", path.display(), e)))?;
             for spec in imports {
-                let base_dir = path.parent().unwrap_or(Path::new("."));
+                let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
                 // attempt to ensure dependency constructed
                 let dep = loader.construct(base_dir, &spec)?;
                 let dep_path = dep.borrow().path.clone();
@@ -592,7 +611,7 @@ impl ModuleLoader {
 
         if !self.map.contains_key(&resolved_canon) {
             // ensure constructed
-            let base_dir = entry.parent().unwrap_or(Path::new("."));
+            let base_dir = entry.parent().unwrap_or_else(|| Path::new("."));
             self.construct(
                 base_dir,
                 &format!("./{}", entry.file_name().unwrap().to_string_lossy()),
@@ -603,12 +622,17 @@ impl ModuleLoader {
         Ok(order)
     }
 
+    /// Resolve an export from a module.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if evaluation fails.
     fn resolve_export(
         &mut self,
         module_path: &Path,
         export_name: &str,
         resolve_set: &mut std::collections::HashSet<(PathBuf, String)>,
-    ) -> Result<Option<ValueSlot>, BundlerError> {
+    ) -> Result<Option<SharedValue>, BundlerError> {
         let module_path =
             std::fs::canonicalize(module_path).unwrap_or_else(|_| module_path.to_path_buf());
         let key = (module_path.clone(), export_name.to_string());
@@ -623,7 +647,10 @@ impl ModuleLoader {
         let (base_dir, direct_slot, indirect_exports, star_exports) = {
             let rec = rec_rc.borrow();
             (
-                rec.path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                rec.path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf(),
                 rec.exports.get(export_name).cloned(),
                 rec.indirect_exports.clone(),
                 rec.star_exports.clone(),
@@ -642,7 +669,7 @@ impl ModuleLoader {
             }
         }
 
-        let mut found: Option<ValueSlot> = None;
+        let mut found: Option<SharedValue> = None;
         for source_spec in star_exports {
             let dep_rec_rc = self.construct(&base_dir, &source_spec)?;
             let dep_path = dep_rec_rc.borrow().path.clone();
@@ -663,6 +690,14 @@ impl ModuleLoader {
     }
 
     /// Evaluate a module graph starting from entry in DFS post-order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if evaluation fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entry cannot be resolved to a canonical path.
     pub fn evaluate_entry(
         &mut self,
         entry: &Path,
@@ -697,7 +732,7 @@ impl ModuleLoader {
                     rec.state = ModuleState::Evaluating;
                     let program = rec.session.program();
                     if enable_typecheck {
-                        crate::typecheck::check_oxc(program).map_err(|e| {
+                        crate::typecheck::check(program).map_err(|e| {
                             crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
                         })?;
                     }
@@ -728,6 +763,10 @@ impl ModuleLoader {
     }
 
     /// Evaluate module graph in depth-first, post-order. For now synchronous.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::errors::RuntimeError`] if evaluation fails.
     pub fn evaluate_all(
         &mut self,
         vm: &mut Vm,
@@ -741,7 +780,7 @@ impl ModuleLoader {
                 // Compile program
                 let program = rec.session.program();
                 if enable_typecheck {
-                    crate::typecheck::check_oxc(program).map_err(|e| {
+                    crate::typecheck::check(program).map_err(|e| {
                         crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
                     })?;
                 }
@@ -765,6 +804,14 @@ impl ModuleLoader {
 ///
 /// This helper borrows the loader only for short phases so nested dynamic
 /// imports can re-enter the same cache while module code is running.
+///
+/// # Errors
+///
+/// Returns a [`crate::errors::RuntimeError`] if evaluation fails.
+///
+/// # Panics
+///
+/// Panics if the entry cannot be resolved to a canonical path.
 pub fn evaluate_entry_shared(
     loader: &Rc<RefCell<ModuleLoader>>,
     entry: &Path,
@@ -803,7 +850,7 @@ pub fn evaluate_entry_shared(
                 rec.state = ModuleState::Evaluating;
                 let program = rec.session.program();
                 if enable_typecheck {
-                    crate::typecheck::check_oxc(program).map_err(|e| {
+                    crate::typecheck::check(program).map_err(|e| {
                         crate::errors::RuntimeError::from(format!("Typecheck failed: {}", e))
                     })?;
                 }

@@ -80,6 +80,11 @@ pub fn value_string(label: &str, v: &crate::value::Value) {
             label,
             map.borrow().properties.len()
         ),
+        Value::Proxy(proxy) => eprintln!(
+            "[trace] {} Proxy(revoked={})",
+            label,
+            proxy.borrow().handler.is_none()
+        ),
         Value::Closure { proto, .. } => eprintln!(
             "[trace] {} Closure(name='{}' arity={})",
             label, proto.name, proto.arity

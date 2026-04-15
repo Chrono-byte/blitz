@@ -162,7 +162,7 @@ impl Compiler {
                             self.compile_function(&fname, None, f, None, false)?;
                         let idx = self.chunk.add_function(proto);
                         self.emit(Op::MakeClosure, LINE);
-                        self.emit_byte(idx as u8, LINE);
+                        self.emit_byte(self.function_index_to_u8(idx)?, LINE);
                         let slot = if let Some(s) = self.resolve_local(&fname) {
                             s
                         } else {
@@ -171,14 +171,14 @@ impl Compiler {
                         if self.is_root {
                             self.emit(Op::Dup, LINE);
                         }
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(slot as u8, LINE);
+                        self.emit(Op::StoreLocal, LINE);
+                        self.emit_byte(self.slot_to_u8(slot)?, LINE);
                         if self.is_root {
                             self.emit_set_global_name(&fname);
                         }
                         if self.current_module.is_some() {
-                            self.emit(Op::GetLocal, LINE);
-                            self.emit_byte(slot as u8, LINE);
+                            self.emit(Op::LoadLocal, LINE);
+                            self.emit_byte(self.slot_to_u8(slot)?, LINE);
                             self.emit_set_own_module_export(&fname)?;
                         }
                     }
@@ -192,7 +192,7 @@ impl Compiler {
                             self.compile_function(&fname, None, f, None, false)?;
                         let idx = self.chunk.add_function(proto);
                         self.emit(Op::MakeClosure, LINE);
-                        self.emit_byte(idx as u8, LINE);
+                        self.emit_byte(self.function_index_to_u8(idx)?, LINE);
                         let slot = if let Some(s) = self.resolve_local(&fname) {
                             s
                         } else {
@@ -201,14 +201,14 @@ impl Compiler {
                         if self.is_root {
                             self.emit(Op::Dup, LINE);
                         }
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(slot as u8, LINE);
+                        self.emit(Op::StoreLocal, LINE);
+                        self.emit_byte(self.slot_to_u8(slot)?, LINE);
                         if self.is_root {
                             self.emit_set_global_name(&fname);
                         }
                         if self.current_module.is_some() {
-                            self.emit(Op::GetLocal, LINE);
-                            self.emit_byte(slot as u8, LINE);
+                            self.emit(Op::LoadLocal, LINE);
+                            self.emit_byte(self.slot_to_u8(slot)?, LINE);
                             self.emit_set_own_module_export(&fname)?;
                         }
                     }
@@ -223,7 +223,7 @@ impl Compiler {
                                 self.compile_function(&fname, None, f, None, false)?;
                             let idx = self.chunk.add_function(proto);
                             self.emit(Op::MakeClosure, LINE);
-                            self.emit_byte(idx as u8, LINE);
+                            self.emit_byte(self.function_index_to_u8(idx)?, LINE);
                             let slot = if let Some(s) = self.resolve_local(&fname) {
                                 s
                             } else {
@@ -232,14 +232,14 @@ impl Compiler {
                             if self.is_root {
                                 self.emit(Op::Dup, LINE);
                             }
-                            self.emit(Op::SetLocal, LINE);
-                            self.emit_byte(slot as u8, LINE);
+                            self.emit(Op::StoreLocal, LINE);
+                            self.emit_byte(self.slot_to_u8(slot)?, LINE);
                             if self.is_root {
                                 self.emit_set_global_name(&fname);
                             }
                             if self.current_module.is_some() {
-                                self.emit(Op::GetLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit(Op::LoadLocal, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 self.emit_set_own_module_export("default")?;
                             }
                         } else {
@@ -248,7 +248,7 @@ impl Compiler {
                                 self.compile_function(&fname, None, f, None, false)?;
                             let idx = self.chunk.add_function(proto);
                             self.emit(Op::MakeClosure, LINE);
-                            self.emit_byte(idx as u8, LINE);
+                            self.emit_byte(self.function_index_to_u8(idx)?, LINE);
                             if self.current_module.is_some() {
                                 self.emit_set_own_module_export("default")?;
                             }

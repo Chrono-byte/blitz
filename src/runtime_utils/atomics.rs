@@ -2,7 +2,7 @@ use super::*;
 use crate::ecmascript::semantics::atomics as semantics_atomics;
 
 use crate::gc;
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::{RuntimeError, Vm};
 use num_bigint::BigInt as BigIntValue;
 use num_traits::ToPrimitive;
@@ -194,9 +194,7 @@ fn atomics_write_view_slot(
     Ok(())
 }
 
-pub(crate) fn atomics_waiters_array(
-    buffer: &Rc<RefCell<ObjectData>>,
-) -> Rc<RefCell<Vec<Option<Value>>>> {
+pub(crate) fn atomics_waiters_array(buffer: &Rc<RefCell<ObjectData>>) -> Rc<RefCell<ArrayData>> {
     let mut buffer_data = buffer.borrow_mut();
     if let Some(PropertyDescriptor::Data {
         value: Value::Array(arr, _),
@@ -207,7 +205,9 @@ pub(crate) fn atomics_waiters_array(
     {
         return Rc::clone(arr);
     }
-    let arr = gc::track_array(Rc::new(RefCell::new(Vec::new())));
+    let arr = gc::track_array(Rc::new(RefCell::new(ArrayData::from(
+        Vec::<Option<Value>>::new(),
+    ))));
     buffer_data.properties.insert(
         PropertyKey::String("[[AtomicsWaiters]]".to_string()),
         PropertyDescriptor::data(Value::Array(
@@ -284,7 +284,7 @@ pub(crate) fn atomics_wake_waiters(
             }
             to_wake.push(waiter);
         }
-        *waiters_mut = remaining;
+        *waiters_mut = ArrayData::from(remaining);
     }
 
     for waiter in &to_wake {

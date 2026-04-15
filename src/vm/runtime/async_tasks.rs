@@ -25,7 +25,7 @@
 //!   exceptions through a host hook.
 use crate::bytecode::FunctionProto;
 use crate::runtime_utils::{reject_pending_promise, resolve_promise_with_value};
-use crate::value::{PromiseState, Value, ValueSlot};
+use crate::value::{PromiseState, SharedValue, Value};
 use crate::vm::state::*;
 use std::cell::RefCell;
 use std::future::Future;
@@ -190,7 +190,7 @@ impl Vm {
     pub(super) fn invoke_async_closure(
         &mut self,
         proto: &Rc<FunctionProto>,
-        env: &Rc<std::sync::Mutex<Vec<ValueSlot>>>,
+        env: &Rc<std::sync::Mutex<Vec<SharedValue>>>,
         call_args: Vec<Value>,
         this_arg: Value,
         callee: &Value,

@@ -15,6 +15,32 @@ use oxc_ast::ast as oast;
 const LINE: u32 = 1;
 
 impl super::Compiler {
+    fn binding_identifier_name(pattern: &oast::BindingPattern<'_>) -> Option<String> {
+        match pattern {
+            oast::BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
+            _ => None,
+        }
+    }
+
+    fn is_anonymous_function_definition(expr: &oast::Expression<'_>) -> bool {
+        match expr {
+            oast::Expression::ArrowFunctionExpression(_) => true,
+            oast::Expression::FunctionExpression(f) => f.id.is_none(),
+            oast::Expression::ClassExpression(c) => c.id.is_none(),
+            oast::Expression::ParenthesizedExpression(p) => {
+                Self::is_anonymous_function_definition(&p.expression)
+            }
+            _ => false,
+        }
+    }
+
+    fn assignment_target_identifier_name(target: &oast::AssignmentTarget<'_>) -> Option<String> {
+        match target {
+            oast::AssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.to_string()),
+            _ => None,
+        }
+    }
+
     /// Compile a variable declaration statement.
     ///
     /// Processes all declarators in the declaration, evaluating their initializers
@@ -127,8 +153,8 @@ impl super::Compiler {
         if self.is_root {
             self.emit(Op::Dup, LINE);
         }
-        self.emit(Op::SetLocal, LINE);
-        self.emit_byte(slot as u8, LINE);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(slot)?, LINE);
         if self.is_root && mirror_global {
             self.emit_set_global_name(name);
         }
@@ -137,8 +163,8 @@ impl super::Compiler {
             .as_ref()
             .is_some_and(|c| c.exports.contains(name));
         if is_exported {
-            self.emit(Op::GetLocal, LINE);
-            self.emit_byte(slot as u8, LINE);
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(slot)?, LINE);
             self.emit_set_own_module_export(name)?;
         }
         Ok(())
@@ -169,11 +195,11 @@ impl super::Compiler {
             return Err(Self::imported_binding_assignment_error());
         }
         if let Some(slot) = self.resolve_local(name) {
-            self.emit(Op::SetLocal, LINE);
-            self.emit_byte(slot as u8, LINE);
+            self.emit(Op::StoreLocal, LINE);
+            self.emit_byte(self.slot_to_u8(slot)?, LINE);
             if self.local_mirrors_global(slot) {
-                self.emit(Op::GetLocal, LINE);
-                self.emit_byte(slot as u8, LINE);
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                 self.emit_set_global_name(name);
             }
             let is_exported = self
@@ -188,8 +214,8 @@ impl super::Compiler {
                     .expect("module_index expected");
                 let cname_idx = self.chunk.add_constant(Value::String(name.to_string()));
                 self.emit(Op::SetModuleExport, LINE);
-                self.emit_byte(module_index as u8, LINE);
-                self.emit_byte(cname_idx as u8, LINE);
+                self.emit_byte(self.module_index_to_u8(module_index)?, LINE);
+                self.emit_byte(self.constant_index_to_u8(cname_idx)?, LINE);
             }
         } else if let Some(upvalue) = self.resolve_upvalue(name) {
             self.emit(Op::SetUpvalue, LINE);
@@ -212,13 +238,13 @@ impl super::Compiler {
         m: &oast::StaticMemberExpression<'_>,
     ) -> Result<(), crate::errors::CompilerError> {
         let value_slot = self.alloc_temp_local("assign_member_value");
-        self.emit(Op::SetLocal, LINE);
-        self.emit_byte(value_slot as u8, LINE);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
         self.compile_expr_oast(&m.object)?;
         self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-        self.emit(Op::GetLocal, LINE);
-        self.emit_byte(value_slot as u8, LINE);
-        self.emit(Op::SetPropertyIC, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+        self.emit(Op::SetProperty, LINE);
         let slot = self.alloc_ic_slot()?;
         self.emit_byte(slot, LINE);
         self.emit(Op::Pop, LINE);
@@ -230,12 +256,12 @@ impl super::Compiler {
         m: &oast::ComputedMemberExpression<'_>,
     ) -> Result<(), crate::errors::CompilerError> {
         let value_slot = self.alloc_temp_local("assign_member_value");
-        self.emit(Op::SetLocal, LINE);
-        self.emit_byte(value_slot as u8, LINE);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
         self.compile_expr_oast(&m.object)?;
         self.compile_expr_oast(&m.expression)?;
-        self.emit(Op::GetLocal, LINE);
-        self.emit_byte(value_slot as u8, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
         self.emit(Op::SetProperty, LINE);
         self.emit(Op::Pop, LINE);
         Ok(())
@@ -248,22 +274,34 @@ impl super::Compiler {
         match target {
             oast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(a) => {
                 let temp_slot = self.alloc_temp_local("assign_default");
-                self.emit(Op::SetLocal, LINE);
-                self.emit_byte(temp_slot as u8, LINE);
-                self.emit(Op::GetLocal, LINE);
-                self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::StoreLocal, LINE);
+                self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
                 self.emit(Op::Undefined, LINE);
-                self.emit(Op::StrictEq, LINE);
-                self.emit(Op::JumpIfFalse, LINE);
+                // Use CompareJump: cond_type 6 = StrictEq, jump if true
+                self.emit_with_payload(Op::CompareJump, 6, LINE);
                 let skip_default = self.chunk.code.len();
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
                 self.compile_expr_oast(&a.init)?;
-                self.emit(Op::SetLocal, LINE);
-                self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::StoreLocal, LINE);
+                self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+                if let Some(name) = Self::assignment_target_identifier_name(&a.binding)
+                    && Self::is_anonymous_function_definition(&a.init)
+                {
+                    self.emit_get_builtin_name("setFunctionNameIfAnonymous");
+                    self.emit(Op::LoadLocal, LINE);
+                    self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+                    self.emit_constant(Value::String(name), LINE);
+                    self.emit(Op::Call, LINE);
+                    self.emit_byte(2, LINE);
+                    self.emit(Op::StoreLocal, LINE);
+                    self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+                }
                 self.patch_jump(skip_default);
-                self.emit(Op::GetLocal, LINE);
-                self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
                 self.compile_assignment_target_oast(&a.binding)?;
                 Ok(())
             }
@@ -292,18 +330,66 @@ impl super::Compiler {
         &mut self,
         a: &oast::ArrayAssignmentTarget<'_>,
     ) -> Result<(), crate::errors::CompilerError> {
-        for (idx, el) in a.elements.iter().enumerate() {
-            let Some(el) = el else { continue };
-            self.emit(Op::Dup, LINE);
-            self.emit_constant(Value::String(idx.to_string()), LINE);
-            self.emit(Op::GetProperty, LINE);
-            self.compile_assignment_target_maybe_default_oast(el)?;
+        self.emit_get_builtin_name("requireObjectCoercible");
+        self.emit(Op::Swap, LINE);
+        self.emit(Op::Call, LINE);
+        self.emit_byte(1, LINE);
+
+        let iterator_slot = self.alloc_temp_local("array_assign_iterator");
+        self.emit(Op::Dup, LINE);
+        self.emit_get_global_name("Symbol");
+        self.emit_constant(Value::String("iterator".to_string()), LINE);
+        self.emit(Op::GetProperty, LINE);
+        let iterator_ic = self.alloc_ic_slot()?;
+        self.emit_byte(iterator_ic, LINE);
+        self.emit(Op::GetProperty, LINE);
+        self.emit(Op::Call, LINE);
+        self.emit_byte(0, LINE);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+
+        for el in &a.elements {
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+            self.emit(Op::IteratorNext, LINE);
+            if let Some(el) = el {
+                self.emit(Op::Dup, LINE);
+                self.emit_constant(Value::String("done".to_string()), LINE);
+                self.emit(Op::GetProperty, LINE);
+                self.emit(Op::JumpIfTrue, LINE);
+                let done_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                self.emit_constant(Value::String("value".to_string()), LINE);
+                self.emit(Op::GetProperty, LINE);
+                self.compile_assignment_target_maybe_default_oast(el)?;
+                self.emit(Op::Jump, LINE);
+                let after_jump = self.chunk.code.len();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                self.patch_jump(done_jump);
+                self.emit(Op::Pop, LINE);
+                self.emit(Op::Undefined, LINE);
+                self.compile_assignment_target_maybe_default_oast(el)?;
+                self.patch_jump(after_jump);
+            } else {
+                self.emit(Op::Pop, LINE);
+            }
         }
         if let Some(rest) = &a.rest {
-            self.emit(Op::Dup, LINE);
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+            self.emit_get_builtin_name("iteratorToArray");
+            self.emit(Op::Swap, LINE);
+            self.emit(Op::Call, LINE);
+            self.emit_byte(1, LINE);
             self.compile_assignment_target_oast(&rest.target)?;
+        } else {
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+            self.emit(Op::IteratorClose, LINE);
+            self.emit(Op::Pop, LINE);
         }
-        self.emit(Op::Pop, LINE);
         Ok(())
     }
 
@@ -319,22 +405,32 @@ impl super::Compiler {
                     self.emit(Op::GetProperty, LINE);
                     if let Some(init) = &p.init {
                         let temp_slot = self.alloc_temp_local("assign_prop_default");
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(temp_slot as u8, LINE);
-                        self.emit(Op::GetLocal, LINE);
-                        self.emit_byte(temp_slot as u8, LINE);
+                        self.emit(Op::StoreLocal, LINE);
+                        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+                        self.emit(Op::LoadLocal, LINE);
+                        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
                         self.emit(Op::Undefined, LINE);
-                        self.emit(Op::StrictEq, LINE);
-                        self.emit(Op::JumpIfFalse, LINE);
+                        // Use CompareJump: cond_type 6 = StrictEq, jump if true
+                        self.emit_with_payload(Op::CompareJump, 6, LINE);
                         let skip_default = self.chunk.code.len();
                         self.emit_byte(0, LINE);
                         self.emit_byte(0, LINE);
                         self.compile_expr_oast(init)?;
-                        self.emit(Op::SetLocal, LINE);
-                        self.emit_byte(temp_slot as u8, LINE);
+                        self.emit(Op::StoreLocal, LINE);
+                        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+                        if Self::is_anonymous_function_definition(init) {
+                            self.emit_get_builtin_name("setFunctionNameIfAnonymous");
+                            self.emit(Op::LoadLocal, LINE);
+                            self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+                            self.emit_constant(Value::String(p.binding.name.to_string()), LINE);
+                            self.emit(Op::Call, LINE);
+                            self.emit_byte(2, LINE);
+                            self.emit(Op::StoreLocal, LINE);
+                            self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+                        }
                         self.patch_jump(skip_default);
-                        self.emit(Op::GetLocal, LINE);
-                        self.emit_byte(temp_slot as u8, LINE);
+                        self.emit(Op::LoadLocal, LINE);
+                        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
                     }
                     self.store_assignment_identifier(p.binding.name.as_str())?;
                 }
@@ -394,96 +490,103 @@ impl super::Compiler {
             }
             oast::BindingPattern::AssignmentPattern(a) => {
                 let temp_slot = self.alloc_temp_local("binding_default");
-                self.emit(Op::SetLocal, LINE);
-                self.emit_byte(temp_slot as u8, LINE);
-                self.emit(Op::GetLocal, LINE);
-                self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::StoreLocal, LINE);
+                self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
                 self.emit(Op::Undefined, LINE);
-                self.emit(Op::StrictEq, LINE);
-                self.emit(Op::JumpIfFalse, LINE);
+                // Use CompareJump: cond_type 6 = StrictEq, jump if true
+                self.emit_with_payload(Op::CompareJump, 6, LINE);
                 let skip_default = self.chunk.code.len();
                 self.emit_byte(0, LINE);
                 self.emit_byte(0, LINE);
                 self.compile_expr_oast(&a.right)?;
-                self.emit(Op::SetLocal, LINE);
-                self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::StoreLocal, LINE);
+                self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+                if let Some(name) = Self::binding_identifier_name(&a.left)
+                    && Self::is_anonymous_function_definition(&a.right)
+                {
+                    self.emit_get_builtin_name("setFunctionNameIfAnonymous");
+                    self.emit(Op::LoadLocal, LINE);
+                    self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+                    self.emit_constant(Value::String(name), LINE);
+                    self.emit(Op::Call, LINE);
+                    self.emit_byte(2, LINE);
+                    self.emit(Op::StoreLocal, LINE);
+                    self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+                }
                 self.patch_jump(skip_default);
-                self.emit(Op::GetLocal, LINE);
-                self.emit_byte(temp_slot as u8, LINE);
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
                 self.compile_binding_pattern_assignment_oast(&a.left, kind)?;
             }
             oast::BindingPattern::ArrayPattern(a) => {
                 self.emit_get_builtin_name("requireObjectCoercible");
                 self.emit(Op::Swap, LINE);
-                self.emit(Op::CallIC, LINE);
+                self.emit(Op::Call, LINE);
                 self.emit_byte(1, LINE);
-                if a.rest.is_none() {
-                    let iterator_slot = self.alloc_temp_local("array_binding_iterator");
-                    self.emit(Op::Dup, LINE);
-                    self.emit_get_global_name("Symbol");
-                    self.emit_constant(Value::String("iterator".to_string()), LINE);
-                    self.emit(Op::GetPropertyIC, LINE);
-                    let iterator_ic = self.alloc_ic_slot()?;
-                    self.emit_byte(iterator_ic, LINE);
-                    self.emit(Op::GetProperty, LINE);
-                    self.emit(Op::CallMethod, LINE);
-                    self.emit_byte(0, LINE);
-                    self.emit(Op::SetLocal, LINE);
-                    self.emit_byte(iterator_slot as u8, LINE);
+                let iterator_slot = self.alloc_temp_local("array_binding_iterator");
+                self.emit(Op::Dup, LINE);
+                self.emit_get_global_name("Symbol");
+                self.emit_constant(Value::String("iterator".to_string()), LINE);
+                self.emit(Op::GetProperty, LINE);
+                let iterator_ic = self.alloc_ic_slot()?;
+                self.emit_byte(iterator_ic, LINE);
+                self.emit(Op::GetProperty, LINE);
+                self.emit(Op::Call, LINE);
+                self.emit_byte(0, LINE);
+                self.emit(Op::StoreLocal, LINE);
+                self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
 
-                    for el in &a.elements {
-                        self.emit(Op::GetLocal, LINE);
-                        self.emit_byte(iterator_slot as u8, LINE);
-                        self.emit(Op::IteratorNext, LINE);
+                for el in &a.elements {
+                    self.emit(Op::LoadLocal, LINE);
+                    self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+                    self.emit(Op::IteratorNext, LINE);
 
-                        if let Some(el) = el {
-                            self.emit(Op::Dup, LINE);
-                            self.emit_constant(Value::String("done".to_string()), LINE);
-                            self.emit(Op::GetProperty, LINE);
-                            self.emit(Op::JumpIfTrue, LINE);
-                            let done_jump = self.chunk.code.len();
-                            self.emit_byte(0, LINE);
-                            self.emit_byte(0, LINE);
-                            self.emit_constant(Value::String("value".to_string()), LINE);
-                            self.emit(Op::GetProperty, LINE);
-                            self.compile_binding_pattern_assignment_oast(el, kind)?;
-                            self.emit(Op::Jump, LINE);
-                            let after_jump = self.chunk.code.len();
-                            self.emit_byte(0, LINE);
-                            self.emit_byte(0, LINE);
-                            self.patch_jump(done_jump);
-                            self.emit(Op::Pop, LINE);
-                            self.emit(Op::Undefined, LINE);
-                            self.compile_binding_pattern_assignment_oast(el, kind)?;
-                            self.patch_jump(after_jump);
-                        } else {
-                            self.emit(Op::Pop, LINE);
-                        }
-                    }
-
-                    self.emit(Op::GetLocal, LINE);
-                    self.emit_byte(iterator_slot as u8, LINE);
-                    self.emit(Op::IteratorClose, LINE);
-                    self.emit(Op::Pop, LINE);
-                } else {
-                    for (idx, el) in a.elements.iter().enumerate() {
-                        let Some(el) = el else { continue };
+                    if let Some(el) = el {
                         self.emit(Op::Dup, LINE);
-                        self.emit_constant(Value::String(idx.to_string()), LINE);
+                        self.emit_constant(Value::String("done".to_string()), LINE);
+                        self.emit(Op::GetProperty, LINE);
+                        self.emit(Op::JumpIfTrue, LINE);
+                        let done_jump = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.emit_constant(Value::String("value".to_string()), LINE);
                         self.emit(Op::GetProperty, LINE);
                         self.compile_binding_pattern_assignment_oast(el, kind)?;
+                        self.emit(Op::Jump, LINE);
+                        let after_jump = self.chunk.code.len();
+                        self.emit_byte(0, LINE);
+                        self.emit_byte(0, LINE);
+                        self.patch_jump(done_jump);
+                        self.emit(Op::Pop, LINE);
+                        self.emit(Op::Undefined, LINE);
+                        self.compile_binding_pattern_assignment_oast(el, kind)?;
+                        self.patch_jump(after_jump);
+                    } else {
+                        self.emit(Op::Pop, LINE);
                     }
-                    if let Some(rest) = &a.rest {
-                        self.emit(Op::Dup, LINE);
-                        self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
-                    }
+                }
+
+                if let Some(rest) = &a.rest {
+                    self.emit(Op::LoadLocal, LINE);
+                    self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+                    self.emit_get_builtin_name("iteratorToArray");
+                    self.emit(Op::Swap, LINE);
+                    self.emit(Op::Call, LINE);
+                    self.emit_byte(1, LINE);
+                    self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
+                } else {
+                    self.emit(Op::LoadLocal, LINE);
+                    self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+                    self.emit(Op::IteratorClose, LINE);
                     self.emit(Op::Pop, LINE);
                 }
             }
             oast::BindingPattern::ObjectPattern(o) => {
                 self.emit_get_builtin_name("requireObjectCoercible");
                 self.emit(Op::Swap, LINE);
-                self.emit(Op::CallIC, LINE);
+                self.emit(Op::Call, LINE);
                 self.emit_byte(1, LINE);
                 for prop in &o.properties {
                     let key = Self::binding_property_key_to_value(&prop.key).ok_or_else(|| {

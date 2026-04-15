@@ -153,9 +153,9 @@ impl super::Compiler {
                     "SyntaxError: super used outside of a method",
                 ));
             }
-            return Err(crate::errors::CompilerError::from(
-                "direct super() calls are not supported yet",
-            ));
+            let arg_count = self.compile_call_arguments(&c.arguments)?;
+            self.emit_call_with_arg_count(Op::SuperConstruct, arg_count)?;
+            return Ok(());
         }
 
         if let OExpr::StaticMemberExpression(m) = &c.callee
@@ -168,7 +168,7 @@ impl super::Compiler {
             }
             self.emit_super_property_get_static(m.property.name.as_str(), true)?;
             let arg_count = self.compile_call_arguments(&c.arguments)?;
-            self.emit_call_with_arg_count(Op::CallMethod, arg_count)?;
+            self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
             return Ok(());
         }
 
@@ -182,18 +182,18 @@ impl super::Compiler {
             }
             self.emit_super_property_get_computed(&m.expression, true)?;
             let arg_count = self.compile_call_arguments(&c.arguments)?;
-            self.emit_call_with_arg_count(Op::CallMethod, arg_count)?;
+            self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
             return Ok(());
         }
 
         if let oast::Expression::StaticMemberExpression(m) = &c.callee {
-            let is_optional_call = c.optional;
+            let _is_optional_call = c.optional;
 
             if m.optional {
                 self.compile_optional_member_access(&m.object, |this| {
                     this.emit(Op::Dup, LINE);
                     this.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                    this.emit(Op::GetPropertyIC, LINE);
+                    this.emit(Op::GetProperty, LINE);
                     let slot = this.alloc_ic_slot()?;
                     this.emit_byte(slot, LINE);
                     Ok(())
@@ -202,25 +202,18 @@ impl super::Compiler {
                 self.compile_expr_oast(&m.object)?;
                 self.emit(Op::Dup, LINE);
                 self.emit_constant(Value::String(m.property.name.to_string()), LINE);
-                self.emit(Op::GetPropertyIC, LINE);
+                self.emit(Op::GetProperty, LINE);
                 let slot = self.alloc_ic_slot()?;
                 self.emit_byte(slot, LINE);
             }
 
             let arg_count = self.compile_call_arguments(&c.arguments)?;
-            self.emit_call_with_arg_count(
-                if is_optional_call {
-                    Op::Call
-                } else {
-                    Op::CallMethod
-                },
-                arg_count,
-            )?;
+            self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
             return Ok(());
         }
 
         if let oast::Expression::ComputedMemberExpression(m) = &c.callee {
-            let is_optional_call = c.optional;
+            let _is_optional_call = c.optional;
 
             if m.optional {
                 self.compile_optional_member_access(&m.object, |this| {
@@ -237,19 +230,12 @@ impl super::Compiler {
             }
 
             let arg_count = self.compile_call_arguments(&c.arguments)?;
-            self.emit_call_with_arg_count(
-                if is_optional_call {
-                    Op::Call
-                } else {
-                    Op::CallMethod
-                },
-                arg_count,
-            )?;
+            self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
             return Ok(());
         }
 
         if let oast::Expression::PrivateFieldExpression(m) = &c.callee {
-            let is_optional_call = c.optional;
+            let _is_optional_call = c.optional;
 
             if m.optional {
                 self.compile_optional_member_access(&m.object, |this| {
@@ -268,14 +254,7 @@ impl super::Compiler {
             }
 
             let arg_count = self.compile_call_arguments(&c.arguments)?;
-            self.emit_call_with_arg_count(
-                if is_optional_call {
-                    Op::Call
-                } else {
-                    Op::CallMethod
-                },
-                arg_count,
-            )?;
+            self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
             return Ok(());
         }
 
@@ -300,7 +279,7 @@ impl super::Compiler {
 
         self.compile_expr_oast(&c.callee)?;
         let arg_count = self.compile_call_arguments(&c.arguments)?;
-        self.emit_call_with_arg_count(Op::CallIC, arg_count)
+        self.emit_call_with_arg_count(Op::Call, arg_count)
     }
 
     fn compile_tagged_template_tail(
@@ -326,7 +305,7 @@ impl super::Compiler {
         }
         self.emit(Op::BuildArray, LINE);
         self.emit_byte(self.checked_arg_count(t.quasi.quasis.len())?, LINE);
-        self.emit(Op::SetPropertyIC, LINE);
+        self.emit(Op::SetProperty, LINE);
         let slot = self.alloc_ic_slot()?;
         self.emit_byte(slot, LINE);
         self.emit(Op::Pop, LINE);
@@ -335,7 +314,7 @@ impl super::Compiler {
             self.compile_expr_oast(sub)?;
             arg_count += 1;
         }
-        self.emit_call_with_arg_count(Op::CallIC, arg_count)
+        self.emit_call_with_arg_count(Op::Call, arg_count)
     }
 
     pub(super) fn compile_expr_oast_tail(

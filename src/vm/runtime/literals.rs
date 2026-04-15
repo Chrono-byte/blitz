@@ -1,8 +1,8 @@
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::mutex_compat::MutexBorrowExt;
-use crate::runtime_utils::array_length_descriptor;
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::runtime_utils::{array_length_descriptor, usize_to_f64};
+use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 use crate::vm::runtime::execution::{ensure_slot, get_property};
 use std::cell::RefCell;
@@ -22,7 +22,7 @@ impl Vm {
         }
         elems.reverse();
 
-        let arr_rc = Rc::new(RefCell::new(elems));
+        let arr_rc = Rc::new(RefCell::new(ArrayData::from(elems)));
         let props: Rc<RefCell<ObjectData>> =
             gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         props.borrow_mut().properties.insert(
@@ -45,7 +45,6 @@ impl Vm {
         {
             props.borrow_mut().set_prototype_value(proto_val);
         }
-        self.property_get_ic_cache.clear();
 
         self.stack
             .push(Value::Array(Rc::clone(&arr_rc), Rc::clone(&props)));
@@ -93,7 +92,7 @@ impl Vm {
         {
             data.set_prototype_value(proto_val);
         }
-        self.property_get_ic_cache.clear();
+
         let obj_rc = gc::track_object(Rc::new(RefCell::new(data)));
         self.stack.push(Value::Object(Rc::clone(&obj_rc)));
         if crate::trace::enabled() {
@@ -236,7 +235,7 @@ impl Vm {
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
             PropertyDescriptor::Data {
-                value: Value::Number(closure_proto.arity as f64),
+                value: Value::Number(usize_to_f64(closure_proto.arity)),
                 writable: false,
                 enumerable: false,
                 configurable: true,

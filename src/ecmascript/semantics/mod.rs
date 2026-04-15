@@ -24,6 +24,7 @@ pub mod shadowrealm;
 pub mod uri;
 
 pub(crate) use crate::runtime_utils::same_value_zero;
+pub(crate) use crate::value::ArrayData;
 pub(crate) use intrinsics::{
     builtin_object, install_minimal_kernel_constructors, set_builtin_length, set_builtin_name,
 };
@@ -34,6 +35,7 @@ fn json_value_identity(value: &Value) -> Option<usize> {
     match value {
         Value::Object(obj) => Some(Rc::as_ptr(obj) as usize),
         Value::Array(arr, _) => Some(Rc::as_ptr(arr) as usize),
+        Value::Proxy(proxy) => Some(Rc::as_ptr(proxy) as usize),
         Value::Closure { props, .. } => Some(Rc::as_ptr(props) as usize),
         Value::BuiltinObject(_, props) => Some(Rc::as_ptr(props) as usize),
         Value::Promise(state) => Some(Rc::as_ptr(state) as usize),
@@ -46,6 +48,22 @@ fn with_object_data_mut<T>(value: &Value, f: impl FnOnce(&mut ObjectData) -> T) 
         Value::Object(obj) => Some(f(&mut obj.borrow_mut())),
         Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
             Some(f(&mut props.borrow_mut()))
+        }
+        Value::Proxy(proxy) => {
+            let proxy = proxy.borrow();
+            if proxy.is_revoked() {
+                None
+            } else if let Value::Object(obj) = &proxy.target {
+                Some(f(&mut obj.borrow_mut()))
+            } else if let Value::Array(_, props) = &proxy.target {
+                Some(f(&mut props.borrow_mut()))
+            } else if let Value::Closure { props, .. } = &proxy.target {
+                Some(f(&mut props.borrow_mut()))
+            } else if let Value::BuiltinObject(_, props) = &proxy.target {
+                Some(f(&mut props.borrow_mut()))
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -74,6 +92,31 @@ fn own_properties_frozen(value: &Value) -> bool {
 }
 
 fn array_like_length(vm: &mut Vm, receiver: &Value) -> Result<usize, RuntimeError> {
+    if let Value::Array(_, props) = receiver {
+        let props_ref = props.borrow();
+        if let Some(PropertyDescriptor::Data {
+            value: Value::Number(len_num),
+            ..
+        }) = props_ref
+            .properties
+            .get(&PropertyKey::String("length".to_string()))
+        {
+            let max_safe_len = 9_007_199_254_740_991u128;
+            if len_num.is_nan() || *len_num <= 0.0 {
+                return Ok(0);
+            }
+            if !len_num.is_finite() {
+                return Err(vm.throw_range_error("Invalid array length"));
+            }
+            let len = len_num
+                .trunc()
+                .to_u128()
+                .unwrap_or(max_safe_len)
+                .min(max_safe_len);
+            return Ok(len as usize);
+        }
+    }
+
     let len_val = vm.get_property_host(receiver, &PropertyKey::String("length".to_string()))?;
     let len_num = vm.to_number_value(&len_val)?;
     let max_safe_len = 9_007_199_254_740_991u128;
@@ -81,7 +124,7 @@ fn array_like_length(vm: &mut Vm, receiver: &Value) -> Result<usize, RuntimeErro
         return Ok(0);
     }
     if !len_num.is_finite() {
-        return Ok(max_safe_len as usize);
+        return Err(vm.throw_range_error("Invalid array length"));
     }
     let len = len_num
         .trunc()
@@ -197,7 +240,7 @@ fn json_stringify_value(
             seen.remove(&identity);
             Some(format!("[{}]", parts.join(",")))
         }
-        Value::Object(_) | Value::Promise(_) => {
+        Value::Object(_) | Value::Proxy(_) | Value::Promise(_) => {
             let identity = json_value_identity(value).expect("object-like value has identity");
             if !seen.insert(identity) {
                 return Err(vm.throw_type_error("Converting circular structure to JSON"));

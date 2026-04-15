@@ -81,9 +81,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
 
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
+                if len > u32::MAX as usize {
+                    return Err(vm.throw_range_error("Invalid array length"));
+                }
                 let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
                 for i in 0..len {
                     let key = PKey::String(i.to_string());
@@ -103,7 +104,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     }
                 }
 
-                let arr_rc = Rc::new(RefCell::new(out));
+                let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                 let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
                 props
                     .borrow_mut()
@@ -256,9 +257,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let array_proto_map = array_proto_map.clone();
                 move |vm, args| {
                     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                    let len_val =
-                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                    let len = to_length(vm, &len_val)?;
+                    let len = array_like_length(vm, &receiver)?;
                     let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
                     for k in 0..len {
                         let from = len - 1 - k;
@@ -269,7 +268,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             out.push(None);
                         }
                     }
-                    let arr_rc = Rc::new(RefCell::new(out));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -296,9 +295,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         compare_fn,
                         Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. }
                     );
-                    let len_val =
-                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                    let len = to_length(vm, &len_val)?;
+                    let len = array_like_length(vm, &receiver)?;
                     let mut values: Vec<Value> = Vec::new();
                     let mut undefined_count = 0usize;
                     let mut hole_count = 0usize;
@@ -341,7 +338,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     }
                     let mut out: Vec<Option<Value>> = values.into_iter().map(Some).collect();
                     out.extend((0..hole_count).map(|_| None));
-                    let arr_rc = Rc::new(RefCell::new(out));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -364,9 +361,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     let array_proto_map = array_proto_map.clone();
                     move |vm, args| {
                         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                        let len_val =
-                            vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                        let len = to_length(vm, &len_val)?;
+                        let len = array_like_length(vm, &receiver)?;
                         let relative_index =
                             to_integer_or_infinity(vm, args.get(1).unwrap_or(&Value::Undefined))?;
                         let actual_index = if relative_index < 0 {
@@ -397,7 +392,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             };
                             out.push(Some(value));
                         }
-                        let arr_rc = Rc::new(RefCell::new(out));
+                        let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                         let props = Rc::new(RefCell::new(ObjectData::new()));
                         props
                             .borrow_mut()
@@ -492,7 +487,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         for i in 0..actual_delete_count {
                             removed.push(snapshot.get(&(start + i)).cloned());
                         }
-                        let removed_arr = Rc::new(RefCell::new(removed));
+                        let removed_arr = Rc::new(RefCell::new(ArrayData::from(removed)));
                         let removed_props = Rc::new(RefCell::new(ObjectData::new()));
                         removed_props
                             .borrow_mut()
@@ -540,7 +535,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         vm.set_property_host(
                             &this,
                             &Value::String("length".to_string()),
-                            Value::Number(new_len as f64),
+                            Value::Number(usize_to_f64(new_len)),
                         )?;
                         Ok(Value::Array(removed_arr, removed_props))
                     }
@@ -591,7 +586,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     vm.set_property_host(
                         &this,
                         &Value::String("length".to_string()),
-                        Value::Number((len - 1) as f64),
+                        Value::Number(usize_to_f64(len - 1)),
                     )?;
                     Ok(result)
                 }),
@@ -651,7 +646,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     vm.set_property_host(
                         &this,
                         &Value::String("length".to_string()),
-                        Value::Number(new_len as f64),
+                        Value::Number(usize_to_f64(new_len)),
                     )?;
                     Ok(Value::Number(usize_to_f64(new_len)))
                 }),
@@ -667,18 +662,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let array_proto_map = array_proto_map.clone();
                 move |vm, args| {
                     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                    let len_val =
-                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                    let len_num = vm.to_number_value(&len_val)?;
+                    let len = array_like_length(vm, &receiver)?;
                     let max_safe_len = 9_007_199_254_740_991u128;
-                    let len = if !len_num.is_finite() || len_num <= 0.0 {
+                    let len = if len == 0 {
                         0usize
                     } else {
-                        len_num
-                            .trunc()
-                            .to_u128()
-                            .unwrap_or(max_safe_len)
-                            .min(max_safe_len) as usize
+                        len.min(max_safe_len as usize)
                     };
                     let insert_count = args.len().saturating_sub(3);
                     let start_raw =
@@ -729,7 +718,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             out.push(None);
                         }
                     }
-                    let arr_rc = Rc::new(RefCell::new(out));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -766,7 +755,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         append(arg)?;
                     }
 
-                    let arr_rc = Rc::new(RefCell::new(out));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                     let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -876,7 +865,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     };
                     iter_obj.borrow_mut().properties.insert(
                         PKey::String("[[ArrayIteratorNextIndex]]".to_string()),
-                        PropertyDescriptor::data(Value::Number((index + 1) as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(index + 1))),
                     );
                     result.borrow_mut().properties.insert(
                         PKey::String("done".to_string()),
@@ -951,9 +940,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
 
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
                 let mut out: Vec<Option<Value>> = Vec::new();
 
                 for i in 0..len {
@@ -976,7 +963,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     }
                 }
 
-                let arr_rc = Rc::new(RefCell::new(out));
+                let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                 let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
                 props
                     .borrow_mut()
@@ -999,9 +986,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
                 let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
 
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
 
                 for i in 0..len {
                     let key = PKey::String(i.to_string());
@@ -1032,9 +1017,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         PropertyDescriptor::data(builtin_object(
             Rc::new(move |vm, args| {
                 let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
                 let index = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
                 if index.is_nan() {
                     return Ok(Value::Undefined);
@@ -1064,9 +1047,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             Rc::new(move |vm, args| {
                 let receiver = args.first().cloned().unwrap_or(Value::Undefined);
                 let search = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
                 let from_index = args.get(2).cloned().unwrap_or(Value::Number(0.0));
                 let mut k = match vm.to_number_value(&from_index)? {
                     n if n.is_nan() => 0isize,
@@ -1097,9 +1078,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             Rc::new(move |vm, args| {
                 let receiver = args.first().cloned().unwrap_or(Value::Undefined);
                 let search = args.get(1).cloned().unwrap_or(Value::Undefined);
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
                 let from_index = args.get(2).cloned().unwrap_or(Value::Number(0.0));
                 let mut k = match vm.to_number_value(&from_index)? {
                     n if n.is_nan() => 0isize,
@@ -1130,10 +1109,25 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             Rc::new({
                 let array_proto_for_slice = array_proto_map.clone();
                 move |vm, args| {
+                    fn is_array_value(value: &Value) -> bool {
+                        match value {
+                            Value::Array(..) => true,
+                            Value::Proxy(proxy) => {
+                                let target = {
+                                    let proxy = proxy.borrow();
+                                    if proxy.is_revoked() {
+                                        return false;
+                                    }
+                                    proxy.target.clone()
+                                };
+                                is_array_value(&target)
+                            }
+                            _ => false,
+                        }
+                    }
+
                     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-                    let len_val =
-                        vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                    let len = to_length(vm, &len_val)?;
+                    let len = array_like_length(vm, &receiver)?;
                     let start_raw =
                         vm.to_number_value(args.get(1).unwrap_or(&Value::Number(0.0)))?;
                     let start = if start_raw.is_nan() {
@@ -1144,39 +1138,119 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     } else {
                         start_raw.trunc().to_usize().unwrap_or(len).min(len)
                     };
-                    let end = if let Some(end_arg) = args.get(2) {
-                        let end_raw = vm.to_number_value(end_arg)?;
-                        if end_raw.is_nan() {
-                            0usize
-                        } else if end_raw < 0.0 {
-                            let back = end_raw.trunc().abs().to_usize().unwrap_or(len);
-                            len.saturating_sub(back)
-                        } else {
-                            end_raw.trunc().to_usize().unwrap_or(len).min(len)
+                    let end = match args.get(2) {
+                        None | Some(Value::Undefined) => len,
+                        Some(end_arg) => {
+                            let end_raw = vm.to_number_value(end_arg)?;
+                            if end_raw.is_nan() {
+                                0usize
+                            } else if end_raw < 0.0 {
+                                let back = end_raw.trunc().abs().to_usize().unwrap_or(len);
+                                len.saturating_sub(back)
+                            } else {
+                                end_raw.trunc().to_usize().unwrap_or(len).min(len)
+                            }
                         }
-                    } else {
-                        len
                     };
                     let end = end.max(start);
-                    let mut out: Vec<Option<Value>> = Vec::with_capacity(end.saturating_sub(start));
+                    let slice_len = end.saturating_sub(start);
+                    if slice_len > u32::MAX as usize {
+                        return Err(vm.throw_range_error("Invalid array length"));
+                    }
+                    let array_ctor = vm.get_global("Array").unwrap_or(Value::Undefined);
+                    let species_ctor = if is_array_value(&receiver) {
+                        let ctor = vm.get_property_host(
+                            &receiver,
+                            &PKey::String("constructor".to_string()),
+                        )?;
+                        match ctor {
+                            Value::Undefined | Value::Null => array_ctor,
+                            v if !matches!(
+                                v,
+                                Value::Object(..)
+                                    | Value::Array(..)
+                                    | Value::Closure { .. }
+                                    | Value::BuiltinObject(_, _)
+                                    | Value::Proxy(_)
+                            ) =>
+                            {
+                                return Err(
+                                    vm.throw_type_error("constructor property is not an object")
+                                );
+                            }
+                            ctor_obj => {
+                                let species = vm.get_property_host(
+                                    &ctor_obj,
+                                    &PKey::Symbol(SymbolId::well_known_species()),
+                                )?;
+                                match species {
+                                    Value::Undefined | Value::Null => array_ctor,
+                                    _ if !species.is_constructable() => {
+                                        return Err(vm.throw_type_error(
+                                            "constructor[Symbol.species] is not a constructor",
+                                        ));
+                                    }
+                                    _ => species,
+                                }
+                            }
+                        }
+                    } else {
+                        array_ctor
+                    };
+                    let result = vm.construct_value(
+                        &species_ctor,
+                        &[Value::Number(usize_to_f64(slice_len))],
+                    )?;
+                    if let Ok(proto) =
+                        vm.get_property_host(&species_ctor, &PKey::String("prototype".to_string()))
+                        && matches!(
+                            proto,
+                            Value::Object(..)
+                                | Value::Array(..)
+                                | Value::Closure { .. }
+                                | Value::BuiltinObject(_, _)
+                        )
+                    {
+                        match &result {
+                            Value::Object(data) => {
+                                data.borrow_mut().set_prototype_value(proto);
+                            }
+                            Value::Array(_, props) => {
+                                props.borrow_mut().set_prototype_value(proto);
+                            }
+                            Value::Closure { props, .. } => {
+                                props.borrow_mut().set_prototype_value(proto);
+                            }
+                            Value::BuiltinObject(_, props) => {
+                                props.borrow_mut().set_prototype_value(proto);
+                            }
+                            _ => {}
+                        }
+                    };
                     for i in start..end {
                         let key = PKey::String(i.to_string());
+                        let out_key = Value::String((i - start).to_string());
                         if vm.has_property_host(&receiver, &key)? {
-                            out.push(Some(vm.get_property_host(&receiver, &key)?));
+                            let item = vm.get_property_host(&receiver, &key)?;
+                            vm.set_property_host(&result, &out_key, item)?;
                         } else {
-                            out.push(None);
+                            let _ = vm.delete_property_host(
+                                &result,
+                                &PKey::String((i - start).to_string()),
+                            )?;
                         }
                     }
-                    let arr_rc = Rc::new(RefCell::new(out));
-                    let props = Rc::new(RefCell::new(ObjectData::new()));
-                    props
-                        .borrow_mut()
-                        .set_prototype_value(Value::Object(array_proto_for_slice.clone()));
-                    props.borrow_mut().properties.insert(
-                        PKey::String("length".to_string()),
-                        array_length_descriptor(arr_rc.borrow().len()),
-                    );
-                    Ok(Value::Array(arr_rc, props))
+                    vm.set_property_host(
+                        &result,
+                        &Value::String("length".to_string()),
+                        Value::Number(usize_to_f64(slice_len)),
+                    )?;
+                    if let Value::Array(_, props) = &result {
+                        props
+                            .borrow_mut()
+                            .set_prototype_value(Value::Object(array_proto_for_slice.clone()));
+                    }
+                    Ok(result)
                 }
             }),
             &function_proto_map,
@@ -1190,9 +1264,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 let receiver = args.first().cloned().unwrap_or(Value::Undefined);
                 let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
 
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
 
                 let mut i = 0;
                 let mut accumulator = if args.len() > 2 {
@@ -1258,9 +1330,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     1
                 };
 
-                let len_val =
-                    vm.get_property_host(&receiver, &PKey::String("length".to_string()))?;
-                let len = to_length(vm, &len_val)?;
+                let len = array_like_length(vm, &receiver)?;
                 let mut out: Vec<Option<Value>> = Vec::new();
 
                 for i in 0..len {
@@ -1294,7 +1364,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     }
                 }
 
-                let arr_rc = Rc::new(RefCell::new(out));
+                let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                 let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
                 props
                     .borrow_mut()
@@ -1322,10 +1392,16 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     to_integer_or_infinity(vm, args.get(2).unwrap_or(&Value::Undefined))?,
                     len,
                 );
-                let final_ = clamp_relative_index(
-                    to_integer_or_infinity(vm, args.get(3).unwrap_or(&Value::Undefined))?,
-                    len,
-                );
+                let final_ = if let Some(end_arg) = args.get(3) {
+                    clamp_relative_index(to_integer_or_infinity(vm, end_arg)?, len)
+                } else {
+                    len
+                };
+                if let Value::Array(arr, _) = &receiver
+                    && arr.borrow_mut().copy_within_dense_numbers(to, from, final_)
+                {
+                    return Ok(receiver);
+                }
                 let count = final_.saturating_sub(from).min(len.saturating_sub(to));
                 let mut snapshot: Vec<Option<Value>> = Vec::with_capacity(count);
                 for i in 0..count {
@@ -1393,6 +1469,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 } else {
                     len
                 };
+                if let Value::Array(arr, _) = &receiver
+                    && let Value::Number(n) = &fill_value
+                    && arr.borrow_mut().fill_dense_numbers(start, end, *n)
+                {
+                    return Ok(receiver);
+                }
                 for i in start..end {
                     let key = Value::String(i.to_string());
                     vm.set_property_host(&receiver, &key, fill_value.clone())?;
@@ -1543,7 +1625,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             }
                         }
                     }
-                    let arr_rc = Rc::new(RefCell::new(out));
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props
                         .borrow_mut()
@@ -1583,7 +1665,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 vm.set_property_host(
                     &receiver,
                     &Value::String("length".to_string()),
-                    Value::Number(index as f64),
+                    Value::Number(usize_to_f64(index)),
                 )?;
                 Ok(result)
             }),
@@ -1853,8 +1935,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         }
         Ok(result)
     });
-    let function_ctor_val =
-        Value::BuiltinObject(function_ctor_fn.clone(), function_ctor_map.clone());
+    let function_ctor_val = Value::BuiltinObject(function_ctor_fn, function_ctor_map);
     let function_call_val = builtin_object(
         Rc::new(|vm, args| {
             let callee = args.first().cloned().unwrap_or(Value::Undefined);
@@ -1905,10 +1986,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             target, bound_this, bound_args
                         );
                     }
-                    let bound_target = target;
-                    let bound_this_arg = bound_this;
-                    let prefix_args = bound_args;
-                    Ok(builtin_object(
+                    let bound_target = target.clone();
+                    let bound_this_arg = bound_this.clone();
+                    let prefix_args = bound_args.clone();
+                    let bound_fn = builtin_object(
                         Rc::new(move |vm, call_args| {
                             if crate::trace::enabled() {
                                 eprintln!(
@@ -1925,7 +2006,22 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             vm.call_value_with_this(&bound_target, &bound_this_arg, &combined)
                         }),
                         &function_proto_map,
-                    ))
+                    );
+                    if let Value::BuiltinObject(_, props) = &bound_fn {
+                        props.borrow_mut().properties.insert(
+                            PKey::String("[[BoundTargetFunction]]".to_string()),
+                            PropertyDescriptor::data(target),
+                        );
+                        props.borrow_mut().properties.insert(
+                            PKey::String("[[BoundThis]]".to_string()),
+                            PropertyDescriptor::data(bound_this),
+                        );
+                        props.borrow_mut().properties.insert(
+                            PKey::String("[[BoundArguments]]".to_string()),
+                            PropertyDescriptor::data(array_from_values(bound_args)),
+                        );
+                    }
+                    Ok(bound_fn)
                 }
             }),
             &function_proto_map,
@@ -2521,15 +2617,31 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         let proto_map_rc = arraybuffer_proto_map.clone();
         Rc::new(move |_vm, args| {
             // Get length argument with ToLength semantics (RangeError on Infinity).
+            let instance_proto = _vm
+                .current_new_target()
+                .and_then(|new_target| {
+                    _vm.get_property_host(&new_target, &PKey::String("prototype".to_string()))
+                        .ok()
+                })
+                .and_then(|proto| match proto {
+                    Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::BuiltinObject(_, _) => Some(proto),
+                    _ => None,
+                })
+                .unwrap_or_else(|| Value::Object(proto_map_rc.clone()));
             let length_value = args.get(1).cloned().unwrap_or(Value::Undefined);
             let length = to_length(_vm, &length_value)?;
 
-            let mut arraybuffer_obj_data =
-                ObjectData::with_prototype(Value::Object(proto_map_rc.clone()));
+            let mut arraybuffer_obj_data = ObjectData::with_prototype(instance_proto);
             arraybuffer_obj_data.properties.insert(
                 PropertyKey::String("[[ArrayBufferData]]".to_string()),
                 PropertyDescriptor::data(Value::Array(
-                    Rc::new(RefCell::new(vec![Some(Value::Number(0.0)); length])),
+                    Rc::new(RefCell::new(ArrayData::from(vec![
+                        Some(Value::Number(0.0));
+                        length
+                    ]))),
                     Rc::new(RefCell::new(ObjectData::new())),
                 )),
             );
@@ -2566,15 +2678,31 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     let sharedarraybuffer_ctor_fn: BuiltinFn = {
         let proto_map_rc = sharedarraybuffer_proto_map.clone();
         Rc::new(move |vm, args| {
+            let instance_proto = vm
+                .current_new_target()
+                .and_then(|new_target| {
+                    vm.get_property_host(&new_target, &PKey::String("prototype".to_string()))
+                        .ok()
+                })
+                .and_then(|proto| match proto {
+                    Value::Object(_)
+                    | Value::Array(..)
+                    | Value::Closure { .. }
+                    | Value::BuiltinObject(_, _) => Some(proto),
+                    _ => None,
+                })
+                .unwrap_or_else(|| Value::Object(proto_map_rc.clone()));
             let length_value = args.get(1).cloned().unwrap_or(Value::Undefined);
             let length = to_length(vm, &length_value)?;
 
-            let mut arraybuffer_obj_data =
-                ObjectData::with_prototype(Value::Object(proto_map_rc.clone()));
+            let mut arraybuffer_obj_data = ObjectData::with_prototype(instance_proto);
             arraybuffer_obj_data.properties.insert(
                 PropertyKey::String("[[ArrayBufferData]]".to_string()),
                 PropertyDescriptor::data(Value::Array(
-                    Rc::new(RefCell::new(vec![Some(Value::Number(0.0)); length])),
+                    Rc::new(RefCell::new(ArrayData::from(vec![
+                        Some(Value::Number(0.0));
+                        length
+                    ]))),
                     Rc::new(RefCell::new(ObjectData::new())),
                 )),
             );
@@ -2623,7 +2751,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             "TypeError: TypedArray constructor is not directly callable",
         ))
     });
-    let typedarray_ctor_val = Value::BuiltinObject(typedarray_ctor_fn, typedarray_ctor_map.clone());
+    let typedarray_ctor_val = Value::BuiltinObject(typedarray_ctor_fn, typedarray_ctor_map);
     typedarray_proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
         PropertyDescriptor::data(typedarray_ctor_val.clone()),
@@ -2683,6 +2811,23 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     let init = args.get(off).cloned().unwrap_or(Value::Undefined);
                     let byte_offset_arg = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
                     let length_arg = args.get(off + 2).cloned().unwrap_or(Value::Undefined);
+                    let instance_proto = vm
+                        .current_new_target()
+                        .and_then(|new_target| {
+                            vm.get_property_host(
+                                &new_target,
+                                &PKey::String("prototype".to_string()),
+                            )
+                            .ok()
+                        })
+                        .and_then(|proto| match proto {
+                            Value::Object(_)
+                            | Value::Array(..)
+                            | Value::Closure { .. }
+                            | Value::BuiltinObject(_, _) => Some(proto),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| Value::Object(proto_map_rc.clone()));
                     let (length, initial_values, byte_offset, view_byte_length, buffer_slot): (
                         usize,
                         Vec<Value>,
@@ -2730,57 +2875,83 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         }
                         Value::Object(_) => {
                             let buffer_value = init.clone();
-                            vm.get_property_host(
+                            let has_arraybuffer_data = vm.has_property_host(
                                 &buffer_value,
                                 &PropertyKey::String("[[ArrayBufferData]]".to_string()),
                             )?;
-                            let byte_length_value = vm.get_property_host(
-                                &buffer_value,
-                                &PropertyKey::String("byteLength".to_string()),
-                            )?;
-                            let buffer_byte_length = vm.to_number_value(&byte_length_value)?;
-                            if !buffer_byte_length.is_finite() || buffer_byte_length < 0.0 {
-                                return Err(vm.throw_range_error("Invalid typed array length"));
-                            }
-                            let buffer_byte_length =
-                                buffer_byte_length.trunc().to_usize().unwrap_or(0);
-                            let byte_offset = if matches!(byte_offset_arg, Value::Undefined) {
-                                0
-                            } else {
-                                to_index(vm, &byte_offset_arg)?
-                            };
-                            if !is_byte_offset_aligned(byte_offset, $element_count) {
-                                return Err(vm.throw_range_error("Invalid typed array offset"));
-                            }
-                            let length_from_spec = if matches!(length_arg, Value::Undefined) {
-                                if buffer_byte_length < byte_offset {
+                            if has_arraybuffer_data {
+                                let byte_length_value = vm.get_property_host(
+                                    &buffer_value,
+                                    &PropertyKey::String("byteLength".to_string()),
+                                )?;
+                                let buffer_byte_length = vm.to_number_value(&byte_length_value)?;
+                                if !buffer_byte_length.is_finite() || buffer_byte_length < 0.0 {
                                     return Err(vm.throw_range_error("Invalid typed array length"));
                                 }
-                                (buffer_byte_length - byte_offset) / $element_count
+                                let buffer_byte_length =
+                                    buffer_byte_length.trunc().to_usize().unwrap_or(0);
+                                let byte_offset = if matches!(byte_offset_arg, Value::Undefined) {
+                                    0
+                                } else {
+                                    to_index(vm, &byte_offset_arg)?
+                                };
+                                if !is_byte_offset_aligned(byte_offset, $element_count) {
+                                    return Err(vm.throw_range_error("Invalid typed array offset"));
+                                }
+                                let length_from_spec = if matches!(length_arg, Value::Undefined) {
+                                    if buffer_byte_length < byte_offset {
+                                        return Err(
+                                            vm.throw_range_error("Invalid typed array length")
+                                        );
+                                    }
+                                    (buffer_byte_length - byte_offset) / $element_count
+                                } else {
+                                    to_index(vm, &length_arg)?
+                                };
+                                let expected_byte_length = length_from_spec * $element_count;
+                                if byte_offset + expected_byte_length > buffer_byte_length {
+                                    return Err(vm.throw_range_error("Invalid typed array length"));
+                                }
+                                (
+                                    length_from_spec,
+                                    Vec::<Value>::new(),
+                                    byte_offset,
+                                    expected_byte_length,
+                                    buffer_value,
+                                )
                             } else {
-                                to_index(vm, &length_arg)?
-                            };
-                            let expected_byte_length = length_from_spec * $element_count;
-                            if byte_offset + expected_byte_length > buffer_byte_length {
-                                return Err(vm.throw_range_error("Invalid typed array length"));
+                                let length_value = vm.get_property_host(
+                                    &buffer_value,
+                                    &PropertyKey::String("length".to_string()),
+                                )?;
+                                let length = to_length(vm, &length_value)?;
+                                let mut initial_values = Vec::with_capacity(length);
+                                for idx in 0..length {
+                                    initial_values.push(vm.get_property_host(
+                                        &buffer_value,
+                                        &PropertyKey::String(usize_to_decimal_string(idx)),
+                                    )?);
+                                }
+                                (
+                                    length,
+                                    initial_values,
+                                    0usize,
+                                    length * $element_count,
+                                    Value::Undefined,
+                                )
                             }
-                            (
-                                length_from_spec,
-                                Vec::<Value>::new(),
-                                byte_offset,
-                                expected_byte_length,
-                                buffer_value,
-                            )
                         }
                         _ => (0, Vec::<Value>::new(), 0usize, 0usize, Value::Undefined),
                     };
 
-                    let mut typed_array_data =
-                        ObjectData::with_prototype(Value::Object(proto_map_rc.clone()));
+                    let mut typed_array_data = ObjectData::with_prototype(instance_proto);
                     typed_array_data.properties.insert(
                         PropertyKey::String("[[TypedArrayData]]".to_string()),
                         PropertyDescriptor::data(Value::Array(
-                            Rc::new(RefCell::new(vec![Some($zero_value.clone()); length])),
+                            Rc::new(RefCell::new(ArrayData::from(vec![
+                                Some($zero_value.clone());
+                                length
+                            ]))),
                             Rc::new(RefCell::new(ObjectData::new())),
                         )),
                     );
@@ -3423,12 +3594,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                             names.push(name);
                         }
                     }
-                    let arr_rc = Rc::new(RefCell::new(
+                    let arr_rc = Rc::new(RefCell::new(ArrayData::from(
                         names
                             .into_iter()
                             .map(|s| Some(Value::String(s)))
                             .collect::<Vec<_>>(),
-                    ));
+                    )));
                     let props = Rc::new(RefCell::new(ObjectData::new()));
                     props.borrow_mut().properties.insert(
                         PropertyKey::String("length".to_string()),
@@ -3964,7 +4135,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
 
         Ok(inst)
     });
-    let regexp_ctor_val = Value::BuiltinObject(regexp_ctor_fn, regexp_ctor_map.clone());
+    let regexp_ctor_val = Value::BuiltinObject(regexp_ctor_fn, regexp_ctor_map);
     set_builtin_name(&regexp_ctor_val, "RegExp");
     set_builtin_length(&regexp_ctor_val, 2.0);
     regexp_proto_map.borrow_mut().properties.insert(
@@ -4294,7 +4465,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         error_proto_map.clone(),
     ))));
     let uri_error_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-        error_proto_map.clone(),
+        error_proto_map,
     ))));
 
     let (_eval_error_name, eval_error_ctor_val) =
@@ -4554,9 +4725,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         shared_array_buffer_constructor: get_ctor("SharedArrayBuffer"),
         data_view_constructor: get_ctor("DataView"),
         typed_array_constructor: get_ctor("TypedArray"),
-        object_prototype: Some(Value::Object(object_proto_map.clone())),
-        array_prototype: Some(Value::Object(array_proto_map.clone())),
-        function_prototype: Some(Value::Object(function_proto_map.clone())),
+        object_prototype: Some(Value::Object(object_proto_map)),
+        array_prototype: Some(Value::Object(array_proto_map)),
+        function_prototype: Some(Value::Object(function_proto_map)),
         string_prototype: get_ctor("String").and_then(|ctor| get_proto(&ctor)),
         symbol_prototype: get_ctor("Symbol").and_then(|ctor| get_proto(&ctor)),
         boolean_prototype: get_ctor("Boolean").and_then(|ctor| get_proto(&ctor)),
@@ -4568,20 +4739,20 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         regexp_prototype: get_ctor("RegExp").and_then(|ctor| get_proto(&ctor)),
         map_prototype: get_ctor("Map").and_then(|ctor| get_proto(&ctor)),
         set_prototype: get_ctor("Set").and_then(|ctor| get_proto(&ctor)),
-        typed_array_prototype: Some(Value::Object(typedarray_proto_map.clone())),
+        typed_array_prototype: Some(Value::Object(typedarray_proto_map)),
         arraybuffer_prototype: get_ctor("ArrayBuffer").and_then(|ctor| get_proto(&ctor)),
         shared_array_buffer_prototype: get_ctor("SharedArrayBuffer")
             .and_then(|ctor| get_proto(&ctor)),
         data_view_prototype: get_ctor("DataView").and_then(|ctor| get_proto(&ctor)),
         iterator_prototype: None,
         async_iterator_prototype: None,
-        array_iterator_prototype: Some(Value::Object(array_iterator_proto.clone())),
+        array_iterator_prototype: Some(Value::Object(array_iterator_proto)),
         map_iterator_prototype: None,
         set_iterator_prototype: None,
         string_iterator_prototype: None,
         regexp_string_iterator_prototype: None,
-        generator_prototype: Some(Value::Object(generator_proto_map.clone())),
-        generator_function_prototype: Some(Value::Object(generator_function_proto_map.clone())),
+        generator_prototype: Some(Value::Object(generator_proto_map)),
+        generator_function_prototype: Some(Value::Object(generator_function_proto_map)),
         async_generator_prototype: None,
         async_from_sync_iterator_prototype: None,
         throw_type_error: Some(throw_type_error_val),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::value::ProxyData;
 use std::cell::RefMut;
 
 pub(crate) struct GlobalIntrinsicValues<'a> {
@@ -204,7 +205,83 @@ pub(crate) fn install_global_bindings(
 
     let weakmap_ctor_val = make_placeholder_ctor("WeakMap", false);
     let weakset_ctor_val = make_placeholder_ctor("WeakSet", false);
-    let proxy_ctor_val = make_placeholder_ctor("Proxy", true);
+    let proxy_object_proto = Rc::clone(object_proto_map);
+    let proxy_function_proto = Rc::clone(function_proto_map);
+    let proxy_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+        Rc::clone(&proxy_object_proto),
+    ))));
+    let proxy_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
+        ObjectData::with_prototype(Value::Object(Rc::clone(&proxy_function_proto))),
+    ));
+    proxy_ctor_map.borrow_mut().properties.insert(
+        PKey::String("prototype".to_string()),
+        PropertyDescriptor::data(Value::Object(proxy_proto_map)),
+    );
+    let proxy_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+        let off = static_builtin_arg_offset(vm, args, "Proxy");
+        let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+        let handler = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+        if !target.is_object() {
+            return Err(vm.throw_type_error("Proxy target must be an object"));
+        }
+        if !handler.is_object() {
+            return Err(vm.throw_type_error("Proxy handler must be an object"));
+        }
+        let proxy = crate::gc::track_proxy(Rc::new(RefCell::new(ProxyData::new(target, handler))));
+        Ok(Value::Proxy(proxy))
+    });
+    let proxy_ctor_val = Value::BuiltinObject(proxy_ctor_fn.clone(), proxy_ctor_map.clone());
+    proxy_ctor_map.borrow_mut().properties.insert(
+        PKey::String("name".to_string()),
+        PropertyDescriptor::data(Value::String("Proxy".to_string())),
+    );
+    proxy_ctor_map.borrow_mut().properties.insert(
+        PKey::String("revocable".to_string()),
+        non_enum_data({
+            let proxy_function_proto_for_builtin = Rc::clone(&proxy_function_proto);
+            let proxy_function_proto_for_revoke = Rc::clone(&proxy_function_proto);
+            let builtin = builtin_object(
+                Rc::new(move |vm, args| {
+                    let off = static_builtin_arg_offset(vm, args, "Proxy");
+                    let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+                    let handler = args.get(off + 1).cloned().unwrap_or(Value::Undefined);
+                    if !target.is_object() {
+                        return Err(vm.throw_type_error("Proxy target must be an object"));
+                    }
+                    if !handler.is_object() {
+                        return Err(vm.throw_type_error("Proxy handler must be an object"));
+                    }
+                    let proxy = crate::gc::track_proxy(Rc::new(RefCell::new(ProxyData::new(
+                        target, handler,
+                    ))));
+                    let revoke_state = proxy.clone();
+                    let revoke_fn = builtin_object(
+                        Rc::new(move |_vm, _args| {
+                            revoke_state.borrow_mut().revoke();
+                            Ok(Value::Undefined)
+                        }),
+                        &proxy_function_proto_for_revoke,
+                    );
+                    set_builtin_name(&revoke_fn, "revoke");
+                    set_builtin_length(&revoke_fn, 0.0);
+                    let result = Rc::new(RefCell::new(ObjectData::new()));
+                    result.borrow_mut().properties.insert(
+                        PKey::String("proxy".to_string()),
+                        PropertyDescriptor::data(Value::Proxy(proxy)),
+                    );
+                    result.borrow_mut().properties.insert(
+                        PKey::String("revoke".to_string()),
+                        PropertyDescriptor::data(revoke_fn),
+                    );
+                    Ok(Value::Object(result))
+                }),
+                &proxy_function_proto_for_builtin,
+            );
+            set_builtin_name(&builtin, "revocable");
+            set_builtin_length(&builtin, 2.0);
+            builtin
+        }),
+    );
     g.properties.insert(
         PKey::String("WeakMap".to_string()),
         PropertyDescriptor::data(weakmap_ctor_val),

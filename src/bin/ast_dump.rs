@@ -19,6 +19,15 @@ struct Path {
 }
 
 impl Path {
+    /// Create a new `Path` from the given path string.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let path = Path::new("/path/to/file.txt");
+    /// assert_eq!(path.file, "file.txt");
+    /// assert_eq!(path.dir, "/path/to");
+    /// ```
     fn new(path: &str) -> Self {
         let file = std::path::Path::new(path)
             .file_name()

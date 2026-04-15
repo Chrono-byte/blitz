@@ -64,6 +64,7 @@ impl Vm {
             &thrown,
             Value::Object(_)
                 | Value::Array(..)
+                | Value::Proxy(_)
                 | Value::Closure { .. }
                 | Value::BuiltinObject(_, _)
                 | Value::Promise(_)
@@ -248,10 +249,14 @@ impl Vm {
 
     /// Returns `true` if the given value is a callable value.
     pub(crate) fn is_callable_value(value: &Value) -> bool {
-        matches!(
-            value,
-            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
-        )
+        match value {
+            Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _) => true,
+            Value::Proxy(proxy) => {
+                let proxy = proxy.borrow();
+                !proxy.is_revoked() && proxy.target.is_callable()
+            }
+            _ => false,
+        }
     }
 
     /// Creates an intrinsic error value with the given name and message.
@@ -271,7 +276,6 @@ impl Vm {
                 PropertyKey::String("message".to_string()),
                 PropertyDescriptor::data(Value::String(message.to_string())),
             );
-            self.property_get_ic_cache.clear();
             return Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(obj)))));
         }
         let proto = self
@@ -280,6 +284,7 @@ impl Vm {
         let mut obj = ObjectData::with_prototype(match proto {
             Value::Object(_)
             | Value::Array(..)
+            | Value::Proxy(_)
             | Value::Closure { .. }
             | Value::BuiltinObject(_, _) => proto,
             _ => Value::Null,
@@ -296,7 +301,6 @@ impl Vm {
             PropertyKey::String("name".to_string()),
             PropertyDescriptor::data(Value::String(name.to_string())),
         );
-        self.property_get_ic_cache.clear();
         Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(obj)))))
     }
 }

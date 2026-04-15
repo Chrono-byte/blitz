@@ -52,6 +52,7 @@
 
 use indexmap::IndexMap;
 use std::cell::RefCell;
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::rc::Weak;
 use std::sync::Mutex;
@@ -60,8 +61,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use num_bigint::BigInt as BigIntValue;
 use num_traits::Zero;
 
-/// Shared mutable slot for live bindings and captured values.
-pub type ValueSlot = Rc<Mutex<Value>>;
+/// Shared, reference-counted, mutable handle to a `Value`.
+/// Note: `Rc<Mutex<_>>` is for single-threaded shared mutation and is not `Send`/`Sync`.
+pub type SharedValue = Rc<Mutex<Value>>;
 
 /// A weak reference to an ObjectData that can be upgraded when needed.
 /// This helps prevent reference cycles in prototype chains.
@@ -188,6 +190,12 @@ impl SymbolId {
     }
 }
 
+impl Default for SymbolId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Property key variant (string or symbol).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PropertyKey {
@@ -222,6 +230,154 @@ pub enum PropertyDescriptor {
         /// Configurable flag
         configurable: bool,
     },
+}
+
+/// Backing store for dense array elements.
+///
+/// This wrapper keeps the storage layout centralized so the runtime can evolve
+/// beyond a plain `Vec<Option<Value>>` without changing every array consumer.
+#[derive(Clone, Debug)]
+pub struct ArrayData {
+    elements: Vec<Option<Value>>,
+}
+
+impl ArrayData {
+    /// Create backing storage from dense elements.
+    pub fn new(elements: Vec<Option<Value>>) -> Self {
+        Self { elements }
+    }
+
+    /// Return a cloned copy of the dense elements.
+    pub fn clone_elements(&self) -> Vec<Option<Value>> {
+        self.elements.clone()
+    }
+
+    /// Return the array contents as packed numbers if every element is a
+    /// present `Number` value.
+    pub fn dense_numbers(&self) -> Option<Vec<f64>> {
+        let mut out = Vec::with_capacity(self.elements.len());
+        for slot in &self.elements {
+            match slot {
+                Some(Value::Number(n)) => out.push(*n),
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+
+    /// Replace the dense contents with packed numbers.
+    pub fn write_dense_numbers(&mut self, numbers: &[f64]) {
+        debug_assert_eq!(self.elements.len(), numbers.len());
+        self.elements.clear();
+        self.elements.reserve(numbers.len());
+        self.elements
+            .extend(numbers.iter().copied().map(|n| Some(Value::Number(n))));
+    }
+
+    /// Fill a dense numeric array range using vector-friendly chunked writes.
+    pub fn fill_dense_numbers(&mut self, start: usize, end: usize, value: f64) -> bool {
+        let Some(mut numbers) = self.dense_numbers() else {
+            return false;
+        };
+        if start > end || end > numbers.len() {
+            return false;
+        }
+        fill_f64_slice(&mut numbers[start..end], value);
+        self.write_dense_numbers(&numbers);
+        true
+    }
+
+    /// Copy a dense numeric range within the array.
+    pub fn copy_within_dense_numbers(&mut self, to: usize, from: usize, end: usize) -> bool {
+        let Some(mut numbers) = self.dense_numbers() else {
+            return false;
+        };
+        if to > numbers.len() || from > end || end > numbers.len() {
+            return false;
+        }
+        let count = end
+            .saturating_sub(from)
+            .min(numbers.len().saturating_sub(to));
+        numbers.copy_within(from..from.saturating_add(count), to);
+        self.write_dense_numbers(&numbers);
+        true
+    }
+}
+
+fn fill_f64_slice(slice: &mut [f64], value: f64) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_mm_set1_pd, _mm_storeu_pd};
+
+        // SAFETY: x86_64 guarantees SSE2 support, and the pointers come from
+        // valid mutable slices with sufficient alignment for unaligned stores.
+        unsafe {
+            let packed = _mm_set1_pd(value);
+            let mut chunks = slice.chunks_exact_mut(2);
+            for chunk in &mut chunks {
+                _mm_storeu_pd(chunk.as_mut_ptr(), packed);
+            }
+            for item in chunks.into_remainder() {
+                *item = value;
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        for item in slice {
+            *item = value;
+        }
+    }
+}
+
+impl From<Vec<Option<Value>>> for ArrayData {
+    fn from(elements: Vec<Option<Value>>) -> Self {
+        Self::new(elements)
+    }
+}
+
+impl Deref for ArrayData {
+    type Target = Vec<Option<Value>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.elements
+    }
+}
+
+impl DerefMut for ArrayData {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.elements
+    }
+}
+
+/// Backing store for proxy objects.
+#[derive(Clone, Debug)]
+pub struct ProxyData {
+    /// The target object being proxied.
+    pub target: Value,
+    /// The handler object that defines the proxy behavior.
+    pub handler: Option<Value>,
+}
+
+impl ProxyData {
+    /// Create a new proxy object with the given target and handler.
+    pub fn new(target: Value, handler: Value) -> Self {
+        Self {
+            target,
+            handler: Some(handler),
+        }
+    }
+
+    /// Revoke the proxy, making it unusable.
+    pub fn revoke(&mut self) {
+        self.handler = None;
+    }
+
+    /// Check if the proxy has been revoked.
+    pub fn is_revoked(&self) -> bool {
+        self.handler.is_none()
+    }
 }
 
 impl PropertyDescriptor {
@@ -389,13 +545,15 @@ pub enum Value {
     /// elements; the second is a property map used for `__proto__` and arbitrary
     /// named properties (so arrays can behave like objects for non-index keys).
     /// Holes are represented as `None` values.
-    Array(Rc<RefCell<Vec<Option<Value>>>>, Rc<RefCell<ObjectData>>),
+    Array(Rc<RefCell<ArrayData>>, Rc<RefCell<ObjectData>>),
+    /// Proxy value with target and handler state.
+    Proxy(Rc<RefCell<ProxyData>>),
     /// Function closure with prototype and captured environment
     Closure {
         /// Function prototype
         proto: Rc<FunctionProto>,
         /// Captured / closed-over binding cells
-        env: Rc<Mutex<Vec<ValueSlot>>>,
+        env: Rc<Mutex<Vec<SharedValue>>>,
         /// Lexically captured `this` value for arrow functions.
         lexical_this: Option<Box<Value>>,
         /// Mutable property bag for function object properties (e.g., `prototype`).
@@ -469,6 +627,7 @@ impl Value {
             self,
             Value::Object(_)
                 | Value::Array(..)
+                | Value::Proxy(_)
                 | Value::Closure { .. }
                 | Value::Builtin(_)
                 | Value::BuiltinObject(_, _)
@@ -497,6 +656,16 @@ impl Value {
             Value::Null => "object",
             Value::Object(_) => "object",
             Value::Array(..) => "object",
+            Value::Proxy(proxy) => {
+                let proxy = proxy.borrow();
+                if proxy.is_revoked() {
+                    "object"
+                } else if proxy.target.is_callable() {
+                    "function"
+                } else {
+                    "object"
+                }
+            }
             Value::Closure { .. } => "function",
             Value::Builtin(_) | Value::BuiltinObject(_, _) => "function",
             Value::Promise(_) => "object",
@@ -516,6 +685,16 @@ impl Value {
             Value::Symbol(_, _) => "Symbol",
             Value::Array(..) => "Array",
             Value::Object(_) => "Object",
+            Value::Proxy(proxy) => {
+                let proxy = proxy.borrow();
+                if proxy.is_revoked() {
+                    "Object"
+                } else if proxy.target.is_callable() {
+                    "Function"
+                } else {
+                    "Object"
+                }
+            }
             Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _) => "Function",
             Value::Promise(_) => "Promise",
         }
@@ -525,10 +704,26 @@ impl Value {
     pub fn is_constructable(&self) -> bool {
         match self {
             Value::Closure { proto, .. } => proto.has_prototype_property && proto.is_constructor,
-            Value::BuiltinObject(_, props) => props
-                .borrow()
-                .properties
-                .contains_key(&PropertyKey::String("prototype".to_string())),
+            Value::BuiltinObject(_, props) => {
+                let props_ref = props.borrow();
+                if props_ref
+                    .properties
+                    .contains_key(&PropertyKey::String("prototype".to_string()))
+                {
+                    return true;
+                }
+                if let Some(PropertyDescriptor::Data { value, .. }) = props_ref
+                    .properties
+                    .get(&PropertyKey::String("[[BoundTargetFunction]]".to_string()))
+                {
+                    return value.is_constructable();
+                }
+                false
+            }
+            Value::Proxy(proxy) => {
+                let proxy = proxy.borrow();
+                !proxy.is_revoked() && proxy.target.is_constructable()
+            }
             _ => false,
         }
     }
@@ -586,6 +781,7 @@ impl std::fmt::Display for Value {
             }
             Value::Null => write!(f, "null"),
             Value::Object(_map) => write!(f, "[object Object]"),
+            Value::Proxy(_proxy) => write!(f, "[object Object]"),
             Value::Array(arr, _props) => {
                 let arr = arr.borrow();
                 let parts: Vec<String> = arr
@@ -620,6 +816,7 @@ impl std::fmt::Debug for Value {
             Value::Symbol(id, desc) => write!(f, "Symbol({:?},{:?})", id, desc),
             Value::Null => write!(f, "Null"),
             Value::Object(map) => write!(f, "Object({:p})", Rc::as_ptr(map)),
+            Value::Proxy(proxy) => write!(f, "Proxy({:p})", Rc::as_ptr(proxy)),
             Value::Array(arr, props) => write!(
                 f,
                 "Array(arr={:p}, props={:p})",
@@ -679,5 +876,62 @@ mod tests {
         let props = Rc::new(RefCell::new(ObjectData::new()));
         let value = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), props);
         assert_eq!(format!("{}", value), "[Native Function]");
+    }
+
+    #[test]
+    fn array_data_numeric_fast_path_round_trips() {
+        let mut arr = ArrayData::from(vec![
+            Some(Value::Number(1.0)),
+            Some(Value::Number(2.0)),
+            Some(Value::Number(3.0)),
+            Some(Value::Number(4.0)),
+        ]);
+
+        assert_eq!(
+            arr.dense_numbers(),
+            Some(vec![1.0_f64, 2.0_f64, 3.0_f64, 4.0_f64])
+        );
+        assert!(arr.fill_dense_numbers(1, 3, 9.0));
+        assert_eq!(
+            arr.clone_elements(),
+            vec![
+                Some(Value::Number(1.0)),
+                Some(Value::Number(9.0)),
+                Some(Value::Number(9.0)),
+                Some(Value::Number(4.0)),
+            ]
+        );
+
+        assert!(arr.copy_within_dense_numbers(0, 2, 4));
+        assert_eq!(
+            arr.clone_elements(),
+            vec![
+                Some(Value::Number(9.0)),
+                Some(Value::Number(4.0)),
+                Some(Value::Number(9.0)),
+                Some(Value::Number(4.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn array_data_copy_within_handles_overlapping_ranges() {
+        let mut arr = ArrayData::from(vec![
+            Some(Value::Number(0.0)),
+            Some(Value::Number(1.0)),
+            Some(Value::Number(2.0)),
+            Some(Value::Number(3.0)),
+        ]);
+
+        assert!(arr.copy_within_dense_numbers(3, 0, 4));
+        assert_eq!(
+            arr.clone_elements(),
+            vec![
+                Some(Value::Number(0.0)),
+                Some(Value::Number(1.0)),
+                Some(Value::Number(2.0)),
+                Some(Value::Number(0.0)),
+            ]
+        );
     }
 }

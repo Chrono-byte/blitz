@@ -53,6 +53,13 @@ use blitz::value::{
 };
 use blitz::{parser::Parser, runtime_utils, typecheck, vm::Vm};
 
+/// Calculates a percentage from two i64 values.
+/// This intentionally loses precision when converting i64 to f64 for display purposes.
+#[inline]
+fn calculate_percentage(numerator: i64, denominator: i64) -> f64 {
+    (numerator as f64) / (denominator as f64) * 100.0_f64
+}
+
 #[derive(Clone, Copy, Default)]
 /// Result statistics for a test bucket (pass/fail/skip counts).
 struct BucketStats {
@@ -79,9 +86,9 @@ impl BucketStats {
     fn pass_pct(self) -> f64 {
         let attempted = self.attempted();
         if attempted == 0 {
-            0.0
+            0.0_f64
         } else {
-            (self.pass as f64 / attempted as f64) * 100.0
+            calculate_percentage(self.pass as i64, attempted as i64)
         }
     }
 }
@@ -136,6 +143,7 @@ fn force_runner_gc() {
     }
 }
 
+/// Trims the allocator, if the `TSBLITZ_TRIM_ALLOCATOR` environment variable is set.
 fn maybe_trim_allocator() {
     if env::var_os("TSBLITZ_TRIM_ALLOCATOR").is_none() {
         return;
@@ -231,16 +239,19 @@ fn sort_test_results(results: &mut [(usize, PathBuf, TestResult)]) {
 
 /// Runs the selected tests and returns the results.
 struct PermitReleaser {
+    /// The semaphore permit to be released when the test run is complete.
     permit: Mutex<Option<OwnedSemaphorePermit>>,
 }
 
 impl PermitReleaser {
+    /// Creates a new `PermitReleaser` with the given permit.
     fn new(permit: OwnedSemaphorePermit) -> Self {
         Self {
             permit: Mutex::new(Some(permit)),
         }
     }
 
+    /// Releases the permit, allowing the semaphore to be acquired by other threads.
     fn release(&self) {
         if let Ok(mut guard) = self.permit.lock() {
             guard.take();
@@ -248,6 +259,7 @@ impl PermitReleaser {
     }
 }
 
+/// Runs the selected tests and returns the results.
 fn run_selected_tests(
     files_to_run: Vec<PathBuf>,
     test262_dir: PathBuf,
@@ -576,10 +588,13 @@ fn parse_bool_env(name: &str) -> Option<bool> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// Represents a report from a subprocess batch run.
 struct SubprocessBatchReport {
+    /// The results of the batch run, including the test index, path, and result.
     results: Vec<(usize, PathBuf, TestResult)>,
 }
 
+/// Loads a file list from the given path and returns a vector of PathBufs.
 fn load_file_list(path: &Path) -> Result<Vec<PathBuf>, String> {
     let contents = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read file list {}: {}", path.display(), e))?;
@@ -591,6 +606,7 @@ fn load_file_list(path: &Path) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+/// Returns a unique temporary path for the given prefix and extension.
 fn unique_temp_path(prefix: &str, ext: &str) -> PathBuf {
     let pid = std::process::id();
     let nanos = SystemTime::now()
@@ -600,6 +616,7 @@ fn unique_temp_path(prefix: &str, ext: &str) -> PathBuf {
     env::temp_dir().join(format!("blitz-test262-{prefix}-{pid}-{nanos}.{ext}"))
 }
 
+/// Returns true if subprocess batches should be used for the given options and selected test count.
 fn should_use_subprocess_batches(opts: &RunnerOptions, selected_count: usize) -> bool {
     !opts.no_subprocess
         && opts.file_list.is_none()
@@ -608,6 +625,7 @@ fn should_use_subprocess_batches(opts: &RunnerOptions, selected_count: usize) ->
         && selected_count > 1
 }
 
+/// Runs selected tests via subprocess batches and returns the results.
 fn run_selected_tests_via_subprocess_batches(
     files_to_run: Vec<PathBuf>,
     job_count: usize,
@@ -1111,7 +1129,7 @@ fn feature_edition(feature: &str) -> Option<u8> {
         "Intl.Locale-info" => Some(99),
         "Intl.NumberFormat-v3" => Some(99),
         "legacy-regexp" => Some(99),
-        "Temporal" => Some(99),
+        "Temporal" => Some(17),
         "ShadowRealm" => Some(99),
         "decorators" => Some(99),
         "regexp-duplicate-named-groups" => Some(99),
@@ -1402,8 +1420,8 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     );
     data.properties.insert(
         PropertyKey::String("gc".to_string()),
-        PropertyDescriptor::data(host_builtin(Rc::new(|_vm, _args| {
-            let _ = _vm.collect_garbage_prototype();
+        PropertyDescriptor::data(host_builtin(Rc::new(|vm, _args| {
+            let _ = vm.collect_garbage_prototype();
             Ok(Value::Undefined)
         }))),
     );
@@ -2586,9 +2604,9 @@ fn main() {
 
     let passed = ran.saturating_sub(failed.len());
     let pass_pct = if ran == 0 {
-        0.0
+        0.0_f64
     } else {
-        (passed as f64) / (ran as f64) * 100.0
+        calculate_percentage(passed as i64, ran as i64)
     };
 
     let exit_code = if failed.is_empty() { 0 } else { 1 };
@@ -2783,7 +2801,7 @@ const ok = 1;
         write_file(&builtin_file, "const ok = 1;\n");
 
         let selected = select_files_to_run(
-            vec![builtin_file.clone(), es2024_file.clone(), es5_file.clone()],
+            vec![builtin_file, es2024_file, es5_file.clone()],
             &[],
             &[],
             &[],
@@ -2798,7 +2816,7 @@ const ok = 1;
     fn print_args_uses_js_stringification() {
         let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
         let intrinsics = runtime_utils::install_minimal_kernel_constructors(&globals);
-        let mut vm = Vm::new(globals.clone());
+        let mut vm = Vm::new(globals);
 
         let array_proto = intrinsics
             .array_prototype
@@ -2806,10 +2824,10 @@ const ok = 1;
         let array_props = Rc::new(RefCell::new(ObjectData::new()));
         array_props.borrow_mut().set_prototype_value(array_proto);
         let array = Value::Array(
-            Rc::new(RefCell::new(vec![
+            Rc::new(RefCell::new(blitz::value::ArrayData::from(vec![
                 Some(Value::Number(1.0)),
                 Some(Value::Number(2.0)),
-            ])),
+            ]))),
             array_props,
         );
 
@@ -2820,7 +2838,7 @@ const ok = 1;
     fn print_args_defaults_to_undefined_when_missing() {
         let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
         let _intrinsics = runtime_utils::install_minimal_kernel_constructors(&globals);
-        let mut vm = Vm::new(globals.clone());
+        let mut vm = Vm::new(globals);
 
         assert_eq!(print_args(&mut vm, &[]), "undefined");
     }
@@ -2906,7 +2924,7 @@ const x = 1;
         write_file(&excluded_dir.join("ignored.js"), "const nope = 1;\n");
 
         let mut out = Vec::new();
-        collect_tests(&root, &mut out, &[excluded_dir.clone()]);
+        collect_tests(&root, &mut out, &[excluded_dir]);
         out.sort();
 
         assert_eq!(out, vec![include_dir.join("good.js")]);

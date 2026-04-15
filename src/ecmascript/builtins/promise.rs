@@ -24,7 +24,6 @@ pub(crate) fn create_promise_intrinsics(
     ));
 
     let promise_ctor_fn: BuiltinFn = {
-        let _promise_proto_map_rc = promise_proto_map.clone();
         Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Promise");
             let undefined = Value::Undefined;
@@ -61,7 +60,7 @@ pub(crate) fn create_promise_intrinsics(
             }));
 
             let promise_for_reject = promise.clone();
-            let reject_called = resolve_called.clone();
+            let reject_called = resolve_called;
             let reject_fn = Value::Builtin(Rc::new(move |vm, args| {
                 if *reject_called.borrow() {
                     return Ok(Value::Undefined);
@@ -164,7 +163,7 @@ pub(crate) fn create_promise_intrinsics(
                             }));
 
                             let user_on_rejected = on_rejected;
-                            let res_p_r = result_promise.clone();
+                            let res_p_r = result_promise;
                             let on_rejected_fn = Value::Builtin(Rc::new(move |vm, args| {
                                 let off = if args.len() > 1 { 1 } else { 0 };
                                 let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -196,7 +195,7 @@ pub(crate) fn create_promise_intrinsics(
                         PromiseState::Fulfilled(value) => {
                             let value = value.clone();
                             let user_on_fulfilled = on_fulfilled;
-                            let res_p_f = result_promise.clone();
+                            let res_p_f = result_promise;
                             vm.queue_microtask(move |vm| {
                                 if matches!(user_on_fulfilled, Value::Undefined) {
                                     resolve_promise_with_value(vm, &res_p_f, value.clone())?;
@@ -224,7 +223,7 @@ pub(crate) fn create_promise_intrinsics(
                             *handled = true;
                             let reason = reason.clone();
                             let user_on_rejected = on_rejected;
-                            let res_p_r = result_promise.clone();
+                            let res_p_r = result_promise;
                             vm.queue_microtask(move |vm| {
                                 if matches!(user_on_rejected, Value::Undefined) {
                                     reject_pending_promise(vm, &res_p_r, reason.clone());
@@ -297,7 +296,7 @@ pub(crate) fn create_promise_intrinsics(
                 let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let resolve_slot_capture = resolve_slot.clone();
-                let reject_slot_capture = reject_slot.clone();
+                let reject_slot_capture = reject_slot;
                 let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                     let off = if executor_args.len() > 2 { 1 } else { 0 };
                     *resolve_slot_capture.lock().unwrap() = executor_args.get(off).cloned();
@@ -496,7 +495,7 @@ pub(crate) fn create_promise_intrinsics(
 
                 let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
                 let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
-                let resolve_slot_capture = resolve_slot.clone();
+                let resolve_slot_capture = resolve_slot;
                 let reject_slot_capture = reject_slot.clone();
                 let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
                     let off = if executor_args.len() > 2 { 1 } else { 0 };

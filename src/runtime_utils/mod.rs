@@ -65,7 +65,9 @@ use crate::mutex_compat::MutexBorrowExt;
 use crate::parser::Parser;
 use crate::realm::Intrinsics;
 use crate::value::SymbolId;
-use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
+use crate::value::{
+    ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value,
+};
 use crate::vm::Vm;
 use crate::{RuntimeError, bytecode};
 use num_traits::{FromPrimitive, ToPrimitive};
@@ -155,6 +157,7 @@ pub(crate) fn strict_equal(a: &Value, b: &Value) -> bool {
         (Value::Symbol(x, _), Value::Symbol(y, _)) => x == y,
         (Value::Object(ax), Value::Object(bx)) => Rc::ptr_eq(ax, bx),
         (Value::Array(ax, _), Value::Array(bx, _)) => Rc::ptr_eq(ax, bx),
+        (Value::Proxy(ax), Value::Proxy(bx)) => Rc::ptr_eq(ax, bx),
         (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
         (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
         (Value::Promise(ap), Value::Promise(bp)) => Rc::ptr_eq(ap, bp),
@@ -255,7 +258,7 @@ pub(crate) enum AtomicsValueKind {
 #[derive(Clone)]
 pub(crate) struct AtomicsViewInfo {
     pub(crate) view: Rc<RefCell<ObjectData>>,
-    pub(crate) data: Rc<RefCell<Vec<Option<Value>>>>,
+    pub(crate) data: Rc<RefCell<ArrayData>>,
     pub(crate) buffer: Rc<RefCell<ObjectData>>,
     pub(crate) kind_name: String,
     pub(crate) value_kind: AtomicsValueKind,
@@ -353,6 +356,7 @@ fn clone_value_across_realms(
             Value::BigInt(bi) => Ok(Value::BigInt(bi.clone())),
             Value::Symbol(_, _) => Err("Cannot clone Symbol across realms".to_string()),
             Value::Promise(_) => Err("Cannot clone Promise across realms".to_string()),
+            Value::Proxy(_) => Err("Cannot clone Proxy across realms".to_string()),
             Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. } => {
                 Err("Cannot clone functions/closures across realms".to_string())
             }
@@ -365,7 +369,7 @@ fn clone_value_across_realms(
                 // Reserve a placeholder array in visited to handle cycles.
                 let len = arr_rc.borrow().len();
                 let placeholder_vec: Vec<Option<Value>> = vec![None; len];
-                let new_arr = Rc::new(RefCell::new(placeholder_vec));
+                let new_arr = Rc::new(RefCell::new(ArrayData::from(placeholder_vec)));
                 let new_props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
                 if let Some(proto) = vm.realm().intrinsics.array_prototype.clone() {
                     new_props.borrow_mut().set_prototype_value(proto);
