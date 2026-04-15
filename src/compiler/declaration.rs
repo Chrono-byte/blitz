@@ -701,7 +701,7 @@ impl Compiler {
                 let symbol_iterator_slot = self.alloc_ic_slot()?;
                 self.emit_byte(symbol_iterator_slot, LINE);
                 self.emit(Op::GetProperty, LINE);
-                self.emit(Op::Call, LINE);
+                self.emit(Op::CallBuiltin, LINE);
                 self.emit_byte(0, LINE);
 
                 let iterator_slot = self.add_local_with_mirror(

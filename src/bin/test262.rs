@@ -136,6 +136,7 @@ fn force_runner_gc() {
     }
 }
 
+/// Trims the allocator, if the `TSBLITZ_TRIM_ALLOCATOR` environment variable is set.
 fn maybe_trim_allocator() {
     if env::var_os("TSBLITZ_TRIM_ALLOCATOR").is_none() {
         return;
@@ -231,16 +232,19 @@ fn sort_test_results(results: &mut [(usize, PathBuf, TestResult)]) {
 
 /// Runs the selected tests and returns the results.
 struct PermitReleaser {
+    /// The semaphore permit to be released when the test run is complete.
     permit: Mutex<Option<OwnedSemaphorePermit>>,
 }
 
 impl PermitReleaser {
+    /// Creates a new `PermitReleaser` with the given permit.
     fn new(permit: OwnedSemaphorePermit) -> Self {
         Self {
             permit: Mutex::new(Some(permit)),
         }
     }
 
+    /// Releases the permit, allowing the semaphore to be acquired by other threads.
     fn release(&self) {
         if let Ok(mut guard) = self.permit.lock() {
             guard.take();
@@ -248,6 +252,7 @@ impl PermitReleaser {
     }
 }
 
+/// Runs the selected tests and returns the results.
 fn run_selected_tests(
     files_to_run: Vec<PathBuf>,
     test262_dir: PathBuf,
@@ -576,10 +581,13 @@ fn parse_bool_env(name: &str) -> Option<bool> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// Represents a report from a subprocess batch run.
 struct SubprocessBatchReport {
+    /// The results of the batch run, including the test index, path, and result.
     results: Vec<(usize, PathBuf, TestResult)>,
 }
 
+/// Loads a file list from the given path and returns a vector of PathBufs.
 fn load_file_list(path: &Path) -> Result<Vec<PathBuf>, String> {
     let contents = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read file list {}: {}", path.display(), e))?;
@@ -591,6 +599,7 @@ fn load_file_list(path: &Path) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+/// Returns a unique temporary path for the given prefix and extension.
 fn unique_temp_path(prefix: &str, ext: &str) -> PathBuf {
     let pid = std::process::id();
     let nanos = SystemTime::now()
@@ -600,6 +609,7 @@ fn unique_temp_path(prefix: &str, ext: &str) -> PathBuf {
     env::temp_dir().join(format!("blitz-test262-{prefix}-{pid}-{nanos}.{ext}"))
 }
 
+/// Returns true if subprocess batches should be used for the given options and selected test count.
 fn should_use_subprocess_batches(opts: &RunnerOptions, selected_count: usize) -> bool {
     !opts.no_subprocess
         && opts.file_list.is_none()
@@ -608,6 +618,7 @@ fn should_use_subprocess_batches(opts: &RunnerOptions, selected_count: usize) ->
         && selected_count > 1
 }
 
+/// Runs selected tests via subprocess batches and returns the results.
 fn run_selected_tests_via_subprocess_batches(
     files_to_run: Vec<PathBuf>,
     job_count: usize,
@@ -1402,8 +1413,8 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     );
     data.properties.insert(
         PropertyKey::String("gc".to_string()),
-        PropertyDescriptor::data(host_builtin(Rc::new(|_vm, _args| {
-            let _ = _vm.collect_garbage_prototype();
+        PropertyDescriptor::data(host_builtin(Rc::new(|vm, _args| {
+            let _ = vm.collect_garbage_prototype();
             Ok(Value::Undefined)
         }))),
     );

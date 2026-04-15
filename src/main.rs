@@ -93,7 +93,8 @@ fn main() -> Result<(), blitz::errors::Error> {
 
     // Public globals visible to user code (populated by the prelude)
     let globals: Rc<RefCell<blitz::value::ObjectData>> = if cli.test262_harness {
-        let done_state = async_done_state.clone();
+        let done_state =
+            Rc::<RefCell<Option<test262_support::AsyncCompletion>>>::clone(&async_done_state);
         let print_native: blitz::value::NativeFn = Rc::new(move |vm, _this, args| {
             let value = args.first().cloned().unwrap_or(Value::Undefined);
             let rendered = match vm.to_string(&value) {
@@ -136,7 +137,7 @@ fn main() -> Result<(), blitz::errors::Error> {
             {
                 let mut loader = loader_handle.borrow_mut();
                 loader.construct(
-                    path.parent().unwrap_or(Path::new(".")),
+                    path.parent().unwrap_or_else(|| Path::new(".")),
                     &format!("./{}", path.file_name().unwrap().to_string_lossy()),
                 )?;
                 loader

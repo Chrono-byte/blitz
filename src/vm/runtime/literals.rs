@@ -45,7 +45,6 @@ impl Vm {
         {
             props.borrow_mut().set_prototype_value(proto_val);
         }
-        self.property_get_ic_cache.clear();
 
         self.stack
             .push(Value::Array(Rc::clone(&arr_rc), Rc::clone(&props)));
@@ -93,7 +92,7 @@ impl Vm {
         {
             data.set_prototype_value(proto_val);
         }
-        self.property_get_ic_cache.clear();
+
         let obj_rc = gc::track_object(Rc::new(RefCell::new(data)));
         self.stack.push(Value::Object(Rc::clone(&obj_rc)));
         if crate::trace::enabled() {

@@ -4,12 +4,9 @@ use crate::runtime_utils::usize_to_f64;
 use crate::value::{PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 use crate::vm::runtime::execution::{
-    array_index_from_key, array_length, get_property, object_identity, set_property, values_equal,
+    array_index_from_key, array_length, get_property, set_property, values_equal,
 };
-use crate::vm::state::{
-    MAX_PROTOTYPE_DEPTH, PartialDescriptor, PropertyGetICEntry, ReferenceRecord,
-};
-use std::rc::Rc;
+use crate::vm::state::{MAX_PROTOTYPE_DEPTH, PartialDescriptor};
 
 impl Vm {
     pub(super) fn super_base_object(&self) -> Result<Value, RuntimeError> {
@@ -282,10 +279,21 @@ impl Vm {
                 drop(p);
                 if let PropertyKey::String(s) = key
                     && let Ok(i) = s.parse::<usize>()
-                    && i < arr.borrow().len()
                 {
-                    arr.borrow_mut()[i] = None;
-                    return Ok(true);
+                    let len = arr.borrow().len();
+                    let array_len = {
+                        let props_ref = props.borrow();
+                        array_length(&props_ref)
+                    };
+                    if i < len {
+                        arr.borrow_mut()[i] = None;
+                        return Ok(true);
+                    } else if i < array_len {
+                        // Index is within the array length but not yet in dense store.
+                        // Resize the array to create a hole.
+                        arr.borrow_mut().resize(i + 1, None);
+                        return Ok(true);
+                    }
                 }
                 let mut p = props.borrow_mut();
                 match p.properties.get(key) {
@@ -977,176 +985,6 @@ impl Vm {
             _ => {}
         }
         Ok(None)
-    }
-
-    /// Inline-cached property access with generation-based invalidation.
-    pub(super) fn get_property_ic(&mut self) -> Result<(), RuntimeError> {
-        // TODO: Re-enable stable per-site caching once generation tracking
-        // covers every mutation path. For now, clear stale entries eagerly so
-        // correctness takes precedence over cache hits.
-        self.property_get_ic_cache.clear();
-        let slot = self.read_byte()?;
-        let key_val = self.pop()?;
-        let obj = self.pop()?;
-        let key = self.to_property_key(&key_val)?;
-        let skip_ic = matches!(obj, Value::Array(..))
-            && matches!(&key, PropertyKey::String(name) if name == "length");
-        if skip_ic {
-            let v = self.get_property_value(&obj, &key)?;
-            if crate::trace::enabled() {
-                match &key {
-                    PropertyKey::String(s) => {
-                        eprintln!(
-                            "[trace] GetPropertyIC bypass receiver={} key='{}' -> {}",
-                            obj.type_name(),
-                            s,
-                            v.type_name()
-                        );
-                    }
-                    PropertyKey::Symbol(_) => {
-                        eprintln!(
-                            "[trace] GetPropertyIC bypass receiver={} key=symbol -> {}",
-                            obj.type_name(),
-                            v.type_name()
-                        );
-                    }
-                }
-                crate::trace::value_string("[trace]   result", &v);
-            }
-            self.stack.push(v);
-            return Ok(());
-        }
-        let chunk_identity = Rc::as_ptr(&self.chunk) as usize;
-        let cache_key = (chunk_identity, slot);
-        if let Some(receiver_identity) = object_identity(&obj) {
-            let current_generation = self
-                .obj_generations
-                .get(&receiver_identity)
-                .copied()
-                .unwrap_or(0);
-            let cached = self
-                .property_get_ic_cache
-                .get(&cache_key)
-                .and_then(|entry| {
-                    let chunk_alive = entry
-                        .chunk
-                        .upgrade()
-                        .is_some_and(|chunk| Rc::ptr_eq(&chunk, &self.chunk));
-                    if chunk_alive
-                        && entry.receiver_identity == receiver_identity
-                        && entry.receiver_generation == current_generation
-                        && entry.key == key
-                    {
-                        Some(entry.value.clone())
-                    } else {
-                        None
-                    }
-                });
-            if let Some(v) = cached {
-                if crate::trace::enabled() {
-                    match &key {
-                        PropertyKey::String(s) => {
-                            eprintln!(
-                                "[trace] GetPropertyIC HIT receiver={} key='{}' -> {}",
-                                obj.type_name(),
-                                s,
-                                v.type_name()
-                            );
-                        }
-                        PropertyKey::Symbol(_) => {
-                            eprintln!(
-                                "[trace] GetPropertyIC HIT receiver={} key=symbol -> {}",
-                                obj.type_name(),
-                                v.type_name()
-                            );
-                        }
-                    }
-                    crate::trace::value_string("[trace]   result", &v);
-                }
-                self.stack.push(v);
-                return Ok(());
-            }
-            if self.property_get_ic_cache.contains_key(&cache_key) {
-                self.property_get_ic_cache.remove(&cache_key);
-            }
-        }
-
-        let v = self.get_property_value(&obj, &key)?;
-        if let Some(receiver_identity) = object_identity(&obj)
-            && let Some((desc, holder)) = self.lookup_property_descriptor(&obj, &key, 0)?
-            && matches!(desc, PropertyDescriptor::Data { .. })
-            && object_identity(&holder) == Some(receiver_identity)
-        {
-            let current_generation = self
-                .obj_generations
-                .get(&receiver_identity)
-                .copied()
-                .unwrap_or(0);
-            self.property_get_ic_cache.insert(
-                cache_key,
-                PropertyGetICEntry {
-                    chunk: Rc::downgrade(&self.chunk),
-                    receiver_identity,
-                    receiver_generation: current_generation,
-                    key: key.clone(),
-                    value: v.clone(),
-                },
-            );
-        }
-        if crate::trace::enabled() {
-            match &key {
-                PropertyKey::String(s) => {
-                    eprintln!(
-                        "[trace] GetPropertyIC receiver={} key='{}' -> {}",
-                        obj.type_name(),
-                        s,
-                        v.type_name()
-                    );
-                }
-                PropertyKey::Symbol(_) => {
-                    eprintln!(
-                        "[trace] GetPropertyIC receiver={} key=symbol -> {}",
-                        obj.type_name(),
-                        v.type_name()
-                    );
-                }
-            }
-            crate::trace::value_string("[trace]   result", &v);
-        }
-        self.stack.push(v);
-        Ok(())
-    }
-
-    pub(super) fn set_property_ic(&mut self) -> Result<(), RuntimeError> {
-        let _slot = self.read_byte()? as usize;
-        let value = self.pop()?;
-        let key = self.pop()?;
-        let obj = self.pop()?;
-        let k = self.to_property_key(&key)?;
-        self.reference_stack.push(ReferenceRecord::new(
-            obj.clone(),
-            k.clone(),
-            self.is_strict_mode(),
-        ));
-        if crate::trace::enabled()
-            && let Some(reference) = self.reference_stack.last()
-        {
-            crate::trace::value_string("[trace]   reference base", &reference.base);
-            match &reference.referenced_name {
-                PropertyKey::String(name) => {
-                    eprintln!("[trace]   reference key='{}'", name);
-                }
-                PropertyKey::Symbol(_) => {
-                    eprintln!("[trace]   reference key=symbol");
-                }
-            }
-            eprintln!("[trace]   reference strict={}", reference.strict);
-        }
-        let result = self.set_property_tracked(&obj, &k, value.clone());
-        let _ = self.reference_stack.pop();
-        result?;
-        self.stack.push(value);
-        Ok(())
     }
 
     /// `SetProperty` wrapper that bumps the generation counter so that stale

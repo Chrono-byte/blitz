@@ -36,7 +36,7 @@ use crate::environment::EnvironmentRecord;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
 use crate::typecheck::Type;
-use crate::value::{ObjectData, PropertyKey, Value, ValueSlot};
+use crate::value::{ObjectData, Value, ValueSlot};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::env;
@@ -57,20 +57,6 @@ pub(crate) use generator_runner::GeneratorRunner;
 pub(crate) use handler::{HandlerRecord, StepOutcome};
 pub(crate) use partial_descriptor::PartialDescriptor;
 pub(crate) use stack::{CallStack, HandlerStack, ReferenceRecord, ReferenceStack};
-
-/// Cached result for a `GetPropertyIC` site.
-pub(crate) struct PropertyGetICEntry {
-    /// The chunk that owns the IC site.
-    pub(crate) chunk: Weak<Chunk>,
-    /// Identity of the receiver object used to populate this entry.
-    pub(crate) receiver_identity: usize,
-    /// Receiver mutation generation captured at cache fill time.
-    pub(crate) receiver_generation: u64,
-    /// Property key used by the cached access.
-    pub(crate) key: PropertyKey,
-    /// Cached property value.
-    pub(crate) value: Value,
-}
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -375,8 +361,6 @@ pub struct Vm {
     /// Incremented on every `SetProperty` so that stale IC entries are
     /// detected and evicted on the next lookup.
     pub(super) obj_generations: HashMap<usize, u64>,
-    /// Per-site property get cache keyed by `(chunk_identity, ic_slot)`.
-    pub(super) property_get_ic_cache: HashMap<(usize, u8), PropertyGetICEntry>,
     /// Background Tokio runtime handle.
     pub(super) bg_runtime: Arc<Runtime>,
     /// Exception-handler stack.

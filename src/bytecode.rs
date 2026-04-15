@@ -264,7 +264,7 @@ impl Chunk {
             return false;
         }
         // ensure fits in signed 24-bit
-        if val < -(1 << 23) || val >= (1 << 23) {
+        if !(-(1_i32 << 23_i32)..(1_i32 << 23_i32)).contains(&val) {
             return false;
         }
         let instr = self.code[idx];
@@ -357,7 +357,7 @@ impl Chunk {
         let next = (ip as i64) + 1;
         let offset = (target_ip as i64).checked_sub(next)?;
         // ensure fits in signed 24-bit
-        if offset < -(1 << 23) || offset >= (1 << 23) {
+        if !(-(1 << 23_i32)..(1 << 23_i32)).contains(&offset) {
             return None;
         }
         if self.write_i24_payload_at(ip, offset as i32) {

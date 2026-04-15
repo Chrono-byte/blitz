@@ -347,11 +347,14 @@ impl DerefMut for ArrayData {
 /// Backing store for proxy objects.
 #[derive(Clone, Debug)]
 pub struct ProxyData {
+    /// The target object being proxied.
     pub target: Value,
+    /// The handler object that defines the proxy behavior.
     pub handler: Option<Value>,
 }
 
 impl ProxyData {
+    /// Create a new proxy object with the given target and handler.
     pub fn new(target: Value, handler: Value) -> Self {
         Self {
             target,
@@ -359,10 +362,12 @@ impl ProxyData {
         }
     }
 
+    /// Revoke the proxy, making it unusable.
     pub fn revoke(&mut self) {
         self.handler = None;
     }
 
+    /// Check if the proxy has been revoked.
     pub fn is_revoked(&self) -> bool {
         self.handler.is_none()
     }

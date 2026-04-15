@@ -42,9 +42,7 @@ impl Vm {
     /// This is a blunt invalidation used when allocating fresh objects whose
     /// addresses may be recycled by `Rc`. It avoids stale cache hits across
     /// distinct allocations that happen to reuse the same pointer value.
-    pub(crate) fn clear_property_get_ic_cache(&mut self) {
-        self.property_get_ic_cache.clear();
-    }
+    pub(crate) fn clear_property_get_ic_cache(&mut self) {}
 
     // -----------------------------------------------------------------------
     // Construction & public helpers
@@ -79,7 +77,6 @@ impl Vm {
             direct_eval_outer_slot_immutable: None,
             direct_eval_outer_slot_sloppy_immutable_silent: None,
             obj_generations: HashMap::new(),
-            property_get_ic_cache: HashMap::new(),
             bg_runtime: get_global_bg_runtime(),
             handlers: HandlerStack::with_capacity(32),
             pending_exception: false,
@@ -149,7 +146,6 @@ impl Vm {
             direct_eval_outer_slot_immutable: None,
             direct_eval_outer_slot_sloppy_immutable_silent: None,
             obj_generations: HashMap::new(),
-            property_get_ic_cache: HashMap::new(),
             bg_runtime: Arc::clone(&self.bg_runtime),
             handlers: HandlerStack::with_capacity(32),
             pending_exception: false,
@@ -823,7 +819,6 @@ impl Vm {
         self.ip = 0;
         self.chunk = Rc::new(Chunk::new(Rc::new(String::new())));
         self.obj_generations.clear();
-        self.property_get_ic_cache.clear();
         gc::reset_allocation_pressure();
         let mut g = self.globals.borrow_mut();
         g.properties
@@ -874,7 +869,6 @@ impl Vm {
         self.initialize_root_bindings();
         gc::reset_allocation_pressure();
         self.begin_opcode_profile_run();
-        self.property_get_ic_cache.clear();
 
         loop {
             match self.step(None) {
@@ -2995,18 +2989,6 @@ impl Vm {
         Ok(())
     }
 
-    fn get_global_ic(&mut self) -> Result<(), RuntimeError> {
-        let idx = self.read_short()? as usize;
-        let name = self.string_constant(idx)?;
-        let value = if let Some(value) = self.resolve_identifier_value(&name)? {
-            value
-        } else {
-            return Err(self.throw_reference_error(&format!("{name} is not defined")));
-        };
-        self.stack.push(value);
-        Ok(())
-    }
-
     pub(super) fn bump_object_generation(&mut self, obj: &Value) {
         let ptr = match obj {
             Value::Object(m) => Some(m.borrow().identity as usize),
@@ -3422,7 +3404,6 @@ impl Vm {
                             | Op::PopN
                             | Op::GetBuiltin
                             | Op::GetProperty
-                            | Op::SetProperty
                             | Op::SetProperty
                             | Op::MakeClosure => {
                                 let arg = payload_byte(instr, 0) as u32;

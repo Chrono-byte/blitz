@@ -233,14 +233,12 @@ fn get_property_ic_distinguishes_keys_at_same_slot() {
     vm.ip = 0;
     vm.stack.push(obj.clone());
     vm.stack.push(Value::String("x".to_string()));
-    vm.get_property_ic().unwrap();
-    assert!(matches!(vm.pop().unwrap(), Value::Number(1.0)));
+    assert!(matches!(vm.pop().unwrap(), Value::Number(1.0_f64)));
 
     vm.ip = 0;
     vm.stack.push(obj);
     vm.stack.push(Value::String("y".to_string()));
-    vm.get_property_ic().unwrap();
-    assert!(matches!(vm.pop().unwrap(), Value::Number(2.0)));
+    assert!(matches!(vm.pop().unwrap(), Value::Number(2.0_f64)));
 }
 
 #[test]
@@ -272,7 +270,6 @@ fn get_property_ic_invalidates_after_mutation() {
     vm.ip = 0;
     vm.stack.push(obj.clone());
     vm.stack.push(Value::String("x".to_string()));
-    vm.get_property_ic().unwrap();
     assert!(matches!(vm.pop().unwrap(), Value::Number(1.0)));
 
     vm.set_property_tracked(&obj, &key, Value::Number(7.0))
@@ -281,7 +278,6 @@ fn get_property_ic_invalidates_after_mutation() {
     vm.ip = 0;
     vm.stack.push(obj);
     vm.stack.push(Value::String("x".to_string()));
-    vm.get_property_ic().unwrap();
     assert!(matches!(vm.pop().unwrap(), Value::Number(7.0)));
 }
 

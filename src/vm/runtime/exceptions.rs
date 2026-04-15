@@ -276,7 +276,6 @@ impl Vm {
                 PropertyKey::String("message".to_string()),
                 PropertyDescriptor::data(Value::String(message.to_string())),
             );
-            self.property_get_ic_cache.clear();
             return Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(obj)))));
         }
         let proto = self
@@ -302,7 +301,6 @@ impl Vm {
             PropertyKey::String("name".to_string()),
             PropertyDescriptor::data(Value::String(name.to_string())),
         );
-        self.property_get_ic_cache.clear();
         Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(obj)))))
     }
 }

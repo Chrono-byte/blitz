@@ -187,6 +187,8 @@ pub struct LabelPatchState {
 }
 
 impl Compiler {
+    /// Resolves the patch index for a jump offset, accounting for fixed-width
+    /// mode where jumps are patched in place rather than emitted separately.
     fn resolve_jump_patch_index(&self, offset: usize) -> usize {
         let op_at = |idx: usize| {
             self.chunk
@@ -194,19 +196,14 @@ impl Compiler {
                 .get(idx)
                 .and_then(|instr| Op::from_byte((instr & 0xFF) as u8))
         };
-        let is_patchable_jump_at = |idx: usize| {
-            op_at(idx)
-                .map(|op| op.is_jump() || matches!(op, Op::PushHandler))
-                .unwrap_or(false)
-        };
+        let is_patchable_jump_at =
+            |idx: usize| op_at(idx).is_some_and(|op| op.is_jump() || matches!(op, Op::PushHandler));
 
         // Legacy call-sites capture `code.len()` immediately after emitting the
         // jump opcode, which points one instruction past the jump in fixed-width
         // mode. Prefer that interpretation first.
         if offset > 0 && is_patchable_jump_at(offset - 1) {
             offset - 1
-        } else if is_patchable_jump_at(offset) {
-            offset
         } else {
             offset
         }
@@ -257,6 +254,7 @@ impl Compiler {
         }
     }
 
+    /// Emits a single instruction word with an 8-bit opcode and zero payload.
     pub(crate) fn emit(&mut self, op: Op, line: u32) {
         // Emit an instruction word with opcode in low 8 bits and zero payload.
         let instr = (op.to_byte() as u32) & 0xFF;
@@ -302,6 +300,8 @@ impl Compiler {
         }
     }
 
+    /// Emits a u16 value as a 24-bit payload in a single instruction word,
+    /// avoiding multi-write emissions which break the fixed-width instruction model.
     pub(crate) fn emit_u16(&mut self, value: u16, line: u32) {
         // Pack the u16 into the low 16 bits of the 24-bit payload and emit
         // as a single instruction word. This avoids emitting multiple operand
@@ -315,14 +315,14 @@ impl Compiler {
         // zero opcode (shouldn't happen in normal compilation).
         if self.chunk.code.is_empty() {
             // Defensive: write a full word with payload and no-op opcode 0.
-            let instr = ((payload & 0x00FF_FFFF) << 8) | 0u32;
+            let instr = (payload & 0x00FF_FFFF) << 8_i32;
             self.chunk.write_instr(instr, line);
         } else {
             let idx = self.chunk.code.len() - 1;
             let instr = self.chunk.code[idx];
             // Clear any existing payload bits and OR in our payload.
             let base = instr & 0xFF;
-            let new = base | ((payload & 0x00FF_FFFF) << 8);
+            let new = base | ((payload & 0x00FF_FFFF) << 8_i32);
             self.chunk.code[idx] = new;
             // Keep line table aligned: one line entry already exists for the opcode,
             // so do not push another. Reset pending counter.
@@ -330,6 +330,9 @@ impl Compiler {
         }
     }
 
+    /// Emits a constant value as a `Const` instruction with the constant index
+    /// encoded into the 24-bit payload in a single instruction word to avoid
+    /// multi-write emissions which break the fixed-width instruction model.
     pub(crate) fn emit_constant(&mut self, value: Value, line: u32) {
         let idx = self.chunk.add_constant(value);
         // Emit the Const instruction with the constant index encoded into
@@ -339,6 +342,7 @@ impl Compiler {
         self.emit_with_payload(Op::Const, idx, line);
     }
 
+    /// Returns a compiler error for a strict binding name (eval/arguments).
     pub(crate) fn strict_binding_name_error(
         strict_context: bool,
         name: &str,
@@ -353,10 +357,12 @@ impl Compiler {
         }
     }
 
+    /// Returns a compiler error for assigning to an imported binding.
     pub(crate) fn imported_binding_assignment_error() -> CompilerError {
         CompilerError::from("SyntaxError: Cannot assign to imported binding")
     }
 
+    /// Returns a compiler error if the given binding pattern has a strict name.
     pub(crate) fn strict_binding_pattern_name_error(
         strict_context: bool,
         pattern: &oast::BindingPattern<'_>,
@@ -395,6 +401,7 @@ impl Compiler {
         Ok(slot)
     }
 
+    /// Resolves a local variable by name, returning its slot index if found.
     pub(crate) fn resolve_local(&self, name: &str) -> Option<usize> {
         self.scopes
             .iter()
@@ -402,6 +409,7 @@ impl Compiler {
             .find_map(|scope| scope.bindings.get(name).copied())
     }
 
+    /// Returns the index of the current function scope.
     pub(crate) fn current_function_scope_index(&self) -> usize {
         self.scopes
             .iter()
@@ -409,6 +417,7 @@ impl Compiler {
             .expect("compiler must always have a function scope")
     }
 
+    /// Adds a local variable to the given scope, returning its slot index.
     pub(crate) fn add_local_in_scope(
         &mut self,
         scope_index: usize,
@@ -430,12 +439,14 @@ impl Compiler {
         slot
     }
 
+    /// Marks a local variable as being in the TDZ (Temporal Dead Zone).
     pub(crate) fn mark_local_tdz(&mut self, slot: usize) {
         if let Some(flag) = self.local_tdz.get_mut(slot) {
             *flag = true;
         }
     }
 
+    /// Adds a lexical binding (used for `let`/`const` bindings).
     pub(crate) fn add_lexical_binding(&mut self, name: &str) {
         let scope_index = self.scopes.len().saturating_sub(1);
         self.scopes[scope_index]
@@ -443,6 +454,7 @@ impl Compiler {
             .insert(name.to_string());
     }
 
+    /// Adds a local variable with a mirror flag (used for `let`/`const` bindings).
     pub(crate) fn add_local_with_mirror(
         &mut self,
         name: String,
@@ -453,6 +465,7 @@ impl Compiler {
         self.add_local_in_scope(scope_index, name, type_ann, mirror_global)
     }
 
+    /// Adds a local variable without a mirror flag (used for `var` bindings).
     pub(crate) fn add_var_local(
         &mut self,
         name: String,
@@ -463,6 +476,7 @@ impl Compiler {
         self.add_local_in_scope(scope_index, name, type_ann, mirror_global)
     }
 
+    /// Checks for a lexical binding conflict with a `var` binding in the current scope.
     pub(crate) fn check_var_lexical_conflict(&self, name: &str) -> Option<String> {
         for scope in self.scopes.iter().rev() {
             if matches!(scope.kind, ScopeKind::Function) {
@@ -478,6 +492,7 @@ impl Compiler {
         None
     }
 
+    /// Collects variable names from a statement, excluding lexical bindings.
     pub(crate) fn collect_var_names_from_statement(
         &self,
         stmt: &oast::Statement<'_>,
@@ -487,6 +502,7 @@ impl Compiler {
         names
     }
 
+    /// Adds variable names from a statement to the given set, excluding lexical bindings.
     pub(crate) fn add_var_names_from_statement(
         &self,
         stmt: &oast::Statement<'_>,
@@ -531,6 +547,7 @@ impl Compiler {
         }
     }
 
+    /// Adds variable names from a binding pattern to the given set.
     pub(crate) fn add_var_names_from_binding(
         &self,
         pattern: &oast::BindingPattern<'_>,
@@ -556,6 +573,7 @@ impl Compiler {
         }
     }
 
+    /// Enters a block scope with the given block var names.
     pub(crate) fn enter_block_scope(&mut self) {
         self.scopes.push(Scope {
             kind: ScopeKind::Block,
@@ -565,6 +583,7 @@ impl Compiler {
         });
     }
 
+    /// Enters a block scope with the given block var names.
     pub(crate) fn enter_block_scope_with_vars(&mut self, stmts: &[oast::Statement<'_>]) {
         let mut block_var_names = HashSet::new();
         for stmt in stmts {
@@ -579,6 +598,7 @@ impl Compiler {
         });
     }
 
+    /// Exits the current scope, popping it from the scope stack.
     pub(crate) fn exit_scope(&mut self) {
         let scope = self
             .scopes
@@ -590,6 +610,7 @@ impl Compiler {
         );
     }
 
+    /// Returns a snapshot of the current visible bindings from all scopes.
     pub(crate) fn visible_bindings_snapshot(&mut self) -> HashMap<String, CaptureSource> {
         let mut bindings = HashMap::new();
         for scope in &self.scopes {
@@ -617,8 +638,9 @@ impl Compiler {
             let (immutable, sloppy_immutable_silent) = self
                 .captured_upvalues
                 .get(*idx as usize)
-                .map(|spec| (spec.immutable, spec.sloppy_immutable_silent))
-                .unwrap_or((false, false));
+                .map_or((false, false), |spec| {
+                    (spec.immutable, spec.sloppy_immutable_silent)
+                });
             bindings
                 .entry(name.clone())
                 .or_insert(CaptureSource::Upvalue {
@@ -640,8 +662,9 @@ impl Compiler {
                 let (immutable, sloppy_immutable_silent) = self
                     .captured_upvalues
                     .get(idx as usize)
-                    .map(|spec| (spec.immutable, spec.sloppy_immutable_silent))
-                    .unwrap_or((false, false));
+                    .map_or((false, false), |spec| {
+                        (spec.immutable, spec.sloppy_immutable_silent)
+                    });
                 bindings.insert(
                     name,
                     CaptureSource::Upvalue {
@@ -655,6 +678,7 @@ impl Compiler {
         bindings
     }
 
+    /// Returns true if the local variable at the given slot mirrors the global object.
     pub(crate) fn local_mirrors_global(&self, slot: usize) -> bool {
         self.local_mirror_globals
             .get(slot)
@@ -662,6 +686,7 @@ impl Compiler {
             .unwrap_or(false)
     }
 
+    /// Emits a `LoadLocal` or `GetUpvalue` operation for the given binding name.
     pub(crate) fn emit_get_binding(&mut self, name: &str) {
         if let Some(slot) = self.resolve_local(name) {
             self.emit(Op::LoadLocal, LINE);
@@ -683,6 +708,7 @@ impl Compiler {
         }
     }
 
+    /// Emits a `SetModuleExport` operation for the given export name.
     pub(crate) fn emit_set_own_module_export(
         &mut self,
         export_name: &str,
@@ -704,6 +730,7 @@ impl Compiler {
         Ok(())
     }
 
+    /// Converts a `ModuleExportName` to a string.
     pub(crate) fn module_export_name_to_string(
         name: &oast::ModuleExportName<'_>,
     ) -> Option<String> {
@@ -714,6 +741,7 @@ impl Compiler {
         }
     }
 
+    /// Resolves the upvalue index for the given binding name.
     pub(crate) fn resolve_upvalue(&mut self, name: &str) -> Option<u8> {
         if let Some(&idx) = self.upvalue_indices.get(name) {
             return Some(idx);
@@ -750,19 +778,21 @@ impl Compiler {
         Some(idx)
     }
 
+    /// Returns the index of the global constant for the given name,
+    /// adding a fresh constant if necessary.
     pub(crate) fn global_name_index(&mut self, name: &str) -> usize {
         // If we previously cached an index for this global name, it may
         // refer to a constant stored in a different chunk (e.g. from an
         // enclosing function/proto). Ensure the returned index always points
         // into the current compilation chunk by validating the cached index
         // and, if necessary, adding a fresh constant into this chunk.
-        if let Some(&idx) = self.globals.get(name) {
-            if idx < self.chunk.constants.len() {
-                return idx;
-            }
-            // Cached index is out-of-range for current chunk; fall through to
-            // add a local constant instead of reusing the stale index.
+        if let Some(&idx) = self.globals.get(name)
+            && idx < self.chunk.constants.len()
+        {
+            return idx;
         }
+        // Cached index is out-of-range for current chunk; fall through to
+        // add a local constant instead of reusing the stale index.
         let idx = self.chunk.add_constant(Value::String(name.to_string()));
         self.globals.insert(name.to_string(), idx);
         idx
@@ -781,18 +811,21 @@ impl Compiler {
         Value::String(key)
     }
 
+    /// Emits a `GetGlobal` operation for the given global name.
     pub(crate) fn emit_get_global_name(&mut self, name: &str) {
         let idx = self.global_name_index(name);
         self.emit(Op::GetGlobal, LINE);
         self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
     }
 
+    /// Emits a `GetBuiltin` operation for the given builtin name.
     pub(crate) fn emit_get_builtin_name(&mut self, name: &str) {
         let idx = self.global_name_index(name);
         self.emit(Op::GetBuiltin, LINE);
         self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
     }
 
+    /// Executes the given closure with the given compile context override.
     pub(crate) fn with_compile_context_override<R>(
         context: Option<(bool, bool)>,
         f: impl FnOnce() -> R,
@@ -835,6 +868,7 @@ impl Compiler {
         Ok(())
     }
 
+    /// Emits a `Typeof` operation for the given identifier name.
     pub(crate) fn emit_typeof_identifier(&mut self, name: &str) {
         if let Some(slot) = self.resolve_local(name) {
             self.emit(Op::LoadLocal, LINE);
@@ -847,12 +881,14 @@ impl Compiler {
         }
     }
 
+    /// Emits a `SetGlobal` operation for the given global name.
     pub(crate) fn emit_set_global_name(&mut self, name: &str) {
         let idx = self.global_name_index(name);
         self.emit(Op::SetGlobal, LINE);
-        self.emit_u16(idx as u16, LINE);
+        self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
     }
 
+    /// Patches a jump instruction at the given offset with the current code size.
     pub(crate) fn patch_jump(&mut self, offset: usize) {
         // `offset` is the instruction index where the jump instruction resides
         // (this follows the previous emitter pattern of recording `code.len()`
@@ -862,21 +898,25 @@ impl Compiler {
         let target = self.chunk.code.len() as isize;
         let rel = target - (patch_idx as isize) - 1;
         let val = i32::try_from(rel).expect("jump offset overflow");
+        self.apply_jump_patch(patch_idx, val);
+    }
+
+    /// Applies a jump patch to the chunk at the given patch index with the given value.
+    fn apply_jump_patch(&mut self, patch_idx: usize, val: i32) {
         let ok = if self
             .chunk
             .code
             .get(patch_idx)
-            .map(|instr| Op::from_byte((instr & 0xFF) as u8) == Some(Op::CompareJump))
-            .unwrap_or(false)
+            .is_some_and(|instr| Op::from_byte((instr & 0xFF) as u8) == Some(Op::CompareJump))
         {
             // Preserve compare-op byte in payload byte 0 and patch signed i16
             // offset into payload bytes 1..2.
             let rel16 = i16::try_from(val).expect("compare jump offset overflow");
             let instr = self.chunk.code[patch_idx];
-            let compare_byte = (instr >> 8) & 0xFF;
-            let rel_u16 = rel16 as u16;
-            let payload = compare_byte | (((rel_u16 as u32) & 0xFFFF) << 8);
-            let new_instr = (instr & 0xFF) | ((payload & 0x00FF_FFFF) << 8);
+            let compare_byte = (instr >> 8_i32) & 0xFF;
+            let rel_u16 = rel16.cast_unsigned();
+            let payload = compare_byte | (((rel_u16 as u32) & 0xFFFF) << 8_i32);
+            let new_instr = (instr & 0xFF) | ((payload & 0x00FF_FFFF) << 8_i32);
             self.chunk.code[patch_idx] = new_instr;
             true
         } else {
@@ -885,33 +925,14 @@ impl Compiler {
         assert!(ok, "failed to write jump payload");
     }
 
+    /// Patches a jump instruction at the given offset to jump to the target instruction.
     pub(crate) fn patch_jump_to_target(&mut self, offset: usize, target: usize) {
         let patch_idx = self.resolve_jump_patch_index(offset);
         let rel = (target as isize) - (patch_idx as isize) - 1;
-        let ok = if self
-            .chunk
-            .code
-            .get(patch_idx)
-            .map(|instr| Op::from_byte((instr & 0xFF) as u8) == Some(Op::CompareJump))
-            .unwrap_or(false)
-        {
-            let rel16 = i16::try_from(rel).expect("compare jump target offset overflow");
-            let instr = self.chunk.code[patch_idx];
-            let compare_byte = (instr >> 8) & 0xFF;
-            let rel_u16 = rel16 as u16;
-            let payload = compare_byte | (((rel_u16 as u32) & 0xFFFF) << 8);
-            let new_instr = (instr & 0xFF) | ((payload & 0x00FF_FFFF) << 8);
-            self.chunk.code[patch_idx] = new_instr;
-            true
-        } else {
-            self.chunk.write_i24_payload_at(
-                patch_idx,
-                i32::try_from(rel).expect("jump target offset overflow"),
-            )
-        };
-        assert!(ok, "failed to write jump target payload");
+        self.apply_jump_patch(patch_idx, rel as i32);
     }
 
+    /// Emits a signed jump offset as a sign-extended i24 payload.
     pub(crate) fn emit_short_signed(&mut self, val: isize, line: u32) {
         // Store signed jump offsets as sign-extended i24 payload so runtime
         // jump decoding (`read_i24_payload_at`) preserves negative back-jumps.
@@ -925,31 +946,14 @@ impl Compiler {
         self.pending_operand_bytes = 0;
     }
 
+    /// Patches a list of jump instructions to point to the given target.
     pub(crate) fn patch_jump_list(&mut self, patches: Vec<usize>, target: usize) {
         for patch_pos in patches {
             let patch_idx = self.resolve_jump_patch_index(patch_pos);
             // compute relative offset in instruction units
             let rel = (target as isize) - (patch_idx as isize) - 1;
             let v = i32::try_from(rel).expect("offset overflow");
-            let ok = if self
-                .chunk
-                .code
-                .get(patch_idx)
-                .map(|instr| Op::from_byte((instr & 0xFF) as u8) == Some(Op::CompareJump))
-                .unwrap_or(false)
-            {
-                let rel16 = i16::try_from(v).expect("compare jump offset overflow");
-                let instr = self.chunk.code[patch_idx];
-                let compare_byte = (instr >> 8) & 0xFF;
-                let rel_u16 = rel16 as u16;
-                let payload = compare_byte | (((rel_u16 as u32) & 0xFFFF) << 8);
-                let new_instr = (instr & 0xFF) | ((payload & 0x00FF_FFFF) << 8);
-                self.chunk.code[patch_idx] = new_instr;
-                true
-            } else {
-                self.chunk.write_i24_payload_at(patch_idx, v)
-            };
-            assert!(ok, "failed to write jump payload");
+            self.apply_jump_patch(patch_idx, v);
         }
     }
 }

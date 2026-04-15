@@ -159,48 +159,6 @@ impl Vm {
         self.execute_tail_call_with_nargs(None)
     }
 
-    pub(super) fn execute_tail_call_method(&mut self) -> Result<(), RuntimeError> {
-        let nargs = self.read_byte()? as usize;
-        if crate::trace::enabled() {
-            eprintln!(
-                "[trace] execute_tail_call_method nargs={} stack_size={} ip={}",
-                nargs,
-                self.stack.len(),
-                self.ip.saturating_sub(1)
-            );
-            for (i, v) in self.stack.iter_rev().take(6).enumerate() {
-                crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
-            }
-        }
-        let mut args: Vec<Value> = Vec::with_capacity(nargs);
-        for _ in 0..nargs {
-            args.push(self.pop()?);
-        }
-        args.reverse();
-        let callee = self.pop()?;
-        let receiver = if self.stack.len() == 0 {
-            Value::Undefined
-        } else {
-            self.pop()?
-        };
-        let receiver = match &callee {
-            Value::Closure {
-                lexical_this: Some(this),
-                ..
-            } => (**this).clone(),
-            _ => receiver,
-        };
-        if crate::trace::enabled() {
-            eprintln!(
-                "[trace] execute_tail_call_method after pops stack_size={} receiver={:?} callee={:?}",
-                self.stack.len(),
-                receiver,
-                callee
-            );
-        }
-        self.tail_call_value(callee, args, receiver, true)
-    }
-
     pub(super) fn execute_call_with_nargs(
         &mut self,
         nargs_override: Option<usize>,
@@ -552,10 +510,6 @@ impl Vm {
         Ok(())
     }
 
-    pub(super) fn execute_call_ic(&mut self) -> Result<(), RuntimeError> {
-        self.execute_call_with_nargs(None)
-    }
-
     pub(super) fn execute_call_method(&mut self) -> Result<(), RuntimeError> {
         let nargs = self.read_byte()? as usize;
         if crate::trace::enabled() {
@@ -694,6 +648,8 @@ impl Vm {
         }
         Ok(())
     }
+
+    /// Creates a generator object for the given function and arguments.
     pub(super) fn create_generator_object(
         &mut self,
         proto: &Rc<FunctionProto>,
@@ -994,7 +950,6 @@ impl Vm {
                     let instance_obj = gc::track_object(Rc::new(RefCell::new(
                         ObjectData::with_prototype(instance_proto),
                     )));
-                    self.property_get_ic_cache.clear();
                     instance_obj.borrow_mut().properties.insert(
                         PropertyKey::String("constructor".to_string()),
                         PropertyDescriptor::data(callee.clone()),
@@ -1107,7 +1062,6 @@ impl Vm {
                 let instance_obj = gc::track_object(Rc::new(RefCell::new(
                     ObjectData::with_prototype(instance_proto),
                 )));
-                self.property_get_ic_cache.clear();
                 instance_obj.borrow_mut().properties.insert(
                     PropertyKey::String("constructor".to_string()),
                     PropertyDescriptor::data(callee.clone()),

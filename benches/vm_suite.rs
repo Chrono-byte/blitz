@@ -14,6 +14,7 @@ use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use blitz::vm::Vm;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
+/// Fixtures for cold-start benchmarking (executed once per benchmark).
 const COLD_START_FIXTURES: [&str; 4] = [
     "arithmetic_loop",
     "function_calls",
@@ -21,6 +22,7 @@ const COLD_START_FIXTURES: [&str; 4] = [
     "closure_calls",
 ];
 
+/// Fixtures for fast execution benchmarking (executed once per benchmark).
 const FAST_EXEC_FIXTURES: [&str; 18] = [
     "parse_numbers",
     "parse_numbers_bases",
@@ -42,6 +44,7 @@ const FAST_EXEC_FIXTURES: [&str; 18] = [
     "deep_object_nesting",
 ];
 
+/// Fixtures for slow execution benchmarking (executed once per benchmark).
 const SLOW_EXEC_FIXTURES: [&str; 6] = [
     "try_catch_no_errors",
     "try_catch_errors",
@@ -51,8 +54,10 @@ const SLOW_EXEC_FIXTURES: [&str; 6] = [
     "array_filter",
 ];
 
+/// Fixtures for stress execution benchmarking (executed once per benchmark).
 const STRESS_EXEC_FIXTURES: [&str; 2] = ["recursive_fib", "large_array_creation"];
 
+/// Extra fixtures for benchmarking (executed once per benchmark).
 const EXTRA_FIXTURES: [&str; 3] = ["dom_like_access", "array_iteration", "config_lookup"];
 
 fn benchmark_globals() -> Rc<RefCell<ObjectData>> {
@@ -282,6 +287,7 @@ fn bench_execute_unicode_hotpaths(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks micro hotpaths, such as string concatenation and number-to-string conversions.
 fn bench_micro_hotpaths(c: &mut Criterion) {
     let mut group = c.benchmark_group("micro_hotpaths");
     group.sample_size(20);
