@@ -258,14 +258,14 @@ impl super::Compiler {
     // CompareJump cond_type values:
     // 0=Eq, 1=Neq, 2=Lt, 3=Lte, 4=Gt, 5=Gte, 6=StrictEq, 7=StrictNeq
     let cond_type = match binary.operator {
-      oast::BinaryOperator::Equality => 0,
-      oast::BinaryOperator::Inequality => 1,
-      oast::BinaryOperator::LessThan => 2,
-      oast::BinaryOperator::LessEqualThan => 3,
-      oast::BinaryOperator::GreaterThan => 4,
-      oast::BinaryOperator::GreaterEqualThan => 5,
-      oast::BinaryOperator::StrictEquality => 6,
-      oast::BinaryOperator::StrictInequality => 7,
+      oast::BinaryOperator::Equality => 0_i32,
+      oast::BinaryOperator::Inequality => 1_i32,
+      oast::BinaryOperator::LessThan => 2_i32,
+      oast::BinaryOperator::LessEqualThan => 3_i32,
+      oast::BinaryOperator::GreaterThan => 4_i32,
+      oast::BinaryOperator::GreaterEqualThan => 5_i32,
+      oast::BinaryOperator::StrictEquality => 6_i32,
+      oast::BinaryOperator::StrictInequality => 7_i32,
       _ => return Ok(None),
     };
 
@@ -373,7 +373,10 @@ impl super::Compiler {
           if start < end && end <= source.len() {
             let digits = source[start..end]
               .strip_suffix('n')
-              .unwrap_or(&source[start..end])
+              .unwrap_or_else(|| {
+                let range = start..end;
+                &source[range]
+              })
               .replace('_', "");
             // Use base field to determine radix, handle both lowercase and uppercase prefixes
             match n.base {
@@ -636,7 +639,11 @@ impl super::Compiler {
             let descriptor_prop_name = match p.kind {
               oast::PropertyKind::Get => "get",
               oast::PropertyKind::Set => "set",
-              oast::PropertyKind::Init => unreachable!(),
+              oast::PropertyKind::Init => {
+                return Err(crate::errors::CompilerError::from(
+                  "InternalCompilerError: unexpected property kind `Init` when building accessor descriptor",
+                ));
+              }
             };
             let method_name_owned = if let Some(Value::String(s)) = &key_value {
               s.clone()
@@ -1410,7 +1417,7 @@ impl super::Compiler {
         if let Some(cond_type) = compare_cond_type {
           self.compile_expr_oast(&b.left)?;
           self.compile_expr_oast(&b.right)?;
-          self.emit_with_payload(Op::CompareJump, cond_type as u32, LINE);
+          self.emit_with_payload(Op::CompareJump, cond_type, LINE);
           let jump_false = self.chunk.code.len();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);

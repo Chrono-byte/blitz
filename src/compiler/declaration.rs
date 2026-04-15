@@ -1583,7 +1583,11 @@ impl Compiler {
       oast::MethodDefinitionKind::Method => "value",
       oast::MethodDefinitionKind::Get => "get",
       oast::MethodDefinitionKind::Set => "set",
-      oast::MethodDefinitionKind::Constructor => unreachable!(),
+      oast::MethodDefinitionKind::Constructor => {
+        return Err(crate::errors::CompilerError::from(
+          "constructor method definition encountered unexpectedly",
+        ));
+      },
     };
     self.emit_constant(Value::String(first_descriptor_key.to_string()), LINE);
     self.emit(Op::MakeClosure, LINE);
