@@ -338,6 +338,8 @@ pub fn collect_with_env_roots(
   }
 }
 
+/// Marks a value for the garbage collector.
+#[allow(clippy::too_many_lines)]
 fn mark_value(
   value: &Value,
   marked_objects: &mut HashSet<usize>,
@@ -666,6 +668,7 @@ fn clear_promise(state: &Rc<RefCell<PromiseState>>) {
 
 #[cfg(test)]
 mod tests {
+  #![allow(clippy::unreachable)]
   use super::*;
 
   use crate::bytecode::{Chunk, FunctionProto};

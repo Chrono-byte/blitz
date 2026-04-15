@@ -100,7 +100,15 @@ pub(super) fn gc_allocation_pressure_threshold() -> usize {
 type Microtask = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 type DynamicImportJob = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 
+// Factor complex hook type into aliases to satisfy clippy's `type_complexity` suggestions.
+//
+// - `UnhandledRejectionHookInner` captures the underlying FnMut signature.
+// - `UnhandledRejectionHook` wraps the inner type in the `Rc<RefCell<...>>` used throughout the VM.
+type UnhandledRejectionHookInner = dyn FnMut(&mut Vm, Value, Value);
+type UnhandledRejectionHook = Rc<RefCell<UnhandledRejectionHookInner>>;
+
 #[derive(Default)]
+/// A stack of values used for operand storage in the VM.
 pub(crate) struct OperandStack {
   /// The main stack of values.
   inner: Vec<Value>,
@@ -231,14 +239,22 @@ impl OperandStack {
     &mut self,
     a: usize,
     b: usize,
-  ) {
+  ) -> Result<(), ()> {
+    // No-op if indices are equal.
+    if a == b {
+      return Ok(());
+    }
+
     let total = self.len();
     if a >= total || b >= total {
-      panic!("swap index out of bounds");
+      // return an error if the nunmber is out of bounds
+      return Err(());
     }
+
     let mut values = self.take_all();
     values.swap(a, b);
     self.restore_from(values);
+    Ok(())
   }
 }
 
@@ -427,7 +443,7 @@ pub struct Vm {
   /// is observed. The hook receives two Values: the first is the promise
   /// object (or Undefined for non-promise microtask exceptions) and the
   /// second is the rejection reason / exception value.
-  pub(super) unhandled_rejection_hook: Option<Rc<RefCell<dyn FnMut(&mut Vm, Value, Value)>>>,
+  pub(super) unhandled_rejection_hook: Option<UnhandledRejectionHook>,
   /// Store of lexical environment records for the current execution context.
   pub(super) lexical_env: Rc<RefCell<EnvironmentRecord>>,
   /// Store of global environment records for the current execution context.

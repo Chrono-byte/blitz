@@ -33,9 +33,9 @@ pub(super) fn to_int32_with_vm(
 ) -> Result<i32, RuntimeError> {
   let u = to_uint32_with_vm(vm, v)?;
   if u & 0x8000_0000 != 0 {
-    Ok(((u as i64) - 0x100000000) as i32)
-  } else {
     Ok(u as i32)
+  } else {
+    Ok((u as i32) & 0x7FFF_FFFF)
   }
 }
 
@@ -44,6 +44,7 @@ pub(super) fn to_int32_with_vm(
 /// # Errors
 ///
 /// Returns a `RuntimeError` if the value cannot be converted to a `u32`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(super) fn to_uint32_with_vm(
   vm: &mut Vm,
   v: &Value,
@@ -57,7 +58,9 @@ pub(super) fn to_uint32_with_vm(
   const TWO32: f64 = 4294967296.0;
   let int_part = n.trunc();
   let vmod = int_part.rem_euclid(TWO32);
-  Ok(vmod as u32)
+  // vmod is in the range [0, 2^32), so this cast is safe
+  let result = vmod as u32;
+  Ok(result)
 }
 
 /// Parse a JavaScript number string into a `f64`.
