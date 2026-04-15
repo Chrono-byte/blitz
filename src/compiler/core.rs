@@ -842,9 +842,8 @@ impl Compiler {
             self.emit(Op::Typeof, LINE);
         } else {
             let idx = self.global_name_index(name);
-            self.emit(Op::GetGlobal, LINE);
+            self.emit(Op::TypeofGlobal, LINE);
             self.emit_u16(u16::try_from(idx).expect("idx fits in u16"), LINE);
-            self.emit(Op::Typeof, LINE);
         }
     }
 
@@ -889,10 +888,27 @@ impl Compiler {
     pub(crate) fn patch_jump_to_target(&mut self, offset: usize, target: usize) {
         let patch_idx = self.resolve_jump_patch_index(offset);
         let rel = (target as isize) - (patch_idx as isize) - 1;
-        let ok = self.chunk.write_i24_payload_at(
-            patch_idx,
-            i32::try_from(rel).expect("jump target offset overflow"),
-        );
+        let ok = if self
+            .chunk
+            .code
+            .get(patch_idx)
+            .map(|instr| Op::from_byte((instr & 0xFF) as u8) == Some(Op::CompareJump))
+            .unwrap_or(false)
+        {
+            let rel16 = i16::try_from(rel).expect("compare jump target offset overflow");
+            let instr = self.chunk.code[patch_idx];
+            let compare_byte = (instr >> 8) & 0xFF;
+            let rel_u16 = rel16 as u16;
+            let payload = compare_byte | (((rel_u16 as u32) & 0xFFFF) << 8);
+            let new_instr = (instr & 0xFF) | ((payload & 0x00FF_FFFF) << 8);
+            self.chunk.code[patch_idx] = new_instr;
+            true
+        } else {
+            self.chunk.write_i24_payload_at(
+                patch_idx,
+                i32::try_from(rel).expect("jump target offset overflow"),
+            )
+        };
         assert!(ok, "failed to write jump target payload");
     }
 

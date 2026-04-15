@@ -570,6 +570,8 @@ pub enum Op {
     // === Global Variable Access with unified IC (2) ===
     /// rd = GetGlobal(name_const_idx). Aux: name_idx (u8), ic_slot (4 bits)
     GetGlobal,
+    /// rd = typeof name_const_idx. Aux: name_idx (u8), ic_slot (4 bits)
+    TypeofGlobal,
     /// SetGlobal(name_const_idx, rd). Aux: name_idx (u8), ic_slot (4 bits)
     SetGlobal,
 
@@ -725,6 +727,7 @@ impl Op {
             Op::DeleteProperty => "DeleteProperty",
             Op::HasProperty => "HasProperty",
             Op::GetGlobal => "GetGlobal",
+            Op::TypeofGlobal => "TypeofGlobal",
             Op::SetGlobal => "SetGlobal",
             Op::GetUpvalue => "GetUpvalue",
             Op::SetUpvalue => "SetUpvalue",
@@ -846,7 +849,7 @@ mod tests {
 
     #[test]
     fn op_round_trip() {
-        for i in 0u8..=Op::PopEnv as u8 {
+        for i in 0u8..=Op::Spread as u8 {
             let op = Op::try_from(i).expect("valid op");
             let b = u8::from(op);
             assert_eq!(b, i);

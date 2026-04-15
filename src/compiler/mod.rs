@@ -945,6 +945,31 @@ fn comparison_branches_use_compare_jump() {
 }
 
 #[test]
+fn while_compare_jump_preserves_compare_opcode_payload() {
+    let src = "var s = \"\"; while (s.length < 4) { s = \"0\" + s; }";
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+
+    let chunk = compile(program, session.source()).expect("compile ok");
+    let compare = chunk
+        .code
+        .iter()
+        .find_map(|instr| {
+            let op = Op::from_byte((*instr & 0xFF) as u8)?;
+            if matches!(op, Op::CompareJump) {
+                Some((instr >> 8) & 0xFF)
+            } else {
+                None
+            }
+        })
+        .expect("expected CompareJump in while loop");
+    assert_eq!(
+        compare, 2,
+        "while condition should preserve LessThan compare op"
+    );
+}
+
+#[test]
 fn compile_for_of_emits_iterator_ops() {
     let src = "for (var x of [1, 2, 3]) {}";
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");

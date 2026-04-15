@@ -1505,6 +1505,15 @@ impl Vm {
                 };
                 self.stack.push(v);
             }
+            Op::TypeofGlobal => {
+                let idx = self.read_short()? as usize;
+                let name = self.string_constant(idx)?;
+                let value = self.resolve_identifier_value(&name)?;
+                let ty = value
+                    .as_ref()
+                    .map_or_else(|| "undefined".to_string(), |v| self.typeof_value(v));
+                self.stack.push(Value::String(ty));
+            }
             Op::SetGlobal => {
                 let idx = self.read_short()? as usize;
                 let name = self.string_constant(idx)?;
@@ -3634,7 +3643,7 @@ impl Vm {
                                 };
                                 eprintln!("[diag] {:#06}  Const       {} ({})", j, arg, repr);
                             }
-                            Op::GetGlobal | Op::SetGlobal => {
+                            Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => {
                                 let instr = proto.chunk.code[j];
                                 let hi = payload_byte(instr, 0) as u16;
                                 let lo = payload_byte(instr, 1) as u16;
@@ -3735,7 +3744,7 @@ impl Vm {
                             }
                         }
                     }
-                    Op::GetGlobal | Op::SetGlobal => {
+                    Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => {
                         let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
                         let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
                         let arg = ((hi << 8) | lo) as usize;
@@ -3805,7 +3814,7 @@ impl Vm {
                             };
                             eprintln!("[diag]    {:#06}  Const       {} ({})", k, arg, repr);
                         }
-                        Op::GetGlobal | Op::SetGlobal => {
+                        Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => {
                             let hi = frame.chunk.code.get(k + 1).cloned().unwrap_or(0) as u16;
                             let lo = frame.chunk.code.get(k + 2).cloned().unwrap_or(0) as u16;
                             let arg = ((hi << 8) | lo) as usize;
@@ -3989,7 +3998,7 @@ impl Vm {
 fn opcode_width(op: Op) -> usize {
     match op {
         Op::Const => 3,
-        Op::GetGlobal | Op::SetGlobal => 3,
+        Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => 3,
         Op::LoadLocal
         | Op::StoreLocal
         | Op::Call

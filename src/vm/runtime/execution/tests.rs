@@ -22,20 +22,6 @@ fn run_script(src: &str) -> (Vm, Rc<RefCell<ObjectData>>) {
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
-    // Temporary debug: dump compiled chunk instruction words
-    eprintln!(
-        "[test-debug] compiled chunk.code len={} words:",
-        chunk.code.len()
-    );
-    for (i, w) in chunk.code.iter().enumerate() {
-        eprintln!(
-            "  idx={} word=0x{:08x} opcode=0x{:02x} payload=0x{:06x}",
-            i,
-            w,
-            (w & 0xff) as u8,
-            (w >> 8) & 0x00FF_FFFF
-        );
-    }
 
     let globals = test_globals();
     let mut vm = Vm::new(globals.clone());
