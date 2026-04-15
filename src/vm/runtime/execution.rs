@@ -211,13 +211,17 @@ impl Vm {
                 if count == 0 {
                     None
                 } else {
-                    Op::from_byte(index as u8).map(|op| (op, count))
+                    // Safe: index is from 0..OP_COUNT which is guaranteed <= u8::MAX
+                    let index =
+                        u8::try_from(index).expect("index from opcode_counts exceeds u8::MAX");
+                    Op::from_byte(index).map(|op| (op, count))
                 }
             })
             .collect();
         ranked.sort_by(|a, b| b.1.cmp(&a.1));
 
         for (op, count) in ranked.into_iter().take(16) {
+            // Precision loss acceptable for percentage display calculation
             let pct = (count as f64 / total as f64) * 100.0;
             eprintln!("[vm-profile] {:>16} {:>12} {:>6.2}%", op.name(), count, pct);
         }
@@ -1866,6 +1870,8 @@ impl Vm {
                 let ai = self.to_int32_value(&a)?;
                 let bi = self.to_int32_value(&b)?;
                 let r = ai & bi;
+                // JS bitwise ops produce i32; convert to f64 for Number type.
+                // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
                 self.stack.push(Value::Number(r as f64));
             }
             Op::BitOr => {
@@ -1874,6 +1880,8 @@ impl Vm {
                 let ai = self.to_int32_value(&a)?;
                 let bi = self.to_int32_value(&b)?;
                 let r = ai | bi;
+                // JS bitwise ops produce i32; convert to f64 for Number type.
+                // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
                 self.stack.push(Value::Number(r as f64));
             }
             Op::BitXor => {
@@ -1882,6 +1890,8 @@ impl Vm {
                 let ai = self.to_int32_value(&a)?;
                 let bi = self.to_int32_value(&b)?;
                 let r = ai ^ bi;
+                // JS bitwise ops produce i32; convert to f64 for Number type.
+                // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
                 self.stack.push(Value::Number(r as f64));
             }
             Op::Shl => {
@@ -1890,6 +1900,8 @@ impl Vm {
                 let ai = self.to_int32_value(&a)?;
                 let shift = self.to_uint32_value(&b)? & 0x1f;
                 let r = ai.wrapping_shl(shift);
+                // JS bitwise ops produce i32; convert to f64 for Number type.
+                // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
                 self.stack.push(Value::Number(r as f64));
             }
             Op::Shr => {
@@ -1898,6 +1910,8 @@ impl Vm {
                 let ai = self.to_int32_value(&a)?;
                 let shift = self.to_uint32_value(&b)? & 0x1f;
                 let r = ai.wrapping_shr(shift);
+                // JS bitwise ops produce i32; convert to f64 for Number type.
+                // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
                 self.stack.push(Value::Number(r as f64));
             }
             Op::Ushr => {
@@ -1906,7 +1920,8 @@ impl Vm {
                 let au = self.to_uint32_value(&a)?;
                 let shift = self.to_uint32_value(&b)? & 0x1f;
                 let r = au.wrapping_shr(shift);
-                // JavaScript >>> yields an unsigned 32-bit number, represent as Number
+                // JavaScript >>> yields an unsigned 32-bit number, represent as Number.
+                // u32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
                 self.stack.push(Value::Number(r as f64));
             }
             Op::Typeof => {

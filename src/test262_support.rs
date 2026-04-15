@@ -139,7 +139,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>, print_native: &NativeF
     }
     data.properties.insert(
         PropertyKey::String("agent".to_string()),
-        PropertyDescriptor::data(Value::Object(agent_obj.clone())),
+        PropertyDescriptor::data(Value::Object(agent_obj)),
     );
 
     let print_native = Rc::clone(print_native);
@@ -161,7 +161,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>, print_native: &NativeF
             if let Value::Object(obj) = &new_262 {
                 obj.borrow_mut().properties.insert(
                     PropertyKey::String("global".to_string()),
-                    PropertyDescriptor::data(Value::Object(realm_global.clone())),
+                    PropertyDescriptor::data(Value::Object(realm_global)),
                 );
             }
             Ok(new_262)

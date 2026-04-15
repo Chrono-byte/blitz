@@ -351,6 +351,24 @@ impl Compiler {
         })
     }
 
+    /// Safely converts a function index (usize) to u8, checking that it doesn't exceed 255.
+    pub(crate) fn function_index_to_u8(&self, idx: usize) -> Result<u8, CompilerError> {
+        u8::try_from(idx)
+            .map_err(|_| CompilerError::from(format!("Too many functions (max 255, got {})", idx)))
+    }
+
+    /// Safely converts a constant index (usize) to u8, checking that it doesn't exceed 255.
+    pub(crate) fn constant_index_to_u8(&self, idx: usize) -> Result<u8, CompilerError> {
+        u8::try_from(idx)
+            .map_err(|_| CompilerError::from(format!("Too many constants (max 255, got {})", idx)))
+    }
+
+    /// Safely converts a module index (usize) to u8, checking that it doesn't exceed 255.
+    pub(crate) fn module_index_to_u8(&self, idx: usize) -> Result<u8, CompilerError> {
+        u8::try_from(idx)
+            .map_err(|_| CompilerError::from(format!("Too many modules (max 255, got {})", idx)))
+    }
+
     /// Returns a compiler error for a strict binding name (eval/arguments).
     pub(crate) fn strict_binding_name_error(
         strict_context: bool,

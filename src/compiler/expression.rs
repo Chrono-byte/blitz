@@ -180,12 +180,12 @@ impl super::Compiler {
         self.compile_expr_oast(&m.object)?;
         let object_slot = self.alloc_temp_local("ref_obj");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(object_slot as u8, LINE);
+        self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
 
         self.compile_expr_oast(&m.expression)?;
         let key_slot = self.alloc_temp_local("ref_key");
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(key_slot as u8, LINE);
+        self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
         Ok((object_slot, key_slot))
     }
 
@@ -196,9 +196,9 @@ impl super::Compiler {
         use_ic: bool,
     ) -> Result<(), crate::errors::CompilerError> {
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(object_slot as u8, LINE);
+        self.emit_byte(self.slot_to_u8(object_slot)?, LINE);
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(key_slot as u8, LINE);
+        self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
         if use_ic {
             self.emit(Op::GetProperty, LINE);
             let slot = self.alloc_ic_slot()?;
@@ -486,7 +486,7 @@ impl super::Compiler {
                 let (proto, _env_len) = self.compile_arrow_function(name, a, None)?;
                 let idx = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
-                self.emit_byte(idx as u8, LINE);
+                self.emit_byte(self.function_index_to_u8(idx)?, LINE);
             }
             OExpr::FunctionExpression(f) => {
                 let name = "<anonymous>";
@@ -494,7 +494,7 @@ impl super::Compiler {
                 let (proto, _env_len) = self.compile_function(name, self_name, f, None, false)?;
                 let idx = self.chunk.add_function(proto);
                 self.emit(Op::MakeClosure, LINE);
-                self.emit_byte(idx as u8, LINE);
+                self.emit_byte(self.function_index_to_u8(idx)?, LINE);
             }
             OExpr::ObjectExpression(obj) => {
                 let mut count = 0usize;
@@ -568,7 +568,7 @@ impl super::Compiler {
                     }
                 }
                 self.emit(Op::BuildObject, LINE);
-                self.emit_byte(count as u8, LINE);
+                self.emit_byte(self.constant_index_to_u8(count)?, LINE);
 
                 for idx in computed_indices {
                     if let oast::ObjectPropertyKind::ObjectProperty(p) = &obj.properties[idx] {
@@ -661,7 +661,7 @@ impl super::Compiler {
                             )?;
                             let idx = self.chunk.add_function(proto);
                             self.emit(Op::MakeClosure, LINE);
-                            self.emit_byte(idx as u8, LINE);
+                            self.emit_byte(self.function_index_to_u8(idx)?, LINE);
                         } else {
                             self.compile_expr_oast(&p.value)?;
                         }
@@ -701,7 +701,7 @@ impl super::Compiler {
                         }
                     }
                     self.emit(Op::BuildArray, LINE);
-                    self.emit_byte(arr.elements.len() as u8, LINE);
+                    self.emit_byte(self.constant_index_to_u8(arr.elements.len())?, LINE);
                     for el in &arr.elements {
                         if matches!(el, oast::ArrayExpressionElement::SpreadElement(_)) {
                             self.emit(Op::True, LINE);
@@ -710,9 +710,9 @@ impl super::Compiler {
                         }
                     }
                     self.emit(Op::BuildArray, LINE);
-                    self.emit_byte(arr.elements.len() as u8, LINE);
+                    self.emit_byte(self.constant_index_to_u8(arr.elements.len())?, LINE);
                     self.emit(Op::ArrayFromSpread, LINE);
-                    self.emit_byte(arr.elements.len() as u8, LINE);
+                    self.emit_byte(self.constant_index_to_u8(arr.elements.len())?, LINE);
                 } else {
                     for el in &arr.elements {
                         if let Some(expr) = el.as_expression() {
@@ -722,7 +722,7 @@ impl super::Compiler {
                         }
                     }
                     self.emit(Op::BuildArray, LINE);
-                    self.emit_byte(arr.elements.len() as u8, LINE);
+                    self.emit_byte(self.constant_index_to_u8(arr.elements.len())?, LINE);
                 }
             }
             OExpr::Identifier(id) => {
@@ -753,10 +753,10 @@ impl super::Compiler {
                             self.emit(Op::Dup, LINE);
                             if let Some(slot) = self.resolve_local(name) {
                                 self.emit(Op::StoreLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 if self.local_mirrors_global(slot) {
                                     self.emit(Op::LoadLocal, LINE);
-                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                     self.emit_set_global_name(name);
                                 }
                                 // Check export membership without holding a borrow
@@ -773,8 +773,8 @@ impl super::Compiler {
                                     let cname_idx =
                                         self.chunk.add_constant(Value::String(name.to_string()));
                                     self.emit(Op::SetModuleExport, LINE);
-                                    self.emit_byte(module_index as u8, LINE);
-                                    self.emit_byte(cname_idx as u8, LINE);
+                                    self.emit_byte(self.module_index_to_u8(module_index)?, LINE);
+                                    self.emit_byte(self.constant_index_to_u8(cname_idx)?, LINE);
                                 }
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
                                 self.emit(Op::SetUpvalue, LINE);
@@ -845,7 +845,7 @@ impl super::Compiler {
                             }
                             if let Some(slot) = self.resolve_local(name) {
                                 self.emit(Op::LoadLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
                                 self.emit(Op::GetUpvalue, LINE);
                                 self.emit_byte(upvalue, LINE);
@@ -875,10 +875,10 @@ impl super::Compiler {
                             self.emit(Op::Dup, LINE);
                             if let Some(slot) = self.resolve_local(name) {
                                 self.emit(Op::StoreLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 if self.local_mirrors_global(slot) {
                                     self.emit(Op::LoadLocal, LINE);
-                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                     self.emit_set_global_name(name);
                                 }
                             } else if let Some(upvalue) = self.resolve_upvalue(name) {
@@ -922,20 +922,20 @@ impl super::Compiler {
                                 let receiver_slot = self.alloc_temp_local("super_receiver");
                                 self.emit(Op::GetThis, LINE);
                                 self.emit(Op::StoreLocal, LINE);
-                                self.emit_byte(receiver_slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
                                 self.emit(Op::LoadLocal, LINE);
-                                self.emit_byte(receiver_slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
                                 self.emit(Op::Dup, LINE);
                                 self.compile_expr_oast(&m.expression)?;
                                 self.emit(Op::StoreLocal, LINE);
-                                self.emit_byte(key_slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
                                 self.emit(Op::LoadLocal, LINE);
-                                self.emit_byte(key_slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
                                 self.emit(Op::GetSuperProperty, LINE);
                                 self.compile_expr_oast(&a.right)?;
                                 self.emit_compound_assignment_op(a.operator);
                                 self.emit(Op::LoadLocal, LINE);
-                                self.emit_byte(key_slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
                                 self.emit(Op::Swap, LINE);
                                 self.emit(Op::SetSuperProperty, LINE);
                                 self.emit(Op::Swap, LINE);
@@ -964,7 +964,7 @@ impl super::Compiler {
                             let name = id.name.as_str();
                             if let Some(slot) = self.resolve_local(name) {
                                 self.emit(Op::LoadLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 self.emit(Op::Dup, LINE);
                                 self.emit(Op::JumpIfFalse, LINE);
                                 let jump_end = self.chunk.code.len();
@@ -974,10 +974,10 @@ impl super::Compiler {
                                 self.compile_expr_oast(&a.right)?;
                                 self.emit(Op::Dup, LINE);
                                 self.emit(Op::StoreLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 if self.local_mirrors_global(slot) {
                                     self.emit(Op::LoadLocal, LINE);
-                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                     self.emit_set_global_name(name);
                                 }
                                 self.patch_jump(jump_end);
@@ -1048,7 +1048,7 @@ impl super::Compiler {
                             let name = id.name.as_str();
                             if let Some(slot) = self.resolve_local(name) {
                                 self.emit(Op::LoadLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 self.emit(Op::Dup, LINE);
                                 self.emit(Op::JumpIfTrue, LINE);
                                 let jump_end = self.chunk.code.len();
@@ -1058,10 +1058,10 @@ impl super::Compiler {
                                 self.compile_expr_oast(&a.right)?;
                                 self.emit(Op::Dup, LINE);
                                 self.emit(Op::StoreLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 if self.local_mirrors_global(slot) {
                                     self.emit(Op::LoadLocal, LINE);
-                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                     self.emit_set_global_name(name);
                                 }
                                 self.patch_jump(jump_end);
@@ -1132,7 +1132,7 @@ impl super::Compiler {
                             let name = id.name.as_str();
                             if let Some(slot) = self.resolve_local(name) {
                                 self.emit(Op::LoadLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 self.emit(Op::Dup, LINE);
                                 self.emit(Op::JumpIfNullish, LINE);
                                 let jump_end = self.chunk.code.len();
@@ -1147,10 +1147,10 @@ impl super::Compiler {
                                 self.compile_expr_oast(&a.right)?;
                                 self.emit(Op::Dup, LINE);
                                 self.emit(Op::StoreLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 if self.local_mirrors_global(slot) {
                                     self.emit(Op::LoadLocal, LINE);
-                                    self.emit_byte(slot as u8, LINE);
+                                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                     self.emit_set_global_name(name);
                                 }
                                 self.patch_jump(after_store);
@@ -1302,7 +1302,7 @@ impl super::Compiler {
                         let name = id.name.as_str();
                         if let Some(slot) = self.resolve_local(name) {
                             self.emit(Op::LoadLocal, LINE);
-                            self.emit_byte(slot as u8, LINE);
+                            self.emit_byte(self.slot_to_u8(slot)?, LINE);
                             self.emit(Op::Neg, LINE);
                             self.emit(Op::Neg, LINE);
                             if !u.prefix {
@@ -1317,10 +1317,10 @@ impl super::Compiler {
                                 self.emit(Op::Dup, LINE);
                             }
                             self.emit(Op::StoreLocal, LINE);
-                            self.emit_byte(slot as u8, LINE);
+                            self.emit_byte(self.slot_to_u8(slot)?, LINE);
                             if self.local_mirrors_global(slot) {
                                 self.emit(Op::LoadLocal, LINE);
-                                self.emit_byte(slot as u8, LINE);
+                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
                                 self.emit_set_global_name(name);
                             }
                         } else if let Some(upvalue) = self.resolve_upvalue(name) {
@@ -1364,9 +1364,9 @@ impl super::Compiler {
                         self.emit_reference_get(object_slot, key_slot, true)?;
                         let old_slot = self.alloc_temp_local("ref_old");
                         self.emit(Op::StoreLocal, LINE);
-                        self.emit_byte(old_slot as u8, LINE);
+                        self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
                         self.emit(Op::LoadLocal, LINE);
-                        self.emit_byte(old_slot as u8, LINE);
+                        self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
                         self.emit(Op::Neg, LINE);
                         self.emit(Op::Neg, LINE);
                         if !u.prefix {
@@ -1387,9 +1387,9 @@ impl super::Compiler {
                         self.emit_reference_get(object_slot, key_slot, false)?;
                         let old_slot = self.alloc_temp_local("ref_old");
                         self.emit(Op::StoreLocal, LINE);
-                        self.emit_byte(old_slot as u8, LINE);
+                        self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
                         self.emit(Op::LoadLocal, LINE);
-                        self.emit_byte(old_slot as u8, LINE);
+                        self.emit_byte(self.slot_to_u8(old_slot)?, LINE);
                         self.emit(Op::Neg, LINE);
                         self.emit(Op::Neg, LINE);
                         if !u.prefix {
@@ -1734,7 +1734,7 @@ impl super::Compiler {
                                 }
                             }
                             self.emit(Op::Call, LINE);
-                            self.emit_byte(arg_count as u8, LINE);
+                            self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
                             return Ok(());
                         }
                         if let OExpr::ComputedMemberExpression(m) = &c.callee
@@ -1757,7 +1757,7 @@ impl super::Compiler {
                                 }
                             }
                             self.emit(Op::Call, LINE);
-                            self.emit_byte(arg_count as u8, LINE);
+                            self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
                             return Ok(());
                         }
                         let is_optional_call = c.optional;
@@ -1792,13 +1792,13 @@ impl super::Compiler {
                         }
                         if is_optional_call {
                             self.emit(Op::Call, LINE);
-                            self.emit_byte(arg_count as u8, LINE);
+                            self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
                             if let Some(end) = end {
                                 self.patch_jump(end);
                             }
                         } else {
                             self.emit(Op::Call, LINE);
-                            self.emit_byte(arg_count as u8, LINE);
+                            self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
                         }
                     }
                     CE::PrivateFieldExpression(m) => {

@@ -81,7 +81,8 @@ impl BucketStats {
         if attempted == 0 {
             0.0
         } else {
-            (self.pass as f64 / attempted as f64) * 100.0
+            let passed_pct = (self.pass as f64) / (attempted as f64) * 100.0;
+            passed_pct
         }
     }
 }
