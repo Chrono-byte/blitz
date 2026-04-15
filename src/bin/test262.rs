@@ -109,6 +109,7 @@ enum TestResult {
 }
 
 impl TestResult {
+    /// Returns a human-readable description of the test result.
     fn description(&self) -> String {
         match self {
             TestResult::Pass => "pass".to_string(),
@@ -178,6 +179,7 @@ fn print_args(vm: &mut Vm, args: &[Value]) -> String {
     }
 }
 
+/// Selects the files to run based on the filter and limit.
 fn select_files_to_run(
     files: Vec<PathBuf>,
     filters: &[String],
