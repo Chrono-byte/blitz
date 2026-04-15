@@ -733,7 +733,7 @@ fn run_selected_tests_via_subprocess_batches(
         drop(fs::remove_file(&file_list_path));
 
         match status {
-          Ok(status) if status.success() || status.code() == Some(1) => {}
+          Ok(status) if status.success() || status.code() == Some(1_i32) => {}
           Ok(status) => {
             drop(fs::remove_file(&report_path));
             shared_errors
@@ -969,6 +969,7 @@ fn extract_front_matter(src: &str) -> Option<String> {
   Some(fm.trim().to_string())
 }
 
+/// Returns the human-readable label for a given edition number.
 fn edition_label(edition: u8) -> Option<&'static str> {
   match edition {
     5 => Some("ES5"),
@@ -988,6 +989,8 @@ fn edition_label(edition: u8) -> Option<&'static str> {
   }
 }
 
+/// Returns the edition number for a given feature.
+#[allow(clippy::too_many_lines)]
 fn feature_edition(feature: &str) -> Option<u8> {
   match feature {
     // ES2025
