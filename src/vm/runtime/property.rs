@@ -50,7 +50,7 @@ impl Vm {
         }
         if let Value::String(text) = obj {
             if matches!(key, PropertyKey::String(name) if name == "length") {
-                return Ok(Value::Number(text.chars().count() as f64));
+                return Ok(Value::Number(usize_to_f64(text.chars().count())));
             }
             if let Some(i) = array_index_from_key(key)
                 && let Some(ch) = text.chars().nth(i)
@@ -794,7 +794,7 @@ impl Vm {
         }
         if let Value::String(text) = obj {
             if matches!(key, PropertyKey::String(name) if name == "length") {
-                return Ok(Value::Number(text.chars().count() as f64));
+                return Ok(Value::Number(usize_to_f64(text.chars().count())));
             }
             if let Some(i) = array_index_from_key(key)
                 && let Some(ch) = text.chars().nth(i)
@@ -1024,7 +1024,7 @@ impl Vm {
             }
             props.borrow_mut().properties.insert(
                 PropertyKey::String("length".to_string()),
-                PropertyDescriptor::data(Value::Number(new_len as f64)),
+                PropertyDescriptor::data(Value::Number(usize_to_f64(new_len))),
             );
             self.bump_object_generation(obj);
             return Ok(());

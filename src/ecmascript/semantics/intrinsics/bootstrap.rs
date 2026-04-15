@@ -535,7 +535,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                         vm.set_property_host(
                             &this,
                             &Value::String("length".to_string()),
-                            Value::Number(new_len as f64),
+                            Value::Number(usize_to_f64(new_len)),
                         )?;
                         Ok(Value::Array(removed_arr, removed_props))
                     }
@@ -586,7 +586,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     vm.set_property_host(
                         &this,
                         &Value::String("length".to_string()),
-                        Value::Number((len - 1) as f64),
+                        Value::Number(usize_to_f64(len - 1)),
                     )?;
                     Ok(result)
                 }),
@@ -646,7 +646,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     vm.set_property_host(
                         &this,
                         &Value::String("length".to_string()),
-                        Value::Number(new_len as f64),
+                        Value::Number(usize_to_f64(new_len)),
                     )?;
                     Ok(Value::Number(usize_to_f64(new_len)))
                 }),
@@ -865,7 +865,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     };
                     iter_obj.borrow_mut().properties.insert(
                         PKey::String("[[ArrayIteratorNextIndex]]".to_string()),
-                        PropertyDescriptor::data(Value::Number((index + 1) as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(index + 1))),
                     );
                     result.borrow_mut().properties.insert(
                         PKey::String("done".to_string()),
@@ -1197,8 +1197,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     } else {
                         array_ctor.clone()
                     };
-                    let result =
-                        vm.construct_value(&species_ctor, &[Value::Number(slice_len as f64)])?;
+                    let result = vm.construct_value(
+                        &species_ctor,
+                        &[Value::Number(usize_to_f64(slice_len))],
+                    )?;
                     if let Ok(proto) =
                         vm.get_property_host(&species_ctor, &PKey::String("prototype".to_string()))
                         && matches!(
@@ -1241,7 +1243,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     vm.set_property_host(
                         &result,
                         &Value::String("length".to_string()),
-                        Value::Number(slice_len as f64),
+                        Value::Number(usize_to_f64(slice_len)),
                     )?;
                     if let Value::Array(_, props) = &result {
                         props
@@ -1663,7 +1665,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                 vm.set_property_host(
                     &receiver,
                     &Value::String("length".to_string()),
-                    Value::Number(index as f64),
+                    Value::Number(usize_to_f64(index)),
                 )?;
                 Ok(result)
             }),

@@ -81,8 +81,7 @@ impl BucketStats {
         if attempted == 0 {
             0.0
         } else {
-            let passed_pct = (self.pass as f64) / (attempted as f64) * 100.0;
-            passed_pct
+            ((self.pass as i64) as f64) / ((attempted as i64) as f64) * 100.0
         }
     }
 }
@@ -2600,7 +2599,7 @@ fn main() {
     let pass_pct = if ran == 0 {
         0.0
     } else {
-        (passed as f64) / (ran as f64) * 100.0
+        ((passed as i64) as f64) / ((ran as i64) as f64) * 100.0
     };
 
     let exit_code = if failed.is_empty() { 0 } else { 1 };

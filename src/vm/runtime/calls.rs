@@ -5,7 +5,7 @@ use crate::errors::RuntimeError;
 use crate::gc;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::runtime_utils::to_length;
-use crate::runtime_utils::{array_from_values, usize_to_decimal_string};
+use crate::runtime_utils::{array_from_values, usize_to_decimal_string, usize_to_f64};
 use crate::value::{
     ArrayData, ObjectData, PropertyDescriptor, PropertyKey, SharedValue, SymbolId, Value,
 };
@@ -1346,7 +1346,7 @@ impl Vm {
             gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(arr_rc.borrow().len() as f64)),
+            PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
         );
 
         if let Some(array_val) = self
@@ -1551,7 +1551,7 @@ impl Vm {
                 props.borrow_mut().properties.insert(
                     PropertyKey::String("length".to_string()),
                     PropertyDescriptor::Data {
-                        value: Value::Number(args_for_arguments.len() as f64),
+                        value: Value::Number(usize_to_f64(args_for_arguments.len())),
                         writable: true,
                         enumerable: false,
                         configurable: true,
@@ -1676,7 +1676,7 @@ impl Vm {
         obj_rc.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
             PropertyDescriptor::Data {
-                value: Value::Number(arg_count as f64),
+                value: Value::Number(usize_to_f64(arg_count)),
                 writable: true,
                 enumerable: false,
                 configurable: true,

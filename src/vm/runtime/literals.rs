@@ -1,7 +1,7 @@
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::mutex_compat::MutexBorrowExt;
-use crate::runtime_utils::array_length_descriptor;
+use crate::runtime_utils::{array_length_descriptor, usize_to_f64};
 use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 use crate::vm::runtime::execution::{ensure_slot, get_property};
@@ -235,7 +235,7 @@ impl Vm {
         props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
             PropertyDescriptor::Data {
-                value: Value::Number(closure_proto.arity as f64),
+                value: Value::Number(usize_to_f64(closure_proto.arity)),
                 writable: false,
                 enumerable: false,
                 configurable: true,

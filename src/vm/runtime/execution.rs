@@ -6,7 +6,7 @@ use crate::errors::RuntimeError;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
-use crate::runtime_utils::{array_length_descriptor, js_number_to_string};
+use crate::runtime_utils::{array_length_descriptor, js_number_to_string, usize_to_f64};
 use crate::value::{
     ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SharedValue,
     SymbolId, Value,
@@ -222,7 +222,7 @@ impl Vm {
 
         for (op, count) in ranked.into_iter().take(16) {
             // Precision loss acceptable for percentage display calculation
-            let pct = (count as f64 / total as f64) * 100.0;
+            let pct = ((count as i64) as f64 / (total as i64) as f64) * 100.0;
             eprintln!("[vm-profile] {:>16} {:>12} {:>6.2}%", op.name(), count, pct);
         }
     }
@@ -4196,7 +4196,7 @@ fn set_array_index_property(obj: &Value, index: usize, value: Value) -> Result<(
         let next_len = next_len.max(a.len());
         p.properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(next_len as f64)),
+            PropertyDescriptor::data(Value::Number(usize_to_f64(next_len))),
         );
     } else {
         p.properties.insert(
@@ -4205,7 +4205,7 @@ fn set_array_index_property(obj: &Value, index: usize, value: Value) -> Result<(
         );
         p.properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(next_len as f64)),
+            PropertyDescriptor::data(Value::Number(usize_to_f64(next_len))),
         );
     }
     Ok(())
@@ -4379,14 +4379,14 @@ pub(super) fn set_property(
                     a[i] = Some(value);
                     p.properties.insert(
                         PropertyKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(a.len() as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(a.len()))),
                     );
                 } else {
                     p.properties
                         .insert(key.clone(), PropertyDescriptor::data(value));
                     p.properties.insert(
                         PropertyKey::String("length".to_string()),
-                        PropertyDescriptor::data(Value::Number(next_len as f64)),
+                        PropertyDescriptor::data(Value::Number(usize_to_f64(next_len))),
                     );
                 }
                 return Ok(());
@@ -4407,7 +4407,7 @@ pub(super) fn set_property(
                 let mut p = props.borrow_mut();
                 p.properties.insert(
                     PropertyKey::String("length".to_string()),
-                    PropertyDescriptor::data(Value::Number(new_len as f64)),
+                    PropertyDescriptor::data(Value::Number(usize_to_f64(new_len))),
                 );
                 return Ok(());
             }
