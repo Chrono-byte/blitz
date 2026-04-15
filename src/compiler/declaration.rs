@@ -1587,7 +1587,7 @@ impl Compiler {
         return Err(crate::errors::CompilerError::from(
           "constructor method definition encountered unexpectedly",
         ));
-      },
+      }
     };
     self.emit_constant(Value::String(first_descriptor_key.to_string()), LINE);
     self.emit(Op::MakeClosure, LINE);
