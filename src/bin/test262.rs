@@ -1680,6 +1680,7 @@ fn snapshot_globals(globals: &Rc<RefCell<ObjectData>>) -> HashMap<PropertyKey, P
 /// Uses snapshot/restore for test isolation instead of deep heap cloning.
 /// The `globals` Rc is shared across tests; we restore from `baseline_snapshot`
 /// before each test mode to undo mutations from the previous test.
+#[allow(clippy::too_many_lines)]
 fn run_test_file(
   path: &Path,
   test262_root: &Path,
