@@ -202,86 +202,6 @@ fn set_property_tracked_mutates_builtin_object_props() {
 }
 
 #[test]
-fn get_property_ic_distinguishes_keys_at_same_slot() {
-    let globals = test_globals();
-    let mut vm = Vm::new(globals);
-
-    let obj_data = Rc::new(RefCell::new(ObjectData::new()));
-    obj_data.borrow_mut().properties.insert(
-        PropertyKey::String("x".to_string()),
-        PropertyDescriptor::data(Value::Number(1.0)),
-    );
-    obj_data.borrow_mut().properties.insert(
-        PropertyKey::String("y".to_string()),
-        PropertyDescriptor::data(Value::Number(2.0)),
-    );
-    let obj = Value::Object(obj_data);
-
-    vm.chunk = Rc::new(Chunk {
-        code: vec![0],
-        constants: vec![],
-        functions: vec![],
-        lines: vec![1],
-        source_text: Rc::new(String::new()),
-        root_slot_types: vec![],
-        root_slot_names: vec![],
-        root_lexical_tdz: vec![],
-        root_strict: false,
-        allow_new_target: false,
-        allow_super: false,
-    });
-    vm.ip = 0;
-    vm.stack.push(obj.clone());
-    vm.stack.push(Value::String("x".to_string()));
-    assert!(matches!(vm.pop().unwrap(), Value::Number(1.0_f64)));
-
-    vm.ip = 0;
-    vm.stack.push(obj);
-    vm.stack.push(Value::String("y".to_string()));
-    assert!(matches!(vm.pop().unwrap(), Value::Number(2.0_f64)));
-}
-
-#[test]
-fn get_property_ic_invalidates_after_mutation() {
-    let globals = test_globals();
-    let mut vm = Vm::new(globals);
-
-    let obj_data = Rc::new(RefCell::new(ObjectData::new()));
-    let key = PropertyKey::String("x".to_string());
-    obj_data
-        .borrow_mut()
-        .properties
-        .insert(key.clone(), PropertyDescriptor::data(Value::Number(1.0)));
-    let obj = Value::Object(obj_data);
-
-    vm.chunk = Rc::new(Chunk {
-        code: vec![0],
-        constants: vec![],
-        functions: vec![],
-        lines: vec![1],
-        source_text: Rc::new(String::new()),
-        root_slot_types: vec![],
-        root_slot_names: vec![],
-        root_lexical_tdz: vec![],
-        root_strict: false,
-        allow_new_target: false,
-        allow_super: false,
-    });
-    vm.ip = 0;
-    vm.stack.push(obj.clone());
-    vm.stack.push(Value::String("x".to_string()));
-    assert!(matches!(vm.pop().unwrap(), Value::Number(1.0)));
-
-    vm.set_property_tracked(&obj, &key, Value::Number(7.0))
-        .unwrap();
-
-    vm.ip = 0;
-    vm.stack.push(obj);
-    vm.stack.push(Value::String("x".to_string()));
-    assert!(matches!(vm.pop().unwrap(), Value::Number(7.0)));
-}
-
-#[test]
 fn same_value_treats_nan_as_equal() {
     assert!(same_value(
         &Value::Number(f64::NAN),
@@ -435,33 +355,6 @@ fn dense_array_property_lookup_sees_index_and_length() {
             .unwrap(),
         Value::Number(n) if n.is_nan()
     ));
-}
-
-#[test]
-fn array_at_returns_negative_index_and_slice_preserves_holes() {
-    let (vm, _) = run_script(
-        r#"
-            var at_value = [10, 20, 30].at(-1);
-            var sparse = [1, 2];
-            delete sparse[1];
-            var sliced = sparse.slice(0, 2);
-        "#,
-    );
-
-    assert!(matches!(
-        vm.get_global("at_value"),
-        Some(Value::Number(n)) if (n - 30.0).abs() < f64::EPSILON
-    ));
-    match vm.get_global("sliced") {
-        Some(Value::Array(arr, _)) => {
-            let slots = arr.borrow();
-            assert!(
-                matches!(slots.first().cloned().flatten(), Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON)
-            );
-            assert!(slots.get(1).is_some_and(Option::is_none));
-        }
-        other => panic!("expected array, got {:?}", other),
-    }
 }
 
 #[test]

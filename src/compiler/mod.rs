@@ -695,17 +695,9 @@ mod test {
     #[test]
     fn compile_member_call_uses_call_method() {
         let src = "obj.method(1);";
-        let session = match crate::parser::Parser::parse_source(src) {
-            Ok(s) => s,
-            // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
-            Err(e) => panic!("parse_source failed: {:?}", e),
-        };
+        let session = crate::parser::Parser::parse_source(src).expect("parse ok");
         let program = session.program();
-        let chunk = match compile(program, session.source()) {
-            Ok(c) => c,
-            // We allow panics here because the compiler error is expected, we can't recover if the user's code is invalid
-            Err(e) => panic!("compile failed: {:?}", e),
-        };
+        let chunk = compile(program, session.source()).expect("compile ok");
 
         let saw_call_method = chunk
             .code
@@ -737,7 +729,7 @@ mod test {
 
     #[test]
     fn compile_rejects_calls_with_more_than_u8_arguments() {
-        let args = (0..256)
+        let args = (0_i32..256_i32)
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
             .join(", ");
@@ -864,8 +856,7 @@ mod test {
     #[test]
     fn compile_sequence_expression_keeps_last_value() {
         let src = "var x = (a = 1, 2);";
-        let session = crate::parser::Parser::parse_source(src)
-            .unwrap_or_else(|e| panic!("parse_source failed: {:?}", e));
+        let session = crate::parser::Parser::parse_source(src).expect("parse_source failed");
         let program = session.program();
         let chunk = compile(program, session.source()).expect("compile ok");
 
@@ -967,7 +958,7 @@ mod test {
             .find_map(|instr| {
                 let op = Op::from_byte((*instr & 0xFF) as u8)?;
                 if matches!(op, Op::CompareJump) {
-                    Some((instr >> 8) & 0xFF)
+                    Some((instr >> 8_i32) & 0xFF)
                 } else {
                     None
                 }
