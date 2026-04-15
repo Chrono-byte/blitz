@@ -5,13 +5,13 @@ use std::rc::Rc;
 use crate::compiler;
 use crate::parser::Parser;
 use crate::runtime_utils::{
-    global_decode_uri, global_decode_uri_component, global_encode_uri, global_encode_uri_component,
-    global_parse_float, global_parse_int, static_builtin_arg_offset, syntax_error,
+  global_decode_uri, global_decode_uri_component, global_encode_uri, global_encode_uri_component,
+  global_parse_float, global_parse_int, static_builtin_arg_offset, syntax_error,
 };
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 fn is_js_line_terminator(c: char) -> bool {
-    matches!(c, '\u{000A}' | '\u{000D}' | '\u{2028}' | '\u{2029}')
+  matches!(c, '\u{000A}' | '\u{000D}' | '\u{2028}' | '\u{2029}')
 }
 
 /// Returns `true` when the source contains only whitespace and comments.
@@ -20,54 +20,54 @@ fn is_js_line_terminator(c: char) -> bool {
 /// compilation entirely for comment-only scripts. That matters for Test262
 /// comment conformance cases that call `eval` tens of thousands of times.
 fn source_is_whitespace_and_comments_only(src: &str) -> bool {
-    let mut chars = src.chars().peekable();
+  let mut chars = src.chars().peekable();
 
-    loop {
-        while chars.peek().is_some_and(|c| c.is_whitespace()) {
-            chars.next();
-        }
-
-        match chars.peek().copied() {
-            None => return true,
-            Some('/') => {
-                chars.next();
-                match chars.peek().copied() {
-                    Some('/') => {
-                        chars.next();
-                        for c in chars.by_ref() {
-                            if is_js_line_terminator(c) {
-                                break;
-                            }
-                        }
-                    }
-                    Some('*') => {
-                        chars.next();
-                        let mut prev = '\0';
-                        let mut closed = false;
-                        for c in chars.by_ref() {
-                            if prev == '*' && c == '/' {
-                                closed = true;
-                                break;
-                            }
-                            prev = c;
-                        }
-                        if !closed {
-                            return false;
-                        }
-                    }
-                    _ => return false,
-                }
-            }
-            Some(_) => return false,
-        }
+  loop {
+    while chars.peek().is_some_and(|c| c.is_whitespace()) {
+      chars.next();
     }
+
+    match chars.peek().copied() {
+      None => return true,
+      Some('/') => {
+        chars.next();
+        match chars.peek().copied() {
+          Some('/') => {
+            chars.next();
+            for c in chars.by_ref() {
+              if is_js_line_terminator(c) {
+                break;
+              }
+            }
+          }
+          Some('*') => {
+            chars.next();
+            let mut prev = '\0';
+            let mut closed = false;
+            for c in chars.by_ref() {
+              if prev == '*' && c == '/' {
+                closed = true;
+                break;
+              }
+              prev = c;
+            }
+            if !closed {
+              return false;
+            }
+          }
+          _ => return false,
+        }
+      }
+      Some(_) => return false,
+    }
+  }
 }
 
 /// Installs global function builtins such as eval, parseInt, parseFloat, etc.
 pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
-    use PropertyKey as PKey;
+  use PropertyKey as PKey;
 
-    g.properties.insert(
+  g.properties.insert(
         PKey::String("eval".to_string()),
         PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "eval");
@@ -147,52 +147,52 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
         }))),
     );
 
-    g.properties.insert(
-        PKey::String("parseInt".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(global_parse_int))),
-    );
-    g.properties.insert(
-        PKey::String("parseFloat".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(global_parse_float))),
-    );
-    g.properties.insert(
-        PKey::String("encodeURI".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(global_encode_uri))),
-    );
-    g.properties.insert(
-        PKey::String("encodeURIComponent".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(global_encode_uri_component))),
-    );
-    g.properties.insert(
-        PKey::String("decodeURI".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(global_decode_uri))),
-    );
-    g.properties.insert(
-        PKey::String("decodeURIComponent".to_string()),
-        PropertyDescriptor::data(Value::Builtin(Rc::new(global_decode_uri_component))),
-    );
+  g.properties.insert(
+    PKey::String("parseInt".to_string()),
+    PropertyDescriptor::data(Value::Builtin(Rc::new(global_parse_int))),
+  );
+  g.properties.insert(
+    PKey::String("parseFloat".to_string()),
+    PropertyDescriptor::data(Value::Builtin(Rc::new(global_parse_float))),
+  );
+  g.properties.insert(
+    PKey::String("encodeURI".to_string()),
+    PropertyDescriptor::data(Value::Builtin(Rc::new(global_encode_uri))),
+  );
+  g.properties.insert(
+    PKey::String("encodeURIComponent".to_string()),
+    PropertyDescriptor::data(Value::Builtin(Rc::new(global_encode_uri_component))),
+  );
+  g.properties.insert(
+    PKey::String("decodeURI".to_string()),
+    PropertyDescriptor::data(Value::Builtin(Rc::new(global_decode_uri))),
+  );
+  g.properties.insert(
+    PKey::String("decodeURIComponent".to_string()),
+    PropertyDescriptor::data(Value::Builtin(Rc::new(global_decode_uri_component))),
+  );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::source_is_whitespace_and_comments_only;
+  use super::source_is_whitespace_and_comments_only;
 
-    #[test]
-    fn detects_comment_only_sources() {
-        assert!(source_is_whitespace_and_comments_only("/* comment */"));
-        assert!(source_is_whitespace_and_comments_only("// comment\n"));
-        assert!(source_is_whitespace_and_comments_only(" \t/* a */\n// b"));
-    }
+  #[test]
+  fn detects_comment_only_sources() {
+    assert!(source_is_whitespace_and_comments_only("/* comment */"));
+    assert!(source_is_whitespace_and_comments_only("// comment\n"));
+    assert!(source_is_whitespace_and_comments_only(" \t/* a */\n// b"));
+  }
 
-    #[test]
-    fn rejects_sources_with_code() {
-        assert!(!source_is_whitespace_and_comments_only("x"));
-        assert!(!source_is_whitespace_and_comments_only("/* comment */ x"));
-        assert!(!source_is_whitespace_and_comments_only("// comment\nx"));
-    }
+  #[test]
+  fn rejects_sources_with_code() {
+    assert!(!source_is_whitespace_and_comments_only("x"));
+    assert!(!source_is_whitespace_and_comments_only("/* comment */ x"));
+    assert!(!source_is_whitespace_and_comments_only("// comment\nx"));
+  }
 
-    #[test]
-    fn treats_unterminated_block_comment_as_non_comment_only() {
-        assert!(!source_is_whitespace_and_comments_only("/* comment"));
-    }
+  #[test]
+  fn treats_unterminated_block_comment_as_non_comment_only() {
+    assert!(!source_is_whitespace_and_comments_only("/* comment"));
+  }
 }

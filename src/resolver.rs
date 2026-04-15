@@ -12,25 +12,25 @@ use std::path::{Path, PathBuf};
 ///
 /// Returns a `BundlerError` if the given specifier cannot be resolved.
 pub fn resolve_specifier(
-    base: &Path,
-    specifier: &str,
+  base: &Path,
+  specifier: &str,
 ) -> Result<PathBuf, crate::errors::BundlerError> {
-    let options = oxc_resolver::ResolveOptions {
-        // Support common JS module extensions and Node resolution conditions.
-        extensions: vec![".js".into()],
-        condition_names: vec!["import".into()],
-        ..Default::default()
-    };
+  let options = oxc_resolver::ResolveOptions {
+    // Support common JS module extensions and Node resolution conditions.
+    extensions: vec![".js".into()],
+    condition_names: vec!["import".into()],
+    ..Default::default()
+  };
 
-    let resolver = Resolver::new(options);
+  let resolver = Resolver::new(options);
 
-    // Resolve expects an absolute base directory; prefer to canonicalize, but
-    // fall back to the original path if canonicalization fails (e.g. path
-    // doesn't exist).
-    let base_dir = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+  // Resolve expects an absolute base directory; prefer to canonicalize, but
+  // fall back to the original path if canonicalization fails (e.g. path
+  // doesn't exist).
+  let base_dir = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
 
-    resolver
-        .resolve(&base_dir, specifier)
-        .map(|resolution| resolution.full_path())
-        .map_err(|e| crate::errors::BundlerError::from(e.to_string()))
+  resolver
+    .resolve(&base_dir, specifier)
+    .map(|resolution| resolution.full_path())
+    .map_err(|e| crate::errors::BundlerError::from(e.to_string()))
 }

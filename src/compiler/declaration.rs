@@ -20,2362 +20,2332 @@ use std::rc::Rc;
 const LINE: u32 = 1;
 
 impl Compiler {
-    fn emit_with_env_pops(&mut self) {
-        for _ in 0..self.with_depth {
-            self.emit(Op::PopEnv, LINE);
-        }
+  fn emit_with_env_pops(&mut self) {
+    for _ in 0..self.with_depth {
+      self.emit(Op::PopEnv, LINE);
     }
-
-    /// Compile a function declaration statement into bytecode.
-    ///
-    /// Creates a closure from the function and assigns it to a local slot,
-    /// optionally mirroring to a global if at module root level.
-    fn compile_function_declaration_oast(
-        &mut self,
-        f: &oast::Function<'_>,
-    ) -> Result<(), crate::errors::CompilerError> {
-        if let Some(ident) = &f.id {
-            let fname = ident.name.to_string();
-
-            if let Some(err) = self.check_var_lexical_conflict(&fname) {
-                return Err(crate::errors::CompilerError::from(err));
-            }
-            if let Some(err) = Self::strict_binding_name_error(self.strict_context, &fname) {
-                return Err(err);
-            }
-
-            let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
-            let idx = self.chunk.add_function(proto);
-            self.emit(Op::MakeClosure, LINE);
-            self.emit_byte(self.function_index_to_u8(idx)?, LINE);
-            let slot = if let Some(s) = self.resolve_local(&fname) {
-                s
-            } else {
-                self.add_local_with_mirror(fname.clone(), None, self.is_root)
-            };
-
-            if slot == self.locals.len() - 1 {
-                self.add_lexical_binding(&fname);
-            }
-
-            if self.is_root {
-                self.emit(Op::Dup, LINE);
-            }
-            self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(slot)?, LINE);
-            if self.is_root {
-                self.emit_set_global_name(&fname);
-            }
-            let is_exported = self
-                .current_module
-                .as_ref()
-                .is_some_and(|c| c.exports.contains(&fname));
-            if is_exported {
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                self.emit_set_own_module_export(&fname)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Compile an oxc AST statement into bytecode.
-    ///
-    /// Wrapper that delegates to `compile_statement_oast_with_mode` with `skip_pop` = false,
-    /// meaning expressions will have their values popped from the stack.
-    fn compile_statement_oast(
-        &mut self,
-        stmt: &oast::Statement,
-    ) -> Result<(), crate::errors::CompilerError> {
-        self.compile_statement_oast_with_mode(stmt, false, None)
-    }
-
-    /// Compile an oxc AST statement into bytecode with optional result preservation.
-    ///
-    /// # Arguments
-    ///
-    /// * `stmt` - The statement to compile
-    /// * `skip_pop` - If true, the result of expression statements is preserved on the stack
-    ///
-    /// This handles all statement types including:
-    /// - Import/export declarations
-    /// - Variable, function, and class declarations
-    /// - Expression statements
-    /// - Control flow (if/else, switch, loops)
-    /// - Try/catch/finally blocks
-    /// - Labeled statements
-    pub(super) fn compile_statement_oast_with_mode(
-        &mut self,
-        stmt: &oast::Statement,
-        skip_pop: bool,
-        completion_slot: Option<usize>,
-    ) -> Result<(), crate::errors::CompilerError> {
-        use oxc_ast::ast::{
-            BindingPattern as OPat, ForStatementLeft as OForLeft, Statement as OStmt,
-        };
-        match stmt {
-            OStmt::ImportDeclaration(_) => {}
-            OStmt::ExportAllDeclaration(_) => {
-                // export * from "module"
-                // Star exports are resolved by the module loader and export
-                // resolution table, so the declaration itself has no runtime
-                // side effects here.
-            }
-            OStmt::ExportNamedDeclaration(export) => {
-                // export {  } from "module"
-                if let Some(decl) = &export.declaration {
-                    match decl {
-                        oast::Declaration::VariableDeclaration(v) => {
-                            self.compile_variable_declaration_oast(v)?
-                        }
-                        oast::Declaration::FunctionDeclaration(f) => {
-                            self.compile_function_declaration_oast(f)?
-                        }
-                        oast::Declaration::ClassDeclaration(c) => {
-                            self.compile_class_declaration_oast(c)?;
-                        }
-                        _ => {}
-                    }
-                }
-                if export.declaration.is_none() && export.source.is_none() {
-                    for spec in &export.specifiers {
-                        let Some(local_name) = Self::module_export_name_to_string(&spec.local)
-                        else {
-                            continue;
-                        };
-                        let Some(export_name) = Self::module_export_name_to_string(&spec.exported)
-                        else {
-                            continue;
-                        };
-                        self.emit_get_binding(&local_name);
-                        self.emit_set_own_module_export(&export_name)?;
-                    }
-                }
-            }
-            OStmt::ExportDefaultDeclaration(export) => {
-                match &export.declaration {
-                    oast::ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
-                        if let Some(id) = &f.id {
-                            self.compile_function_declaration_oast(f)?;
-                            self.emit_get_binding(id.name.as_str());
-                        } else {
-                            let fname = "default".to_string();
-                            let (proto, _env_len) =
-                                self.compile_function(&fname, None, f, None, false)?;
-                            let idx = self.chunk.add_function(proto);
-                            self.emit(Op::MakeClosure, LINE);
-                            self.emit_byte(self.function_index_to_u8(idx)?, LINE);
-                        }
-                    }
-                    oast::ExportDefaultDeclarationKind::ClassDeclaration(c) => {
-                        if let Some(id) = &c.id {
-                            self.compile_class_declaration_oast(c)?;
-                            self.emit_get_binding(id.name.as_str());
-                        } else {
-                            return Err(crate::errors::CompilerError::from(
-                                "unsupported anonymous export default class declaration",
-                            ));
-                        }
-                    }
-                    oast::ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
-                        return Err(crate::errors::CompilerError::from(
-                            "unsupported export default declaration",
-                        ));
-                    }
-                    other => {
-                        if let Some(expr) = other.as_expression() {
-                            self.compile_expr_oast(expr)?;
-                        } else {
-                            return Err(crate::errors::CompilerError::from(
-                                "unsupported export default declaration",
-                            ));
-                        }
-                    }
-                }
-                self.emit_set_own_module_export("default")?;
-            }
-            OStmt::VariableDeclaration(v) => self.compile_variable_declaration_oast(v)?,
-            OStmt::FunctionDeclaration(f) => self.compile_function_declaration_oast(f)?,
-            OStmt::ClassDeclaration(c) => self.compile_class_declaration_oast(c)?,
-            OStmt::ExpressionStatement(e) => {
-                self.compile_expr_oast(&e.expression)?;
-                if let Some(slot) = completion_slot {
-                    self.emit(Op::StoreLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                } else if !skip_pop {
-                    self.emit(Op::Pop, LINE);
-                }
-            }
-            OStmt::LabeledStatement(l) => {
-                let can_continue = matches!(
-                    &l.body,
-                    OStmt::WhileStatement(_) | OStmt::ForStatement(_) | OStmt::ForInStatement(_)
-                );
-                self.label_patches.push(crate::compiler::LabelPatchState {
-                    name: l.label.name.to_string(),
-                    can_continue,
-                    owner_loop_depth: if can_continue {
-                        self.loop_depth + 1
-                    } else {
-                        self.loop_depth
-                    },
-                    continue_patches: Vec::new(),
-                    break_patches: Vec::new(),
-                });
-                self.compile_statement_oast_with_mode(&l.body, false, completion_slot)?;
-                let label_state = self
-                    .label_patches
-                    .pop()
-                    .ok_or_else(|| crate::errors::CompilerError::from("label stack underflow"))?;
-                if !label_state.can_continue && !label_state.continue_patches.is_empty() {
-                    return Err(crate::errors::CompilerError::from(
-                        "'continue' used with non-iteration label",
-                    ));
-                }
-                if !label_state.break_patches.is_empty() {
-                    let target = self.chunk.code.len();
-                    self.patch_jump_list(label_state.break_patches, target);
-                }
-            }
-            OStmt::WithStatement(w) => {
-                if self.strict_context {
-                    return Err(crate::errors::CompilerError::from(
-                        "SyntaxError: Strict mode code may not include a with statement",
-                    ));
-                }
-                self.compile_expr_oast(&w.object)?;
-                self.emit(Op::PushWithEnv, LINE);
-                self.with_depth += 1;
-                self.emit(Op::PushHandler, LINE);
-                let handler_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-
-                let with_body_stmts = match &w.body {
-                    OStmt::BlockStatement(b) => &b.body[..],
-                    _ => std::slice::from_ref(&w.body),
-                };
-                self.enter_block_scope_with_vars(with_body_stmts);
-                self.compile_statement_oast_with_mode(&w.body, false, completion_slot)?;
-                self.exit_scope();
-
-                self.emit(Op::PopHandler, LINE);
-                self.emit(Op::PopEnv, LINE);
-                self.with_depth = self.with_depth.saturating_sub(1);
-                self.emit(Op::Jump, LINE);
-                let skip_handler_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-
-                let _handler_start = self.chunk.code.len();
-                self.patch_jump(handler_jump);
-
-                self.emit(Op::PopEnv, LINE);
-                self.with_depth = self.with_depth.saturating_sub(1);
-                self.emit(Op::Throw, LINE);
-                let _after_handler = self.chunk.code.len();
-
-                self.patch_jump(skip_handler_jump);
-            }
-            OStmt::BlockStatement(b) => {
-                self.enter_block_scope_with_vars(&b.body);
-                for s in &b.body {
-                    self.compile_statement_oast_with_mode(s, false, completion_slot)?;
-                }
-                self.exit_scope();
-            }
-            OStmt::IfStatement(i) => {
-                if let Some(jump_over) = self.try_emit_compare_jump_if_false(&i.test)? {
-                    self.compile_statement_oast_with_mode(&i.consequent, false, completion_slot)?;
-                    if let Some(alt) = &i.alternate {
-                        self.emit(Op::Jump, LINE);
-                        let jump_else = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-                        self.patch_jump(jump_over);
-                        self.compile_statement_oast_with_mode(alt, false, completion_slot)?;
-                        self.patch_jump(jump_else);
-                    } else {
-                        self.patch_jump(jump_over);
-                    }
-                } else {
-                    self.compile_expr_oast(&i.test)?;
-                    self.emit(Op::JumpIfFalse, LINE);
-                    let jump_over = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
-                    self.compile_statement_oast_with_mode(&i.consequent, false, completion_slot)?;
-                    if let Some(alt) = &i.alternate {
-                        self.emit(Op::Jump, LINE);
-                        let jump_else = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-                        self.patch_jump(jump_over);
-                        self.compile_statement_oast_with_mode(alt, false, completion_slot)?;
-                        self.patch_jump(jump_else);
-                    } else {
-                        self.patch_jump(jump_over);
-                    }
-                }
-            }
-            OStmt::SwitchStatement(s) => {
-                // Evaluate discriminant once and store in a local slot.
-                self.compile_expr_oast(&s.discriminant)?;
-                let discr_name = format!("__switch_discriminant_{}", self.locals.len());
-                let discr_slot = self.add_local_with_mirror(discr_name, None, false);
-                self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(discr_slot)?, LINE);
-
-                // `break` inside a switch should jump to switch end.
-                self.break_patches.push(Vec::new());
-
-                // First phase: dispatch checks, each successful match jumps to
-                // the corresponding case body.
-                let mut case_body_jumps: Vec<(usize, usize)> = Vec::new();
-                let mut default_index: Option<usize> = None;
-                for (case_idx, case) in s.cases.iter().enumerate() {
-                    if let Some(test) = &case.test {
-                        self.emit(Op::LoadLocal, LINE);
-                        self.emit_byte(self.slot_to_u8(discr_slot)?, LINE);
-                        self.compile_expr_oast(test)?;
-                        // Use CompareJump: cond_type 6 = StrictEq, jump if false (negated)
-                        self.emit_with_payload(Op::CompareJump, 6, LINE);
-                        let skip_jump = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-
-                        self.emit(Op::Jump, LINE);
-                        let body_jump = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-                        case_body_jumps.push((case_idx, body_jump));
-
-                        self.patch_jump(skip_jump);
-                    } else {
-                        default_index = Some(case_idx);
-                    }
-                }
-
-                // If no case matched, jump to default (if any), else to end.
-                self.emit(Op::Jump, LINE);
-                let no_match_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-
-                // Second phase: emit case bodies in source order. Fallthrough is
-                // represented naturally by layout.
-                let mut case_starts: Vec<usize> = vec![0; s.cases.len()];
-                for (case_idx, case) in s.cases.iter().enumerate() {
-                    case_starts[case_idx] = self.chunk.code.len();
-                    for stmt in &case.consequent {
-                        self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
-                    }
-                }
-                let switch_end = self.chunk.code.len();
-
-                // Patch successful-case jumps to case body starts.
-                for (case_idx, jump_pos) in case_body_jumps {
-                    self.patch_jump_to_target(jump_pos, case_starts[case_idx]);
-                }
-
-                // Patch no-match jump to default start or end.
-                let default_target = default_index.map_or(switch_end, |idx| case_starts[idx]);
-                self.patch_jump_to_target(no_match_jump, default_target);
-
-                // Patch `break` statements emitted within this switch.
-                if let Some(patches) = self.break_patches.pop() {
-                    for patch_pos in patches {
-                        self.patch_jump_to_target(patch_pos, switch_end);
-                    }
-                }
-            }
-            OStmt::WhileStatement(w) => {
-                self.loop_depth += 1;
-                self.continue_patches.push(Vec::new());
-                self.break_patches.push(Vec::new());
-                let owns_completion_slot = completion_slot.is_none();
-                let loop_completion_slot = if let Some(slot) = completion_slot {
-                    slot
-                } else {
-                    let slot = self.alloc_temp_local("loop_result");
-                    self.emit(Op::Undefined, LINE);
-                    self.emit(Op::StoreLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                    slot
-                };
-                let loop_start = self.chunk.code.len();
-                let exit_jump =
-                    if let Some(jump_over) = self.try_emit_compare_jump_if_false(&w.test)? {
-                        Some(jump_over)
-                    } else {
-                        self.compile_expr_oast(&w.test)?;
-                        self.emit(Op::JumpIfFalse, LINE);
-                        let exit_jump = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-                        Some(exit_jump)
-                    };
-                self.enter_block_scope();
-                self.compile_statement_oast_with_mode(&w.body, false, Some(loop_completion_slot))?;
-                self.exit_scope();
-                self.emit(Op::Jump, LINE);
-                let _back_jump_pos = self.chunk.code.len();
-                // back_offset in instruction units: loop_start - (current_ip + 1)
-                let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
-                self.emit_short_signed(back_offset, LINE);
-                if let Some(patches) = self.continue_patches.pop() {
-                    for patch_pos in patches {
-                        self.patch_jump_to_target(patch_pos, loop_start);
-                    }
-                }
-                let cleanup_start = self.chunk.code.len();
-                if owns_completion_slot {
-                    self.emit(Op::LoadLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
-                    if let Some(exit_jump) = exit_jump {
-                        self.patch_jump_to_target(exit_jump, cleanup_start);
-                    }
-                } else if let Some(exit_jump) = exit_jump {
-                    self.patch_jump(exit_jump);
-                }
-                if let Some(patches) = self.break_patches.pop() {
-                    for patch_pos in patches {
-                        self.patch_jump_to_target(patch_pos, cleanup_start);
-                    }
-                }
-                let label_patches = if let Some(state) = self.label_patches.last_mut() {
-                    if state.can_continue && state.owner_loop_depth == self.loop_depth {
-                        Some((
-                            std::mem::take(&mut state.continue_patches),
-                            std::mem::take(&mut state.break_patches),
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some((continue_patches, break_patches)) = label_patches {
-                    let loop_end = self.chunk.code.len();
-                    self.patch_jump_list(continue_patches, loop_start);
-                    self.patch_jump_list(break_patches, loop_end);
-                }
-                self.loop_depth = self.loop_depth.saturating_sub(1);
-            }
-            OStmt::DoWhileStatement(d) => {
-                self.loop_depth += 1;
-                self.continue_patches.push(Vec::new());
-                self.break_patches.push(Vec::new());
-                let owns_completion_slot = completion_slot.is_none();
-                let loop_completion_slot = if let Some(slot) = completion_slot {
-                    slot
-                } else {
-                    let slot = self.alloc_temp_local("loop_result");
-                    self.emit(Op::Undefined, LINE);
-                    self.emit(Op::StoreLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                    slot
-                };
-                let loop_start = self.chunk.code.len();
-                self.enter_block_scope();
-                self.compile_statement_oast_with_mode(&d.body, false, Some(loop_completion_slot))?;
-                self.exit_scope();
-                let test_start = self.chunk.code.len();
-                let exit_jump =
-                    if let Some(jump_over) = self.try_emit_compare_jump_if_false(&d.test)? {
-                        Some(jump_over)
-                    } else {
-                        self.compile_expr_oast(&d.test)?;
-                        self.emit(Op::JumpIfFalse, LINE);
-                        let exit_jump = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-                        Some(exit_jump)
-                    };
-                self.emit(Op::Jump, LINE);
-                let _back_jump_pos = self.chunk.code.len();
-                let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
-                self.emit_short_signed(back_offset, LINE);
-                if let Some(patches) = self.continue_patches.pop() {
-                    for patch_pos in patches {
-                        self.patch_jump_to_target(patch_pos, test_start);
-                    }
-                }
-                let cleanup_start = self.chunk.code.len();
-                if owns_completion_slot {
-                    self.emit(Op::LoadLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
-                    if let Some(exit_jump) = exit_jump {
-                        self.patch_jump_to_target(exit_jump, cleanup_start);
-                    }
-                } else if let Some(exit_jump) = exit_jump {
-                    self.patch_jump(exit_jump);
-                }
-                if let Some(patches) = self.break_patches.pop() {
-                    for patch_pos in patches {
-                        self.patch_jump_to_target(patch_pos, cleanup_start);
-                    }
-                }
-                let label_patches = if let Some(state) = self.label_patches.last_mut() {
-                    if state.can_continue && state.owner_loop_depth == self.loop_depth {
-                        Some((
-                            std::mem::take(&mut state.continue_patches),
-                            std::mem::take(&mut state.break_patches),
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let loop_end = self.chunk.code.len();
-                if let Some((continue_patches, break_patches)) = label_patches {
-                    self.patch_jump_list(continue_patches, test_start);
-                    self.patch_jump_list(break_patches, loop_end);
-                }
-                self.loop_depth = self.loop_depth.saturating_sub(1);
-            }
-            OStmt::ForStatement(f) => {
-                use oxc_ast::ast::ForStatementInit as OForInit;
-                self.loop_depth += 1;
-                self.continue_patches.push(Vec::new());
-                self.break_patches.push(Vec::new());
-                let mut per_iteration_slots = Vec::new();
-
-                if let Some(init) = &f.init {
-                    match init {
-                        OForInit::VariableDeclaration(v) => {
-                            for dec in &v.declarations {
-                                if let Some(init) = &dec.init {
-                                    self.compile_expr_oast(init)?;
-                                } else {
-                                    self.emit(Op::Undefined, LINE);
-                                }
-                                let name = match &dec.id {
-                                    OPat::BindingIdentifier(i) => i.name.to_string(),
-                                    _ => {
-                                        return Err(crate::errors::CompilerError::from(
-                                            "unsupported var pattern",
-                                        ));
-                                    }
-                                };
-                                let mirror_global = self.is_root;
-                                let slot =
-                                    if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var)
-                                    {
-                                        self.resolve_local(&name).unwrap_or_else(|| {
-                                            self.add_var_local(name.clone(), None, mirror_global)
-                                        })
-                                    } else {
-                                        self.add_local_with_mirror(
-                                            name.clone(),
-                                            None,
-                                            mirror_global,
-                                        )
-                                    };
-                                if matches!(
-                                    v.kind,
-                                    oxc_ast::ast::VariableDeclarationKind::Let
-                                        | oxc_ast::ast::VariableDeclarationKind::Const
-                                ) {
-                                    per_iteration_slots.push(slot);
-                                }
-                                if self.is_root {
-                                    self.emit(Op::Dup, LINE);
-                                }
-                                self.emit(Op::StoreLocal, LINE);
-                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                                if self.is_root && mirror_global {
-                                    self.emit_set_global_name(&name);
-                                }
-                            }
-                        }
-                        other => {
-                            let expr = other.as_expression().ok_or_else(|| {
-                                crate::errors::CompilerError::from(
-                                    "unsupported for-loop initializer",
-                                )
-                            })?;
-                            self.compile_expr_oast(expr)?;
-                            self.emit(Op::Pop, LINE);
-                        }
-                    }
-                }
-
-                for &slot in &per_iteration_slots {
-                    self.emit(Op::CloneLocalCell, LINE);
-                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                }
-
-                let loop_start = self.chunk.code.len();
-                let exit_jump = if let Some(test) = &f.test {
-                    if let Some(jump_over) = self.try_emit_compare_jump_if_false(test)? {
-                        Some(jump_over)
-                    } else {
-                        self.compile_expr_oast(test)?;
-                        self.emit(Op::JumpIfFalse, LINE);
-                        let exit_jump = self.chunk.code.len();
-                        self.emit_byte(0, LINE);
-                        self.emit_byte(0, LINE);
-                        Some(exit_jump)
-                    }
-                } else {
-                    None
-                };
-
-                self.enter_block_scope();
-                self.compile_statement_oast_with_mode(&f.body, false, completion_slot)?;
-                self.exit_scope();
-
-                let update_start = self.chunk.code.len();
-                if let Some(patches) = self.continue_patches.pop() {
-                    for patch_pos in patches {
-                        self.patch_jump_to_target(patch_pos, update_start);
-                    }
-                }
-
-                for &slot in &per_iteration_slots {
-                    self.emit(Op::CloneLocalCell, LINE);
-                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                }
-
-                if let Some(update) = &f.update {
-                    self.compile_expr_oast(update)?;
-                    self.emit(Op::Pop, LINE);
-                }
-
-                self.emit(Op::Jump, LINE);
-                let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
-                self.emit_short_signed(back_offset, LINE);
-
-                if let Some(exit_jump) = exit_jump {
-                    self.patch_jump(exit_jump);
-                }
-                let loop_end = self.chunk.code.len();
-                if let Some(patches) = self.break_patches.pop() {
-                    for patch_pos in patches {
-                        self.patch_jump_to_target(patch_pos, loop_end);
-                    }
-                }
-                let label_patches = if let Some(state) = self.label_patches.last_mut() {
-                    if state.can_continue && state.owner_loop_depth == self.loop_depth {
-                        Some((
-                            std::mem::take(&mut state.continue_patches),
-                            std::mem::take(&mut state.break_patches),
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some((continue_patches, break_patches)) = label_patches {
-                    let loop_end = self.chunk.code.len();
-                    self.patch_jump_list(continue_patches, update_start);
-                    self.patch_jump_list(break_patches, loop_end);
-                }
-                self.loop_depth = self.loop_depth.saturating_sub(1);
-            }
-            OStmt::ForOfStatement(f) => {
-                self.loop_depth += 1;
-                self.continue_patches.push(Vec::new());
-                self.break_patches.push(Vec::new());
-                let owns_completion_slot = completion_slot.is_none();
-                let loop_completion_slot = if let Some(slot) = completion_slot {
-                    slot
-                } else {
-                    let slot = self.alloc_temp_local("loop_result");
-                    self.emit(Op::Undefined, LINE);
-                    self.emit(Op::StoreLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                    slot
-                };
-
-                // iterable -> iterator via iterable[Symbol.iterator]()
-                self.compile_expr_oast(&f.right)?;
-                self.emit(Op::Dup, LINE);
-                self.emit_get_global_name("Symbol");
-                self.emit_constant(Value::String("iterator".to_string()), LINE);
-                self.emit(Op::GetProperty, LINE);
-                let symbol_iterator_slot = self.alloc_ic_slot()?;
-                self.emit_byte(symbol_iterator_slot, LINE);
-                self.emit(Op::GetProperty, LINE);
-                self.emit(Op::CallBuiltin, LINE);
-                self.emit_byte(0, LINE);
-
-                let iterator_slot = self.add_local_with_mirror(
-                    format!("__forof_iter_{}", self.locals.len()),
-                    None,
-                    false,
-                );
-                self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
-
-                if let oast::ForStatementLeft::VariableDeclaration(v) = &f.left
-                    && matches!(
-                        v.kind,
-                        oxc_ast::ast::VariableDeclarationKind::Let
-                            | oxc_ast::ast::VariableDeclarationKind::Const
-                    )
-                {
-                    let Some(dec) = v.declarations.first() else {
-                        return Err(crate::errors::CompilerError::from(
-                            "unsupported empty for-of declaration",
-                        ));
-                    };
-                    let mut names = HashSet::new();
-                    self.add_var_names_from_binding(&dec.id, &mut names);
-                    for name in names {
-                        if self.resolve_local(&name).is_none() {
-                            self.add_local_with_mirror(name.clone(), None, false);
-                        }
-                    }
-                }
-
-                let thrown_slot = self.alloc_temp_local("forof_thrown");
-                self.emit(Op::PushHandler, LINE);
-                let handler_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-
-                let loop_start = self.chunk.code.len();
-
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
-                self.emit(Op::IteratorNext, LINE);
-                self.emit(Op::Dup, LINE);
-                self.emit_constant(Value::String("done".to_string()), LINE);
-                self.emit(Op::GetProperty, LINE);
-                let done_slot = self.alloc_ic_slot()?;
-                self.emit_byte(done_slot, LINE);
-                self.emit(Op::JumpIfTrue, LINE);
-                let exit_jump = self.chunk.code.len() - 1;
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-                self.emit_constant(Value::String("value".to_string()), LINE);
-                self.emit(Op::GetProperty, LINE);
-                let value_slot = self.alloc_ic_slot()?;
-                self.emit_byte(value_slot, LINE);
-
-                match &f.left {
-                    oast::ForStatementLeft::VariableDeclaration(v) => {
-                        let Some(dec) = v.declarations.first() else {
-                            return Err(crate::errors::CompilerError::from(
-                                "unsupported empty for-of declaration",
-                            ));
-                        };
-                        if matches!(
-                            v.kind,
-                            oxc_ast::ast::VariableDeclarationKind::Let
-                                | oxc_ast::ast::VariableDeclarationKind::Const
-                        ) {
-                            let mut names = HashSet::new();
-                            self.add_var_names_from_binding(&dec.id, &mut names);
-                            for name in &names {
-                                if let Some(slot) = self.resolve_local(name) {
-                                    self.emit(Op::CloneLocalCell, LINE);
-                                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                                }
-                            }
-                        }
-                        self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
-                    }
-                    oast::ForStatementLeft::AssignmentTargetIdentifier(id) => {
-                        self.compile_assignment_identifier_reference(id)?;
-                    }
-                    oast::ForStatementLeft::StaticMemberExpression(m) => {
-                        self.compile_static_member_assignment_target(m)?;
-                    }
-                    oast::ForStatementLeft::ComputedMemberExpression(m) => {
-                        self.compile_computed_member_assignment_target(m)?;
-                    }
-                    oast::ForStatementLeft::ArrayAssignmentTarget(a) => {
-                        self.compile_array_assignment_target(a)?;
-                    }
-                    oast::ForStatementLeft::ObjectAssignmentTarget(o) => {
-                        self.compile_object_assignment_target(o)?;
-                    }
-                    _ => {
-                        return Err(crate::errors::CompilerError::from(
-                            "unsupported for-of assignment target",
-                        ));
-                    }
-                }
-
-                self.enter_block_scope();
-                self.compile_statement_oast_with_mode(&f.body, false, Some(loop_completion_slot))?;
-                self.exit_scope();
-
-                let update_start = loop_start;
-                if let Some(patches) = self.continue_patches.pop() {
-                    for patch_pos in patches {
-                        self.patch_jump_to_target(patch_pos, update_start);
-                    }
-                }
-
-                self.emit(Op::Jump, LINE);
-                let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
-                self.emit_short_signed(back_offset, LINE);
-
-                self.patch_jump(exit_jump);
-                // Normal iterator exhaustion should not perform IteratorClose.
-                // Also discard the final iterator result object left on stack.
-                self.emit(Op::Pop, LINE);
-                self.emit(Op::PopHandler, LINE);
-                self.emit(Op::Jump, LINE);
-                let done_end_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-
-                let break_cleanup = self.chunk.code.len();
-                if let Some(patches) = self.break_patches.pop() {
-                    for patch_pos in patches {
-                        self.patch_jump_to_target(patch_pos, break_cleanup);
-                    }
-                }
-                let label_patches = if let Some(state) = self.label_patches.last_mut() {
-                    if state.can_continue && state.owner_loop_depth == self.loop_depth {
-                        Some((
-                            std::mem::take(&mut state.continue_patches),
-                            std::mem::take(&mut state.break_patches),
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some((continue_patches, break_patches)) = label_patches {
-                    self.patch_jump_list(continue_patches, update_start);
-                    self.patch_jump_list(break_patches, break_cleanup);
-                }
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
-                self.emit(Op::IteratorClose, LINE);
-                self.emit(Op::Pop, LINE);
-                self.emit(Op::Jump, LINE);
-                let end_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-
-                self.patch_jump(handler_jump);
-                self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
-                self.emit(Op::IteratorClose, LINE);
-                self.emit(Op::Pop, LINE);
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
-                self.emit(Op::Throw, LINE);
-                self.patch_jump(done_end_jump);
-                self.patch_jump(end_jump);
-                if owns_completion_slot {
-                    self.emit(Op::LoadLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
-                }
-                self.loop_depth = self.loop_depth.saturating_sub(1);
-            }
-            OStmt::ForInStatement(f) => {
-                self.loop_depth += 1;
-                self.continue_patches.push(Vec::new());
-                self.break_patches.push(Vec::new());
-
-                if let OForLeft::VariableDeclaration(v) = &f.left
-                    && matches!(
-                        v.kind,
-                        oxc_ast::ast::VariableDeclarationKind::Let
-                            | oxc_ast::ast::VariableDeclarationKind::Const
-                    )
-                {
-                    if v.declarations.len() != 1 {
-                        return Err(crate::errors::CompilerError::from(
-                            "SyntaxError: for-in lexical declaration must have exactly one binding",
-                        ));
-                    }
-                    if v.declarations
-                        .first()
-                        .and_then(|dec| dec.init.as_ref())
-                        .is_some()
-                    {
-                        return Err(crate::errors::CompilerError::from(
-                            "SyntaxError: for-in lexical declaration may not have an initializer",
-                        ));
-                    }
-                }
-
-                self.emit_get_builtin_name("forInKeys");
-                self.compile_expr_oast(&f.right)?;
-                self.emit(Op::Call, LINE);
-                self.emit_byte(1, LINE);
-
-                let keys_slot = self.add_local_with_mirror(
-                    format!("__forin_keys_{}", self.locals.len()),
-                    None,
-                    false,
-                );
-                self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(keys_slot)?, LINE);
-
-                self.emit_constant(Value::Number(0.0), LINE);
-                let index_slot = self.add_local_with_mirror(
-                    format!("__forin_i_{}", self.locals.len()),
-                    None,
-                    false,
-                );
-                self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
-
-                if let OForLeft::VariableDeclaration(v) = &f.left
-                    && matches!(
-                        v.kind,
-                        oxc_ast::ast::VariableDeclarationKind::Let
-                            | oxc_ast::ast::VariableDeclarationKind::Const
-                    )
-                {
-                    let Some(dec) = v.declarations.first() else {
-                        return Err(crate::errors::CompilerError::from(
-                            "unsupported empty for-in declaration",
-                        ));
-                    };
-                    let mut names = HashSet::new();
-                    self.add_var_names_from_binding(&dec.id, &mut names);
-                    for name in names {
-                        if self.resolve_local(&name).is_none() {
-                            self.add_local_with_mirror(name.clone(), None, false);
-                        }
-                    }
-                }
-
-                let loop_start = self.chunk.code.len();
-
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(keys_slot)?, LINE);
-                self.emit_constant(Value::String("length".to_string()), LINE);
-                self.emit(Op::GetProperty, LINE);
-                // Use CompareJump: cond_type 2 = Lt, jump if true
-                self.emit_with_payload(Op::CompareJump, 2, LINE);
-                let exit_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(keys_slot)?, LINE);
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
-                self.emit(Op::GetProperty, LINE);
-
-                match &f.left {
-                    OForLeft::VariableDeclaration(v) => {
-                        let Some(dec) = v.declarations.first() else {
-                            return Err(crate::errors::CompilerError::from(
-                                "unsupported empty for-in declaration",
-                            ));
-                        };
-                        if matches!(
-                            v.kind,
-                            oxc_ast::ast::VariableDeclarationKind::Let
-                                | oxc_ast::ast::VariableDeclarationKind::Const
-                        ) {
-                            let mut names = HashSet::new();
-                            self.add_var_names_from_binding(&dec.id, &mut names);
-                            for name in &names {
-                                if let Some(slot) = self.resolve_local(name) {
-                                    self.emit(Op::CloneLocalCell, LINE);
-                                    self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                                }
-                            }
-                        }
-                        self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
-                    }
-                    OForLeft::AssignmentTargetIdentifier(id) => {
-                        let name = id.name.as_str();
-                        if let Some(slot) = self.resolve_local(name) {
-                            self.emit(Op::StoreLocal, LINE);
-                            self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                            if self.local_mirrors_global(slot) {
-                                self.emit(Op::LoadLocal, LINE);
-                                self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                                self.emit_set_global_name(name);
-                            }
-                        } else if let Some(upvalue) = self.resolve_upvalue(name) {
-                            self.emit(Op::SetUpvalue, LINE);
-                            self.emit_byte(upvalue, LINE);
-                        } else {
-                            self.emit_set_global_name(name);
-                        }
-                    }
-                    _ => {
-                        return Err(crate::errors::CompilerError::from(
-                            "unsupported for-in assignment target",
-                        ));
-                    }
-                }
-
-                self.enter_block_scope();
-                self.compile_statement_oast_with_mode(&f.body, false, completion_slot)?;
-                self.exit_scope();
-
-                let update_start = self.chunk.code.len();
-                if let Some(patches) = self.continue_patches.pop() {
-                    for patch_pos in patches {
-                        self.patch_jump_to_target(patch_pos, update_start);
-                    }
-                }
-
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
-                self.emit_constant(Value::Number(1.0), LINE);
-                self.emit(Op::Add, LINE);
-                self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
-
-                self.emit(Op::Jump, LINE);
-                let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
-                self.emit_short_signed(back_offset, LINE);
-
-                self.patch_jump(exit_jump);
-                let loop_end = self.chunk.code.len();
-                if let Some(patches) = self.break_patches.pop() {
-                    for patch_pos in patches {
-                        self.patch_jump_to_target(patch_pos, loop_end);
-                    }
-                }
-                let label_patches = if let Some(state) = self.label_patches.last_mut() {
-                    if state.can_continue && state.owner_loop_depth == self.loop_depth {
-                        Some((
-                            std::mem::take(&mut state.continue_patches),
-                            std::mem::take(&mut state.break_patches),
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some((continue_patches, break_patches)) = label_patches {
-                    let loop_end = self.chunk.code.len();
-                    self.patch_jump_list(continue_patches, update_start);
-                    self.patch_jump_list(break_patches, loop_end);
-                }
-                self.loop_depth = self.loop_depth.saturating_sub(1);
-            }
-            OStmt::ReturnStatement(r) => {
-                let return_target = self.finally_patches.last().and_then(|state| {
-                    if state.in_finalizer {
-                        None
-                    } else {
-                        Some((state.return_slot, state.did_return_slot))
-                    }
-                });
-                if let Some((return_slot, did_return_slot)) = return_target {
-                    if let Some(arg) = &r.argument {
-                        self.compile_expr_oast_tail(arg)?;
-                    } else {
-                        self.emit(Op::Undefined, LINE);
-                    }
-                    self.emit(Op::Dup, LINE);
-                    self.emit(Op::StoreLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
-                    self.emit_with_env_pops();
-                    self.emit(Op::True, LINE);
-                    self.emit(Op::StoreLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
-                    self.emit(Op::Jump, LINE);
-                    let patch_pos = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
-                    if let Some(state) = self.finally_patches.last_mut() {
-                        state.return_jumps.push(patch_pos);
-                    }
-                    return Ok(());
-                }
-                if let Some(arg) = &r.argument {
-                    self.compile_expr_oast_tail(arg)?;
-                } else {
-                    self.emit(Op::Undefined, LINE);
-                }
-                self.emit_with_env_pops();
-                self.emit(Op::Return, LINE);
-            }
-            OStmt::ContinueStatement(c) => {
-                self.emit_with_env_pops();
-                self.emit(Op::Jump, LINE);
-                let patch_pos = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-                if let Some(label) = &c.label {
-                    let label_name = label.name.to_string();
-                    let idx = self
-                        .label_patches
-                        .iter()
-                        .rposition(|state| state.name == label_name)
-                        .ok_or_else(|| {
-                            crate::errors::CompilerError::from(format!(
-                                "SyntaxError: unknown label '{}'",
-                                label_name
-                            ))
-                        })?;
-                    if !self.label_patches[idx].can_continue {
-                        return Err(crate::errors::CompilerError::from(
-                            "SyntaxError: 'continue' used with non-iteration label",
-                        ));
-                    }
-                    self.label_patches[idx].continue_patches.push(patch_pos);
-                } else {
-                    if self.continue_patches.is_empty() {
-                        return Err(crate::errors::CompilerError::from(
-                            "SyntaxError: 'continue' used outside of a loop",
-                        ));
-                    }
-                    if let Some(patches) = self.continue_patches.last_mut() {
-                        patches.push(patch_pos);
-                    }
-                }
-            }
-            OStmt::BreakStatement(b) => {
-                self.emit_with_env_pops();
-                self.emit(Op::Jump, LINE);
-                let patch_pos = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-                if let Some(label) = &b.label {
-                    let label_name = label.name.to_string();
-                    let idx = self
-                        .label_patches
-                        .iter()
-                        .rposition(|state| state.name == label_name)
-                        .ok_or_else(|| {
-                            crate::errors::CompilerError::from(format!(
-                                "SyntaxError: unknown label '{}'",
-                                label_name
-                            ))
-                        })?;
-                    self.label_patches[idx].break_patches.push(patch_pos);
-                } else {
-                    if self.break_patches.is_empty() {
-                        return Err(crate::errors::CompilerError::from(
-                            "SyntaxError: 'break' used outside of a loop",
-                        ));
-                    }
-                    if let Some(patches) = self.break_patches.last_mut() {
-                        patches.push(patch_pos);
-                    }
-                }
-            }
-            OStmt::ThrowStatement(t) => {
-                self.compile_expr_oast(&t.argument)?;
-                self.emit(Op::Throw, LINE);
-            }
-            OStmt::TryStatement(t) => {
-                let handler = t.handler.as_ref();
-                let finalizer = t.finalizer.as_ref();
-                if finalizer.is_some() {
-                    let return_slot = self.add_local_with_mirror(
-                        format!("__finally_return_{}", self.locals.len()),
-                        None,
-                        false,
-                    );
-                    let did_return_slot = self.add_local_with_mirror(
-                        format!("__finally_did_return_{}", self.locals.len() + 1),
-                        None,
-                        false,
-                    );
-                    self.emit(Op::Undefined, LINE);
-                    self.emit(Op::StoreLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
-                    self.emit(Op::False, LINE);
-                    self.emit(Op::StoreLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
-                    self.finally_patches
-                        .push(crate::compiler::FinallyPatchState {
-                            return_slot,
-                            did_return_slot,
-                            return_jumps: Vec::new(),
-                            in_finalizer: false,
-                        });
-                }
-                let finally_idx = finalizer
-                    .as_ref()
-                    .map(|_| self.finally_patches.len().saturating_sub(1));
-
-                self.emit(Op::PushHandler, LINE);
-                let handler_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-
-                self.enter_block_scope_with_vars(&t.block.body);
-                for stmt in &t.block.body {
-                    self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
-                }
-                self.exit_scope();
-
-                self.emit(Op::PopHandler, LINE);
-
-                // Normal completion path: run finalizer (if present), then skip handler path.
-                if let Some(fin) = finalizer {
-                    let finally_idx = finally_idx.ok_or_else(|| {
-                        crate::errors::CompilerError::from("finally state missing")
-                    })?;
-                    {
-                        let state = self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
-                            crate::errors::CompilerError::from("finally state missing")
-                        })?;
-                        state.in_finalizer = true;
-                    }
-                    let body_start = self.chunk.code.len();
-                    self.enter_block_scope_with_vars(&fin.body);
-                    for stmt in &fin.body {
-                        self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
-                    }
-                    self.exit_scope();
-                    let (did_return_slot, return_slot, return_jumps) = {
-                        let state = self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
-                            crate::errors::CompilerError::from("finally state missing")
-                        })?;
-                        state.in_finalizer = false;
-                        (
-                            state.did_return_slot,
-                            state.return_slot,
-                            std::mem::take(&mut state.return_jumps),
-                        )
-                    };
-                    for patch_pos in return_jumps {
-                        self.patch_jump_to_target(patch_pos, body_start);
-                    }
-                    self.emit(Op::LoadLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
-                    self.emit(Op::JumpIfFalse, LINE);
-                    let skip_return = self.chunk.code.len();
-                    self.emit_byte(0, LINE);
-                    self.emit_byte(0, LINE);
-                    self.emit(Op::LoadLocal, LINE);
-                    self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
-                    self.emit(Op::Return, LINE);
-                    self.patch_jump(skip_return);
-                }
-                self.emit(Op::Jump, LINE);
-                let end_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-
-                // Exception path starts here.
-                self.patch_jump(handler_jump);
-
-                match handler {
-                    Some(handler) => {
-                        if let Some(param) = &handler.param {
-                            let name = match &param.pattern {
-                                OPat::BindingIdentifier(i) => i.name.to_string(),
-                                _ => "__catch_pattern".to_string(),
-                            };
-                            self.enter_block_scope_with_vars(&handler.body.body);
-                            let slot = self.add_local_with_mirror(name, None, false);
-                            self.emit(Op::StoreLocal, LINE);
-                            self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                            self.emit(Op::LoadLocal, LINE);
-                            self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                            self.compile_binding_pattern_assignment_oast(
-                                &param.pattern,
-                                oxc_ast::ast::VariableDeclarationKind::Let,
-                            )?;
-                            for stmt in &handler.body.body {
-                                self.compile_statement_oast_with_mode(
-                                    stmt,
-                                    false,
-                                    completion_slot,
-                                )?;
-                            }
-                            self.exit_scope();
-                        } else {
-                            self.emit(Op::Pop, LINE);
-                            self.enter_block_scope_with_vars(&handler.body.body);
-                            for stmt in &handler.body.body {
-                                self.compile_statement_oast_with_mode(
-                                    stmt,
-                                    false,
-                                    completion_slot,
-                                )?;
-                            }
-                            self.exit_scope();
-                        }
-
-                        if let Some(fin) = finalizer {
-                            let finally_idx = finally_idx.ok_or_else(|| {
-                                crate::errors::CompilerError::from("finally state missing")
-                            })?;
-                            {
-                                let state =
-                                    self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
-                                        crate::errors::CompilerError::from("finally state missing")
-                                    })?;
-                                state.in_finalizer = true;
-                            }
-                            self.enter_block_scope_with_vars(&fin.body);
-                            for stmt in &fin.body {
-                                self.compile_statement_oast_with_mode(
-                                    stmt,
-                                    false,
-                                    completion_slot,
-                                )?;
-                            }
-                            self.exit_scope();
-                            let state =
-                                self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
-                                    crate::errors::CompilerError::from("finally state missing")
-                                })?;
-                            state.in_finalizer = false;
-                        }
-                    }
-                    None => {
-                        // try/finally with no catch: preserve thrown value, run finally, rethrow.
-                        if finalizer.is_none() {
-                            return Err(crate::errors::CompilerError::from(
-                                "try without catch/finally not supported",
-                            ));
-                        }
-                        self.enter_block_scope();
-                        let slot =
-                            self.add_local_with_mirror("__finally_thrown".to_string(), None, false);
-                        self.emit(Op::StoreLocal, LINE);
-                        self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                        if let Some(fin) = finalizer {
-                            let finally_idx = finally_idx.ok_or_else(|| {
-                                crate::errors::CompilerError::from("finally state missing")
-                            })?;
-                            {
-                                let state =
-                                    self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
-                                        crate::errors::CompilerError::from("finally state missing")
-                                    })?;
-                                state.in_finalizer = true;
-                            }
-                            self.enter_block_scope_with_vars(&fin.body);
-                            for stmt in &fin.body {
-                                self.compile_statement_oast_with_mode(
-                                    stmt,
-                                    false,
-                                    completion_slot,
-                                )?;
-                            }
-                            self.exit_scope();
-                            let state =
-                                self.finally_patches.get_mut(finally_idx).ok_or_else(|| {
-                                    crate::errors::CompilerError::from("finally state missing")
-                                })?;
-                            state.in_finalizer = false;
-                        }
-                        self.emit(Op::LoadLocal, LINE);
-                        self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                        self.emit(Op::Throw, LINE);
-                        self.exit_scope();
-                    }
-                }
-
-                self.patch_jump(end_jump);
-                if finalizer.is_some() {
-                    self.finally_patches.pop();
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Compile a class declaration statement into bytecode.
-    ///
-    /// Creates a constructor function closure and compiles all class methods,
-    /// attaching them to either the constructor or its prototype.
-    fn compile_class_declaration_oast(
-        &mut self,
-        c: &oast::Class<'_>,
-    ) -> Result<(), crate::errors::CompilerError> {
-        let name =
-            c.id.as_ref()
-                .map(|id| id.name.to_string())
-                .ok_or_else(|| crate::errors::CompilerError::from("anonymous class declaration"))?;
-
-        if let Some(err) = self.check_var_lexical_conflict(&name) {
-            return Err(crate::errors::CompilerError::from(err));
-        }
-
-        self.emit_class_from_oast(c, Some(&name))?;
-        let slot = self
-            .resolve_local(&name)
-            .unwrap_or_else(|| self.add_local_with_mirror(name.clone(), None, self.is_root));
-
-        if slot == self.locals.len() - 1 {
-            self.add_lexical_binding(&name);
-        }
-
-        if self.is_root {
-            self.emit(Op::Dup, LINE);
-        }
-        self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(slot)?, LINE);
-        if self.is_root {
-            self.emit_set_global_name(&name);
-        }
-        // Emit class elements (methods/fields). Minimal implementation:
-        // Create closures for methods and install them on the constructor
-        // (static) or constructor.prototype (instance). Computed keys and
-        // accessors are lowered through objectDefineProperty so we preserve
-        // symbol keys and accessor semantics.
-        let instance_home_slot = if c.body.body.iter().any(
-            |element| matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static),
-        ) {
-            self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(slot)?, LINE);
-            self.emit_constant(Value::String("prototype".to_string()), LINE);
-            self.emit(Op::GetProperty, LINE);
-            let home_slot = self.alloc_temp_local("class_home");
-            self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(home_slot)?, LINE);
-            Some(home_slot)
-        } else {
-            None
-        };
-        for element in &c.body.body {
-            if let oast::ClassElement::MethodDefinition(md) = element {
-                let target_slot = if md.r#static {
-                    slot
-                } else {
-                    instance_home_slot.expect("instance home slot")
-                };
-                self.emit_class_member_installation(target_slot, md)?;
-            }
-        }
-
+  }
+
+  /// Compile a function declaration statement into bytecode.
+  ///
+  /// Creates a closure from the function and assigns it to a local slot,
+  /// optionally mirroring to a global if at module root level.
+  fn compile_function_declaration_oast(
+    &mut self,
+    f: &oast::Function<'_>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    if let Some(ident) = &f.id {
+      let fname = ident.name.to_string();
+
+      if let Some(err) = self.check_var_lexical_conflict(&fname) {
+        return Err(crate::errors::CompilerError::from(err));
+      }
+      if let Some(err) = Self::strict_binding_name_error(self.strict_context, &fname) {
+        return Err(err);
+      }
+
+      let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
+      let idx = self.chunk.add_function(proto);
+      self.emit(Op::MakeClosure, LINE);
+      self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+      let slot = if let Some(s) = self.resolve_local(&fname) {
+        s
+      } else {
+        self.add_local_with_mirror(fname.clone(), None, self.is_root)
+      };
+
+      if slot == self.locals.len() - 1 {
+        self.add_lexical_binding(&fname);
+      }
+
+      if self.is_root {
+        self.emit(Op::Dup, LINE);
+      }
+      self.emit(Op::StoreLocal, LINE);
+      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      if self.is_root {
+        self.emit_set_global_name(&fname);
+      }
+      let is_exported = self
+        .current_module
+        .as_ref()
+        .is_some_and(|c| c.exports.contains(&fname));
+      if is_exported {
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(slot)?, LINE);
-
-        Ok(())
+        self.emit_set_own_module_export(&fname)?;
+      }
     }
 
-    /// Check if a function has a simple parameter list (no rest, no defaults, all identifiers).
-    fn has_simple_parameter_list(func: &oast::Function<'_>) -> bool {
-        func.params.rest.is_none()
-            && func.params.items.iter().all(|param| {
-                matches!(param.pattern, oast::BindingPattern::BindingIdentifier(_))
-                    && param.initializer.is_none()
-            })
-    }
+    Ok(())
+  }
 
-    /// Emit bytecode to initialize non-simple function parameters from hidden
-    /// raw argument slots.
-    ///
-    /// Raw slots are expected to be laid out before any visible parameter
-    /// bindings. This keeps later parameters in TDZ while earlier defaults are
-    /// evaluated.
-    fn emit_parameter_initializers_from_raw_slots(
-        &mut self,
-        params: &oast::FormalParameters<'_>,
-        raw_slots: &[usize],
-    ) -> Result<(), crate::errors::CompilerError> {
-        let temp_slot = self.alloc_temp_local("param_init_value");
+  /// Compile an oxc AST statement into bytecode.
+  ///
+  /// Wrapper that delegates to `compile_statement_oast_with_mode` with `skip_pop` = false,
+  /// meaning expressions will have their values popped from the stack.
+  fn compile_statement_oast(
+    &mut self,
+    stmt: &oast::Statement,
+  ) -> Result<(), crate::errors::CompilerError> {
+    self.compile_statement_oast_with_mode(stmt, false, None)
+  }
 
-        for (idx, param) in params.items.iter().enumerate() {
-            let raw_slot = raw_slots
-                .get(idx)
-                .copied()
-                .ok_or_else(|| crate::errors::CompilerError::from("missing parameter slot"))?;
-
-            self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(raw_slot)?, LINE);
-
-            if let Some(init) = &param.initializer {
-                self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
-                self.emit(Op::Undefined, LINE);
-                // Use CompareJump: cond_type 6 = StrictEq, jump if true
-                self.emit_with_payload(Op::CompareJump, 6, LINE);
-                let skip_jump = self.chunk.code.len();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-                self.compile_expr_oast(init)?;
-                self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
-                self.patch_jump(skip_jump);
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+  /// Compile an oxc AST statement into bytecode with optional result preservation.
+  ///
+  /// # Arguments
+  ///
+  /// * `stmt` - The statement to compile
+  /// * `skip_pop` - If true, the result of expression statements is preserved on the stack
+  ///
+  /// This handles all statement types including:
+  /// - Import/export declarations
+  /// - Variable, function, and class declarations
+  /// - Expression statements
+  /// - Control flow (if/else, switch, loops)
+  /// - Try/catch/finally blocks
+  /// - Labeled statements
+  pub(super) fn compile_statement_oast_with_mode(
+    &mut self,
+    stmt: &oast::Statement,
+    skip_pop: bool,
+    completion_slot: Option<usize>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    use oxc_ast::ast::{BindingPattern as OPat, ForStatementLeft as OForLeft, Statement as OStmt};
+    match stmt {
+      OStmt::ImportDeclaration(_) => {}
+      OStmt::ExportAllDeclaration(_) => {
+        // export * from "module"
+        // Star exports are resolved by the module loader and export
+        // resolution table, so the declaration itself has no runtime
+        // side effects here.
+      }
+      OStmt::ExportNamedDeclaration(export) => {
+        // export {  } from "module"
+        if let Some(decl) = &export.declaration {
+          match decl {
+            oast::Declaration::VariableDeclaration(v) => {
+              self.compile_variable_declaration_oast(v)?
             }
-
-            self.compile_binding_pattern_assignment_oast(
-                &param.pattern,
-                oxc_ast::ast::VariableDeclarationKind::Var,
-            )?;
+            oast::Declaration::FunctionDeclaration(f) => {
+              self.compile_function_declaration_oast(f)?
+            }
+            oast::Declaration::ClassDeclaration(c) => {
+              self.compile_class_declaration_oast(c)?;
+            }
+            _ => {}
+          }
         }
-
-        if let Some(rest) = &params.rest {
-            let raw_slot = raw_slots
-                .get(params.items.len())
-                .copied()
-                .ok_or_else(|| crate::errors::CompilerError::from("missing rest parameter slot"))?;
-            self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(raw_slot)?, LINE);
-            self.compile_binding_pattern_assignment_oast(
-                &rest.rest.argument,
-                oxc_ast::ast::VariableDeclarationKind::Var,
-            )?;
-        }
-
-        Ok(())
-    }
-
-    /// Emit bytecode to initialize default parameter values using the current
-    /// parameter slots directly.
-    fn emit_parameter_initializers_from_current_slots(
-        &mut self,
-        params: &oast::FormalParameters<'_>,
-    ) -> Result<(), crate::errors::CompilerError> {
-        for (idx, param) in params.items.iter().enumerate() {
-            let Some(init) = &param.initializer else {
-                continue;
+        if export.declaration.is_none() && export.source.is_none() {
+          for spec in &export.specifiers {
+            let Some(local_name) = Self::module_export_name_to_string(&spec.local) else {
+              continue;
             };
+            let Some(export_name) = Self::module_export_name_to_string(&spec.exported) else {
+              continue;
+            };
+            self.emit_get_binding(&local_name);
+            self.emit_set_own_module_export(&export_name)?;
+          }
+        }
+      }
+      OStmt::ExportDefaultDeclaration(export) => {
+        match &export.declaration {
+          oast::ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+            if let Some(id) = &f.id {
+              self.compile_function_declaration_oast(f)?;
+              self.emit_get_binding(id.name.as_str());
+            } else {
+              let fname = "default".to_string();
+              let (proto, _env_len) = self.compile_function(&fname, None, f, None, false)?;
+              let idx = self.chunk.add_function(proto);
+              self.emit(Op::MakeClosure, LINE);
+              self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+            }
+          }
+          oast::ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+            if let Some(id) = &c.id {
+              self.compile_class_declaration_oast(c)?;
+              self.emit_get_binding(id.name.as_str());
+            } else {
+              return Err(crate::errors::CompilerError::from(
+                "unsupported anonymous export default class declaration",
+              ));
+            }
+          }
+          oast::ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
+            return Err(crate::errors::CompilerError::from(
+              "unsupported export default declaration",
+            ));
+          }
+          other => {
+            if let Some(expr) = other.as_expression() {
+              self.compile_expr_oast(expr)?;
+            } else {
+              return Err(crate::errors::CompilerError::from(
+                "unsupported export default declaration",
+              ));
+            }
+          }
+        }
+        self.emit_set_own_module_export("default")?;
+      }
+      OStmt::VariableDeclaration(v) => self.compile_variable_declaration_oast(v)?,
+      OStmt::FunctionDeclaration(f) => self.compile_function_declaration_oast(f)?,
+      OStmt::ClassDeclaration(c) => self.compile_class_declaration_oast(c)?,
+      OStmt::ExpressionStatement(e) => {
+        self.compile_expr_oast(&e.expression)?;
+        if let Some(slot) = completion_slot {
+          self.emit(Op::StoreLocal, LINE);
+          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+        } else if !skip_pop {
+          self.emit(Op::Pop, LINE);
+        }
+      }
+      OStmt::LabeledStatement(l) => {
+        let can_continue = matches!(
+          &l.body,
+          OStmt::WhileStatement(_) | OStmt::ForStatement(_) | OStmt::ForInStatement(_)
+        );
+        self
+          .label_patches
+          .push(crate::compiler::LabelPatchState {
+            name: l.label.name.to_string(),
+            can_continue,
+            owner_loop_depth: if can_continue {
+              self.loop_depth + 1
+            } else {
+              self.loop_depth
+            },
+            continue_patches: Vec::new(),
+            break_patches: Vec::new(),
+          });
+        self.compile_statement_oast_with_mode(&l.body, false, completion_slot)?;
+        let label_state = self
+          .label_patches
+          .pop()
+          .ok_or_else(|| crate::errors::CompilerError::from("label stack underflow"))?;
+        if !label_state.can_continue && !label_state.continue_patches.is_empty() {
+          return Err(crate::errors::CompilerError::from(
+            "'continue' used with non-iteration label",
+          ));
+        }
+        if !label_state.break_patches.is_empty() {
+          let target = self.chunk.code.len();
+          self.patch_jump_list(label_state.break_patches, target);
+        }
+      }
+      OStmt::WithStatement(w) => {
+        if self.strict_context {
+          return Err(crate::errors::CompilerError::from(
+            "SyntaxError: Strict mode code may not include a with statement",
+          ));
+        }
+        self.compile_expr_oast(&w.object)?;
+        self.emit(Op::PushWithEnv, LINE);
+        self.with_depth += 1;
+        self.emit(Op::PushHandler, LINE);
+        let handler_jump = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+
+        let with_body_stmts = match &w.body {
+          OStmt::BlockStatement(b) => &b.body[..],
+          _ => std::slice::from_ref(&w.body),
+        };
+        self.enter_block_scope_with_vars(with_body_stmts);
+        self.compile_statement_oast_with_mode(&w.body, false, completion_slot)?;
+        self.exit_scope();
+
+        self.emit(Op::PopHandler, LINE);
+        self.emit(Op::PopEnv, LINE);
+        self.with_depth = self.with_depth.saturating_sub(1);
+        self.emit(Op::Jump, LINE);
+        let skip_handler_jump = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+
+        let _handler_start = self.chunk.code.len();
+        self.patch_jump(handler_jump);
+
+        self.emit(Op::PopEnv, LINE);
+        self.with_depth = self.with_depth.saturating_sub(1);
+        self.emit(Op::Throw, LINE);
+        let _after_handler = self.chunk.code.len();
+
+        self.patch_jump(skip_handler_jump);
+      }
+      OStmt::BlockStatement(b) => {
+        self.enter_block_scope_with_vars(&b.body);
+        for s in &b.body {
+          self.compile_statement_oast_with_mode(s, false, completion_slot)?;
+        }
+        self.exit_scope();
+      }
+      OStmt::IfStatement(i) => {
+        if let Some(jump_over) = self.try_emit_compare_jump_if_false(&i.test)? {
+          self.compile_statement_oast_with_mode(&i.consequent, false, completion_slot)?;
+          if let Some(alt) = &i.alternate {
+            self.emit(Op::Jump, LINE);
+            let jump_else = self.chunk.code.len();
+            self.emit_byte(0, LINE);
+            self.emit_byte(0, LINE);
+            self.patch_jump(jump_over);
+            self.compile_statement_oast_with_mode(alt, false, completion_slot)?;
+            self.patch_jump(jump_else);
+          } else {
+            self.patch_jump(jump_over);
+          }
+        } else {
+          self.compile_expr_oast(&i.test)?;
+          self.emit(Op::JumpIfFalse, LINE);
+          let jump_over = self.chunk.code.len();
+          self.emit_byte(0, LINE);
+          self.emit_byte(0, LINE);
+          self.compile_statement_oast_with_mode(&i.consequent, false, completion_slot)?;
+          if let Some(alt) = &i.alternate {
+            self.emit(Op::Jump, LINE);
+            let jump_else = self.chunk.code.len();
+            self.emit_byte(0, LINE);
+            self.emit_byte(0, LINE);
+            self.patch_jump(jump_over);
+            self.compile_statement_oast_with_mode(alt, false, completion_slot)?;
+            self.patch_jump(jump_else);
+          } else {
+            self.patch_jump(jump_over);
+          }
+        }
+      }
+      OStmt::SwitchStatement(s) => {
+        // Evaluate discriminant once and store in a local slot.
+        self.compile_expr_oast(&s.discriminant)?;
+        let discr_name = format!("__switch_discriminant_{}", self.locals.len());
+        let discr_slot = self.add_local_with_mirror(discr_name, None, false);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(discr_slot)?, LINE);
+
+        // `break` inside a switch should jump to switch end.
+        self.break_patches.push(Vec::new());
+
+        // First phase: dispatch checks, each successful match jumps to
+        // the corresponding case body.
+        let mut case_body_jumps: Vec<(usize, usize)> = Vec::new();
+        let mut default_index: Option<usize> = None;
+        for (case_idx, case) in s.cases.iter().enumerate() {
+          if let Some(test) = &case.test {
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(idx)?, LINE);
-            self.emit(Op::Undefined, LINE);
-            // Use CompareJump: cond_type 6 = StrictEq, jump if true
+            self.emit_byte(self.slot_to_u8(discr_slot)?, LINE);
+            self.compile_expr_oast(test)?;
+            // Use CompareJump: cond_type 6 = StrictEq, jump if false (negated)
             self.emit_with_payload(Op::CompareJump, 6, LINE);
             let skip_jump = self.chunk.code.len();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
-            self.compile_expr_oast(init)?;
-            self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(idx)?, LINE);
+
+            self.emit(Op::Jump, LINE);
+            let body_jump = self.chunk.code.len();
+            self.emit_byte(0, LINE);
+            self.emit_byte(0, LINE);
+            case_body_jumps.push((case_idx, body_jump));
+
             self.patch_jump(skip_jump);
-        }
-        Ok(())
-    }
-
-    /// Lower a class method/getter/setter installation to a property
-    /// definition with a real descriptor object.
-    pub(super) fn emit_class_member_installation(
-        &mut self,
-        target_slot: usize,
-        md: &oast::MethodDefinition<'_>,
-    ) -> Result<(), crate::errors::CompilerError> {
-        if matches!(md.kind, oast::MethodDefinitionKind::Constructor) {
-            return Ok(());
+          } else {
+            default_index = Some(case_idx);
+          }
         }
 
-        let method_name = if md.computed {
+        // If no case matched, jump to default (if any), else to end.
+        self.emit(Op::Jump, LINE);
+        let no_match_jump = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+
+        // Second phase: emit case bodies in source order. Fallthrough is
+        // represented naturally by layout.
+        let mut case_starts: Vec<usize> = vec![0; s.cases.len()];
+        for (case_idx, case) in s.cases.iter().enumerate() {
+          case_starts[case_idx] = self.chunk.code.len();
+          for stmt in &case.consequent {
+            self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
+          }
+        }
+        let switch_end = self.chunk.code.len();
+
+        // Patch successful-case jumps to case body starts.
+        for (case_idx, jump_pos) in case_body_jumps {
+          self.patch_jump_to_target(jump_pos, case_starts[case_idx]);
+        }
+
+        // Patch no-match jump to default start or end.
+        let default_target = default_index.map_or(switch_end, |idx| case_starts[idx]);
+        self.patch_jump_to_target(no_match_jump, default_target);
+
+        // Patch `break` statements emitted within this switch.
+        if let Some(patches) = self.break_patches.pop() {
+          for patch_pos in patches {
+            self.patch_jump_to_target(patch_pos, switch_end);
+          }
+        }
+      }
+      OStmt::WhileStatement(w) => {
+        self.loop_depth += 1;
+        self.continue_patches.push(Vec::new());
+        self.break_patches.push(Vec::new());
+        let owns_completion_slot = completion_slot.is_none();
+        let loop_completion_slot = if let Some(slot) = completion_slot {
+          slot
+        } else {
+          let slot = self.alloc_temp_local("loop_result");
+          self.emit(Op::Undefined, LINE);
+          self.emit(Op::StoreLocal, LINE);
+          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          slot
+        };
+        let loop_start = self.chunk.code.len();
+        let exit_jump = if let Some(jump_over) = self.try_emit_compare_jump_if_false(&w.test)? {
+          Some(jump_over)
+        } else {
+          self.compile_expr_oast(&w.test)?;
+          self.emit(Op::JumpIfFalse, LINE);
+          let exit_jump = self.chunk.code.len();
+          self.emit_byte(0, LINE);
+          self.emit_byte(0, LINE);
+          Some(exit_jump)
+        };
+        self.enter_block_scope();
+        self.compile_statement_oast_with_mode(&w.body, false, Some(loop_completion_slot))?;
+        self.exit_scope();
+        self.emit(Op::Jump, LINE);
+        let _back_jump_pos = self.chunk.code.len();
+        // back_offset in instruction units: loop_start - (current_ip + 1)
+        let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
+        self.emit_short_signed(back_offset, LINE);
+        if let Some(patches) = self.continue_patches.pop() {
+          for patch_pos in patches {
+            self.patch_jump_to_target(patch_pos, loop_start);
+          }
+        }
+        let cleanup_start = self.chunk.code.len();
+        if owns_completion_slot {
+          self.emit(Op::LoadLocal, LINE);
+          self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
+          if let Some(exit_jump) = exit_jump {
+            self.patch_jump_to_target(exit_jump, cleanup_start);
+          }
+        } else if let Some(exit_jump) = exit_jump {
+          self.patch_jump(exit_jump);
+        }
+        if let Some(patches) = self.break_patches.pop() {
+          for patch_pos in patches {
+            self.patch_jump_to_target(patch_pos, cleanup_start);
+          }
+        }
+        let label_patches = if let Some(state) = self.label_patches.last_mut() {
+          if state.can_continue && state.owner_loop_depth == self.loop_depth {
+            Some((
+              std::mem::take(&mut state.continue_patches),
+              std::mem::take(&mut state.break_patches),
+            ))
+          } else {
             None
+          }
         } else {
-            match &md.key {
-                oast::PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
-                oast::PropertyKey::Identifier(ident) => Some(ident.name.to_string()),
-                oast::PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
-                oast::PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
-                oast::PropertyKey::PrivateIdentifier(pid) => Some(pid.name.to_string()),
-                _ => None,
-            }
+          None
         };
-
-        let self_name = md.value.id.as_ref().map(|id| id.name.as_str());
-        let (mut proto, _env_len) = self.compile_function(
-            method_name.as_deref().unwrap_or("<method>"),
-            self_name,
-            &md.value,
-            None,
-            true,
-        )?;
-        proto.is_strict = true;
-        let fidx = self.chunk.add_function(proto);
-
-        self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(target_slot)?, LINE);
-        self.emit(Op::Dup, LINE);
-        self.emit_get_builtin_name("objectDefineProperty");
-        self.emit(Op::Swap, LINE);
-
-        if let Some(ref key_name) = method_name {
-            if matches!(md.key, oast::PropertyKey::PrivateIdentifier(_)) {
-                let key = self.ensure_private_name_constant(key_name);
-                self.emit_constant(key, LINE);
-            } else {
-                self.emit_constant(Value::String(key_name.clone()), LINE);
-            }
-        } else {
-            let key_expr = md
-                .key
-                .as_expression()
-                .expect("computed class member key must be an expression");
-            self.compile_expr_oast(key_expr)?;
+        if let Some((continue_patches, break_patches)) = label_patches {
+          let loop_end = self.chunk.code.len();
+          self.patch_jump_list(continue_patches, loop_start);
+          self.patch_jump_list(break_patches, loop_end);
         }
-
-        let first_descriptor_key = match md.kind {
-            oast::MethodDefinitionKind::Method => "value",
-            oast::MethodDefinitionKind::Get => "get",
-            oast::MethodDefinitionKind::Set => "set",
-            oast::MethodDefinitionKind::Constructor => unreachable!(),
-        };
-        self.emit_constant(Value::String(first_descriptor_key.to_string()), LINE);
-        self.emit(Op::MakeClosure, LINE);
-        self.emit_byte(self.function_index_to_u8(fidx)?, LINE);
-        self.emit_set_method_home_object(target_slot)?;
-
-        let prop_count = match md.kind {
-            oast::MethodDefinitionKind::Method => {
-                self.emit_constant(Value::String("writable".to_string()), LINE);
-                self.emit_constant(Value::Bool(true), LINE);
-                self.emit_constant(Value::String("enumerable".to_string()), LINE);
-                self.emit_constant(Value::Bool(false), LINE);
-                self.emit_constant(Value::String("configurable".to_string()), LINE);
-                self.emit_constant(Value::Bool(true), LINE);
-                4
-            }
-            oast::MethodDefinitionKind::Get => {
-                self.emit_constant(Value::String("enumerable".to_string()), LINE);
-                self.emit_constant(Value::Bool(false), LINE);
-                self.emit_constant(Value::String("configurable".to_string()), LINE);
-                self.emit_constant(Value::Bool(true), LINE);
-                3
-            }
-            oast::MethodDefinitionKind::Set => {
-                self.emit_constant(Value::String("enumerable".to_string()), LINE);
-                self.emit_constant(Value::Bool(false), LINE);
-                self.emit_constant(Value::String("configurable".to_string()), LINE);
-                self.emit_constant(Value::Bool(true), LINE);
-                3
-            }
-            oast::MethodDefinitionKind::Constructor => unreachable!(),
-        };
-        self.emit(Op::BuildObject, LINE);
-        self.emit_byte(prop_count, LINE);
-        self.emit(Op::Call, LINE);
-        self.emit_byte(3, LINE);
-        self.emit(Op::Pop, LINE);
-        self.emit(Op::Pop, LINE);
-        Ok(())
-    }
-
-    /// Emits a class declaration from an OAST class node.
-    #[allow(clippy::too_many_lines)]
-    pub(super) fn emit_class_from_oast(
-        &mut self,
-        c: &oast::Class<'_>,
-        declaration_name: Option<&str>,
-    ) -> Result<(), crate::errors::CompilerError> {
-        let class_name =
-            c.id.as_ref()
-                .map(|id| id.name.to_string())
-                .or_else(|| declaration_name.map(ToString::to_string))
-                .unwrap_or_else(|| "<anonymous>".to_string());
-
-        let constructor_method = c.body.body.iter().find_map(|element| {
-            if let oast::ClassElement::MethodDefinition(md) = element
-                && matches!(md.kind, oast::MethodDefinitionKind::Constructor)
-            {
-                return Some(md);
-            }
-            None
-        });
-        let class_has_super = c.super_class.is_some();
-        let proto = if let Some(md) = constructor_method {
-            let (mut proto, _env_len) =
-                self.compile_function(&class_name, None, &md.value, None, class_has_super)?;
-            proto.is_strict = true;
-            proto.is_derived_constructor = class_has_super;
-            proto.is_class_constructor = true;
-            proto
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+      }
+      OStmt::DoWhileStatement(d) => {
+        self.loop_depth += 1;
+        self.continue_patches.push(Vec::new());
+        self.break_patches.push(Vec::new());
+        let owns_completion_slot = completion_slot.is_none();
+        let loop_completion_slot = if let Some(slot) = completion_slot {
+          slot
         } else {
-            let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
-            if class_has_super {
-                ctor_chunk.allow_new_target = true;
-                ctor_chunk.allow_super = true;
-                let mut inner = Compiler {
-                    chunk: ctor_chunk,
-                    source_text: Rc::clone(&self.source_text),
-                    locals: Vec::new(),
-                    local_types: Vec::new(),
-                    local_tdz: Vec::new(),
-                    local_immutable: Vec::new(),
-                    local_sloppy_immutable_silent: Vec::new(),
-                    local_mirror_globals: Vec::new(),
-                    scopes: vec![crate::compiler::Scope {
-                        kind: crate::compiler::ScopeKind::Function,
-                        bindings: HashMap::new(),
-                        lexical_bindings: HashSet::new(),
-                        block_var_names: HashSet::new(),
-                    }],
-                    globals: HashMap::new(),
-                    is_root: false,
-                    strict_context: true,
-                    loop_depth: 0,
-                    with_depth: 0,
-                    continue_patches: Vec::new(),
-                    break_patches: Vec::new(),
-                    finally_patches: Vec::new(),
-                    label_patches: Vec::new(),
-                    current_module: self.current_module.clone(),
-                    next_ic_slot: 0,
-                    pending_operand_bytes: 0,
-                    allow_new_target: true,
-                    allow_super: true,
-                    outer_bindings: self.visible_bindings_snapshot(),
-                    upvalue_indices: HashMap::new(),
-                    captured_upvalues: Vec::new(),
-                    private_names: self.private_names.clone(),
-                    object_expr_had_set_property: false,
+          let slot = self.alloc_temp_local("loop_result");
+          self.emit(Op::Undefined, LINE);
+          self.emit(Op::StoreLocal, LINE);
+          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          slot
+        };
+        let loop_start = self.chunk.code.len();
+        self.enter_block_scope();
+        self.compile_statement_oast_with_mode(&d.body, false, Some(loop_completion_slot))?;
+        self.exit_scope();
+        let test_start = self.chunk.code.len();
+        let exit_jump = if let Some(jump_over) = self.try_emit_compare_jump_if_false(&d.test)? {
+          Some(jump_over)
+        } else {
+          self.compile_expr_oast(&d.test)?;
+          self.emit(Op::JumpIfFalse, LINE);
+          let exit_jump = self.chunk.code.len();
+          self.emit_byte(0, LINE);
+          self.emit_byte(0, LINE);
+          Some(exit_jump)
+        };
+        self.emit(Op::Jump, LINE);
+        let _back_jump_pos = self.chunk.code.len();
+        let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
+        self.emit_short_signed(back_offset, LINE);
+        if let Some(patches) = self.continue_patches.pop() {
+          for patch_pos in patches {
+            self.patch_jump_to_target(patch_pos, test_start);
+          }
+        }
+        let cleanup_start = self.chunk.code.len();
+        if owns_completion_slot {
+          self.emit(Op::LoadLocal, LINE);
+          self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
+          if let Some(exit_jump) = exit_jump {
+            self.patch_jump_to_target(exit_jump, cleanup_start);
+          }
+        } else if let Some(exit_jump) = exit_jump {
+          self.patch_jump(exit_jump);
+        }
+        if let Some(patches) = self.break_patches.pop() {
+          for patch_pos in patches {
+            self.patch_jump_to_target(patch_pos, cleanup_start);
+          }
+        }
+        let label_patches = if let Some(state) = self.label_patches.last_mut() {
+          if state.can_continue && state.owner_loop_depth == self.loop_depth {
+            Some((
+              std::mem::take(&mut state.continue_patches),
+              std::mem::take(&mut state.break_patches),
+            ))
+          } else {
+            None
+          }
+        } else {
+          None
+        };
+        let loop_end = self.chunk.code.len();
+        if let Some((continue_patches, break_patches)) = label_patches {
+          self.patch_jump_list(continue_patches, test_start);
+          self.patch_jump_list(break_patches, loop_end);
+        }
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+      }
+      OStmt::ForStatement(f) => {
+        use oxc_ast::ast::ForStatementInit as OForInit;
+        self.loop_depth += 1;
+        self.continue_patches.push(Vec::new());
+        self.break_patches.push(Vec::new());
+        let mut per_iteration_slots = Vec::new();
+
+        if let Some(init) = &f.init {
+          match init {
+            OForInit::VariableDeclaration(v) => {
+              for dec in &v.declarations {
+                if let Some(init) = &dec.init {
+                  self.compile_expr_oast(init)?;
+                } else {
+                  self.emit(Op::Undefined, LINE);
+                }
+                let name = match &dec.id {
+                  OPat::BindingIdentifier(i) => i.name.to_string(),
+                  _ => {
+                    return Err(crate::errors::CompilerError::from(
+                      "unsupported var pattern",
+                    ));
+                  }
                 };
-                inner.add_local_with_mirror("arguments".to_string(), None, false);
-                inner.emit(Op::GetGlobal, LINE);
-                let global_idx = inner.global_name_index("Array");
-                inner.emit_u16(inner.global_index_to_u16(global_idx)?, LINE);
-                inner.emit_constant(Value::String("from".to_string()), LINE);
-                inner.emit(Op::GetProperty, LINE);
-                let from_slot = inner.alloc_ic_slot()?;
-                inner.emit_byte(from_slot, LINE);
-                inner.emit(Op::LoadLocal, LINE);
-                inner.emit_byte(0, LINE);
-                inner.emit(Op::SuperConstruct, LINE);
-                inner.emit_byte(1, LINE);
-                inner.emit(Op::Pop, LINE);
-                inner.emit(Op::GetThis, LINE);
-                inner.emit(Op::Return, LINE);
-                ctor_chunk = std::mem::take(&mut inner.chunk);
-                FunctionProto {
-                    name: class_name.clone(),
-                    span: c.span,
-                    arity: 0,
-                    chunk: Rc::new(ctor_chunk),
-                    slot_types: inner.local_types,
-                    slot_names: inner.locals.into_iter().map(Some).collect(),
-                    lexical_tdz: inner.local_tdz,
-                    slot_immutable: inner.local_immutable,
-                    slot_sloppy_immutable_silent: inner.local_sloppy_immutable_silent,
-                    upvalues: inner.captured_upvalues,
-                    has_rest: false,
-                    has_prototype_property: true,
-                    captures_this: false,
-                    arguments_slot: Some(0),
-                    self_binding_slot: None,
-                    has_simple_parameter_list: true,
-                    return_type: None,
-                    is_strict: true,
-                    is_constructor: true,
-                    is_derived_constructor: true,
-                    is_class_constructor: true,
-                    is_async: false,
-                    is_generator: false,
-                    ic_table: Vec::new(),
+                let mirror_global = self.is_root;
+                let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+                  self
+                    .resolve_local(&name)
+                    .unwrap_or_else(|| self.add_var_local(name.clone(), None, mirror_global))
+                } else {
+                  self.add_local_with_mirror(name.clone(), None, mirror_global)
+                };
+                if matches!(
+                  v.kind,
+                  oxc_ast::ast::VariableDeclarationKind::Let
+                    | oxc_ast::ast::VariableDeclarationKind::Const
+                ) {
+                  per_iteration_slots.push(slot);
                 }
-            } else {
-                ctor_chunk.write(Op::GetThis as u8, LINE);
-                ctor_chunk.write(Op::Return as u8, LINE);
-                FunctionProto {
-                    name: class_name.clone(),
-                    span: c.span,
-                    arity: 0,
-                    chunk: Rc::new(ctor_chunk),
-                    slot_types: Vec::new(),
-                    slot_names: Vec::new(),
-                    lexical_tdz: Vec::new(),
-                    slot_immutable: Vec::new(),
-                    slot_sloppy_immutable_silent: Vec::new(),
-                    upvalues: Vec::new(),
-                    has_rest: false,
-                    has_prototype_property: true,
-                    captures_this: false,
-                    arguments_slot: None,
-                    self_binding_slot: None,
-                    has_simple_parameter_list: true,
-                    return_type: None,
-                    is_strict: true,
-                    is_constructor: true,
-                    is_derived_constructor: false,
-                    is_class_constructor: true,
-                    is_async: false,
-                    is_generator: false,
-                    ic_table: Vec::new(),
+                if self.is_root {
+                  self.emit(Op::Dup, LINE);
                 }
+                self.emit(Op::StoreLocal, LINE);
+                self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                if self.is_root && mirror_global {
+                  self.emit_set_global_name(&name);
+                }
+              }
             }
-        };
-
-        let idx = self.chunk.add_function(proto);
-        self.emit(Op::MakeClosure, LINE);
-        self.emit_byte(self.function_index_to_u8(idx)?, LINE);
-        if let Some(super_class) = &c.super_class {
-            self.emit_get_builtin_name("classInitExtends");
-            self.emit(Op::Swap, LINE);
-            self.compile_expr_oast(super_class)?;
-            self.emit(Op::Call, LINE);
-            self.emit_byte(2, LINE);
+            other => {
+              let expr = other.as_expression().ok_or_else(|| {
+                crate::errors::CompilerError::from("unsupported for-loop initializer")
+              })?;
+              self.compile_expr_oast(expr)?;
+              self.emit(Op::Pop, LINE);
+            }
+          }
         }
 
-        let ctor_slot = self.alloc_temp_local("class_ctor_tmp");
+        for &slot in &per_iteration_slots {
+          self.emit(Op::CloneLocalCell, LINE);
+          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+        }
+
+        let loop_start = self.chunk.code.len();
+        let exit_jump = if let Some(test) = &f.test {
+          if let Some(jump_over) = self.try_emit_compare_jump_if_false(test)? {
+            Some(jump_over)
+          } else {
+            self.compile_expr_oast(test)?;
+            self.emit(Op::JumpIfFalse, LINE);
+            let exit_jump = self.chunk.code.len();
+            self.emit_byte(0, LINE);
+            self.emit_byte(0, LINE);
+            Some(exit_jump)
+          }
+        } else {
+          None
+        };
+
+        self.enter_block_scope();
+        self.compile_statement_oast_with_mode(&f.body, false, completion_slot)?;
+        self.exit_scope();
+
+        let update_start = self.chunk.code.len();
+        if let Some(patches) = self.continue_patches.pop() {
+          for patch_pos in patches {
+            self.patch_jump_to_target(patch_pos, update_start);
+          }
+        }
+
+        for &slot in &per_iteration_slots {
+          self.emit(Op::CloneLocalCell, LINE);
+          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+        }
+
+        if let Some(update) = &f.update {
+          self.compile_expr_oast(update)?;
+          self.emit(Op::Pop, LINE);
+        }
+
+        self.emit(Op::Jump, LINE);
+        let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
+        self.emit_short_signed(back_offset, LINE);
+
+        if let Some(exit_jump) = exit_jump {
+          self.patch_jump(exit_jump);
+        }
+        let loop_end = self.chunk.code.len();
+        if let Some(patches) = self.break_patches.pop() {
+          for patch_pos in patches {
+            self.patch_jump_to_target(patch_pos, loop_end);
+          }
+        }
+        let label_patches = if let Some(state) = self.label_patches.last_mut() {
+          if state.can_continue && state.owner_loop_depth == self.loop_depth {
+            Some((
+              std::mem::take(&mut state.continue_patches),
+              std::mem::take(&mut state.break_patches),
+            ))
+          } else {
+            None
+          }
+        } else {
+          None
+        };
+        if let Some((continue_patches, break_patches)) = label_patches {
+          let loop_end = self.chunk.code.len();
+          self.patch_jump_list(continue_patches, update_start);
+          self.patch_jump_list(break_patches, loop_end);
+        }
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+      }
+      OStmt::ForOfStatement(f) => {
+        self.loop_depth += 1;
+        self.continue_patches.push(Vec::new());
+        self.break_patches.push(Vec::new());
+        let owns_completion_slot = completion_slot.is_none();
+        let loop_completion_slot = if let Some(slot) = completion_slot {
+          slot
+        } else {
+          let slot = self.alloc_temp_local("loop_result");
+          self.emit(Op::Undefined, LINE);
+          self.emit(Op::StoreLocal, LINE);
+          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          slot
+        };
+
+        // iterable -> iterator via iterable[Symbol.iterator]()
+        self.compile_expr_oast(&f.right)?;
         self.emit(Op::Dup, LINE);
+        self.emit_get_global_name("Symbol");
+        self.emit_constant(Value::String("iterator".to_string()), LINE);
+        self.emit(Op::GetProperty, LINE);
+        let symbol_iterator_slot = self.alloc_ic_slot()?;
+        self.emit_byte(symbol_iterator_slot, LINE);
+        self.emit(Op::GetProperty, LINE);
+        self.emit(Op::CallBuiltin, LINE);
+        self.emit_byte(0, LINE);
+
+        let iterator_slot =
+          self.add_local_with_mirror(format!("__forof_iter_{}", self.locals.len()), None, false);
         self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
+        self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
 
-        let instance_home_slot = if c.body.body.iter().any(
-            |element| matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static),
-        ) {
-            self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
-            self.emit_constant(Value::String("prototype".to_string()), LINE);
-            self.emit(Op::GetProperty, LINE);
-            let home_slot = self.alloc_temp_local("class_home");
-            self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(home_slot)?, LINE);
-            Some(home_slot)
-        } else {
-            None
-        };
-
-        for element in &c.body.body {
-            if let oast::ClassElement::MethodDefinition(md) = element {
-                let target_slot = if md.r#static {
-                    ctor_slot
-                } else {
-                    instance_home_slot.expect("instance home slot")
-                };
-                self.emit_class_member_installation(target_slot, md)?;
+        if let oast::ForStatementLeft::VariableDeclaration(v) = &f.left
+          && matches!(
+            v.kind,
+            oxc_ast::ast::VariableDeclarationKind::Let
+              | oxc_ast::ast::VariableDeclarationKind::Const
+          )
+        {
+          let Some(dec) = v.declarations.first() else {
+            return Err(crate::errors::CompilerError::from(
+              "unsupported empty for-of declaration",
+            ));
+          };
+          let mut names = HashSet::new();
+          self.add_var_names_from_binding(&dec.id, &mut names);
+          for name in names {
+            if self.resolve_local(&name).is_none() {
+              self.add_local_with_mirror(name.clone(), None, false);
             }
+          }
+        }
+
+        let thrown_slot = self.alloc_temp_local("forof_thrown");
+        self.emit(Op::PushHandler, LINE);
+        let handler_jump = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+
+        let loop_start = self.chunk.code.len();
+
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+        self.emit(Op::IteratorNext, LINE);
+        self.emit(Op::Dup, LINE);
+        self.emit_constant(Value::String("done".to_string()), LINE);
+        self.emit(Op::GetProperty, LINE);
+        let done_slot = self.alloc_ic_slot()?;
+        self.emit_byte(done_slot, LINE);
+        self.emit(Op::JumpIfTrue, LINE);
+        let exit_jump = self.chunk.code.len() - 1;
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+        self.emit_constant(Value::String("value".to_string()), LINE);
+        self.emit(Op::GetProperty, LINE);
+        let value_slot = self.alloc_ic_slot()?;
+        self.emit_byte(value_slot, LINE);
+
+        match &f.left {
+          oast::ForStatementLeft::VariableDeclaration(v) => {
+            let Some(dec) = v.declarations.first() else {
+              return Err(crate::errors::CompilerError::from(
+                "unsupported empty for-of declaration",
+              ));
+            };
+            if matches!(
+              v.kind,
+              oxc_ast::ast::VariableDeclarationKind::Let
+                | oxc_ast::ast::VariableDeclarationKind::Const
+            ) {
+              let mut names = HashSet::new();
+              self.add_var_names_from_binding(&dec.id, &mut names);
+              for name in &names {
+                if let Some(slot) = self.resolve_local(name) {
+                  self.emit(Op::CloneLocalCell, LINE);
+                  self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                }
+              }
+            }
+            self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
+          }
+          oast::ForStatementLeft::AssignmentTargetIdentifier(id) => {
+            self.compile_assignment_identifier_reference(id)?;
+          }
+          oast::ForStatementLeft::StaticMemberExpression(m) => {
+            self.compile_static_member_assignment_target(m)?;
+          }
+          oast::ForStatementLeft::ComputedMemberExpression(m) => {
+            self.compile_computed_member_assignment_target(m)?;
+          }
+          oast::ForStatementLeft::ArrayAssignmentTarget(a) => {
+            self.compile_array_assignment_target(a)?;
+          }
+          oast::ForStatementLeft::ObjectAssignmentTarget(o) => {
+            self.compile_object_assignment_target(o)?;
+          }
+          _ => {
+            return Err(crate::errors::CompilerError::from(
+              "unsupported for-of assignment target",
+            ));
+          }
+        }
+
+        self.enter_block_scope();
+        self.compile_statement_oast_with_mode(&f.body, false, Some(loop_completion_slot))?;
+        self.exit_scope();
+
+        let update_start = loop_start;
+        if let Some(patches) = self.continue_patches.pop() {
+          for patch_pos in patches {
+            self.patch_jump_to_target(patch_pos, update_start);
+          }
+        }
+
+        self.emit(Op::Jump, LINE);
+        let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
+        self.emit_short_signed(back_offset, LINE);
+
+        self.patch_jump(exit_jump);
+        // Normal iterator exhaustion should not perform IteratorClose.
+        // Also discard the final iterator result object left on stack.
+        self.emit(Op::Pop, LINE);
+        self.emit(Op::PopHandler, LINE);
+        self.emit(Op::Jump, LINE);
+        let done_end_jump = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+
+        let break_cleanup = self.chunk.code.len();
+        if let Some(patches) = self.break_patches.pop() {
+          for patch_pos in patches {
+            self.patch_jump_to_target(patch_pos, break_cleanup);
+          }
+        }
+        let label_patches = if let Some(state) = self.label_patches.last_mut() {
+          if state.can_continue && state.owner_loop_depth == self.loop_depth {
+            Some((
+              std::mem::take(&mut state.continue_patches),
+              std::mem::take(&mut state.break_patches),
+            ))
+          } else {
+            None
+          }
+        } else {
+          None
+        };
+        if let Some((continue_patches, break_patches)) = label_patches {
+          self.patch_jump_list(continue_patches, update_start);
+          self.patch_jump_list(break_patches, break_cleanup);
+        }
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+        self.emit(Op::IteratorClose, LINE);
+        self.emit(Op::Pop, LINE);
+        self.emit(Op::Jump, LINE);
+        let end_jump = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+
+        self.patch_jump(handler_jump);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+        self.emit(Op::IteratorClose, LINE);
+        self.emit(Op::Pop, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+        self.emit(Op::Throw, LINE);
+        self.patch_jump(done_end_jump);
+        self.patch_jump(end_jump);
+        if owns_completion_slot {
+          self.emit(Op::LoadLocal, LINE);
+          self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
+        }
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+      }
+      OStmt::ForInStatement(f) => {
+        self.loop_depth += 1;
+        self.continue_patches.push(Vec::new());
+        self.break_patches.push(Vec::new());
+
+        if let OForLeft::VariableDeclaration(v) = &f.left
+          && matches!(
+            v.kind,
+            oxc_ast::ast::VariableDeclarationKind::Let
+              | oxc_ast::ast::VariableDeclarationKind::Const
+          )
+        {
+          if v.declarations.len() != 1 {
+            return Err(crate::errors::CompilerError::from(
+              "SyntaxError: for-in lexical declaration must have exactly one binding",
+            ));
+          }
+          if v
+            .declarations
+            .first()
+            .and_then(|dec| dec.init.as_ref())
+            .is_some()
+          {
+            return Err(crate::errors::CompilerError::from(
+              "SyntaxError: for-in lexical declaration may not have an initializer",
+            ));
+          }
+        }
+
+        self.emit_get_builtin_name("forInKeys");
+        self.compile_expr_oast(&f.right)?;
+        self.emit(Op::Call, LINE);
+        self.emit_byte(1, LINE);
+
+        let keys_slot =
+          self.add_local_with_mirror(format!("__forin_keys_{}", self.locals.len()), None, false);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(keys_slot)?, LINE);
+
+        self.emit_constant(Value::Number(0.0), LINE);
+        let index_slot =
+          self.add_local_with_mirror(format!("__forin_i_{}", self.locals.len()), None, false);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
+
+        if let OForLeft::VariableDeclaration(v) = &f.left
+          && matches!(
+            v.kind,
+            oxc_ast::ast::VariableDeclarationKind::Let
+              | oxc_ast::ast::VariableDeclarationKind::Const
+          )
+        {
+          let Some(dec) = v.declarations.first() else {
+            return Err(crate::errors::CompilerError::from(
+              "unsupported empty for-in declaration",
+            ));
+          };
+          let mut names = HashSet::new();
+          self.add_var_names_from_binding(&dec.id, &mut names);
+          for name in names {
+            if self.resolve_local(&name).is_none() {
+              self.add_local_with_mirror(name.clone(), None, false);
+            }
+          }
+        }
+
+        let loop_start = self.chunk.code.len();
+
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(keys_slot)?, LINE);
+        self.emit_constant(Value::String("length".to_string()), LINE);
+        self.emit(Op::GetProperty, LINE);
+        // Use CompareJump: cond_type 2 = Lt, jump if true
+        self.emit_with_payload(Op::CompareJump, 2, LINE);
+        let exit_jump = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(keys_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
+        self.emit(Op::GetProperty, LINE);
+
+        match &f.left {
+          OForLeft::VariableDeclaration(v) => {
+            let Some(dec) = v.declarations.first() else {
+              return Err(crate::errors::CompilerError::from(
+                "unsupported empty for-in declaration",
+              ));
+            };
+            if matches!(
+              v.kind,
+              oxc_ast::ast::VariableDeclarationKind::Let
+                | oxc_ast::ast::VariableDeclarationKind::Const
+            ) {
+              let mut names = HashSet::new();
+              self.add_var_names_from_binding(&dec.id, &mut names);
+              for name in &names {
+                if let Some(slot) = self.resolve_local(name) {
+                  self.emit(Op::CloneLocalCell, LINE);
+                  self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                }
+              }
+            }
+            self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
+          }
+          OForLeft::AssignmentTargetIdentifier(id) => {
+            let name = id.name.as_str();
+            if let Some(slot) = self.resolve_local(name) {
+              self.emit(Op::StoreLocal, LINE);
+              self.emit_byte(self.slot_to_u8(slot)?, LINE);
+              if self.local_mirrors_global(slot) {
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                self.emit_set_global_name(name);
+              }
+            } else if let Some(upvalue) = self.resolve_upvalue(name) {
+              self.emit(Op::SetUpvalue, LINE);
+              self.emit_byte(upvalue, LINE);
+            } else {
+              self.emit_set_global_name(name);
+            }
+          }
+          _ => {
+            return Err(crate::errors::CompilerError::from(
+              "unsupported for-in assignment target",
+            ));
+          }
+        }
+
+        self.enter_block_scope();
+        self.compile_statement_oast_with_mode(&f.body, false, completion_slot)?;
+        self.exit_scope();
+
+        let update_start = self.chunk.code.len();
+        if let Some(patches) = self.continue_patches.pop() {
+          for patch_pos in patches {
+            self.patch_jump_to_target(patch_pos, update_start);
+          }
         }
 
         self.emit(Op::LoadLocal, LINE);
-        self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
-        Ok(())
-    }
+        self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
+        self.emit_constant(Value::Number(1.0), LINE);
+        self.emit(Op::Add, LINE);
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
 
-    /// Compile a function declaration into a FunctionProto with its own scope.
-    ///
-    /// Creates an inner compiler scope, compiles the function body, and returns
-    /// the compiled prototype with all metadata about parameters, locals, and closures.
-    pub(super) fn compile_function(
-        &mut self,
-        name: &str,
-        self_name: Option<&str>,
-        func: &oast::Function,
-        return_type: Option<Type>,
-        allow_super: bool,
-    ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
-        let _env_len = self.locals.len();
-        let function_is_strict = self.strict_context
-            || func
-                .body
-                .as_ref()
-                .is_some_and(|body| Self::has_use_strict_directive(body));
-        let body_has_use_strict = func
-            .body
-            .as_ref()
-            .is_some_and(|body| Self::has_use_strict_directive(body));
+        self.emit(Op::Jump, LINE);
+        let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
+        self.emit_short_signed(back_offset, LINE);
 
-        if let Some(err) = Self::strict_binding_name_error(function_is_strict, name) {
-            return Err(err);
+        self.patch_jump(exit_jump);
+        let loop_end = self.chunk.code.len();
+        if let Some(patches) = self.break_patches.pop() {
+          for patch_pos in patches {
+            self.patch_jump_to_target(patch_pos, loop_end);
+          }
         }
-        if let Some(self_name) = self_name
-            && let Some(err) = Self::strict_binding_name_error(function_is_strict, self_name)
-        {
-            return Err(err);
-        }
-        if function_is_strict {
-            let mut seen = HashSet::new();
-            for p in &func.params.items {
-                if let oast::BindingPattern::BindingIdentifier(id) = &p.pattern
-                    && !seen.insert(id.name.to_string())
-                {
-                    return Err(crate::errors::CompilerError::from(
-                        "SyntaxError: duplicate parameter name in strict mode",
-                    ));
-                }
-            }
-            if let Some(rest) = &func.params.rest
-                && let oast::BindingPattern::BindingIdentifier(id) = &rest.rest.argument
-                && !seen.insert(id.name.to_string())
-            {
-                return Err(crate::errors::CompilerError::from(
-                    "SyntaxError: duplicate parameter name in strict mode",
-                ));
-            }
-        }
-        for p in &func.params.items {
-            if let Some(err) =
-                Self::strict_binding_pattern_name_error(function_is_strict, &p.pattern)
-            {
-                return Err(err);
-            }
-        }
-        if let Some(rest) = &func.params.rest
-            && let Some(err) =
-                Self::strict_binding_pattern_name_error(function_is_strict, &rest.rest.argument)
-        {
-            return Err(err);
-        }
-
-        let has_simple_parameter_list = Self::has_simple_parameter_list(func);
-        if !has_simple_parameter_list {
-            if body_has_use_strict && !func.generator {
-                return Err(crate::errors::CompilerError::from(
-                    "SyntaxError: non-simple parameter list in strict mode",
-                ));
-            }
-            let mut seen = HashSet::new();
-            for p in &func.params.items {
-                let mut names = HashSet::new();
-                Self::collect_binding_names(&p.pattern, &mut names);
-                for name in names {
-                    if !seen.insert(name) {
-                        return Err(crate::errors::CompilerError::from(
-                            "SyntaxError: duplicate parameter name in non-simple parameter list",
-                        ));
-                    }
-                }
-            }
-            if let Some(rest) = &func.params.rest {
-                let mut names = HashSet::new();
-                Self::collect_binding_names(&rest.rest.argument, &mut names);
-                for name in names {
-                    if !seen.insert(name) {
-                        return Err(crate::errors::CompilerError::from(
-                            "SyntaxError: duplicate parameter name in non-simple parameter list",
-                        ));
-                    }
-                }
-            }
-        }
-
-        let mut inner = Compiler {
-            chunk: Chunk::new(Rc::clone(&self.source_text)),
-            source_text: Rc::clone(&self.source_text),
-            locals: Vec::new(),
-            local_types: Vec::new(),
-            local_tdz: Vec::new(),
-            local_immutable: Vec::new(),
-            local_sloppy_immutable_silent: Vec::new(),
-            local_mirror_globals: Vec::new(),
-            scopes: vec![crate::compiler::Scope {
-                kind: crate::compiler::ScopeKind::Function,
-                bindings: HashMap::new(),
-                lexical_bindings: HashSet::new(),
-                block_var_names: HashSet::new(),
-            }],
-            globals: HashMap::new(),
-            is_root: false,
-            strict_context: self.strict_context,
-            loop_depth: 0,
-            with_depth: 0,
-            continue_patches: Vec::new(),
-            break_patches: Vec::new(),
-            finally_patches: Vec::new(),
-            label_patches: Vec::new(),
-            current_module: self.current_module.clone(),
-            next_ic_slot: 0,
-            pending_operand_bytes: 0,
-            allow_new_target: true,
-            allow_super,
-            outer_bindings: self.visible_bindings_snapshot(),
-            upvalue_indices: HashMap::new(),
-            captured_upvalues: Vec::new(),
-            private_names: self.private_names.clone(),
-            object_expr_had_set_property: false,
+        let label_patches = if let Some(state) = self.label_patches.last_mut() {
+          if state.can_continue && state.owner_loop_depth == self.loop_depth {
+            Some((
+              std::mem::take(&mut state.continue_patches),
+              std::mem::take(&mut state.break_patches),
+            ))
+          } else {
+            None
+          }
+        } else {
+          None
         };
-        inner.strict_context = function_is_strict;
-        inner.chunk.allow_new_target = inner.allow_new_target;
-        inner.chunk.allow_super = inner.allow_super;
-
-        let mut raw_param_slots = Vec::new();
-        if has_simple_parameter_list {
-            // Parameter placeholders (no type information available here).
-            for p in &func.params.items {
-                let pname = match &p.pattern {
-                    oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
-                    _ => "_".to_string(),
-                };
-                inner.add_local_with_mirror(pname, None, false);
-            }
-            if let Some(rest) = &func.params.rest {
-                let pname = match &rest.rest.argument {
-                    oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
-                    _ => "_".to_string(),
-                };
-                inner.add_local_with_mirror(pname, None, false);
-            }
+        if let Some((continue_patches, break_patches)) = label_patches {
+          let loop_end = self.chunk.code.len();
+          self.patch_jump_list(continue_patches, update_start);
+          self.patch_jump_list(break_patches, loop_end);
+        }
+        self.loop_depth = self.loop_depth.saturating_sub(1);
+      }
+      OStmt::ReturnStatement(r) => {
+        let return_target = self.finally_patches.last().and_then(|state| {
+          if state.in_finalizer {
+            None
+          } else {
+            Some((state.return_slot, state.did_return_slot))
+          }
+        });
+        if let Some((return_slot, did_return_slot)) = return_target {
+          if let Some(arg) = &r.argument {
+            self.compile_expr_oast_tail(arg)?;
+          } else {
+            self.emit(Op::Undefined, LINE);
+          }
+          self.emit(Op::Dup, LINE);
+          self.emit(Op::StoreLocal, LINE);
+          self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+          self.emit_with_env_pops();
+          self.emit(Op::True, LINE);
+          self.emit(Op::StoreLocal, LINE);
+          self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
+          self.emit(Op::Jump, LINE);
+          let patch_pos = self.chunk.code.len();
+          self.emit_byte(0, LINE);
+          self.emit_byte(0, LINE);
+          if let Some(state) = self.finally_patches.last_mut() {
+            state.return_jumps.push(patch_pos);
+          }
+          return Ok(());
+        }
+        if let Some(arg) = &r.argument {
+          self.compile_expr_oast_tail(arg)?;
         } else {
-            for _ in &func.params.items {
-                raw_param_slots.push(inner.add_local_with_mirror(
-                    format!("__param_raw_{}", raw_param_slots.len()),
-                    None,
-                    false,
-                ));
-            }
-            if func.params.rest.is_some() {
-                raw_param_slots.push(inner.add_local_with_mirror(
-                    "__param_raw_rest".to_string(),
-                    None,
-                    false,
-                ));
-            }
-            for p in &func.params.items {
-                if let oast::BindingPattern::BindingIdentifier(i) = &p.pattern {
-                    let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
-                    inner.mark_local_tdz(slot);
-                }
-            }
-            if let Some(rest) = &func.params.rest
-                && let oast::BindingPattern::BindingIdentifier(i) = &rest.rest.argument
-            {
-                let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
-                inner.mark_local_tdz(slot);
-            }
+          self.emit(Op::Undefined, LINE);
         }
-        let self_binding_slot = self_name
-            .map(|self_name| inner.add_local_with_mirror(self_name.to_string(), None, false));
-        if let Some(slot) = self_binding_slot
-            && let Some(flag) = inner.local_immutable.get_mut(slot)
-        {
-            *flag = true;
-        }
-        if let Some(slot) = self_binding_slot
-            && let Some(flag) = inner.local_sloppy_immutable_silent.get_mut(slot)
-        {
-            *flag = true;
-        }
-        let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
-
-        // Pre-declare nested functions inside this function body.
-        if let Some(body) = &func.body {
-            inner.pre_declare_variables_oast_stmts(&body.statements);
-            inner.pre_declare_functions_oast_stmts(&body.statements);
-            inner.emit_hoisted_function_decls_oast_stmts(&body.statements)?;
-        }
-
-        if has_simple_parameter_list {
-            inner.emit_parameter_initializers_from_current_slots(&func.params)?;
+        self.emit_with_env_pops();
+        self.emit(Op::Return, LINE);
+      }
+      OStmt::ContinueStatement(c) => {
+        self.emit_with_env_pops();
+        self.emit(Op::Jump, LINE);
+        let patch_pos = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+        if let Some(label) = &c.label {
+          let label_name = label.name.to_string();
+          let idx = self
+            .label_patches
+            .iter()
+            .rposition(|state| state.name == label_name)
+            .ok_or_else(|| {
+              crate::errors::CompilerError::from(format!(
+                "SyntaxError: unknown label '{}'",
+                label_name
+              ))
+            })?;
+          if !self.label_patches[idx].can_continue {
+            return Err(crate::errors::CompilerError::from(
+              "SyntaxError: 'continue' used with non-iteration label",
+            ));
+          }
+          self.label_patches[idx]
+            .continue_patches
+            .push(patch_pos);
         } else {
-            inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
+          if self.continue_patches.is_empty() {
+            return Err(crate::errors::CompilerError::from(
+              "SyntaxError: 'continue' used outside of a loop",
+            ));
+          }
+          if let Some(patches) = self.continue_patches.last_mut() {
+            patches.push(patch_pos);
+          }
         }
-        if func.generator {
-            inner.emit(Op::GeneratorInitDone, LINE);
+      }
+      OStmt::BreakStatement(b) => {
+        self.emit_with_env_pops();
+        self.emit(Op::Jump, LINE);
+        let patch_pos = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+        if let Some(label) = &b.label {
+          let label_name = label.name.to_string();
+          let idx = self
+            .label_patches
+            .iter()
+            .rposition(|state| state.name == label_name)
+            .ok_or_else(|| {
+              crate::errors::CompilerError::from(format!(
+                "SyntaxError: unknown label '{}'",
+                label_name
+              ))
+            })?;
+          self.label_patches[idx]
+            .break_patches
+            .push(patch_pos);
+        } else {
+          if self.break_patches.is_empty() {
+            return Err(crate::errors::CompilerError::from(
+              "SyntaxError: 'break' used outside of a loop",
+            ));
+          }
+          if let Some(patches) = self.break_patches.last_mut() {
+            patches.push(patch_pos);
+          }
         }
-
-        // Compile function body statements into inner compiler.
-        if let Some(body) = &func.body {
-            for stmt in &body.statements {
-                if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-                    continue;
-                }
-                inner.compile_statement_oast(stmt)?;
-            }
-        }
-
-        inner.emit(Op::Return, LINE);
-        let mut chunk = std::mem::take(&mut inner.chunk);
-        chunk.allow_new_target = inner.allow_new_target;
-        chunk.allow_super = inner.allow_super;
-        let has_rest = func.params.rest.is_some();
-        let has_simple_parameter_list = Self::has_simple_parameter_list(func);
-        let slot_types = inner.local_types;
-        let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
-        let lexical_tdz = inner.local_tdz;
-        let has_prototype_property = !func.r#async;
-        let is_constructor = !func.r#async && !func.generator;
-        Ok((
-            FunctionProto {
-                name: name.to_string(),
-                span: func.span,
-                arity: func.params.items.len() + if has_rest { 1 } else { 0 },
-                chunk: Rc::new(chunk),
-                slot_types,
-                slot_names,
-                lexical_tdz,
-                slot_immutable: inner.local_immutable,
-                slot_sloppy_immutable_silent: inner.local_sloppy_immutable_silent,
-                upvalues: inner.captured_upvalues,
-                has_rest,
-                has_prototype_property,
-                captures_this: false,
-                arguments_slot: Some(arguments_slot),
-                self_binding_slot,
-                has_simple_parameter_list,
-                return_type,
-                is_strict: function_is_strict,
-                is_constructor,
-                is_derived_constructor: false,
-                is_class_constructor: false,
-                is_async: func.r#async,
-                is_generator: func.generator,
-                ic_table: Vec::new(),
-            },
-            _env_len,
-        ))
-    }
-
-    /// Compile an arrow function expression into a FunctionProto with its own scope.
-    ///
-    /// Similar to `compile_function` but with key differences:
-    /// - No `arguments` binding
-    /// - Captures `this` from enclosing scope
-    /// - Not usable as a constructor
-    /// - Supports implicit return for expression bodies
-    pub(super) fn compile_arrow_function(
-        &mut self,
-        name: &str,
-        func: &oast::ArrowFunctionExpression,
-        return_type: Option<Type>,
-    ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
-        let _env_len = self.locals.len();
-        let function_is_strict = self.strict_context || Self::has_use_strict_directive(&func.body);
-        let body_has_use_strict = Self::has_use_strict_directive(&func.body);
-        let has_simple_parameter_list = func.params.rest.is_none()
-            && func.params.items.iter().all(|param| {
-                matches!(param.pattern, oast::BindingPattern::BindingIdentifier(_))
-                    && param.initializer.is_none()
+      }
+      OStmt::ThrowStatement(t) => {
+        self.compile_expr_oast(&t.argument)?;
+        self.emit(Op::Throw, LINE);
+      }
+      OStmt::TryStatement(t) => {
+        let handler = t.handler.as_ref();
+        let finalizer = t.finalizer.as_ref();
+        if finalizer.is_some() {
+          let return_slot = self.add_local_with_mirror(
+            format!("__finally_return_{}", self.locals.len()),
+            None,
+            false,
+          );
+          let did_return_slot = self.add_local_with_mirror(
+            format!("__finally_did_return_{}", self.locals.len() + 1),
+            None,
+            false,
+          );
+          self.emit(Op::Undefined, LINE);
+          self.emit(Op::StoreLocal, LINE);
+          self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+          self.emit(Op::False, LINE);
+          self.emit(Op::StoreLocal, LINE);
+          self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
+          self
+            .finally_patches
+            .push(crate::compiler::FinallyPatchState {
+              return_slot,
+              did_return_slot,
+              return_jumps: Vec::new(),
+              in_finalizer: false,
             });
-
-        if let Some(err) = Self::strict_binding_name_error(function_is_strict, name) {
-            return Err(err);
         }
-        if function_is_strict {
-            let mut seen = HashSet::new();
-            for p in &func.params.items {
-                if let oast::BindingPattern::BindingIdentifier(id) = &p.pattern
-                    && !seen.insert(id.name.to_string())
-                {
-                    return Err(crate::errors::CompilerError::from(
-                        "SyntaxError: duplicate parameter name in strict mode",
-                    ));
-                }
-            }
-            if let Some(rest) = &func.params.rest
-                && let oast::BindingPattern::BindingIdentifier(id) = &rest.rest.argument
-                && !seen.insert(id.name.to_string())
-            {
-                return Err(crate::errors::CompilerError::from(
-                    "SyntaxError: duplicate parameter name in strict mode",
-                ));
-            }
-        }
-        for p in &func.params.items {
-            if let Some(err) =
-                Self::strict_binding_pattern_name_error(function_is_strict, &p.pattern)
-            {
-                return Err(err);
-            }
-        }
-        if let Some(rest) = &func.params.rest
-            && let Some(err) =
-                Self::strict_binding_pattern_name_error(function_is_strict, &rest.rest.argument)
-        {
-            return Err(err);
-        }
+        let finally_idx = finalizer
+          .as_ref()
+          .map(|_| self.finally_patches.len().saturating_sub(1));
 
-        if !has_simple_parameter_list {
-            if body_has_use_strict {
-                return Err(crate::errors::CompilerError::from(
-                    "SyntaxError: non-simple parameter list in strict mode",
-                ));
-            }
-            let mut seen = HashSet::new();
-            for p in &func.params.items {
-                let mut names = HashSet::new();
-                Self::collect_binding_names(&p.pattern, &mut names);
-                for name in names {
-                    if !seen.insert(name) {
-                        return Err(crate::errors::CompilerError::from(
-                            "SyntaxError: duplicate parameter name in non-simple parameter list",
-                        ));
-                    }
-                }
-            }
-            if let Some(rest) = &func.params.rest {
-                let mut names = HashSet::new();
-                Self::collect_binding_names(&rest.rest.argument, &mut names);
-                for name in names {
-                    if !seen.insert(name) {
-                        return Err(crate::errors::CompilerError::from(
-                            "SyntaxError: duplicate parameter name in non-simple parameter list",
-                        ));
-                    }
-                }
-            }
+        self.emit(Op::PushHandler, LINE);
+        let handler_jump = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+
+        self.enter_block_scope_with_vars(&t.block.body);
+        for stmt in &t.block.body {
+          self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
         }
+        self.exit_scope();
 
-        let mut inner = Compiler {
-            chunk: Chunk::new(Rc::clone(&self.source_text)),
-            source_text: Rc::clone(&self.source_text),
-            locals: Vec::new(),
-            local_types: Vec::new(),
-            local_tdz: Vec::new(),
-            local_immutable: Vec::new(),
-            local_sloppy_immutable_silent: Vec::new(),
-            local_mirror_globals: Vec::new(),
-            scopes: vec![crate::compiler::Scope {
-                kind: crate::compiler::ScopeKind::Function,
-                bindings: HashMap::new(),
-                lexical_bindings: HashSet::new(),
-                block_var_names: HashSet::new(),
-            }],
-            globals: HashMap::new(),
-            is_root: false,
-            strict_context: self.strict_context,
-            loop_depth: 0,
-            with_depth: 0,
-            continue_patches: Vec::new(),
-            break_patches: Vec::new(),
-            finally_patches: Vec::new(),
-            label_patches: Vec::new(),
-            current_module: self.current_module.clone(),
-            next_ic_slot: 0,
-            pending_operand_bytes: 0,
-            allow_new_target: self.allow_new_target,
-            allow_super: self.allow_super,
-            outer_bindings: self.visible_bindings_snapshot(),
-            upvalue_indices: HashMap::new(),
-            captured_upvalues: Vec::new(),
-            private_names: self.private_names.clone(),
-            object_expr_had_set_property: false,
-        };
-        inner.strict_context = function_is_strict;
-        inner.chunk.allow_new_target = inner.allow_new_target;
-        inner.chunk.allow_super = inner.allow_super;
+        self.emit(Op::PopHandler, LINE);
 
-        let mut raw_param_slots = Vec::new();
-        if has_simple_parameter_list {
-            for p in &func.params.items {
-                let pname = match &p.pattern {
-                    oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
-                    _ => "_".to_string(),
-                };
-                inner.add_local_with_mirror(pname, None, false);
-            }
-            if let Some(rest) = &func.params.rest {
-                let pname = match &rest.rest.argument {
-                    oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
-                    _ => "_".to_string(),
-                };
-                inner.add_local_with_mirror(pname, None, false);
-            }
-        } else {
-            for _ in &func.params.items {
-                raw_param_slots.push(inner.add_local_with_mirror(
-                    format!("__param_raw_{}", raw_param_slots.len()),
-                    None,
-                    false,
-                ));
-            }
-            if func.params.rest.is_some() {
-                raw_param_slots.push(inner.add_local_with_mirror(
-                    "__param_raw_rest".to_string(),
-                    None,
-                    false,
-                ));
-            }
-            for p in &func.params.items {
-                if let oast::BindingPattern::BindingIdentifier(i) = &p.pattern {
-                    let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
-                    inner.mark_local_tdz(slot);
-                }
-            }
-            if let Some(rest) = &func.params.rest
-                && let oast::BindingPattern::BindingIdentifier(i) = &rest.rest.argument
-            {
-                let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
-                inner.mark_local_tdz(slot);
-            }
+        // Normal completion path: run finalizer (if present), then skip handler path.
+        if let Some(fin) = finalizer {
+          let finally_idx = finally_idx
+            .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
+          {
+            let state = self
+              .finally_patches
+              .get_mut(finally_idx)
+              .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
+            state.in_finalizer = true;
+          }
+          let body_start = self.chunk.code.len();
+          self.enter_block_scope_with_vars(&fin.body);
+          for stmt in &fin.body {
+            self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
+          }
+          self.exit_scope();
+          let (did_return_slot, return_slot, return_jumps) = {
+            let state = self
+              .finally_patches
+              .get_mut(finally_idx)
+              .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
+            state.in_finalizer = false;
+            (
+              state.did_return_slot,
+              state.return_slot,
+              std::mem::take(&mut state.return_jumps),
+            )
+          };
+          for patch_pos in return_jumps {
+            self.patch_jump_to_target(patch_pos, body_start);
+          }
+          self.emit(Op::LoadLocal, LINE);
+          self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
+          self.emit(Op::JumpIfFalse, LINE);
+          let skip_return = self.chunk.code.len();
+          self.emit_byte(0, LINE);
+          self.emit_byte(0, LINE);
+          self.emit(Op::LoadLocal, LINE);
+          self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+          self.emit(Op::Return, LINE);
+          self.patch_jump(skip_return);
         }
-        // Pre-declare nested functions inside this function body.
-        inner.pre_declare_variables_oast_stmts(&func.body.statements);
-        inner.pre_declare_functions_oast_stmts(&func.body.statements);
+        self.emit(Op::Jump, LINE);
+        let end_jump = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
 
-        inner.emit_hoisted_function_decls_oast_stmts(&func.body.statements)?;
+        // Exception path starts here.
+        self.patch_jump(handler_jump);
 
-        if has_simple_parameter_list {
-            // Check if this is an implicit-return arrow function (expression: true).
-            // In that case, the body contains a single ExpressionStatement that should be returned.
-            if func.expression && func.body.statements.len() == 1 {
-                if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
-                    // Compile the expression and return its value
-                    inner.compile_expr_oast(&expr_stmt.expression)?;
-                    inner.emit(Op::Return, LINE);
-                } else {
-                    // Shouldn't happen for expression: true, but handle it safely
-                    for stmt in &func.body.statements {
-                        if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-                            inner.compile_statement_oast(stmt)?;
-                        }
-                    }
-                    inner.emit(Op::Return, LINE);
-                }
+        match handler {
+          Some(handler) => {
+            if let Some(param) = &handler.param {
+              let name = match &param.pattern {
+                OPat::BindingIdentifier(i) => i.name.to_string(),
+                _ => "__catch_pattern".to_string(),
+              };
+              self.enter_block_scope_with_vars(&handler.body.body);
+              let slot = self.add_local_with_mirror(name, None, false);
+              self.emit(Op::StoreLocal, LINE);
+              self.emit_byte(self.slot_to_u8(slot)?, LINE);
+              self.emit(Op::LoadLocal, LINE);
+              self.emit_byte(self.slot_to_u8(slot)?, LINE);
+              self.compile_binding_pattern_assignment_oast(
+                &param.pattern,
+                oxc_ast::ast::VariableDeclarationKind::Let,
+              )?;
+              for stmt in &handler.body.body {
+                self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
+              }
+              self.exit_scope();
             } else {
-                // Regular function body with explicit statements
-                for stmt in &func.body.statements {
-                    if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-                        continue;
-                    }
-                    inner.compile_statement_oast(stmt)?;
-                }
-                inner.emit(Op::Return, LINE);
+              self.emit(Op::Pop, LINE);
+              self.enter_block_scope_with_vars(&handler.body.body);
+              for stmt in &handler.body.body {
+                self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
+              }
+              self.exit_scope();
             }
-        } else {
-            inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
-            if func.expression && func.body.statements.len() == 1 {
-                if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
-                    inner.compile_expr_oast(&expr_stmt.expression)?;
-                    inner.emit(Op::Return, LINE);
-                } else {
-                    for stmt in &func.body.statements {
-                        if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-                            inner.compile_statement_oast(stmt)?;
-                        }
-                    }
-                    inner.emit(Op::Return, LINE);
-                }
-            } else {
-                for stmt in &func.body.statements {
-                    if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-                        continue;
-                    }
-                    inner.compile_statement_oast(stmt)?;
-                }
-                inner.emit(Op::Return, LINE);
+
+            if let Some(fin) = finalizer {
+              let finally_idx = finally_idx
+                .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
+              {
+                let state = self
+                  .finally_patches
+                  .get_mut(finally_idx)
+                  .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
+                state.in_finalizer = true;
+              }
+              self.enter_block_scope_with_vars(&fin.body);
+              for stmt in &fin.body {
+                self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
+              }
+              self.exit_scope();
+              let state = self
+                .finally_patches
+                .get_mut(finally_idx)
+                .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
+              state.in_finalizer = false;
             }
+          }
+          None => {
+            // try/finally with no catch: preserve thrown value, run finally, rethrow.
+            if finalizer.is_none() {
+              return Err(crate::errors::CompilerError::from(
+                "try without catch/finally not supported",
+              ));
+            }
+            self.enter_block_scope();
+            let slot = self.add_local_with_mirror("__finally_thrown".to_string(), None, false);
+            self.emit(Op::StoreLocal, LINE);
+            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+            if let Some(fin) = finalizer {
+              let finally_idx = finally_idx
+                .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
+              {
+                let state = self
+                  .finally_patches
+                  .get_mut(finally_idx)
+                  .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
+                state.in_finalizer = true;
+              }
+              self.enter_block_scope_with_vars(&fin.body);
+              for stmt in &fin.body {
+                self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
+              }
+              self.exit_scope();
+              let state = self
+                .finally_patches
+                .get_mut(finally_idx)
+                .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
+              state.in_finalizer = false;
+            }
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+            self.emit(Op::Throw, LINE);
+            self.exit_scope();
+          }
         }
 
-        let mut chunk = std::mem::take(&mut inner.chunk);
-        chunk.allow_new_target = inner.allow_new_target;
-        chunk.allow_super = inner.allow_super;
-        let has_rest = func.params.rest.is_some();
-        let slot_types = inner.local_types;
-        let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
-        let lexical_tdz = inner.local_tdz;
-        Ok((
-            FunctionProto {
-                name: name.to_string(),
-                span: func.span,
-                arity: func.params.items.len() + if has_rest { 1 } else { 0 },
-                chunk: Rc::new(chunk),
-                slot_types,
-                slot_names,
-                lexical_tdz,
-                slot_immutable: inner.local_immutable,
-                slot_sloppy_immutable_silent: inner.local_sloppy_immutable_silent,
-                upvalues: inner.captured_upvalues,
-                has_rest,
-                has_prototype_property: false,
-                captures_this: true,
-                // Arrow functions do not create their own `arguments`; it is
-                // lexically resolved from the enclosing function/global scope.
-                arguments_slot: None,
-                self_binding_slot: None,
-                has_simple_parameter_list,
-                return_type,
-                is_strict: function_is_strict,
-                is_constructor: false,
-                is_derived_constructor: false,
-                is_class_constructor: false,
-                is_async: func.r#async,
-                is_generator: false,
-                ic_table: Vec::new(),
-            },
-            _env_len,
-        ))
+        self.patch_jump(end_jump);
+        if finalizer.is_some() {
+          self.finally_patches.pop();
+        }
+      }
+      _ => {}
     }
+    Ok(())
+  }
+
+  /// Compile a class declaration statement into bytecode.
+  ///
+  /// Creates a constructor function closure and compiles all class methods,
+  /// attaching them to either the constructor or its prototype.
+  fn compile_class_declaration_oast(
+    &mut self,
+    c: &oast::Class<'_>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    let name = c
+      .id
+      .as_ref()
+      .map(|id| id.name.to_string())
+      .ok_or_else(|| crate::errors::CompilerError::from("anonymous class declaration"))?;
+
+    if let Some(err) = self.check_var_lexical_conflict(&name) {
+      return Err(crate::errors::CompilerError::from(err));
+    }
+
+    self.emit_class_from_oast(c, Some(&name))?;
+    let slot = self
+      .resolve_local(&name)
+      .unwrap_or_else(|| self.add_local_with_mirror(name.clone(), None, self.is_root));
+
+    if slot == self.locals.len() - 1 {
+      self.add_lexical_binding(&name);
+    }
+
+    if self.is_root {
+      self.emit(Op::Dup, LINE);
+    }
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(self.slot_to_u8(slot)?, LINE);
+    if self.is_root {
+      self.emit_set_global_name(&name);
+    }
+    // Emit class elements (methods/fields). Minimal implementation:
+    // Create closures for methods and install them on the constructor
+    // (static) or constructor.prototype (instance). Computed keys and
+    // accessors are lowered through objectDefineProperty so we preserve
+    // symbol keys and accessor semantics.
+    let instance_home_slot = if c
+      .body
+      .body
+      .iter()
+      .any(|element| matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static))
+    {
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      self.emit_constant(Value::String("prototype".to_string()), LINE);
+      self.emit(Op::GetProperty, LINE);
+      let home_slot = self.alloc_temp_local("class_home");
+      self.emit(Op::StoreLocal, LINE);
+      self.emit_byte(self.slot_to_u8(home_slot)?, LINE);
+      Some(home_slot)
+    } else {
+      None
+    };
+    for element in &c.body.body {
+      if let oast::ClassElement::MethodDefinition(md) = element {
+        let target_slot = if md.r#static {
+          slot
+        } else {
+          instance_home_slot.expect("instance home slot")
+        };
+        self.emit_class_member_installation(target_slot, md)?;
+      }
+    }
+
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(slot)?, LINE);
+
+    Ok(())
+  }
+
+  /// Check if a function has a simple parameter list (no rest, no defaults, all identifiers).
+  fn has_simple_parameter_list(func: &oast::Function<'_>) -> bool {
+    func.params.rest.is_none()
+      && func.params.items.iter().all(|param| {
+        matches!(param.pattern, oast::BindingPattern::BindingIdentifier(_))
+          && param.initializer.is_none()
+      })
+  }
+
+  /// Emit bytecode to initialize non-simple function parameters from hidden
+  /// raw argument slots.
+  ///
+  /// Raw slots are expected to be laid out before any visible parameter
+  /// bindings. This keeps later parameters in TDZ while earlier defaults are
+  /// evaluated.
+  fn emit_parameter_initializers_from_raw_slots(
+    &mut self,
+    params: &oast::FormalParameters<'_>,
+    raw_slots: &[usize],
+  ) -> Result<(), crate::errors::CompilerError> {
+    let temp_slot = self.alloc_temp_local("param_init_value");
+
+    for (idx, param) in params.items.iter().enumerate() {
+      let raw_slot = raw_slots
+        .get(idx)
+        .copied()
+        .ok_or_else(|| crate::errors::CompilerError::from("missing parameter slot"))?;
+
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(raw_slot)?, LINE);
+
+      if let Some(init) = &param.initializer {
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.emit(Op::Undefined, LINE);
+        // Use CompareJump: cond_type 6 = StrictEq, jump if true
+        self.emit_with_payload(Op::CompareJump, 6, LINE);
+        let skip_jump = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+        self.compile_expr_oast(init)?;
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+        self.patch_jump(skip_jump);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
+      }
+
+      self.compile_binding_pattern_assignment_oast(
+        &param.pattern,
+        oxc_ast::ast::VariableDeclarationKind::Var,
+      )?;
+    }
+
+    if let Some(rest) = &params.rest {
+      let raw_slot = raw_slots
+        .get(params.items.len())
+        .copied()
+        .ok_or_else(|| crate::errors::CompilerError::from("missing rest parameter slot"))?;
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(raw_slot)?, LINE);
+      self.compile_binding_pattern_assignment_oast(
+        &rest.rest.argument,
+        oxc_ast::ast::VariableDeclarationKind::Var,
+      )?;
+    }
+
+    Ok(())
+  }
+
+  /// Emit bytecode to initialize default parameter values using the current
+  /// parameter slots directly.
+  fn emit_parameter_initializers_from_current_slots(
+    &mut self,
+    params: &oast::FormalParameters<'_>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    for (idx, param) in params.items.iter().enumerate() {
+      let Some(init) = &param.initializer else {
+        continue;
+      };
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(idx)?, LINE);
+      self.emit(Op::Undefined, LINE);
+      // Use CompareJump: cond_type 6 = StrictEq, jump if true
+      self.emit_with_payload(Op::CompareJump, 6, LINE);
+      let skip_jump = self.chunk.code.len();
+      self.emit_byte(0, LINE);
+      self.emit_byte(0, LINE);
+      self.compile_expr_oast(init)?;
+      self.emit(Op::StoreLocal, LINE);
+      self.emit_byte(self.slot_to_u8(idx)?, LINE);
+      self.patch_jump(skip_jump);
+    }
+    Ok(())
+  }
+
+  /// Lower a class method/getter/setter installation to a property
+  /// definition with a real descriptor object.
+  pub(super) fn emit_class_member_installation(
+    &mut self,
+    target_slot: usize,
+    md: &oast::MethodDefinition<'_>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    if matches!(md.kind, oast::MethodDefinitionKind::Constructor) {
+      return Ok(());
+    }
+
+    let method_name = if md.computed {
+      None
+    } else {
+      match &md.key {
+        oast::PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
+        oast::PropertyKey::Identifier(ident) => Some(ident.name.to_string()),
+        oast::PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+        oast::PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+        oast::PropertyKey::PrivateIdentifier(pid) => Some(pid.name.to_string()),
+        _ => None,
+      }
+    };
+
+    let self_name = md.value.id.as_ref().map(|id| id.name.as_str());
+    let (mut proto, _env_len) = self.compile_function(
+      method_name.as_deref().unwrap_or("<method>"),
+      self_name,
+      &md.value,
+      None,
+      true,
+    )?;
+    proto.is_strict = true;
+    let fidx = self.chunk.add_function(proto);
+
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(target_slot)?, LINE);
+    self.emit(Op::Dup, LINE);
+    self.emit_get_builtin_name("objectDefineProperty");
+    self.emit(Op::Swap, LINE);
+
+    if let Some(ref key_name) = method_name {
+      if matches!(md.key, oast::PropertyKey::PrivateIdentifier(_)) {
+        let key = self.ensure_private_name_constant(key_name);
+        self.emit_constant(key, LINE);
+      } else {
+        self.emit_constant(Value::String(key_name.clone()), LINE);
+      }
+    } else {
+      let key_expr = md
+        .key
+        .as_expression()
+        .expect("computed class member key must be an expression");
+      self.compile_expr_oast(key_expr)?;
+    }
+
+    let first_descriptor_key = match md.kind {
+      oast::MethodDefinitionKind::Method => "value",
+      oast::MethodDefinitionKind::Get => "get",
+      oast::MethodDefinitionKind::Set => "set",
+      oast::MethodDefinitionKind::Constructor => unreachable!(),
+    };
+    self.emit_constant(Value::String(first_descriptor_key.to_string()), LINE);
+    self.emit(Op::MakeClosure, LINE);
+    self.emit_byte(self.function_index_to_u8(fidx)?, LINE);
+    self.emit_set_method_home_object(target_slot)?;
+
+    let prop_count = match md.kind {
+      oast::MethodDefinitionKind::Method => {
+        self.emit_constant(Value::String("writable".to_string()), LINE);
+        self.emit_constant(Value::Bool(true), LINE);
+        self.emit_constant(Value::String("enumerable".to_string()), LINE);
+        self.emit_constant(Value::Bool(false), LINE);
+        self.emit_constant(Value::String("configurable".to_string()), LINE);
+        self.emit_constant(Value::Bool(true), LINE);
+        4
+      }
+      oast::MethodDefinitionKind::Get => {
+        self.emit_constant(Value::String("enumerable".to_string()), LINE);
+        self.emit_constant(Value::Bool(false), LINE);
+        self.emit_constant(Value::String("configurable".to_string()), LINE);
+        self.emit_constant(Value::Bool(true), LINE);
+        3
+      }
+      oast::MethodDefinitionKind::Set => {
+        self.emit_constant(Value::String("enumerable".to_string()), LINE);
+        self.emit_constant(Value::Bool(false), LINE);
+        self.emit_constant(Value::String("configurable".to_string()), LINE);
+        self.emit_constant(Value::Bool(true), LINE);
+        3
+      }
+      oast::MethodDefinitionKind::Constructor => unreachable!(),
+    };
+    self.emit(Op::BuildObject, LINE);
+    self.emit_byte(prop_count, LINE);
+    self.emit(Op::Call, LINE);
+    self.emit_byte(3, LINE);
+    self.emit(Op::Pop, LINE);
+    self.emit(Op::Pop, LINE);
+    Ok(())
+  }
+
+  /// Emits a class declaration from an OAST class node.
+  #[allow(clippy::too_many_lines)]
+  pub(super) fn emit_class_from_oast(
+    &mut self,
+    c: &oast::Class<'_>,
+    declaration_name: Option<&str>,
+  ) -> Result<(), crate::errors::CompilerError> {
+    let class_name = c
+      .id
+      .as_ref()
+      .map(|id| id.name.to_string())
+      .or_else(|| declaration_name.map(ToString::to_string))
+      .unwrap_or_else(|| "<anonymous>".to_string());
+
+    let constructor_method = c.body.body.iter().find_map(|element| {
+      if let oast::ClassElement::MethodDefinition(md) = element
+        && matches!(md.kind, oast::MethodDefinitionKind::Constructor)
+      {
+        return Some(md);
+      }
+      None
+    });
+    let class_has_super = c.super_class.is_some();
+    let proto = if let Some(md) = constructor_method {
+      let (mut proto, _env_len) =
+        self.compile_function(&class_name, None, &md.value, None, class_has_super)?;
+      proto.is_strict = true;
+      proto.is_derived_constructor = class_has_super;
+      proto.is_class_constructor = true;
+      proto
+    } else {
+      let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
+      if class_has_super {
+        ctor_chunk.allow_new_target = true;
+        ctor_chunk.allow_super = true;
+        let mut inner = Compiler {
+          chunk: ctor_chunk,
+          source_text: Rc::clone(&self.source_text),
+          locals: Vec::new(),
+          local_types: Vec::new(),
+          local_tdz: Vec::new(),
+          local_immutable: Vec::new(),
+          local_sloppy_immutable_silent: Vec::new(),
+          local_mirror_globals: Vec::new(),
+          scopes: vec![crate::compiler::Scope {
+            kind: crate::compiler::ScopeKind::Function,
+            bindings: HashMap::new(),
+            lexical_bindings: HashSet::new(),
+            block_var_names: HashSet::new(),
+          }],
+          globals: HashMap::new(),
+          is_root: false,
+          strict_context: true,
+          loop_depth: 0,
+          with_depth: 0,
+          continue_patches: Vec::new(),
+          break_patches: Vec::new(),
+          finally_patches: Vec::new(),
+          label_patches: Vec::new(),
+          current_module: self.current_module.clone(),
+          next_ic_slot: 0,
+          pending_operand_bytes: 0,
+          allow_new_target: true,
+          allow_super: true,
+          outer_bindings: self.visible_bindings_snapshot(),
+          upvalue_indices: HashMap::new(),
+          captured_upvalues: Vec::new(),
+          private_names: self.private_names.clone(),
+          object_expr_had_set_property: false,
+        };
+        inner.add_local_with_mirror("arguments".to_string(), None, false);
+        inner.emit(Op::GetGlobal, LINE);
+        let global_idx = inner.global_name_index("Array");
+        inner.emit_u16(inner.global_index_to_u16(global_idx)?, LINE);
+        inner.emit_constant(Value::String("from".to_string()), LINE);
+        inner.emit(Op::GetProperty, LINE);
+        let from_slot = inner.alloc_ic_slot()?;
+        inner.emit_byte(from_slot, LINE);
+        inner.emit(Op::LoadLocal, LINE);
+        inner.emit_byte(0, LINE);
+        inner.emit(Op::SuperConstruct, LINE);
+        inner.emit_byte(1, LINE);
+        inner.emit(Op::Pop, LINE);
+        inner.emit(Op::GetThis, LINE);
+        inner.emit(Op::Return, LINE);
+        ctor_chunk = std::mem::take(&mut inner.chunk);
+        FunctionProto {
+          name: class_name.clone(),
+          span: c.span,
+          arity: 0,
+          chunk: Rc::new(ctor_chunk),
+          slot_types: inner.local_types,
+          slot_names: inner.locals.into_iter().map(Some).collect(),
+          lexical_tdz: inner.local_tdz,
+          slot_immutable: inner.local_immutable,
+          slot_sloppy_immutable_silent: inner.local_sloppy_immutable_silent,
+          upvalues: inner.captured_upvalues,
+          has_rest: false,
+          has_prototype_property: true,
+          captures_this: false,
+          arguments_slot: Some(0),
+          self_binding_slot: None,
+          has_simple_parameter_list: true,
+          return_type: None,
+          is_strict: true,
+          is_constructor: true,
+          is_derived_constructor: true,
+          is_class_constructor: true,
+          is_async: false,
+          is_generator: false,
+          ic_table: Vec::new(),
+        }
+      } else {
+        ctor_chunk.write(Op::GetThis as u8, LINE);
+        ctor_chunk.write(Op::Return as u8, LINE);
+        FunctionProto {
+          name: class_name.clone(),
+          span: c.span,
+          arity: 0,
+          chunk: Rc::new(ctor_chunk),
+          slot_types: Vec::new(),
+          slot_names: Vec::new(),
+          lexical_tdz: Vec::new(),
+          slot_immutable: Vec::new(),
+          slot_sloppy_immutable_silent: Vec::new(),
+          upvalues: Vec::new(),
+          has_rest: false,
+          has_prototype_property: true,
+          captures_this: false,
+          arguments_slot: None,
+          self_binding_slot: None,
+          has_simple_parameter_list: true,
+          return_type: None,
+          is_strict: true,
+          is_constructor: true,
+          is_derived_constructor: false,
+          is_class_constructor: true,
+          is_async: false,
+          is_generator: false,
+          ic_table: Vec::new(),
+        }
+      }
+    };
+
+    let idx = self.chunk.add_function(proto);
+    self.emit(Op::MakeClosure, LINE);
+    self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+    if let Some(super_class) = &c.super_class {
+      self.emit_get_builtin_name("classInitExtends");
+      self.emit(Op::Swap, LINE);
+      self.compile_expr_oast(super_class)?;
+      self.emit(Op::Call, LINE);
+      self.emit_byte(2, LINE);
+    }
+
+    let ctor_slot = self.alloc_temp_local("class_ctor_tmp");
+    self.emit(Op::Dup, LINE);
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
+
+    let instance_home_slot = if c
+      .body
+      .body
+      .iter()
+      .any(|element| matches!(element, oast::ClassElement::MethodDefinition(md) if !md.r#static))
+    {
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
+      self.emit_constant(Value::String("prototype".to_string()), LINE);
+      self.emit(Op::GetProperty, LINE);
+      let home_slot = self.alloc_temp_local("class_home");
+      self.emit(Op::StoreLocal, LINE);
+      self.emit_byte(self.slot_to_u8(home_slot)?, LINE);
+      Some(home_slot)
+    } else {
+      None
+    };
+
+    for element in &c.body.body {
+      if let oast::ClassElement::MethodDefinition(md) = element {
+        let target_slot = if md.r#static {
+          ctor_slot
+        } else {
+          instance_home_slot.expect("instance home slot")
+        };
+        self.emit_class_member_installation(target_slot, md)?;
+      }
+    }
+
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
+    Ok(())
+  }
+
+  /// Compile a function declaration into a FunctionProto with its own scope.
+  ///
+  /// Creates an inner compiler scope, compiles the function body, and returns
+  /// the compiled prototype with all metadata about parameters, locals, and closures.
+  pub(super) fn compile_function(
+    &mut self,
+    name: &str,
+    self_name: Option<&str>,
+    func: &oast::Function,
+    return_type: Option<Type>,
+    allow_super: bool,
+  ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
+    let _env_len = self.locals.len();
+    let function_is_strict = self.strict_context
+      || func
+        .body
+        .as_ref()
+        .is_some_and(|body| Self::has_use_strict_directive(body));
+    let body_has_use_strict = func
+      .body
+      .as_ref()
+      .is_some_and(|body| Self::has_use_strict_directive(body));
+
+    if let Some(err) = Self::strict_binding_name_error(function_is_strict, name) {
+      return Err(err);
+    }
+    if let Some(self_name) = self_name
+      && let Some(err) = Self::strict_binding_name_error(function_is_strict, self_name)
+    {
+      return Err(err);
+    }
+    if function_is_strict {
+      let mut seen = HashSet::new();
+      for p in &func.params.items {
+        if let oast::BindingPattern::BindingIdentifier(id) = &p.pattern
+          && !seen.insert(id.name.to_string())
+        {
+          return Err(crate::errors::CompilerError::from(
+            "SyntaxError: duplicate parameter name in strict mode",
+          ));
+        }
+      }
+      if let Some(rest) = &func.params.rest
+        && let oast::BindingPattern::BindingIdentifier(id) = &rest.rest.argument
+        && !seen.insert(id.name.to_string())
+      {
+        return Err(crate::errors::CompilerError::from(
+          "SyntaxError: duplicate parameter name in strict mode",
+        ));
+      }
+    }
+    for p in &func.params.items {
+      if let Some(err) = Self::strict_binding_pattern_name_error(function_is_strict, &p.pattern) {
+        return Err(err);
+      }
+    }
+    if let Some(rest) = &func.params.rest
+      && let Some(err) =
+        Self::strict_binding_pattern_name_error(function_is_strict, &rest.rest.argument)
+    {
+      return Err(err);
+    }
+
+    let has_simple_parameter_list = Self::has_simple_parameter_list(func);
+    if !has_simple_parameter_list {
+      if body_has_use_strict && !func.generator {
+        return Err(crate::errors::CompilerError::from(
+          "SyntaxError: non-simple parameter list in strict mode",
+        ));
+      }
+      let mut seen = HashSet::new();
+      for p in &func.params.items {
+        let mut names = HashSet::new();
+        Self::collect_binding_names(&p.pattern, &mut names);
+        for name in names {
+          if !seen.insert(name) {
+            return Err(crate::errors::CompilerError::from(
+              "SyntaxError: duplicate parameter name in non-simple parameter list",
+            ));
+          }
+        }
+      }
+      if let Some(rest) = &func.params.rest {
+        let mut names = HashSet::new();
+        Self::collect_binding_names(&rest.rest.argument, &mut names);
+        for name in names {
+          if !seen.insert(name) {
+            return Err(crate::errors::CompilerError::from(
+              "SyntaxError: duplicate parameter name in non-simple parameter list",
+            ));
+          }
+        }
+      }
+    }
+
+    let mut inner = Compiler {
+      chunk: Chunk::new(Rc::clone(&self.source_text)),
+      source_text: Rc::clone(&self.source_text),
+      locals: Vec::new(),
+      local_types: Vec::new(),
+      local_tdz: Vec::new(),
+      local_immutable: Vec::new(),
+      local_sloppy_immutable_silent: Vec::new(),
+      local_mirror_globals: Vec::new(),
+      scopes: vec![crate::compiler::Scope {
+        kind: crate::compiler::ScopeKind::Function,
+        bindings: HashMap::new(),
+        lexical_bindings: HashSet::new(),
+        block_var_names: HashSet::new(),
+      }],
+      globals: HashMap::new(),
+      is_root: false,
+      strict_context: self.strict_context,
+      loop_depth: 0,
+      with_depth: 0,
+      continue_patches: Vec::new(),
+      break_patches: Vec::new(),
+      finally_patches: Vec::new(),
+      label_patches: Vec::new(),
+      current_module: self.current_module.clone(),
+      next_ic_slot: 0,
+      pending_operand_bytes: 0,
+      allow_new_target: true,
+      allow_super,
+      outer_bindings: self.visible_bindings_snapshot(),
+      upvalue_indices: HashMap::new(),
+      captured_upvalues: Vec::new(),
+      private_names: self.private_names.clone(),
+      object_expr_had_set_property: false,
+    };
+    inner.strict_context = function_is_strict;
+    inner.chunk.allow_new_target = inner.allow_new_target;
+    inner.chunk.allow_super = inner.allow_super;
+
+    let mut raw_param_slots = Vec::new();
+    if has_simple_parameter_list {
+      // Parameter placeholders (no type information available here).
+      for p in &func.params.items {
+        let pname = match &p.pattern {
+          oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
+          _ => "_".to_string(),
+        };
+        inner.add_local_with_mirror(pname, None, false);
+      }
+      if let Some(rest) = &func.params.rest {
+        let pname = match &rest.rest.argument {
+          oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
+          _ => "_".to_string(),
+        };
+        inner.add_local_with_mirror(pname, None, false);
+      }
+    } else {
+      for _ in &func.params.items {
+        raw_param_slots.push(inner.add_local_with_mirror(
+          format!("__param_raw_{}", raw_param_slots.len()),
+          None,
+          false,
+        ));
+      }
+      if func.params.rest.is_some() {
+        raw_param_slots.push(inner.add_local_with_mirror(
+          "__param_raw_rest".to_string(),
+          None,
+          false,
+        ));
+      }
+      for p in &func.params.items {
+        if let oast::BindingPattern::BindingIdentifier(i) = &p.pattern {
+          let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
+          inner.mark_local_tdz(slot);
+        }
+      }
+      if let Some(rest) = &func.params.rest
+        && let oast::BindingPattern::BindingIdentifier(i) = &rest.rest.argument
+      {
+        let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
+        inner.mark_local_tdz(slot);
+      }
+    }
+    let self_binding_slot =
+      self_name.map(|self_name| inner.add_local_with_mirror(self_name.to_string(), None, false));
+    if let Some(slot) = self_binding_slot
+      && let Some(flag) = inner.local_immutable.get_mut(slot)
+    {
+      *flag = true;
+    }
+    if let Some(slot) = self_binding_slot
+      && let Some(flag) = inner.local_sloppy_immutable_silent.get_mut(slot)
+    {
+      *flag = true;
+    }
+    let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
+
+    // Pre-declare nested functions inside this function body.
+    if let Some(body) = &func.body {
+      inner.pre_declare_variables_oast_stmts(&body.statements);
+      inner.pre_declare_functions_oast_stmts(&body.statements);
+      inner.emit_hoisted_function_decls_oast_stmts(&body.statements)?;
+    }
+
+    if has_simple_parameter_list {
+      inner.emit_parameter_initializers_from_current_slots(&func.params)?;
+    } else {
+      inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
+    }
+    if func.generator {
+      inner.emit(Op::GeneratorInitDone, LINE);
+    }
+
+    // Compile function body statements into inner compiler.
+    if let Some(body) = &func.body {
+      for stmt in &body.statements {
+        if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+          continue;
+        }
+        inner.compile_statement_oast(stmt)?;
+      }
+    }
+
+    inner.emit(Op::Return, LINE);
+    let mut chunk = std::mem::take(&mut inner.chunk);
+    chunk.allow_new_target = inner.allow_new_target;
+    chunk.allow_super = inner.allow_super;
+    let has_rest = func.params.rest.is_some();
+    let has_simple_parameter_list = Self::has_simple_parameter_list(func);
+    let slot_types = inner.local_types;
+    let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
+    let lexical_tdz = inner.local_tdz;
+    let has_prototype_property = !func.r#async;
+    let is_constructor = !func.r#async && !func.generator;
+    Ok((
+      FunctionProto {
+        name: name.to_string(),
+        span: func.span,
+        arity: func.params.items.len() + if has_rest { 1 } else { 0 },
+        chunk: Rc::new(chunk),
+        slot_types,
+        slot_names,
+        lexical_tdz,
+        slot_immutable: inner.local_immutable,
+        slot_sloppy_immutable_silent: inner.local_sloppy_immutable_silent,
+        upvalues: inner.captured_upvalues,
+        has_rest,
+        has_prototype_property,
+        captures_this: false,
+        arguments_slot: Some(arguments_slot),
+        self_binding_slot,
+        has_simple_parameter_list,
+        return_type,
+        is_strict: function_is_strict,
+        is_constructor,
+        is_derived_constructor: false,
+        is_class_constructor: false,
+        is_async: func.r#async,
+        is_generator: func.generator,
+        ic_table: Vec::new(),
+      },
+      _env_len,
+    ))
+  }
+
+  /// Compile an arrow function expression into a FunctionProto with its own scope.
+  ///
+  /// Similar to `compile_function` but with key differences:
+  /// - No `arguments` binding
+  /// - Captures `this` from enclosing scope
+  /// - Not usable as a constructor
+  /// - Supports implicit return for expression bodies
+  pub(super) fn compile_arrow_function(
+    &mut self,
+    name: &str,
+    func: &oast::ArrowFunctionExpression,
+    return_type: Option<Type>,
+  ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
+    let _env_len = self.locals.len();
+    let function_is_strict = self.strict_context || Self::has_use_strict_directive(&func.body);
+    let body_has_use_strict = Self::has_use_strict_directive(&func.body);
+    let has_simple_parameter_list = func.params.rest.is_none()
+      && func.params.items.iter().all(|param| {
+        matches!(param.pattern, oast::BindingPattern::BindingIdentifier(_))
+          && param.initializer.is_none()
+      });
+
+    if let Some(err) = Self::strict_binding_name_error(function_is_strict, name) {
+      return Err(err);
+    }
+    if function_is_strict {
+      let mut seen = HashSet::new();
+      for p in &func.params.items {
+        if let oast::BindingPattern::BindingIdentifier(id) = &p.pattern
+          && !seen.insert(id.name.to_string())
+        {
+          return Err(crate::errors::CompilerError::from(
+            "SyntaxError: duplicate parameter name in strict mode",
+          ));
+        }
+      }
+      if let Some(rest) = &func.params.rest
+        && let oast::BindingPattern::BindingIdentifier(id) = &rest.rest.argument
+        && !seen.insert(id.name.to_string())
+      {
+        return Err(crate::errors::CompilerError::from(
+          "SyntaxError: duplicate parameter name in strict mode",
+        ));
+      }
+    }
+    for p in &func.params.items {
+      if let Some(err) = Self::strict_binding_pattern_name_error(function_is_strict, &p.pattern) {
+        return Err(err);
+      }
+    }
+    if let Some(rest) = &func.params.rest
+      && let Some(err) =
+        Self::strict_binding_pattern_name_error(function_is_strict, &rest.rest.argument)
+    {
+      return Err(err);
+    }
+
+    if !has_simple_parameter_list {
+      if body_has_use_strict {
+        return Err(crate::errors::CompilerError::from(
+          "SyntaxError: non-simple parameter list in strict mode",
+        ));
+      }
+      let mut seen = HashSet::new();
+      for p in &func.params.items {
+        let mut names = HashSet::new();
+        Self::collect_binding_names(&p.pattern, &mut names);
+        for name in names {
+          if !seen.insert(name) {
+            return Err(crate::errors::CompilerError::from(
+              "SyntaxError: duplicate parameter name in non-simple parameter list",
+            ));
+          }
+        }
+      }
+      if let Some(rest) = &func.params.rest {
+        let mut names = HashSet::new();
+        Self::collect_binding_names(&rest.rest.argument, &mut names);
+        for name in names {
+          if !seen.insert(name) {
+            return Err(crate::errors::CompilerError::from(
+              "SyntaxError: duplicate parameter name in non-simple parameter list",
+            ));
+          }
+        }
+      }
+    }
+
+    let mut inner = Compiler {
+      chunk: Chunk::new(Rc::clone(&self.source_text)),
+      source_text: Rc::clone(&self.source_text),
+      locals: Vec::new(),
+      local_types: Vec::new(),
+      local_tdz: Vec::new(),
+      local_immutable: Vec::new(),
+      local_sloppy_immutable_silent: Vec::new(),
+      local_mirror_globals: Vec::new(),
+      scopes: vec![crate::compiler::Scope {
+        kind: crate::compiler::ScopeKind::Function,
+        bindings: HashMap::new(),
+        lexical_bindings: HashSet::new(),
+        block_var_names: HashSet::new(),
+      }],
+      globals: HashMap::new(),
+      is_root: false,
+      strict_context: self.strict_context,
+      loop_depth: 0,
+      with_depth: 0,
+      continue_patches: Vec::new(),
+      break_patches: Vec::new(),
+      finally_patches: Vec::new(),
+      label_patches: Vec::new(),
+      current_module: self.current_module.clone(),
+      next_ic_slot: 0,
+      pending_operand_bytes: 0,
+      allow_new_target: self.allow_new_target,
+      allow_super: self.allow_super,
+      outer_bindings: self.visible_bindings_snapshot(),
+      upvalue_indices: HashMap::new(),
+      captured_upvalues: Vec::new(),
+      private_names: self.private_names.clone(),
+      object_expr_had_set_property: false,
+    };
+    inner.strict_context = function_is_strict;
+    inner.chunk.allow_new_target = inner.allow_new_target;
+    inner.chunk.allow_super = inner.allow_super;
+
+    let mut raw_param_slots = Vec::new();
+    if has_simple_parameter_list {
+      for p in &func.params.items {
+        let pname = match &p.pattern {
+          oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
+          _ => "_".to_string(),
+        };
+        inner.add_local_with_mirror(pname, None, false);
+      }
+      if let Some(rest) = &func.params.rest {
+        let pname = match &rest.rest.argument {
+          oast::BindingPattern::BindingIdentifier(i) => i.name.to_string(),
+          _ => "_".to_string(),
+        };
+        inner.add_local_with_mirror(pname, None, false);
+      }
+    } else {
+      for _ in &func.params.items {
+        raw_param_slots.push(inner.add_local_with_mirror(
+          format!("__param_raw_{}", raw_param_slots.len()),
+          None,
+          false,
+        ));
+      }
+      if func.params.rest.is_some() {
+        raw_param_slots.push(inner.add_local_with_mirror(
+          "__param_raw_rest".to_string(),
+          None,
+          false,
+        ));
+      }
+      for p in &func.params.items {
+        if let oast::BindingPattern::BindingIdentifier(i) = &p.pattern {
+          let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
+          inner.mark_local_tdz(slot);
+        }
+      }
+      if let Some(rest) = &func.params.rest
+        && let oast::BindingPattern::BindingIdentifier(i) = &rest.rest.argument
+      {
+        let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
+        inner.mark_local_tdz(slot);
+      }
+    }
+    // Pre-declare nested functions inside this function body.
+    inner.pre_declare_variables_oast_stmts(&func.body.statements);
+    inner.pre_declare_functions_oast_stmts(&func.body.statements);
+
+    inner.emit_hoisted_function_decls_oast_stmts(&func.body.statements)?;
+
+    if has_simple_parameter_list {
+      // Check if this is an implicit-return arrow function (expression: true).
+      // In that case, the body contains a single ExpressionStatement that should be returned.
+      if func.expression && func.body.statements.len() == 1 {
+        if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
+          // Compile the expression and return its value
+          inner.compile_expr_oast(&expr_stmt.expression)?;
+          inner.emit(Op::Return, LINE);
+        } else {
+          // Shouldn't happen for expression: true, but handle it safely
+          for stmt in &func.body.statements {
+            if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+              inner.compile_statement_oast(stmt)?;
+            }
+          }
+          inner.emit(Op::Return, LINE);
+        }
+      } else {
+        // Regular function body with explicit statements
+        for stmt in &func.body.statements {
+          if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+            continue;
+          }
+          inner.compile_statement_oast(stmt)?;
+        }
+        inner.emit(Op::Return, LINE);
+      }
+    } else {
+      inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
+      if func.expression && func.body.statements.len() == 1 {
+        if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
+          inner.compile_expr_oast(&expr_stmt.expression)?;
+          inner.emit(Op::Return, LINE);
+        } else {
+          for stmt in &func.body.statements {
+            if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+              inner.compile_statement_oast(stmt)?;
+            }
+          }
+          inner.emit(Op::Return, LINE);
+        }
+      } else {
+        for stmt in &func.body.statements {
+          if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+            continue;
+          }
+          inner.compile_statement_oast(stmt)?;
+        }
+        inner.emit(Op::Return, LINE);
+      }
+    }
+
+    let mut chunk = std::mem::take(&mut inner.chunk);
+    chunk.allow_new_target = inner.allow_new_target;
+    chunk.allow_super = inner.allow_super;
+    let has_rest = func.params.rest.is_some();
+    let slot_types = inner.local_types;
+    let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
+    let lexical_tdz = inner.local_tdz;
+    Ok((
+      FunctionProto {
+        name: name.to_string(),
+        span: func.span,
+        arity: func.params.items.len() + if has_rest { 1 } else { 0 },
+        chunk: Rc::new(chunk),
+        slot_types,
+        slot_names,
+        lexical_tdz,
+        slot_immutable: inner.local_immutable,
+        slot_sloppy_immutable_silent: inner.local_sloppy_immutable_silent,
+        upvalues: inner.captured_upvalues,
+        has_rest,
+        has_prototype_property: false,
+        captures_this: true,
+        // Arrow functions do not create their own `arguments`; it is
+        // lexically resolved from the enclosing function/global scope.
+        arguments_slot: None,
+        self_binding_slot: None,
+        has_simple_parameter_list,
+        return_type,
+        is_strict: function_is_strict,
+        is_constructor: false,
+        is_derived_constructor: false,
+        is_class_constructor: false,
+        is_async: func.r#async,
+        is_generator: false,
+        ic_table: Vec::new(),
+      },
+      _env_len,
+    ))
+  }
 }

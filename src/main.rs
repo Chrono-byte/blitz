@@ -41,12 +41,15 @@ use blitz::{parser::Parser as JsParser, value::Value, vm::Vm};
 ///
 /// Returns an error string if any stage of compilation fails
 #[cfg(test)]
-fn run_source(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> {
-    let session = JsParser::parse_source(source)?;
-    let oast_prog = session.program();
+fn run_source(
+  vm: &mut Vm,
+  source: &str,
+) -> Result<Value, blitz::errors::Error> {
+  let session = JsParser::parse_source(source)?;
+  let oast_prog = session.program();
 
-    let chunk = compiler::compile_oxc(oast_prog, source).map_err(blitz::errors::Error::from)?;
-    vm.run(chunk).map_err(blitz::errors::Error::from)
+  let chunk = compiler::compile_oxc(oast_prog, source).map_err(blitz::errors::Error::from)?;
+  vm.run(chunk).map_err(blitz::errors::Error::from)
 }
 
 /// Runs source code in REPL mode (preserves expression results)
@@ -54,229 +57,230 @@ fn run_source(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> 
 /// # Errors
 ///
 /// Returns an error string if any stage of compilation fails
-fn run_source_repl(vm: &mut Vm, source: &str) -> Result<Value, blitz::errors::Error> {
-    let session = JsParser::parse_source(source)?;
-    let oast_prog = session.program();
+fn run_source_repl(
+  vm: &mut Vm,
+  source: &str,
+) -> Result<Value, blitz::errors::Error> {
+  let session = JsParser::parse_source(source)?;
+  let oast_prog = session.program();
 
-    let chunk =
-        compiler::compile_oxc_repl(oast_prog, source).map_err(blitz::errors::Error::from)?;
-    vm.run(chunk).map_err(blitz::errors::Error::from)
+  let chunk = compiler::compile_oxc_repl(oast_prog, source).map_err(blitz::errors::Error::from)?;
+  vm.run(chunk).map_err(blitz::errors::Error::from)
 }
 
 /// Command line arguments for the Blitz executable.
 #[derive(Parser, Debug)]
 #[command(name = "blitz", about = "Blitz")]
 struct Cli {
-    /// JavaScript file to execute. If omitted the REPL will be started.
-    #[arg(value_name = "FILE")]
-    file: Option<PathBuf>,
+  /// JavaScript file to execute. If omitted the REPL will be started.
+  #[arg(value_name = "FILE")]
+  file: Option<PathBuf>,
 
-    /// Start the REPL even when a file is not provided.
-    #[arg(short, long, action)]
-    repl: bool,
+  /// Start the REPL even when a file is not provided.
+  #[arg(short, long, action)]
+  repl: bool,
 
-    /// Run the file with Test262 host globals (`print`, `$262`, etc.).
-    #[arg(long, action)]
-    test262_harness: bool,
+  /// Run the file with Test262 host globals (`print`, `$262`, etc.).
+  #[arg(long, action)]
+  test262_harness: bool,
 
-    /// Treat the input file as an ECMAScript module.
-    #[arg(long, action)]
-    module: bool,
+  /// Treat the input file as an ECMAScript module.
+  #[arg(long, action)]
+  module: bool,
 }
 
 fn main() -> Result<(), blitz::errors::Error> {
-    // Parse CLI early so clap can handle --help/--version before doing work.
-    let cli = Cli::parse();
+  // Parse CLI early so clap can handle --help/--version before doing work.
+  let cli = Cli::parse();
 
-    let async_done_state: Rc<RefCell<Option<test262_support::AsyncCompletion>>> =
-        Rc::new(RefCell::new(None));
+  let async_done_state: Rc<RefCell<Option<test262_support::AsyncCompletion>>> =
+    Rc::new(RefCell::new(None));
 
-    // Public globals visible to user code (populated by the prelude)
-    let globals: Rc<RefCell<blitz::value::ObjectData>> = if cli.test262_harness {
-        let done_state =
-            Rc::<RefCell<Option<test262_support::AsyncCompletion>>>::clone(&async_done_state);
-        let print_native: blitz::value::NativeFn = Rc::new(move |vm, _this, args| {
-            let value = args.first().cloned().unwrap_or(Value::Undefined);
-            let rendered = match vm.to_string(&value) {
-                Ok(s) => s,
-                Err(_) => format!("{}", value),
-            };
-            if let Some(marker) = test262_support::async_completion_marker(&rendered) {
-                *done_state.borrow_mut() = Some(marker);
-                return Ok(Value::Null);
-            }
-            println!("{}", rendered);
-            Ok(Value::Null)
-        });
-        test262_support::make_test262_globals_with_print(print_native)
+  // Public globals visible to user code (populated by the prelude)
+  let globals: Rc<RefCell<blitz::value::ObjectData>> = if cli.test262_harness {
+    let done_state =
+      Rc::<RefCell<Option<test262_support::AsyncCompletion>>>::clone(&async_done_state);
+    let print_native: blitz::value::NativeFn = Rc::new(move |vm, _this, args| {
+      let value = args.first().cloned().unwrap_or(Value::Undefined);
+      let rendered = match vm.to_string(&value) {
+        Ok(s) => s,
+        Err(_) => format!("{}", value),
+      };
+      if let Some(marker) = test262_support::async_completion_marker(&rendered) {
+        *done_state.borrow_mut() = Some(marker);
+        return Ok(Value::Null);
+      }
+      println!("{}", rendered);
+      Ok(Value::Null)
+    });
+    test262_support::make_test262_globals_with_print(print_native)
+  } else {
+    let globals: Rc<RefCell<blitz::value::ObjectData>> =
+      Rc::new(RefCell::new(blitz::value::ObjectData::new()));
+    let global_this = Value::Object(Rc::clone(&globals));
+    {
+      let mut g = globals.borrow_mut();
+      g.properties.insert(
+        blitz::value::PropertyKey::String("globalThis".to_string()),
+        blitz::value::PropertyDescriptor::data(global_this),
+      );
+    }
+    globals
+  };
+
+  // Create a persistent VM for the REPL and reuse it for every input so
+  // we don't recompile and recreate the VM on each line.
+  // Create VM and run prelude. blitzlib can call `__host_get(name)` during
+  // bootstrap to capture host-provided values; raw host entries are never
+  // placed into the globals table.
+  let mut repl_vm = Vm::new(globals);
+
+  // If a file was provided, run it and exit. Otherwise start REPL.
+  if let Some(path) = cli.file {
+    if cli.module {
+      let loader_handle = repl_vm.module_loader_handle();
+      {
+        let mut loader = loader_handle.borrow_mut();
+        loader.construct(
+          path.parent().unwrap_or_else(|| Path::new(".")),
+          &format!(
+            "./{}",
+            path
+              .file_name()
+              .expect("path must have a file name")
+              .to_string_lossy()
+          ),
+        )?;
+        loader
+          .instantiate_all()
+          .map_err(blitz::errors::Error::from)?;
+      }
+      blitz::module::evaluate_entry_shared(&loader_handle, &path, &mut repl_vm, false)
+        .map_err(blitz::errors::Error::from)?;
     } else {
-        let globals: Rc<RefCell<blitz::value::ObjectData>> =
-            Rc::new(RefCell::new(blitz::value::ObjectData::new()));
-        let global_this = Value::Object(Rc::clone(&globals));
-        {
-            let mut g = globals.borrow_mut();
-            g.properties.insert(
-                blitz::value::PropertyKey::String("globalThis".to_string()),
-                blitz::value::PropertyDescriptor::data(global_this),
-            );
-        }
-        globals
-    };
+      let source = std::fs::read_to_string(&path).map_err(|e| {
+        blitz::errors::RuntimeError::from(format!("Failed to read {}: {}", path.display(), e))
+      })?;
+      let session = JsParser::parse_source(&source)?;
+      let program = session.program();
+      let chunk = compiler::compile_oxc(program, &source).map_err(blitz::errors::Error::from)?;
+      repl_vm
+        .run(chunk)
+        .map_err(blitz::errors::Error::from)?;
 
-    // Create a persistent VM for the REPL and reuse it for every input so
-    // we don't recompile and recreate the VM on each line.
-    // Create VM and run prelude. blitzlib can call `__host_get(name)` during
-    // bootstrap to capture host-provided values; raw host entries are never
-    // placed into the globals table.
-    let mut repl_vm = Vm::new(globals);
+      if cli.test262_harness && repl_vm.get_global("$DONE").is_some() {
+        let start = Instant::now();
+        let timeout = Duration::from_secs(30);
+        loop {
+          repl_vm
+            .flush_microtasks()
+            .map_err(blitz::errors::Error::from)?;
 
-    // If a file was provided, run it and exit. Otherwise start REPL.
-    if let Some(path) = cli.file {
-        if cli.module {
-            let loader_handle = repl_vm.module_loader_handle();
-            {
-                let mut loader = loader_handle.borrow_mut();
-                loader.construct(
-                    path.parent().unwrap_or_else(|| Path::new(".")),
-                    &format!(
-                        "./{}",
-                        path.file_name()
-                            .expect("path must have a file name")
-                            .to_string_lossy()
-                    ),
-                )?;
-                loader
-                    .instantiate_all()
-                    .map_err(blitz::errors::Error::from)?;
-            }
-            blitz::module::evaluate_entry_shared(&loader_handle, &path, &mut repl_vm, false)
-                .map_err(blitz::errors::Error::from)?;
-        } else {
-            let source = std::fs::read_to_string(&path).map_err(|e| {
-                blitz::errors::RuntimeError::from(format!(
-                    "Failed to read {}: {}",
-                    path.display(),
-                    e
-                ))
-            })?;
-            let session = JsParser::parse_source(&source)?;
-            let program = session.program();
-            let chunk =
-                compiler::compile_oxc(program, &source).map_err(blitz::errors::Error::from)?;
-            repl_vm.run(chunk).map_err(blitz::errors::Error::from)?;
-
-            if cli.test262_harness && repl_vm.get_global("$DONE").is_some() {
-                let start = Instant::now();
-                let timeout = Duration::from_secs(30);
-                loop {
-                    repl_vm
-                        .flush_microtasks()
-                        .map_err(blitz::errors::Error::from)?;
-
-                    if let Some(done) = async_done_state.borrow().clone() {
-                        match done {
-                            test262_support::AsyncCompletion::Complete => {
-                                println!("Test262:AsyncTestComplete");
-                                break;
-                            }
-                            test262_support::AsyncCompletion::Failure(message) => {
-                                return Err(blitz::errors::RuntimeError::from(format!(
-                                    "async test failed: {}",
-                                    message
-                                ))
-                                .into());
-                            }
-                        }
-                    }
-
-                    if start.elapsed() >= timeout {
-                        return Err(blitz::errors::RuntimeError::from(format!(
-                            "async test timed out after {}s",
-                            timeout.as_secs()
-                        ))
-                        .into());
-                    }
-
-                    thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
-        return Ok(());
-    }
-
-    // Start REPL (explicit flag or no file provided)
-    println!("Blitz REPL. Type exit to quit.");
-    let mut rl = rustyline::Editor::<(), rustyline::history::DefaultHistory>::new()
-        .map_err(|e| blitz::errors::RuntimeError::from(format!("Readline init error: {}", e)))?;
-    let history_path = env::temp_dir().join("blitz_repl_history");
-    let _ = rl.load_history(&history_path);
-    loop {
-        match rl.readline("> ") {
-            Ok(input) => {
-                let line: &str = input.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let _ = rl.add_history_entry(line);
-                let _ = rl.save_history(&history_path);
-                if line.eq_ignore_ascii_case("exit") || line.eq_ignore_ascii_case("quit") {
-                    break;
-                }
-                match run_source_repl(&mut repl_vm, line) {
-                    Ok(v) if !matches!(v, Value::Null | Value::Undefined) => println!("{}", v),
-                    Ok(_) => {}
-                    Err(e) => eprintln!("Error: {}", e),
-                }
-            }
-            Err(rustyline::error::ReadlineError::Interrupted)
-            | Err(rustyline::error::ReadlineError::Eof) => break,
-            Err(e) => {
-                eprintln!("Readline error: {}", e);
+          if let Some(done) = async_done_state.borrow().clone() {
+            match done {
+              test262_support::AsyncCompletion::Complete => {
+                println!("Test262:AsyncTestComplete");
                 break;
+              }
+              test262_support::AsyncCompletion::Failure(message) => {
+                return Err(
+                  blitz::errors::RuntimeError::from(format!("async test failed: {}", message))
+                    .into(),
+                );
+              }
             }
+          }
+
+          if start.elapsed() >= timeout {
+            return Err(
+              blitz::errors::RuntimeError::from(format!(
+                "async test timed out after {}s",
+                timeout.as_secs()
+              ))
+              .into(),
+            );
+          }
+
+          thread::sleep(Duration::from_millis(10));
         }
+      }
     }
-    Ok(())
+    return Ok(());
+  }
+
+  // Start REPL (explicit flag or no file provided)
+  println!("Blitz REPL. Type exit to quit.");
+  let mut rl = rustyline::Editor::<(), rustyline::history::DefaultHistory>::new()
+    .map_err(|e| blitz::errors::RuntimeError::from(format!("Readline init error: {}", e)))?;
+  let history_path = env::temp_dir().join("blitz_repl_history");
+  let _ = rl.load_history(&history_path);
+  loop {
+    match rl.readline("> ") {
+      Ok(input) => {
+        let line: &str = input.trim();
+        if line.is_empty() {
+          continue;
+        }
+        let _ = rl.add_history_entry(line);
+        let _ = rl.save_history(&history_path);
+        if line.eq_ignore_ascii_case("exit") || line.eq_ignore_ascii_case("quit") {
+          break;
+        }
+        match run_source_repl(&mut repl_vm, line) {
+          Ok(v) if !matches!(v, Value::Null | Value::Undefined) => println!("{}", v),
+          Ok(_) => {}
+          Err(e) => eprintln!("Error: {}", e),
+        }
+      }
+      Err(rustyline::error::ReadlineError::Interrupted)
+      | Err(rustyline::error::ReadlineError::Eof) => break,
+      Err(e) => {
+        eprintln!("Readline error: {}", e);
+        break;
+      }
+    }
+  }
+  Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
-    use std::cell::RefCell;
-    use std::rc::Rc;
+  use super::*;
+  use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
+  use std::cell::RefCell;
+  use std::rc::Rc;
 
-    fn test_globals() -> Rc<RefCell<ObjectData>> {
-        let globals = Rc::new(RefCell::new(ObjectData::new()));
-        globals.borrow_mut().properties.insert(
-            PropertyKey::String("globalThis".to_string()),
-            PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
-        );
-        globals
-    }
+  fn test_globals() -> Rc<RefCell<ObjectData>> {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    globals.borrow_mut().properties.insert(
+      PropertyKey::String("globalThis".to_string()),
+      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+    );
+    globals
+  }
 
-    #[test]
-    fn run_source_executes_basic_program() {
-        let globals = Rc::new(RefCell::new(ObjectData::new()));
-        let mut vm = Vm::new(globals);
+  #[test]
+  fn run_source_executes_basic_program() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
 
-        run_source(&mut vm, "var answer = 1 + 2; answer;").expect("run");
+    run_source(&mut vm, "var answer = 1 + 2; answer;").expect("run");
 
-        assert!(
-            matches!(vm.get_global("answer"), Some(Value::Number(n)) if (n - 3.0).abs() < f64::EPSILON)
-        );
-    }
+    assert!(
+      matches!(vm.get_global("answer"), Some(Value::Number(n)) if (n - 3.0).abs() < f64::EPSILON)
+    );
+  }
 
-    #[test]
-    fn run_source_returns_expression_result() {
-        let globals = test_globals();
-        let mut vm = Vm::new(globals);
+  #[test]
+  fn run_source_returns_expression_result() {
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
 
-        let result = run_source_repl(&mut vm, "1 + 2").expect("run");
-        assert!(
-            matches!(result, Value::Number(n) if (n - 3.0).abs() < f64::EPSILON),
-            "expected 3, got {:?}",
-            result
-        );
-    }
+    let result = run_source_repl(&mut vm, "1 + 2").expect("run");
+    assert!(
+      matches!(result, Value::Number(n) if (n - 3.0).abs() < f64::EPSILON),
+      "expected 3, got {:?}",
+      result
+    );
+  }
 }
