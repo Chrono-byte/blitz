@@ -1040,36 +1040,39 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       &function_proto_map,
     )),
   );
+  let array_includes = builtin_object(
+    Rc::new(move |vm, args| {
+      let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      let search = args.get(1).cloned().unwrap_or(Value::Undefined);
+      let len = array_like_length(vm, &receiver)?;
+      if len == 0 {
+        return Ok(Value::Bool(false));
+      }
+      let from_index = args.get(2).cloned().unwrap_or(Value::Number(0.0));
+      let from_index = vm.to_number_value(&from_index)?;
+      let mut k = match from_index {
+        n if n.is_nan() || n == f64::NEG_INFINITY => 0usize,
+        n if n == f64::INFINITY => return Ok(Value::Bool(false)),
+        n if n >= 0.0 => n.trunc().to_usize().unwrap_or(len),
+        n => len.saturating_sub(n.abs().trunc().to_usize().unwrap_or(len)),
+      };
+      while k < len {
+        let key = PKey::String(k.to_string());
+        let element = vm.get_property_host(&receiver, &key)?;
+        if same_value_zero(&element, &search) {
+          return Ok(Value::Bool(true));
+        }
+        k += 1;
+      }
+      Ok(Value::Bool(false))
+    }),
+    &function_proto_map,
+  );
+  set_builtin_name(&array_includes, "includes");
+  set_builtin_length(&array_includes, 1.0);
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("includes".to_string()),
-    PropertyDescriptor::data(builtin_object(
-      Rc::new(move |vm, args| {
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-        let search = args.get(1).cloned().unwrap_or(Value::Undefined);
-        let len = array_like_length(vm, &receiver)?;
-        let from_index = args.get(2).cloned().unwrap_or(Value::Number(0.0));
-        let mut k = match vm.to_number_value(&from_index)? {
-          n if n.is_nan() => 0isize,
-          n if n >= 0.0 => n.trunc() as isize,
-          n => len as isize + n.trunc() as isize,
-        };
-        if k < 0 {
-          k = 0;
-        }
-        while (k as usize) < len {
-          let key = PKey::String((k as usize).to_string());
-          if vm.has_property_host(&receiver, &key)? {
-            let element = vm.get_property_host(&receiver, &key)?;
-            if same_value_zero(&element, &search) {
-              return Ok(Value::Bool(true));
-            }
-          }
-          k += 1;
-        }
-        Ok(Value::Bool(false))
-      }),
-      &function_proto_map,
-    )),
+    non_enum_data(array_includes),
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("indexOf".to_string()),

@@ -9,6 +9,36 @@ use crate::vm::runtime::execution::{
 use crate::vm::state::{MAX_PROTOTYPE_DEPTH, PartialDescriptor};
 
 impl Vm {
+  fn get_proxy_property(
+    &mut self,
+    proxy_value: &Value,
+    key: &PropertyKey,
+    receiver: &Value,
+  ) -> Result<Value, RuntimeError> {
+    let Value::Proxy(proxy) = proxy_value else {
+      return Err(RuntimeError::from("expected proxy value"));
+    };
+    let (target, handler) = {
+      let proxy = proxy.borrow();
+      let Some(handler) = proxy.handler.clone() else {
+        return Err(self.throw_type_error("Cannot read property of revoked proxy"));
+      };
+      (proxy.target.clone(), handler)
+    };
+    let trap = self.get_property_value(&handler, &PropertyKey::String("get".to_string()))?;
+    if matches!(trap, Value::Undefined | Value::Null) {
+      return self.get_property_with_receiver(&target, key, receiver);
+    }
+    if !Self::is_callable_value(&trap) {
+      return Err(self.throw_type_error("Proxy get trap is not callable"));
+    }
+    let key_value = match key {
+      PropertyKey::String(name) => Value::String(name.clone()),
+      PropertyKey::Symbol(id) => Value::Symbol(id.clone(), None),
+    };
+    self.call_with_this(&trap, &handler, &[target, key_value, receiver.clone()])
+  }
+
   pub(super) fn super_base_object(&self) -> Result<Value, RuntimeError> {
     let home_object = self
       .current_method_home_object()
@@ -29,12 +59,8 @@ impl Vm {
         obj.type_name()
       )));
     }
-    if let Value::Proxy(proxy) = obj {
-      let proxy = proxy.borrow();
-      if proxy.is_revoked() {
-        return Err(self.throw_type_error("Cannot read property of revoked proxy"));
-      }
-      return self.get_property_value(&proxy.target, key);
+    if matches!(obj, Value::Proxy(_)) {
+      return self.get_proxy_property(obj, key, receiver);
     }
     if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
       return match desc {
@@ -798,12 +824,8 @@ impl Vm {
         obj.type_name()
       )));
     }
-    if let Value::Proxy(proxy) = obj {
-      let proxy = proxy.borrow();
-      if proxy.is_revoked() {
-        return Err(self.throw_type_error("Cannot read property of revoked proxy"));
-      }
-      return self.get_property_value(&proxy.target, key);
+    if matches!(obj, Value::Proxy(_)) {
+      return self.get_proxy_property(obj, key, obj);
     }
     if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
       return match desc {

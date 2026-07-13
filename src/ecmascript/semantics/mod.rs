@@ -118,7 +118,7 @@ fn array_like_length(
         return Ok(0);
       }
       if !len_num.is_finite() {
-        return Err(vm.throw_range_error("Invalid array length"));
+        return Ok(max_safe_len as usize);
       }
       let len = len_num
         .trunc()
@@ -136,7 +136,7 @@ fn array_like_length(
     return Ok(0);
   }
   if !len_num.is_finite() {
-    return Err(vm.throw_range_error("Invalid array length"));
+    return Ok(max_safe_len as usize);
   }
   let len = len_num
     .trunc()
