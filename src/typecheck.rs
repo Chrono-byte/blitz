@@ -124,8 +124,7 @@ fn strict_mode() -> bool {
   if let Some(v) = STRICT_OVERRIDE.with(|m| *m.borrow()) {
     return v;
   }
-  std::env::var("TSBLITZ_STRICT")
-    .is_ok_and(|v| v != "0")
+  std::env::var("TSBLITZ_STRICT").is_ok_and(|v| v != "0")
 }
 
 /// Override strict-mode behavior for type checking.

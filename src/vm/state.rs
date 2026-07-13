@@ -320,8 +320,7 @@ pub(super) fn get_global_bg_runtime() -> Arc<Runtime> {
       .and_then(|s| s.parse::<usize>().ok())
       .filter(|&n| n > 0 && n <= 1024); // upper bound for sanity
 
-    let cpus = std::thread::available_parallelism()
-      .map_or(4, std::num::NonZero::get);
+    let cpus = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
 
     // Reserve 1 core for main thread, but at least 1 worker
     let threads = threads_from_env.unwrap_or_else(|| cpus.saturating_sub(1).max(1));

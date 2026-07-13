@@ -29,8 +29,7 @@ use std::env;
 
 /// Returns true if tracing is enabled via TSBLITZ_TRACE environment variable
 pub fn enabled() -> bool {
-  env::var("TSBLITZ_TRACE")
-    .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+  env::var("TSBLITZ_TRACE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 fn string_inner(
