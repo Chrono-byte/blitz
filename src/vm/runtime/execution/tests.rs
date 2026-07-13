@@ -116,6 +116,31 @@ mod test {
   }
 
   #[test]
+  fn exponentiation_and_unary_operators_match_ecmascript() {
+    let (vm, _) = run_script(
+      r#"
+        globalThis.exp_positive_infinity = 1 ** Infinity;
+        globalThis.exp_negative_infinity = (-1) ** -Infinity;
+        globalThis.exp_negative = 2 ** -2;
+        globalThis.bitwise_not = ~(3 ** 2);
+        globalThis.unary_plus = +("2");
+      "#,
+    );
+
+    assert!(matches!(
+      vm.get_global("exp_positive_infinity"),
+      Some(Value::Number(value)) if value.is_nan()
+    ));
+    assert!(matches!(
+      vm.get_global("exp_negative_infinity"),
+      Some(Value::Number(value)) if value.is_nan()
+    ));
+    assert_eq!(vm.get_global("exp_negative"), Some(Value::Number(0.25_f64)));
+    assert_eq!(vm.get_global("bitwise_not"), Some(Value::Number(-10.0_f64)));
+    assert_eq!(vm.get_global("unary_plus"), Some(Value::Number(2.0_f64)));
+  }
+
+  #[test]
   fn risc_functions_literals_and_overflow_arguments_match_stack_v1() {
     let source = r#"
       function sum(a, b, c, d, e, f, g, h) {

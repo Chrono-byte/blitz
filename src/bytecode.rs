@@ -1019,10 +1019,12 @@ pub enum Op {
   LoadSpill,
   /// Store `rd` into a RISC spill slot. Aux: spill index (u16).
   StoreSpill,
+  /// rd = ~rs (bitwise NOT)
+  BitNot,
 }
 
 /// Total number of opcode variants.
-pub const OP_COUNT: usize = Op::StoreSpill as usize + 1;
+pub const OP_COUNT: usize = Op::BitNot as usize + 1;
 
 impl Op {
   /// Converts a byte to an Op if valid, returns None otherwise
@@ -1116,6 +1118,7 @@ impl Op {
       Op::ResetLocalCell => "ResetLocalCell",
       Op::LoadSpill => "LoadSpill",
       Op::StoreSpill => "StoreSpill",
+      Op::BitNot => "BitNot",
     }
   }
 
@@ -1237,6 +1240,7 @@ impl TryFrom<u8> for Op {
       75 => Ok(ResetLocalCell),
       76 => Ok(LoadSpill),
       77 => Ok(StoreSpill),
+      78 => Ok(BitNot),
       _ => Err(()),
     }
   }
@@ -1254,7 +1258,7 @@ mod tests {
 
   #[test]
   fn op_round_trip() {
-    for i in 0u8..=Op::StoreSpill as u8 {
+    for i in 0u8..=Op::BitNot as u8 {
       let op = Op::try_from(i).expect("valid op");
       let b = u8::from(op);
       assert_eq!(b, i);

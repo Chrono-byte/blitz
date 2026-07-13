@@ -7,6 +7,22 @@ pub(crate) fn usize_to_f64(value: usize) -> f64 {
   value.to_f64().unwrap_or(f64::NAN)
 }
 
+/// Apply ECMAScript Number exponentiation semantics.
+///
+/// Rust's `powf` differs from ECMAScript when the base has an absolute value
+/// of one and the exponent is infinite: ECMAScript requires `NaN` because the
+/// limiting value is indeterminate.
+pub(crate) fn number_exponentiate(
+  base: f64,
+  exponent: f64,
+) -> f64 {
+  if base.abs() == 1.0_f64 && exponent.is_infinite() {
+    f64::NAN
+  } else {
+    base.powf(exponent)
+  }
+}
+
 /// Format a JavaScript `Number` for string conversion.
 ///
 /// This intentionally follows ECMAScript `ToString` expectations for the
@@ -210,6 +226,24 @@ fn parse_float_string(text: &str) -> f64 {
     trimmed[..len].parse::<f64>().unwrap_or(f64::NAN)
   } else {
     f64::NAN
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::number_exponentiate;
+
+  #[test]
+  fn exponentiation_of_unit_base_by_infinity_is_nan() {
+    for base in [-1.0_f64, 1.0_f64] {
+      assert!(number_exponentiate(base, f64::INFINITY).is_nan());
+      assert!(number_exponentiate(base, f64::NEG_INFINITY).is_nan());
+    }
+  }
+
+  #[test]
+  fn exponentiation_uses_regular_power_for_finite_values() {
+    assert_eq!(number_exponentiate(2.0_f64, -2.0_f64), 0.25_f64);
   }
 }
 

@@ -205,7 +205,7 @@ pub(crate) fn lower_chunk(chunk: &Chunk) -> Result<Chunk, CompilerError> {
         store_location(&mut lowered, plan.get(height - 2)?, upper, line);
         store_location(&mut lowered, plan.get(height - 1)?, 0, line);
       }
-      Op::Neg | Op::Not | Op::Typeof => {
+      Op::Neg | Op::Not | Op::BitNot | Op::Typeof => {
         let destination = plan.get(height - 1)?;
         let source = load_location(&mut lowered, destination, 0, line);
         let rd = destination_register(destination, source);
@@ -490,6 +490,7 @@ fn risc_executor_supports(op: Op) -> bool {
       | Op::Mod
       | Op::Pow
       | Op::Neg
+      | Op::BitNot
       | Op::BitAnd
       | Op::BitOr
       | Op::BitXor
@@ -805,7 +806,7 @@ fn stack_effect(
     | Op::SetModuleExport
     | Op::Throw => StackEffect::new(1, 0),
 
-    Op::Neg | Op::Not | Op::Typeof => StackEffect::new(1, 1),
+    Op::Neg | Op::Not | Op::BitNot | Op::Typeof => StackEffect::new(1, 1),
     Op::Add
     | Op::Sub
     | Op::Mul

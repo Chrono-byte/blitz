@@ -9,7 +9,9 @@ use crate::errors::RuntimeError;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
-use crate::runtime_utils::{array_length_descriptor, js_number_to_string, usize_to_f64};
+use crate::runtime_utils::{
+  array_length_descriptor, js_number_to_string, number_exponentiate, usize_to_f64,
+};
 use crate::value::{
   ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SharedValue,
   SymbolId, Value,
@@ -1199,6 +1201,12 @@ impl Vm {
           registers[rd] = Value::Number(-self.to_number_value(&registers[rs])?);
         }
         Op::Not => registers[rd] = Value::Bool(!registers[rs].is_truthy()),
+        Op::BitNot => {
+          registers[rd] = match registers[rs].clone() {
+            Value::BigInt(value) => Value::BigInt(!value),
+            value => Value::Number((!self.to_int32_value(&value)?) as f64),
+          };
+        }
         Op::Typeof => registers[rd] = Value::String(registers[rs].type_name().to_string()),
         Op::Add => {
           let left = self.to_primitive(&registers[rd], None)?;
@@ -1255,7 +1263,7 @@ impl Vm {
                 Op::Mul => left * right,
                 Op::Div => left / right,
                 Op::Mod => left % right,
-                Op::Pow => left.powf(right),
+                Op::Pow => number_exponentiate(left, right),
                 _ => unreachable!(),
               })
             }
@@ -2354,41 +2362,8 @@ impl Vm {
           }
         };
 
-        let a_num = match to_numeric(self, a) {
-          Ok(n) => n,
-          Err(_e) => {
-            // Convert runtime error into a JS TypeError where appropriate
-            let ctor = self
-              .get_global("TypeError")
-              .unwrap_or(Value::Undefined);
-            let thrown = self
-              .construct_value(&ctor, &[])
-              .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                ObjectData::new(),
-              )))));
-            match self.unwind_to_handler(thrown) {
-              Ok(()) => return Ok(StepOutcome::Continue),
-              Err(err) => return Err(err),
-            }
-          }
-        };
-        let b_num = match to_numeric(self, b) {
-          Ok(n) => n,
-          Err(_e) => {
-            let ctor = self
-              .get_global("TypeError")
-              .unwrap_or(Value::Undefined);
-            let thrown = self
-              .construct_value(&ctor, &[])
-              .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                ObjectData::new(),
-              )))));
-            match self.unwind_to_handler(thrown) {
-              Ok(()) => return Ok(StepOutcome::Continue),
-              Err(err) => return Err(err),
-            }
-          }
-        };
+        let a_num = to_numeric(self, a)?;
+        let b_num = to_numeric(self, b)?;
 
         match (a_num, b_num) {
           (Numeric::BigInt(x), Numeric::BigInt(y)) => {
@@ -2414,7 +2389,7 @@ impl Vm {
             self.stack.push(Value::BigInt(x.pow(exp_u32)));
           }
           (Numeric::Number(x), Numeric::Number(y)) => {
-            let r = x.powf(y);
+            let r = number_exponentiate(x, y);
             self.stack.push(Value::Number(r));
           }
           // Mixing BigInt and Number -> throw TypeError as JS semantics
@@ -2457,6 +2432,16 @@ impl Vm {
       Op::Not => {
         let v = self.pop()?;
         self.stack.push(Value::Bool(!v.is_truthy()));
+      }
+      Op::BitNot => {
+        let value = self.pop()?;
+        match value {
+          Value::BigInt(value) => self.stack.push(Value::BigInt(!value)),
+          value => {
+            let value = self.to_int32_value(&value)?;
+            self.stack.push(Value::Number((!value) as f64));
+          }
+        }
       }
       Op::BitAnd => {
         // Perform ToInt32 on operands and bitwise-and like JS

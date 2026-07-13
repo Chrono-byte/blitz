@@ -4579,7 +4579,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         Rc::new(|vm, args| {
           let x = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
           let y = vm.to_number_value(args.get(2).unwrap_or(&Value::Undefined))?;
-          Ok(Value::Number(x.powf(y)))
+          Ok(Value::Number(number_exponentiate(x, y)))
         }),
         &function_proto_map,
       );

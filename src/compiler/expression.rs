@@ -1252,6 +1252,12 @@ impl super::Compiler {
           match u.operator {
             oast::UnaryOperator::LogicalNot => self.emit(Op::Not, LINE),
             oast::UnaryOperator::UnaryNegation => self.emit(Op::Neg, LINE),
+            oast::UnaryOperator::UnaryPlus => {
+              // Unary plus performs ToNumber while preserving negative zero.
+              self.emit(Op::Neg, LINE);
+              self.emit(Op::Neg, LINE);
+            }
+            oast::UnaryOperator::BitwiseNot => self.emit(Op::BitNot, LINE),
             oast::UnaryOperator::Void => {
               self.emit(Op::Pop, LINE);
               self.emit(Op::Undefined, LINE);
