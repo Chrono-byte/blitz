@@ -36,6 +36,7 @@ mod binding;
 mod declaration;
 mod expression;
 mod pre_declare;
+mod risc;
 mod tail;
 
 const LINE: u32 = 1;
@@ -55,6 +56,19 @@ pub fn compile(
   c.compile_oxc(program, None)
 }
 
+/// Compile a parsed program through verified StackV1 IR into RISC v2 bytecode.
+///
+/// # Errors
+///
+/// Returns an error when stack verification or RISC lowering fails.
+pub fn compile_risc(
+  program: &oast::Program<'_>,
+  source: &str,
+) -> Result<Chunk, crate::errors::CompilerError> {
+  let stack_chunk = compile(program, source)?;
+  risc::lower_chunk(&stack_chunk)
+}
+
 /// Compile an oxc AST Program.
 ///
 /// # Errors
@@ -66,7 +80,8 @@ pub fn compile_oxc(
 ) -> Result<Chunk, crate::errors::CompilerError> {
   let source_text = Rc::new(source.to_string());
   let mut c = Compiler::new(source_text);
-  c.compile_oxc(program, None)
+  let stack_chunk = c.compile_oxc(program, None)?;
+  Ok(risc::lower_chunk(&stack_chunk).unwrap_or(stack_chunk))
 }
 
 /// Compile an oxc AST Program with an optional ModuleContext.

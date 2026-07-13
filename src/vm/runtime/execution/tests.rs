@@ -21,7 +21,7 @@ fn test_globals() -> Rc<RefCell<ObjectData>> {
 fn run_script(src: &str) -> (Vm, Rc<RefCell<ObjectData>>) {
   let session = Parser::parse_source(src).expect("parse ok");
   let program = session.program();
-  let chunk = compiler::compile(program, session.source()).expect("compile ok");
+  let chunk = compiler::compile_oxc(program, session.source()).expect("compile ok");
 
   let globals = test_globals();
   let mut vm = Vm::new(Clone::clone(&globals));
@@ -86,6 +86,61 @@ mod test {
     assert!(matches!(
       vm.get_global("for_const_result"),
       Some(Value::Bool(true))
+    ));
+  }
+
+  #[test]
+  fn risc_core_execution_matches_stack_v1() {
+    let source = r#"
+      var x = 1;
+      while (x < 5) x = x + 1;
+      var result = x * 2;
+    "#;
+    let session = Parser::parse_source(source).expect("parse");
+    let stack_chunk = compiler::compile(session.program(), session.source()).expect("stack");
+    let risc_chunk = compiler::compile_risc(session.program(), session.source()).expect("risc");
+
+    let stack_globals = test_globals();
+    let mut stack_vm = Vm::new(Rc::clone(&stack_globals));
+    stack_vm.run(stack_chunk).expect("stack run");
+
+    let risc_globals = test_globals();
+    let mut risc_vm = Vm::new(Rc::clone(&risc_globals));
+    risc_vm.run(risc_chunk).expect("risc run");
+
+    assert_eq!(stack_vm.get_global("result"), risc_vm.get_global("result"));
+    assert!(matches!(
+      risc_vm.get_global("result"),
+      Some(Value::Number(10.0_f64))
+    ));
+  }
+
+  #[test]
+  fn risc_functions_literals_and_overflow_arguments_match_stack_v1() {
+    let source = r#"
+      function sum(a, b, c, d, e, f, g, h) {
+        return a + b + c + d + e + f + g + h;
+      }
+      var array = [1, 2, 3];
+      var object = { value: 4, other: 5 };
+      var result = sum(array[0], array[1], array[2], object.value, object.other, 6, 7, 8);
+    "#;
+    let session = Parser::parse_source(source).expect("parse");
+    let stack_chunk = compiler::compile(session.program(), session.source()).expect("stack");
+    let risc_chunk = compiler::compile_risc(session.program(), session.source()).expect("risc");
+
+    let stack_globals = test_globals();
+    let mut stack_vm = Vm::new(Rc::clone(&stack_globals));
+    stack_vm.run(stack_chunk).expect("stack run");
+
+    let risc_globals = test_globals();
+    let mut risc_vm = Vm::new(Rc::clone(&risc_globals));
+    risc_vm.run(risc_chunk).expect("risc run");
+
+    assert_eq!(stack_vm.get_global("result"), risc_vm.get_global("result"));
+    assert!(matches!(
+      risc_vm.get_global("result"),
+      Some(Value::Number(36.0_f64))
     ));
   }
 

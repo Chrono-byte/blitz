@@ -149,6 +149,7 @@ fn force_runner_gc() {
 }
 
 /// Trims the allocator, if the `TSBLITZ_TRIM_ALLOCATOR` environment variable is set.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn maybe_trim_allocator() {
   if env::var_os("TSBLITZ_TRIM_ALLOCATOR").is_none() {
     return;
@@ -164,6 +165,15 @@ fn maybe_trim_allocator() {
   let trimmed = unsafe { malloc_trim(0) };
   if env::var_os("TSBLITZ_GC_TRACE").is_some() {
     eprintln!("[gc] allocator trim requested result={}", trimmed);
+  }
+}
+
+/// `malloc_trim` is a glibc extension. Other targets keep the runner behavior
+/// portable by treating allocator trimming as an unavailable best-effort hint.
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn maybe_trim_allocator() {
+  if env::var_os("TSBLITZ_TRIM_ALLOCATOR").is_some() && env::var_os("TSBLITZ_GC_TRACE").is_some() {
+    eprintln!("[gc] allocator trim requested but unsupported on this target");
   }
 }
 

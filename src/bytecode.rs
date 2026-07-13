@@ -181,6 +181,10 @@ pub struct Chunk {
   pub root_lexical_tdz: Vec<bool>,
   /// Root script immutability flags (`const`).
   pub root_slot_immutable: Vec<bool>,
+  /// Number of non-lexical frame spill slots required by RISC v2 lowering.
+  pub risc_spill_count: u16,
+  /// Prefix of `risc_spill_count` occupied by stable lowered value homes.
+  pub risc_value_spill_count: u16,
   /// Whether the compiled root source is strict.
   pub root_strict: bool,
   /// Whether `new.target` is valid in this chunk's execution context.
@@ -267,6 +271,8 @@ impl Chunk {
       root_slot_names: Vec::new(),
       root_lexical_tdz: Vec::new(),
       root_slot_immutable: Vec::new(),
+      risc_spill_count: 0,
+      risc_value_spill_count: 0,
       root_strict: false,
       allow_new_target: false,
       allow_super: false,
@@ -305,6 +311,18 @@ impl Chunk {
         format!(
           "compare={} r{} r{} offset={}",
           condition, left, right, offset
+        )
+      }
+      BytecodeFormat::RiscV2
+        if matches!(
+          instruction.op,
+          Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish
+        ) =>
+      {
+        format!(
+          "r{} offset={}",
+          decode_rd(word),
+          decode_risc_cond_offset(word)
         )
       }
       BytecodeFormat::RiscV2 => format!(
@@ -356,6 +374,14 @@ impl Chunk {
         BytecodeFormat::RiscV2 if instruction.op == Op::CompareJump => {
           Some(decode_compare_jump(self.code[ip]).3 as i32)
         }
+        BytecodeFormat::RiscV2
+          if matches!(
+            instruction.op,
+            Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish
+          ) =>
+        {
+          Some(decode_risc_cond_offset(self.code[ip]))
+        }
         BytecodeFormat::RiscV2 => instruction.branch_offset(),
       };
       if let Some(offset) = branch_offset {
@@ -367,21 +393,21 @@ impl Chunk {
           ));
         }
       }
+      let pool_index = match self.format {
+        BytecodeFormat::StackV1 => instruction.operand_u16(),
+        BytecodeFormat::RiscV2 => decode_risc_aux16(self.code[ip]),
+      };
       match instruction.op {
-        Op::Const if instruction.operand_u16() as usize >= self.constants.len() => {
+        Op::Const if pool_index as usize >= self.constants.len() => {
           return Err(format!(
             "constant index {} at instruction {} is out of bounds",
-            instruction.operand_u16(),
-            ip
+            pool_index, ip
           ));
         }
-        Op::MakeClosure
-          if instruction.operand_u8(0).unwrap_or_default() as usize >= self.functions.len() =>
-        {
+        Op::MakeClosure if pool_index as usize >= self.functions.len() => {
           return Err(format!(
             "function index {} at instruction {} is out of bounds",
-            instruction.operand_u8(0).unwrap_or_default(),
-            ip
+            pool_index, ip
           ));
         }
         _ => {}
@@ -649,6 +675,53 @@ pub fn encode_registers(
   rs: u8,
 ) -> u32 {
   encode_rd(rd) | encode_rs(rs)
+}
+
+/// Encode a normal RISC instruction with destination and source registers.
+pub fn encode_risc_registers(
+  op: Op,
+  rd: u8,
+  rs: u8,
+) -> u32 {
+  op as u32 | encode_registers(rd, rs)
+}
+
+/// Encode a RISC instruction with `rd` and a 16-bit auxiliary operand.
+pub fn encode_risc_aux16(
+  op: Op,
+  rd: u8,
+  aux: u16,
+) -> u32 {
+  op as u32 | encode_rd(rd) | ((aux as u32) << 16)
+}
+
+/// Decode the 16-bit auxiliary operand from a normal RISC instruction.
+pub fn decode_risc_aux16(instr: u32) -> u16 {
+  (instr >> 16) as u16
+}
+
+/// Encode a RISC conditional jump using `rd` and a signed 20-bit offset.
+pub fn encode_risc_cond_jump(
+  op: Op,
+  rd: u8,
+  offset: i32,
+) -> Option<u32> {
+  if !matches!(op, Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish)
+    || !(-(1 << 19)..(1 << 19)).contains(&offset)
+  {
+    return None;
+  }
+  Some(op as u32 | encode_rd(rd) | (((offset as u32) & 0x000F_FFFF) << 12))
+}
+
+/// Decode the signed 20-bit offset from a RISC conditional jump.
+pub fn decode_risc_cond_offset(instr: u32) -> i32 {
+  let value = (instr >> 12) & 0x000F_FFFF;
+  if value & 0x0008_0000 != 0 {
+    (value | 0xFFF0_0000) as i32
+  } else {
+    value as i32
+  }
 }
 
 /// Pack a RISC compare-and-branch instruction.
@@ -942,10 +1015,14 @@ pub enum Op {
   Spread,
   /// ResetLocalCell: create a fresh uninitialized lexical cell. Aux: slot_idx (u8)
   ResetLocalCell,
+  /// Load a RISC spill slot into `rd`. Aux: spill index (u16).
+  LoadSpill,
+  /// Store `rd` into a RISC spill slot. Aux: spill index (u16).
+  StoreSpill,
 }
 
 /// Total number of opcode variants.
-pub const OP_COUNT: usize = Op::ResetLocalCell as usize + 1;
+pub const OP_COUNT: usize = Op::StoreSpill as usize + 1;
 
 impl Op {
   /// Converts a byte to an Op if valid, returns None otherwise
@@ -1037,6 +1114,8 @@ impl Op {
       Op::InstanceOf => "InstanceOf",
       Op::Spread => "Spread",
       Op::ResetLocalCell => "ResetLocalCell",
+      Op::LoadSpill => "LoadSpill",
+      Op::StoreSpill => "StoreSpill",
     }
   }
 
@@ -1156,6 +1235,8 @@ impl TryFrom<u8> for Op {
       73 => Ok(InstanceOf),
       74 => Ok(Spread),
       75 => Ok(ResetLocalCell),
+      76 => Ok(LoadSpill),
+      77 => Ok(StoreSpill),
       _ => Err(()),
     }
   }
@@ -1173,7 +1254,7 @@ mod tests {
 
   #[test]
   fn op_round_trip() {
-    for i in 0u8..=Op::ResetLocalCell as u8 {
+    for i in 0u8..=Op::StoreSpill as u8 {
       let op = Op::try_from(i).expect("valid op");
       let b = u8::from(op);
       assert_eq!(b, i);

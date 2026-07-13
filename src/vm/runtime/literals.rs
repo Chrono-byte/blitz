@@ -12,15 +12,28 @@ use std::sync::Mutex;
 impl Vm {
   pub(super) fn build_array(&mut self) -> Result<(), RuntimeError> {
     let n = self.read_byte()? as usize;
-    let mut elems: Vec<Option<Value>> = Vec::with_capacity(n);
+    let mut values = Vec::with_capacity(n);
     for _ in 0..n {
-      let value = self.pop()?;
-      elems.push(match value {
+      values.push(self.pop()?);
+    }
+    values.reverse();
+    let array = self.build_array_value(values)?;
+    self.stack.push(array);
+    Ok(())
+  }
+
+  pub(super) fn build_array_value(
+    &mut self,
+    values: Vec<Value>,
+  ) -> Result<Value, RuntimeError> {
+    let n = values.len();
+    let elems: Vec<Option<Value>> = values
+      .into_iter()
+      .map(|value| match value {
         Value::Uninitialized => None,
         other => Some(other),
-      });
-    }
-    elems.reverse();
+      })
+      .collect();
 
     let arr_rc = Rc::new(RefCell::new(ArrayData::from(elems)));
     let props: Rc<RefCell<ObjectData>> = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
@@ -45,9 +58,7 @@ impl Vm {
       props.borrow_mut().set_prototype_value(proto_val);
     }
 
-    self
-      .stack
-      .push(Value::Array(Rc::clone(&arr_rc), Rc::clone(&props)));
+    let array = Value::Array(Rc::clone(&arr_rc), Rc::clone(&props));
     if crate::trace::enabled() {
       eprintln!(
         "[trace] build_array: created Array arr_ptr={:p} props_ptr={:p} ip={}",
@@ -56,20 +67,41 @@ impl Vm {
         self.ip.saturating_sub(1)
       );
     }
-    Ok(())
+    Ok(array)
   }
 
   pub(super) fn build_object(&mut self) -> Result<(), RuntimeError> {
     let n = self.read_byte()? as usize;
-    let mut entries: Vec<(PropertyKey, PropertyDescriptor)> = Vec::with_capacity(n);
+    let mut values = Vec::with_capacity(n.saturating_mul(2));
     for _ in 0..n {
-      let value = self.pop()?;
-      let key_val = self.pop()?;
+      values.push(self.pop()?);
+      values.push(self.pop()?);
+    }
+    values.reverse();
+    let object = self.build_object_value(values)?;
+    self.stack.push(object);
+    Ok(())
+  }
+
+  pub(super) fn build_object_value(
+    &mut self,
+    values: Vec<Value>,
+  ) -> Result<Value, RuntimeError> {
+    if !values.len().is_multiple_of(2) {
+      return Err(RuntimeError::from(
+        "object literal operand count is not even",
+      ));
+    }
+    let n = values.len() / 2;
+    let mut entries: Vec<(PropertyKey, PropertyDescriptor)> = Vec::with_capacity(n);
+    for pair in values.chunks_exact(2) {
+      let key_val = pair[0].clone();
+      let value = pair[1].clone();
       let key = self.to_property_key(&key_val)?;
       entries.push((key, PropertyDescriptor::data(value)));
     }
     let mut map = indexmap::IndexMap::with_capacity(n);
-    for (key, desc) in entries.into_iter().rev() {
+    for (key, desc) in entries {
       map.insert(key, desc);
     }
     let mut data = ObjectData::new();
@@ -94,7 +126,7 @@ impl Vm {
     }
 
     let obj_rc = gc::track_object(Rc::new(RefCell::new(data)));
-    self.stack.push(Value::Object(Rc::clone(&obj_rc)));
+    let object = Value::Object(Rc::clone(&obj_rc));
     if crate::trace::enabled() {
       eprintln!(
         "[trace] build_object: created Object obj_ptr={:p} ip={}",
@@ -102,13 +134,24 @@ impl Vm {
         self.ip.saturating_sub(1)
       );
     }
-    Ok(())
+    Ok(object)
   }
 
   /// Creates a closure value from a function index.
   #[allow(clippy::too_many_lines)]
   pub(super) fn make_closure(&mut self) -> Result<(), RuntimeError> {
     let idx = self.read_byte()? as usize;
+    let closure = self.make_closure_value(idx)?;
+    self.stack.push(closure);
+    Ok(())
+  }
+
+  /// Creates a closure without coupling the result to the StackV1 operand stack.
+  #[allow(clippy::too_many_lines)]
+  pub(super) fn make_closure_value(
+    &mut self,
+    idx: usize,
+  ) -> Result<Value, RuntimeError> {
     let proto = self
       .chunk
       .functions
@@ -286,7 +329,6 @@ impl Vm {
       );
     }
 
-    self.stack.push(closure.clone());
     if crate::trace::enabled() {
       if let Value::Closure { props, .. } = &closure {
         eprintln!(
@@ -311,6 +353,6 @@ impl Vm {
         );
       }
     }
-    Ok(())
+    Ok(closure)
   }
 }

@@ -8,9 +8,10 @@ this file wins.
 
 - Bytecode instructions are fixed-width 32-bit words.
 - Serialized or cached bytecode must carry an explicit format version.
-- `StackV1` remains readable during migration. New compilation targets
-  `RiscV2` once differential execution is green for the supported language
-  surface.
+- `StackV1` remains readable as the compatibility format. The default script
+  frontend selects `RiscV2` when every root instruction is supported and
+  otherwise preserves the verified `StackV1` chunk. `compile_risc` is the
+  strict API for callers that require RISC output and rejects fallback.
 - The verifier, executor, disassembler, profiler, hotpatch helpers, and tests
   must decode through the same version-aware instruction API.
 
@@ -44,14 +45,16 @@ must not depend on whether a value resides in a register or slot.
 
 ## Compiler pipeline
 
-The existing stack compiler is retained temporarily as `StackV1` IR. RISC
+The existing stack compiler is retained as `StackV1` IR and as the versioned
+compatibility executor for suspension and exception machinery. RISC
 lowering performs control-flow discovery, exact stack-height verification,
 virtual-register construction, allocation/spilling, and final encoding. A
 merge with conflicting stack heights is a compiler error, not a runtime fixup.
 
 ## Cutover gates
 
-RISC becomes the default only after all of the following hold:
+RISC selection at the public script frontend is guarded by all of the
+following:
 
 1. Stack and RISC execution agree on values, thrown errors, and observable
    side effects for the unit corpus and targeted Test262 cases.

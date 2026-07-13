@@ -9,7 +9,7 @@
 //!   - [`parser`] - Parses tokens into AST (using oxc_ast)
 //!   - [`compiler`] - Compiles AST into bytecode instructions
 //!   - [`bytecode`] - Defines VM opcodes and instruction encoding
-//!   - [`vm`] - Stack-based bytecode interpreter with heap/stack management
+//!   - [`vm`] - Versioned register/stack bytecode interpreter and runtime
 //!   - [`value`] - Runtime value types (numbers, strings, objects, closures)
 //!   - [`errors`] - Error types for all VM operations
 //!   - [`trace`] - Execution tracing and debugging utilities

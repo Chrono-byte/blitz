@@ -343,8 +343,8 @@ pub(super) fn get_global_bg_runtime() -> Arc<Runtime> {
 //
 // Conformance notes
 //
-// The VM implements a stack-based bytecode interpreter suitable for
-// executing compiled chunks produced by the project's compiler. A few
+// The VM implements versioned RISC and stack compatibility bytecode
+// interpreters suitable for executing compiled chunks. A few
 // runtime behaviors are intentionally non-standard or are pragmatic
 // approximations of ECMAScript semantics:
 //
