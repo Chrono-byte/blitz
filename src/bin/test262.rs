@@ -34,7 +34,7 @@ use std::env;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::process::{Command, exit};
+use std::process::{Command, ExitStatus, exit};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -668,7 +668,34 @@ fn should_use_subprocess_batches(
     && opts.file_list.is_none()
     && !opts.harness_only
     && !opts.dump_scopes
-    && selected_count > 1
+    && selected_count > 0
+}
+
+/// Splits a crashed subprocess batch while preserving each test's original index.
+fn bisect_subprocess_batch(
+  chunk_start: usize,
+  mut chunk_files: Vec<PathBuf>,
+) -> Option<((usize, Vec<PathBuf>), (usize, Vec<PathBuf>))> {
+  if chunk_files.len() < 2 {
+    return None;
+  }
+
+  let midpoint = chunk_files.len() / 2;
+  let right = chunk_files.split_off(midpoint);
+  Some(((chunk_start, chunk_files), (chunk_start + midpoint, right)))
+}
+
+/// Converts a single-test subprocess crash into a reportable Test262 result.
+fn subprocess_crash_result(status: &ExitStatus) -> TestResult {
+  #[cfg(windows)]
+  {
+    const WINDOWS_STACK_OVERFLOW: i32 = i32::from_ne_bytes(0xC000_00FD_u32.to_ne_bytes());
+    if status.code() == Some(WINDOWS_STACK_OVERFLOW) {
+      return TestResult::StackOverflow;
+    }
+  }
+
+  TestResult::Panic(format!("subprocess exited with status {status}"))
 }
 
 /// Runs selected tests via subprocess batches and returns the results.
@@ -746,15 +773,36 @@ fn run_selected_tests_via_subprocess_batches(
           Ok(status) if status.success() || status.code() == Some(1_i32) => {}
           Ok(status) => {
             drop(fs::remove_file(&report_path));
-            shared_errors
+            let crashed_count = chunk_files.len();
+            if crashed_count > 1 {
+              let (left, right) = bisect_subprocess_batch(chunk_start, chunk_files)
+                .expect("a multi-test subprocess batch can be split");
+              eprintln!(
+                "Subprocess batch crashed with status {} for {} tests; retrying smaller batches",
+                status, crashed_count
+              );
+              let mut guard = queue
+                .lock()
+                .expect("subprocess chunk queue poisoned");
+              guard.push_front(right);
+              guard.push_front(left);
+              continue;
+            }
+
+            let file = chunk_files
+              .into_iter()
+              .next()
+              .expect("a subprocess batch always contains a test");
+            eprintln!(
+              "Subprocess test crashed with status {}: {}",
+              status,
+              file.display()
+            );
+            shared_results
               .lock()
-              .expect("subprocess errors poisoned")
-              .push(format!(
-                "Subprocess batch failed with status {} for {} tests",
-                status,
-                chunk_files.len()
-              ));
-            break;
+              .expect("subprocess results poisoned")
+              .push((chunk_start, file, subprocess_crash_result(&status)));
+            continue;
           }
           Err(e) => {
             drop(fs::remove_file(&report_path));
@@ -2848,6 +2896,14 @@ mod tests {
   }
 
   #[test]
+  fn subprocess_isolation_applies_to_a_single_selected_test() {
+    let opts = RunnerOptions::parse_from(["test262"]);
+
+    assert!(should_use_subprocess_batches(&opts, 1));
+    assert!(!should_use_subprocess_batches(&opts, 0));
+  }
+
+  #[test]
   fn sort_test_results_orders_by_original_index() {
     let mut results = vec![
       (2, PathBuf::from("c.js"), TestResult::Pass),
@@ -2859,6 +2915,36 @@ mod tests {
 
     let indices: Vec<_> = results.iter().map(|(idx, _, _)| *idx).collect();
     assert_eq!(indices, vec![0, 1, 2]);
+  }
+
+  #[test]
+  fn bisect_subprocess_batch_preserves_original_indices() {
+    let files = vec![
+      PathBuf::from("a.js"),
+      PathBuf::from("b.js"),
+      PathBuf::from("c.js"),
+      PathBuf::from("d.js"),
+      PathBuf::from("e.js"),
+    ];
+
+    let (left, right) = bisect_subprocess_batch(10, files).expect("batch should split");
+
+    assert_eq!(left.0, 10);
+    assert_eq!(left.1, vec![PathBuf::from("a.js"), PathBuf::from("b.js")]);
+    assert_eq!(right.0, 12);
+    assert_eq!(
+      right.1,
+      vec![
+        PathBuf::from("c.js"),
+        PathBuf::from("d.js"),
+        PathBuf::from("e.js")
+      ]
+    );
+  }
+
+  #[test]
+  fn bisect_subprocess_batch_leaves_single_test_for_failure_reporting() {
+    assert!(bisect_subprocess_batch(3, vec![PathBuf::from("only.js")]).is_none());
   }
 
   #[test]
