@@ -563,6 +563,13 @@ impl Compiler {
                 } else {
                   self.add_local_with_mirror(name.clone(), None, mirror_global)
                 };
+                if !matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+                  self.mark_local_tdz(slot);
+                  self.add_lexical_binding(&name);
+                }
+                if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
+                  self.mark_local_immutable(slot);
+                }
                 if matches!(
                   v.kind,
                   oxc_ast::ast::VariableDeclarationKind::Let
@@ -758,7 +765,7 @@ impl Compiler {
               self.add_var_names_from_binding(&dec.id, &mut names);
               for name in &names {
                 if let Some(slot) = self.resolve_local(name) {
-                  self.emit(Op::CloneLocalCell, LINE);
+                  self.emit(Op::ResetLocalCell, LINE);
                   self.emit_byte(self.slot_to_u8(slot)?, LINE);
                 }
               }
@@ -963,7 +970,7 @@ impl Compiler {
               self.add_var_names_from_binding(&dec.id, &mut names);
               for name in &names {
                 if let Some(slot) = self.resolve_local(name) {
-                  self.emit(Op::CloneLocalCell, LINE);
+                  self.emit(Op::ResetLocalCell, LINE);
                   self.emit_byte(self.slot_to_u8(slot)?, LINE);
                 }
               }

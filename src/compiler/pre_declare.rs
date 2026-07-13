@@ -74,22 +74,29 @@ impl Compiler {
     &mut self,
     stmts: &[oast::Statement],
   ) {
-    use oxc_ast::ast::BindingPattern as OPat;
+    use std::collections::HashSet;
+
     for stmt in stmts {
       if let oast::Statement::VariableDeclaration(v) = stmt {
         for dec in &v.declarations {
-          let name = match &dec.id {
-            OPat::BindingIdentifier(i) => i.name.to_string(),
-            _ => continue,
-          };
-          if self.resolve_local(&name).is_none() {
-            let mirror_global =
-              self.is_root && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
-            if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
-              self.add_var_local(name, None, mirror_global);
+          let mut names = HashSet::new();
+          Self::collect_binding_names(&dec.id, &mut names);
+          for name in names {
+            let slot = if let Some(slot) = self.resolve_local(&name) {
+              slot
             } else {
-              let slot = self.add_local_with_mirror(name.clone(), None, mirror_global);
-              self.mark_local_tdz(slot);
+              let mirror_global =
+                self.is_root && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
+              if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+                self.add_var_local(name.clone(), None, mirror_global)
+              } else {
+                let slot = self.add_local_with_mirror(name.clone(), None, mirror_global);
+                self.mark_local_tdz(slot);
+                slot
+              }
+            };
+            if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
+              self.mark_local_immutable(slot);
             }
           }
         }

@@ -943,6 +943,14 @@ impl Vm {
     &mut self,
     chunk: Chunk,
   ) -> Result<Value, RuntimeError> {
+    chunk
+      .verify()
+      .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
+    if chunk.format != crate::bytecode::BytecodeFormat::StackV1 {
+      return Err(RuntimeError::from(
+        "RISC v2 bytecode requires the register executor",
+      ));
+    }
     let chunk_rc = Rc::new(chunk);
     self.root_chunk = Some(Rc::clone(&chunk_rc));
     self.chunk = chunk_rc;
@@ -1027,6 +1035,14 @@ impl Vm {
     chunk: Chunk,
     direct_eval: bool,
   ) -> Result<Value, RuntimeError> {
+    chunk
+      .verify()
+      .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
+    if chunk.format != crate::bytecode::BytecodeFormat::StackV1 {
+      return Err(RuntimeError::from(
+        "RISC v2 bytecode requires the register executor",
+      ));
+    }
     let saved_chunk = Rc::clone(&self.chunk);
     let saved_ip = self.ip;
     let saved_stack = self.stack.snapshot();
@@ -1138,13 +1154,17 @@ impl Vm {
         }
         Ok(StepOutcome::Return(result)) => {
           self.pending_exception = false;
-          self.run_microtasks_if_needed()?;
+          let result = self.run_microtasks_if_needed().map(|()| result);
 
           {
             let _ = self.collect_garbage_prototype();
           }
-          self.finish_opcode_profile_run("return");
-          break Ok(result);
+          self.finish_opcode_profile_run(if result.is_ok() {
+            "return"
+          } else {
+            "microtask-error"
+          });
+          break result;
         }
         Ok(StepOutcome::Yield(_)) => {
           break Err(self.throw_type_error("yield used outside generator resume"));
@@ -1203,12 +1223,13 @@ impl Vm {
     let slot_names = self.chunk.root_slot_names.clone();
     let slot_tdz = self.chunk.root_lexical_tdz.clone();
     let slot_types = self.chunk.root_slot_types.clone();
-    let slot_immutable = vec![false; slot_names.len()];
+    let slot_immutable = self.chunk.root_slot_immutable.clone();
     let slot_sloppy_immutable_silent = vec![false; slot_names.len()];
     let slot_count = slot_names
       .len()
       .max(slot_tdz.len())
-      .max(slot_types.len());
+      .max(slot_types.len())
+      .max(slot_immutable.len());
     if slot_count == 0 {
       return;
     }
@@ -1230,11 +1251,19 @@ impl Vm {
         && idx < self.locals.len()
       {
         let initialized = !slot_tdz.get(idx).copied().unwrap_or(false);
-        root_env.borrow_mut().create_mutable_binding(
-          name.clone(),
-          Rc::clone(&self.locals[idx]),
-          initialized,
-        );
+        if slot_immutable.get(idx).copied().unwrap_or(false) {
+          root_env.borrow_mut().create_immutable_binding(
+            name.clone(),
+            Rc::clone(&self.locals[idx]),
+            initialized,
+          );
+        } else {
+          root_env.borrow_mut().create_mutable_binding(
+            name.clone(),
+            Rc::clone(&self.locals[idx]),
+            initialized,
+          );
+        }
         if initialized {
           let value = self.locals[idx].borrow().clone();
           self.globals.borrow_mut().properties.insert(
@@ -1499,8 +1528,11 @@ impl Vm {
     };
     if crate::trace::enabled() {
       eprintln!(
-        "[trace] step ip={} stack_size={} op_byte=0x{:02x}",
-        self.ip.saturating_sub(1),
+        "[trace] step {} stack_size={} op_byte=0x{:02x}",
+        self
+          .chunk
+          .disassemble_at(self.ip.saturating_sub(1))
+          .unwrap_or_else(|_| format!("ip={}", self.ip.saturating_sub(1))),
         self.stack.len(),
         op_byte
       );
@@ -1590,13 +1622,16 @@ impl Vm {
       Op::StoreLocal => {
         let slot = self.read_byte()? as usize;
         let v = self.pop()?;
+        ensure_slot(&mut self.locals, slot);
         let slot_immutable = self
           .current_slot_immutable
           .as_ref()
           .and_then(|flags| flags.get(slot))
           .copied()
           .unwrap_or(false);
-        if slot_immutable {
+        let initializes_immutable =
+          slot_immutable && matches!(*self.locals[slot].borrow(), Value::Uninitialized);
+        if slot_immutable && !initializes_immutable {
           let sloppy_silent = self
             .current_slot_sloppy_immutable_silent
             .as_ref()
@@ -1617,7 +1652,6 @@ impl Vm {
         {
           return Ok(StepOutcome::Continue);
         }
-        ensure_slot(&mut self.locals, slot);
         *self.locals[slot].borrow_mut() = v;
         if let Some(name) = self
           .chunk
@@ -1648,6 +1682,11 @@ impl Vm {
         ensure_slot(&mut self.locals, slot);
         let value = self.locals[slot].borrow().clone();
         self.locals[slot] = Rc::new(Mutex::new(value));
+      }
+      Op::ResetLocalCell => {
+        let slot = self.read_byte()? as usize;
+        ensure_slot(&mut self.locals, slot);
+        self.locals[slot] = Rc::new(Mutex::new(Value::Uninitialized));
       }
       Op::GetGlobal => {
         let idx = self.read_short()? as usize;
@@ -2404,7 +2443,10 @@ impl Vm {
         if len < 2 {
           return Err(RuntimeError::from("Stack underflow"));
         }
-        self.stack.swap(len - 1, len - 2);
+        self
+          .stack
+          .swap(len - 1, len - 2)
+          .map_err(|()| RuntimeError::from("Stack underflow"))?;
       }
       Op::PopN => {
         let count = self.read_byte()? as usize;
@@ -3557,14 +3599,14 @@ impl Vm {
                             | Op::PushHandler => {
                                 let hi = payload_byte(instr, 0) as i32;
                                 let lo = payload_byte(instr, 1) as i32;
-                                let offset = (((hi << 8) | lo) as i32) as i16;
+                                let offset = (((hi << 8) | lo)) as i16;
                                 eprintln!("[diag]    {:#06}  {:?} {}", k, op, offset);
                             }
                             Op::CompareJump => {
                                 let cmp = payload_byte(instr, 0);
                                 let hi = payload_byte(instr, 1) as i32;
                                 let lo = payload_byte(instr, 2) as i32;
-                                let offset = (((hi << 8) | lo) as i32) as i16;
+                                let offset = (((hi << 8) | lo)) as i16;
                                 eprintln!("[diag]    {:#06}  {:?} cmp={} {}", k, op, cmp, offset);
                             }
                             _ if width == 2 => {
@@ -3624,14 +3666,14 @@ impl Vm {
                             | Op::PushHandler => {
                                 let hi = payload_byte(instr, 0) as i32;
                                 let lo = payload_byte(instr, 1) as i32;
-                                let offset = (((hi << 8) | lo) as i32) as i16;
+                                let offset = (((hi << 8) | lo)) as i16;
                                 eprintln!("[diag]   {}: {:?} {}", j, op, offset);
                             }
                             Op::CompareJump => {
                                 let cmp = payload_byte(instr, 0);
                                 let hi = payload_byte(instr, 1) as i16;
                                 let lo = payload_byte(instr, 2) as i16;
-                                let offset = ((hi as i16) << 8) | (lo as i16);
+                                let offset = (hi << 8) | lo;
                                 eprintln!("[diag]   {}: {:?} cmp={} {}", j, op, cmp, offset);
                             }
                             Op::StoreLocal
@@ -3684,7 +3726,7 @@ impl Vm {
                                     let instr = self.chunk.code[full];
                                     let hi = payload_byte(instr, 0) as i16;
                                     let lo = payload_byte(instr, 1) as i16;
-                                    let offset = ((hi as i16) << 8) | (lo as i16);
+                                    let offset = (hi << 8) | lo;
                                     eprintln!("[diag]   {:#06}  {:?} {}", full, op, offset);
                                 }
                                 Op::CompareJump => {
@@ -3692,7 +3734,7 @@ impl Vm {
                                     let cmp = payload_byte(instr, 0);
                                     let hi = payload_byte(instr, 1) as i16;
                                     let lo = payload_byte(instr, 2) as i16;
-                                    let offset = ((hi as i16) << 8) | (lo as i16);
+                                    let offset = (hi << 8) | lo;
                                     eprintln!("[diag]   {:#06}  {:?} cmp={} {}", full, op, cmp, offset);
                                 }
                                 _ if width == 2 => {
@@ -4235,30 +4277,10 @@ impl Vm {
 // Free functions
 // ---------------------------------------------------------------------------
 
-/// Return the bytecode width of an opcode (opcode byte + operand bytes).
+/// Return the number of fixed-width instruction words occupied by an opcode.
 fn opcode_width(op: Op) -> usize {
-  match op {
-    Op::Const => 3,
-    Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => 3,
-    Op::LoadLocal
-    | Op::StoreLocal
-    | Op::Call
-    | Op::CallBuiltin
-    | Op::Construct
-    | Op::SuperConstruct
-    | Op::PopN
-    | Op::MakeClosure
-    | Op::GetUpvalue
-    | Op::SetUpvalue
-    | Op::SetProperty
-    | Op::BuildArray
-    | Op::BuildObject
-    | Op::Spread
-    | Op::ArrayFromSpread => 2,
-    Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => 3,
-    Op::CompareJump => 4,
-    _ => 1,
-  }
+  let _ = op;
+  1
 }
 
 /// Return own keys for a value when applicable.

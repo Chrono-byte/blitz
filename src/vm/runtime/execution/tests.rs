@@ -34,6 +34,62 @@ mod test {
   use super::*;
 
   #[test]
+  fn const_bindings_initialize_once_and_reject_reassignment() {
+    let (vm, _) = run_script(
+      r#"
+        const root = 1;
+        let root_threw = false;
+        try { root = 2; } catch (error) { root_threw = error instanceof TypeError; }
+
+        function localConst() {
+          const local = 3;
+          try { local = 4; } catch (error) { return error instanceof TypeError; }
+          return false;
+        }
+
+        const { value: destructured } = { value: 5 };
+        let destructured_threw = false;
+        try { destructured = 6; } catch (error) {
+          destructured_threw = error instanceof TypeError;
+        }
+
+        globalThis.const_result =
+          root === 1 && root_threw && localConst() &&
+          destructured === 5 && destructured_threw;
+      "#,
+    );
+
+    assert!(matches!(
+      vm.get_global("const_result"),
+      Some(Value::Bool(true))
+    ));
+  }
+
+  #[test]
+  fn for_const_uses_a_fresh_immutable_cell_per_iteration() {
+    let (vm, _) = run_script(
+      r#"
+        let closures = [];
+        for (const value of [1, 2, 3]) closures.push(() => value);
+        let reassignment_threw = false;
+        try {
+          for (const value of [1]) value = 2;
+        } catch (error) {
+          reassignment_threw = error instanceof TypeError;
+        }
+        globalThis.for_const_result =
+          closures[0]() === 1 && closures[1]() === 2 &&
+          closures[2]() === 3 && reassignment_threw;
+      "#,
+    );
+
+    assert!(matches!(
+      vm.get_global("for_const_result"),
+      Some(Value::Bool(true))
+    ));
+  }
+
+  #[test]
   fn object_get_own_property_descriptor_reports_data_flags() {
     let (vm, _globals) = run_script(
       r#"

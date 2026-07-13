@@ -16,7 +16,7 @@
 //!
 //! Special cases:
 //! - Jump instructions: bits 8-31 contain i24 signed offset
-//! - CompareJump: cond(3 bits) | rs1(4) | rs2(4) | offset_i13(15 bits) packed in bits 8-31
+//! - RISC CompareJump: cond(3) | rs1(4) | rs2(4) | signed offset(13)
 //!
 //! # Hotpatching
 //!
@@ -35,8 +35,7 @@
 //! use std::rc::Rc;
 //!
 //! let mut chunk = Chunk::new(Rc::new(String::new()));
-//! chunk.write(Op::Const as u8, 1);
-//! chunk.write(0, 1); // Constant index
+//! chunk.write_instr(Op::Const as u32, 1); // constant index 0
 //! ```
 
 use crate::typecheck::Type;
@@ -103,9 +102,66 @@ impl ICEntry {
   }
 }
 
+/// Bytecode execution format carried by every chunk.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BytecodeFormat {
+  /// Fixed-width encoding interpreted with the legacy operand-stack semantics.
+  #[default]
+  StackV1,
+  /// Fixed-width encoding interpreted with the 16-register RISC v2 semantics.
+  RiscV2,
+}
+
+/// A decoded fixed-width instruction.
+#[derive(Clone, Copy, Debug)]
+pub struct DecodedInstruction {
+  /// Decoded opcode.
+  pub op: Op,
+  /// Unsigned 24-bit payload.
+  pub payload: u32,
+}
+
+impl DecodedInstruction {
+  /// Return one of the three packed payload bytes.
+  pub fn operand_u8(
+    self,
+    index: usize,
+  ) -> Option<u8> {
+    (index < 3).then(|| ((self.payload >> (index * 8)) & 0xFF) as u8)
+  }
+
+  /// Return the low 16 payload bits as an unsigned operand.
+  pub fn operand_u16(self) -> u16 {
+    (self.payload & 0xFFFF) as u16
+  }
+
+  /// Return the sign-extended 24-bit payload.
+  pub fn operand_i24(self) -> i32 {
+    let payload = self.payload & 0x00FF_FFFF;
+    if payload & 0x0080_0000 != 0 {
+      (payload | 0xFF00_0000) as i32
+    } else {
+      payload as i32
+    }
+  }
+
+  /// Relative branch offset, accounting for opcode-specific payload layouts.
+  pub fn branch_offset(self) -> Option<i32> {
+    match self.op {
+      Op::CompareJump => Some(((self.payload >> 8) as u16 as i16) as i32),
+      Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => {
+        Some(self.operand_i24())
+      }
+      _ => None,
+    }
+  }
+}
+
 /// A chunk of bytecode containing opcodes, constants, and metadata
 #[derive(Clone, Debug)]
 pub struct Chunk {
+  /// Execution semantics for the encoded instruction words.
+  pub format: BytecodeFormat,
   /// Instructions stored as fixed-width 32-bit words. Each u32 contains
   /// opcode in the low 8 bits and a 24-bit payload in the upper bits.
   pub code: Vec<u32>,
@@ -123,6 +179,8 @@ pub struct Chunk {
   pub root_slot_names: Vec<Option<String>>,
   /// Root script temporal dead zone flags.
   pub root_lexical_tdz: Vec<bool>,
+  /// Root script immutability flags (`const`).
+  pub root_slot_immutable: Vec<bool>,
   /// Whether the compiled root source is strict.
   pub root_strict: bool,
   /// Whether `new.target` is valid in this chunk's execution context.
@@ -189,8 +247,9 @@ pub struct FunctionProto {
   pub is_async: bool,
   /// Whether this function was declared as a generator (`function*`).
   pub is_generator: bool,
-  /// Unified inline cache table for this function (RISC bytecode).
-  /// Indexed by 4-bit IC slot field in bytecode (0-15 slots max).
+  /// Unified inline cache table for this function.
+  /// Stack v1 sites currently use an 8-bit site index. RISC v2 sites use
+  /// side metadata so the register operand fields do not cap the site count.
   pub ic_table: Vec<ICEntry>,
 }
 
@@ -198,6 +257,7 @@ impl Chunk {
   /// Creates a new empty chunk
   pub fn new(source_text: Rc<String>) -> Self {
     Self {
+      format: BytecodeFormat::StackV1,
       code: Vec::new(),
       constants: Vec::new(),
       functions: Vec::new(),
@@ -206,10 +266,131 @@ impl Chunk {
       root_slot_types: Vec::new(),
       root_slot_names: Vec::new(),
       root_lexical_tdz: Vec::new(),
+      root_slot_immutable: Vec::new(),
       root_strict: false,
       allow_new_target: false,
       allow_super: false,
     }
+  }
+
+  /// Decode one instruction through the format-independent word decoder.
+  pub fn decode_at(
+    &self,
+    ip: usize,
+  ) -> Result<DecodedInstruction, String> {
+    let word = self
+      .code
+      .get(ip)
+      .copied()
+      .ok_or_else(|| format!("instruction index {} is out of bounds", ip))?;
+    let opcode = (word & 0xFF) as u8;
+    let op = Op::from_byte(opcode)
+      .ok_or_else(|| format!("invalid opcode {} at instruction {}", opcode, ip))?;
+    Ok(DecodedInstruction {
+      op,
+      payload: word >> 8,
+    })
+  }
+
+  /// Format one instruction for tracing and diagnostics.
+  pub fn disassemble_at(
+    &self,
+    ip: usize,
+  ) -> Result<String, String> {
+    let instruction = self.decode_at(ip)?;
+    let word = self.code[ip];
+    let detail = match self.format {
+      BytecodeFormat::RiscV2 if instruction.op == Op::CompareJump => {
+        let (condition, left, right, offset) = decode_compare_jump(word);
+        format!(
+          "compare={} r{} r{} offset={}",
+          condition, left, right, offset
+        )
+      }
+      BytecodeFormat::RiscV2 => format!(
+        "r{} r{} aux={} aux2={}",
+        decode_rd(word),
+        decode_rs(word),
+        decode_aux8(word),
+        decode_aux8_2(word)
+      ),
+      BytecodeFormat::StackV1 => match instruction.op {
+        Op::Const | Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => {
+          instruction.operand_u16().to_string()
+        }
+        Op::CompareJump => format!(
+          "compare={} offset={}",
+          instruction.operand_u8(0).unwrap_or_default(),
+          instruction.branch_offset().unwrap_or_default()
+        ),
+        Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => {
+          format!("offset={}", instruction.branch_offset().unwrap_or_default())
+        }
+        _ if instruction.payload != 0 => instruction
+          .operand_u8(0)
+          .unwrap_or_default()
+          .to_string(),
+        _ => String::new(),
+      },
+    };
+    if detail.is_empty() {
+      Ok(format!("{:#06} {}", ip, instruction.op.name()))
+    } else {
+      Ok(format!("{:#06} {} {}", ip, instruction.op.name(), detail))
+    }
+  }
+
+  /// Validate structural invariants before a chunk is executed.
+  pub fn verify(&self) -> Result<(), String> {
+    if self.lines.len() != self.code.len() {
+      return Err(format!(
+        "line table length {} does not match instruction count {}",
+        self.lines.len(),
+        self.code.len()
+      ));
+    }
+    for ip in 0..self.code.len() {
+      let instruction = self.decode_at(ip)?;
+      let branch_offset = match self.format {
+        BytecodeFormat::StackV1 => instruction.branch_offset(),
+        BytecodeFormat::RiscV2 if instruction.op == Op::CompareJump => {
+          Some(decode_compare_jump(self.code[ip]).3 as i32)
+        }
+        BytecodeFormat::RiscV2 => instruction.branch_offset(),
+      };
+      if let Some(offset) = branch_offset {
+        let target = ip as i64 + 1 + offset as i64;
+        if !(0..self.code.len() as i64).contains(&target) {
+          return Err(format!(
+            "jump at instruction {} targets out-of-bounds instruction {}",
+            ip, target
+          ));
+        }
+      }
+      match instruction.op {
+        Op::Const if instruction.operand_u16() as usize >= self.constants.len() => {
+          return Err(format!(
+            "constant index {} at instruction {} is out of bounds",
+            instruction.operand_u16(),
+            ip
+          ));
+        }
+        Op::MakeClosure
+          if instruction.operand_u8(0).unwrap_or_default() as usize >= self.functions.len() =>
+        {
+          return Err(format!(
+            "function index {} at instruction {} is out of bounds",
+            instruction.operand_u8(0).unwrap_or_default(),
+            ip
+          ));
+        }
+        _ => {}
+      }
+    }
+    for function in &self.functions {
+      function.chunk.verify()?;
+    }
+    Ok(())
   }
 
   /// Writes a packed instruction word to the chunk with line number info.
@@ -470,6 +651,41 @@ pub fn encode_registers(
   encode_rd(rd) | encode_rs(rs)
 }
 
+/// Pack a RISC compare-and-branch instruction.
+///
+/// The signed instruction-relative offset is limited to 13 bits. Larger
+/// branches must use an inverted short branch followed by a long jump.
+pub fn encode_compare_jump(
+  condition: u8,
+  left: u8,
+  right: u8,
+  offset: i16,
+) -> Option<u32> {
+  if condition > 7 || left > 15 || right > 15 || !(-4096..=4095).contains(&offset) {
+    return None;
+  }
+  let payload = (condition as u32)
+    | ((left as u32) << 3)
+    | ((right as u32) << 7)
+    | (((offset as u16 as u32) & 0x1FFF) << 11);
+  Some(Op::CompareJump as u32 | (payload << 8))
+}
+
+/// Decode a RISC compare-and-branch word as `(condition, left, right, offset)`.
+pub fn decode_compare_jump(instr: u32) -> (u8, u8, u8, i16) {
+  let payload = instr >> 8;
+  let condition = (payload & 0x7) as u8;
+  let left = ((payload >> 3) & 0xF) as u8;
+  let right = ((payload >> 7) & 0xF) as u8;
+  let raw_offset = ((payload >> 11) & 0x1FFF) as i16;
+  let offset = if raw_offset & 0x1000 != 0 {
+    raw_offset | !0x1FFF
+  } else {
+    raw_offset
+  };
+  (condition, left, right, offset)
+}
+
 // ============================================================================
 
 /// Returns the opcode from `instr`.
@@ -724,10 +940,12 @@ pub enum Op {
   InstanceOf,
   /// Spread: spread array into arguments
   Spread,
+  /// ResetLocalCell: create a fresh uninitialized lexical cell. Aux: slot_idx (u8)
+  ResetLocalCell,
 }
 
 /// Total number of opcode variants.
-pub const OP_COUNT: usize = Op::Spread as usize + 1;
+pub const OP_COUNT: usize = Op::ResetLocalCell as usize + 1;
 
 impl Op {
   /// Converts a byte to an Op if valid, returns None otherwise
@@ -818,6 +1036,7 @@ impl Op {
       Op::GetBuiltin => "GetBuiltin",
       Op::InstanceOf => "InstanceOf",
       Op::Spread => "Spread",
+      Op::ResetLocalCell => "ResetLocalCell",
     }
   }
 
@@ -936,6 +1155,7 @@ impl TryFrom<u8> for Op {
       72 => Ok(GetBuiltin),
       73 => Ok(InstanceOf),
       74 => Ok(Spread),
+      75 => Ok(ResetLocalCell),
       _ => Err(()),
     }
   }
@@ -953,12 +1173,50 @@ mod tests {
 
   #[test]
   fn op_round_trip() {
-    for i in 0u8..=Op::Spread as u8 {
+    for i in 0u8..=Op::ResetLocalCell as u8 {
       let op = Op::try_from(i).expect("valid op");
       let b = u8::from(op);
       assert_eq!(b, i);
       let op2 = Op::from_byte(b).expect("from_byte");
       assert_eq!(op2, op);
     }
+  }
+
+  #[test]
+  fn verifier_rejects_invalid_opcode_and_branch_target() {
+    let mut invalid_opcode = Chunk::default();
+    invalid_opcode.write_instr(0xFF, 1);
+    assert!(
+      invalid_opcode
+        .verify()
+        .unwrap_err()
+        .contains("invalid opcode")
+    );
+
+    let mut invalid_jump = Chunk::default();
+    invalid_jump.write_instr(Op::Jump as u32 | (10 << 8), 1);
+    assert!(
+      invalid_jump
+        .verify()
+        .unwrap_err()
+        .contains("out-of-bounds instruction")
+    );
+  }
+
+  #[test]
+  fn compare_jump_decoder_uses_its_signed_i16_offset() {
+    let payload = 2_u32 | ((-3_i16 as u16 as u32) << 8);
+    let instruction = DecodedInstruction {
+      op: Op::CompareJump,
+      payload,
+    };
+    assert_eq!(instruction.branch_offset(), Some(-3));
+  }
+
+  #[test]
+  fn risc_compare_jump_encoding_round_trips() {
+    let word = encode_compare_jump(6, 3, 14, -4096).expect("encodable branch");
+    assert_eq!(decode_compare_jump(word), (6, 3, 14, -4096));
+    assert!(encode_compare_jump(0, 0, 0, 4096).is_none());
   }
 }

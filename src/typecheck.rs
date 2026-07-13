@@ -125,8 +125,7 @@ fn strict_mode() -> bool {
     return v;
   }
   std::env::var("TSBLITZ_STRICT")
-    .map(|v| v != "0")
-    .unwrap_or(false)
+    .is_ok_and(|v| v != "0")
 }
 
 /// Override strict-mode behavior for type checking.

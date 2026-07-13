@@ -550,6 +550,16 @@ impl Compiler {
     }
   }
 
+  /// Marks a local variable as immutable after its first initialization.
+  pub(crate) fn mark_local_immutable(
+    &mut self,
+    slot: usize,
+  ) {
+    if let Some(flag) = self.local_immutable.get_mut(slot) {
+      *flag = true;
+    }
+  }
+
   /// Adds a lexical binding (used for `let`/`const` bindings).
   pub(crate) fn add_lexical_binding(
     &mut self,

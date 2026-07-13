@@ -151,6 +151,9 @@ impl super::Compiler {
       self.add_lexical_binding(name);
       slot
     };
+    if matches!(kind, oxc_ast::ast::VariableDeclarationKind::Const) {
+      self.mark_local_immutable(slot);
+    }
     if self.is_root {
       self.emit(Op::Dup, LINE);
     }

@@ -498,6 +498,7 @@ impl Compiler {
       self.chunk.root_slot_types = self.local_types.clone();
       self.chunk.root_slot_names = self.locals.iter().cloned().map(Some).collect();
       self.chunk.root_lexical_tdz = self.local_tdz.clone();
+      self.chunk.root_slot_immutable = self.local_immutable.clone();
       self.chunk.root_strict = self.strict_context;
     }
     Ok(std::mem::take(&mut self.chunk))
