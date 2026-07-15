@@ -6,9 +6,64 @@ use crate::vm::Vm;
 use crate::vm::runtime::execution::{
   array_index_from_key, array_length, get_property, set_property, values_equal,
 };
-use crate::vm::state::{MAX_PROTOTYPE_DEPTH, PartialDescriptor};
+use crate::vm::state::{MAX_PROTOTYPE_DEPTH, PartialDescriptor, PropertyGetIcEntry};
 
 impl Vm {
+  /// Read a property through the per-instruction monomorphic cache.
+  ///
+  /// Only own data properties are cached. Prototype and accessor reads stay
+  /// on the semantic path so prototype mutation and getter side effects can
+  /// never be hidden by the cache.
+  pub(super) fn get_property_value_cached(
+    &mut self,
+    instruction_ip: usize,
+    obj: &Value,
+    key: &PropertyKey,
+  ) -> Result<Value, RuntimeError> {
+    let receiver_identity = match obj {
+      Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::BuiltinObject(_, _) => {
+        super::execution::object_identity(obj)
+      }
+      _ => None,
+    };
+    let Some(receiver_identity) = receiver_identity else {
+      return self.get_property_value(obj, key);
+    };
+    let receiver_generation = self
+      .obj_generations
+      .get(&receiver_identity)
+      .copied()
+      .unwrap_or(0);
+    let site = (std::rc::Rc::as_ptr(&self.chunk) as usize, instruction_ip);
+
+    if let Some(entry) = self.property_get_ic.get(&site)
+      && entry.receiver_identity == receiver_identity
+      && entry.receiver_generation == receiver_generation
+      && entry.key == *key
+    {
+      return Ok(entry.value.clone());
+    }
+
+    let value = self.get_property_value(obj, key)?;
+    if matches!(
+      crate::ecmascript::semantics::properties::own_property_descriptor(obj, key),
+      Some(PropertyDescriptor::Data { .. })
+    ) {
+      self.property_get_ic.insert(
+        site,
+        PropertyGetIcEntry {
+          receiver_identity,
+          receiver_generation,
+          key: key.clone(),
+          value: value.clone(),
+        },
+      );
+    } else {
+      self.property_get_ic.remove(&site);
+    }
+    Ok(value)
+  }
+
   fn get_proxy_property(
     &mut self,
     proxy_value: &Value,

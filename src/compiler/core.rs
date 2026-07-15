@@ -84,7 +84,7 @@ pub struct Compiler {
   /// Optional module context when compiling a module
   pub current_module: Option<ModuleContext>,
   /// Monotonic inline-cache slot allocator for the current chunk.
-  pub next_ic_slot: u8,
+  pub next_ic_slot: u16,
   /// Number of operand bytes already emitted into the last instruction's payload.
   /// This lets the old emit()/emit_byte() caller pattern pack subsequent operand
   /// bytes into the single 24-bit payload of the instruction word.
@@ -486,8 +486,10 @@ impl Compiler {
   ///
   /// Returns an error if the maximum number of inline cache sites has been exceeded.
   pub fn alloc_ic_slot(&mut self) -> Result<u8, CompilerError> {
-    let slot = self.next_ic_slot;
-    self.next_ic_slot = self.next_ic_slot.wrapping_add(1);
+    let slot = u8::try_from(self.next_ic_slot).map_err(|_| {
+      CompilerError::from("too many inline-cache sites in one bytecode chunk (maximum 256)")
+    })?;
+    self.next_ic_slot += 1;
     Ok(slot)
   }
 

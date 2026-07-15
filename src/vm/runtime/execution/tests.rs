@@ -170,6 +170,113 @@ mod test {
   }
 
   #[test]
+  fn returning_to_strict_root_preserves_strict_mode() {
+    let (vm, _) = run_script(
+      r#"
+        "use strict";
+        function helper() {}
+        helper();
+        let threw = false;
+        try { leaked_after_call = 1; } catch (error) { threw = error instanceof ReferenceError; }
+        globalThis.strict_after_call = threw;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("strict_after_call"), Some(Value::Bool(true)));
+    assert_eq!(vm.get_global("leaked_after_call"), None);
+  }
+
+  #[test]
+  fn ordinary_nested_call_does_not_inherit_new_target() {
+    let (vm, _) = run_script(
+      r#"
+        let nested_target;
+        function helper() { nested_target = new.target; }
+        function Constructor() { helper(); }
+        new Constructor();
+        globalThis.nested_new_target_is_undefined = nested_target === undefined;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("nested_new_target_is_undefined"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn throwing_an_object_does_not_add_own_properties() {
+    let (vm, _) = run_script(
+      r#"
+        let thrown = {};
+        try { throw thrown; } catch (error) {}
+        globalThis.throw_preserved_object =
+          Object.getOwnPropertyDescriptor(thrown, "constructor") === undefined;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("throw_preserved_object"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn relational_comparison_applies_to_primitive_in_both_executors() {
+    let source = r#"
+      var left = { valueOf: function () { return 1; } };
+      var relational_result = left < 2;
+    "#;
+    let session = Parser::parse_source(source).expect("parse");
+    let stack_chunk = compiler::compile(session.program(), session.source()).expect("stack");
+    let risc_chunk = compiler::compile_risc(session.program(), session.source()).expect("risc");
+
+    for chunk in [stack_chunk, risc_chunk] {
+      let globals = test_globals();
+      let mut vm = Vm::new(globals);
+      vm.run(chunk).expect("run");
+      assert_eq!(vm.get_global("relational_result"), Some(Value::Bool(true)));
+    }
+  }
+
+  #[test]
+  fn risc_ordinary_builtin_call_does_not_prepend_receiver() {
+    let source = "var builtin_argument = capture(\"expected\");";
+    let session = Parser::parse_source(source).expect("parse");
+    let chunk = compiler::compile_risc(session.program(), session.source()).expect("risc");
+    let globals = test_globals();
+    globals.borrow_mut().properties.insert(
+      PropertyKey::String("capture".to_string()),
+      PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+        Ok(args.first().cloned().unwrap_or(Value::Undefined))
+      }))),
+    );
+    let mut vm = Vm::new(globals);
+    vm.run(chunk).expect("run");
+
+    assert_eq!(
+      vm.get_global("builtin_argument"),
+      Some(Value::String("expected".to_string()))
+    );
+  }
+
+  #[test]
+  fn property_get_ic_invalidates_after_tracked_write() {
+    let (vm, _) = run_script(
+      r#"
+        var cached_object = { value: 1 };
+        var before_write = cached_object.value;
+        cached_object.value = 2;
+        globalThis.after_write = cached_object.value;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("before_write"), Some(Value::Number(1.0)));
+    assert_eq!(vm.get_global("after_write"), Some(Value::Number(2.0)));
+    assert!(!vm.property_get_ic.is_empty());
+  }
+
+  #[test]
   fn object_get_own_property_descriptor_reports_data_flags() {
     let (vm, _globals) = run_script(
       r#"

@@ -473,6 +473,12 @@ impl Vm {
       );
     }
     roots.extend(self.gc_temp_roots.iter().cloned());
+    roots.extend(
+      self
+        .property_get_ic
+        .values()
+        .map(|entry| entry.value.clone()),
+    );
     self
       .lexical_env
       .borrow()
@@ -1342,11 +1348,15 @@ impl Vm {
           let result = match condition {
             0 => self.abstract_equality(left, right)?,
             1 => !self.abstract_equality(left, right)?,
-            2 => self.abstract_relational_comparison(left, right)?.unwrap_or(false),
+            2 => self
+              .abstract_relational_comparison(left, right)?
+              .unwrap_or(false),
             3 => self
               .abstract_relational_comparison(right, left)?
               .is_some_and(|result| !result),
-            4 => self.abstract_relational_comparison(right, left)?.unwrap_or(false),
+            4 => self
+              .abstract_relational_comparison(right, left)?
+              .unwrap_or(false),
             5 => self
               .abstract_relational_comparison(left, right)?
               .is_some_and(|result| !result),
@@ -1363,7 +1373,7 @@ impl Vm {
           let object = registers[rd].clone();
           let key = registers[rs].clone();
           let key = self.to_property_key(&key)?;
-          registers[rd] = self.get_property_value(&object, &key)?;
+          registers[rd] = self.get_property_value_cached(instruction_ip, &object, &key)?;
         }
         Op::SetProperty => {
           let object = registers[rd].clone();
@@ -2691,6 +2701,7 @@ impl Vm {
       Op::BuildArray => self.build_array()?,
       Op::BuildObject => self.build_object()?,
       Op::GetProperty => {
+        let instruction_ip = self.ip.saturating_sub(1);
         let key = self.pop()?;
         let obj = self.pop()?;
         let v = if let Some(i) = array_index_from_value(&key) {
@@ -2698,11 +2709,11 @@ impl Vm {
             v
           } else {
             let k = self.to_property_key(&key)?;
-            self.get_property_value(&obj, &k)?
+            self.get_property_value_cached(instruction_ip, &obj, &k)?
           }
         } else {
           let k = self.to_property_key(&key)?;
-          self.get_property_value(&obj, &k)?
+          self.get_property_value_cached(instruction_ip, &obj, &k)?
         };
         if crate::trace::enabled() {
           match self.to_property_key(&key) {
@@ -3300,7 +3311,7 @@ impl Vm {
     &mut self,
     x: &Value,
     y: &Value,
-  ) -> Result<Option<bool>, RuntimeError> {
+  ) -> Result<bool, RuntimeError> {
     // Same-value for identical discriminants
     if std::mem::discriminant(x) == std::mem::discriminant(y) {
       return Ok(values_equal(x, y));
@@ -3413,17 +3424,24 @@ impl Vm {
     &mut self,
     left: &Value,
     right: &Value,
-  ) -> Result<bool, RuntimeError> {
+  ) -> Result<Option<bool>, RuntimeError> {
     let left = self.to_primitive(left, Some("number"))?;
     let right = self.to_primitive(right, Some("number"))?;
 
     if let (Value::String(left), Value::String(right)) = (&left, &right) {
       return Ok(Some(
-        left.encode_utf16().cmp(right.encode_utf16()).is_lt(),
+        left
+          .encode_utf16()
+          .cmp(right.encode_utf16())
+          .is_lt(),
       ));
     }
 
-    Ok(left.partial_cmp(&right).map(|order| order.is_lt()))
+    Ok(
+      left
+        .partial_cmp(&right)
+        .map(|order| order.is_lt()),
+    )
   }
 
   /// Read a property descriptor from a value, following the prototype chain.

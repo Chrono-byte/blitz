@@ -528,7 +528,7 @@ mod test {
   use std::collections::{HashMap, HashSet};
   use std::rc::Rc;
 
-  use crate::{Chunk, ModuleContext, ObjectData, Value, Vm, compile_oxc_with_ctx};
+  use crate::{Chunk, Compiler, ModuleContext, ObjectData, Value, Vm, compile_oxc_with_ctx};
   use crate::{Op, compile};
 
   #[cfg(test)]
@@ -636,6 +636,21 @@ mod test {
     }
 
     assert_eq!(slots, vec![0, 1, 2]);
+  }
+
+  #[test]
+  fn inline_cache_slot_allocation_rejects_overflow() {
+    let mut compiler = Compiler::new(Rc::new(String::new()));
+    for expected in 0_u16..=u8::MAX as u16 {
+      assert_eq!(
+        compiler.alloc_ic_slot().expect("slot available") as u16,
+        expected
+      );
+    }
+    let error = compiler
+      .alloc_ic_slot()
+      .expect_err("the 257th cache site must be rejected");
+    assert!(error.to_string().contains("maximum 256"));
   }
 
   #[test]
