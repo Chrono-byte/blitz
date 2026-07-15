@@ -1116,6 +1116,57 @@ impl Vm {
     }
   }
 
+  /// Calls a function without an explicit receiver.
+  ///
+  /// Native builtins use the same argument convention as the StackV1
+  /// `Call` opcode: user arguments begin at index zero. Closures still pass
+  /// through ordinary ECMAScript `this` preparation.
+  pub(super) fn call_value(
+    &mut self,
+    callee: &Value,
+    args: &[Value],
+  ) -> Result<Value, RuntimeError> {
+    match callee {
+      Value::Builtin(f) | Value::BuiltinObject(f, _) => {
+        let temp_root_base = self.gc_temp_roots.len();
+        self.gc_temp_roots.push(callee.clone());
+        self.gc_temp_roots.extend(args.iter().cloned());
+
+        let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
+        let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, false);
+        let prev_closure_env = self.current_closure_env.clone();
+        let prev_slot_types = self.current_slot_types.clone();
+        let prev_lexical_env = Rc::clone(&self.lexical_env);
+        let result = (f.as_ref())(self, args);
+        self.builtin_this_arg_prepended = prev_builtin_this;
+        self.this_value = prev_this;
+        self.current_closure_env = prev_closure_env;
+        self.current_slot_types = prev_slot_types;
+        self.lexical_env = prev_lexical_env;
+
+        let result = (|| {
+          let result = result?;
+          self.gc_temp_roots.push(result.clone());
+          self.run_microtasks_if_needed()?;
+          self.recent_return_value = matches!(
+            result,
+            Value::Object(_)
+              | Value::Array(..)
+              | Value::Closure { .. }
+              | Value::BuiltinObject(_, _)
+              | Value::Proxy(_)
+              | Value::Promise(_)
+          )
+          .then(|| result.clone());
+          Ok(result)
+        })();
+        self.gc_temp_roots.truncate(temp_root_base);
+        result
+      }
+      _ => self.call_with_this(callee, &Value::Undefined, args),
+    }
+  }
+
   /// Calls a function with an explicit `this` value and arguments.
   #[allow(clippy::too_many_lines)]
   pub(super) fn call_with_this(
@@ -1250,6 +1301,7 @@ impl Vm {
             let caller_this = self.this_value.clone();
             let caller_env = self.current_closure_env.clone();
             let caller_slot_types = self.current_slot_types.clone();
+            let caller_strict_mode = self.current_strict_mode;
             let caller_frame_len = self.call_stack.len();
             let caller_handler_len = self.handlers.len();
             self.push_call_frame(proto, &closure_env, call_args, this_arg, callee.clone())?;
@@ -1264,10 +1316,7 @@ impl Vm {
               self.current_slot_types = caller_slot_types;
               self.stack.restore_from(saved_stack);
               self.call_stack.truncate(caller_frame_len);
-              self.current_strict_mode = self
-                .call_stack
-                .last()
-                .is_some_and(|f| f.is_strict);
+              self.current_strict_mode = caller_strict_mode;
               self.handlers.truncate(caller_handler_len);
             }
             result
@@ -1562,6 +1611,7 @@ impl Vm {
   ) -> Result<(), RuntimeError> {
     let caller_stack = self.stack.take_all();
     let stack_base = caller_stack.len();
+    let caller_strict_mode = self.current_strict_mode;
 
     if crate::trace::enabled() {
       eprintln!(
@@ -1583,7 +1633,10 @@ impl Vm {
       ),
       this_value: std::mem::replace(&mut self.this_value, this_value.clone()),
       callee: callee.clone(),
-      new_target: self.construct_new_target.clone(),
+      // `construct_new_target` is a pending entry value. Moving it into the
+      // suspended frame makes it active for this callee while ensuring an
+      // ordinary nested call starts with no [[NewTarget]].
+      new_target: self.construct_new_target.take(),
       closure_env: self.current_closure_env.take(),
       upvalues: proto.upvalues.clone(),
       slot_types: self.current_slot_types.take(),
@@ -1591,7 +1644,7 @@ impl Vm {
       slot_immutable: self.current_slot_immutable.take(),
       slot_sloppy_immutable_silent: self.current_slot_sloppy_immutable_silent.take(),
       stack_base,
-      is_strict: proto.is_strict,
+      is_strict: caller_strict_mode,
       lexical_env: Rc::clone(&self.lexical_env),
       yield_star_queue: self.yield_star_queue.take(),
       arguments_object: self.current_arguments_object.take(),

@@ -100,6 +100,14 @@ pub(super) fn gc_allocation_pressure_threshold() -> usize {
 type Microtask = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 type DynamicImportJob = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 
+#[derive(Clone)]
+pub(super) struct PropertyGetIcEntry {
+  pub(super) receiver_identity: usize,
+  pub(super) receiver_generation: u64,
+  pub(super) key: crate::value::PropertyKey,
+  pub(super) value: Value,
+}
+
 // Factor complex hook type into aliases to satisfy clippy's `type_complexity` suggestions.
 //
 // - `UnhandledRejectionHookInner` captures the underlying FnMut signature.
@@ -414,6 +422,8 @@ pub struct Vm {
   /// Incremented on every `SetProperty` so that stale IC entries are
   /// detected and evicted on the next lookup.
   pub(super) obj_generations: HashMap<usize, u64>,
+  /// Monomorphic per-instruction cache for own data-property reads.
+  pub(super) property_get_ic: HashMap<(usize, usize), PropertyGetIcEntry>,
   /// Background Tokio runtime handle.
   pub(super) bg_runtime: Arc<Runtime>,
   /// Exception-handler stack.

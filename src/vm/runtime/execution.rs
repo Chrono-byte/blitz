@@ -47,7 +47,9 @@ impl Vm {
   /// This is a blunt invalidation used when allocating fresh objects whose
   /// addresses may be recycled by `Rc`. It avoids stale cache hits across
   /// distinct allocations that happen to reuse the same pointer value.
-  pub(crate) fn clear_property_get_ic_cache(&mut self) {}
+  pub(crate) fn clear_property_get_ic_cache(&mut self) {
+    self.property_get_ic.clear();
+  }
 
   // -----------------------------------------------------------------------
   // Construction & public helpers
@@ -82,6 +84,7 @@ impl Vm {
       direct_eval_outer_slot_immutable: None,
       direct_eval_outer_slot_sloppy_immutable_silent: None,
       obj_generations: HashMap::new(),
+      property_get_ic: HashMap::new(),
       bg_runtime: get_global_bg_runtime(),
       handlers: HandlerStack::with_capacity(32),
       pending_exception: false,
@@ -151,6 +154,7 @@ impl Vm {
       direct_eval_outer_slot_immutable: None,
       direct_eval_outer_slot_sloppy_immutable_silent: None,
       obj_generations: HashMap::new(),
+      property_get_ic: HashMap::new(),
       bg_runtime: Arc::clone(&self.bg_runtime),
       handlers: HandlerStack::with_capacity(32),
       pending_exception: false,
@@ -253,6 +257,8 @@ impl Vm {
       .call_stack
       .last()
       .and_then(|frame| frame.new_target.clone())
+      // During constructor entry the pending value has not yet been moved
+      // into the suspended caller frame.
       .or_else(|| self.construct_new_target.clone())
   }
 
@@ -789,10 +795,7 @@ impl Vm {
 
   /// Returns whether the current execution context is in strict mode.
   pub(crate) fn active_strict_mode(&self) -> bool {
-    self
-      .call_stack
-      .last()
-      .is_some_and(|f| f.is_strict)
+    self.current_strict_mode
   }
 
   /// Sets the current strict mode flag.
@@ -929,6 +932,7 @@ impl Vm {
     self.ip = 0;
     self.chunk = Rc::new(Chunk::new(Rc::new(String::new())));
     self.obj_generations.clear();
+    self.property_get_ic.clear();
     gc::reset_allocation_pressure();
     let mut g = self.globals.borrow_mut();
     g.properties
@@ -963,6 +967,7 @@ impl Vm {
     self.call_stack.clear();
     self.current_strict_mode = self.chunk.root_strict;
     self.handlers.clear();
+    self.property_get_ic.clear();
     self.current_slot_types = None;
     self.current_slot_names = None;
     self.current_slot_immutable = None;
@@ -1041,6 +1046,7 @@ impl Vm {
     self.call_stack.clear();
     self.current_strict_mode = self.chunk.root_strict;
     self.handlers.clear();
+    self.property_get_ic.clear();
     self.current_slot_types = None;
     self.current_slot_names = None;
     self.current_slot_immutable = None;
@@ -1336,10 +1342,14 @@ impl Vm {
           let result = match condition {
             0 => self.abstract_equality(left, right)?,
             1 => !self.abstract_equality(left, right)?,
-            2 => left < right,
-            3 => left <= right,
-            4 => left > right,
-            5 => left >= right,
+            2 => self.abstract_relational_comparison(left, right)?.unwrap_or(false),
+            3 => self
+              .abstract_relational_comparison(right, left)?
+              .is_some_and(|result| !result),
+            4 => self.abstract_relational_comparison(right, left)?.unwrap_or(false),
+            5 => self
+              .abstract_relational_comparison(left, right)?
+              .is_some_and(|result| !result),
             6 => values_equal(left, right),
             7 => !values_equal(left, right),
             _ => unreachable!(),
@@ -1394,12 +1404,12 @@ impl Vm {
               .ok_or_else(|| RuntimeError::from("RISC call operand window out of bounds"))?,
           );
           let callee = registers[0].clone();
-          let receiver = if matches!(op, Op::CallBuiltin) {
-            registers[1].clone()
+          registers[0] = if matches!(op, Op::CallBuiltin) {
+            let receiver = registers[1].clone();
+            self.call_value_with_this(&callee, &receiver, &args)?
           } else {
-            Value::Undefined
+            self.call_value(&callee, &args)?
           };
-          registers[0] = self.call_value_with_this(&callee, &receiver, &args)?;
         }
         Op::Construct => {
           let count = decode_risc_aux16(word) as usize;
@@ -2628,10 +2638,18 @@ impl Vm {
         let result = match compare_op {
           0 => self.abstract_equality(&a, &b)?,
           1 => !self.abstract_equality(&a, &b)?,
-          2 => a < b,
-          3 => a <= b,
-          4 => a > b,
-          5 => a >= b,
+          2 => self
+            .abstract_relational_comparison(&a, &b)?
+            .unwrap_or(false),
+          3 => self
+            .abstract_relational_comparison(&b, &a)?
+            .is_some_and(|result| !result),
+          4 => self
+            .abstract_relational_comparison(&b, &a)?
+            .unwrap_or(false),
+          5 => self
+            .abstract_relational_comparison(&a, &b)?
+            .is_some_and(|result| !result),
           6 => values_equal(&a, &b),
           7 => !values_equal(&a, &b),
           _ => return Err(RuntimeError::from("Invalid compare-jump opcode")),
@@ -3282,7 +3300,7 @@ impl Vm {
     &mut self,
     x: &Value,
     y: &Value,
-  ) -> Result<bool, RuntimeError> {
+  ) -> Result<Option<bool>, RuntimeError> {
     // Same-value for identical discriminants
     if std::mem::discriminant(x) == std::mem::discriminant(y) {
       return Ok(values_equal(x, y));
@@ -3388,6 +3406,26 @@ impl Vm {
     Ok(false)
   }
 
+  /// ECMAScript Abstract Relational Comparison with left-to-right
+  /// `ToPrimitive` evaluation. An unordered comparison (for example one
+  /// involving `NaN`) produces `false`.
+  pub fn abstract_relational_comparison(
+    &mut self,
+    left: &Value,
+    right: &Value,
+  ) -> Result<bool, RuntimeError> {
+    let left = self.to_primitive(left, Some("number"))?;
+    let right = self.to_primitive(right, Some("number"))?;
+
+    if let (Value::String(left), Value::String(right)) = (&left, &right) {
+      return Ok(Some(
+        left.encode_utf16().cmp(right.encode_utf16()).is_lt(),
+      ));
+    }
+
+    Ok(left.partial_cmp(&right).map(|order| order.is_lt()))
+  }
+
   /// Read a property descriptor from a value, following the prototype chain.
   ///
   /// # Errors
@@ -3431,10 +3469,7 @@ impl Vm {
     self.yield_star_queue = frame.yield_star_queue;
     self.current_arguments_object = frame.arguments_object;
     self.current_arguments_mapped_count = frame.arguments_mapped_count;
-    self.current_strict_mode = self
-      .call_stack
-      .last()
-      .is_some_and(|f| f.is_strict);
+    self.current_strict_mode = frame.is_strict;
     // Handlers registered in the returning frame are now invalid.
     self.prune_stale_handlers();
     self.stack.push(result);

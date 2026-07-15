@@ -2,7 +2,6 @@ use crate::errors::RuntimeError;
 use crate::gc;
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
-use crate::vm::runtime::execution::values_equal;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -13,7 +12,6 @@ impl Vm {
     &mut self,
     thrown: Value,
   ) -> Result<(), RuntimeError> {
-    let thrown = self.ensure_constructor_for_thrown(thrown)?;
     let handler = match self.handlers.pop() {
       Some(h) => h,
       None => {
@@ -29,6 +27,7 @@ impl Vm {
       }
     };
 
+    let mut restored_strict_mode = None;
     while self.call_stack.len() > handler.frame_count {
       if let Some(frame) = self.call_stack.pop() {
         self.chunk = frame.chunk;
@@ -43,12 +42,12 @@ impl Vm {
         self.current_slot_sloppy_immutable_silent = frame.slot_sloppy_immutable_silent;
         self.current_arguments_object = frame.arguments_object;
         self.current_arguments_mapped_count = frame.arguments_mapped_count;
+        restored_strict_mode = Some(frame.is_strict);
       }
     }
-    self.current_strict_mode = self
-      .call_stack
-      .last()
-      .is_some_and(|f| f.is_strict);
+    if let Some(strict) = restored_strict_mode {
+      self.current_strict_mode = strict;
+    }
     self.prune_stale_handlers();
 
     self.chunk = handler.chunk;
@@ -60,133 +59,6 @@ impl Vm {
 
     self.stack.push(thrown);
     Ok(())
-  }
-
-  /// Best-effort repair for thrown object-like values whose `constructor`
-  /// property was lost or was never installed.
-  fn ensure_constructor_for_thrown(
-    &mut self,
-    thrown: Value,
-  ) -> Result<Value, RuntimeError> {
-    let key = PropertyKey::String("constructor".to_string());
-    let needs_repair = matches!(
-      &thrown,
-      Value::Object(_)
-        | Value::Array(..)
-        | Value::Proxy(_)
-        | Value::Closure { .. }
-        | Value::BuiltinObject(_, _)
-        | Value::Promise(_)
-    ) && !matches!(
-        self.lookup_property_descriptor(&thrown, &key, 0)?,
-        Some((_, holder)) if values_equal(&holder, &thrown)
-    );
-    if !needs_repair {
-      return Ok(thrown);
-    }
-
-    let proto = self.get_prototype(&thrown);
-    if crate::trace::enabled() {
-      eprintln!(
-        "[trace] ensure_constructor_for_thrown missing constructor type={} proto_type={}",
-        thrown.type_name(),
-        proto.type_name()
-      );
-      if let Some(keys) = self.list_own_keys_of_value(&thrown) {
-        eprintln!("[trace]   thrown own keys={:?}", keys);
-      }
-      if let Some(keys) = self.list_own_keys_of_value(&proto) {
-        eprintln!("[trace]   proto own keys={:?}", keys);
-      }
-    }
-    if matches!(proto, Value::Null) {
-      return Ok(thrown);
-    }
-    if let Ok(ctor) = self.get_property_value(&proto, &key)
-      && !matches!(ctor, Value::Undefined)
-    {
-      self.write_constructor_directly(&thrown, ctor);
-      return Ok(thrown);
-    }
-
-    let globals_snapshot: Vec<(String, Value)> = self
-      .globals
-      .borrow()
-      .properties
-      .iter()
-      .filter_map(|(k, desc)| match (k, desc) {
-        (PropertyKey::String(name), PropertyDescriptor::Data { value, .. }) => {
-          Some((name.clone(), value.clone()))
-        }
-        _ => None,
-      })
-      .collect();
-    for (_name, candidate) in globals_snapshot {
-      if !Self::is_callable_value(&candidate) {
-        continue;
-      }
-      if let Ok(candidate_proto) =
-        self.get_property_value(&candidate, &PropertyKey::String("prototype".to_string()))
-        && values_equal(&candidate_proto, &proto)
-      {
-        self.write_constructor_directly(&thrown, candidate.clone());
-        break;
-      }
-    }
-    if let Some(test262_error) = self.get_global("Test262Error")
-      && Self::is_callable_value(&test262_error)
-    {
-      self.write_constructor_directly(&thrown, test262_error);
-    }
-    Ok(thrown)
-  }
-
-  fn write_constructor_directly(
-    &self,
-    value: &Value,
-    ctor: Value,
-  ) {
-    match value {
-      Value::Object(obj) => {
-        obj.borrow_mut().properties.insert(
-          PropertyKey::String("constructor".to_string()),
-          PropertyDescriptor::data(ctor),
-        );
-        if crate::trace::enabled() {
-          eprintln!(
-            "[trace] write_constructor_directly object keys={:?}",
-            obj
-              .borrow()
-              .properties
-              .keys()
-              .filter_map(|k| match k {
-                PropertyKey::String(s) => Some(s.clone()),
-                PropertyKey::Symbol(_) => None,
-              })
-              .collect::<Vec<_>>()
-          );
-        }
-      }
-      Value::Array(_, props) => {
-        props.borrow_mut().properties.insert(
-          PropertyKey::String("constructor".to_string()),
-          PropertyDescriptor::data(ctor),
-        );
-      }
-      Value::Closure { props, .. } => {
-        props.borrow_mut().properties.insert(
-          PropertyKey::String("constructor".to_string()),
-          PropertyDescriptor::data(ctor),
-        );
-      }
-      Value::BuiltinObject(_, props) => {
-        props.borrow_mut().properties.insert(
-          PropertyKey::String("constructor".to_string()),
-          PropertyDescriptor::data(ctor),
-        );
-      }
-      _ => {}
-    }
   }
 
   /// Helper to throw a JS exception value from bytecode or builtins.

@@ -37,10 +37,8 @@ pub(crate) struct Frame {
   pub(crate) slot_sloppy_immutable_silent: Option<Vec<bool>>,
   /// Length of caller stack at call entry (diagnostic only).
   pub(crate) stack_base: usize,
-  /// Whether this frame executes in strict mode.
-  /// Set from the callee's FunctionProto::is_strict field when the frame
-  /// is created during function entry. Used at runtime to apply strict
-  /// mode semantics (assignment errors, this binding, etc.).
+  /// Whether the suspended caller executes in strict mode.
+  /// Restored when this frame is popped on return or exception unwind.
   pub(crate) is_strict: bool,
   /// The lexical environment for this frame.
   pub(crate) lexical_env: Rc<RefCell<EnvironmentRecord>>,
