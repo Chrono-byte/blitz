@@ -1,6 +1,5 @@
 use super::frame::Frame;
 use super::handler::HandlerRecord;
-use crate::value::{PropertyKey, Value};
 
 /// Manages VM call frames as a compact stack component.
 #[derive(Default)]
@@ -116,62 +115,5 @@ impl HandlerStack {
   /// Clears all handler records from the stack.
   pub(crate) fn clear(&mut self) {
     self.records.clear();
-  }
-}
-
-/// ECMAScript reference record (base, referenced name, strict mode flag).
-#[derive(Clone)]
-pub(crate) struct ReferenceRecord {
-  /// The base object or environment for the reference.
-  pub(crate) base: Value,
-  /// The name or key being referenced.
-  pub(crate) referenced_name: PropertyKey,
-  /// Whether the reference is in strict mode.
-  pub(crate) strict: bool,
-}
-
-impl ReferenceRecord {
-  /// Creates a new reference record with the given base, name, and strict mode flag.
-  pub(crate) fn new(
-    base: Value,
-    referenced_name: PropertyKey,
-    strict: bool,
-  ) -> Self {
-    Self {
-      base,
-      referenced_name,
-      strict,
-    }
-  }
-}
-
-/// Stack storing pending reference records for future assignments.
-#[derive(Default)]
-pub(crate) struct ReferenceStack {
-  inner: Vec<ReferenceRecord>,
-}
-
-impl ReferenceStack {
-  /// Creates a new empty reference stack.
-  pub(crate) fn new() -> Self {
-    Self { inner: Vec::new() }
-  }
-
-  /// Pushes a reference record onto the stack.
-  pub(crate) fn push(
-    &mut self,
-    record: ReferenceRecord,
-  ) {
-    self.inner.push(record);
-  }
-
-  /// Pops and returns the last reference record from the stack.
-  pub(crate) fn pop(&mut self) -> Option<ReferenceRecord> {
-    self.inner.pop()
-  }
-
-  /// Returns a reference to the last reference record without removing it.
-  pub(crate) fn last(&self) -> Option<&ReferenceRecord> {
-    self.inner.last()
   }
 }

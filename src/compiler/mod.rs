@@ -51,12 +51,20 @@ pub fn compile(
   program: &oast::Program<'_>,
   source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
+  let stack_chunk = compile_stack_ir(program, source)?;
+  risc::lower_chunk(&stack_chunk)
+}
+
+pub(crate) fn compile_stack_ir(
+  program: &oast::Program<'_>,
+  source: &str,
+) -> Result<Chunk, crate::errors::CompilerError> {
   let source_text = Rc::new(source.to_string());
   let mut c = Compiler::new(source_text);
   c.compile_oxc(program, None)
 }
 
-/// Compile a parsed program through verified StackV1 IR into RISC v2 bytecode.
+/// Compile a parsed program through verified compiler IR into RISC v2 bytecode.
 ///
 /// # Errors
 ///
@@ -65,7 +73,7 @@ pub fn compile_risc(
   program: &oast::Program<'_>,
   source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
-  let stack_chunk = compile(program, source)?;
+  let stack_chunk = compile_stack_ir(program, source)?;
   risc::lower_chunk(&stack_chunk)
 }
 
@@ -81,7 +89,7 @@ pub fn compile_oxc(
   let source_text = Rc::new(source.to_string());
   let mut c = Compiler::new(source_text);
   let stack_chunk = c.compile_oxc(program, None)?;
-  Ok(risc::lower_chunk(&stack_chunk).unwrap_or(stack_chunk))
+  risc::lower_chunk(&stack_chunk)
 }
 
 /// Compile an oxc AST Program with an optional ModuleContext.
@@ -96,7 +104,8 @@ pub fn compile_oxc_with_ctx(
 ) -> Result<Chunk, crate::errors::CompilerError> {
   let source_text = Rc::new(source.to_string());
   let mut c = Compiler::new(source_text);
-  c.compile_oxc(program, ctx)
+  let stack_chunk = c.compile_oxc(program, ctx)?;
+  risc::lower_chunk(&stack_chunk)
 }
 
 /// Compile an oxc AST Program in REPL mode.
@@ -112,7 +121,8 @@ pub fn compile_oxc_repl(
 ) -> Result<Chunk, crate::errors::CompilerError> {
   let source_text = Rc::new(source.to_string());
   let mut c = Compiler::new(source_text);
-  c.compile_oxc_with_mode(program, None, true)
+  let stack_chunk = c.compile_oxc_with_mode(program, None, true)?;
+  risc::lower_chunk(&stack_chunk)
 }
 
 impl Compiler {
@@ -449,9 +459,7 @@ impl Compiler {
     Ok(())
   }
 
-  /// Transitional compiler entry that accepts an `oast::Program` reference.
-  ///
-  /// Uses a direct walker over `oast`.
+  /// Compile an `oast::Program` with the direct AST walker.
   ///
   /// # Errors
   /// Returns a `CompilerError` if compilation fails.
@@ -528,8 +536,8 @@ mod test {
   use std::collections::{HashMap, HashSet};
   use std::rc::Rc;
 
-  use crate::{Chunk, Compiler, ModuleContext, ObjectData, Value, Vm, compile_oxc_with_ctx};
-  use crate::{Op, compile};
+  use crate::compiler::compile_stack_ir as compile;
+  use crate::{Chunk, Compiler, ModuleContext, ObjectData, Op, Value, Vm, compile_oxc_with_ctx};
 
   #[cfg(test)]
   fn walk_chunk_ops(chunk: &Chunk) -> Vec<(usize, Op)> {
@@ -1035,6 +1043,7 @@ mod test {
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
+    let chunk = super::risc::lower_chunk(&chunk).expect("lower ok");
 
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
@@ -1060,6 +1069,7 @@ mod test {
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
+    let chunk = super::risc::lower_chunk(&chunk).expect("lower ok");
 
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
@@ -1085,6 +1095,7 @@ mod test {
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
+    let chunk = super::risc::lower_chunk(&chunk).expect("lower ok");
 
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
@@ -1105,6 +1116,7 @@ mod test {
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
+    let chunk = super::risc::lower_chunk(&chunk).expect("lower ok");
 
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     let mut vm = Vm::new(globals);

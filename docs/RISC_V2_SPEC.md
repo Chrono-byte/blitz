@@ -4,14 +4,12 @@ This document is the authoritative contract for the RISC migration. Older
 notes on `risc-docs` are design inputs; where they disagree with this file,
 this file wins.
 
-## Compatibility boundary
+## Execution boundary
 
 - Bytecode instructions are fixed-width 32-bit words.
-- Serialized or cached bytecode must carry an explicit format version.
-- `StackV1` remains readable as the compatibility format. The default script
-  frontend selects `RiscV2` when every root instruction is supported and
-  otherwise preserves the verified `StackV1` chunk. `compile_risc` is the
-  strict API for callers that require RISC output and rejects fallback.
+- Serialized or cached bytecode carries the RISC format version.
+- Every public compiler frontend emits `RiscV2` or returns a compiler error.
+  There is no executable fallback format.
 - The verifier, executor, disassembler, profiler, hotpatch helpers, and tests
   must decode through the same version-aware instruction API.
 
@@ -45,19 +43,22 @@ must not depend on whether a value resides in a register or slot.
 
 ## Compiler pipeline
 
-The existing stack compiler is retained as `StackV1` IR and as the versioned
-compatibility executor for suspension and exception machinery. RISC
-lowering performs control-flow discovery, exact stack-height verification,
+The frontend emits private compiler IR which is never accepted by `Vm::run`.
+RISC lowering recursively processes the root and every nested function,
+performing control-flow discovery, exact stack-height verification,
 virtual-register construction, allocation/spilling, and final encoding. A
 merge with conflicting stack heights is a compiler error, not a runtime fixup.
+Generators preserve an explicit RISC register/spill continuation across
+`yield`; exceptions, async functions, direct eval, and ordinary calls all use
+the RISC executor.
 
 ## Cutover gates
 
 RISC selection at the public script frontend is guarded by all of the
 following:
 
-1. Stack and RISC execution agree on values, thrown errors, and observable
-   side effects for the unit corpus and targeted Test262 cases.
+1. RISC execution preserves values, thrown errors, and observable side effects
+   for the unit corpus and targeted Test262 cases.
 2. Calls, constructors, closures, direct eval, exceptions, generators, async
    functions, and modules have explicit compatibility tests.
 3. Bytecode verification rejects malformed opcodes, operands, branches, slot

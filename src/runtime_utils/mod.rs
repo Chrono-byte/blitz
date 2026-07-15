@@ -121,6 +121,7 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
 
     // Rebuild the chunk fields, replacing functions with cleared slot types.
     let mut new_chunk = bytecode::Chunk::new(Rc::clone(&rc_chunk.source_text));
+    new_chunk.format = rc_chunk.format;
     new_chunk.code = rc_chunk.code.clone();
     new_chunk.constants = rc_chunk.constants.clone();
     new_chunk.lines = rc_chunk.lines.clone();

@@ -105,9 +105,9 @@ impl ICEntry {
 /// Bytecode execution format carried by every chunk.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BytecodeFormat {
-  /// Fixed-width encoding interpreted with the legacy operand-stack semantics.
+  /// Internal compiler IR. This format is verified and lowered, never executed.
   #[default]
-  StackV1,
+  CompilerIr,
   /// Fixed-width encoding interpreted with the 16-register RISC v2 semantics.
   RiscV2,
 }
@@ -260,8 +260,20 @@ pub struct FunctionProto {
 impl Chunk {
   /// Creates a new empty chunk
   pub fn new(source_text: Rc<String>) -> Self {
+    Self::new_with_format(source_text, BytecodeFormat::RiscV2)
+  }
+
+  /// Creates a private frontend IR chunk which must be lowered before use.
+  pub(crate) fn new_compiler_ir(source_text: Rc<String>) -> Self {
+    Self::new_with_format(source_text, BytecodeFormat::CompilerIr)
+  }
+
+  fn new_with_format(
+    source_text: Rc<String>,
+    format: BytecodeFormat,
+  ) -> Self {
     Self {
-      format: BytecodeFormat::StackV1,
+      format,
       code: Vec::new(),
       constants: Vec::new(),
       functions: Vec::new(),
@@ -332,7 +344,7 @@ impl Chunk {
         decode_aux8(word),
         decode_aux8_2(word)
       ),
-      BytecodeFormat::StackV1 => match instruction.op {
+      BytecodeFormat::CompilerIr => match instruction.op {
         Op::Const | Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => {
           instruction.operand_u16().to_string()
         }
@@ -370,7 +382,7 @@ impl Chunk {
     for ip in 0..self.code.len() {
       let instruction = self.decode_at(ip)?;
       let branch_offset = match self.format {
-        BytecodeFormat::StackV1 => instruction.branch_offset(),
+        BytecodeFormat::CompilerIr => instruction.branch_offset(),
         BytecodeFormat::RiscV2 if instruction.op == Op::CompareJump => {
           Some(decode_compare_jump(self.code[ip]).3 as i32)
         }
@@ -394,7 +406,7 @@ impl Chunk {
         }
       }
       let pool_index = match self.format {
-        BytecodeFormat::StackV1 => instruction.operand_u16(),
+        BytecodeFormat::CompilerIr => instruction.operand_u16(),
         BytecodeFormat::RiscV2 => decode_risc_aux16(self.code[ip]),
       };
       match instruction.op {

@@ -6,21 +6,22 @@ use crate::bytecode::{
 };
 use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
+use crate::gc;
 use crate::module::ModuleLoader;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
 use crate::runtime_utils::{
-  array_length_descriptor, js_number_to_string, number_exponentiate, usize_to_f64,
+  array_from_values, array_length_descriptor, js_number_to_string, number_exponentiate,
+  usize_to_f64,
 };
 use crate::value::{
   ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SharedValue,
   SymbolId, Value,
 };
-use crate::vm::runtime::coercions::{parse_js_bigint_string, parse_js_number_string, to_number};
+use crate::vm::runtime::coercions::{parse_js_bigint_string, parse_js_number_string};
 use crate::vm::state::*;
-use crate::{gc, opcode_from_instr, payload_byte};
 use num_bigint::BigInt as BigIntValue;
-use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
+use num_traits::{FromPrimitive, ToPrimitive, Zero};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -65,7 +66,6 @@ impl Vm {
       realm,
       chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
       ip: 0,
-      operand_cursor: 0,
       stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
       locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
       this_value: Value::Object(Rc::clone(&globals)),
@@ -96,14 +96,12 @@ impl Vm {
       microtasks: VecDeque::new(),
       dynamic_import_jobs: VecDeque::new(),
       unhandled_rejection_hook: None,
-      reference_stack: ReferenceStack::new(),
       lexical_env: Rc::clone(&global_env),
       global_env,
       yield_star_queue: None,
       current_arguments_object: None,
       current_arguments_mapped_count: 0,
       current_strict_mode: false,
-      gc_step_counter: 0,
       opcode_profiling_enabled: std::env::var("BLITZ_VM_PROFILE")
         .ok()
         .is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false")),
@@ -135,7 +133,6 @@ impl Vm {
       realm: self.realm.clone(),
       chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
       ip: 0,
-      operand_cursor: 0,
       stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
       locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
       this_value,
@@ -166,14 +163,12 @@ impl Vm {
       microtasks: VecDeque::new(),
       dynamic_import_jobs: VecDeque::new(),
       unhandled_rejection_hook: self.unhandled_rejection_hook.clone(),
-      reference_stack: ReferenceStack::new(),
       lexical_env: Rc::clone(&self.lexical_env),
       global_env: Rc::clone(&self.global_env),
       yield_star_queue: None,
       current_arguments_object: None,
       current_arguments_mapped_count: 0,
       current_strict_mode: self.current_strict_mode,
-      gc_step_counter: 0,
       opcode_profiling_enabled: self.opcode_profiling_enabled,
       opcode_counts: [0; OP_COUNT],
       run_started_at: None,
@@ -184,15 +179,6 @@ impl Vm {
     if self.opcode_profiling_enabled {
       self.opcode_counts = [0; OP_COUNT];
       self.run_started_at = Some(std::time::Instant::now());
-    }
-  }
-
-  fn record_opcode(
-    &mut self,
-    op: Op,
-  ) {
-    if self.opcode_profiling_enabled {
-      self.opcode_counts[op as usize] = self.opcode_counts[op as usize].saturating_add(1);
     }
   }
 
@@ -693,7 +679,6 @@ impl Vm {
       }
       return;
     }
-    self.gc_step_counter = 0;
     let _ = self.collect_garbage_prototype();
   }
 
@@ -961,82 +946,12 @@ impl Vm {
     chunk
       .verify()
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
-    if chunk.format == BytecodeFormat::RiscV2 {
-      return self.run_risc_root(chunk);
+    if chunk.format != BytecodeFormat::RiscV2 {
+      return Err(RuntimeError::from(
+        "compiler IR cannot be executed; lower it to RISC v2 first",
+      ));
     }
-    let chunk_rc = Rc::new(chunk);
-    self.root_chunk = Some(Rc::clone(&chunk_rc));
-    self.chunk = chunk_rc;
-    self.ip = 0;
-    self.stack.clear();
-    self.locals.clear();
-    self.call_stack.clear();
-    self.current_strict_mode = self.chunk.root_strict;
-    self.handlers.clear();
-    self.property_get_ic.clear();
-    self.current_slot_types = None;
-    self.current_slot_names = None;
-    self.current_slot_immutable = None;
-    self.current_slot_sloppy_immutable_silent = None;
-    self.direct_eval_outer_slot_names = None;
-    self.direct_eval_outer_slot_immutable = None;
-    self.direct_eval_outer_slot_sloppy_immutable_silent = None;
-    self.current_closure_env = None;
-    self.pending_closure_env = None;
-    self.gc_temp_roots.clear();
-    self.lexical_env = Rc::clone(&self.global_env);
-    self.yield_star_queue = None;
-    self.this_value = self
-      .globals
-      .borrow()
-      .properties
-      .get(&PropertyKey::String("globalThis".to_string()))
-      .and_then(|d| match d {
-        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-        _ => None,
-      })
-      .unwrap_or(Value::Undefined);
-    self.initialize_root_bindings();
-    gc::reset_allocation_pressure();
-    self.begin_opcode_profile_run();
-
-    loop {
-      match self.step(None) {
-        Ok(StepOutcome::Continue) => {
-          // `pending_exception` is only meant to swallow the
-          // immediate synthetic error returned by host throw helpers.
-          // If execution continues normally, clear it so unrelated
-          // future runtime errors are not masked.
-          self.pending_exception = false;
-          self.maybe_collect_garbage_prototype();
-        }
-        Ok(StepOutcome::Return(result)) => {
-          self.pending_exception = false;
-          self.run_microtasks_if_needed()?;
-
-          {
-            let _ = self.collect_garbage_prototype();
-          }
-          self.finish_opcode_profile_run("return");
-          return Ok(result);
-        }
-        Ok(StepOutcome::Yield(_)) => {
-          return Err(self.throw_type_error("yield used outside generator resume"));
-        }
-        Err(err) => {
-          if self.pending_exception {
-            self.pending_exception = false;
-            continue;
-          }
-
-          {
-            let _ = self.collect_garbage_prototype();
-          }
-          self.finish_opcode_profile_run("error");
-          return Err(err);
-        }
-      }
-    }
+    self.run_risc_root(chunk)
   }
 
   fn run_risc_root(
@@ -1079,9 +994,39 @@ impl Vm {
     gc::reset_allocation_pressure();
     self.begin_opcode_profile_run();
 
-    let mut registers: [Value; 16] = std::array::from_fn(|_| Value::Undefined);
-    registers[1] = self.this_value.clone();
-    let mut spills = vec![Value::Undefined; self.chunk.risc_spill_count as usize];
+    self.run_risc_loop(true)
+  }
+
+  pub(super) fn run_risc_loop(
+    &mut self,
+    _root_execution: bool,
+  ) -> Result<Value, RuntimeError> {
+    let mut state = RiscExecutionState::new(
+      self.this_value.clone(),
+      self.chunk.risc_spill_count as usize,
+    );
+    match self.run_risc_state(&mut state, false)? {
+      RiscRunOutcome::Return(value) => Ok(value),
+      RiscRunOutcome::Yield(_) => Err(RuntimeError::from("yield outside generator execution")),
+      RiscRunOutcome::Initialized => Err(RuntimeError::from(
+        "generator boundary outside generator execution",
+      )),
+    }
+  }
+
+  pub(super) fn run_risc_state(
+    &mut self,
+    state: &mut RiscExecutionState,
+    stop_at_generator_init: bool,
+  ) -> Result<RiscRunOutcome, RuntimeError> {
+    let execution_chunk = Rc::clone(&self.chunk);
+    let registers = &mut state.registers;
+    let spills = &mut state.spills;
+
+    if self.pending_exception && Rc::ptr_eq(&self.chunk, &execution_chunk) {
+      self.pending_exception = false;
+      registers[7] = self.stack.pop().unwrap_or(Value::Undefined);
+    }
 
     loop {
       let word = *self
@@ -1108,348 +1053,661 @@ impl Vm {
         );
       }
 
-      match op {
-        Op::Const => {
-          registers[rd] = self
-            .chunk
-            .constants
-            .get(decode_risc_aux16(word) as usize)
-            .cloned()
-            .ok_or_else(|| RuntimeError::from("RISC constant index out of bounds"))?;
-        }
-        Op::Null => registers[rd] = Value::Null,
-        Op::True => registers[rd] = Value::Bool(true),
-        Op::False => registers[rd] = Value::Bool(false),
-        Op::Undefined => registers[rd] = Value::Undefined,
-        Op::Move => registers[rd] = registers[rs].clone(),
-        Op::LoadSpill => {
-          registers[rd] = spills
-            .get(decode_risc_aux16(word) as usize)
-            .cloned()
-            .ok_or_else(|| RuntimeError::from("RISC spill load out of bounds"))?;
-        }
-        Op::StoreSpill => {
-          let spill = spills
-            .get_mut(decode_risc_aux16(word) as usize)
-            .ok_or_else(|| RuntimeError::from("RISC spill store out of bounds"))?;
-          *spill = registers[rd].clone();
-        }
-        Op::MakeClosure => {
-          registers[rd] = self.make_closure_value(decode_risc_aux16(word) as usize)?;
-        }
-        Op::LoadLocal => {
-          let slot = decode_risc_aux16(word) as usize;
-          let value = self
-            .locals
-            .get(slot)
-            .map(|cell| cell.borrow().clone())
-            .ok_or_else(|| RuntimeError::from("bad RISC local slot"))?;
-          if matches!(value, Value::Uninitialized) {
-            return Err(
-              self.throw_reference_error("Cannot access lexical binding before initialization"),
-            );
+      let step_result = (|| -> Result<Option<RiscRunOutcome>, RuntimeError> {
+        match op {
+          Op::Const => {
+            registers[rd] = self
+              .chunk
+              .constants
+              .get(decode_risc_aux16(word) as usize)
+              .cloned()
+              .ok_or_else(|| RuntimeError::from("RISC constant index out of bounds"))?;
           }
-          registers[rd] = value;
-        }
-        Op::StoreLocal => {
-          let slot = decode_risc_aux16(word) as usize;
-          ensure_slot(&mut self.locals, slot);
-          let immutable = self
-            .current_slot_immutable
-            .as_ref()
-            .and_then(|flags| flags.get(slot))
-            .copied()
-            .unwrap_or(false);
-          let initializes =
-            immutable && matches!(*self.locals[slot].borrow(), Value::Uninitialized);
-          if immutable && !initializes {
-            return Err(self.throw_type_error("Assignment to constant variable"));
+          Op::Null => registers[rd] = Value::Null,
+          Op::True => registers[rd] = Value::Bool(true),
+          Op::False => registers[rd] = Value::Bool(false),
+          Op::Undefined => registers[rd] = Value::Undefined,
+          Op::Move => registers[rd] = registers[rs].clone(),
+          Op::LoadSpill => {
+            registers[rd] = spills
+              .get(decode_risc_aux16(word) as usize)
+              .cloned()
+              .ok_or_else(|| RuntimeError::from("RISC spill load out of bounds"))?;
           }
-          *self.locals[slot].borrow_mut() = registers[rd].clone();
-          if let Some(name) = self
-            .chunk
-            .root_slot_names
-            .get(slot)
-            .and_then(Clone::clone)
-          {
-            let _ = self
-              .lexical_env
-              .borrow_mut()
-              .set_binding_initialized_in_chain(&name, true);
+          Op::StoreSpill => {
+            let spill = spills
+              .get_mut(decode_risc_aux16(word) as usize)
+              .ok_or_else(|| RuntimeError::from("RISC spill store out of bounds"))?;
+            *spill = registers[rd].clone();
           }
-        }
-        Op::CloneLocalCell => {
-          let slot = decode_risc_aux16(word) as usize;
-          ensure_slot(&mut self.locals, slot);
-          let value = self.locals[slot].borrow().clone();
-          self.locals[slot] = Rc::new(Mutex::new(value));
-        }
-        Op::ResetLocalCell => {
-          let slot = decode_risc_aux16(word) as usize;
-          ensure_slot(&mut self.locals, slot);
-          self.locals[slot] = Rc::new(Mutex::new(Value::Uninitialized));
-        }
-        Op::GetGlobal | Op::TypeofGlobal => {
-          let name = self.string_constant(decode_risc_aux16(word) as usize)?;
-          let value = self.resolve_identifier_value(&name)?;
-          registers[rd] = if matches!(op, Op::TypeofGlobal) {
-            Value::String(
-              value
+          Op::MakeClosure => {
+            registers[rd] = self.make_closure_value(decode_risc_aux16(word) as usize)?;
+          }
+          Op::LoadLocal => {
+            let slot = decode_risc_aux16(word) as usize;
+            let value = self
+              .locals
+              .get(slot)
+              .map(|cell| cell.borrow().clone())
+              .ok_or_else(|| RuntimeError::from("bad RISC local slot"))?;
+            if matches!(value, Value::Uninitialized) {
+              return Err(
+                self.throw_reference_error("Cannot access lexical binding before initialization"),
+              );
+            }
+            registers[rd] = value;
+          }
+          Op::StoreLocal => {
+            let slot = decode_risc_aux16(word) as usize;
+            ensure_slot(&mut self.locals, slot);
+            let immutable = self
+              .current_slot_immutable
+              .as_ref()
+              .and_then(|flags| flags.get(slot))
+              .copied()
+              .unwrap_or(false);
+            let initializes =
+              immutable && matches!(*self.locals[slot].borrow(), Value::Uninitialized);
+            if immutable && !initializes {
+              let sloppy_silent = self
+                .current_slot_sloppy_immutable_silent
                 .as_ref()
-                .map_or_else(|| "undefined".to_string(), |value| self.typeof_value(value)),
-            )
-          } else {
-            value.ok_or_else(|| self.throw_reference_error(&format!("{name} is not defined")))?
-          };
-        }
-        Op::SetGlobal => {
-          let name = self.string_constant(decode_risc_aux16(word) as usize)?;
-          let value = registers[rd].clone();
-          self.set_global_value(&name, value)?;
-        }
-        Op::GetThis => registers[rd] = self.get_this(),
-        Op::GetNewTarget => registers[rd] = self.get_new_target(),
-        Op::Neg => {
-          registers[rd] = Value::Number(-self.to_number_value(&registers[rs])?);
-        }
-        Op::Not => registers[rd] = Value::Bool(!registers[rs].is_truthy()),
-        Op::BitNot => {
-          registers[rd] = match registers[rs].clone() {
-            Value::BigInt(value) => Value::BigInt(!value),
-            value => Value::Number((!self.to_int32_value(&value)?) as f64),
-          };
-        }
-        Op::Typeof => registers[rd] = Value::String(registers[rs].type_name().to_string()),
-        Op::Add => {
-          let left = self.to_primitive(&registers[rd], None)?;
-          let right = self.to_primitive(&registers[rs], None)?;
-          registers[rd] = if matches!(left, Value::String(_)) || matches!(right, Value::String(_)) {
-            Value::String(format!(
-              "{}{}",
-              self.to_string(&left)?,
-              self.to_string(&right)?
-            ))
-          } else {
-            match (&left, &right) {
-              (Value::BigInt(left), Value::BigInt(right)) => {
-                Value::BigInt(left.clone() + right.clone())
+                .and_then(|flags| flags.get(slot))
+                .copied()
+                .unwrap_or(false);
+              if self.is_strict_mode() || !sloppy_silent {
+                return Err(self.throw_type_error("Assignment to constant variable"));
               }
+            } else {
+              let slot_name = self
+                .current_slot_names
+                .as_ref()
+                .and_then(|names| names.get(slot))
+                .and_then(Clone::clone)
+                .or_else(|| {
+                  self
+                    .chunk
+                    .root_slot_names
+                    .get(slot)
+                    .and_then(Clone::clone)
+                });
+              let wrote_with_environment = if let Some(name) = slot_name.as_ref() {
+                self.set_with_env_binding_value(name, registers[rd].clone())?
+              } else {
+                false
+              };
+              if !wrote_with_environment {
+                *self.locals[slot].borrow_mut() = registers[rd].clone();
+                if let Some(name) = slot_name {
+                  let _ = self
+                    .lexical_env
+                    .borrow_mut()
+                    .set_binding_initialized_in_chain(&name, true);
+                }
+                if let Some(arguments_object) = self.current_arguments_object.clone()
+                  && slot < self.current_arguments_mapped_count
+                {
+                  let key = PropertyKey::String(slot.to_string());
+                  if let Some((PropertyDescriptor::Data { writable: true, .. }, _)) =
+                    self.lookup_property_descriptor(&arguments_object, &key, 0)?
+                  {
+                    set_property(&arguments_object, &key, registers[rd].clone())?;
+                    self.bump_object_generation(&arguments_object);
+                  }
+                }
+              }
+            }
+          }
+          Op::CloneLocalCell => {
+            let slot = decode_risc_aux16(word) as usize;
+            ensure_slot(&mut self.locals, slot);
+            let value = self.locals[slot].borrow().clone();
+            self.locals[slot] = Rc::new(Mutex::new(value));
+          }
+          Op::ResetLocalCell => {
+            let slot = decode_risc_aux16(word) as usize;
+            ensure_slot(&mut self.locals, slot);
+            self.locals[slot] = Rc::new(Mutex::new(Value::Uninitialized));
+          }
+          Op::GetUpvalue => {
+            let index = decode_risc_aux16(word) as usize;
+            let value = {
+              let environment = self
+                .current_closure_env
+                .as_ref()
+                .ok_or("GetUpvalue without closure environment")?;
+              let environment = environment.borrow();
+              environment
+                .get(index)
+                .map(|cell| cell.borrow().clone())
+                .ok_or("Bad upvalue index")?
+            };
+            if matches!(value, Value::Uninitialized) {
+              return Err(
+                self.throw_reference_error("Cannot access lexical binding before initialization"),
+              );
+            }
+            registers[rd] = value;
+          }
+          Op::SetUpvalue => {
+            let index = decode_risc_aux16(word) as usize;
+            let (mirror_global_name, immutable, sloppy_immutable_silent) = self
+              .call_stack
+              .last()
+              .and_then(|frame| frame.upvalues.get(index))
+              .map_or((None, false, false), |spec| {
+                (
+                  spec.mirror_global_name.clone(),
+                  spec.immutable,
+                  spec.sloppy_immutable_silent,
+                )
+              });
+            if immutable {
+              if self.is_strict_mode() || !sloppy_immutable_silent {
+                return Err(self.throw_type_error("Assignment to constant variable"));
+              }
+            } else {
+              let environment = self
+                .current_closure_env
+                .as_ref()
+                .ok_or("SetUpvalue without closure environment")?;
+              let cell = environment
+                .borrow()
+                .get(index)
+                .cloned()
+                .ok_or("Bad upvalue index")?;
+              *cell.borrow_mut() = registers[rd].clone();
+              if let Some(name) = mirror_global_name {
+                let current = cell.borrow().clone();
+                self.sync_named_binding_to_global_and_frames(&name, &current);
+              }
+            }
+          }
+          Op::GetGlobal | Op::TypeofGlobal => {
+            let name = self.string_constant(decode_risc_aux16(word) as usize)?;
+            let value = self.resolve_identifier_value(&name)?;
+            registers[rd] = if matches!(op, Op::TypeofGlobal) {
+              Value::String(
+                value
+                  .as_ref()
+                  .map_or_else(|| "undefined".to_string(), |value| self.typeof_value(value)),
+              )
+            } else {
+              value.ok_or_else(|| self.throw_reference_error(&format!("{name} is not defined")))?
+            };
+          }
+          Op::SetGlobal => {
+            let name = self.string_constant(decode_risc_aux16(word) as usize)?;
+            let value = registers[rd].clone();
+            self.set_global_value(&name, value)?;
+          }
+          Op::GetBuiltin => {
+            let name = self.string_constant(decode_risc_aux16(word) as usize)?;
+            let value = self
+              .realm
+              .get_hidden_builtin(&name)
+              .ok_or_else(|| RuntimeError::from(format!("GetBuiltin: '{name}' not found")))?;
+            if !matches!(value, Value::Builtin(_) | Value::BuiltinObject(_, _)) {
+              return Err(RuntimeError::from(format!(
+                "GetBuiltin: '{name}' is not a builtin"
+              )));
+            }
+            registers[rd] = value;
+          }
+          Op::GetModuleExport => {
+            let module_index = decode_aux8(word) as usize;
+            let name_index = crate::bytecode::decode_aux8_2(word) as usize;
+            let name = self.string_constant(name_index)?;
+            registers[rd] = self
+              .module_table
+              .get(module_index)
+              .and_then(|module| module.get(&name).cloned())
+              .map_or(Value::Undefined, |slot| slot.borrow().clone());
+          }
+          Op::SetModuleExport => {
+            let module_index = decode_aux8(word) as usize;
+            let name_index = crate::bytecode::decode_aux8_2(word) as usize;
+            let name = self.string_constant(name_index)?;
+            while self.module_table.len() <= module_index {
+              self.module_table.push(HashMap::new());
+            }
+            if let Some(slot) = self.module_table[module_index].get(&name) {
+              *slot.borrow_mut() = registers[rd].clone();
+            } else {
+              self.module_table[module_index]
+                .insert(name, Rc::new(Mutex::new(registers[rd].clone())));
+            }
+          }
+          Op::GetThis => registers[rd] = self.get_this(),
+          Op::GetNewTarget => registers[rd] = self.get_new_target(),
+          Op::Neg => {
+            registers[rd] = Value::Number(-self.to_number_value(&registers[rs])?);
+          }
+          Op::Not => registers[rd] = Value::Bool(!registers[rs].is_truthy()),
+          Op::BitNot => {
+            registers[rd] = match registers[rs].clone() {
+              Value::BigInt(value) => Value::BigInt(!value),
+              value => Value::Number((!self.to_int32_value(&value)?) as f64),
+            };
+          }
+          Op::Typeof => registers[rd] = Value::String(registers[rs].type_name().to_string()),
+          Op::Add => {
+            let left = self.to_primitive(&registers[rd], None)?;
+            let right = self.to_primitive(&registers[rs], None)?;
+            registers[rd] = if matches!(left, Value::String(_)) || matches!(right, Value::String(_))
+            {
+              Value::String(format!(
+                "{}{}",
+                self.to_string(&left)?,
+                self.to_string(&right)?
+              ))
+            } else {
+              match (&left, &right) {
+                (Value::BigInt(left), Value::BigInt(right)) => {
+                  Value::BigInt(left.clone() + right.clone())
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                  return Err(self.throw_type_error("Cannot mix BigInt and other types"));
+                }
+                _ => Value::Number(self.to_number_value(&left)? + self.to_number_value(&right)?),
+              }
+            };
+          }
+          Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Pow => {
+            let left = registers[rd].clone();
+            let right = registers[rs].clone();
+            registers[rd] = match (left, right) {
+              (Value::BigInt(left), Value::BigInt(right)) => match op {
+                Op::Sub => Value::BigInt(left - right),
+                Op::Mul => Value::BigInt(left * right),
+                Op::Div if right.is_zero() => {
+                  return Err(self.throw_range_error("Division by zero"));
+                }
+                Op::Div => Value::BigInt(left / right),
+                Op::Mod if right.is_zero() => {
+                  return Err(self.throw_range_error("Division by zero"));
+                }
+                Op::Mod => Value::BigInt(left % right),
+                Op::Pow => {
+                  let exponent = right
+                    .to_u32()
+                    .ok_or_else(|| self.throw_range_error("Invalid BigInt exponent"))?;
+                  Value::BigInt(left.pow(exponent))
+                }
+                _ => unreachable!(),
+              },
               (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 return Err(self.throw_type_error("Cannot mix BigInt and other types"));
               }
-              _ => Value::Number(self.to_number_value(&left)? + self.to_number_value(&right)?),
-            }
-          };
-        }
-        Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Pow => {
-          let left = registers[rd].clone();
-          let right = registers[rs].clone();
-          registers[rd] = match (left, right) {
-            (Value::BigInt(left), Value::BigInt(right)) => match op {
-              Op::Sub => Value::BigInt(left - right),
-              Op::Mul => Value::BigInt(left * right),
-              Op::Div if right.is_zero() => {
-                return Err(self.throw_range_error("Division by zero"));
+              (left, right) => {
+                let left = self.to_number_value(&left)?;
+                let right = self.to_number_value(&right)?;
+                Value::Number(match op {
+                  Op::Sub => left - right,
+                  Op::Mul => left * right,
+                  Op::Div => left / right,
+                  Op::Mod => left % right,
+                  Op::Pow => number_exponentiate(left, right),
+                  _ => unreachable!(),
+                })
               }
-              Op::Div => Value::BigInt(left / right),
-              Op::Mod if right.is_zero() => {
-                return Err(self.throw_range_error("Division by zero"));
+            };
+          }
+          Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::Ushr => {
+            let left = registers[rd].clone();
+            let right = registers[rs].clone();
+            registers[rd] = match op {
+              Op::BitAnd => {
+                Value::Number((self.to_int32_value(&left)? & self.to_int32_value(&right)?) as f64)
               }
-              Op::Mod => Value::BigInt(left % right),
-              Op::Pow => {
-                let exponent = right
-                  .to_u32()
-                  .ok_or_else(|| self.throw_range_error("Invalid BigInt exponent"))?;
-                Value::BigInt(left.pow(exponent))
+              Op::BitOr => {
+                Value::Number((self.to_int32_value(&left)? | self.to_int32_value(&right)?) as f64)
               }
+              Op::BitXor => {
+                Value::Number((self.to_int32_value(&left)? ^ self.to_int32_value(&right)?) as f64)
+              }
+              Op::Shl => Value::Number(
+                self
+                  .to_int32_value(&left)?
+                  .wrapping_shl(self.to_uint32_value(&right)? & 0x1f) as f64,
+              ),
+              Op::Shr => Value::Number(
+                self
+                  .to_int32_value(&left)?
+                  .wrapping_shr(self.to_uint32_value(&right)? & 0x1f) as f64,
+              ),
+              Op::Ushr => Value::Number(
+                self
+                  .to_uint32_value(&left)?
+                  .wrapping_shr(self.to_uint32_value(&right)? & 0x1f) as f64,
+              ),
               _ => unreachable!(),
-            },
-            (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
-              return Err(self.throw_type_error("Cannot mix BigInt and other types"));
-            }
-            (left, right) => {
-              let left = self.to_number_value(&left)?;
-              let right = self.to_number_value(&right)?;
-              Value::Number(match op {
-                Op::Sub => left - right,
-                Op::Mul => left * right,
-                Op::Div => left / right,
-                Op::Mod => left % right,
-                Op::Pow => number_exponentiate(left, right),
-                _ => unreachable!(),
-              })
-            }
-          };
-        }
-        Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::Ushr => {
-          let left = registers[rd].clone();
-          let right = registers[rs].clone();
-          registers[rd] = match op {
-            Op::BitAnd => {
-              Value::Number((self.to_int32_value(&left)? & self.to_int32_value(&right)?) as f64)
-            }
-            Op::BitOr => {
-              Value::Number((self.to_int32_value(&left)? | self.to_int32_value(&right)?) as f64)
-            }
-            Op::BitXor => {
-              Value::Number((self.to_int32_value(&left)? ^ self.to_int32_value(&right)?) as f64)
-            }
-            Op::Shl => Value::Number(
-              self
-                .to_int32_value(&left)?
-                .wrapping_shl(self.to_uint32_value(&right)? & 0x1f) as f64,
-            ),
-            Op::Shr => Value::Number(
-              self
-                .to_int32_value(&left)?
-                .wrapping_shr(self.to_uint32_value(&right)? & 0x1f) as f64,
-            ),
-            Op::Ushr => Value::Number(
-              self
-                .to_uint32_value(&left)?
-                .wrapping_shr(self.to_uint32_value(&right)? & 0x1f) as f64,
-            ),
-            _ => unreachable!(),
-          };
-        }
-        Op::And => {
-          registers[rd] = Value::Bool(registers[rd].is_truthy() && registers[rs].is_truthy());
-        }
-        Op::Or => {
-          registers[rd] = Value::Bool(registers[rd].is_truthy() || registers[rs].is_truthy());
-        }
-        Op::Jump => {
-          let offset = ((word >> 8) & 0x00FF_FFFF) as i32;
-          let offset = if offset & 0x0080_0000 != 0 {
-            offset | !0x00FF_FFFF
-          } else {
-            offset
-          };
-          self.ip = usize::try_from(self.ip as i64 + offset as i64)
-            .map_err(|_| RuntimeError::from("negative RISC jump target"))?;
-        }
-        Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
-          let value = &registers[rd];
-          let take = match op {
-            Op::JumpIfFalse => !value.is_truthy(),
-            Op::JumpIfTrue => value.is_truthy(),
-            Op::JumpIfNullish => matches!(value, Value::Null | Value::Undefined),
-            _ => unreachable!(),
-          };
-          if take {
-            self.ip = usize::try_from(self.ip as i64 + decode_risc_cond_offset(word) as i64)
-              .map_err(|_| RuntimeError::from("negative RISC conditional target"))?;
+            };
           }
-        }
-        Op::CompareJump => {
-          let (condition, left, right, offset) = decode_compare_jump(word);
-          let left = &registers[left as usize];
-          let right = &registers[right as usize];
-          let result = match condition {
-            0 => self.abstract_equality(left, right)?,
-            1 => !self.abstract_equality(left, right)?,
-            2 => self
-              .abstract_relational_comparison(left, right)?
-              .unwrap_or(false),
-            3 => self
-              .abstract_relational_comparison(right, left)?
-              .is_some_and(|result| !result),
-            4 => self
-              .abstract_relational_comparison(right, left)?
-              .unwrap_or(false),
-            5 => self
-              .abstract_relational_comparison(left, right)?
-              .is_some_and(|result| !result),
-            6 => values_equal(left, right),
-            7 => !values_equal(left, right),
-            _ => unreachable!(),
-          };
-          if !result {
+          Op::And => {
+            registers[rd] = Value::Bool(registers[rd].is_truthy() && registers[rs].is_truthy());
+          }
+          Op::Or => {
+            registers[rd] = Value::Bool(registers[rd].is_truthy() || registers[rs].is_truthy());
+          }
+          Op::Jump => {
+            let offset = ((word >> 8) & 0x00FF_FFFF) as i32;
+            let offset = if offset & 0x0080_0000 != 0 {
+              offset | !0x00FF_FFFF
+            } else {
+              offset
+            };
             self.ip = usize::try_from(self.ip as i64 + offset as i64)
-              .map_err(|_| RuntimeError::from("negative RISC compare target"))?;
+              .map_err(|_| RuntimeError::from("negative RISC jump target"))?;
+          }
+          Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
+            let value = &registers[rd];
+            let take = match op {
+              Op::JumpIfFalse => !value.is_truthy(),
+              Op::JumpIfTrue => value.is_truthy(),
+              Op::JumpIfNullish => matches!(value, Value::Null | Value::Undefined),
+              _ => unreachable!(),
+            };
+            if take {
+              self.ip = usize::try_from(self.ip as i64 + decode_risc_cond_offset(word) as i64)
+                .map_err(|_| RuntimeError::from("negative RISC conditional target"))?;
+            }
+          }
+          Op::CompareJump => {
+            let (condition, left, right, offset) = decode_compare_jump(word);
+            let left = &registers[left as usize];
+            let right = &registers[right as usize];
+            let result = match condition {
+              0 => self.abstract_equality(left, right)?,
+              1 => !self.abstract_equality(left, right)?,
+              2 => self
+                .abstract_relational_comparison(left, right)?
+                .unwrap_or(false),
+              3 => self
+                .abstract_relational_comparison(right, left)?
+                .is_some_and(|result| !result),
+              4 => self
+                .abstract_relational_comparison(right, left)?
+                .unwrap_or(false),
+              5 => self
+                .abstract_relational_comparison(left, right)?
+                .is_some_and(|result| !result),
+              6 => values_equal(left, right),
+              7 => !values_equal(left, right),
+              _ => unreachable!(),
+            };
+            if !result {
+              self.ip = usize::try_from(self.ip as i64 + offset as i64)
+                .map_err(|_| RuntimeError::from("negative RISC compare target"))?;
+            }
+          }
+          Op::GetProperty => {
+            let object = registers[rd].clone();
+            let key = registers[rs].clone();
+            let key = self.to_property_key(&key)?;
+            registers[rd] = self.get_property_value_cached(instruction_ip, &object, &key)?;
+          }
+          Op::SetProperty => {
+            let object = registers[rd].clone();
+            let key = self.to_property_key(&registers[rs])?;
+            let value = registers[(decode_aux8(word) & 0xF) as usize].clone();
+            self.set_property_tracked(&object, &key, value.clone())?;
+            registers[rd] = value;
+          }
+          Op::DeleteProperty => {
+            let object = registers[rd].clone();
+            let key = self.to_property_key(&registers[rs])?;
+            let deleted = self.delete_property_host(&object, &key)?;
+            if !deleted && self.is_strict_mode() {
+              return Err(self.throw_type_error("Cannot delete property in strict mode"));
+            }
+            registers[rd] = Value::Bool(deleted);
+          }
+          Op::HasProperty => {
+            let object = registers[rd].clone();
+            let key = self.to_property_key(&registers[rs])?;
+            registers[rd] = Value::Bool(self.has_property_host(&object, &key)?);
+          }
+          Op::InstanceOf => {
+            let value = registers[rd].clone();
+            let constructor = registers[rs].clone();
+            registers[rd] = Value::Bool(self.instance_of(&value, &constructor)?);
+          }
+          Op::GetSuperProperty => {
+            self.stack.push(registers[rd].clone());
+            self.stack.push(registers[rs].clone());
+            let key = self.pop()?;
+            let receiver = self.pop()?;
+            self.get_super_property(&receiver, &key)?;
+            registers[rd] = self.pop()?;
+          }
+          Op::SetSuperProperty => {
+            let value_register = (decode_aux8(word) & 0xF) as usize;
+            let receiver = registers[rd].clone();
+            let key = registers[rs].clone();
+            let value = registers[value_register].clone();
+            self.set_super_property(&receiver, &key, value)?;
+            registers[rd] = self.pop()?;
+          }
+          Op::BuildArray => {
+            let count = decode_risc_aux16(word) as usize;
+            let base = self.chunk.risc_value_spill_count as usize;
+            let values = spills
+              .get(base..base + count)
+              .ok_or_else(|| RuntimeError::from("RISC array operand window out of bounds"))?
+              .to_vec();
+            registers[rd] = self.build_array_value(values)?;
+          }
+          Op::BuildObject => {
+            let count = decode_risc_aux16(word) as usize;
+            let operand_count = count.saturating_mul(2);
+            let base = self.chunk.risc_value_spill_count as usize;
+            let values = spills
+              .get(base..base + operand_count)
+              .ok_or_else(|| RuntimeError::from("RISC object operand window out of bounds"))?
+              .to_vec();
+            registers[rd] = self.build_object_value(values)?;
+          }
+          Op::ArrayFromSpread => {
+            let values = registers[rd].clone();
+            let mask = registers[rs].clone();
+            registers[rd] = array_from_values(self.flatten_spread_values(values, mask)?);
+          }
+          Op::Spread => {
+            let callee = registers[rd].clone();
+            let values = registers[rs].clone();
+            let mask = registers[(decode_aux8(word) & 0xF) as usize].clone();
+            let arguments = self.flatten_spread_values(values, mask)?;
+            registers[rd] = self.call_value(&callee, &arguments)?;
+          }
+          Op::Call | Op::TailCall | Op::CallBuiltin => {
+            let count = decode_risc_aux16(word) as usize;
+            let mut args: Vec<Value> = (0..count.min(6))
+              .map(|index| registers[2 + index].clone())
+              .collect();
+            let overflow = count.saturating_sub(6);
+            let base = self.chunk.risc_value_spill_count as usize;
+            args.extend_from_slice(
+              spills
+                .get(base..base + overflow)
+                .ok_or_else(|| RuntimeError::from("RISC call operand window out of bounds"))?,
+            );
+            let callee = registers[0].clone();
+            registers[0] = if matches!(op, Op::CallBuiltin) {
+              let receiver = registers[1].clone();
+              self.call_value_with_this(&callee, &receiver, &args)?
+            } else {
+              self.call_value(&callee, &args)?
+            };
+          }
+          Op::Construct => {
+            let count = decode_risc_aux16(word) as usize;
+            let mut args: Vec<Value> = (0..count.min(6))
+              .map(|index| registers[2 + index].clone())
+              .collect();
+            let overflow = count.saturating_sub(6);
+            let base = self.chunk.risc_value_spill_count as usize;
+            args.extend_from_slice(
+              spills
+                .get(base..base + overflow)
+                .ok_or_else(|| RuntimeError::from("RISC construct operand window out of bounds"))?,
+            );
+            let callee = registers[0].clone();
+            registers[0] = self.construct_value(&callee, &args)?;
+          }
+          Op::SuperConstruct => {
+            let count = decode_risc_aux16(word) as usize;
+            let base = self.chunk.risc_value_spill_count as usize;
+            let args = spills
+              .get(base..base + count)
+              .ok_or_else(|| RuntimeError::from("RISC super operand window out of bounds"))?
+              .to_vec();
+            registers[rd] = self.construct_super_value(args)?;
+          }
+          Op::PushHandler => {
+            let offset = ((word >> 8) & 0x00FF_FFFF) as i32;
+            let offset = if offset & 0x0080_0000 != 0 {
+              offset | !0x00FF_FFFF
+            } else {
+              offset
+            };
+            let handler_ip = usize::try_from(self.ip as i64 + offset as i64)
+              .map_err(|_| RuntimeError::from("negative RISC handler target"))?;
+            self.handlers.push(HandlerRecord {
+              chunk: Rc::clone(&self.chunk),
+              handler_ip,
+              saved_stack_len: self.stack.len(),
+              saved_locals_len: self.locals.len(),
+              frame_count: self.call_stack.len(),
+              saved_lexical_env: Rc::clone(&self.lexical_env),
+            });
+          }
+          Op::PopHandler => {
+            self.handlers.pop();
+          }
+          Op::Throw => {
+            self.throw_value(registers[rd].clone())?;
+            return Err(RuntimeError::from("JS exception"));
+          }
+          Op::DeleteIdentifier => {
+            self.stack.push(registers[rd].clone());
+            self.delete_identifier_op()?;
+            registers[rd] = self.pop()?;
+          }
+          Op::IteratorNext => {
+            self.stack.push(registers[rd].clone());
+            self.iterator_next_op()?;
+            registers[rd] = self.pop()?;
+          }
+          Op::IteratorClose => {
+            self.stack.push(registers[rd].clone());
+            self.iterator_close_op()?;
+            registers[rd] = self.pop()?;
+          }
+          Op::PushWithEnv => {
+            let object = self.to_object_value(registers[rd].clone())?;
+            self.lexical_env = Rc::new(RefCell::new(EnvironmentRecord::new_object(
+              Some(Rc::clone(&self.lexical_env)),
+              object,
+              true,
+            )));
+          }
+          Op::PopEnv => {
+            let outer = self.lexical_env.borrow().outer();
+            self.lexical_env = outer.unwrap_or_else(|| Rc::clone(&self.global_env));
+          }
+          Op::GeneratorInitDone if stop_at_generator_init => {
+            return Ok(Some(RiscRunOutcome::Initialized));
+          }
+          Op::GeneratorInitDone => {}
+          Op::Yield => {
+            state.resume_register = Some(rd);
+            return Ok(Some(RiscRunOutcome::Yield(registers[rd].clone())));
+          }
+          Op::YieldStar => {
+            if self.yield_star_queue.is_none() {
+              let mut queue = VecDeque::new();
+              match registers[rd].clone() {
+                Value::Array(array, _) => {
+                  for value in array.borrow().iter().flatten() {
+                    queue.push_back(value.clone());
+                  }
+                }
+                other => queue.push_back(other),
+              }
+              self.yield_star_queue = Some(queue);
+            }
+            if let Some(queue) = &mut self.yield_star_queue
+              && let Some(value) = queue.pop_front()
+            {
+              self.ip = self.ip.saturating_sub(1);
+              return Ok(Some(RiscRunOutcome::Yield(value)));
+            }
+            self.yield_star_queue = None;
+            registers[rd] = Value::Undefined;
+          }
+          Op::AwaitPromise => {
+            let awaited = registers[rd].clone();
+            registers[rd] = match awaited {
+              Value::Promise(promise) => loop {
+                let settled = {
+                  let promise = promise.borrow();
+                  match &*promise {
+                    PromiseState::Fulfilled(value) => Some(Ok(value.clone())),
+                    PromiseState::Rejected { reason, .. } => Some(Err(reason.clone())),
+                    PromiseState::Pending { .. } => None,
+                  }
+                };
+                match settled {
+                  Some(Ok(value)) => break value,
+                  Some(Err(reason)) => {
+                    self.throw_value(reason)?;
+                    return Err(RuntimeError::from("JS exception"));
+                  }
+                  None if !self.microtasks.is_empty() || !self.dynamic_import_jobs.is_empty() => {
+                    self.run_microtasks_if_needed()?;
+                    self.maybe_collect_garbage_prototype();
+                  }
+                  None => {
+                    return Err(RuntimeError::from(
+                      "Promise did not settle during synchronous await",
+                    ));
+                  }
+                }
+              },
+              other => other,
+            };
+          }
+          Op::Return => {
+            let result = registers[rd].clone();
+            if self.call_stack.is_empty() {
+              self.run_microtasks_if_needed()?;
+              let _ = self.collect_garbage_prototype();
+              self.finish_opcode_profile_run("risc-return");
+            }
+            return Ok(Some(RiscRunOutcome::Return(result)));
+          }
+          unsupported => {
+            if self.call_stack.is_empty() {
+              self.finish_opcode_profile_run("risc-error");
+            }
+            return Err(RuntimeError::from(format!(
+              "RISC executor does not yet support {}",
+              unsupported.name()
+            )));
           }
         }
-        Op::GetProperty => {
-          let object = registers[rd].clone();
-          let key = registers[rs].clone();
-          let key = self.to_property_key(&key)?;
-          registers[rd] = self.get_property_value_cached(instruction_ip, &object, &key)?;
+        Ok(None)
+      })();
+      match step_result {
+        Ok(Some(result)) => return Ok(result),
+        Ok(None) => {}
+        Err(_error) if self.pending_exception && Rc::ptr_eq(&self.chunk, &execution_chunk) => {
+          self.pending_exception = false;
+          registers[7] = self.stack.pop().unwrap_or(Value::Undefined);
+          continue;
         }
-        Op::SetProperty => {
-          let object = registers[rd].clone();
-          let key = self.to_property_key(&registers[rs])?;
-          let value = registers[(decode_aux8(word) & 0xF) as usize].clone();
-          self.set_property_tracked(&object, &key, value.clone())?;
-          registers[rd] = value;
-        }
-        Op::BuildArray => {
-          let count = decode_risc_aux16(word) as usize;
-          let base = self.chunk.risc_value_spill_count as usize;
-          let values = spills
-            .get(base..base + count)
-            .ok_or_else(|| RuntimeError::from("RISC array operand window out of bounds"))?
-            .to_vec();
-          registers[rd] = self.build_array_value(values)?;
-        }
-        Op::BuildObject => {
-          let count = decode_risc_aux16(word) as usize;
-          let operand_count = count.saturating_mul(2);
-          let base = self.chunk.risc_value_spill_count as usize;
-          let values = spills
-            .get(base..base + operand_count)
-            .ok_or_else(|| RuntimeError::from("RISC object operand window out of bounds"))?
-            .to_vec();
-          registers[rd] = self.build_object_value(values)?;
-        }
-        Op::Call | Op::TailCall | Op::CallBuiltin => {
-          let count = decode_risc_aux16(word) as usize;
-          let mut args: Vec<Value> = (0..count.min(6))
-            .map(|index| registers[2 + index].clone())
-            .collect();
-          let overflow = count.saturating_sub(6);
-          let base = self.chunk.risc_value_spill_count as usize;
-          args.extend_from_slice(
-            spills
-              .get(base..base + overflow)
-              .ok_or_else(|| RuntimeError::from("RISC call operand window out of bounds"))?,
-          );
-          let callee = registers[0].clone();
-          registers[0] = if matches!(op, Op::CallBuiltin) {
-            let receiver = registers[1].clone();
-            self.call_value_with_this(&callee, &receiver, &args)?
-          } else {
-            self.call_value(&callee, &args)?
-          };
-        }
-        Op::Construct => {
-          let count = decode_risc_aux16(word) as usize;
-          let mut args: Vec<Value> = (0..count.min(6))
-            .map(|index| registers[2 + index].clone())
-            .collect();
-          let overflow = count.saturating_sub(6);
-          let base = self.chunk.risc_value_spill_count as usize;
-          args.extend_from_slice(
-            spills
-              .get(base..base + overflow)
-              .ok_or_else(|| RuntimeError::from("RISC construct operand window out of bounds"))?,
-          );
-          let callee = registers[0].clone();
-          registers[0] = self.construct_value(&callee, &args)?;
-        }
-        Op::Return => {
-          let result = registers[rd].clone();
-          self.run_microtasks_if_needed()?;
-          let _ = self.collect_garbage_prototype();
-          self.finish_opcode_profile_run("risc-return");
-          return Ok(result);
-        }
-        unsupported => {
-          self.finish_opcode_profile_run("risc-error");
-          return Err(RuntimeError::from(format!(
-            "RISC executor does not yet support {}",
-            unsupported.name()
-          )));
-        }
+        Err(error) => return Err(error),
       }
       self.maybe_collect_garbage_prototype();
     }
@@ -1468,9 +1726,9 @@ impl Vm {
     chunk
       .verify()
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
-    if chunk.format != BytecodeFormat::StackV1 {
+    if chunk.format != BytecodeFormat::RiscV2 {
       return Err(RuntimeError::from(
-        "RISC v2 bytecode requires the register executor",
+        "nested execution requires RISC v2 bytecode",
       ));
     }
     let saved_chunk = Rc::clone(&self.chunk);
@@ -1576,43 +1834,7 @@ impl Vm {
     }
     self.begin_opcode_profile_run();
 
-    let result = loop {
-      match self.step(None) {
-        Ok(StepOutcome::Continue) => {
-          self.pending_exception = false;
-          self.maybe_collect_garbage_prototype();
-        }
-        Ok(StepOutcome::Return(result)) => {
-          self.pending_exception = false;
-          let result = self.run_microtasks_if_needed().map(|()| result);
-
-          {
-            let _ = self.collect_garbage_prototype();
-          }
-          self.finish_opcode_profile_run(if result.is_ok() {
-            "return"
-          } else {
-            "microtask-error"
-          });
-          break result;
-        }
-        Ok(StepOutcome::Yield(_)) => {
-          break Err(self.throw_type_error("yield used outside generator resume"));
-        }
-        Err(err) => {
-          if self.pending_exception {
-            self.pending_exception = false;
-            continue;
-          }
-
-          {
-            let _ = self.collect_garbage_prototype();
-          }
-          self.finish_opcode_profile_run("error");
-          break Err(err);
-        }
-      }
-    };
+    let result = self.run_risc_loop(true);
 
     self.chunk = saved_chunk;
     self.ip = saved_ip;
@@ -1888,1124 +2110,6 @@ impl Vm {
       }
     }
   }
-
-  pub(super) fn run_until_return(
-    &mut self,
-    stack_base: usize,
-    drain_microtasks: bool,
-  ) -> Result<Value, RuntimeError> {
-    let target_frame_depth = self.call_stack.len();
-    loop {
-      match self.step(Some(target_frame_depth)) {
-        Ok(StepOutcome::Continue) => {
-          if self.pending_exception {
-            if self.call_stack.len() < target_frame_depth {
-              return Err(RuntimeError::from("JS exception"));
-            }
-            self.pending_exception = false;
-          }
-          self.maybe_collect_garbage_prototype();
-        }
-        Ok(StepOutcome::Return(result)) => {
-          self.pending_exception = false;
-          self.stack.truncate(stack_base);
-          if drain_microtasks {
-            self.run_microtasks_if_needed()?;
-          }
-          return Ok(result);
-        }
-        Ok(StepOutcome::Yield(_)) => {
-          return Err(self.throw_type_error("yield used outside generator resume"));
-        }
-        Err(err) => {
-          if self.pending_exception {
-            if self.call_stack.len() < target_frame_depth {
-              return Err(err);
-            }
-            self.pending_exception = false;
-            continue;
-          }
-          return Err(err);
-        }
-      }
-    }
-  }
-
-  /// Executes a single instruction, returning the outcome (return value or yield).
-  ///
-  /// # Errors
-  ///
-  /// Returns a [`crate::errors::RuntimeError`] if the instruction fails.
-  pub(super) fn step(
-    &mut self,
-    stop_at_frame_depth: Option<usize>,
-  ) -> Result<StepOutcome, RuntimeError> {
-    // In fixed-width mode `ip` is an instruction index. Read the current
-    // instruction word and extract the opcode byte.
-    let op_byte = {
-      if self.ip >= self.chunk.code.len() {
-        return Err(RuntimeError::from(format!(
-          "Unexpected end of bytecode at ip {}",
-          self.ip
-        )));
-      }
-      let instr = self.chunk.code[self.ip];
-      // advance to next instruction index (next = ip + 1)
-      self.ip += 1;
-      // reset operand cursor for the newly fetched instruction
-      self.operand_cursor = 0;
-      (instr & 0xFF) as u8
-    };
-    if crate::trace::enabled() {
-      eprintln!(
-        "[trace] step {} stack_size={} op_byte=0x{:02x}",
-        self
-          .chunk
-          .disassemble_at(self.ip.saturating_sub(1))
-          .unwrap_or_else(|_| format!("ip={}", self.ip.saturating_sub(1))),
-        self.stack.len(),
-        op_byte
-      );
-    }
-    let op = match Op::from_byte(op_byte) {
-      Some(o) => o,
-      None => {
-        return Err(RuntimeError::from(format!(
-          "Invalid opcode 0x{:02x} at ip {}",
-          op_byte,
-          self.ip.saturating_sub(1)
-        )));
-      }
-    };
-    self.record_opcode(op);
-
-    match op {
-      Op::Const => {
-        let idx = self.read_short()? as usize;
-        let v = self.constant(idx)?;
-        self.stack.push(v);
-      }
-      Op::Null => self.stack.push(Value::Null),
-      Op::Undefined => self.stack.push(Value::Undefined),
-      Op::True => self.stack.push(Value::Bool(true)),
-      Op::False => self.stack.push(Value::Bool(false)),
-      Op::LoadLocal => {
-        let slot = self.read_byte()? as usize;
-        if let Some(name) = self
-          .chunk
-          .root_slot_names
-          .get(slot)
-          .and_then(Clone::clone)
-          && let Some(v) = self.get_with_env_binding_value(&name)?
-        {
-          if crate::trace::enabled() && name.starts_with("st_") {
-            eprintln!(
-              "[trace] LoadLocal '{}' via with-env -> {}",
-              name,
-              v.type_name()
-            );
-            crate::trace::value_string("[trace]   value", &v);
-          }
-          self.stack.push(v);
-          return Ok(StepOutcome::Continue);
-        }
-        let v = self
-          .locals
-          .get(slot)
-          .map(|cell| cell.borrow().clone())
-          .ok_or("Bad local slot")?;
-        if crate::trace::enabled()
-          && matches!(v, Value::Uninitialized)
-          && let Some(name) = self
-            .chunk
-            .root_slot_names
-            .get(slot)
-            .and_then(Clone::clone)
-        {
-          eprintln!("[trace] LoadLocal TDZ name='{}' slot={}", name, slot);
-        }
-        if matches!(v, Value::Uninitialized) {
-          return Err(
-            self.throw_reference_error("Cannot access lexical binding before initialization"),
-          );
-        }
-        if crate::trace::enabled()
-          && self
-            .chunk
-            .root_slot_names
-            .get(slot)
-            .and_then(Clone::clone)
-            .as_deref()
-            .is_some_and(|name| name.starts_with("st_"))
-        {
-          let name = self
-            .chunk
-            .root_slot_names
-            .get(slot)
-            .and_then(Clone::clone)
-            .expect("name should exist after is_some_and check");
-          eprintln!("[trace] LoadLocal '{}' -> {}", name, v.type_name());
-          crate::trace::value_string("[trace]   value", &v);
-        }
-        self.stack.push(v);
-      }
-      Op::StoreLocal => {
-        let slot = self.read_byte()? as usize;
-        let v = self.pop()?;
-        ensure_slot(&mut self.locals, slot);
-        let slot_immutable = self
-          .current_slot_immutable
-          .as_ref()
-          .and_then(|flags| flags.get(slot))
-          .copied()
-          .unwrap_or(false);
-        let initializes_immutable =
-          slot_immutable && matches!(*self.locals[slot].borrow(), Value::Uninitialized);
-        if slot_immutable && !initializes_immutable {
-          let sloppy_silent = self
-            .current_slot_sloppy_immutable_silent
-            .as_ref()
-            .and_then(|flags| flags.get(slot))
-            .copied()
-            .unwrap_or(false);
-          if self.is_strict_mode() || !sloppy_silent {
-            return Err(self.throw_type_error("Assignment to constant variable"));
-          }
-          return Ok(StepOutcome::Continue);
-        }
-        if let Some(name) = self
-          .chunk
-          .root_slot_names
-          .get(slot)
-          .and_then(Clone::clone)
-          && self.set_with_env_binding_value(&name, v.clone())?
-        {
-          return Ok(StepOutcome::Continue);
-        }
-        *self.locals[slot].borrow_mut() = v;
-        if let Some(name) = self
-          .chunk
-          .root_slot_names
-          .get(slot)
-          .and_then(Clone::clone)
-        {
-          let _ = self
-            .lexical_env
-            .borrow_mut()
-            .set_binding_initialized_in_chain(&name, true);
-        }
-        if let Some(arguments_object) = self.current_arguments_object.clone()
-          && slot < self.current_arguments_mapped_count
-        {
-          let key = PropertyKey::String(slot.to_string());
-          if let Some((PropertyDescriptor::Data { writable: true, .. }, _)) =
-            self.lookup_property_descriptor(&arguments_object, &key, 0)?
-          {
-            let value = self.locals[slot].borrow().clone();
-            set_property(&arguments_object, &key, value)?;
-            self.bump_object_generation(&arguments_object);
-          }
-        }
-      }
-      Op::CloneLocalCell => {
-        let slot = self.read_byte()? as usize;
-        ensure_slot(&mut self.locals, slot);
-        let value = self.locals[slot].borrow().clone();
-        self.locals[slot] = Rc::new(Mutex::new(value));
-      }
-      Op::ResetLocalCell => {
-        let slot = self.read_byte()? as usize;
-        ensure_slot(&mut self.locals, slot);
-        self.locals[slot] = Rc::new(Mutex::new(Value::Uninitialized));
-      }
-      Op::GetGlobal => {
-        let idx = self.read_short()? as usize;
-        let name = self.string_constant(idx)?;
-        let v = if let Some(v) = self.resolve_identifier_value(&name)? {
-          v
-        } else {
-          return Err(self.throw_reference_error(&format!("{name} is not defined")));
-        };
-        self.stack.push(v);
-      }
-      Op::TypeofGlobal => {
-        let idx = self.read_short()? as usize;
-        let name = self.string_constant(idx)?;
-        let value = self.resolve_identifier_value(&name)?;
-        let ty = value
-          .as_ref()
-          .map_or_else(|| "undefined".to_string(), |v| self.typeof_value(v));
-        self.stack.push(Value::String(ty));
-      }
-      Op::SetGlobal => {
-        let idx = self.read_short()? as usize;
-        let name = self.string_constant(idx)?;
-        let v = self.pop()?;
-        self.set_global_value(&name, v)?;
-      }
-      // New op: GetThis
-      Op::GetThis => {
-        if matches!(self.this_value, Value::Uninitialized) {
-          return Err(
-            self.throw_reference_error("Must call super constructor before accessing 'this'"),
-          );
-        }
-        self.stack.push(self.get_this());
-      }
-      Op::GetUpvalue => {
-        let idx = self.read_byte()? as usize;
-        let value = {
-          let env = self
-            .current_closure_env
-            .as_ref()
-            .ok_or("GetUpvalue without closure env")?;
-          let env_guard = env.borrow();
-          env_guard
-            .get(idx)
-            .map(|cell| cell.borrow().clone())
-            .ok_or_else(|| {
-              if crate::trace::enabled() {
-                eprintln!(
-                  "[diag] GetUpvalue bad index={} env_len={} ip={} chunk_ptr={:p} chunk_len={}",
-                  idx,
-                  env_guard.len(),
-                  self.ip.saturating_sub(1),
-                  Rc::as_ptr(&self.chunk),
-                  self.chunk.code.len()
-                );
-              }
-              "Bad upvalue index"
-            })?
-        };
-        if matches!(value, Value::Uninitialized) {
-          return Err(
-            self.throw_reference_error("Cannot access lexical binding before initialization"),
-          );
-        }
-        self.stack.push(value);
-      }
-      Op::SetUpvalue => {
-        let idx = self.read_byte()? as usize;
-        let value = self.pop()?;
-        let (mirror_global_name, immutable, sloppy_immutable_silent) = self
-          .call_stack
-          .last()
-          .and_then(|frame| frame.upvalues.get(idx))
-          .map_or((None, false, false), |spec| {
-            (
-              spec.mirror_global_name.clone(),
-              spec.immutable,
-              spec.sloppy_immutable_silent,
-            )
-          });
-        if immutable {
-          if self.is_strict_mode() || !sloppy_immutable_silent {
-            return Err(self.throw_type_error("Assignment to constant variable"));
-          }
-          return Ok(StepOutcome::Continue);
-        }
-        let env = self
-          .current_closure_env
-          .as_ref()
-          .ok_or("SetUpvalue without closure env")?;
-        let cell = {
-          let env_guard = env.borrow();
-          env_guard.get(idx).cloned().ok_or_else(|| {
-            if crate::trace::enabled() {
-              eprintln!(
-                "[diag] SetUpvalue bad index={} env_len={} ip={} chunk_ptr={:p} chunk_len={}",
-                idx,
-                env_guard.len(),
-                self.ip.saturating_sub(1),
-                Rc::as_ptr(&self.chunk),
-                self.chunk.code.len()
-              );
-            }
-            "Bad upvalue index"
-          })?
-        };
-        *cell.borrow_mut() = value;
-
-        if let Some(name) = mirror_global_name {
-          let current = cell.borrow().clone();
-          self.sync_named_binding_to_global_and_frames(&name, &current);
-        }
-      }
-      Op::Pop => {
-        self.pop()?;
-      }
-      Op::Dup => {
-        let v = self
-          .stack
-          .last()
-          .cloned()
-          .ok_or("Stack underflow")?;
-        if crate::trace::enabled() {
-          crate::trace::value_string("[trace] Dup top value", &v);
-          eprintln!("[trace] Dup before push stack_size={} ", self.stack.len());
-        }
-        self.stack.push(v);
-        if crate::trace::enabled() {
-          eprintln!("[trace] Dup after push stack_size={} ", self.stack.len());
-        }
-      }
-      Op::Add => {
-        let b = self.pop()?;
-        let a = self.pop()?;
-        // ECMAScript Add: ToPrimitive first; string concatenation takes
-        // precedence, otherwise numeric/bigint addition.
-        let a_prim = self.to_primitive(&a, None)?;
-        let b_prim = self.to_primitive(&b, None)?;
-        if matches!(a_prim, Value::String(_)) || matches!(b_prim, Value::String(_)) {
-          let sa = self.to_string(&a_prim)?;
-          let sb = self.to_string(&b_prim)?;
-          self
-            .stack
-            .push(Value::String(format!("{}{}", sa, sb)));
-        } else if matches!(a_prim, Value::BigInt(_)) || matches!(b_prim, Value::BigInt(_)) {
-          if let (Value::BigInt(x), Value::BigInt(y)) = (a_prim, b_prim) {
-            self.stack.push(Value::BigInt(x + y));
-          } else {
-            // Mixing BigInt and other numeric types should throw a JS TypeError
-            let ctor = self
-              .get_global("TypeError")
-              .unwrap_or(Value::Undefined);
-            let thrown = self
-              .construct_value(&ctor, &[])
-              .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                ObjectData::new(),
-              )))));
-            match self.unwind_to_handler(thrown) {
-              Ok(()) => return Ok(StepOutcome::Continue),
-              Err(err) => return Err(err),
-            }
-          }
-        } else {
-          let na = self.to_number_value(&a_prim)?;
-          let nb = self.to_number_value(&b_prim)?;
-          self.stack.push(Value::Number(na + nb));
-        }
-      }
-      Op::Sub => self.binary_num_bigint(|a, b| a - b, |a, b| Ok(a - b))?,
-      Op::Mul => self.binary_num_bigint(|a, b| a * b, |a, b| Ok(a * b))?,
-      Op::Div => {
-        // Division supports BigInt/BigInt -> BigInt (trunc toward zero)
-        // and numeric division for other types.
-        let b = self.pop()?;
-        let a = self.pop()?;
-        match (a, b) {
-          (Value::BigInt(x), Value::BigInt(y)) => {
-            if y.is_zero() {
-              // Division by zero for BigInt throws RangeError
-              let ctor = self
-                .get_global("RangeError")
-                .unwrap_or(Value::Undefined);
-              let thrown = self
-                .construct_value(&ctor, &[])
-                .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                  ObjectData::new(),
-                )))));
-              match self.unwind_to_handler(thrown) {
-                Ok(()) => return Ok(StepOutcome::Continue),
-                Err(err) => return Err(err),
-              }
-            }
-            // Use BigInt division (num_bigint division semantics align with trunc toward zero)
-            let res = x / y;
-            self.stack.push(Value::BigInt(res));
-          }
-          (a, b) => {
-            let (x, y) = (to_number(&a)?, to_number(&b)?);
-            self.stack.push(Value::Number(x / y));
-          }
-        }
-      }
-      Op::Mod => {
-        let b = self.pop()?;
-        let a = self.pop()?;
-        match (a, b) {
-          (Value::BigInt(x), Value::BigInt(y)) => {
-            if y.is_zero() {
-              let ctor = self
-                .get_global("RangeError")
-                .unwrap_or(Value::Undefined);
-              let thrown = self
-                .construct_value(&ctor, &[])
-                .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                  ObjectData::new(),
-                )))));
-              match self.unwind_to_handler(thrown) {
-                Ok(()) => return Ok(StepOutcome::Continue),
-                Err(err) => return Err(err),
-              }
-            }
-            self.stack.push(Value::BigInt(x % y));
-          }
-          (a, b) => {
-            let (x, y) = (to_number(&a)?, to_number(&b)?);
-            self.stack.push(Value::Number(x % y));
-          }
-        }
-      }
-      Op::Pow => {
-        // Exponentiation: handle BigInt**BigInt and Number**Number semantics.
-        // Pop right then left.
-        let b = self.pop()?;
-        let a = self.pop()?;
-        // Helper: ToNumeric approximation returning either Number(f64) or BigInt(i128)
-        enum Numeric {
-          Number(f64),
-          BigInt(BigIntValue),
-        }
-
-        let to_numeric = |vm: &mut Vm, v: Value| -> Result<Numeric, RuntimeError> {
-          match v {
-            Value::BigInt(n) => Ok(Numeric::BigInt(n)),
-            Value::Number(n) => Ok(Numeric::Number(n)),
-            other => {
-              // ToPrimitive with number hint then interpret
-              let prim = vm.to_primitive(&other, Some("number"))?;
-              match prim {
-                Value::BigInt(n) => Ok(Numeric::BigInt(n)),
-                Value::Number(n) => Ok(Numeric::Number(n)),
-                Value::String(s) => Ok(Numeric::Number(parse_js_number_string(&s))),
-                Value::Bool(b) => Ok(Numeric::Number(if b { 1.0 } else { 0.0 })),
-                Value::Null => Ok(Numeric::Number(0.0)),
-                Value::Undefined => Ok(Numeric::Number(f64::NAN)),
-                _ => {
-                  // Default: try ToNumber
-                  let n = vm.to_number_value(&prim)?;
-                  Ok(Numeric::Number(n))
-                }
-              }
-            }
-          }
-        };
-
-        let a_num = to_numeric(self, a)?;
-        let b_num = to_numeric(self, b)?;
-
-        match (a_num, b_num) {
-          (Numeric::BigInt(x), Numeric::BigInt(y)) => {
-            // BigInt exponent must be non-negative
-            let exp = y;
-            if exp.is_negative() {
-              let ctor = self
-                .get_global("RangeError")
-                .unwrap_or(Value::Undefined);
-              let thrown = self
-                .construct_value(&ctor, &[])
-                .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                  ObjectData::new(),
-                )))));
-              match self.unwind_to_handler(thrown) {
-                Ok(()) => return Ok(StepOutcome::Continue),
-                Err(err) => return Err(err),
-              }
-            }
-            let exp_u32 = exp
-              .to_u32()
-              .ok_or_else(|| RuntimeError::from("Pow: bigint exponent too large"))?;
-            self.stack.push(Value::BigInt(x.pow(exp_u32)));
-          }
-          (Numeric::Number(x), Numeric::Number(y)) => {
-            let r = number_exponentiate(x, y);
-            self.stack.push(Value::Number(r));
-          }
-          // Mixing BigInt and Number -> throw TypeError as JS semantics
-          _ => {
-            let ctor = self
-              .get_global("TypeError")
-              .unwrap_or(Value::Undefined);
-            let thrown = self
-              .construct_value(&ctor, &[])
-              .unwrap_or(Value::Object(gc::track_object(Rc::new(RefCell::new(
-                ObjectData::new(),
-              )))));
-            match self.unwind_to_handler(thrown) {
-              Ok(()) => return Ok(StepOutcome::Continue),
-              Err(err) => return Err(err),
-            }
-          }
-        }
-      }
-      Op::And => {
-        let b = self.pop()?;
-        let a = self.pop()?;
-        self
-          .stack
-          .push(Value::Bool(a.is_truthy() && b.is_truthy()));
-      }
-      Op::Or => {
-        let b = self.pop()?;
-        let a = self.pop()?;
-        self
-          .stack
-          .push(Value::Bool(a.is_truthy() || b.is_truthy()));
-      }
-      Op::Neg => {
-        let v = self.pop()?;
-        // Perform ToNumber semantics for unary negation
-        let n = self.to_number_value(&v)?;
-        self.stack.push(Value::Number(-n));
-      }
-      Op::Not => {
-        let v = self.pop()?;
-        self.stack.push(Value::Bool(!v.is_truthy()));
-      }
-      Op::BitNot => {
-        let value = self.pop()?;
-        match value {
-          Value::BigInt(value) => self.stack.push(Value::BigInt(!value)),
-          value => {
-            let value = self.to_int32_value(&value)?;
-            self.stack.push(Value::Number((!value) as f64));
-          }
-        }
-      }
-      Op::BitAnd => {
-        // Perform ToInt32 on operands and bitwise-and like JS
-        let b = self.pop()?;
-        let a = self.pop()?;
-        let ai = self.to_int32_value(&a)?;
-        let bi = self.to_int32_value(&b)?;
-        let r = ai & bi;
-        // JS bitwise ops produce i32; convert to f64 for Number type.
-        // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
-        self.stack.push(Value::Number(r as f64));
-      }
-      Op::BitOr => {
-        let b = self.pop()?;
-        let a = self.pop()?;
-        let ai = self.to_int32_value(&a)?;
-        let bi = self.to_int32_value(&b)?;
-        let r = ai | bi;
-        // JS bitwise ops produce i32; convert to f64 for Number type.
-        // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
-        self.stack.push(Value::Number(r as f64));
-      }
-      Op::BitXor => {
-        let b = self.pop()?;
-        let a = self.pop()?;
-        let ai = self.to_int32_value(&a)?;
-        let bi = self.to_int32_value(&b)?;
-        let r = ai ^ bi;
-        // JS bitwise ops produce i32; convert to f64 for Number type.
-        // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
-        self.stack.push(Value::Number(r as f64));
-      }
-      Op::Shl => {
-        let b = self.pop()?;
-        let a = self.pop()?;
-        let ai = self.to_int32_value(&a)?;
-        let shift = self.to_uint32_value(&b)? & 0x1f;
-        let r = ai.wrapping_shl(shift);
-        // JS bitwise ops produce i32; convert to f64 for Number type.
-        // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
-        self.stack.push(Value::Number(r as f64));
-      }
-      Op::Shr => {
-        let b = self.pop()?;
-        let a = self.pop()?;
-        let ai = self.to_int32_value(&a)?;
-        let shift = self.to_uint32_value(&b)? & 0x1f;
-        let r = ai.wrapping_shr(shift);
-        // JS bitwise ops produce i32; convert to f64 for Number type.
-        // i32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
-        self.stack.push(Value::Number(r as f64));
-      }
-      Op::Ushr => {
-        let b = self.pop()?;
-        let a = self.pop()?;
-        let au = self.to_uint32_value(&a)?;
-        let shift = self.to_uint32_value(&b)? & 0x1f;
-        let r = au.wrapping_shr(shift);
-        // JavaScript >>> yields an unsigned 32-bit number, represent as Number.
-        // u32 fits exactly in f64's 52-bit mantissa - no actual precision loss.
-        self.stack.push(Value::Number(r as f64));
-      }
-      Op::Typeof => {
-        let v = self.pop()?;
-        self
-          .stack
-          .push(Value::String(v.type_name().to_string()));
-      }
-      Op::Call => self.execute_call()?,
-      Op::TailCall => self.execute_tail_call()?,
-      Op::PushWithEnv => {
-        let obj = self.pop()?;
-        let obj = self.to_object_value(obj)?;
-        let env = Rc::new(RefCell::new(EnvironmentRecord::new_object(
-          Some(Rc::clone(&self.lexical_env)),
-          obj,
-          true,
-        )));
-        self.lexical_env = env;
-      }
-      Op::PopEnv => {
-        let outer = self.lexical_env.borrow().outer();
-        self.lexical_env = outer.unwrap_or_else(|| Rc::clone(&self.global_env));
-      }
-      Op::GetNewTarget => {
-        let new_target = self.get_new_target();
-        self.stack.push(new_target);
-      }
-      Op::GetSuperProperty => {
-        let key = self.pop()?;
-        let receiver = self.pop()?;
-        self.get_super_property(&receiver, &key)?;
-      }
-      Op::SetSuperProperty => {
-        let value = self.pop()?;
-        let key = self.pop()?;
-        let receiver = self.pop()?;
-        self.set_super_property(&receiver, &key, value)?;
-      }
-      Op::GeneratorInitDone => {}
-      Op::Move => {
-        return Err(RuntimeError::from(
-          "Move opcode is not implemented in this VM",
-        ));
-      }
-      Op::LoadSpill | Op::StoreSpill => {
-        return Err(RuntimeError::from(
-          "RISC spill opcode reached the StackV1 executor",
-        ));
-      }
-      Op::CallBuiltin => {
-        self.execute_call_method()?;
-      }
-      Op::Spread => self.execute_spread()?,
-      Op::ArrayFromSpread => self.execute_array_from_spread()?,
-      Op::Construct => self.execute_construct()?,
-      Op::SuperConstruct => self.execute_super_construct()?,
-      Op::Return => {
-        if self.call_stack.is_empty() {
-          let result = self.stack.pop().unwrap_or(Value::Undefined);
-          return Ok(StepOutcome::Return(result));
-        }
-        self.execute_return()?;
-        // Only stop if we've returned PAST the target frame depth
-        // (i.e., we've returned from the function we were waiting for)
-        if let Some(target_depth) = stop_at_frame_depth
-          && self.call_stack.len() < target_depth
-        {
-          let result = self.pop().unwrap_or(Value::Undefined);
-          return Ok(StepOutcome::Return(result));
-        }
-      }
-      Op::Jump => {
-        // Read signed 24-bit payload directly from fetched instruction
-        // word (previous instruction index = ip - 1).
-        let idx = self
-          .ip
-          .checked_sub(1)
-          .ok_or_else(|| RuntimeError::from("Jump: ip underflow"))?;
-        let offset = self
-          .chunk
-          .read_i24_payload_at(idx)
-          .ok_or_else(|| RuntimeError::from("Jump: payload out of bounds"))?
-          as isize;
-        self.jump(offset)?;
-      }
-      Op::JumpIfFalse => {
-        let idx = self
-          .ip
-          .checked_sub(1)
-          .ok_or_else(|| RuntimeError::from("JumpIfFalse: ip underflow"))?;
-        let offset = self
-          .chunk
-          .read_i24_payload_at(idx)
-          .ok_or_else(|| RuntimeError::from("JumpIfFalse: payload out of bounds"))?
-          as isize;
-        let v = self.pop()?;
-        if !v.is_truthy() {
-          self.jump(offset)?;
-        }
-      }
-      Op::CompareJump => {
-        // CompareJump layout: payload byte 0 = compare opcode,
-        // payload bytes 1..2 = signed 16-bit relative offset (instruction units).
-        // Read directly from the previously-fetched instruction word so
-        // we don't mix operand_cursor-based reads with full-payload reads.
-        let instr_idx = self
-          .ip
-          .checked_sub(1)
-          .ok_or_else(|| RuntimeError::from("CompareJump: ip underflow"))?;
-        let instr = *self
-          .chunk
-          .code
-          .get(instr_idx)
-          .ok_or_else(|| RuntimeError::from("CompareJump: out of bounds"))?;
-        let compare_op = payload_byte(instr, 0);
-        // offset is stored little-endian in payload bytes 1 (low) and 2 (high)
-        let off_lo = payload_byte(instr, 1) as u16;
-        let off_hi = payload_byte(instr, 2) as u16;
-        let offset16 = ((off_hi << 8) | off_lo) as i16;
-        let offset = offset16 as isize;
-        let b = self.pop()?;
-        let a = self.pop()?;
-        let result = match compare_op {
-          0 => self.abstract_equality(&a, &b)?,
-          1 => !self.abstract_equality(&a, &b)?,
-          2 => self
-            .abstract_relational_comparison(&a, &b)?
-            .unwrap_or(false),
-          3 => self
-            .abstract_relational_comparison(&b, &a)?
-            .is_some_and(|result| !result),
-          4 => self
-            .abstract_relational_comparison(&b, &a)?
-            .unwrap_or(false),
-          5 => self
-            .abstract_relational_comparison(&a, &b)?
-            .is_some_and(|result| !result),
-          6 => values_equal(&a, &b),
-          7 => !values_equal(&a, &b),
-          _ => return Err(RuntimeError::from("Invalid compare-jump opcode")),
-        };
-        if !result {
-          self.jump(offset)?;
-        }
-      }
-      Op::JumpIfTrue => {
-        let idx = self
-          .ip
-          .checked_sub(1)
-          .ok_or_else(|| RuntimeError::from("JumpIfTrue: ip underflow"))?;
-        let offset = self
-          .chunk
-          .read_i24_payload_at(idx)
-          .ok_or_else(|| RuntimeError::from("JumpIfTrue: payload out of bounds"))?
-          as isize;
-        let v = self.pop()?;
-        if v.is_truthy() {
-          self.jump(offset)?;
-        }
-      }
-      Op::JumpIfNullish => {
-        let idx = self
-          .ip
-          .checked_sub(1)
-          .ok_or_else(|| RuntimeError::from("JumpIfNullish: ip underflow"))?;
-        let offset = self
-          .chunk
-          .read_i24_payload_at(idx)
-          .ok_or_else(|| RuntimeError::from("JumpIfNullish: payload out of bounds"))?
-          as isize;
-        let v = self.pop()?;
-        if matches!(v, Value::Null | Value::Undefined) {
-          self.jump(offset)?;
-        }
-      }
-      Op::BuildArray => self.build_array()?,
-      Op::BuildObject => self.build_object()?,
-      Op::GetProperty => {
-        let instruction_ip = self.ip.saturating_sub(1);
-        let key = self.pop()?;
-        let obj = self.pop()?;
-        let v = if let Some(i) = array_index_from_value(&key) {
-          if let Some(v) = array_element_value(&obj, i) {
-            v
-          } else {
-            let k = self.to_property_key(&key)?;
-            self.get_property_value_cached(instruction_ip, &obj, &k)?
-          }
-        } else {
-          let k = self.to_property_key(&key)?;
-          self.get_property_value_cached(instruction_ip, &obj, &k)?
-        };
-        if crate::trace::enabled() {
-          match self.to_property_key(&key) {
-            Ok(PropertyKey::String(s)) => {
-              eprintln!(
-                "[trace] GetProperty receiver={} key='{}' -> {}",
-                obj.type_name(),
-                s,
-                v.type_name()
-              );
-            }
-            Ok(PropertyKey::Symbol(_)) => {
-              eprintln!(
-                "[trace] GetProperty receiver={} key=symbol -> {}",
-                obj.type_name(),
-                v.type_name()
-              );
-            }
-            Err(_) => {
-              eprintln!(
-                "[trace] GetProperty receiver={} key=<error> -> {}",
-                obj.type_name(),
-                v.type_name()
-              );
-            }
-          }
-          crate::trace::value_string("[trace]   result", &v);
-        }
-        self.stack.push(v);
-      }
-      Op::DeleteProperty => self.delete_property_op()?,
-      Op::DeleteIdentifier => self.delete_identifier_op()?,
-      Op::HasProperty => self.has_property_op()?,
-      Op::InstanceOf => {
-        let constructor = self.pop()?;
-        let value = self.pop()?;
-        let result = self.instance_of(&value, &constructor)?;
-        self.stack.push(Value::Bool(result));
-      }
-      Op::SetProperty => {
-        if crate::trace::enabled() {
-          eprintln!(
-            "[trace] SetProperty stack_size={} ip={}",
-            self.stack.len(),
-            self.ip.saturating_sub(1)
-          );
-          for (i, v) in self.stack.iter_rev().take(6).enumerate() {
-            crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
-          }
-        }
-        let value = self.pop()?;
-        let key = self.pop()?;
-        let obj = self.pop()?;
-        if let Some(i) = array_index_from_value(&key)
-          && matches!(obj, Value::Array(..))
-        {
-          let strict = self.is_strict_mode();
-          self.reference_stack.push(ReferenceRecord::new(
-            obj.clone(),
-            PropertyKey::String(i.to_string()),
-            strict,
-          ));
-          let result = set_array_index_property(&obj, i, value.clone());
-          if crate::trace::enabled()
-            && let Some(reference) = self.reference_stack.last()
-          {
-            crate::trace::value_string("[trace]   reference base", &reference.base);
-            match &reference.referenced_name {
-              PropertyKey::String(name) => {
-                eprintln!("[trace]   reference key='{}'", name);
-              }
-              PropertyKey::Symbol(_) => {
-                eprintln!("[trace]   reference key=symbol");
-              }
-            }
-            eprintln!("[trace]   reference strict={}", reference.strict);
-          }
-          drop(self.reference_stack.pop());
-          result?;
-          self.bump_object_generation(&obj);
-          self.stack.push(value);
-          return Ok(StepOutcome::Continue);
-        }
-        let k = self.to_property_key(&key)?;
-        let strict = self.is_strict_mode();
-        self
-          .reference_stack
-          .push(ReferenceRecord::new(obj.clone(), k.clone(), strict));
-        let result = self.set_property_tracked(&obj, &k, value.clone());
-        if crate::trace::enabled()
-          && let Some(reference) = self.reference_stack.last()
-        {
-          crate::trace::value_string("[trace]   reference base", &reference.base);
-          match &reference.referenced_name {
-            PropertyKey::String(name) => {
-              eprintln!("[trace]   reference key='{}'", name);
-            }
-            PropertyKey::Symbol(_) => {
-              eprintln!("[trace]   reference key=symbol");
-            }
-          }
-          eprintln!("[trace]   reference strict={}", reference.strict);
-        }
-        drop(self.reference_stack.pop());
-        result?;
-        self.stack.push(value);
-      }
-      Op::IteratorNext => self.iterator_next_op()?,
-      Op::IteratorClose => self.iterator_close_op()?,
-      Op::Swap => {
-        let len = self.stack.len();
-        if len < 2 {
-          return Err(RuntimeError::from("Stack underflow"));
-        }
-        self
-          .stack
-          .swap(len - 1, len - 2)
-          .map_err(|()| RuntimeError::from("Stack underflow"))?;
-      }
-      Op::PopN => {
-        let count = self.read_byte()? as usize;
-        if count > self.stack.len() {
-          return Err(RuntimeError::from("Stack underflow"));
-        }
-        self.stack.truncate(self.stack.len() - count);
-      }
-      Op::GetModuleExport => {
-        let module_idx = self.read_byte()? as usize;
-        let name_idx = self.read_byte()? as usize;
-        let name = self.string_constant(name_idx)?;
-        let v = self
-          .module_table
-          .get(module_idx)
-          .and_then(|m| m.get(&name).cloned())
-          .map_or(Value::Undefined, |slot| slot.borrow().clone());
-        self.stack.push(v);
-      }
-      Op::SetModuleExport => {
-        let module_idx = self.read_byte()? as usize;
-        let name_idx = self.read_byte()? as usize;
-        let name = self.string_constant(name_idx)?;
-        let v = self.pop()?;
-        if let Some(m) = self.module_table.get_mut(module_idx) {
-          if let Some(slot) = m.get(&name) {
-            *slot.borrow_mut() = v;
-          } else {
-            let new_slot = Rc::new(Mutex::new(v));
-            m.insert(name, new_slot);
-          }
-        } else {
-          while self.module_table.len() <= module_idx {
-            self.module_table.push(HashMap::new());
-          }
-          let new_slot = Rc::new(Mutex::new(v));
-          self.module_table[module_idx].insert(name, new_slot);
-        }
-      }
-      Op::MakeClosure => self.make_closure()?,
-      Op::GetBuiltin => {
-        let idx = self.read_byte()? as usize;
-        let name = self.string_constant(idx)?;
-        let v = self
-          .realm
-          .get_hidden_builtin(&name)
-          .ok_or_else(|| RuntimeError::from(format!("GetBuiltin: '{}' not found", name)))?;
-        match v {
-          Value::Builtin(_) | Value::BuiltinObject(_, _) => self.stack.push(v),
-          _ => {
-            return Err(RuntimeError::from(format!(
-              "GetBuiltin: '{}' is not a builtin",
-              name
-            )));
-          }
-        }
-      }
-      Op::PushHandler => {
-        let offset = self.read_short_signed()?;
-        let handler_ip = (self.ip as isize + offset) as usize;
-        self.handlers.push(HandlerRecord {
-          chunk: Rc::clone(&self.chunk),
-          handler_ip,
-          saved_stack_len: self.stack.len(),
-          saved_locals_len: self.locals.len(),
-          frame_count: self.call_stack.len(),
-          saved_lexical_env: Rc::clone(&self.lexical_env),
-        });
-        if crate::trace::enabled() {
-          eprintln!(
-            "[trace] PushHandler handler_ip={} saved_stack_len={} handlers={}",
-            handler_ip,
-            self.stack.len(),
-            self.handlers.len()
-          );
-        }
-      }
-      Op::PopHandler => {
-        self.handlers.pop();
-        if crate::trace::enabled() {
-          eprintln!("[trace] PopHandler handlers={}", self.handlers.len());
-        }
-      }
-      Op::Throw => {
-        let thrown = self.pop()?;
-        if crate::trace::enabled() {
-          crate::trace::value_string("[trace] Throw thrown", &thrown);
-          eprintln!(
-            "[trace] Throw stack_size={} handlers={}",
-            self.stack.len(),
-            self.handlers.len()
-          );
-        }
-        self.throw_value(thrown)?;
-      }
-      Op::Yield => {
-        let yielded = self.pop()?;
-        return Ok(StepOutcome::Yield(yielded));
-      }
-      Op::YieldStar => {
-        if self.yield_star_queue.is_none() {
-          let iterand = self.stack.pop().unwrap_or(Value::Undefined);
-          let mut queue = VecDeque::new();
-          match iterand {
-            Value::Array(arr, _) => {
-              for value in arr.borrow().iter().flatten() {
-                queue.push_back(value.clone());
-              }
-            }
-            other => queue.push_back(other),
-          }
-          self.yield_star_queue = Some(queue);
-        }
-        if let Some(queue) = &mut self.yield_star_queue
-          && let Some(value) = queue.pop_front()
-        {
-          self.ip = self.ip.saturating_sub(1);
-          return Ok(StepOutcome::Yield(value));
-        }
-        self.yield_star_queue = None;
-        self.stack.push(Value::Undefined);
-      }
-      Op::AwaitPromise => {
-        let awaited = self.pop()?;
-        match awaited {
-          Value::Promise(state) => {
-            let mut settled = false;
-            loop {
-              let settled_state = {
-                let state_ref = state.borrow();
-                match &*state_ref {
-                  PromiseState::Fulfilled(v) => Some(Ok(v.clone())),
-                  PromiseState::Rejected { reason, .. } => Some(Err(reason.clone())),
-                  PromiseState::Pending { .. } => None,
-                }
-              };
-
-              match settled_state {
-                Some(Ok(value)) => {
-                  self.stack.push(value);
-                  settled = true;
-                  break;
-                }
-                Some(Err(reason)) => {
-                  self.throw_value(reason)?;
-                  settled = true;
-                  break;
-                }
-                None => {
-                  if !self.microtasks.is_empty() || !self.dynamic_import_jobs.is_empty() {
-                    self.run_microtasks_if_needed()?;
-                    self.maybe_collect_garbage_prototype();
-                    continue;
-                  }
-                  break;
-                }
-              }
-            }
-            if !settled {
-              return Err(RuntimeError::from(
-                "Promise did not settle during synchronous await",
-              ));
-            }
-          }
-          other => self.stack.push(other),
-        }
-      }
-    }
-    Ok(StepOutcome::Continue)
-  }
-
-  // -----------------------------------------------------------------------
-  // ECMAScript coercions
-  // -----------------------------------------------------------------------
 
   /// Apply ECMAScript `ToPrimitive` coercion with an optional preferred hint.
   ///
@@ -3502,18 +2606,6 @@ impl Vm {
     Ok(())
   }
 
-  fn delete_property_op(&mut self) -> Result<(), RuntimeError> {
-    let key = self.pop()?;
-    let obj = self.pop()?;
-    let prop = self.to_property_key(&key)?;
-    let deleted = self.delete_property_host(&obj, &prop)?;
-    if !deleted && self.is_strict_mode() {
-      return Err(self.throw_type_error("Cannot delete property in strict mode"));
-    }
-    self.stack.push(Value::Bool(deleted));
-    Ok(())
-  }
-
   fn delete_identifier_op(&mut self) -> Result<(), RuntimeError> {
     let name_val = self.pop()?;
     let name = if let Value::String(s) = name_val {
@@ -3554,15 +2646,6 @@ impl Vm {
     let deleted = self.delete_property_host(&global_obj, &key)?;
     self.bump_object_generation(&global_obj);
     self.stack.push(Value::Bool(deleted));
-    Ok(())
-  }
-
-  fn has_property_op(&mut self) -> Result<(), RuntimeError> {
-    let key = self.pop()?;
-    let obj = self.pop()?;
-    let prop = self.to_property_key(&key)?;
-    let has = self.has_property_host(&obj, &prop)?;
-    self.stack.push(Value::Bool(has));
     Ok(())
   }
 
@@ -3725,552 +2808,28 @@ impl Vm {
   }
 
   // -----------------------------------------------------------------------
-  // Control flow
+  // Stack helpers
   // -----------------------------------------------------------------------
-
-  fn jump(
-    &mut self,
-    offset: isize,
-  ) -> Result<(), RuntimeError> {
-    let new_ip = (self.ip as isize) + offset;
-    if new_ip < 0 || (new_ip as usize) > self.chunk.code.len() {
-      return Err(RuntimeError::from(format!(
-        "Jump target out of bounds (ip={} offset={})",
-        self.ip, offset
-      )));
-    }
-    self.ip = new_ip as usize;
-    Ok(())
-  }
-
-  // -----------------------------------------------------------------------
-  // Byte-reading helpers
-  // -----------------------------------------------------------------------
-
-  #[inline(always)]
-  /// Deprecated: in fixed-width instruction mode callers should read the
-  /// opcode by inspecting the current instruction word. This helper is kept
-  /// for limited use by other modules that expect a single-byte read; it
-  /// will read the opcode byte from the current instruction and advance by
-  /// one instruction.
-
-  pub(super) fn read_byte(&mut self) -> Result<u8, RuntimeError> {
-    if self.ip >= self.chunk.code.len() {
-      return Err(RuntimeError::from(format!(
-        "Unexpected end of bytecode at ip {}",
-        self.ip
-      )));
-    }
-    // Return the next operand byte from the previously fetched instruction.
-    // This helper is retained for compatibility with existing modules that
-    // expect to consume operand bytes sequentially. It reads from the
-    // instruction at ip - 1 (the last fetched instruction) and advances
-    // an operand cursor.
-    // For compatibility with callers that may invoke helpers while ip==0
-    // (for example, tests that set up a synthetic chunk), allow reading
-    // from instruction 0 when ip == 0. Otherwise read from the
-    // previously fetched instruction at ip - 1.
-    let instr_idx = if self.ip == 0 {
-      0usize
-    } else {
-      self
-        .ip
-        .checked_sub(1)
-        .ok_or_else(|| RuntimeError::from("read_byte: no current instruction"))?
-    };
-    let instr = *self
-      .chunk
-      .code
-      .get(instr_idx)
-      .ok_or_else(|| RuntimeError::from("read_byte: out of bounds"))?;
-    if self.operand_cursor >= 3 {
-      return Err(RuntimeError::from("read_byte: too many operand bytes"));
-    }
-    let shift = 8 + (self.operand_cursor * 8);
-    let b = ((instr >> shift) & 0xFF) as u8;
-    self.operand_cursor += 1;
-    Ok(b)
-  }
-
-  #[inline(always)]
-  fn read_short_signed(&mut self) -> Result<isize, RuntimeError> {
-    // Read signed 24-bit payload from the *previously consumed* instruction
-    // index. Because instruction reads advance ip, callers that expect to
-    // read operands should instead have captured the instruction word or
-    // rely on the chunk helpers. To maintain compatibility, treat this as
-    // reading the 24-bit payload from the instruction immediately before
-    // the current ip (i.e., ip - 1).
-    let idx = self
-      .ip
-      .checked_sub(1)
-      .ok_or_else(|| RuntimeError::from("read_short_signed: ip underflow"))?;
-    let val = self
-      .chunk
-      .read_i24_payload_at(idx)
-      .ok_or_else(|| RuntimeError::from("read_short_signed: payload out of bounds"))?;
-    Ok(val as isize)
-  }
-
-  #[inline(always)]
-  fn read_short(&mut self) -> Result<u16, RuntimeError> {
-    // Return the unsigned 24-bit payload (truncated to u16 when callers
-    // expect it). Use the payload from the previous instruction.
-    let idx = self
-      .ip
-      .checked_sub(1)
-      .ok_or_else(|| RuntimeError::from("read_short: ip underflow"))?;
-    let w = *self
-      .chunk
-      .code
-      .get(idx)
-      .ok_or_else(|| RuntimeError::from("read_short: out of bounds"))?;
-    let payload = (w >> 8) & 0x00FF_FFFF;
-    Ok((payload & 0xFFFF) as u16)
-  }
-
-  // -----------------------------------------------------------------------
-  // Constant pool helpers
-  // -----------------------------------------------------------------------
-
-  #[inline(always)]
-  fn constant(
-    &self,
-    idx: usize,
-  ) -> Result<Value, RuntimeError> {
-    self
-      .chunk
-      .constants
-      .get(idx)
-      .cloned()
-      .ok_or_else(|| RuntimeError::from("Bad constant index"))
-  }
 
   #[inline(always)]
   fn string_constant(
     &self,
     idx: usize,
   ) -> Result<String, RuntimeError> {
-    if let Some(Value::String(s)) = self.chunk.constants.get(idx) {
-      return Ok(s.clone());
-    }
-
-    // If the index is not present in the current chunk's constant pool,
-    // it may refer to a function prototype's own chunk (MakeClosure
-    // migration artifact). Try to find a proto chunk that contains the
-    // index and return the string from there.
-    for (i, proto) in self.chunk.functions.iter().enumerate() {
-      if let Some(Value::String(s)) = proto.chunk.constants.get(idx) {
-        eprintln!(
-          "[diag] string_constant: resolved idx={} from proto[{}] '{}' proto_chunk_ptr={:p}",
-          idx,
-          i,
-          proto.name,
-          Rc::as_ptr(&proto.chunk)
-        );
-        return Ok(s.clone());
-      }
-    }
-
-    // Fallback: emit diagnostics and error
-    let other = self.chunk.constants.get(idx);
-    match other {
-      Some(Value::String(s)) => Ok(s.clone()),
-      other => {
-        // Emit targeted diagnostics to help map the failing constant
-        // index back to the emitting chunk or a function proto's
-        // constant pool. Keep output concise but informative.
-        eprintln!(
-          "[diag] string_constant: requested idx={} current_chunk_ptr={:p} current_consts_len={}",
-          idx,
-          Rc::as_ptr(&self.chunk),
-          self.chunk.constants.len()
-        );
-        if let Some(v) = other {
-          eprintln!(
-            "[diag] string_constant: actual constant at idx exists and is type={}",
-            v.type_name()
-          );
-        } else {
-          eprintln!("[diag] string_constant: no constant at idx in current chunk");
-        }
-        // Print brief summary of function protos referenced by this chunk
-        for (i, proto) in self.chunk.functions.iter().enumerate().take(16) {
-          eprintln!(
-            "[diag] proto[{}] name='{}' proto_chunk_ptr={:p} proto_consts_len={}",
-            i,
-            proto.name,
-            Rc::as_ptr(&proto.chunk),
-            proto.chunk.constants.len()
-          );
-          if idx < proto.chunk.constants.len() {
-            eprintln!(
-              "[diag]   -> const[{}] in proto[{}] = {:?}",
-              idx,
-              i,
-              proto.chunk.constants.get(idx)
-            );
-          }
-        }
-        // Try to locate an owning proto whose constant pool contains idx
-        for (i, proto) in self.chunk.functions.iter().enumerate().take(32) {
-          if idx < proto.chunk.constants.len() {
-            eprintln!(
-              "[diag] candidate owner proto[{}] '{}' proto_chunk_ptr={:p} proto_consts_len={} const_at_idx={:?}",
-              i,
-              proto.name,
-              Rc::as_ptr(&proto.chunk),
-              proto.chunk.constants.len(),
-              proto.chunk.constants.get(idx)
-            );
-          }
-        }
-        // Delegate to the more comprehensive diagnostic dump when tracing
-        if crate::trace::enabled() {
-          self.dump_diag("string_constant", &Value::Undefined);
-        }
-        Err(RuntimeError::from("Constant not a string"))
-      }
+    match self.chunk.constants.get(idx) {
+      Some(Value::String(value)) => Ok(value.clone()),
+      Some(_) => Err(RuntimeError::from("Constant is not a string")),
+      None => Err(RuntimeError::from("String constant index out of bounds")),
     }
   }
-
-  // -----------------------------------------------------------------------
-  // Stack helpers
-  // -----------------------------------------------------------------------
 
   #[inline(always)]
   pub(super) fn pop(&mut self) -> Result<Value, RuntimeError> {
-    self.stack.pop().ok_or_else(|| {
-        if crate::trace::enabled() {
-            eprintln!("[diag] Stack underflow");
-            // Extra diagnostics: print some VM state to help map the
-            // underflow to the currently-executing frame and chunk.
-                eprintln!(
-                    "[diag] chunk_ptr={:p} chunk_len={} frames={} handlers={}",
-                    Rc::as_ptr(&self.chunk),
-                    self.chunk.code.len(),
-                    self.call_stack.len(),
-                    self.handlers.len()
-                );
-                if let Some(f) = self.call_stack.last() {
-                    eprintln!("[diag] top_frame.stack_base={} top_frame.ip={} ", f.stack_base, f.ip);
-                    // Print the owning chunk for the top frame and a summary of
-                    // any function prototypes referenced by the current chunk.
-                    eprintln!(
-                        "[diag] top_frame.chunk_ptr={:p} chunk_code_len={} functions={}",
-                        Rc::as_ptr(&f.chunk),
-                        f.chunk.code.len(),
-                        f.chunk.functions.len()
-                    );
-                    // List function proto summaries (limited to first 20)
-                    for (i, proto) in f.chunk.functions.iter().enumerate().take(20) {
-                        eprintln!(
-                            "[diag]   fn[{}] name='{}' arity={} captures_this={} proto_chunk_ptr={:p} chunk_len={}",
-                            i,
-                            proto.name,
-                            proto.arity,
-                            proto.captures_this,
-                            Rc::as_ptr(&proto.chunk),
-                            proto.chunk.code.len()
-                        );
-                }
-            }
-                let mut found_owner = false;
-                for (fi, frame) in self.call_stack.iter().enumerate().rev().take(8) {
-                    if let Some(proto) = frame
-                        .chunk
-                        .functions
-                        .iter()
-                        .find(|proto| Rc::as_ptr(&proto.chunk) == Rc::as_ptr(&self.chunk))
-                    {
-                        eprintln!(
-                            "[diag] current chunk owner: frame[{}] proto='{}' span={}..{} proto_chunk_ptr={:p} proto_chunk_len={}",
-                            fi,
-                            proto.name,
-                            proto.span.start,
-                            proto.span.end,
-                            Rc::as_ptr(&proto.chunk),
-                            proto.chunk.code.len()
-                        );
-                        if let Some(src) = proto.source_text() {
-                            eprintln!("[diag] current chunk source:");
-                            for (line_no, line) in src.lines().take(12).enumerate() {
-                                eprintln!("[diag]   {:>5}: {}", line_no + 1, line);
-                            }
-                        }
-                        found_owner = true;
-                        break;
-                    }
-                }
-                if !found_owner {
-                    eprintln!(
-                        "[diag] current chunk owner: <unknown> ptr={:p} len={}",
-                        Rc::as_ptr(&self.chunk),
-                        self.chunk.code.len()
-                    );
-                }
-            eprintln!("[diag] Active frames (top -> bottom):");
-            for (fi, frame) in self.call_stack.iter().enumerate().rev().take(8) {
-                eprintln!(
-                    "[diag]  frame[{}] chunk_ptr={:p} chunk_len={} ip={} stack_base={} is_strict={}",
-                    fi,
-                    Rc::as_ptr(&frame.chunk),
-                    frame.chunk.code.len(),
-                    frame.ip,
-                    frame.stack_base,
-                    frame.is_strict
-                );
-                if let Some(&line_no) = frame.chunk.lines.get(frame.ip.saturating_sub(1)) {
-                    eprintln!("[diag]  frame[{}] source line {}:", fi, line_no);
-                    let line_idx = line_no.saturating_sub(1) as usize;
-                    for (idx, line) in frame.chunk.source_text.lines().enumerate() {
-                        if idx + 1 >= line_idx.saturating_sub(2)
-                            && idx < line_idx.saturating_add(2)
-                        {
-                            eprintln!("[diag]    {:>5}: {}", idx + 1, line);
-                        }
-                    }
-                }
-                let fstart = frame.ip.saturating_sub(8);
-                let fend = usize::min(frame.ip + 8, frame.chunk.code.len());
-                eprintln!("[diag]  frame[{}] disasm ({}..{}):", fi, fstart, fend);
-                    let mut k = fstart;
-                while k < fend {
-                        let instr = frame.chunk.code[k];
-                        let b = opcode_from_instr(instr);
-                        if let Some(op) = Op::from_byte(b) {
-                        let width = opcode_width(op);
-                        match op {
-                            Op::Const => {
-                                let hi = payload_byte(instr, 0) as u16;
-                                let lo = payload_byte(instr, 1) as u16;
-                                let arg = (hi << 8) | lo;
-                                eprintln!("[diag]    {:#06}  Const       {}", k, arg);
-                            }
-                            Op::Jump
-                            | Op::JumpIfFalse
-                            | Op::JumpIfTrue
-                            | Op::JumpIfNullish
-                            | Op::PushHandler => {
-                                let hi = payload_byte(instr, 0) as i32;
-                                let lo = payload_byte(instr, 1) as i32;
-                                let offset = (((hi << 8) | lo)) as i16;
-                                eprintln!("[diag]    {:#06}  {:?} {}", k, op, offset);
-                            }
-                            Op::CompareJump => {
-                                let cmp = payload_byte(instr, 0);
-                                let hi = payload_byte(instr, 1) as i32;
-                                let lo = payload_byte(instr, 2) as i32;
-                                let offset = (((hi << 8) | lo)) as i16;
-                                eprintln!("[diag]    {:#06}  {:?} cmp={} {}", k, op, cmp, offset);
-                            }
-                            _ if width == 2 => {
-                                let arg = payload_byte(instr, 0) as u32;
-                                eprintln!("[diag]    {:#06}  {:?} {}", k, op, arg);
-                            }
-                            _ => eprintln!("[diag]    {:#06}  {:?}", k, op),
-                        }
-                        k += width;
-                    } else {
-                        eprintln!("[diag]    {:#06}  ???  0x{:02x}", k, b);
-                        k += 1;
-                    }
-                }
-                if let Some(proto_src) = frame
-                    .chunk
-                    .functions
-                    .iter()
-                    .find(|proto| Rc::as_ptr(&proto.chunk) == Rc::as_ptr(&frame.chunk))
-                    .and_then(|proto| proto.source_text())
-                {
-                    eprintln!("[diag]  frame[{}] source:", fi);
-                    for (line_no, line) in proto_src.lines().take(8).enumerate() {
-                        eprintln!("[diag]    {:>5}: {}", line_no + 1, line);
-                    }
-                }
-            }
-            // Print a short constant pool dump for the current chunk (limited).
-            eprintln!("[diag] chunk constants (len={}):", self.chunk.constants.len());
-            for (i, c) in self.chunk.constants.iter().enumerate().take(32) {
-                eprintln!("[diag]   const[{}] = {:?}", i, c);
-            }
-                let start = self.ip.saturating_sub(24);
-                let end = usize::min(self.ip + 24, self.chunk.code.len());
-                eprintln!("[diag] disasm window ({}..{}):", start, end);
-                let mut j = start;
-                while j < end {
-                    let instr = self.chunk.code[j];
-                    let b = opcode_from_instr(instr);
-                    if let Some(op) = Op::from_byte(b) {
-                        let width = opcode_width(op);
-                        match op {
-                            Op::Const => {
-                                let hi = payload_byte(instr, 0) as u16;
-                                let lo = payload_byte(instr, 1) as u16;
-                                let arg = (hi << 8) | lo;
-                                if let Some(c) = self.chunk.constants.get(arg as usize) {
-                                    eprintln!("[diag]   {}: {:?} {:?}", j, op, c);
-                                } else {
-                                    eprintln!("[diag]   {}: {:?} {}", j, op, arg);
-                                }
-                            }
-                            Op::Jump
-                            | Op::JumpIfFalse
-                            | Op::JumpIfTrue
-                            | Op::JumpIfNullish
-                            | Op::PushHandler => {
-                                let hi = payload_byte(instr, 0) as i32;
-                                let lo = payload_byte(instr, 1) as i32;
-                                let offset = (((hi << 8) | lo)) as i16;
-                                eprintln!("[diag]   {}: {:?} {}", j, op, offset);
-                            }
-                            Op::CompareJump => {
-                                let cmp = payload_byte(instr, 0);
-                                let hi = payload_byte(instr, 1) as i16;
-                                let lo = payload_byte(instr, 2) as i16;
-                                let offset = (hi << 8) | lo;
-                                eprintln!("[diag]   {}: {:?} cmp={} {}", j, op, cmp, offset);
-                            }
-                            Op::StoreLocal
-                            | Op::LoadLocal
-                            | Op::Call
-                            | Op::Construct
-                            | Op::PopN
-                            | Op::GetBuiltin
-                            | Op::GetProperty
-                            | Op::SetProperty
-                            | Op::MakeClosure => {
-                                let arg = payload_byte(instr, 0) as u32;
-                                eprintln!("[diag]   {}: {:?} {}", j, op, arg);
-                            }
-                            Op::SetGlobal | Op::GetGlobal => {
-                                let hi = payload_byte(instr, 0) as u16;
-                                let lo = payload_byte(instr, 1) as u16;
-                                let arg = ((hi << 8) | lo) as usize;
-                                eprintln!("[diag]   {}: {:?} {}", j, op, arg);
-                            }
-                            _ => eprintln!("[diag]   {}: {:?}", j, op),
-                        }
-                        j += width;
-                    } else {
-                        eprintln!("[diag]   {}: <invalid {}>", j, b);
-                        j += 1;
-                    }
-                }
-                if self.chunk.code.len() <= 256 {
-                    eprintln!("[diag] full current-chunk disasm:");
-                    let mut full = 0usize;
-                    while full < self.chunk.code.len() {
-                        let instr = self.chunk.code[full];
-                        let b = (instr & 0xFF) as u8;
-                        if let Some(op) = Op::from_byte(b) {
-                            let width = opcode_width(op);
-                            match op {
-                                Op::Const => {
-                                let instr = self.chunk.code[full];
-                                let hi = payload_byte(instr, 0) as u16;
-                                let lo = payload_byte(instr, 1) as u16;
-                                let arg = (hi << 8) | lo;
-                                    eprintln!("[diag]   {:#06}  Const       {}", full, arg);
-                                }
-                                Op::Jump
-                                | Op::JumpIfFalse
-                                | Op::JumpIfTrue
-                                | Op::JumpIfNullish
-                                | Op::PushHandler => {
-                                    let instr = self.chunk.code[full];
-                                    let hi = payload_byte(instr, 0) as i16;
-                                    let lo = payload_byte(instr, 1) as i16;
-                                    let offset = (hi << 8) | lo;
-                                    eprintln!("[diag]   {:#06}  {:?} {}", full, op, offset);
-                                }
-                                Op::CompareJump => {
-                                    let instr = self.chunk.code[full];
-                                    let cmp = payload_byte(instr, 0);
-                                    let hi = payload_byte(instr, 1) as i16;
-                                    let lo = payload_byte(instr, 2) as i16;
-                                    let offset = (hi << 8) | lo;
-                                    eprintln!("[diag]   {:#06}  {:?} cmp={} {}", full, op, cmp, offset);
-                                }
-                                _ if width == 2 => {
-                                    let instr = self.chunk.code[full];
-                                    let arg = payload_byte(instr, 0) as u32;
-                                    eprintln!("[diag]   {:#06}  {:?} {}", full, op, arg);
-                                }
-                                _ => eprintln!("[diag]   {:#06}  {:?}", full, op),
-                            }
-                            full += width;
-                        } else {
-                            eprintln!("[diag]   {:#06}  ???  0x{:02x}", full, b);
-                            full += 1;
-                        }
-                    }
-                }
-                let raw_start = 44usize;
-                let raw_end = usize::min(56usize, self.chunk.code.len());
-                eprintln!("[diag] raw bytes ({}..{}):", raw_start, raw_end);
-                for i in raw_start..raw_end {
-                    let instr = self.chunk.code[i];
-                    let b = (instr & 0xFF) as u8;
-                    eprintln!("[diag]   {:>5}: 0x{:02x}", i, b);
-                }
-                let raw_start2 = 188usize;
-                let raw_end2 = usize::min(196usize, self.chunk.code.len());
-                eprintln!("[diag] raw bytes ({}..{}):", raw_start2, raw_end2);
-                for i in raw_start2..raw_end2 {
-                    let instr = self.chunk.code[i];
-                    let b = (instr & 0xFF) as u8;
-                    eprintln!("[diag]   {:>5}: 0x{:02x}", i, b);
-                }
-                eprintln!("[diag] Stack size: {}", self.stack.len());
-                if let Some(&line_no) = self.chunk.lines.get(self.ip.saturating_sub(1)) {
-                    eprintln!("[diag] source line {}:", line_no);
-                    let line_idx = line_no.saturating_sub(1) as usize;
-                    for (idx, line) in self.chunk.source_text.lines().enumerate() {
-                        if idx + 1 >= line_idx.saturating_sub(2)
-                            && idx < line_idx.saturating_add(2)
-                        {
-                            eprintln!("[diag]   {:>5}: {}", idx + 1, line);
-                        }
-                    }
-                }
-            }
-            RuntimeError::from("Stack underflow")
-        })
+    self
+      .stack
+      .pop()
+      .ok_or_else(|| RuntimeError::from("Stack underflow"))
   }
-
-  // -----------------------------------------------------------------------
-  // Arithmetic helpers
-  // -----------------------------------------------------------------------
-
-  #[inline(always)]
-  fn binary_num_bigint<F, G>(
-    &mut self,
-    f: F,
-    g: G,
-  ) -> Result<(), RuntimeError>
-  where
-    F: FnOnce(f64, f64) -> f64,
-    G: FnOnce(BigIntValue, BigIntValue) -> Result<BigIntValue, RuntimeError>,
-  {
-    let b = self.pop()?;
-    let a = self.pop()?;
-    match (a, b) {
-      (Value::BigInt(x), Value::BigInt(y)) => {
-        let v = g(x, y)?;
-        self.stack.push(Value::BigInt(v));
-        Ok(())
-      }
-      (a, b) => {
-        let (x, y) = (to_number(&a)?, to_number(&b)?);
-        self.stack.push(Value::Number(f(x, y)));
-        Ok(())
-      }
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // Diagnostics (only emitted when tracing is enabled)
-  // -----------------------------------------------------------------------
 
   pub(super) fn dump_diag(
     &self,
@@ -4280,309 +2839,20 @@ impl Vm {
     if !crate::trace::enabled() {
       return;
     }
-
-    eprintln!("[diag] {}: actual={}", label, offender.type_name());
+    eprintln!("[diag] {label}: actual={}", offender.type_name());
     crate::trace::value_string("[diag] offending value", offender);
-
-    eprintln!("[diag] Stack snapshot (top -> bottom):");
-    for (idx, v) in self.stack.iter_rev().take(32).enumerate() {
-      crate::trace::value_string(&format!("[diag]   stack[{}]", idx), v);
-    }
-
     let start = self.ip.saturating_sub(8);
     let end = usize::min(self.ip + 8, self.chunk.code.len());
-    eprintln!("[diag] disasm window ({}..{}):", start, end);
-
-    // Print current chunk pointer to help correlate disasm with function proto
-    eprintln!(
-      "[diag] current chunk ptr={:p} chunk_len={}",
-      Rc::as_ptr(&self.chunk),
-      self.chunk.code.len()
-    );
-
-    // Print a brief summary of any function prototypes present in the
-    // current chunk to help map MakeClosure indexes to human-readable
-    // names when diagnosing callee/runtime mismatches.
-    eprintln!(
-      "[diag] current chunk functions (len={}):",
-      self.chunk.functions.len()
-    );
-    for (i, proto) in self.chunk.functions.iter().enumerate().take(40) {
-      eprintln!(
-        "[diag]   fn[{}] name='{}' arity={} has_prototype_property={} is_async={} proto_chunk_ptr={:p} chunk_len={}",
-        i,
-        proto.name,
-        proto.arity,
-        proto.has_prototype_property,
-        proto.is_async,
-        Rc::as_ptr(&proto.chunk),
-        proto.chunk.code.len()
-      );
-    }
-
-    // Also print a short dump of the constant pool for this chunk which
-    // helps map large Const indices back to concrete values during
-    // diagnostic analysis.
-    eprintln!(
-      "[diag] chunk constants (len={}):",
-      self.chunk.constants.len()
-    );
-    for (i, c) in self.chunk.constants.iter().enumerate().take(64) {
-      eprintln!("[diag]   const[{}] = {:?}", i, c);
-    }
-
-    // Additionally, some Const operands printed in caller disassembly may
-    // refer to constants in a function prototype's own chunk. To help
-    // correlate large Const indices back to their owning proto, print a
-    // brief summary and constant dump for the first few function proto
-    // chunks referenced by the current chunk. This is intentionally
-    // limited and only for diagnostic builds (gated by tracing).
-    for (i, proto) in self.chunk.functions.iter().enumerate().take(4) {
-      eprintln!(
-        "[diag] proto[{}] name='{}' proto_chunk_ptr={:p} proto_chunk_len={} proto_consts_len={}",
-        i,
-        proto.name,
-        Rc::as_ptr(&proto.chunk),
-        proto.chunk.code.len(),
-        proto.chunk.constants.len()
-      );
-      // Print a small slice of the proto's constant pool to help map
-      // Const operands that are actually meant to index this proto.
-      for (ci, cc) in proto.chunk.constants.iter().enumerate().take(16) {
-        eprintln!("[diag]   proto[{}].const[{}] = {:?}", i, ci, cc);
-      }
-
-      // Disassemble the start of the proto chunk to give context where
-      // MakeClosure/Call sequences often appear (IIFE patterns, etc.).
-      let end = usize::min(128, proto.chunk.code.len());
-      if end > 0 {
-        eprintln!("[diag] proto[{}] disasm (0..{}):", i, end);
-        let mut j = 0usize;
-        while j < end {
-          let instr = proto.chunk.code[j];
-          let b = (instr & 0xFF) as u8;
-          if let Some(op) = Op::from_byte(b) {
-            let width = opcode_width(op);
-            match op {
-              Op::Const => {
-                let instr = proto.chunk.code[j];
-                let hi = payload_byte(instr, 0) as u16;
-                let lo = payload_byte(instr, 1) as u16;
-                let arg = (hi << 8) | lo;
-                let repr = match proto.chunk.constants.get(arg as usize) {
-                  Some(Value::String(s)) => format!("'{}'", s),
-                  Some(v) => v.type_name().to_string(),
-                  None => "<undef>".to_string(),
-                };
-                eprintln!("[diag] {:#06}  Const       {} ({})", j, arg, repr);
-              }
-              Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => {
-                let instr = proto.chunk.code[j];
-                let hi = payload_byte(instr, 0) as u16;
-                let lo = payload_byte(instr, 1) as u16;
-                let arg = ((hi << 8) | lo) as usize;
-                let name = match proto.chunk.constants.get(arg) {
-                  Some(Value::String(s)) => s.clone(),
-                  _ => "<non-string>".to_string(),
-                };
-                eprintln!("[diag] {:#06}  {:12?} {} ({})", j, op, arg, name);
-              }
-              Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => {
-                let instr = proto.chunk.code[j];
-                let hi = payload_byte(instr, 0) as u16;
-                let lo = payload_byte(instr, 1) as u16;
-                let val = ((hi << 8) | lo) as i16;
-                eprintln!("[diag] {:#06}  {:12?} {}", j, op, val);
-              }
-              Op::CompareJump => {
-                let instr = proto.chunk.code[j];
-                let cmp = payload_byte(instr, 0);
-                let hi = payload_byte(instr, 1) as u16;
-                let lo = payload_byte(instr, 2) as u16;
-                let val = ((hi << 8) | lo) as i16;
-                eprintln!("[diag] {:#06}  {:12?} cmp={} {}", j, op, cmp, val);
-              }
-              _ if opcode_width(op) == 2 => {
-                let instr = proto.chunk.code[j];
-                let arg = payload_byte(instr, 0) as u32;
-                eprintln!("[diag] {:#06}  {:12?} {}", j, op, arg);
-              }
-              _ => {
-                eprintln!("[diag] {:#06}  {:?}", j, op);
-              }
-            }
-            j += width;
-          } else {
-            eprintln!("[diag] {:#06}  ???  0x{:02x}", j, b);
-            j += 1;
-          }
-        }
-      }
-    }
-
-    let mut j = start;
-    while j < end {
-      let b = self.chunk.code[j];
-      if let Some(op) = Op::from_byte((b & 0xFF) as u8) {
-        let width = opcode_width(op);
-        match op {
-          Op::Const => {
-            let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
-            let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
-            let arg = (hi << 8) | lo;
-            if (arg as usize) < self.chunk.constants.len() {
-              let repr = match self.chunk.constants.get(arg as usize) {
-                Some(Value::String(s)) => format!("'{}'", s),
-                Some(v) => v.type_name().to_string(),
-                None => "<undef>".to_string(),
-              };
-              eprintln!("[diag] {:#06}  Const       {} ({})", j, arg, repr);
-            } else {
-              eprintln!(
-                "[diag] {:#06}  Const       {} (<out-of-range for current chunk constants len={}>)",
-                j,
-                arg,
-                self.chunk.constants.len()
-              );
-              // Try to locate a function proto whose constant pool would contain this index
-              for (pi, proto) in self.chunk.functions.iter().enumerate() {
-                if (arg as usize) < proto.chunk.constants.len() {
-                  eprintln!(
-                    "[diag]   -> const {} appears valid in proto[{}] '{}', proto_chunk_ptr={:p} proto_consts_len={}",
-                    arg,
-                    pi,
-                    proto.name,
-                    Rc::as_ptr(&proto.chunk),
-                    proto.chunk.constants.len()
-                  );
-                  // Print a small slice of that proto's constants
-                  for (ci, cc) in proto
-                    .chunk
-                    .constants
-                    .iter()
-                    .enumerate()
-                    .skip((arg as usize).saturating_sub(4))
-                    .take(8)
-                  {
-                    eprintln!("[diag]     proto[{}].const[{}] = {:?}", pi, ci, cc);
-                  }
-                }
-              }
-            }
-          }
-          Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => {
-            let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
-            let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
-            let arg = ((hi << 8) | lo) as usize;
-            let name = match self.chunk.constants.get(arg) {
-              Some(Value::String(s)) => s.clone(),
-              _ => "<non-string>".to_string(),
-            };
-            eprintln!("[diag] {:#06}  {:12?} {} ({})", j, op, arg, name);
-          }
-          Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => {
-            let hi = self.chunk.code.get(j + 1).cloned().unwrap_or(0) as u16;
-            let lo = self.chunk.code.get(j + 2).cloned().unwrap_or(0) as u16;
-            let val = ((hi << 8) | lo) as i16;
-            eprintln!("[diag] {:#06}  {:12?} {}", j, op, val);
-          }
-          _ if width == 2 => {
-            let arg = self.chunk.code.get(j + 1).cloned().unwrap_or(0);
-            eprintln!("[diag] {:#06}  {:12?} {}", j, op, arg);
-          }
-          _ => {
-            eprintln!("[diag] {:#06}  {:?}", j, op);
-          }
-        }
-        j += width;
-      } else {
-        eprintln!("[diag] {:#06}  ???  0x{:02x}", j, b);
-        j += 1;
-      }
-    }
-
-    // Print active call frames to help map which chunk/ip belongs to which
-    // JavaScript function. Limit to first 8 frames for brevity.
-    eprintln!("[diag] Frames (count={}):", self.call_stack.len());
-    for (fi, frame) in self.call_stack.iter().enumerate().take(8) {
-      eprintln!(
-        "[diag]  frame[{}] chunk_ptr={:p} chunk_len={} ip={} stack_base={} is_strict={}",
-        fi,
-        Rc::as_ptr(&frame.chunk),
-        frame.chunk.code.len(),
-        frame.ip,
-        frame.stack_base,
-        frame.is_strict,
-      );
-
-      // Disassemble a small window around the frame ip to see recent ops
-      let fstart = frame.ip.saturating_sub(8);
-      let fend = usize::min(frame.ip + 8, frame.chunk.code.len());
-      eprintln!("[diag]  frame[{}] disasm ({}..{}):", fi, fstart, fend);
-      let mut k = fstart;
-      while k < fend {
-        let b = frame.chunk.code[k];
-        if let Some(op) = Op::from_byte((b & 0xFF) as u8) {
-          let width = opcode_width(op);
-          match op {
-            Op::Const => {
-              let hi = frame.chunk.code.get(k + 1).cloned().unwrap_or(0) as u16;
-              let lo = frame.chunk.code.get(k + 2).cloned().unwrap_or(0) as u16;
-              let arg = (hi << 8) | lo;
-              let repr = match frame.chunk.constants.get(arg as usize) {
-                Some(Value::String(s)) => format!("'{}'", s),
-                Some(v) => v.type_name().to_string(),
-                None => "<undef>".to_string(),
-              };
-              eprintln!("[diag]    {:#06}  Const       {} ({})", k, arg, repr);
-            }
-            Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => {
-              let hi = frame.chunk.code.get(k + 1).cloned().unwrap_or(0) as u16;
-              let lo = frame.chunk.code.get(k + 2).cloned().unwrap_or(0) as u16;
-              let arg = ((hi << 8) | lo) as usize;
-              let name = match frame.chunk.constants.get(arg) {
-                Some(Value::String(s)) => s.clone(),
-                _ => "<non-string>".to_string(),
-              };
-              eprintln!("[diag]    {:#06}  {:12?} {} ({})", k, op, arg, name);
-            }
-            _ if opcode_width(op) == 2 => {
-              let arg = frame.chunk.code.get(k + 1).cloned().unwrap_or(0);
-              eprintln!("[diag]    {:#06}  {:12?} {}", k, op, arg);
-            }
-            _ => eprintln!("[diag]    {:#06}  {:?}", k, op),
-          }
-          k += width;
-        } else {
-          eprintln!("[diag]    {:#06}  ???  0x{:02x}", k, b);
-          k += 1;
-        }
-      }
+    for ip in start..end {
+      let instruction = self
+        .chunk
+        .disassemble_at(ip)
+        .unwrap_or_else(|error| format!("{ip:#06} <{error}>"));
+      eprintln!("[diag] {instruction}");
     }
   }
 
-  /// Try to find a runtime value in the constant pools of recent frames.
-  /// Returns a vector of (frame_index, const_index) matches.
-  pub(super) fn find_constants_containing_value(
-    &self,
-    v: &Value,
-  ) -> Vec<(usize, usize)> {
-    let mut found = Vec::new();
-    for (fi, frame) in self.call_stack.iter().enumerate().take(12) {
-      for (ci, c) in frame.chunk.constants.iter().enumerate() {
-        if values_equal(c, v) {
-          found.push((fi, ci));
-        }
-      }
-    }
-    found
-  }
-
-  /// Instanceof helper: checks whether `value` has `constructor.prototype` in its prototype chain.
-  ///
-  /// # Errors
-  ///
-  /// Returns a [`crate::errors::RuntimeError`] if the operation fails.
+  /// Apply ECMAScript `instanceof` semantics.
   pub fn instance_of(
     &mut self,
     value: &Value,
@@ -4731,12 +3001,6 @@ impl Vm {
 // Free functions
 // ---------------------------------------------------------------------------
 
-/// Return the number of fixed-width instruction words occupied by an opcode.
-fn opcode_width(op: Op) -> usize {
-  let _ = op;
-  1
-}
-
 /// Return own keys for a value when applicable.
 fn list_own_keys_of_value(v: &Value) -> Option<Vec<String>> {
   match v {
@@ -4876,69 +3140,6 @@ pub(super) fn array_index_from_key(key: &PropertyKey) -> Option<usize> {
     return None;
   }
   Some(idx as usize)
-}
-
-fn array_index_from_value(value: &Value) -> Option<usize> {
-  let Value::Number(n) = value else {
-    return None;
-  };
-  if !n.is_finite() || *n < 0.0 {
-    return None;
-  }
-  let idx = n.trunc();
-  if idx != *n || idx >= u32::MAX as f64 {
-    return None;
-  }
-  Some(idx as usize)
-}
-
-fn array_element_value(
-  obj: &Value,
-  index: usize,
-) -> Option<Value> {
-  let Value::Array(arr, _) = obj else {
-    return None;
-  };
-  arr.borrow().get(index).cloned().flatten()
-}
-
-fn set_array_index_property(
-  obj: &Value,
-  index: usize,
-  value: Value,
-) -> Result<(), RuntimeError> {
-  let Value::Array(arr, props) = obj else {
-    return Ok(());
-  };
-  let mut p = props.borrow_mut();
-  let current_len = array_length(&p);
-  let next_len = current_len.max(index.saturating_add(1));
-  let dense_limit = arr
-    .borrow()
-    .len()
-    .saturating_add(MAX_DENSE_ARRAY_GROWTH);
-  if index <= dense_limit {
-    let mut a = arr.borrow_mut();
-    if index >= a.len() {
-      a.resize(index + 1, None);
-    }
-    a[index] = Some(value);
-    let next_len = next_len.max(a.len());
-    p.properties.insert(
-      PropertyKey::String("length".to_string()),
-      PropertyDescriptor::data(Value::Number(usize_to_f64(next_len))),
-    );
-  } else {
-    p.properties.insert(
-      PropertyKey::String(index.to_string()),
-      PropertyDescriptor::data(value),
-    );
-    p.properties.insert(
-      PropertyKey::String("length".to_string()),
-      PropertyDescriptor::data(Value::Number(usize_to_f64(next_len))),
-    );
-  }
-  Ok(())
 }
 
 pub(super) fn array_length(props: &ObjectData) -> usize {

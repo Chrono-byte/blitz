@@ -4,14 +4,15 @@ use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::mutex_compat::MutexBorrowExt;
-use crate::runtime_utils::to_length;
-use crate::runtime_utils::{array_from_values, usize_to_decimal_string, usize_to_f64};
+use crate::runtime_utils::{to_length, usize_to_decimal_string, usize_to_f64};
 use crate::value::{
   ArrayData, ObjectData, PropertyDescriptor, PropertyKey, SharedValue, SymbolId, Value,
 };
 use crate::vm::Vm;
 use crate::vm::runtime::execution::get_property;
-use crate::vm::state::{Frame, GeneratorRunner, LOCALS_INITIAL_CAPACITY, StepOutcome};
+use crate::vm::state::{
+  Frame, GeneratorRunner, LOCALS_INITIAL_CAPACITY, RiscExecutionState, RiscRunOutcome,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -25,339 +26,6 @@ impl Vm {
       "Class constructor {} cannot be invoked without 'new'",
       proto.name
     ))
-  }
-
-  fn prune_handlers_for_tail_call(&mut self) {
-    let active_frames = self.call_stack.len();
-    while self
-      .handlers
-      .last()
-      .is_some_and(|h| h.frame_count >= active_frames)
-    {
-      self.handlers.pop();
-    }
-  }
-
-  pub(super) fn execute_tail_call_with_nargs(
-    &mut self,
-    nargs_override: Option<usize>,
-  ) -> Result<(), RuntimeError> {
-    let nargs = nargs_override.unwrap_or(self.read_byte()? as usize);
-    let mut args: Vec<Value> = Vec::with_capacity(nargs);
-    for _ in 0..nargs {
-      args.push(self.pop()?);
-    }
-    args.reverse();
-    let callee = self.pop()?;
-    self.tail_call_value(callee, args, Value::Undefined, false)
-  }
-
-  fn tail_call_value(
-    &mut self,
-    callee: Value,
-    args: Vec<Value>,
-    this_value: Value,
-    prepend_this_for_builtins: bool,
-  ) -> Result<(), RuntimeError> {
-    self.prune_handlers_for_tail_call();
-    match callee {
-      Value::Builtin(f) => {
-        let mut call_args: Vec<Value> =
-          Vec::with_capacity(args.len() + usize::from(prepend_this_for_builtins));
-        if prepend_this_for_builtins {
-          call_args.push(this_value.clone());
-        }
-        call_args.extend_from_slice(&args);
-        let prev_this = std::mem::replace(&mut self.this_value, this_value);
-        let prev_builtin_this = std::mem::replace(
-          &mut self.builtin_this_arg_prepended,
-          prepend_this_for_builtins,
-        );
-        let prev_closure_env = self.current_closure_env.clone();
-        let prev_slot_types = self.current_slot_types.clone();
-        let prev_lexical_env = Rc::clone(&self.lexical_env);
-        let result = (f.as_ref())(self, &call_args);
-        self.builtin_this_arg_prepended = prev_builtin_this;
-        self.this_value = prev_this;
-        self.current_closure_env = prev_closure_env;
-        self.current_slot_types = prev_slot_types;
-        self.lexical_env = prev_lexical_env;
-        let result = result?;
-        let result_root_base = self.gc_temp_roots.len();
-        self.gc_temp_roots.push(result.clone());
-        self.maybe_collect_garbage_prototype();
-        self.gc_temp_roots.truncate(result_root_base);
-        self.stack.push(result);
-        self.execute_return()
-      }
-      Value::BuiltinObject(f, _props) => {
-        let mut call_args: Vec<Value> =
-          Vec::with_capacity(args.len() + usize::from(prepend_this_for_builtins));
-        if prepend_this_for_builtins {
-          call_args.push(this_value.clone());
-        }
-        call_args.extend_from_slice(&args);
-        let prev_this = std::mem::replace(&mut self.this_value, this_value);
-        let prev_builtin_this = std::mem::replace(
-          &mut self.builtin_this_arg_prepended,
-          prepend_this_for_builtins,
-        );
-        let prev_closure_env = self.current_closure_env.clone();
-        let prev_slot_types = self.current_slot_types.clone();
-        let prev_lexical_env = Rc::clone(&self.lexical_env);
-        let result = (f.as_ref())(self, &call_args);
-        self.builtin_this_arg_prepended = prev_builtin_this;
-        self.this_value = prev_this;
-        self.current_closure_env = prev_closure_env;
-        self.current_slot_types = prev_slot_types;
-        self.lexical_env = prev_lexical_env;
-        let result = result?;
-        let result_root_base = self.gc_temp_roots.len();
-        self.gc_temp_roots.push(result.clone());
-        self.maybe_collect_garbage_prototype();
-        self.gc_temp_roots.truncate(result_root_base);
-        self.stack.push(result);
-        self.execute_return()
-      }
-      Value::Closure {
-        ref proto, ref env, ..
-      } => {
-        if proto.is_class_constructor && self.construct_new_target.is_none() {
-          return Err(self.throw_class_constructor_call_error(proto));
-        }
-        let call_args = self.prepare_call_args(&args, proto)?;
-        let this_value = match &callee {
-          Value::Closure {
-            lexical_this: Some(this),
-            ..
-          } => (**this).clone(),
-          _ => this_value,
-        };
-        if proto.is_generator {
-          let generator =
-            self.create_generator_object(proto, env, call_args, this_value, &callee)?;
-          self.stack.push(generator);
-          self.execute_return()
-        } else if proto.is_async {
-          let promise = self.invoke_async_closure(proto, env, call_args, this_value, &callee)?;
-          self.stack.push(promise);
-          self.execute_return()
-        } else {
-          self.configure_call_frame(proto, env, call_args, this_value, callee.clone())
-        }
-      }
-      _ => {
-        if crate::trace::enabled() {
-          eprintln!("[trace] tail_call_value: callee not callable");
-          crate::trace::value_string("[trace]   callee", &callee);
-        }
-        self.dump_diag("Tail call failed: callee not callable", &callee);
-        Err(self.throw_type_error(&format!("{} is not a function", callee.type_name())))
-      }
-    }
-  }
-
-  pub(super) fn execute_tail_call(&mut self) -> Result<(), RuntimeError> {
-    self.execute_tail_call_with_nargs(None)
-  }
-
-  pub(super) fn execute_call_with_nargs(
-    &mut self,
-    nargs_override: Option<usize>,
-  ) -> Result<(), RuntimeError> {
-    let nargs = nargs_override.unwrap_or(self.read_byte()? as usize);
-    let mut args: Vec<Value> = Vec::with_capacity(nargs);
-    for _ in 0..nargs {
-      args.push(self.pop()?);
-    }
-    args.reverse();
-    let callee = self.pop()?;
-
-    match callee {
-      Value::Builtin(f) => {
-        let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
-        let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, false);
-        let prev_closure_env = self.current_closure_env.clone();
-        let prev_slot_types = self.current_slot_types.clone();
-        let prev_lexical_env = Rc::clone(&self.lexical_env);
-        let result = (f.as_ref())(self, &args);
-        self.builtin_this_arg_prepended = prev_builtin_this;
-        self.this_value = prev_this;
-        self.current_closure_env = prev_closure_env;
-        self.current_slot_types = prev_slot_types;
-        self.lexical_env = prev_lexical_env;
-        let result = result?;
-        let result_root_base = self.gc_temp_roots.len();
-        self.gc_temp_roots.push(result.clone());
-        if self.call_stack.is_empty() {
-          self.run_microtasks_if_needed()?;
-        }
-        self.maybe_collect_garbage_prototype();
-        self.gc_temp_roots.truncate(result_root_base);
-        self.stack.push(result);
-      }
-      Value::BuiltinObject(f, _props) => {
-        let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
-        let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, false);
-        let prev_closure_env = self.current_closure_env.clone();
-        let prev_slot_types = self.current_slot_types.clone();
-        let prev_lexical_env = Rc::clone(&self.lexical_env);
-        let result = (f.as_ref())(self, &args);
-        self.builtin_this_arg_prepended = prev_builtin_this;
-        self.this_value = prev_this;
-        self.current_closure_env = prev_closure_env;
-        self.current_slot_types = prev_slot_types;
-        self.lexical_env = prev_lexical_env;
-        let result = result?;
-        let result_root_base = self.gc_temp_roots.len();
-        self.gc_temp_roots.push(result.clone());
-        if self.call_stack.is_empty() {
-          self.run_microtasks_if_needed()?;
-        }
-        self.maybe_collect_garbage_prototype();
-        self.gc_temp_roots.truncate(result_root_base);
-        self.stack.push(result);
-      }
-      Value::Closure {
-        ref proto, ref env, ..
-      } => {
-        if proto.is_class_constructor && self.construct_new_target.is_none() {
-          return Err(self.throw_class_constructor_call_error(proto));
-        }
-        let call_args = self.prepare_call_args(&args, proto)?;
-        // Argument validation removed in JS-first mode.
-        let this_arg = Self::closure_lexical_this(&callee).unwrap_or(Value::Undefined);
-        if proto.is_generator {
-          let generator = self.create_generator_object(proto, env, call_args, this_arg, &callee)?;
-          self.stack.push(generator);
-        } else if proto.is_async {
-          let promise = self.invoke_async_closure(proto, env, call_args, this_arg, &callee)?;
-          self.stack.push(promise);
-        } else {
-          self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
-        }
-      }
-      _ => {
-        if crate::trace::enabled() {
-          eprintln!("[trace] execute_call: callee not callable, dumping context...");
-          crate::trace::value_string("[trace]   callee", &callee);
-          for (i, v) in self.stack.iter_rev().take(8).enumerate() {
-            crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
-          }
-          // Try to locate the callee value inside any known constant
-          // pools referenced by the active frames to help map origins.
-          let matches = self.find_constants_containing_value(&callee);
-          if !matches.is_empty() {
-            for (fi, ci) in matches {
-              eprintln!(
-                "[trace]   callee appears in frame[{}] constants[{}]",
-                fi, ci
-              );
-            }
-          }
-        }
-        self.dump_diag("Call failed: callee not callable", &callee);
-        return Err(self.throw_type_error(&format!("{} is not a function", callee.type_name())));
-      }
-    }
-
-    Ok(())
-  }
-
-  pub(super) fn execute_call(&mut self) -> Result<(), RuntimeError> {
-    self.execute_call_with_nargs(None)
-  }
-
-  pub(super) fn execute_construct(&mut self) -> Result<(), RuntimeError> {
-    let nargs = self.read_byte()? as usize;
-    let mut args: Vec<Value> = Vec::with_capacity(nargs);
-    for _ in 0..nargs {
-      args.push(self.pop()?);
-    }
-    args.reverse();
-    let callee = self.pop()?;
-    let result = self.construct_value(&callee, &args)?;
-    self.stack.push(result);
-    Ok(())
-  }
-
-  pub(super) fn execute_super_construct(&mut self) -> Result<(), RuntimeError> {
-    let nargs = self.read_byte()? as usize;
-    let mut args: Vec<Value> = Vec::with_capacity(nargs);
-    for _ in 0..nargs {
-      args.push(self.pop()?);
-    }
-    args.reverse();
-    if nargs == 1
-      && let Some(arg0) = args.first()
-      && matches!(
-        own_property_descriptor(arg0, &PropertyKey::String("callee".to_string())),
-        Some(PropertyDescriptor::Accessor { .. })
-      )
-      && let Ok(len_val) = self.get_property_host(arg0, &PropertyKey::String("length".to_string()))
-      && let Ok(len) = to_length(self, &len_val)
-    {
-      let mut flat = Vec::with_capacity(len);
-      for idx in 0..len {
-        flat.push(self.get_property_host(arg0, &PropertyKey::String(idx.to_string()))?);
-      }
-      args = flat;
-    }
-
-    let frame = self
-      .call_stack
-      .last()
-      .ok_or_else(|| RuntimeError::from("super() outside function frame"))?;
-    let (callee, is_derived_constructor) = match &frame.callee {
-      Value::Closure { proto, .. } => (frame.callee.clone(), proto.is_derived_constructor),
-      _ => (frame.callee.clone(), false),
-    };
-    if !is_derived_constructor {
-      return Err(self.throw_type_error("super() is only valid in derived class constructors"));
-    }
-
-    let super_ctor = self
-      .get_property_value(
-        &callee,
-        &PropertyKey::String("[[SuperConstructor]]".to_string()),
-      )
-      .unwrap_or_else(|_| self.get_prototype(&callee));
-    if matches!(super_ctor, Value::Null | Value::Undefined) {
-      return Err(self.throw_type_error("Class extends value does not have a valid constructor"));
-    }
-    if !super_ctor.is_constructable() {
-      return Err(self.throw_type_error("Super constructor is not a constructor"));
-    }
-
-    let new_target = self.current_new_target().unwrap_or(callee);
-    let prev_new_target = self.construct_new_target.clone();
-    self.construct_new_target = Some(new_target);
-    let result = self.construct_value(&super_ctor, &args);
-    self.construct_new_target = prev_new_target;
-    let result = result?;
-    self.this_value = result.clone();
-    self.recent_return_value = Some(result.clone());
-    self.stack.push(result);
-    Ok(())
-  }
-
-  pub(super) fn execute_spread(&mut self) -> Result<(), RuntimeError> {
-    self.read_byte()?; // nargs, consumed by VM dispatcher
-    let mask = self.pop()?;
-    let values = self.pop()?;
-    let callee = self.pop()?;
-    let flat = self.flatten_spread_values(values, mask)?;
-    self.call_with_flat_args(callee, flat)?;
-    Ok(())
-  }
-
-  pub(super) fn execute_array_from_spread(&mut self) -> Result<(), RuntimeError> {
-    self.read_byte()?; // nargs, consumed by VM dispatcher
-    let mask = self.pop()?;
-    let values = self.pop()?;
-    let flat = self.flatten_spread_values(values, mask)?;
-    self.stack.push(array_from_values(flat));
-    Ok(())
   }
 
   pub(super) fn flatten_spread_values(
@@ -417,216 +85,6 @@ impl Vm {
     Ok(flat)
   }
 
-  pub(super) fn call_with_flat_args(
-    &mut self,
-    callee: Value,
-    flat: Vec<Value>,
-  ) -> Result<(), RuntimeError> {
-    match callee {
-      Value::Builtin(f) => {
-        let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
-        let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, false);
-        let prev_closure_env = self.current_closure_env.clone();
-        let prev_slot_types = self.current_slot_types.clone();
-        let prev_lexical_env = Rc::clone(&self.lexical_env);
-        let result = (f.as_ref())(self, &flat);
-        self.builtin_this_arg_prepended = prev_builtin_this;
-        self.this_value = prev_this;
-        self.current_closure_env = prev_closure_env;
-        self.current_slot_types = prev_slot_types;
-        self.lexical_env = prev_lexical_env;
-        let result = result?;
-        let result_root_base = self.gc_temp_roots.len();
-        self.gc_temp_roots.push(result.clone());
-        if self.call_stack.is_empty() {
-          self.run_microtasks_if_needed()?;
-        }
-        self.maybe_collect_garbage_prototype();
-        self.gc_temp_roots.truncate(result_root_base);
-        self.stack.push(result);
-      }
-      Value::BuiltinObject(f, _props) => {
-        let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
-        let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, false);
-        let prev_closure_env = self.current_closure_env.clone();
-        let prev_slot_types = self.current_slot_types.clone();
-        let prev_lexical_env = Rc::clone(&self.lexical_env);
-        let result = (f.as_ref())(self, &flat);
-        self.builtin_this_arg_prepended = prev_builtin_this;
-        self.this_value = prev_this;
-        self.current_closure_env = prev_closure_env;
-        self.current_slot_types = prev_slot_types;
-        self.lexical_env = prev_lexical_env;
-        let result = result?;
-        let result_root_base = self.gc_temp_roots.len();
-        self.gc_temp_roots.push(result.clone());
-        if self.call_stack.is_empty() {
-          self.run_microtasks_if_needed()?;
-        }
-        self.maybe_collect_garbage_prototype();
-        self.gc_temp_roots.truncate(result_root_base);
-        self.stack.push(result);
-      }
-      Value::Closure {
-        ref proto, ref env, ..
-      } => {
-        if proto.is_class_constructor && self.construct_new_target.is_none() {
-          return Err(self.throw_class_constructor_call_error(proto));
-        }
-        let call_args = self.prepare_call_args(&flat, proto)?;
-        let this_arg = Self::closure_lexical_this(&callee).unwrap_or(Value::Undefined);
-        if proto.is_generator {
-          let generator = self.create_generator_object(proto, env, call_args, this_arg, &callee)?;
-          self.stack.push(generator);
-        } else if proto.is_async {
-          let promise = self.invoke_async_closure(proto, env, call_args, this_arg, &callee)?;
-          self.stack.push(promise);
-        } else {
-          self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
-        }
-      }
-      _ => {
-        self.dump_diag("Spread call failed: callee not callable", &callee);
-        return Err(self.throw_type_error(&format!("{} is not a function", callee.type_name())));
-      }
-    }
-
-    Ok(())
-  }
-
-  pub(super) fn execute_call_method(&mut self) -> Result<(), RuntimeError> {
-    let nargs = self.read_byte()? as usize;
-    if crate::trace::enabled() {
-      eprintln!(
-        "[trace] execute_call_method nargs={} stack_size={} ip={}",
-        nargs,
-        self.stack.len(),
-        self.ip.saturating_sub(1)
-      );
-      for (i, v) in self.stack.iter_rev().take(6).enumerate() {
-        crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
-      }
-    }
-    let mut args: Vec<Value> = Vec::with_capacity(nargs);
-    for _ in 0..nargs {
-      args.push(self.pop()?);
-    }
-    args.reverse();
-    let callee = self.pop()?;
-    let receiver = self.pop()?;
-    if crate::trace::enabled() {
-      eprintln!(
-        "[trace] execute_call_method after pops stack_size={} receiver={:?} callee={:?}",
-        self.stack.len(),
-        receiver,
-        callee
-      );
-    }
-    match callee {
-      Value::Builtin(f) => {
-        // Builtins invoked as methods receive the receiver as the
-        // first argument.
-        let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-        call_args.push(receiver.clone());
-        call_args.extend_from_slice(&args);
-        let prev_this = std::mem::replace(&mut self.this_value, receiver);
-        let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, true);
-        let prev_closure_env = self.current_closure_env.clone();
-        let prev_slot_types = self.current_slot_types.clone();
-        let prev_lexical_env = Rc::clone(&self.lexical_env);
-        let result = (f.as_ref())(self, &call_args);
-        self.builtin_this_arg_prepended = prev_builtin_this;
-        self.this_value = prev_this;
-        self.current_closure_env = prev_closure_env;
-        self.current_slot_types = prev_slot_types;
-        self.lexical_env = prev_lexical_env;
-        let result = result?;
-        if self.call_stack.is_empty() {
-          self.run_microtasks_if_needed()?;
-        }
-        self.stack.push(result);
-      }
-      Value::BuiltinObject(f, _props) => {
-        let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
-        call_args.push(receiver.clone());
-        call_args.extend_from_slice(&args);
-        let prev_this = std::mem::replace(&mut self.this_value, receiver);
-        let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, true);
-        let prev_closure_env = self.current_closure_env.clone();
-        let prev_slot_types = self.current_slot_types.clone();
-        let prev_lexical_env = Rc::clone(&self.lexical_env);
-        let result = (f.as_ref())(self, &call_args);
-        self.builtin_this_arg_prepended = prev_builtin_this;
-        self.this_value = prev_this;
-        self.current_closure_env = prev_closure_env;
-        self.current_slot_types = prev_slot_types;
-        self.lexical_env = prev_lexical_env;
-        let result = result?;
-        if self.call_stack.is_empty() {
-          self.run_microtasks_if_needed()?;
-        }
-        self.stack.push(result);
-      }
-      Value::Closure {
-        ref proto, ref env, ..
-      } => {
-        if proto.is_class_constructor && self.construct_new_target.is_none() {
-          return Err(self.throw_class_constructor_call_error(proto));
-        }
-        let call_args = self.prepare_call_args(&args, proto)?;
-        // Argument validation removed in JS-first mode.
-        let receiver = Self::closure_lexical_this(&callee).unwrap_or(receiver);
-        if proto.is_generator {
-          let generator = self.create_generator_object(proto, env, call_args, receiver, &callee)?;
-          self.stack.push(generator);
-        } else if proto.is_async {
-          let promise = self.invoke_async_closure(proto, env, call_args, receiver, &callee)?;
-          self.stack.push(promise);
-        } else {
-          self.push_call_frame(proto, env, call_args, receiver, callee.clone())?;
-        }
-      }
-      Value::Undefined => {
-        self.dump_diag("CallWithThis failed: callee not callable", &callee);
-        return Err(self.throw_type_error("undefined is not a function"));
-      }
-      Value::Null => {
-        return Err(self.throw_type_error("null is not a function"));
-      }
-      _ => {
-        // Debug: print what value type we got and nearby stack when tracing
-        if crate::trace::enabled() {
-          eprintln!("[trace] execute_call_method: callee not callable, receiver and stack follow");
-          crate::trace::value_string("[trace]   callee", &callee);
-          crate::trace::value_string("[trace]   receiver", &receiver);
-          for (i, v) in self.stack.iter_rev().take(12).enumerate() {
-            crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
-          }
-          // Attempt to locate the callee in constants for active frames
-          let matches = self.find_constants_containing_value(&callee);
-          if !matches.is_empty() {
-            for (fi, ci) in matches {
-              eprintln!(
-                "[trace]   callee appears in frame[{}] constants[{}]",
-                fi, ci
-              );
-            }
-          }
-        } else {
-          eprintln!(
-            "CallWithThis ERROR: callee={:?}, receiver={:?}",
-            callee, receiver
-          );
-        }
-        self.dump_diag("CallWithThis failed: callee not callable", &callee);
-        return Err(self.throw_type_error(&format!("{} is not a function", callee.type_name())));
-      }
-    }
-    Ok(())
-  }
-
-  /// Creates a generator object for the given function and arguments.
-  #[allow(clippy::too_many_lines)]
   pub(super) fn create_generator_object(
     &mut self,
     proto: &Rc<FunctionProto>,
@@ -637,45 +95,21 @@ impl Vm {
   ) -> Result<Value, RuntimeError> {
     let mut child = self.fork_execution();
     child.push_call_frame(proto, closure_env, call_args, this_value, callee.clone())?;
-    loop {
-      let Some(instr) = child.chunk.code.get(child.ip).copied() else {
-        break;
-      };
-      let Some(op) = crate::bytecode::Op::from_byte((instr & 0xFF) as u8) else {
-        break;
-      };
-      if matches!(op, crate::bytecode::Op::GeneratorInitDone) {
-        child.ip += 1;
-        break;
-      }
-      match child.step(Some(1)) {
-        Ok(StepOutcome::Continue) => {
-          if child.pending_exception {
-            child.pending_exception = false;
-          }
-        }
-        Ok(StepOutcome::Return(_)) => break,
-        Ok(StepOutcome::Yield(_)) => break,
-        Err(err) => {
-          if child.pending_exception {
-            if child.call_stack.is_empty() {
-              if let Some(thrown) = child.last_uncaught_exception.take() {
-                return Err(self.throw_exception(thrown));
-              }
-              return Err(err);
-            }
-            child.pending_exception = false;
-            continue;
-          }
-          if let Some(thrown) = child.last_uncaught_exception.take() {
-            return Err(self.throw_exception(thrown));
-          }
-          return Err(err);
-        }
+    let mut risc_state = RiscExecutionState::new(
+      child.this_value.clone(),
+      child.chunk.risc_spill_count as usize,
+    );
+    match child.run_risc_state(&mut risc_state, true)? {
+      RiscRunOutcome::Initialized => {}
+      RiscRunOutcome::Return(_) | RiscRunOutcome::Yield(_) => {
+        return Err(RuntimeError::from(
+          "generator body reached a suspension before initialization",
+        ));
       }
     }
     let runner = Rc::new(RefCell::new(GeneratorRunner {
       vm: child,
+      risc_state,
       started: false,
       completed: false,
     }));
@@ -688,11 +122,19 @@ impl Vm {
       .set_prototype_value(self.realm.generator_prototype());
     gen_obj.borrow_mut().properties.insert(
       PropertyKey::String("next".to_string()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+      PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = next_runner
           .try_borrow_mut()
           .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
-        let first_arg = args.first().cloned().unwrap_or(Value::Undefined);
+        let user_args = if vm.builtin_this_arg_prepended() {
+          args.get(1..).unwrap_or_default()
+        } else {
+          args
+        };
+        let first_arg = user_args
+          .first()
+          .cloned()
+          .unwrap_or(Value::Undefined);
 
         if runner.completed {
           Ok(Self::make_iterator_result(Value::Undefined, true))
@@ -700,46 +142,38 @@ impl Vm {
           if !runner.started {
             runner.started = true;
           } else {
-            runner.vm.stack.push(first_arg);
+            runner.risc_state.resume_with(first_arg);
           }
 
-          loop {
-            match runner.vm.step(Some(1)) {
-              Ok(StepOutcome::Continue) => {
-                if let Err(err) = runner.vm.run_microtasks_if_needed() {
-                  break Err(err);
-                }
-                runner.vm.maybe_collect_garbage_prototype();
-              }
-              Ok(StepOutcome::Yield(v)) => {
-                break Ok(Self::make_iterator_result(v, false));
-              }
-              Ok(StepOutcome::Return(v)) => {
-                runner.completed = true;
-                break Ok(Self::make_iterator_result(v, true));
-              }
-              Err(err) => {
-                if runner.vm.pending_exception {
-                  if runner.vm.call_stack.is_empty() {
-                    break Err(err);
-                  }
-                  runner.vm.pending_exception = false;
-                  continue;
-                }
-                break Err(err);
-              }
+          let GeneratorRunner { vm, risc_state, .. } = &mut *runner;
+          match vm.run_risc_state(risc_state, false)? {
+            RiscRunOutcome::Yield(value) => Ok(Self::make_iterator_result(value, false)),
+            RiscRunOutcome::Return(value) => {
+              runner.completed = true;
+              Ok(Self::make_iterator_result(value, true))
             }
+            RiscRunOutcome::Initialized => Err(RuntimeError::from(
+              "generator initialization marker executed twice",
+            )),
           }
         }
       }))),
     );
     gen_obj.borrow_mut().properties.insert(
       PropertyKey::String("throw".to_string()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+      PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = throw_runner
           .try_borrow_mut()
           .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
-        let thrown = args.first().cloned().unwrap_or(Value::Undefined);
+        let user_args = if vm.builtin_this_arg_prepended() {
+          args.get(1..).unwrap_or_default()
+        } else {
+          args
+        };
+        let thrown = user_args
+          .first()
+          .cloned()
+          .unwrap_or(Value::Undefined);
 
         if runner.completed {
           Err(RuntimeError::from(format!(
@@ -751,33 +185,19 @@ impl Vm {
             runner.completed = true;
             Err(err)
           } else {
-            loop {
-              match runner.vm.step(Some(1)) {
-                Ok(StepOutcome::Continue) => {
-                  if let Err(e) = runner.vm.run_microtasks_if_needed() {
-                    runner.completed = true;
-                    break Err(e);
-                  }
-                }
-                Ok(StepOutcome::Yield(v)) => {
-                  break Ok(Self::make_iterator_result(v, false));
-                }
-                Ok(StepOutcome::Return(v)) => {
-                  runner.completed = true;
-                  break Ok(Self::make_iterator_result(v, true));
-                }
-                Err(e) => {
-                  if runner.vm.pending_exception {
-                    if runner.vm.call_stack.is_empty() {
-                      runner.completed = true;
-                      break Err(e);
-                    }
-                    runner.vm.pending_exception = false;
-                    continue;
-                  }
-                  runner.completed = true;
-                  break Err(e);
-                }
+            let GeneratorRunner { vm, risc_state, .. } = &mut *runner;
+            match vm.run_risc_state(risc_state, false) {
+              Ok(RiscRunOutcome::Yield(value)) => Ok(Self::make_iterator_result(value, false)),
+              Ok(RiscRunOutcome::Return(value)) => {
+                runner.completed = true;
+                Ok(Self::make_iterator_result(value, true))
+              }
+              Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
+                "generator initialization marker executed twice",
+              )),
+              Err(error) => {
+                runner.completed = true;
+                Err(error)
               }
             }
           }
@@ -786,11 +206,19 @@ impl Vm {
     );
     gen_obj.borrow_mut().properties.insert(
       PropertyKey::String("return".to_string()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new(move |_vm, args| {
+      PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = return_runner
           .try_borrow_mut()
           .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
-        let result_value = args.first().cloned().unwrap_or(Value::Undefined);
+        let user_args = if vm.builtin_this_arg_prepended() {
+          args.get(1..).unwrap_or_default()
+        } else {
+          args
+        };
+        let result_value = user_args
+          .first()
+          .cloned()
+          .unwrap_or(Value::Undefined);
         runner.completed = true;
         Ok(Self::make_iterator_result(result_value, true))
       }))),
@@ -1116,9 +544,65 @@ impl Vm {
     }
   }
 
+  pub(super) fn construct_super_value(
+    &mut self,
+    mut args: Vec<Value>,
+  ) -> Result<Value, RuntimeError> {
+    if args.len() == 1
+      && let Some(arguments) = args.first()
+      && matches!(
+        own_property_descriptor(arguments, &PropertyKey::String("callee".to_string())),
+        Some(PropertyDescriptor::Accessor { .. })
+      )
+      && let Ok(length) =
+        self.get_property_host(arguments, &PropertyKey::String("length".to_string()))
+      && let Ok(length) = to_length(self, &length)
+    {
+      let mut flattened = Vec::with_capacity(length);
+      for index in 0..length {
+        flattened.push(self.get_property_host(arguments, &PropertyKey::String(index.to_string()))?);
+      }
+      args = flattened;
+    }
+
+    let frame = self
+      .call_stack
+      .last()
+      .ok_or_else(|| RuntimeError::from("super() outside function frame"))?;
+    let (callee, is_derived_constructor) = match &frame.callee {
+      Value::Closure { proto, .. } => (frame.callee.clone(), proto.is_derived_constructor),
+      _ => (frame.callee.clone(), false),
+    };
+    if !is_derived_constructor {
+      return Err(self.throw_type_error("super() is only valid in derived class constructors"));
+    }
+
+    let super_constructor = self
+      .get_property_value(
+        &callee,
+        &PropertyKey::String("[[SuperConstructor]]".to_string()),
+      )
+      .unwrap_or_else(|_| self.get_prototype(&callee));
+    if matches!(super_constructor, Value::Null | Value::Undefined) {
+      return Err(self.throw_type_error("Class extends value does not have a valid constructor"));
+    }
+    if !super_constructor.is_constructable() {
+      return Err(self.throw_type_error("Super constructor is not a constructor"));
+    }
+
+    let new_target = self.current_new_target().unwrap_or(callee);
+    let previous_new_target = self.construct_new_target.replace(new_target);
+    let result = self.construct_value(&super_constructor, &args);
+    self.construct_new_target = previous_new_target;
+    let result = result?;
+    self.this_value = result.clone();
+    self.recent_return_value = Some(result.clone());
+    Ok(result)
+  }
+
   /// Calls a function without an explicit receiver.
   ///
-  /// Native builtins use the same argument convention as the StackV1
+  /// Native builtins use the same argument convention as the compiler IR
   /// `Call` opcode: user arguments begin at index zero. Closures still pass
   /// through ordinary ECMAScript `this` preparation.
   pub(super) fn call_value(
@@ -1305,9 +789,13 @@ impl Vm {
             let caller_frame_len = self.call_stack.len();
             let caller_handler_len = self.handlers.len();
             self.push_call_frame(proto, &closure_env, call_args, this_arg, callee.clone())?;
-            let result = self.run_until_return(stack_base, true);
+            let result = self.run_risc_loop(false).and_then(|value| {
+              self.stack.push(value);
+              self.execute_return()?;
+              self.pop()
+            });
             if result.is_ok() || !self.pending_exception {
-              // Restore caller state (run_until_return already truncated stack)
+              // Restore the suspended caller state after the callee returns.
               self.chunk = caller_chunk;
               self.ip = caller_ip;
               self.locals = caller_locals;

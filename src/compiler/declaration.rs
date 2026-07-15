@@ -771,6 +771,9 @@ impl Compiler {
               }
             }
             self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
+            if self.is_root && !matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+              self.emit(Op::Pop, LINE);
+            }
           }
           oast::ForStatementLeft::AssignmentTargetIdentifier(id) => {
             self.compile_assignment_identifier_reference(id)?;
@@ -976,6 +979,9 @@ impl Compiler {
               }
             }
             self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
+            if self.is_root && !matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+              self.emit(Op::Pop, LINE);
+            }
           }
           OForLeft::AssignmentTargetIdentifier(id) => {
             let name = id.name.as_str();
@@ -1161,6 +1167,16 @@ impl Compiler {
         self.emit(Op::Throw, LINE);
       }
       OStmt::TryStatement(t) => {
+        let owns_completion_slot = completion_slot.is_none();
+        let try_completion_slot = if let Some(slot) = completion_slot {
+          slot
+        } else {
+          let slot = self.alloc_temp_local("try_result");
+          self.emit(Op::Undefined, LINE);
+          self.emit(Op::StoreLocal, LINE);
+          self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          slot
+        };
         let handler = t.handler.as_ref();
         let finalizer = t.finalizer.as_ref();
         if finalizer.is_some() {
@@ -1200,7 +1216,7 @@ impl Compiler {
 
         self.enter_block_scope_with_vars(&t.block.body);
         for stmt in &t.block.body {
-          self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
+          self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
         }
         self.exit_scope();
 
@@ -1220,7 +1236,7 @@ impl Compiler {
           let body_start = self.chunk.code.len();
           self.enter_block_scope_with_vars(&fin.body);
           for stmt in &fin.body {
-            self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
+            self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
           }
           self.exit_scope();
           let (did_return_slot, return_slot, return_jumps) = {
@@ -1268,21 +1284,24 @@ impl Compiler {
               let slot = self.add_local_with_mirror(name, None, false);
               self.emit(Op::StoreLocal, LINE);
               self.emit_byte(self.slot_to_u8(slot)?, LINE);
-              self.emit(Op::LoadLocal, LINE);
-              self.emit_byte(self.slot_to_u8(slot)?, LINE);
-              self.compile_binding_pattern_assignment_oast(
-                &param.pattern,
-                oxc_ast::ast::VariableDeclarationKind::Let,
-              )?;
+              if !matches!(param.pattern, OPat::BindingIdentifier(_)) {
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                self.compile_binding_pattern_assignment_oast(
+                  &param.pattern,
+                  oxc_ast::ast::VariableDeclarationKind::Let,
+                )?;
+                self.emit(Op::Pop, LINE);
+              }
               for stmt in &handler.body.body {
-                self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
+                self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
               }
               self.exit_scope();
             } else {
               self.emit(Op::Pop, LINE);
               self.enter_block_scope_with_vars(&handler.body.body);
               for stmt in &handler.body.body {
-                self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
+                self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
               }
               self.exit_scope();
             }
@@ -1299,7 +1318,7 @@ impl Compiler {
               }
               self.enter_block_scope_with_vars(&fin.body);
               for stmt in &fin.body {
-                self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
+                self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
               }
               self.exit_scope();
               let state = self
@@ -1332,7 +1351,7 @@ impl Compiler {
               }
               self.enter_block_scope_with_vars(&fin.body);
               for stmt in &fin.body {
-                self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
+                self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
               }
               self.exit_scope();
               let state = self
@@ -1351,6 +1370,10 @@ impl Compiler {
         self.patch_jump(end_jump);
         if finalizer.is_some() {
           self.finally_patches.pop();
+        }
+        if owns_completion_slot {
+          self.emit(Op::LoadLocal, LINE);
+          self.emit_byte(self.slot_to_u8(try_completion_slot)?, LINE);
         }
       }
       _ => {}
@@ -1667,7 +1690,7 @@ impl Compiler {
       proto.is_class_constructor = true;
       proto
     } else {
-      let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
+      let mut ctor_chunk = Chunk::new_compiler_ir(Rc::clone(&self.source_text));
       if class_has_super {
         ctor_chunk.allow_new_target = true;
         ctor_chunk.allow_super = true;
@@ -1926,7 +1949,7 @@ impl Compiler {
     }
 
     let mut inner = Compiler {
-      chunk: Chunk::new(Rc::clone(&self.source_text)),
+      chunk: Chunk::new_compiler_ir(Rc::clone(&self.source_text)),
       source_text: Rc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -2180,7 +2203,7 @@ impl Compiler {
     }
 
     let mut inner = Compiler {
-      chunk: Chunk::new(Rc::clone(&self.source_text)),
+      chunk: Chunk::new_compiler_ir(Rc::clone(&self.source_text)),
       source_text: Rc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),

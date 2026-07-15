@@ -219,7 +219,7 @@ impl Compiler {
     let (allow_new_target, allow_super) = COMPILE_CONTEXT_OVERRIDE
       .with(|override_state| *override_state.borrow())
       .unwrap_or((false, false));
-    let mut chunk = Chunk::new(Rc::clone(&source_text));
+    let mut chunk = Chunk::new_compiler_ir(Rc::clone(&source_text));
     chunk.allow_new_target = allow_new_target;
     chunk.allow_super = allow_super;
     Self {
@@ -318,16 +318,8 @@ impl Compiler {
     let new = instr | ((byte as u32) << shift);
     self.chunk.code[idx] = new;
     self.pending_operand_bytes += 1;
-    // Update line info for the instruction's operand emission. We modify
-    // the previous instruction word in-place, so update the corresponding
-    // line entry instead of pushing a new one.
-    let lines_idx = idx;
-    if lines_idx < self.chunk.lines.len() {
-      self.chunk.lines[lines_idx] = line;
-    } else {
-      // Defensive fallback: if lines is shorter than code, push the line.
-      self.chunk.lines.push(line);
-    }
+    assert_eq!(self.chunk.lines.len(), self.chunk.code.len());
+    self.chunk.lines[idx] = line;
   }
 
   /// Emits a u16 value as a 24-bit payload in a single instruction word,

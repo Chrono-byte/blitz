@@ -5,7 +5,7 @@ use crate::bytecode::{
   encode_risc_cond_jump, encode_risc_registers,
 };
 use crate::errors::CompilerError;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 /// Verified operand-stack heights used to assign RISC value locations.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,17 +75,19 @@ struct BranchPatch {
   kind: BranchKind,
 }
 
-/// Lower a verified stack-v1 chunk into register-addressed RISC v2 bytecode.
+/// Lower verified frontend IR into register-addressed RISC v2 bytecode.
 pub(crate) fn lower_chunk(chunk: &Chunk) -> Result<Chunk, CompilerError> {
-  if chunk.format != BytecodeFormat::StackV1 {
-    return Err(CompilerError::from("RISC lowering requires StackV1 input"));
+  if chunk.format != BytecodeFormat::CompilerIr {
+    return Err(CompilerError::from(
+      "RISC lowering requires compiler IR input",
+    ));
   }
   for word in &chunk.code {
     let op = Op::from_byte((word & 0xFF) as u8)
-      .ok_or_else(|| CompilerError::from("invalid opcode in StackV1 input"))?;
+      .ok_or_else(|| CompilerError::from("invalid opcode in compiler IR input"))?;
     if !risc_executor_supports(op) {
       return Err(CompilerError::from(format!(
-        "RISC v2 compatibility fallback required for {}",
+        "RISC lowering does not support {}",
         op.name()
       )));
     }
@@ -114,12 +116,28 @@ pub(crate) fn lower_chunk(chunk: &Chunk) -> Result<Chunk, CompilerError> {
 
   let mut old_to_new = vec![None; chunk.code.len()];
   let mut patches = Vec::new();
+  let handler_targets: HashSet<usize> = chunk
+    .code
+    .iter()
+    .enumerate()
+    .filter_map(|(ip, _)| {
+      let instruction = chunk.decode_at(ip).ok()?;
+      (instruction.op == Op::PushHandler)
+        .then(|| instruction.branch_offset())
+        .flatten()
+        .and_then(|offset| usize::try_from(ip as i64 + 1 + offset as i64).ok())
+    })
+    .collect();
 
   for old_ip in 0..chunk.code.len() {
     let Some(height) = analysis.entry_heights[old_ip] else {
       continue;
     };
     old_to_new[old_ip] = Some(lowered.code.len());
+    if handler_targets.contains(&old_ip) {
+      let exception_location = plan.get(height.saturating_sub(1))?;
+      store_location(&mut lowered, exception_location, 7, chunk.lines[old_ip]);
+    }
     let instruction = chunk
       .decode_at(old_ip)
       .map_err(|error| CompilerError::from(format!("invalid stack IR: {error}")))?;
@@ -271,6 +289,36 @@ pub(crate) fn lower_chunk(chunk: &Chunk) -> Result<Chunk, CompilerError> {
         );
         store_location(&mut lowered, plan.get(height - 3)?, 0, line);
       }
+      Op::Spread => {
+        for (position, register) in [(height - 3, 0), (height - 2, 1), (height - 1, 2)] {
+          move_location_to_register(&mut lowered, plan.get(position)?, register, line);
+        }
+        emit(
+          &mut lowered,
+          encode_risc_registers(Op::Spread, 0, 1) | (2_u32 << 16),
+          line,
+        );
+        store_location(&mut lowered, plan.get(height - 3)?, 0, line);
+      }
+      Op::ArrayFromSpread => {
+        let destination = plan.get(height - 2)?;
+        let values = load_location(&mut lowered, destination, 0, line);
+        let mask = load_location(&mut lowered, plan.get(height - 1)?, 1, line);
+        let rd = destination_register(destination, values);
+        if rd != values {
+          emit(
+            &mut lowered,
+            encode_risc_registers(Op::Move, rd, values),
+            line,
+          );
+        }
+        emit(
+          &mut lowered,
+          encode_risc_registers(Op::ArrayFromSpread, rd, mask),
+          line,
+        );
+        store_location(&mut lowered, destination, rd, line);
+      }
       Op::Call | Op::TailCall | Op::Construct => {
         let count = arg as usize;
         let base = height - count - 1;
@@ -351,6 +399,19 @@ pub(crate) fn lower_chunk(chunk: &Chunk) -> Result<Chunk, CompilerError> {
         );
         store_location(&mut lowered, destination, rd, line);
       }
+      Op::SuperConstruct => {
+        let count = arg as usize;
+        let base = height - count;
+        stage_window(&mut lowered, &plan, base, count, line)?;
+        let destination = plan.get(base)?;
+        let rd = destination_register(destination, 0);
+        emit(
+          &mut lowered,
+          encode_risc_aux16(Op::SuperConstruct, rd, count as u16),
+          line,
+        );
+        store_location(&mut lowered, destination, rd, line);
+      }
       Op::DeleteIdentifier | Op::IteratorNext | Op::IteratorClose => {
         let destination = plan.get(height - 1)?;
         let source = load_location(&mut lowered, destination, 0, line);
@@ -421,7 +482,7 @@ pub(crate) fn lower_chunk(chunk: &Chunk) -> Result<Chunk, CompilerError> {
           line,
         );
       }
-      Op::Throw | Op::PushWithEnv => {
+      Op::Throw | Op::PushWithEnv | Op::Yield | Op::YieldStar | Op::AwaitPromise => {
         let source = load_location(&mut lowered, plan.get(height - 1)?, 0, line);
         emit(
           &mut lowered,
@@ -470,6 +531,16 @@ pub(crate) fn lower_chunk(chunk: &Chunk) -> Result<Chunk, CompilerError> {
     lowered.code[patch.risc_ip] = word;
   }
 
+  lowered.functions = chunk
+    .functions
+    .iter()
+    .map(|proto| {
+      let mut lowered_proto = proto.clone();
+      lowered_proto.chunk = std::rc::Rc::new(lower_chunk(&proto.chunk)?);
+      Ok(lowered_proto)
+    })
+    .collect::<Result<Vec<_>, CompilerError>>()?;
+
   Ok(lowered)
 }
 
@@ -508,25 +579,50 @@ fn risc_executor_supports(op: Op) -> bool {
       | Op::Typeof
       | Op::GetProperty
       | Op::SetProperty
+      | Op::DeleteProperty
+      | Op::HasProperty
       | Op::GetGlobal
       | Op::TypeofGlobal
       | Op::SetGlobal
+      | Op::GetUpvalue
+      | Op::SetUpvalue
       | Op::Call
       | Op::TailCall
       | Op::Construct
       | Op::CallBuiltin
+      | Op::Spread
+      | Op::ArrayFromSpread
       | Op::MakeClosure
       | Op::GetThis
       | Op::GetNewTarget
+      | Op::GetSuperProperty
+      | Op::SetSuperProperty
       | Op::BuildArray
       | Op::BuildObject
+      | Op::SuperConstruct
       | Op::Pop
       | Op::PopN
       | Op::Dup
       | Op::Swap
+      | Op::Throw
+      | Op::PushHandler
+      | Op::PopHandler
+      | Op::IteratorNext
+      | Op::IteratorClose
       | Op::Return
+      | Op::PushWithEnv
+      | Op::PopEnv
+      | Op::GeneratorInitDone
+      | Op::Yield
+      | Op::YieldStar
+      | Op::AwaitPromise
+      | Op::GetModuleExport
+      | Op::SetModuleExport
       | Op::CloneLocalCell
       | Op::ResetLocalCell
+      | Op::DeleteIdentifier
+      | Op::GetBuiltin
+      | Op::InstanceOf
   )
 }
 
@@ -641,6 +737,7 @@ fn risc_window_size(
     Op::Call | Op::TailCall | Op::Construct | Op::CallBuiltin => count.saturating_sub(6),
     Op::BuildArray => count,
     Op::BuildObject => count.saturating_mul(2),
+    Op::SuperConstruct => count,
     _ => 0,
   }
 }
@@ -706,7 +803,10 @@ pub(crate) fn analyze_stack(chunk: &Chunk) -> Result<StackAnalysis, CompilerErro
     if let Some(existing) = entry_heights[ip] {
       if existing != height {
         return Err(CompilerError::from(format!(
-          "conflicting stack heights at instruction {ip}: {existing} and {height}"
+          "conflicting stack heights at instruction {ip} ({}): {existing} and {height}",
+          chunk
+            .disassemble_at(ip)
+            .unwrap_or_else(|_| "unknown".to_string())
         )));
       }
       continue;
@@ -870,7 +970,7 @@ mod tests {
 
   fn analyze(source: &str) -> StackAnalysis {
     let session = Parser::parse_source(source).expect("parse");
-    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+    let chunk = compiler::compile_stack_ir(session.program(), session.source()).expect("compile");
     analyze_stack(&chunk).expect("valid stack graph")
   }
 
@@ -903,7 +1003,7 @@ mod tests {
   }
 
   #[test]
-  fn default_frontend_selects_risc_and_preserves_stack_compatibility() {
+  fn default_frontend_selects_risc_for_core_and_exceptional_code() {
     let core = Parser::parse_source("var x = 1 + 2;").expect("parse core");
     let core_chunk = compiler::compile_oxc(core.program(), core.source()).expect("compile core");
     assert_eq!(core_chunk.format, BytecodeFormat::RiscV2);
@@ -912,6 +1012,17 @@ mod tests {
       Parser::parse_source("try { throw 1; } catch (error) { error; }").expect("parse exceptional");
     let exceptional_chunk = compiler::compile_oxc(exceptional.program(), exceptional.source())
       .expect("compile exceptional");
-    assert_eq!(exceptional_chunk.format, BytecodeFormat::StackV1);
+    assert_eq!(exceptional_chunk.format, BytecodeFormat::RiscV2);
+
+    let nested =
+      Parser::parse_source("function value() { return 1; } value();").expect("parse nested");
+    let nested_chunk =
+      compiler::compile_oxc(nested.program(), nested.source()).expect("compile nested");
+    assert!(
+      nested_chunk
+        .functions
+        .iter()
+        .all(|function| function.chunk.format == BytecodeFormat::RiscV2)
+    );
   }
 }

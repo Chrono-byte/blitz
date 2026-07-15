@@ -54,9 +54,9 @@ mod stack;
 
 pub(crate) use frame::Frame;
 pub(crate) use generator_runner::GeneratorRunner;
-pub(crate) use handler::{HandlerRecord, StepOutcome};
+pub(crate) use handler::{HandlerRecord, RiscExecutionState, RiscRunOutcome};
 pub(crate) use partial_descriptor::PartialDescriptor;
-pub(crate) use stack::{CallStack, HandlerStack, ReferenceRecord, ReferenceStack};
+pub(crate) use stack::{CallStack, HandlerStack};
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -241,29 +241,6 @@ impl OperandStack {
       self.register = None;
     }
   }
-
-  /// Swaps the values at two positions in the stack.
-  pub(crate) fn swap(
-    &mut self,
-    a: usize,
-    b: usize,
-  ) -> Result<(), ()> {
-    // No-op if indices are equal.
-    if a == b {
-      return Ok(());
-    }
-
-    let total = self.len();
-    if a >= total || b >= total {
-      // return an error if the nunmber is out of bounds
-      return Err(());
-    }
-
-    let mut values = self.take_all();
-    values.swap(a, b);
-    self.restore_from(values);
-    Ok(())
-  }
 }
 
 /// Forward iterator over operand stack values.
@@ -347,29 +324,7 @@ pub(super) fn get_global_bg_runtime() -> Arc<Runtime> {
 // VM
 // ---------------------------------------------------------------------------
 
-/// Virtual machine for executing bytecode.
-//
-// Conformance notes
-//
-// The VM implements versioned RISC and stack compatibility bytecode
-// interpreters suitable for executing compiled chunks. A few
-// runtime behaviors are intentionally non-standard or are pragmatic
-// approximations of ECMAScript semantics:
-//
-// - Runtime type checking: the VM can enforce TypeScript-like slot type
-//   annotations at runtime. This is a non-spec extension and should be
-//   disabled for strict ECMA-262 conformance or made opt-in.
-// - Global background runtime: a shared Tokio runtime backs blocking and
-//   background operations; this is a host implementation detail and not
-//   mandated by ECMA-262.
-// - Inline caching and generation counters: the VM implements a simple
-//   generation counter approach for invalidating property caches. The
-//   mechanism is an implementation detail and should be validated against
-//   correctness tests rather than spec text.
-//
-// See `src/runtime_utils.rs`, `src/module.rs`, and the `runtime` submodules
-// for additional documentation about known deviations and recommended fixes
-// when stricter conformance is required.
+/// Virtual machine for executing RISC bytecode.
 pub struct Vm {
   /// The ECMAScript Realm this VM operates in.
   pub(super) realm: Realm,
@@ -377,10 +332,6 @@ pub struct Vm {
   pub(super) chunk: Rc<Chunk>,
   /// Instruction pointer within the chunk.
   pub(super) ip: usize,
-  /// How many operand bytes have been consumed from the most recently fetched
-  /// instruction (0..3). This supports legacy read_byte/read_short helpers
-  /// that sequentially consume operand bytes from the last instruction word.
-  pub(super) operand_cursor: usize,
   /// Operand stack. Shared across all frames; each frame records its base
   /// offset so the stack is truncated correctly on return.
   pub(super) stack: OperandStack,
@@ -445,8 +396,6 @@ pub struct Vm {
   pub(super) microtasks: VecDeque<Microtask>,
   /// Queue for pending dynamic import jobs.
   pub(super) dynamic_import_jobs: VecDeque<DynamicImportJob>,
-  /// Optional reference stack for future reference record handling.
-  pub(super) reference_stack: ReferenceStack,
   /// Optional hook invoked when an unhandled rejection or microtask exception
   /// is observed. The hook receives two Values: the first is the promise
   /// object (or Undefined for non-promise microtask exceptions) and the
@@ -464,8 +413,6 @@ pub struct Vm {
   pub(super) current_arguments_mapped_count: usize,
   /// Current strict-mode state for the active call context.
   pub(super) current_strict_mode: bool,
-  /// Legacy step counter retained for non-GC builds and diagnostics.
-  pub(super) gc_step_counter: usize,
   /// Whether runtime opcode profiling is enabled for this VM instance.
   pub(super) opcode_profiling_enabled: bool,
   /// Per-opcode execution counters for the current run.

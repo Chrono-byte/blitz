@@ -10,18 +10,6 @@ use std::rc::Rc;
 use std::sync::Mutex;
 
 impl Vm {
-  pub(super) fn build_array(&mut self) -> Result<(), RuntimeError> {
-    let n = self.read_byte()? as usize;
-    let mut values = Vec::with_capacity(n);
-    for _ in 0..n {
-      values.push(self.pop()?);
-    }
-    values.reverse();
-    let array = self.build_array_value(values)?;
-    self.stack.push(array);
-    Ok(())
-  }
-
   pub(super) fn build_array_value(
     &mut self,
     values: Vec<Value>,
@@ -68,19 +56,6 @@ impl Vm {
       );
     }
     Ok(array)
-  }
-
-  pub(super) fn build_object(&mut self) -> Result<(), RuntimeError> {
-    let n = self.read_byte()? as usize;
-    let mut values = Vec::with_capacity(n.saturating_mul(2));
-    for _ in 0..n {
-      values.push(self.pop()?);
-      values.push(self.pop()?);
-    }
-    values.reverse();
-    let object = self.build_object_value(values)?;
-    self.stack.push(object);
-    Ok(())
   }
 
   pub(super) fn build_object_value(
@@ -137,16 +112,7 @@ impl Vm {
     Ok(object)
   }
 
-  /// Creates a closure value from a function index.
-  #[allow(clippy::too_many_lines)]
-  pub(super) fn make_closure(&mut self) -> Result<(), RuntimeError> {
-    let idx = self.read_byte()? as usize;
-    let closure = self.make_closure_value(idx)?;
-    self.stack.push(closure);
-    Ok(())
-  }
-
-  /// Creates a closure without coupling the result to the StackV1 operand stack.
+  /// Creates a closure without coupling the result to compiler-IR operand state.
   #[allow(clippy::too_many_lines)]
   pub(super) fn make_closure_value(
     &mut self,

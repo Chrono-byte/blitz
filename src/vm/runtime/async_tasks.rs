@@ -248,7 +248,6 @@ impl Vm {
     let proto = Rc::clone(proto);
     let env = Rc::clone(env);
     let promise_for_job = Rc::clone(&promise);
-    let stack_base = self.stack.len();
     let saved_stack = self.stack.snapshot();
     let caller_chunk = Rc::clone(&self.chunk);
     let caller_ip = self.ip;
@@ -264,7 +263,11 @@ impl Vm {
     self.last_uncaught_exception = None;
     let exec_result = (|| {
       self.push_call_frame(&proto, &env, call_args, this_arg, callee.clone())?;
-      self.run_until_return(stack_base, false)
+      self.run_risc_loop(false).and_then(|value| {
+        self.stack.push(value);
+        self.execute_return()?;
+        self.pop()
+      })
     })();
     self.maybe_collect_garbage_prototype();
 

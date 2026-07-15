@@ -20,12 +20,40 @@ pub(crate) struct HandlerRecord {
   pub(crate) saved_lexical_env: Rc<RefCell<EnvironmentRecord>>,
 }
 
-/// Outcome of a single VM execution step.
-pub(crate) enum StepOutcome {
-  /// Continue execution with the next instruction.
-  Continue,
-  /// Return from the current function with a value.
+/// Register and spill state that survives a suspended RISC execution.
+pub(crate) struct RiscExecutionState {
+  pub(crate) registers: [Value; 16],
+  pub(crate) spills: Vec<Value>,
+  pub(crate) resume_register: Option<usize>,
+}
+
+impl RiscExecutionState {
+  pub(crate) fn new(
+    this_value: Value,
+    spill_count: usize,
+  ) -> Self {
+    let mut registers = std::array::from_fn(|_| Value::Undefined);
+    registers[1] = this_value;
+    Self {
+      registers,
+      spills: vec![Value::Undefined; spill_count],
+      resume_register: None,
+    }
+  }
+
+  pub(crate) fn resume_with(
+    &mut self,
+    value: Value,
+  ) {
+    if let Some(register) = self.resume_register.take() {
+      self.registers[register] = value;
+    }
+  }
+}
+
+/// Boundary reached while executing a persistent RISC state.
+pub(crate) enum RiscRunOutcome {
+  Initialized,
   Return(Value),
-  /// Yield a value from a generator function.
   Yield(Value),
 }

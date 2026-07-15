@@ -1,4 +1,4 @@
-//! Temporary binary used to dump AST for debugging.
+//! Binary used to dump AST for debugging.
 #![allow(missing_docs)]
 
 use blitz::parser::Parser;

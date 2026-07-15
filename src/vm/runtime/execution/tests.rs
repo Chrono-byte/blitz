@@ -90,7 +90,7 @@ mod test {
   }
 
   #[test]
-  fn risc_core_execution_matches_stack_v1() {
+  fn risc_core_execution_is_stable_across_compiler_entrypoints() {
     let source = r#"
       var x = 1;
       while (x < 5) x = x + 1;
@@ -141,7 +141,7 @@ mod test {
   }
 
   #[test]
-  fn risc_functions_literals_and_overflow_arguments_match_stack_v1() {
+  fn risc_functions_literals_and_overflow_arguments_are_stable() {
     let source = r#"
       function sum(a, b, c, d, e, f, g, h) {
         return a + b + c + d + e + f + g + h;
@@ -222,7 +222,7 @@ mod test {
   }
 
   #[test]
-  fn relational_comparison_applies_to_primitive_in_both_executors() {
+  fn relational_comparison_applies_to_primitive_across_compiler_entrypoints() {
     let source = r#"
       var left = { valueOf: function () { return 1; } };
       var relational_result = left < 2;
@@ -1650,6 +1650,11 @@ mod test {
             var b = it.next();
             var c = it.next();
             var d = it.next();
+            function* h() { yield yield 4; }
+            var nested = h();
+            var e = nested.next();
+            var f = nested.next();
+            var g_result = nested.next(9);
         "#;
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
@@ -1662,6 +1667,11 @@ mod test {
     let b = vm.get_global("b").expect("b exists");
     let c = vm.get_global("c").expect("c exists");
     let d = vm.get_global("d").expect("d exists");
+    let e = vm.get_global("e").expect("e exists");
+    let f = vm.get_global("f").expect("f exists");
+    let g_result = vm
+      .get_global("g_result")
+      .expect("g_result exists");
 
     assert!(matches!(
         get_property(&a, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
@@ -1685,6 +1695,19 @@ mod test {
     ));
     assert!(matches!(
       get_property(&d, &PropertyKey::String("done".to_string()), 0).expect("test should not fail"),
+      Value::Bool(true)
+    ));
+    assert!(matches!(
+      get_property(&e, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
+      Value::Number(n) if (n - 4.0).abs() < f64::EPSILON
+    ));
+    assert!(matches!(
+      get_property(&f, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
+      Value::Undefined
+    ));
+    assert!(matches!(
+      get_property(&g_result, &PropertyKey::String("done".to_string()), 0)
+        .expect("test should not fail"),
       Value::Bool(true)
     ));
   }
@@ -1802,6 +1825,24 @@ mod test {
       "unexpected assign_result: {:?}",
       assign_result
     );
+  }
+
+  #[test]
+  fn risc_super_construct_initializes_derived_this() {
+    let source = r#"
+      class Base { constructor(value) { this.value = value; } }
+      class Derived extends Base { constructor(value) { super(value + 1); } }
+      var derived_value = new Derived(4).value;
+    "#;
+    let session = Parser::parse_source(source).expect("parse ok");
+    let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    vm.run(chunk).expect("run ok");
+    assert!(matches!(
+      vm.get_global("derived_value"),
+      Some(Value::Number(value)) if (value - 5.0).abs() < f64::EPSILON
+    ));
   }
 
   #[test]

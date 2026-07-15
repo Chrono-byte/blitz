@@ -241,32 +241,6 @@ impl Vm {
     Ok(false)
   }
 
-  pub(super) fn get_with_env_binding_value(
-    &mut self,
-    name: &str,
-  ) -> Result<Option<Value>, RuntimeError> {
-    let mut env = Some(Rc::clone(&self.lexical_env));
-    while let Some(current) = env {
-      let (binding_object, with_environment, outer) = {
-        let borrowed = current.borrow();
-        (
-          borrowed.binding_object(),
-          borrowed.is_with_environment(),
-          borrowed.outer(),
-        )
-      };
-      if let Some(binding_object) = binding_object {
-        let key = PropertyKey::String(name.to_string());
-        let found = self.has_property_host(&binding_object, &key)?;
-        if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
-          return Ok(Some(self.get_property_host(&binding_object, &key)?));
-        }
-      }
-      env = outer;
-    }
-    Ok(None)
-  }
-
   pub(super) fn set_with_env_binding_value(
     &mut self,
     name: &str,

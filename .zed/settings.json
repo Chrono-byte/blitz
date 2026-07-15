@@ -19,6 +19,6 @@
     },
   },
   "language_servers": [
-    "..."
+    "!typescript-language-server", "!eslint", "..."
   ]
 }

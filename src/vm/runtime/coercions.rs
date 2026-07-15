@@ -2,25 +2,6 @@ use crate::errors::RuntimeError;
 use crate::value::Value;
 use crate::vm::Vm;
 use num_bigint::BigInt as BigIntValue;
-use num_traits::{Signed, ToPrimitive};
-
-pub(super) fn to_number(v: &Value) -> Result<f64, RuntimeError> {
-  match v {
-    Value::Number(n) => Ok(*n),
-    Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
-    Value::String(s) => Ok(parse_js_number_string(s)),
-    Value::Undefined => Ok(f64::NAN),
-    Value::Null => Ok(0.0),
-    Value::BigInt(n) => Ok(n.to_f64().unwrap_or_else(|| {
-      if n.is_negative() {
-        f64::NEG_INFINITY
-      } else {
-        f64::INFINITY
-      }
-    })),
-    _ => Err(RuntimeError::from("Expected number")),
-  }
-}
 
 /// Convert a runtime value with ECMAScript `ToInt32` semantics.
 ///

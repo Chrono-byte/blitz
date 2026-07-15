@@ -1,5 +1,7 @@
 # Repository Guidelines
 
+If you need a paragraph-long comment to justify why the workaround is OK, the code is wrong — fix the code.
+
 ## Project Structure & Module Organization
 - `src/lib.rs` is the library entrypoint; `src/main.rs` provides the CLI.
 - Core VM and bytecode live in `src/vm/`, `src/bytecode.rs`, `src/value.rs`, and `src/compiler/`.
