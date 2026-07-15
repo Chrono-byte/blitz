@@ -3,7 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -102,16 +102,23 @@ fn hotpath_number_value() -> Value {
 }
 
 /// Compiles a benchmark fixture from the given path.
-fn compile_fixture(path: &str) -> blitz::bytecode::Chunk {
-  let source =
-    std::fs::read_to_string(Path::new(path)).expect("benchmark fixture should be readable");
+fn compile_fixture(path: &Path) -> blitz::bytecode::Chunk {
+  let source = std::fs::read_to_string(path).expect("benchmark fixture should be readable");
   let session = Parser::parse_source(&source).expect("benchmark fixture should parse as JS");
   compiler::compile_oxc(session.program(), &source).expect("benchmark fixture should compile")
 }
 
 /// Returns the source text for the given benchmark fixture path.
-fn fixture_source(path: &str) -> String {
-  std::fs::read_to_string(Path::new(path)).expect("benchmark fixture should be readable")
+fn fixture_source(path: &Path) -> String {
+  std::fs::read_to_string(path).expect("benchmark fixture should be readable")
+}
+
+/// Returns a benchmark fixture path relative to this crate.
+fn fixture_path(fixture: &str) -> PathBuf {
+  Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("benches")
+    .join("fixtures")
+    .join(format!("{fixture}.js"))
 }
 
 /// Returns the baseline set of global names from the given globals object.
@@ -140,7 +147,7 @@ fn bench_compile(c: &mut Criterion) {
     .chain(STRESS_EXEC_FIXTURES)
     .chain(EXTRA_FIXTURES)
   {
-    let path = format!("benches/fixtures/{fixture}.js");
+    let path = fixture_path(fixture);
     let source = fixture_source(&path);
     group.throughput(Throughput::Bytes(source.len() as u64));
     group.bench_with_input(
@@ -165,7 +172,7 @@ fn bench_execute_cold(c: &mut Criterion) {
   group.warm_up_time(Duration::from_secs(1));
 
   for fixture in COLD_START_FIXTURES {
-    let path = format!("benches/fixtures/{fixture}.js");
+    let path = fixture_path(fixture);
     let chunk = compile_fixture(&path);
     group.throughput(Throughput::Elements(1));
     group.bench_with_input(BenchmarkId::from_parameter(fixture), &chunk, |b, chunk| {
@@ -190,7 +197,7 @@ fn bench_execute_fast(c: &mut Criterion) {
   group.warm_up_time(Duration::from_secs(2));
 
   for fixture in FAST_EXEC_FIXTURES {
-    let path = format!("benches/fixtures/{fixture}.js");
+    let path = fixture_path(fixture);
     let chunk = compile_fixture(&path);
     let globals = benchmark_globals();
     let keep_globals = baseline_global_names(&globals);
@@ -219,7 +226,7 @@ fn bench_execute_slow(c: &mut Criterion) {
   group.warm_up_time(Duration::from_secs(1));
 
   for fixture in SLOW_EXEC_FIXTURES {
-    let path = format!("benches/fixtures/{fixture}.js");
+    let path = fixture_path(fixture);
     let chunk = compile_fixture(&path);
     let globals = benchmark_globals();
     let keep_globals = baseline_global_names(&globals);
@@ -248,7 +255,7 @@ fn bench_execute_stress(c: &mut Criterion) {
   group.warm_up_time(Duration::from_secs(1));
 
   for fixture in STRESS_EXEC_FIXTURES {
-    let path = format!("benches/fixtures/{fixture}.js");
+    let path = fixture_path(fixture);
     let chunk = compile_fixture(&path);
     let globals = benchmark_globals();
     let keep_globals = baseline_global_names(&globals);

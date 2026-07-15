@@ -3,11 +3,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::Vm;
-use crate::errors::RuntimeError;
-use crate::gc;
-use crate::runtime_utils::array_from_values;
-use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use blitz::Vm;
+use blitz::errors::RuntimeError;
+use blitz::gc;
+use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 use super::RuntimeOptions;
 
@@ -16,8 +15,6 @@ pub(super) fn install(
   options: RuntimeOptions,
 ) {
   let object_prototype = vm.realm().object_prototype();
-  let array_prototype = vm.realm().array_prototype();
-
   let process = object(object_prototype.clone());
   let environment = object(object_prototype.clone());
   for (name, value) in options.env {
@@ -31,18 +28,13 @@ pub(super) fn install(
     Value::String(env!("CARGO_PKG_VERSION").to_string()),
   );
 
-  let argv = array_from_values(
+  let argv = vm.new_array(
     options
       .argv
       .into_iter()
-      .map(Value::String)
+      .map(|argument| Some(Value::String(argument)))
       .collect(),
   );
-  if let Value::Array(_, props) = &argv {
-    props
-      .borrow_mut()
-      .set_prototype_value(array_prototype);
-  }
 
   set(&process, "argv", argv);
   set(&process, "env", environment);
@@ -119,8 +111,8 @@ mod tests {
   use std::collections::BTreeMap;
 
   use super::*;
-  use crate::compiler;
-  use crate::parser::Parser as JsParser;
+  use blitz::compiler;
+  use blitz::parser::Parser as JsParser;
 
   #[test]
   fn installs_process_metadata_for_scripts() {

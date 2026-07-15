@@ -6,9 +6,9 @@ use std::io::{self, Write};
 use std::rc::Rc;
 use std::time::Instant;
 
-use crate::Vm;
-use crate::gc;
-use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use blitz::Vm;
+use blitz::gc;
+use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 #[derive(Default)]
 struct ConsoleState {

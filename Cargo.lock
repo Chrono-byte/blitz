@@ -110,7 +110,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "blitz"
+name = "blitz-cli"
+version = "0.1.2"
+dependencies = [
+ "blitz-engine",
+ "blitz-runtime",
+ "clap",
+ "rustyline",
+]
+
+[[package]]
+name = "blitz-engine"
 version = "0.1.2"
 dependencies = [
  "clap",
@@ -136,6 +146,13 @@ dependencies = [
  "serde_yaml",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "blitz-runtime"
+version = "0.1.2"
+dependencies = [
+ "blitz-engine",
 ]
 
 [[package]]

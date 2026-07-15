@@ -12,7 +12,7 @@
 //! Known divergences (summary):
 //! - Module namespace objects are created as plain objects with copied values
 //!   rather than the spec-defined exotic namespace objects backed by live
-//!   export slots. See `ModuleLoader` in `src/module.rs` for details.
+//!   export slots. See `ModuleLoader` in `crate::module` for details.
 //! - Dynamic `import()` is implemented synchronously in places and does not
 //!   always follow Promise job/microtask timing; import `options` are
 //!   currently ignored in some paths.
@@ -49,8 +49,8 @@
 //! promise/microtask ordering, array semantics, property key order), the
 //! implementation is considered non-compliant with ECMA-262 and should be
 //! updated if strict conformance is required. See the project notes and
-//! module-level comments in `src/module.rs`, `src/vm/runtime/async_tasks.rs`,
-//! and `src/vm/state.rs` for targeted recommendations.
+//! module-level comments in `crate::module`, `crate::vm::runtime::async_tasks`,
+//! and `crate::vm::state` for targeted recommendations.
 
 use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, HashSet};

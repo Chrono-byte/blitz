@@ -6,9 +6,12 @@ Blitz is a compact ECMAScript engine/runtime centered on a minimal Rust kernel t
 Key layers
 ----------
 
-- `src/` — the Rust kernel that ships the lexer, parser, compiler, VM, GC, and the native hooks that expose every capability to the runtime. `src/main.rs` boots the globals, exposes natives, and can run a REPL or execute scripts.
-- `examples/` — sample JavaScript entry points and probes that exercise how Blitz should be embedded or orchestrated.
-- `tests/`, `benches/`, and `test262/` — Rust integration tests, Criterion benchmarks for the VM pipeline, plus the upstream ECMAScript Test262 harness for the conformance material we exercise manually or with auxiliary runners.
+- `crates/blitz-engine/` — the host-neutral parser, compiler, VM, ECMAScript
+  builtins, raw engine executable, Test262 runner, and benchmarks.
+- `crates/blitz-runtime/` — reusable host capabilities and application examples.
+- `crates/blitz-cli/` — the `blitz` executable and home for the toolchain,
+  project commands, and package management.
+- `docs/` and `test262/` — design material and the vendored conformance suite.
 
 Executables
 -----------
@@ -20,10 +23,10 @@ Executables
 
 ```powershell
 # Run an application with the Blitz runtime.
-cargo run --bin blitz -- examples/simple_demo.js
+cargo run -p blitz-cli -- crates/blitz-runtime/examples/simple_demo.js
 
 # Exercise the raw engine without host capabilities.
-cargo run --bin blitz-engine -- path/to/engine-test.js
+cargo run -p blitz-engine --bin blitz-engine -- path/to/engine-test.js
 ```
 
 License

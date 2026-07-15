@@ -53,7 +53,6 @@ pub mod ecmascript;
 pub mod environment;
 pub mod errors;
 pub mod gc;
-pub mod host;
 pub mod lexer;
 pub mod module;
 pub mod mutex_compat;

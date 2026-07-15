@@ -1,51 +1,43 @@
-[package]
-name = "blitz"
+[workspace]
+members = [
+  "crates/blitz-cli",
+  "crates/blitz-engine",
+  "crates/blitz-runtime",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.2"
 edition = "2024"
-description = "ECMAScript VM: Rust base layer"
-default-run = "blitz"
 
-[[bin]]
-name = "blitz"
-path = "src/main.rs"
-
-[[bin]]
-name = "blitz-engine"
-path = "src/bin/blitz_engine.rs"
-
-[dependencies]
+[workspace.dependencies]
+blitz = { package = "blitz-engine", path = "crates/blitz-engine" }
+blitz-runtime = { path = "crates/blitz-runtime" }
 clap = { version = "4.5.57", features = ["derive"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+fastrand = "2.1"
+futures = "0.3"
+indexmap = "2"
+num-bigint = "0.4"
+num-traits = "0.2"
 ouroboros = "0.18"
 oxc_allocator = "0"
 oxc_ast = { version = "0", features = ["serialize"] }
 oxc_parser = "0"
+oxc_resolver = "11.17.1"
 oxc_semantic = "0"
 oxc_span = "0"
+oxc_str = "0.125.0"
 oxc_syntax = "0"
+regex = "1"
 rustyline = "18"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
-oxc_resolver = "11.17.1"
 thiserror = "2.0"
 tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync"] }
-fastrand = "2.1"
-regex = "1"
-num-bigint = "0.4"
-num-traits = "0.2"
-indexmap = "2"
-futures = "0.3"
-oxc_str = "0.125.0"
 
-[dev-dependencies]
-criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
-serde_yaml = "0.9"
-
-[[bench]]
-name = "vm_suite"
-harness = false
-
-[lints.clippy]
+[workspace.lints.clippy]
 blocks_in_conditions = "warn"
 bool_comparison = "warn"
 box_collection = "warn"
@@ -93,7 +85,7 @@ unwrap_used = "warn"
 vec_box = "warn"
 wrong_self_convention = "warn"
 
-[lints.rust]
+[workspace.lints.rust]
 missing_docs = "warn"
 nonstandard-style = "warn"
 deprecated = "warn"

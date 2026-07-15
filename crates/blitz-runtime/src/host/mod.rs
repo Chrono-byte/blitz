@@ -12,7 +12,7 @@ mod process;
 use std::collections::BTreeMap;
 use std::env;
 
-use crate::Vm;
+use blitz::Vm;
 
 /// Host configuration installed into a Blitz VM.
 #[derive(Clone, Debug)]

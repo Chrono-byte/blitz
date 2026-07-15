@@ -3,18 +3,23 @@
 If you need a paragraph-long comment to justify why the workaround is OK, the code is wrong — fix the code.
 
 ## Project Structure & Module Organization
-- `src/lib.rs` is the library entrypoint; `src/main.rs` provides the CLI.
-- Core VM and bytecode live in `src/vm/`, `src/bytecode.rs`, `src/value.rs`, and `src/compiler/`.
-- ECMAScript builtins and semantics are under `src/ecmascript/`.
-- Local Test262 integration lives in `src/bin/test262.rs`; AST dumping is in `src/bin/ast_dump.rs`.
+- `crates/blitz-engine/src/lib.rs` is the engine library entrypoint. Core VM,
+  bytecode, compiler, and ECMAScript semantics live in this crate.
+- `crates/blitz-runtime/src/lib.rs` exposes host capabilities; its examples are
+  under `crates/blitz-runtime/examples/`.
+- `crates/blitz-cli/src/main.rs` provides the user-facing CLI and owns future
+  toolchain and package-management commands.
+- Local Test262 integration and AST dumping live under
+  `crates/blitz-engine/src/bin/`.
 - Design notes and work plans live in `docs/`; Test262 is vendored in `test262/`.
 
 ## Build, Test, and Development Commands
-- `cargo build` compiles the crate.
-- `cargo test` runs the Rust unit test suite.
-- `cargo test <name> --lib` runs a focused unit test, e.g. `cargo test comparison_branches_use_compare_jump --lib`.
-- `cargo run --bin test262 -- --filter <path> --limit 1 --jobs 1` runs a targeted Test262 case.
-- `cargo run --bin ast_dump -- <args>` is useful for parser or AST inspection.
+- `cargo build --workspace` compiles all crates.
+- `cargo test --workspace` runs the Rust unit test suite.
+- `cargo test -p blitz-engine <name> --lib` runs a focused engine unit test.
+- `cargo run -p blitz-cli -- <file>` runs JavaScript through the full runtime.
+- `cargo run -p blitz-engine --bin test262 -- --filter <path> --limit 1 --workers 1` runs a targeted Test262 case.
+- `cargo run -p blitz-engine --bin ast_dump -- <args>` is useful for parser or AST inspection.
 
 ## Coding Style & Naming Conventions
 - Use standard Rust formatting: `cargo fmt` before committing.

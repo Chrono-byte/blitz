@@ -6,7 +6,17 @@ use crate::runtime_utils::strict_equal;
 use crate::typecheck;
 use crate::value::ArrayData;
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+
+fn test262_harness_path(name: &str) -> PathBuf {
+  Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("..")
+    .join("..")
+    .join("test262")
+    .join("harness")
+    .join(name)
+}
 
 fn test_globals() -> Rc<RefCell<ObjectData>> {
   let globals = Rc::new(RefCell::new(ObjectData::new()));
@@ -1255,7 +1265,7 @@ mod test {
     let mut vm = Vm::new(globals);
 
     for harness_name in ["assert.js", "sta.js"] {
-      let path = std::path::Path::new("test262/harness").join(harness_name);
+      let path = test262_harness_path(harness_name);
       let src = std::fs::read_to_string(&path).expect("read harness");
       let session = Parser::parse_source(&src).expect("parse harness");
       let program = session.program();
@@ -1727,7 +1737,7 @@ mod test {
     let mut vm = Vm::new(globals);
 
     for harness_name in ["assert.js", "sta.js", "propertyHelper.js"] {
-      let path = std::path::Path::new("test262/harness").join(harness_name);
+      let path = test262_harness_path(harness_name);
       let src = std::fs::read_to_string(&path).expect("read harness");
       let session = Parser::parse_source(&src).expect("parse harness");
       let program = session.program();

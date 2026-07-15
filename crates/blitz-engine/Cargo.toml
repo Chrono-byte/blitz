@@ -1,0 +1,55 @@
+[package]
+name = "blitz-engine"
+version.workspace = true
+edition.workspace = true
+description = "Host-neutral ECMAScript engine for Blitz"
+
+[lib]
+name = "blitz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "blitz-engine"
+path = "src/bin/blitz_engine.rs"
+
+[[bin]]
+name = "ast_dump"
+path = "src/bin/ast_dump.rs"
+
+[[bin]]
+name = "test262"
+path = "src/bin/test262.rs"
+
+[[bench]]
+name = "vm_suite"
+harness = false
+
+[dependencies]
+clap.workspace = true
+fastrand.workspace = true
+futures.workspace = true
+indexmap.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+ouroboros.workspace = true
+oxc_allocator.workspace = true
+oxc_ast.workspace = true
+oxc_parser.workspace = true
+oxc_resolver.workspace = true
+oxc_semantic.workspace = true
+oxc_span.workspace = true
+oxc_str.workspace = true
+oxc_syntax.workspace = true
+regex.workspace = true
+rustyline.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[lints]
+workspace = true

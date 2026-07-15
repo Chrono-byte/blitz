@@ -252,23 +252,23 @@ Integration with existing codebase
 This spec targets the current `blitz` repository layout. Key existing files to integrate
 with are:
 
-- `src/vm.rs` — the synchronous interpreter and `Vm::run` loop. The scheduler will call
+- `crates/blitz-engine/src/vm/` — the synchronous interpreter and `Vm::run` loop. The scheduler will call
   into `Vm` instances to execute user processes; add small hooks where the interpreter
   decrements reductions and yields (e.g. at opcode dispatch in the main loop).
-- `src/main.rs` — bootstraps a single `Vm` and runs the soft prelude. Replace the single
+- `crates/blitz-cli/src/main.rs` — bootstraps a single `Vm` through the runtime host. Replace the single
   REPL VM with a kernel-managed prelude VM and a scheduler that can spawn multiple
   isolated `Process` instances backed by separate `Vm` state/heap regions.
-- `src/lib.rs` — crate module exports; consider splitting into workspace crates (`vm-core`,
-  `vm-kernel`, `vm-alloc`, `vm-ipc`) as the design evolves. For an incremental approach,
-  start by adding `vm-kernel` and `vm-ipc` modules inside the existing crate.
+- `crates/blitz-engine/src/lib.rs` and `crates/blitz-runtime/src/lib.rs` — engine
+  and host-runtime exports. Scheduler and IPC capabilities belong in the
+  runtime crate unless they require an engine execution hook.
 
 Minimal integration steps (incremental)
 1. Add a `Process` struct that wraps a `Vm` instance plus process metadata. Place near
-   `src/vm.rs` or in a new `src/process.rs`.
+   `crates/blitz-runtime/src/process.rs`.
 2. Modify `Vm::run` to support a `run_step(&mut self, budget: &mut Reductions) -> RunResult`
    variant that executes up to `N` reductions and returns control. This makes it easy to
    integrate with a pinned scheduler without large refactors.
-3. Introduce a scheduler module (`src/scheduler.rs`) that owns pinned worker threads and
+3. Introduce a scheduler module (`crates/blitz-runtime/src/scheduler.rs`) that owns pinned worker threads and
    a work-stealing deque. Each scheduler pulls `Process` instances and calls
    `process.vm.run_step(&mut proc.reductions_left)`.
 4. Add kernel channels and a small async runtime dependency (tokio) behind a new
@@ -278,9 +278,9 @@ Minimal integration steps (incremental)
    optimize to lock-free or off-heap blobs as needed.
 
 Files to consider adding
-- `src/process.rs` — Process struct and per-process allocator hooks
-- `src/scheduler.rs` — pinned scheduler threads, work-stealing integration
-- `src/kernel.rs` — tokio runtime bootstrap, IO/NIF manager, recovery thread
+- `crates/blitz-runtime/src/process.rs` — Process struct and per-process allocator hooks
+- `crates/blitz-runtime/src/scheduler.rs` — pinned scheduler threads, work-stealing integration
+- `crates/blitz-runtime/src/kernel.rs` — tokio runtime bootstrap, IO/NIF manager, recovery thread
 - `vm-ipc` (module/file) — serde types and framed socket helpers; or keep `docs/VM_IPC_SPEC.md`
   as the single source of truth until an on-disk crate is required.
 

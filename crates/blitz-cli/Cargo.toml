@@ -1,0 +1,19 @@
+[package]
+name = "blitz-cli"
+version.workspace = true
+edition.workspace = true
+description = "CLI, toolchain, and package-management frontend for Blitz"
+default-run = "blitz"
+
+[[bin]]
+name = "blitz"
+path = "src/main.rs"
+
+[dependencies]
+blitz.workspace = true
+blitz-runtime.workspace = true
+clap.workspace = true
+rustyline.workspace = true
+
+[lints]
+workspace = true

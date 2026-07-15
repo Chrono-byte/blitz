@@ -2596,13 +2596,15 @@ fn run_scope_dump_test(
 fn main() {
   let opts = parse_args();
 
-  // Use the local `./test262` checkout only. This runner is intended to be
-  // hermetic and operate against a repository checked out next to the project.
-  // If `./test262` is missing we skip the connector rather than using a
+  // Use the workspace's local Test262 checkout only. This runner is intended
+  // to be hermetic. If the checkout is missing we skip the connector rather than using a
   // remote or environment-provided path.
-  let test262_dir = PathBuf::from("test262");
+  let test262_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("..")
+    .join("..")
+    .join("test262");
   if !test262_dir.exists() {
-    eprintln!("Local './test262' not found; skipping Test262 connector");
+    eprintln!("Workspace Test262 checkout not found; skipping connector");
     exit(0);
   }
 

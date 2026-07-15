@@ -17,13 +17,13 @@
 //!
 //! ```bash
 //! # Run a JavaScript file
-//! cargo run -- path/to/file.js
+//! cargo run -p blitz-cli -- path/to/file.js
 //!
 //! # Start REPL
-//! cargo run -- --repl
+//! cargo run -p blitz-cli -- --repl
 //!
 //! # Enable tracing
-//! TSBLITZ_TRACE=1 cargo run -- file.js
+//! TSBLITZ_TRACE=1 cargo run -p blitz-cli -- file.js
 //! ```
 
 use clap::Parser;
@@ -152,9 +152,9 @@ fn main() -> Result<(), blitz::errors::Error> {
     runtime_argv.push(path.to_string_lossy().into_owned());
   }
   runtime_argv.extend(cli.args.iter().cloned());
-  blitz::host::install_runtime(
+  blitz_runtime::host::install_runtime(
     &mut repl_vm,
-    blitz::host::RuntimeOptions::from_host(runtime_argv),
+    blitz_runtime::host::RuntimeOptions::from_host(runtime_argv),
   );
 
   // If a file was provided, run it and exit. Otherwise start REPL.

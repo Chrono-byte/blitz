@@ -1,0 +1,11 @@
+[package]
+name = "blitz-runtime"
+version.workspace = true
+edition.workspace = true
+description = "Application JavaScript runtime powered by the Blitz engine"
+
+[dependencies]
+blitz.workspace = true
+
+[lints]
+workspace = true

@@ -8,12 +8,13 @@ tooling, and compatibility APIs.
 ## Architecture
 
 ```text
-`blitz` runtime CLI
-  -> host capability layer (`src/host`)
+`blitz` CLI (`crates/blitz-cli`)
+  -> toolchain and package management
+  -> host capability layer (`crates/blitz-runtime/src/host`)
     -> builtin modules and Web APIs
     -> async event loop and I/O drivers
     -> package and module resolution
-  -> ECMAScript engine
+  -> ECMAScript engine (`crates/blitz-engine`)
     -> parser and compiler
     -> VM, values, realms, and garbage collector
 ```

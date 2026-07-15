@@ -18,7 +18,7 @@ Current status
 Work blocks
 -----------
 1. Method dispatch
-   - Profile `method_call_chain` in `src/vm/runtime/execution.rs`.
+   - Profile `method_call_chain` in `crates/blitz-engine/src/vm/runtime/execution.rs`.
    - Check:
      - call frame allocation and teardown,
      - argument setup and copying,
@@ -26,7 +26,7 @@ Work blocks
      - unnecessary cloning of callable values.
 
 2. Variable lookup
-   - Profile nested scope access in `src/vm/runtime/execution.rs`.
+   - Profile nested scope access in `crates/blitz-engine/src/vm/runtime/execution.rs`.
    - Check:
      - scope-chain walking on every read,
      - captured binding cloning,
