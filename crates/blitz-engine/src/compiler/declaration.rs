@@ -1566,7 +1566,7 @@ impl Compiler {
         oast::PropertyKey::StaticIdentifier(ident) => Some(ident.name.to_string()),
         oast::PropertyKey::Identifier(ident) => Some(ident.name.to_string()),
         oast::PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
-        oast::PropertyKey::NumericLiteral(n) => Some(n.value.to_string()),
+        oast::PropertyKey::NumericLiteral(n) => Some(super::numeric_property_key(n.value)),
         oast::PropertyKey::PrivateIdentifier(pid) => Some(pid.name.to_string()),
         _ => None,
       }

@@ -550,7 +550,7 @@ impl super::Compiler {
               oast::PropertyKey::StaticIdentifier(ident) => ident.name.to_string(),
               oast::PropertyKey::Identifier(ident) => ident.name.to_string(),
               oast::PropertyKey::StringLiteral(s) => s.value.to_string(),
-              oast::PropertyKey::NumericLiteral(n) => n.value.to_string(),
+              oast::PropertyKey::NumericLiteral(n) => super::numeric_property_key(n.value),
               _ => continue,
             };
             self.emit_constant(Value::String(key), LINE);
@@ -615,7 +615,9 @@ impl super::Compiler {
                 oast::PropertyKey::StaticIdentifier(ident) => Value::String(ident.name.to_string()),
                 oast::PropertyKey::Identifier(ident) => Value::String(ident.name.to_string()),
                 oast::PropertyKey::StringLiteral(s) => Value::String(s.value.to_string()),
-                oast::PropertyKey::NumericLiteral(n) => Value::String(n.value.to_string()),
+                oast::PropertyKey::NumericLiteral(n) => {
+                  Value::String(super::numeric_property_key(n.value))
+                }
                 _ => {
                   return Err(crate::errors::CompilerError::from(
                     "unsupported accessor key",

@@ -95,7 +95,9 @@ impl super::Compiler {
       oast::PropertyKey::StaticIdentifier(i) => Some(Value::String(i.name.to_string())),
       oast::PropertyKey::Identifier(i) => Some(Value::String(i.name.to_string())),
       oast::PropertyKey::StringLiteral(s) => Some(Value::String(s.value.to_string())),
-      oast::PropertyKey::NumericLiteral(n) => Some(Value::String(n.value.to_string())),
+      oast::PropertyKey::NumericLiteral(n) => {
+        Some(Value::String(super::numeric_property_key(n.value)))
+      }
       _ => None,
     }
   }
