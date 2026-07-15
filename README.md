@@ -10,6 +10,22 @@ Key layers
 - `examples/` — sample JavaScript entry points and probes that exercise how Blitz should be embedded or orchestrated.
 - `tests/`, `benches/`, and `test262/` — Rust integration tests, Criterion benchmarks for the VM pipeline, plus the upstream ECMAScript Test262 harness for the conformance material we exercise manually or with auxiliary runners.
 
+Executables
+-----------
+
+- `blitz` is the application runtime. It installs host APIs such as `console`
+  and `process` and is the executable intended for JavaScript applications.
+- `blitz-engine` is a host-neutral engine harness. It exposes ECMAScript
+  intrinsics and `globalThis`, but deliberately omits OS and runtime APIs.
+
+```powershell
+# Run an application with the Blitz runtime.
+cargo run --bin blitz -- examples/simple_demo.js
+
+# Exercise the raw engine without host capabilities.
+cargo run --bin blitz-engine -- path/to/engine-test.js
+```
+
 License
 --------------------
 

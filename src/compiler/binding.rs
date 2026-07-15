@@ -154,7 +154,7 @@ impl super::Compiler {
     if matches!(kind, oxc_ast::ast::VariableDeclarationKind::Const) {
       self.mark_local_immutable(slot);
     }
-    if self.is_root {
+    if mirror_global {
       self.emit(Op::Dup, LINE);
     }
     self.emit(Op::StoreLocal, LINE);

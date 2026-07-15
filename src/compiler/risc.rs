@@ -975,6 +975,12 @@ mod tests {
   }
 
   #[test]
+  fn root_lexical_in_try_does_not_unbalance_catch_merge() {
+    let analysis = analyze("try { const value = 1; } catch (error) { error; } 0;");
+    assert!(analysis.max_height > 0);
+  }
+
+  #[test]
   fn analyzes_branches_and_loops_with_exact_merge_heights() {
     let analysis = analyze("let x = 0; while (x < 3) { x = x + 1; } x;");
     assert!(analysis.max_height >= 2);

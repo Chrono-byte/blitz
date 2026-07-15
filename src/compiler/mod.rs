@@ -1127,4 +1127,12 @@ mod test {
       "block-local binding should not leak past its block"
     );
   }
+
+  #[test]
+  fn simple_demo_has_balanced_control_flow() {
+    let src = include_str!("../../examples/simple_demo.js");
+    let session = crate::parser::Parser::parse_source(src).expect("parse simple demo");
+    let chunk = compile(session.program(), session.source()).expect("compile simple demo stack IR");
+    super::risc::lower_chunk(&chunk).expect("lower simple demo");
+  }
 }

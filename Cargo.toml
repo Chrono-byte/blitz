@@ -3,10 +3,15 @@ name = "blitz"
 version = "0.1.2"
 edition = "2024"
 description = "ECMAScript VM: Rust base layer"
+default-run = "blitz"
 
 [[bin]]
 name = "blitz"
 path = "src/main.rs"
+
+[[bin]]
+name = "blitz-engine"
+path = "src/bin/blitz_engine.rs"
 
 [dependencies]
 clap = { version = "4.5.57", features = ["derive"] }

@@ -555,7 +555,8 @@ impl Compiler {
                     ));
                   }
                 };
-                let mirror_global = self.is_root;
+                let mirror_global =
+                  self.is_root && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
                 let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
                   self
                     .resolve_local(&name)
@@ -577,12 +578,12 @@ impl Compiler {
                 ) {
                   per_iteration_slots.push(slot);
                 }
-                if self.is_root {
+                if mirror_global {
                   self.emit(Op::Dup, LINE);
                 }
                 self.emit(Op::StoreLocal, LINE);
                 self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                if self.is_root && mirror_global {
+                if mirror_global {
                   self.emit_set_global_name(&name);
                 }
               }
@@ -771,9 +772,6 @@ impl Compiler {
               }
             }
             self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
-            if self.is_root && !matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
-              self.emit(Op::Pop, LINE);
-            }
           }
           oast::ForStatementLeft::AssignmentTargetIdentifier(id) => {
             self.compile_assignment_identifier_reference(id)?;
@@ -979,9 +977,6 @@ impl Compiler {
               }
             }
             self.compile_binding_pattern_assignment_oast(&dec.id, v.kind)?;
-            if self.is_root && !matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
-              self.emit(Op::Pop, LINE);
-            }
           }
           OForLeft::AssignmentTargetIdentifier(id) => {
             let name = id.name.as_str();

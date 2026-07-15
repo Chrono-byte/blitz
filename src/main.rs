@@ -1,6 +1,10 @@
-//! CLI entry point for Blitz VM.
+//! CLI entry point for the full Blitz JavaScript runtime.
 //!
-//! The CLI provides two main interfaces:
+//! This executable installs OS-facing host APIs such as `console` and
+//! `process` before evaluating user code. Use `blitz-engine` when testing the
+//! host-neutral ECMAScript engine directly.
+//!
+//! The runtime CLI provides two main interfaces:
 //! - **File execution**: Run a JavaScript file directly
 //! - **REPL**: Interactive read-eval-print loop with history
 //!
@@ -87,6 +91,14 @@ struct Cli {
   /// Treat the input file as an ECMAScript module.
   #[arg(long, action)]
   module: bool,
+
+  /// Arguments passed to the JavaScript program.
+  #[arg(
+    value_name = "ARGS",
+    trailing_var_arg = true,
+    allow_hyphen_values = true
+  )]
+  args: Vec<String>,
 }
 
 fn main() -> Result<(), blitz::errors::Error> {
@@ -134,6 +146,16 @@ fn main() -> Result<(), blitz::errors::Error> {
   // bootstrap to capture host-provided values; raw host entries are never
   // placed into the globals table.
   let mut repl_vm = Vm::new(globals);
+  let mut runtime_argv = Vec::new();
+  runtime_argv.push("blitz".to_string());
+  if let Some(path) = &cli.file {
+    runtime_argv.push(path.to_string_lossy().into_owned());
+  }
+  runtime_argv.extend(cli.args.iter().cloned());
+  blitz::host::install_runtime(
+    &mut repl_vm,
+    blitz::host::RuntimeOptions::from_host(runtime_argv),
+  );
 
   // If a file was provided, run it and exit. Otherwise start REPL.
   if let Some(path) = cli.file {
