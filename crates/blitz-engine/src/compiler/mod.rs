@@ -41,6 +41,10 @@ mod tail;
 
 const LINE: u32 = 1;
 
+fn numeric_property_key(value: f64) -> String {
+  crate::runtime_utils::js_number_to_string(value)
+}
+
 /// Compile a parsed program to bytecode.
 ///
 /// # Errors
@@ -553,6 +557,16 @@ mod test {
       }
     }
     ops
+  }
+
+  #[test]
+  fn numeric_property_keys_use_ecmascript_number_formatting() {
+    assert_eq!(super::numeric_property_key(0.000_000_1), "1e-7");
+    assert_eq!(
+      super::numeric_property_key(1_000_000_000_000_000_000_000.0),
+      "1e+21"
+    );
+    assert_eq!(super::numeric_property_key(-0.0), "0");
   }
 
   #[test]
