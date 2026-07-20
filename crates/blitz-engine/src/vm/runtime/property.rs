@@ -1,14 +1,391 @@
+use crate::ecmascript::semantics::properties::{
+  own_property_descriptor, own_property_keys, property_key_to_value,
+};
 use crate::errors::RuntimeError;
 use crate::mutex_compat::MutexBorrowExt;
-use crate::runtime_utils::usize_to_f64;
-use crate::value::{PropertyDescriptor, PropertyKey, Value};
+use crate::runtime_utils::{to_length, usize_to_f64};
+use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
 use crate::vm::runtime::execution::{
-  array_index_from_key, array_length, get_property, set_property, values_equal,
+  array_index_from_key, array_length, get_property, same_value, set_property, values_equal,
 };
 use crate::vm::state::{MAX_PROTOTYPE_DEPTH, PartialDescriptor, PropertyGetIcEntry};
 
 impl Vm {
+  /// Run the `[[IsExtensible]]` internal method for an object value.
+  pub(crate) fn is_extensible_value(
+    &mut self,
+    obj: &Value,
+  ) -> Result<bool, RuntimeError> {
+    let Value::Proxy(proxy) = obj else {
+      return Ok(object_is_extensible(obj));
+    };
+
+    let (target, handler) = proxy_target_and_handler(self, proxy, "isExtensible")?;
+    let trap =
+      self.get_property_value(&handler, &PropertyKey::String("isExtensible".to_string()))?;
+    if matches!(trap, Value::Undefined | Value::Null) {
+      return self.is_extensible_value(&target);
+    }
+    if !Self::is_callable_value(&trap) {
+      return Err(self.throw_type_error("Proxy isExtensible trap is not callable"));
+    }
+
+    let trap_result = self.call_with_this(&trap, &handler, std::slice::from_ref(&target))?;
+    let extensible = self.to_boolean(&trap_result);
+    if extensible != self.is_extensible_value(&target)? {
+      return Err(
+        self.throw_type_error("Proxy isExtensible trap result does not match the target"),
+      );
+    }
+    Ok(extensible)
+  }
+
+  /// Run the `[[PreventExtensions]]` internal method for an object value.
+  pub(crate) fn prevent_extensions_value(
+    &mut self,
+    obj: &Value,
+  ) -> Result<bool, RuntimeError> {
+    if let Value::Proxy(proxy) = obj {
+      let (target, handler) = proxy_target_and_handler(self, proxy, "preventExtensions")?;
+      let trap = self.get_property_value(
+        &handler,
+        &PropertyKey::String("preventExtensions".to_string()),
+      )?;
+      if matches!(trap, Value::Undefined | Value::Null) {
+        return self.prevent_extensions_value(&target);
+      }
+      if !Self::is_callable_value(&trap) {
+        return Err(self.throw_type_error("Proxy preventExtensions trap is not callable"));
+      }
+
+      let trap_result = self.call_with_this(&trap, &handler, std::slice::from_ref(&target))?;
+      if !self.to_boolean(&trap_result) {
+        return Ok(false);
+      }
+      if self.is_extensible_value(&target)? {
+        return Err(self.throw_type_error(
+          "Proxy preventExtensions trap reported success for an extensible target",
+        ));
+      }
+      return Ok(true);
+    }
+
+    Ok(set_object_extensible(obj, false))
+  }
+
+  /// Run the `[[GetPrototypeOf]]` internal method for an object value.
+  pub(crate) fn get_prototype_of_value(
+    &mut self,
+    obj: &Value,
+  ) -> Result<Value, RuntimeError> {
+    let Value::Proxy(proxy) = obj else {
+      return Ok(self.get_prototype(obj));
+    };
+
+    let (target, handler) = proxy_target_and_handler(self, proxy, "getPrototypeOf")?;
+    let trap =
+      self.get_property_value(&handler, &PropertyKey::String("getPrototypeOf".to_string()))?;
+    if matches!(trap, Value::Undefined | Value::Null) {
+      return self.get_prototype_of_value(&target);
+    }
+    if !Self::is_callable_value(&trap) {
+      return Err(self.throw_type_error("Proxy getPrototypeOf trap is not callable"));
+    }
+
+    let trap_result = self.call_with_this(&trap, &handler, std::slice::from_ref(&target))?;
+    if !matches!(trap_result, Value::Null) && !trap_result.is_object() {
+      return Err(self.throw_type_error("Proxy getPrototypeOf trap must return an object or null"));
+    }
+    if !self.is_extensible_value(&target)? {
+      let target_proto = self.get_prototype_of_value(&target)?;
+      if !same_value(&trap_result, &target_proto) {
+        return Err(self.throw_type_error(
+          "Proxy getPrototypeOf trap cannot report a different prototype for a non-extensible target",
+        ));
+      }
+    }
+    Ok(trap_result)
+  }
+
+  /// Run the `[[SetPrototypeOf]]` internal method for an object value.
+  pub(crate) fn set_prototype_of_value(
+    &mut self,
+    obj: &Value,
+    proto: &Value,
+  ) -> Result<bool, RuntimeError> {
+    if let Value::Proxy(proxy) = obj {
+      let (target, handler) = proxy_target_and_handler(self, proxy, "setPrototypeOf")?;
+      let trap =
+        self.get_property_value(&handler, &PropertyKey::String("setPrototypeOf".to_string()))?;
+      if matches!(trap, Value::Undefined | Value::Null) {
+        return self.set_prototype_of_value(&target, proto);
+      }
+      if !Self::is_callable_value(&trap) {
+        return Err(self.throw_type_error("Proxy setPrototypeOf trap is not callable"));
+      }
+
+      let trap_result = self.call_with_this(&trap, &handler, &[target.clone(), proto.clone()])?;
+      if !self.to_boolean(&trap_result) {
+        return Ok(false);
+      }
+      if !self.is_extensible_value(&target)? {
+        let target_proto = self.get_prototype_of_value(&target)?;
+        if !same_value(proto, &target_proto) {
+          return Err(self.throw_type_error(
+            "Proxy setPrototypeOf trap cannot change the prototype of a non-extensible target",
+          ));
+        }
+      }
+      return Ok(true);
+    }
+
+    let current = self.get_prototype(obj);
+    if same_value(&current, proto) {
+      return Ok(true);
+    }
+    if !object_is_extensible(obj) {
+      return Ok(false);
+    }
+
+    let mut candidate = proto.clone();
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+      if matches!(candidate, Value::Null) {
+        break;
+      }
+      if same_value(obj, &candidate) {
+        return Ok(false);
+      }
+      candidate = self.get_prototype_of_value(&candidate)?;
+    }
+    Ok(set_object_prototype(obj, proto.clone()))
+  }
+
+  pub(crate) fn set_integrity_level(
+    &mut self,
+    obj: &Value,
+    frozen: bool,
+  ) -> Result<bool, RuntimeError> {
+    if !self.prevent_extensions_value(obj)? {
+      return Ok(false);
+    }
+    for key in self.own_property_keys_value(obj)? {
+      let mut desc = PartialDescriptor {
+        configurable: Some(false),
+        has_configurable: true,
+        ..PartialDescriptor::default()
+      };
+      if frozen
+        && matches!(
+          self.get_own_property_value(obj, &key)?,
+          Some(PropertyDescriptor::Data { .. })
+        )
+      {
+        desc.writable = Some(false);
+        desc.has_writable = true;
+      }
+      if !self.define_own_property(obj, key, desc)? {
+        return Ok(false);
+      }
+    }
+    Ok(true)
+  }
+
+  pub(crate) fn test_integrity_level(
+    &mut self,
+    obj: &Value,
+    frozen: bool,
+  ) -> Result<bool, RuntimeError> {
+    if self.is_extensible_value(obj)? {
+      return Ok(false);
+    }
+    for key in self.own_property_keys_value(obj)? {
+      let Some(desc) = self.get_own_property_value(obj, &key)? else {
+        continue;
+      };
+      if descriptor_configurable(&desc)
+        || frozen && matches!(desc, PropertyDescriptor::Data { writable: true, .. })
+      {
+        return Ok(false);
+      }
+    }
+    Ok(true)
+  }
+
+  /// Run the `[[GetOwnProperty]]` internal method for an object value.
+  pub(crate) fn get_own_property_value(
+    &mut self,
+    obj: &Value,
+    key: &PropertyKey,
+  ) -> Result<Option<PropertyDescriptor>, RuntimeError> {
+    let Value::Proxy(proxy) = obj else {
+      return Ok(own_property_descriptor(obj, key));
+    };
+
+    let (target, handler) = proxy_target_and_handler(self, proxy, "getOwnPropertyDescriptor")?;
+    let trap = self.get_property_value(
+      &handler,
+      &PropertyKey::String("getOwnPropertyDescriptor".to_string()),
+    )?;
+    if matches!(trap, Value::Undefined | Value::Null) {
+      return self.get_own_property_value(&target, key);
+    }
+    if !Self::is_callable_value(&trap) {
+      return Err(self.throw_type_error("Proxy getOwnPropertyDescriptor trap is not callable"));
+    }
+
+    let trap_result = self.call_with_this(
+      &trap,
+      &handler,
+      &[target.clone(), property_key_to_value(key)],
+    )?;
+    if !matches!(trap_result, Value::Undefined) && !trap_result.is_object() {
+      return Err(self.throw_type_error(
+        "Proxy getOwnPropertyDescriptor trap must return an object or undefined",
+      ));
+    }
+
+    let target_desc = self.get_own_property_value(&target, key)?;
+    let extensible = self.is_extensible_value(&target)?;
+    if matches!(trap_result, Value::Undefined) {
+      let Some(target_desc) = target_desc else {
+        return Ok(None);
+      };
+      if !descriptor_configurable(&target_desc) {
+        return Err(self.throw_type_error(
+          "Proxy getOwnPropertyDescriptor trap cannot hide a non-configurable property",
+        ));
+      }
+      if !extensible {
+        return Err(self.throw_type_error(
+          "Proxy getOwnPropertyDescriptor trap cannot hide a property of a non-extensible target",
+        ));
+      }
+      return Ok(None);
+    }
+
+    let result_desc = complete_property_descriptor(self.read_descriptor_from_value(&trap_result)?);
+    let result_partial = partial_descriptor_from_complete(&result_desc);
+    if !is_compatible_property_descriptor(extensible, &result_partial, target_desc.as_ref()) {
+      return Err(self.throw_type_error(
+        "Proxy getOwnPropertyDescriptor trap returned an incompatible descriptor",
+      ));
+    }
+    if !descriptor_configurable(&result_desc)
+      && target_desc
+        .as_ref()
+        .is_none_or(descriptor_configurable)
+    {
+      return Err(self.throw_type_error(
+        "Proxy getOwnPropertyDescriptor trap cannot report a new non-configurable property",
+      ));
+    }
+    Ok(Some(result_desc))
+  }
+
+  /// Run the `[[OwnPropertyKeys]]` internal method for an object value.
+  pub(crate) fn own_property_keys_value(
+    &mut self,
+    obj: &Value,
+  ) -> Result<Vec<PropertyKey>, RuntimeError> {
+    let Value::Proxy(proxy) = obj else {
+      return Ok(own_property_keys(obj));
+    };
+
+    let (target, handler) = {
+      let proxy = proxy.borrow();
+      let Some(handler) = proxy.handler.clone() else {
+        return Err(self.throw_type_error("Cannot perform 'ownKeys' on a revoked proxy"));
+      };
+      (proxy.target.clone(), handler)
+    };
+    let trap = self.get_property_value(&handler, &PropertyKey::String("ownKeys".to_string()))?;
+    if matches!(trap, Value::Undefined | Value::Null) {
+      return self.own_property_keys_value(&target);
+    }
+    if !Self::is_callable_value(&trap) {
+      return Err(self.throw_type_error("Proxy ownKeys trap is not callable"));
+    }
+
+    let trap_result = self.call_with_this(&trap, &handler, std::slice::from_ref(&target))?;
+    if !trap_result.is_object() {
+      return Err(self.throw_type_error("Proxy ownKeys trap must return an object"));
+    }
+    let length =
+      self.get_property_value(&trap_result, &PropertyKey::String("length".to_string()))?;
+    let length = to_length(self, &length)?;
+    let mut trap_keys = Vec::with_capacity(length);
+    for index in 0..length {
+      let key = self.get_property_value(&trap_result, &PropertyKey::String(index.to_string()))?;
+      let key = match key {
+        Value::String(name) => PropertyKey::String(name),
+        Value::Symbol(id, _) => PropertyKey::Symbol(id),
+        _ => {
+          return Err(
+            self
+              .throw_type_error("Proxy ownKeys trap result must contain only strings and symbols"),
+          );
+        }
+      };
+      if trap_keys.contains(&key) {
+        return Err(self.throw_type_error("Proxy ownKeys trap returned duplicate entries"));
+      }
+      trap_keys.push(key);
+    }
+
+    let target_keys = self.own_property_keys_value(&target)?;
+    let mut unchecked = trap_keys.clone();
+    let mut configurable_target_keys = Vec::new();
+    for key in &target_keys {
+      let non_configurable = self
+        .get_own_property_value(&target, key)?
+        .is_some_and(|desc| !descriptor_configurable(&desc));
+      if non_configurable {
+        if !remove_key(&mut unchecked, key) {
+          return Err(
+            self.throw_type_error("Proxy ownKeys trap omitted a non-configurable property"),
+          );
+        }
+      } else {
+        configurable_target_keys.push(key);
+      }
+    }
+
+    if self.is_extensible_value(&target)? {
+      return Ok(trap_keys);
+    }
+    for key in configurable_target_keys {
+      if !remove_key(&mut unchecked, key) {
+        return Err(
+          self.throw_type_error("Proxy ownKeys trap omitted a property of a non-extensible target"),
+        );
+      }
+    }
+    if !unchecked.is_empty() {
+      return Err(
+        self.throw_type_error("Proxy ownKeys trap added a property to a non-extensible target"),
+      );
+    }
+    Ok(trap_keys)
+  }
+
+  /// Return enumerable own property keys through `[[OwnPropertyKeys]]`.
+  pub(crate) fn own_enumerable_keys_value(
+    &mut self,
+    obj: &Value,
+  ) -> Result<Vec<PropertyKey>, RuntimeError> {
+    let mut enumerable = Vec::new();
+    for key in self.own_property_keys_value(obj)? {
+      if self
+        .get_own_property_value(obj, &key)?
+        .is_some_and(|desc| descriptor_enumerable(&desc))
+      {
+        enumerable.push(key);
+      }
+    }
+    Ok(enumerable)
+  }
+
   /// Read a property through the per-instruction monomorphic cache.
   ///
   /// Only own data properties are cached. Prototype and accessor reads stay
@@ -46,7 +423,7 @@ impl Vm {
 
     let value = self.get_property_value(obj, key)?;
     if matches!(
-      crate::ecmascript::semantics::properties::own_property_descriptor(obj, key),
+      own_property_descriptor(obj, key),
       Some(PropertyDescriptor::Data { .. })
     ) {
       self.property_get_ic.insert(
@@ -91,7 +468,179 @@ impl Vm {
       PropertyKey::String(name) => Value::String(name.clone()),
       PropertyKey::Symbol(id) => Value::Symbol(id.clone(), None),
     };
-    self.call_with_this(&trap, &handler, &[target, key_value, receiver.clone()])
+    let trap_result = self.call_with_this(
+      &trap,
+      &handler,
+      &[target.clone(), key_value, receiver.clone()],
+    )?;
+    if let Some(target_desc) = self.get_own_property_value(&target, key)? {
+      match target_desc {
+        PropertyDescriptor::Data {
+          value,
+          writable: false,
+          configurable: false,
+          ..
+        } if !same_value(&trap_result, &value) => {
+          return Err(self.throw_type_error(
+            "Proxy get trap must return the value of a non-writable, non-configurable target property",
+          ));
+        }
+        PropertyDescriptor::Accessor {
+          get,
+          configurable: false,
+          ..
+        } if get
+          .as_ref()
+          .is_none_or(|getter| matches!(getter, Value::Undefined))
+          && !matches!(trap_result, Value::Undefined) =>
+        {
+          return Err(self.throw_type_error(
+            "Proxy get trap must return undefined for a non-configurable target property with no getter",
+          ));
+        }
+        _ => {}
+      }
+    }
+    Ok(trap_result)
+  }
+
+  fn set_proxy_property(
+    &mut self,
+    proxy_value: &Value,
+    key: &PropertyKey,
+    value: Value,
+    receiver: &Value,
+  ) -> Result<bool, RuntimeError> {
+    let Value::Proxy(proxy) = proxy_value else {
+      return Err(RuntimeError::from("expected proxy value"));
+    };
+    let (target, handler) = proxy_target_and_handler(self, proxy, "set")?;
+    let trap = self.get_property_value(&handler, &PropertyKey::String("set".to_string()))?;
+    if matches!(trap, Value::Undefined | Value::Null) {
+      return self.set_property_value(&target, key, value, receiver);
+    }
+    if !Self::is_callable_value(&trap) {
+      return Err(self.throw_type_error("Proxy set trap is not callable"));
+    }
+
+    let trap_result = self.call_with_this(
+      &trap,
+      &handler,
+      &[
+        target.clone(),
+        property_key_to_value(key),
+        value.clone(),
+        receiver.clone(),
+      ],
+    )?;
+    if !self.to_boolean(&trap_result) {
+      return Ok(false);
+    }
+
+    if let Some(target_desc) = self.get_own_property_value(&target, key)? {
+      match target_desc {
+        PropertyDescriptor::Data {
+          value: target_value,
+          writable: false,
+          configurable: false,
+          ..
+        } if !same_value(&value, &target_value) => {
+          return Err(self.throw_type_error(
+            "Proxy set trap cannot change a non-writable, non-configurable target property",
+          ));
+        }
+        PropertyDescriptor::Accessor {
+          set,
+          configurable: false,
+          ..
+        } if set
+          .as_ref()
+          .is_none_or(|setter| matches!(setter, Value::Undefined)) =>
+        {
+          return Err(self.throw_type_error(
+            "Proxy set trap cannot set a non-configurable target property with no setter",
+          ));
+        }
+        _ => {}
+      }
+    }
+    Ok(true)
+  }
+
+  fn set_property_value(
+    &mut self,
+    target: &Value,
+    key: &PropertyKey,
+    value: Value,
+    receiver: &Value,
+  ) -> Result<bool, RuntimeError> {
+    if matches!(target, Value::Proxy(_)) {
+      return self.set_proxy_property(target, key, value, receiver);
+    }
+
+    if let Some((desc, _holder)) = self.lookup_property_descriptor(target, key, 0)? {
+      match desc {
+        PropertyDescriptor::Accessor { set, .. } => {
+          let Some(setter) = set.filter(|setter| !matches!(setter, Value::Undefined)) else {
+            return Ok(false);
+          };
+          drop(self.call_with_this(&setter, receiver, &[value])?);
+          self.bump_object_generation(receiver);
+          return Ok(true);
+        }
+        PropertyDescriptor::Data {
+          writable: false, ..
+        } => return Ok(false),
+        PropertyDescriptor::Data { .. } => {}
+      }
+    }
+
+    if !receiver.is_object() {
+      return Ok(false);
+    }
+    if let Some(receiver_desc) = self.get_own_property_value(receiver, key)? {
+      match receiver_desc {
+        PropertyDescriptor::Accessor { .. } => return Ok(false),
+        PropertyDescriptor::Data {
+          writable: false, ..
+        } => return Ok(false),
+        PropertyDescriptor::Data { .. } => {
+          let accepted = self.define_own_property(
+            receiver,
+            key.clone(),
+            PartialDescriptor {
+              value: Some(value),
+              has_value: true,
+              ..PartialDescriptor::default()
+            },
+          )?;
+          if accepted {
+            self.bump_object_generation(receiver);
+          }
+          return Ok(accepted);
+        }
+      }
+    }
+
+    let accepted = self.define_own_property(
+      receiver,
+      key.clone(),
+      PartialDescriptor {
+        value: Some(value),
+        writable: Some(true),
+        enumerable: Some(true),
+        configurable: Some(true),
+        has_value: true,
+        has_writable: true,
+        has_enumerable: true,
+        has_configurable: true,
+        ..PartialDescriptor::default()
+      },
+    )?;
+    if accepted {
+      self.bump_object_generation(receiver);
+    }
+    Ok(accepted)
   }
 
   pub(super) fn super_base_object(&self) -> Result<Value, RuntimeError> {
@@ -121,7 +670,7 @@ impl Vm {
       return match desc {
         PropertyDescriptor::Data { value, .. } => Ok(value),
         PropertyDescriptor::Accessor { get, .. } => {
-          if let Some(getter) = get {
+          if let Some(getter) = get.filter(|getter| !matches!(getter, Value::Undefined)) {
             self.call_with_this(&getter, receiver, &[])
           } else {
             Ok(Value::Undefined)
@@ -156,10 +705,17 @@ impl Vm {
         obj.type_name()
       )));
     }
+    if matches!(obj, Value::Proxy(_)) {
+      let accepted = self.set_proxy_property(obj, key, value, receiver)?;
+      if !accepted && self.is_strict_mode() {
+        return Err(self.throw_type_error("Proxy set trap returned false"));
+      }
+      return Ok(());
+    }
     if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
       match desc {
         PropertyDescriptor::Accessor { set, .. } => {
-          if let Some(setter) = set {
+          if let Some(setter) = set.filter(|setter| !matches!(setter, Value::Undefined)) {
             drop(self.call_with_this(&setter, receiver, &[value])?);
             self.bump_object_generation(receiver);
             return Ok(());
@@ -290,16 +846,41 @@ impl Vm {
   ///
   /// Returns a [`crate::errors::RuntimeError`] if the property lookup fails.
   pub fn has_property_host(
-    &self,
+    &mut self,
     obj: &Value,
     key: &PropertyKey,
   ) -> Result<bool, RuntimeError> {
     if let Value::Proxy(proxy) = obj {
-      let proxy = proxy.borrow();
-      if proxy.is_revoked() {
-        return Err(RuntimeError::from("Cannot operate on revoked proxy"));
+      let (target, handler) = proxy_target_and_handler(self, proxy, "has")?;
+      let trap = self.get_property_value(&handler, &PropertyKey::String("has".to_string()))?;
+      if matches!(trap, Value::Undefined | Value::Null) {
+        return self.has_property_host(&target, key);
       }
-      return self.has_property_host(&proxy.target, key);
+      if !Self::is_callable_value(&trap) {
+        return Err(self.throw_type_error("Proxy has trap is not callable"));
+      }
+      let trap_result = self.call_with_this(
+        &trap,
+        &handler,
+        &[target.clone(), property_key_to_value(key)],
+      )?;
+      if self.to_boolean(&trap_result) {
+        return Ok(true);
+      }
+      if let Some(target_desc) = self.get_own_property_value(&target, key)? {
+        if !descriptor_configurable(&target_desc) {
+          return Err(
+            self.throw_type_error("Proxy has trap cannot hide a non-configurable property"),
+          );
+        }
+        if !self.is_extensible_value(&target)? {
+          return Err(
+            self
+              .throw_type_error("Proxy has trap cannot hide a property of a non-extensible target"),
+          );
+        }
+      }
+      return Ok(false);
     }
     Ok(
       self
@@ -320,11 +901,36 @@ impl Vm {
   ) -> Result<bool, RuntimeError> {
     let deleted_res: Result<bool, RuntimeError> = match obj {
       Value::Proxy(proxy) => {
-        let proxy = proxy.borrow();
-        if proxy.is_revoked() {
-          return Err(self.throw_type_error("Cannot operate on revoked proxy"));
+        let (target, handler) = proxy_target_and_handler(self, proxy, "deleteProperty")?;
+        let trap =
+          self.get_property_value(&handler, &PropertyKey::String("deleteProperty".to_string()))?;
+        if matches!(trap, Value::Undefined | Value::Null) {
+          return self.delete_property_host(&target, key);
         }
-        return self.delete_property_host(&proxy.target, key);
+        if !Self::is_callable_value(&trap) {
+          return Err(self.throw_type_error("Proxy deleteProperty trap is not callable"));
+        }
+        let trap_result = self.call_with_this(
+          &trap,
+          &handler,
+          &[target.clone(), property_key_to_value(key)],
+        )?;
+        if !self.to_boolean(&trap_result) {
+          return Ok(false);
+        }
+        if let Some(target_desc) = self.get_own_property_value(&target, key)? {
+          if !descriptor_configurable(&target_desc) {
+            return Err(self.throw_type_error(
+              "Proxy deleteProperty trap cannot delete a non-configurable property",
+            ));
+          }
+          if !self.is_extensible_value(&target)? {
+            return Err(self.throw_type_error(
+              "Proxy deleteProperty trap cannot delete a property of a non-extensible target",
+            ));
+          }
+        }
+        return Ok(true);
       }
       Value::Object(data) => {
         let mut d = data.borrow_mut();
@@ -471,57 +1077,7 @@ impl Vm {
     let receiver = receiver.unwrap_or_else(|| target.clone());
     let saved_strict = self.current_strict_mode;
     self.current_strict_mode = false;
-    let result = (|| -> Result<bool, RuntimeError> {
-      if let Some((desc, _holder)) = self.lookup_property_descriptor(target, &prop, 0)? {
-        match desc {
-          PropertyDescriptor::Accessor { set, .. } => {
-            if let Some(setter) = set {
-              drop(self.call_with_this(&setter, &receiver, &[value])?);
-              self.bump_object_generation(&receiver);
-              return Ok(true);
-            }
-            return Ok(false);
-          }
-          PropertyDescriptor::Data {
-            writable: false, ..
-          } => return Ok(false),
-          PropertyDescriptor::Data { .. } => {}
-        }
-      }
-
-      let receiver_can_accept = match &receiver {
-        Value::Object(obj) => {
-          let obj = obj.borrow();
-          match obj.properties.get(&prop) {
-            Some(PropertyDescriptor::Data {
-              writable: false, ..
-            }) => false,
-            Some(PropertyDescriptor::Accessor { set: None, .. }) => false,
-            Some(_) => true,
-            None => obj.extensible,
-          }
-        }
-        Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
-          let props = props.borrow();
-          match props.properties.get(&prop) {
-            Some(PropertyDescriptor::Data {
-              writable: false, ..
-            }) => false,
-            Some(PropertyDescriptor::Accessor { set: None, .. }) => false,
-            Some(_) => true,
-            None => props.extensible,
-          }
-        }
-        _ => false,
-      };
-
-      if !receiver_can_accept {
-        return Ok(false);
-      }
-
-      self.set_property_tracked(&receiver, &prop, value)?;
-      Ok(true)
-    })();
+    let result = self.set_property_value(target, &prop, value, &receiver);
     self.current_strict_mode = saved_strict;
     result
   }
@@ -609,11 +1165,56 @@ impl Vm {
     desc: PartialDescriptor,
   ) -> Result<bool, RuntimeError> {
     if let Value::Proxy(proxy) = obj {
-      let proxy = proxy.borrow();
-      if proxy.is_revoked() {
-        return Err(self.throw_type_error("Cannot operate on revoked proxy"));
+      let (target, handler) = proxy_target_and_handler(self, proxy, "defineProperty")?;
+      let trap =
+        self.get_property_value(&handler, &PropertyKey::String("defineProperty".to_string()))?;
+      if matches!(trap, Value::Undefined | Value::Null) {
+        return self.define_own_property(&target, key, desc);
       }
-      return self.define_own_property(&proxy.target, key, desc);
+      if !Self::is_callable_value(&trap) {
+        return Err(self.throw_type_error("Proxy defineProperty trap is not callable"));
+      }
+      let descriptor = partial_descriptor_to_value(self.realm().object_prototype(), &desc);
+      let trap_result = self.call_with_this(
+        &trap,
+        &handler,
+        &[target.clone(), property_key_to_value(&key), descriptor],
+      )?;
+      if !self.to_boolean(&trap_result) {
+        return Ok(false);
+      }
+
+      let target_desc = self.get_own_property_value(&target, &key)?;
+      let extensible = self.is_extensible_value(&target)?;
+      let setting_config_false = desc.has_configurable && desc.configurable == Some(false);
+      match target_desc.as_ref() {
+        None => {
+          if !extensible {
+            return Err(self.throw_type_error(
+              "Proxy defineProperty trap cannot add a property to a non-extensible target",
+            ));
+          }
+          if setting_config_false {
+            return Err(self.throw_type_error(
+              "Proxy defineProperty trap cannot create a non-configurable property",
+            ));
+          }
+        }
+        Some(target_desc) => {
+          if !is_compatible_property_descriptor(extensible, &desc, Some(target_desc)) {
+            return Err(
+              self
+                .throw_type_error("Proxy defineProperty trap accepted an incompatible descriptor"),
+            );
+          }
+          if setting_config_false && descriptor_configurable(target_desc) {
+            return Err(self.throw_type_error(
+              "Proxy defineProperty trap cannot make a configurable target property non-configurable",
+            ));
+          }
+        }
+      }
+      return Ok(true);
     }
     if let Value::Array(arr, props) = obj
       && matches!(key, PropertyKey::String(ref name) if name == "length")
@@ -886,7 +1487,7 @@ impl Vm {
       return match desc {
         PropertyDescriptor::Data { value, .. } => Ok(value),
         PropertyDescriptor::Accessor { get, .. } => {
-          if let Some(getter) = get {
+          if let Some(getter) = get.filter(|getter| !matches!(getter, Value::Undefined)) {
             self.call_with_this(&getter, obj, &[])
           } else {
             Ok(Value::Undefined)
@@ -1104,12 +1705,12 @@ impl Vm {
         obj.type_name()
       )));
     }
-    if let Value::Proxy(proxy) = obj {
-      let proxy = proxy.borrow();
-      if proxy.is_revoked() {
-        return Err(self.throw_type_error("Cannot operate on revoked proxy"));
+    if matches!(obj, Value::Proxy(_)) {
+      let accepted = self.set_proxy_property(obj, key, value, obj)?;
+      if !accepted && self.is_strict_mode() {
+        return Err(self.throw_type_error("Proxy set trap returned false"));
       }
-      return self.set_property_tracked(&proxy.target, key, value);
+      return Ok(());
     }
     if let Value::Array(arr, props) = obj
       && matches!(key, PropertyKey::String(s) if s == "length")
@@ -1143,7 +1744,7 @@ impl Vm {
     if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
       match desc {
         PropertyDescriptor::Accessor { set, .. } => {
-          if let Some(setter) = set {
+          if let Some(setter) = set.filter(|setter| !matches!(setter, Value::Undefined)) {
             drop(self.call_with_this(&setter, obj, &[value])?);
             self.bump_object_generation(obj);
             return Ok(());
@@ -1200,4 +1801,258 @@ impl Vm {
 
     Ok(())
   }
+}
+
+fn remove_key(
+  keys: &mut Vec<PropertyKey>,
+  key: &PropertyKey,
+) -> bool {
+  let Some(index) = keys.iter().position(|candidate| candidate == key) else {
+    return false;
+  };
+  keys.swap_remove(index);
+  true
+}
+
+fn object_is_extensible(value: &Value) -> bool {
+  match value {
+    Value::Object(data) => data.borrow().extensible,
+    Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+      props.borrow().extensible
+    }
+    Value::Proxy(_) | Value::Builtin(_) | Value::Promise(_) => false,
+    _ => false,
+  }
+}
+
+fn set_object_extensible(
+  value: &Value,
+  extensible: bool,
+) -> bool {
+  match value {
+    Value::Object(data) => data.borrow_mut().extensible = extensible,
+    Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+      props.borrow_mut().extensible = extensible;
+    }
+    Value::Builtin(_) | Value::Promise(_) => return !extensible,
+    _ => return false,
+  }
+  true
+}
+
+fn set_object_prototype(
+  value: &Value,
+  prototype: Value,
+) -> bool {
+  match value {
+    Value::Object(data) => data.borrow_mut().set_prototype_value(prototype),
+    Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+      props.borrow_mut().set_prototype_value(prototype);
+    }
+    _ => return false,
+  }
+  true
+}
+
+fn proxy_target_and_handler(
+  vm: &mut Vm,
+  proxy: &std::rc::Rc<std::cell::RefCell<crate::value::ProxyData>>,
+  operation: &str,
+) -> Result<(Value, Value), RuntimeError> {
+  let proxy = proxy.borrow();
+  let Some(handler) = proxy.handler.clone() else {
+    return Err(vm.throw_type_error(&format!("Cannot perform '{operation}' on a revoked proxy")));
+  };
+  Ok((proxy.target.clone(), handler))
+}
+
+fn descriptor_configurable(desc: &PropertyDescriptor) -> bool {
+  match desc {
+    PropertyDescriptor::Data { configurable, .. }
+    | PropertyDescriptor::Accessor { configurable, .. } => *configurable,
+  }
+}
+
+fn descriptor_enumerable(desc: &PropertyDescriptor) -> bool {
+  match desc {
+    PropertyDescriptor::Data { enumerable, .. }
+    | PropertyDescriptor::Accessor { enumerable, .. } => *enumerable,
+  }
+}
+
+fn complete_property_descriptor(desc: PartialDescriptor) -> PropertyDescriptor {
+  if desc.has_get || desc.has_set {
+    PropertyDescriptor::Accessor {
+      get: desc
+        .get
+        .filter(|value| !matches!(value, Value::Undefined)),
+      set: desc
+        .set
+        .filter(|value| !matches!(value, Value::Undefined)),
+      enumerable: desc.enumerable.unwrap_or(false),
+      configurable: desc.configurable.unwrap_or(false),
+    }
+  } else {
+    PropertyDescriptor::Data {
+      value: desc.value.unwrap_or(Value::Undefined),
+      writable: desc.writable.unwrap_or(false),
+      enumerable: desc.enumerable.unwrap_or(false),
+      configurable: desc.configurable.unwrap_or(false),
+    }
+  }
+}
+
+fn partial_descriptor_from_complete(desc: &PropertyDescriptor) -> PartialDescriptor {
+  match desc {
+    PropertyDescriptor::Data {
+      value,
+      writable,
+      enumerable,
+      configurable,
+    } => PartialDescriptor {
+      value: Some(value.clone()),
+      writable: Some(*writable),
+      enumerable: Some(*enumerable),
+      configurable: Some(*configurable),
+      has_value: true,
+      has_writable: true,
+      has_enumerable: true,
+      has_configurable: true,
+      ..PartialDescriptor::default()
+    },
+    PropertyDescriptor::Accessor {
+      get,
+      set,
+      enumerable,
+      configurable,
+    } => PartialDescriptor {
+      get: Some(get.clone().unwrap_or(Value::Undefined)),
+      set: Some(set.clone().unwrap_or(Value::Undefined)),
+      enumerable: Some(*enumerable),
+      configurable: Some(*configurable),
+      has_get: true,
+      has_set: true,
+      has_enumerable: true,
+      has_configurable: true,
+      ..PartialDescriptor::default()
+    },
+  }
+}
+
+fn partial_descriptor_to_value(
+  prototype: Value,
+  desc: &PartialDescriptor,
+) -> Value {
+  let mut object = ObjectData::with_prototype(prototype);
+  let mut insert = |name: &str, value: Value| {
+    object.properties.insert(
+      PropertyKey::String(name.to_string()),
+      PropertyDescriptor::data(value),
+    );
+  };
+  if desc.has_value {
+    insert("value", desc.value.clone().unwrap_or(Value::Undefined));
+  }
+  if desc.has_writable {
+    insert("writable", Value::Bool(desc.writable.unwrap_or(false)));
+  }
+  if desc.has_get {
+    insert("get", desc.get.clone().unwrap_or(Value::Undefined));
+  }
+  if desc.has_set {
+    insert("set", desc.set.clone().unwrap_or(Value::Undefined));
+  }
+  if desc.has_enumerable {
+    insert("enumerable", Value::Bool(desc.enumerable.unwrap_or(false)));
+  }
+  if desc.has_configurable {
+    insert(
+      "configurable",
+      Value::Bool(desc.configurable.unwrap_or(false)),
+    );
+  }
+  Value::Object(std::rc::Rc::new(std::cell::RefCell::new(object)))
+}
+
+fn is_compatible_property_descriptor(
+  extensible: bool,
+  desc: &PartialDescriptor,
+  current: Option<&PropertyDescriptor>,
+) -> bool {
+  let Some(current) = current else {
+    return extensible;
+  };
+  if !desc.has_value
+    && !desc.has_writable
+    && !desc.has_get
+    && !desc.has_set
+    && !desc.has_enumerable
+    && !desc.has_configurable
+  {
+    return true;
+  }
+
+  let current_configurable = descriptor_configurable(current);
+  if !current_configurable {
+    if desc.configurable == Some(true) {
+      return false;
+    }
+    if desc.has_enumerable
+      && desc
+        .enumerable
+        .is_some_and(|value| value != descriptor_enumerable(current))
+    {
+      return false;
+    }
+  }
+
+  let desc_is_data = desc.has_value || desc.has_writable;
+  let desc_is_accessor = desc.has_get || desc.has_set;
+  if !desc_is_data && !desc_is_accessor {
+    return true;
+  }
+  let current_is_data = matches!(current, PropertyDescriptor::Data { .. });
+  if desc_is_data != current_is_data {
+    return current_configurable;
+  }
+
+  match current {
+    PropertyDescriptor::Data {
+      value, writable, ..
+    } if !current_configurable && !*writable => {
+      if desc.writable == Some(true) {
+        return false;
+      }
+      if desc.has_value
+        && desc
+          .value
+          .as_ref()
+          .is_some_and(|next| !same_value(next, value))
+      {
+        return false;
+      }
+    }
+    PropertyDescriptor::Accessor { get, set, .. } if !current_configurable => {
+      let current_get = get.clone().unwrap_or(Value::Undefined);
+      let current_set = set.clone().unwrap_or(Value::Undefined);
+      if desc.has_get
+        && desc
+          .get
+          .as_ref()
+          .is_some_and(|next| !same_value(next, &current_get))
+      {
+        return false;
+      }
+      if desc.has_set
+        && desc
+          .set
+          .as_ref()
+          .is_some_and(|next| !same_value(next, &current_set))
+      {
+        return false;
+      }
+    }
+    _ => {}
+  }
+  true
 }

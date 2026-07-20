@@ -609,7 +609,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           if new_len > 9_007_199_254_740_991usize {
             return Err(vm.throw_type_error("Array length exceeds supported size"));
           }
-          let mut keys: Vec<usize> = own_property_keys(&this)
+          let mut keys: Vec<usize> = vm
+            .own_property_keys_value(&this)?
             .into_iter()
             .filter_map(|key| match key {
               PropertyKey::String(s) => s.parse::<usize>().ok(),
@@ -2239,9 +2240,13 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("ownKeys".to_string()),
     PropertyDescriptor::data(builtin_object(
-      Rc::new(|_vm, args| {
+      Rc::new(|vm, args| {
         let target = args.get(1).cloned().unwrap_or(Value::Undefined);
-        let keys = own_property_keys(&target)
+        if !target.is_object() {
+          return Err(vm.throw_type_error("Reflect.ownKeys called on non-object"));
+        }
+        let keys = vm
+          .own_property_keys_value(&target)?
           .into_iter()
           .map(|key| property_key_to_value(&key))
           .collect::<Vec<_>>();
@@ -2319,7 +2324,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             .cloned()
             .unwrap_or(Value::Undefined);
           let key = vm.to_property_key(&key)?;
-          let Some(desc) = own_property_descriptor(&target, &key) else {
+          let Some(desc) = vm.get_own_property_value(&target, &key)? else {
             return Ok(Value::Undefined);
           };
           Ok(descriptor_value_from_descriptor(&object_proto_map, &desc))
@@ -2327,6 +2332,20 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         &function_proto_map,
       )
     }),
+  );
+  reflect_obj.borrow_mut().properties.insert(
+    PKey::String("getPrototypeOf".to_string()),
+    PropertyDescriptor::data(builtin_object(
+      Rc::new(|vm, args| {
+        let off = static_builtin_arg_offset(vm, args, "Reflect");
+        let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+        if !target.is_object() {
+          return Err(vm.throw_type_error("Reflect.getPrototypeOf called on non-object"));
+        }
+        vm.get_prototype_of_value(&target)
+      }),
+      &function_proto_map,
+    )),
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("has".to_string()),
@@ -2350,16 +2369,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-        let target = vm.to_object_value(target)?;
-        let extensible = match target {
-          Value::Object(obj) => obj.borrow().extensible,
-          Value::Array(_, props)
-          | Value::Closure { props, .. }
-          | Value::BuiltinObject(_, props) => props.borrow().extensible,
-          Value::Promise(_) => false,
-          _ => false,
-        };
-        Ok(Value::Bool(extensible))
+        if !target.is_object() {
+          return Err(vm.throw_type_error("Reflect.isExtensible called on non-object"));
+        }
+        Ok(Value::Bool(vm.is_extensible_value(&target)?))
       }),
       &function_proto_map,
     )),
@@ -2370,16 +2383,33 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-        let target = vm.to_object_value(target)?;
-        match &target {
-          Value::Object(obj) => obj.borrow_mut().extensible = false,
-          Value::Array(_, props)
-          | Value::Closure { props, .. }
-          | Value::BuiltinObject(_, props) => props.borrow_mut().extensible = false,
-          Value::Promise(_) => {}
-          _ => {}
+        if !target.is_object() {
+          return Err(vm.throw_type_error("Reflect.preventExtensions called on non-object"));
         }
-        Ok(Value::Bool(true))
+        Ok(Value::Bool(vm.prevent_extensions_value(&target)?))
+      }),
+      &function_proto_map,
+    )),
+  );
+  reflect_obj.borrow_mut().properties.insert(
+    PKey::String("setPrototypeOf".to_string()),
+    PropertyDescriptor::data(builtin_object(
+      Rc::new(|vm, args| {
+        let off = static_builtin_arg_offset(vm, args, "Reflect");
+        let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+        let proto = args
+          .get(off + 1)
+          .cloned()
+          .unwrap_or(Value::Undefined);
+        if !target.is_object() {
+          return Err(vm.throw_type_error("Reflect.setPrototypeOf called on non-object"));
+        }
+        if !matches!(proto, Value::Null) && !proto.is_object() {
+          return Err(
+            vm.throw_type_error("Reflect.setPrototypeOf prototype must be object or null"),
+          );
+        }
+        Ok(Value::Bool(vm.set_prototype_of_value(&target, &proto)?))
       }),
       &function_proto_map,
     )),
@@ -3297,7 +3327,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       let this = args.first().cloned().unwrap_or(Value::Undefined);
       let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
       let key = vm.to_property_key(&key_value)?;
-      let has_own = own_property_descriptor(&this, &key).is_some();
+      let has_own = vm.get_own_property_value(&this, &key)?.is_some();
       Ok(Value::Bool(has_own))
     }),
     &function_proto_map,
@@ -3312,10 +3342,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       let this = args.first().cloned().unwrap_or(Value::Undefined);
       let key_value = args.get(1).cloned().unwrap_or(Value::Undefined);
       let key = vm.to_property_key(&key_value)?;
-      let enumerable = own_property_descriptor(&this, &key).is_some_and(|desc| match desc {
-        PropertyDescriptor::Data { enumerable, .. }
-        | PropertyDescriptor::Accessor { enumerable, .. } => enumerable,
-      });
+      let enumerable = vm
+        .get_own_property_value(&this, &key)?
+        .is_some_and(|desc| match desc {
+          PropertyDescriptor::Data { enumerable, .. }
+          | PropertyDescriptor::Accessor { enumerable, .. } => enumerable,
+        });
       Ok(Value::Bool(enumerable))
     }),
     &function_proto_map,
@@ -3424,7 +3456,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       let name = args.get(1).cloned().unwrap_or(Value::Undefined);
       let this = vm.to_object_value(this)?;
       let key = vm.to_property_key(&name)?;
-      if let Some(desc) = own_property_descriptor(&this, &key)
+      if let Some(desc) = vm.get_own_property_value(&this, &key)?
         && let PropertyDescriptor::Accessor { get, .. } = desc
       {
         return Ok(get.unwrap_or(Value::Undefined));
@@ -3444,7 +3476,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       let name = args.get(1).cloned().unwrap_or(Value::Undefined);
       let this = vm.to_object_value(this)?;
       let key = vm.to_property_key(&name)?;
-      if let Some(desc) = own_property_descriptor(&this, &key)
+      if let Some(desc) = vm.get_own_property_value(&this, &key)?
         && let PropertyDescriptor::Accessor { set, .. } = desc
       {
         return Ok(set.unwrap_or(Value::Undefined));
@@ -3482,7 +3514,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           if let Some(props) = args.get(off + 1)
             && !matches!(props, Value::Undefined)
           {
-            for key in own_enumerable_keys(props) {
+            for key in vm.own_enumerable_keys_value(props)? {
               let descriptor = vm.get_property_host(props, &key)?;
               let key_value = match &key {
                 PropertyKey::String(s) => Value::String(s.clone()),
@@ -3516,7 +3548,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
               continue;
             }
             let source_obj = vm.to_object_value(source)?;
-            for key in own_enumerable_keys(&source_obj) {
+            for key in vm.own_enumerable_keys_value(&source_obj)? {
               let value = vm.get_property_host(&source_obj, &key)?;
               let key_value = property_key_to_value(&key);
               vm.set_property_host(&target, &key_value, value)?;
@@ -3561,7 +3593,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             .cloned()
             .unwrap_or(Value::Undefined);
           let key = vm.to_property_key(&key_value)?;
-          let has = own_property_descriptor(&target, &key).is_some();
+          let has = vm
+            .get_own_property_value(&target, &key)?
+            .is_some();
           Ok(Value::Bool(has))
         }),
         &function_proto_map,
@@ -3580,7 +3614,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           if matches!(target, Value::Null | Value::Undefined) {
             return Err(vm.throw_type_error("Object.getPrototypeOf called on null/undefined"));
           }
-          Ok(vm.get_prototype(&target))
+          let target = vm.to_object_value(target)?;
+          vm.get_prototype_of_value(&target)
         }),
         &function_proto_map,
       );
@@ -3601,7 +3636,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             .cloned()
             .unwrap_or(Value::Undefined);
           let key = vm.to_property_key(&key_value)?;
-          let Some(desc) = own_property_descriptor(&target, &key) else {
+          let Some(desc) = vm.get_own_property_value(&target, &key)? else {
             return Ok(Value::Undefined);
           };
           Ok(descriptor_value_from_descriptor(&object_proto_map, &desc))
@@ -3617,9 +3652,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     PKey::String("getOwnPropertySymbols".to_string()),
     {
       let builtin = builtin_object(
-        Rc::new(|_vm, args| {
+        Rc::new(|vm, args| {
           let target = args.get(1).cloned().unwrap_or(Value::Undefined);
-          let symbols = own_property_keys(&target)
+          let symbols = vm
+            .own_property_keys_value(&target)?
             .into_iter()
             .filter_map(|key| {
               if let PropertyKey::Symbol(id) = key {
@@ -3647,8 +3683,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           let off = static_builtin_arg_offset(vm, args, "Object");
           let target = args.get(off).cloned().unwrap_or(Value::Undefined);
           let mut result = ObjectData::new();
-          for key in own_property_keys(&target) {
-            if let Some(desc) = own_property_descriptor(&target, &key) {
+          for key in vm.own_property_keys_value(&target)? {
+            if let Some(desc) = vm.get_own_property_value(&target, &key)? {
               let descriptor_value = descriptor_value_from_descriptor(&object_proto_map, &desc);
               result
                 .properties
@@ -3671,7 +3707,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           let off = static_builtin_arg_offset(vm, args, "Object");
           let target = args.get(off).cloned().unwrap_or(Value::Undefined);
           let mut names: Vec<String> = Vec::new();
-          for key in own_property_keys(&target) {
+          for key in vm.own_property_keys_value(&target)? {
             if let PropertyKey::String(name) = key {
               names.push(name);
             }
@@ -3702,7 +3738,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
           let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-          let keys = own_enumerable_keys(&target)
+          let keys = vm
+            .own_enumerable_keys_value(&target)?
             .into_iter()
             .filter_map(|key| match key {
               PropertyKey::String(s) => Some(Value::String(s)),
@@ -3724,7 +3761,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
           let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-          let values = own_enumerable_keys(&target)
+          let values = vm
+            .own_enumerable_keys_value(&target)?
             .into_iter()
             .map(|key| vm.get_property_host(&target, &key))
             .collect::<Result<Vec<_>, _>>()?;
@@ -3743,7 +3781,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
           let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-          let entries = own_enumerable_keys(&target)
+          let entries = vm
+            .own_enumerable_keys_value(&target)?
             .into_iter()
             .map(|key| {
               let key_val = property_key_to_value(&key);
@@ -3811,7 +3850,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           ) {
             return Err(vm.throw_type_error("Object.defineProperties called on non-object"));
           }
-          for key in own_property_keys(&props) {
+          for key in vm.own_property_keys_value(&props)? {
             let descriptor = vm.get_property_host(&props, &key)?;
             if matches!(descriptor, Value::Undefined) {
               continue;
@@ -3829,35 +3868,18 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       set_builtin_length(&builtin, 2.0);
       PropertyDescriptor::data(builtin)
     });
-  object_ctor_map.borrow_mut().properties.insert(
-    PKey::String("getPrototypeOf".to_string()),
-    PropertyDescriptor::data(builtin_object(
-      Rc::new(|vm, args| {
-        let off = static_builtin_arg_offset(vm, args, "Object");
-        let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-        if matches!(target, Value::Null | Value::Undefined) {
-          return Err(vm.throw_type_error("Object.getPrototypeOf called on null/undefined"));
-        }
-        Ok(vm.get_prototype(&target))
-      }),
-      &function_proto_map,
-    )),
-  );
   object_ctor_map
     .borrow_mut()
     .properties
     .insert(PKey::String("isExtensible".to_string()), {
       let builtin = builtin_object(
-        Rc::new(|_vm, args| {
-          let target = args.get(1).cloned().unwrap_or(Value::Undefined);
-          let extensible = match target {
-            Value::Object(obj) => obj.borrow().extensible,
-            Value::Array(_, props)
-            | Value::Closure { props, .. }
-            | Value::BuiltinObject(_, props) => props.borrow().extensible,
-            _ => false,
-          };
-          Ok(Value::Bool(extensible))
+        Rc::new(|vm, args| {
+          let off = static_builtin_arg_offset(vm, args, "Object");
+          let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+          if !target.is_object() {
+            return Ok(Value::Bool(false));
+          }
+          Ok(Value::Bool(vm.is_extensible_value(&target)?))
         }),
         &function_proto_map,
       );
@@ -3872,14 +3894,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
           let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-          let target = vm.to_object_value(target)?;
-          match &target {
-            Value::Object(obj) => obj.borrow_mut().extensible = false,
-            Value::Array(_, props)
-            | Value::Closure { props, .. }
-            | Value::BuiltinObject(_, props) => props.borrow_mut().extensible = false,
-            Value::Promise(_) => {}
-            _ => {}
+          if !target.is_object() {
+            return Ok(target);
+          }
+          if !vm.prevent_extensions_value(&target)? {
+            return Err(vm.throw_type_error("Object.preventExtensions failed"));
           }
           Ok(target)
         }),
@@ -3895,37 +3914,22 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
           let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-          let target = vm.to_object_value(target)?;
           let proto = args
             .get(off + 1)
             .cloned()
             .unwrap_or(Value::Undefined);
-          if !matches!(
-            proto,
-            Value::Null
-              | Value::Object(_)
-              | Value::Array(..)
-              | Value::Closure { .. }
-              | Value::BuiltinObject(_, _)
-          ) {
+          if !matches!(proto, Value::Null) && !proto.is_object() {
             return Err(
               vm.throw_type_error("Object.setPrototypeOf prototype must be object or null"),
             );
           }
-          let current_proto = vm.get_prototype(&target);
-          if strict_equal(&current_proto, &proto) {
+          if matches!(target, Value::Null | Value::Undefined) {
+            return Err(vm.throw_type_error("Object.setPrototypeOf called on null/undefined"));
+          }
+          if !target.is_object() {
             return Ok(target);
           }
-          let Some(updated) = with_object_data_mut(&target, |data| {
-            if !data.extensible {
-              return false;
-            }
-            data.set_prototype_value(proto.clone());
-            true
-          }) else {
-            return Ok(target);
-          };
-          if !updated {
+          if !vm.set_prototype_of_value(&target, &proto)? {
             return Err(
               vm.throw_type_error("Object.setPrototypeOf called on non-extensible object"),
             );
@@ -3945,28 +3949,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
           let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-          let target = vm.to_object_value(target)?;
-          if with_object_data_mut(&target, |data| {
-            for desc in data.properties.values_mut() {
-              match desc {
-                PropertyDescriptor::Data {
-                  writable,
-                  configurable,
-                  ..
-                } => {
-                  *writable = false;
-                  *configurable = false;
-                }
-                PropertyDescriptor::Accessor { configurable, .. } => {
-                  *configurable = false;
-                }
-              }
-            }
-            data.extensible = false;
-          })
-          .is_none()
-          {
+          if !target.is_object() {
             return Ok(target);
+          }
+          if !vm.set_integrity_level(&target, true)? {
+            return Err(vm.throw_type_error("Object.freeze failed"));
           }
           Ok(target)
         }),
@@ -3983,21 +3970,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
           let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-          let target = vm.to_object_value(target)?;
-          if with_object_data_mut(&target, |data| {
-            for desc in data.properties.values_mut() {
-              match desc {
-                PropertyDescriptor::Data { configurable, .. }
-                | PropertyDescriptor::Accessor { configurable, .. } => {
-                  *configurable = false;
-                }
-              }
-            }
-            data.extensible = false;
-          })
-          .is_none()
-          {
+          if !target.is_object() {
             return Ok(target);
+          }
+          if !vm.set_integrity_level(&target, false)? {
+            return Err(vm.throw_type_error("Object.seal failed"));
           }
           Ok(target)
         }),
@@ -4014,10 +3991,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
           let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-          let target = vm.to_object_value(target)?;
-          let sealed =
-            matches!(target, Value::Promise(_)) || own_properties_all_non_configurable(&target);
-          Ok(Value::Bool(sealed))
+          if !target.is_object() {
+            return Ok(Value::Bool(true));
+          }
+          Ok(Value::Bool(vm.test_integrity_level(&target, false)?))
         }),
         &function_proto_map,
       );
@@ -4032,9 +4009,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
           let target = args.get(off).cloned().unwrap_or(Value::Undefined);
-          let target = vm.to_object_value(target)?;
-          let frozen = matches!(target, Value::Promise(_)) || own_properties_frozen(&target);
-          Ok(Value::Bool(frozen))
+          if !target.is_object() {
+            return Ok(Value::Bool(true));
+          }
+          Ok(Value::Bool(vm.test_integrity_level(&target, true)?))
         }),
         &function_proto_map,
       );
@@ -4665,9 +4643,13 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   reflect.borrow_mut().properties.insert(
     PKey::String("ownKeys".to_string()),
     PropertyDescriptor::data(Value::BuiltinObject(
-      Rc::new(|_vm, args| {
+      Rc::new(|vm, args| {
         let target = args.get(1).cloned().unwrap_or(Value::Undefined);
-        let keys = own_property_keys(&target)
+        if !target.is_object() {
+          return Err(vm.throw_type_error("Reflect.ownKeys called on non-object"));
+        }
+        let keys = vm
+          .own_property_keys_value(&target)?
           .into_iter()
           .map(|key| property_key_to_value(&key))
           .collect::<Vec<_>>();

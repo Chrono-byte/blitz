@@ -403,6 +403,640 @@ mod test {
   }
 
   #[test]
+  fn reflect_own_keys_uses_ecmascript_key_order() {
+    let (vm, _globals) = run_script(
+      r#"
+        var first = Symbol("first");
+        var second = Symbol("second");
+        var obj = {};
+        obj.b = 1;
+        obj[2] = 2;
+        obj["4294967295"] = 3;
+        obj.a = 4;
+        obj[1] = 5;
+        obj[first] = 6;
+        obj.c = 7;
+        obj[second] = 8;
+        var keys = Reflect.ownKeys(obj);
+        globalThis.key_order = keys.slice(0, 6).join(",");
+        globalThis.symbol_order = keys[6] === first && keys[7] === second;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("key_order"),
+      Some(Value::String("1,2,b,4294967295,a,c".to_string()))
+    );
+    assert_eq!(vm.get_global("symbol_order"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn reflect_own_keys_excludes_array_holes() {
+    let (vm, _globals) = run_script(
+      r#"
+        var array = [];
+        array.length = 4;
+        array[2] = "present";
+        array.extra = true;
+        globalThis.keys = Reflect.ownKeys(array).join(",");
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("keys"),
+      Some(Value::String("2,length,extra".to_string()))
+    );
+  }
+
+  #[test]
+  fn proxy_own_keys_trap_controls_order_and_preserves_symbols() {
+    let (vm, _globals) = run_script(
+      r#"
+        var symbol = Symbol("key");
+        var target = { a: 1, b: 2 };
+        target[symbol] = 3;
+        var proxy = new Proxy(target, {
+          ownKeys: function() { return [symbol, "b", "a", "extra"]; }
+        });
+        var keys = Reflect.ownKeys(proxy);
+        globalThis.order_ok = keys[0] === symbol
+          && keys[1] === "b"
+          && keys[2] === "a"
+          && keys[3] === "extra";
+      "#,
+    );
+
+    assert_eq!(vm.get_global("order_ok"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn proxy_own_keys_rejects_invalid_trap_results() {
+    let (vm, _globals) = run_script(
+      r#"
+        var duplicate_rejected = false;
+        try {
+          Reflect.ownKeys(new Proxy({}, {
+            ownKeys: function() { return ["a", "a"]; }
+          }));
+        } catch (error) {
+          duplicate_rejected = error instanceof TypeError;
+        }
+
+        var fixed = {};
+        Object.defineProperty(fixed, "fixed", { configurable: false });
+        var fixed_rejected = false;
+        try {
+          Reflect.ownKeys(new Proxy(fixed, {
+            ownKeys: function() { return []; }
+          }));
+        } catch (error) {
+          fixed_rejected = error instanceof TypeError;
+        }
+
+        var sealed = { present: true };
+        Object.preventExtensions(sealed);
+        var sealed_rejected = false;
+        try {
+          Reflect.ownKeys(new Proxy(sealed, {
+            ownKeys: function() { return ["present", "extra"]; }
+          }));
+        } catch (error) {
+          sealed_rejected = error instanceof TypeError;
+        }
+
+        var valid = {};
+        Object.defineProperty(valid, "fixed", { configurable: false });
+        Object.preventExtensions(valid);
+        var valid_keys = Reflect.ownKeys(new Proxy(valid, {
+          ownKeys: function() { return ["fixed"]; }
+        }));
+        var valid_result_accepted = valid_keys.length === 1 && valid_keys[0] === "fixed";
+
+        globalThis.invalid_results_rejected = duplicate_rejected
+          && fixed_rejected
+          && sealed_rejected
+          && valid_result_accepted;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("invalid_results_rejected"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn proxy_get_own_property_descriptor_drives_enumeration() {
+    let (vm, _globals) = run_script(
+      r#"
+        var target = {};
+        var proxy = new Proxy(target, {
+          ownKeys: function() { return ["virtual"]; },
+          getOwnPropertyDescriptor: function(target, key) {
+            return {
+              value: 42,
+              writable: true,
+              enumerable: true,
+              configurable: true
+            };
+          }
+        });
+        var desc = Object.getOwnPropertyDescriptor(proxy, "virtual");
+        globalThis.proxy_descriptor_ok = desc.value === 42
+          && desc.enumerable === true
+          && Object.keys(proxy).join(",") === "virtual";
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("proxy_descriptor_ok"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn proxy_get_own_property_descriptor_enforces_invariants() {
+    let (vm, _globals) = run_script(
+      r#"
+        var fixed = {};
+        Object.defineProperty(fixed, "value", { configurable: false });
+        var hidden_fixed_rejected = false;
+        try {
+          Object.getOwnPropertyDescriptor(new Proxy(fixed, {
+            getOwnPropertyDescriptor: function() { return undefined; }
+          }), "value");
+        } catch (error) {
+          hidden_fixed_rejected = error instanceof TypeError;
+        }
+
+        var sealed = { value: 1 };
+        Object.preventExtensions(sealed);
+        var hidden_sealed_rejected = false;
+        try {
+          Object.getOwnPropertyDescriptor(new Proxy(sealed, {
+            getOwnPropertyDescriptor: function() { return undefined; }
+          }), "value");
+        } catch (error) {
+          hidden_sealed_rejected = error instanceof TypeError;
+        }
+
+        var new_fixed_rejected = false;
+        try {
+          Object.getOwnPropertyDescriptor(new Proxy({}, {
+            getOwnPropertyDescriptor: function() {
+              return { configurable: false };
+            }
+          }), "value");
+        } catch (error) {
+          new_fixed_rejected = error instanceof TypeError;
+        }
+
+        globalThis.proxy_descriptor_invariants = hidden_fixed_rejected
+          && hidden_sealed_rejected
+          && new_fixed_rejected;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("proxy_descriptor_invariants"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn proxy_get_and_set_traps_receive_the_original_receiver() {
+    let (vm, _globals) = run_script(
+      r#"
+        var get_receiver;
+        var set_receiver;
+        var set_value;
+        var target = {};
+        var proxy = new Proxy(target, {
+          get: function(actual_target, key, receiver) {
+            get_receiver = receiver;
+            return key === "value" && actual_target === target ? 42 : undefined;
+          },
+          set: function(actual_target, key, value, receiver) {
+            set_receiver = receiver;
+            set_value = value;
+            return actual_target === target && key === "value";
+          }
+        });
+
+        var read = proxy.value;
+        proxy.value = 7;
+        var custom_receiver = {};
+        var reflected = Reflect.set(proxy, "value", 9, custom_receiver);
+        globalThis.proxy_get_set_receiver_ok = read === 42
+          && get_receiver === proxy
+          && set_receiver === custom_receiver
+          && set_value === 9
+          && reflected
+          && target.value === undefined;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("proxy_get_set_receiver_ok"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn proxy_get_and_set_traps_enforce_target_invariants() {
+    let (vm, _globals) = run_script(
+      r#"
+        var fixed = {};
+        Object.defineProperty(fixed, "value", {
+          value: 1,
+          writable: false,
+          configurable: false
+        });
+
+        var bad_get_rejected = false;
+        var bad_set_rejected = false;
+        try {
+          new Proxy(fixed, { get: function() { return 2; } }).value;
+        } catch (error) {
+          bad_get_rejected = error instanceof TypeError;
+        }
+        try {
+          Reflect.set(new Proxy(fixed, { set: function() { return true; } }), "value", 2);
+        } catch (error) {
+          bad_set_rejected = error instanceof TypeError;
+        }
+
+        var accessor = {};
+        Object.defineProperty(accessor, "value", {
+          get: undefined,
+          set: undefined,
+          configurable: false
+        });
+        var missing_getter_rejected = false;
+        var missing_setter_rejected = false;
+        try {
+          new Proxy(accessor, { get: function() { return 1; } }).value;
+        } catch (error) {
+          missing_getter_rejected = error instanceof TypeError;
+        }
+        try {
+          Reflect.set(new Proxy(accessor, { set: function() { return true; } }), "value", 1);
+        } catch (error) {
+          missing_setter_rejected = error instanceof TypeError;
+        }
+
+        var allowed_get = new Proxy(fixed, { get: function() { return 1; } }).value === 1;
+        var allowed_set = Reflect.set(
+          new Proxy(fixed, { set: function() { return true; } }),
+          "value",
+          1
+        );
+        globalThis.proxy_get_set_invariants = bad_get_rejected
+          && bad_set_rejected
+          && missing_getter_rejected
+          && missing_setter_rejected
+          && allowed_get
+          && allowed_set;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("proxy_get_set_invariants"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn proxy_set_false_distinguishes_reflect_and_strict_assignment() {
+    let (vm, _globals) = run_script(
+      r#"
+        var proxy = new Proxy({}, { set: function() { return false; } });
+        var reflected = Reflect.set(proxy, "value", 1);
+        var strict_rejected = false;
+        try {
+          (function() { "use strict"; proxy.value = 1; })();
+        } catch (error) {
+          strict_rejected = error instanceof TypeError;
+        }
+        globalThis.proxy_set_false_ok = reflected === false && strict_rejected;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("proxy_set_false_ok"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn proxy_get_and_set_fallbacks_preserve_receiver_semantics() {
+    let (vm, _globals) = run_script(
+      r#"
+        var accessor_receiver;
+        var target = {};
+        Object.defineProperty(target, "accessor", {
+          get: function() { return this; },
+          set: function() { accessor_receiver = this; },
+          configurable: true
+        });
+        var proxy = new Proxy(target, {});
+
+        proxy.value = 3;
+        var custom_receiver = {};
+        var reflected = Reflect.set(proxy, "other", 4, custom_receiver);
+        var getter_receiver_ok = proxy.accessor === proxy;
+        proxy.accessor = 5;
+
+        var empty_accessor = {};
+        Object.defineProperty(empty_accessor, "value", {
+          get: undefined,
+          set: undefined,
+          configurable: false
+        });
+        var empty_proxy = new Proxy(empty_accessor, {});
+        var empty_accessor_ok = empty_proxy.value === undefined
+          && Reflect.set(empty_proxy, "value", 1) === false;
+
+        globalThis.proxy_get_set_fallback_ok = target.value === 3
+          && target.other === undefined
+          && custom_receiver.other === 4
+          && reflected
+          && getter_receiver_ok
+          && accessor_receiver === proxy
+          && empty_accessor_ok;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("proxy_get_set_fallback_ok"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn proxy_define_property_trap_and_invariants() {
+    let (vm, _globals) = run_script(
+      r#"
+        var observed = false;
+        var target = {};
+        var proxy = new Proxy(target, {
+          defineProperty: function(target, key, desc) {
+            observed = key === "virtual" && desc.value === 7;
+            return true;
+          }
+        });
+        var accepted = Reflect.defineProperty(proxy, "virtual", {
+          value: 7,
+          configurable: true
+        });
+
+        var sealed = {};
+        Object.preventExtensions(sealed);
+        var sealed_rejected = false;
+        try {
+          Reflect.defineProperty(new Proxy(sealed, {
+            defineProperty: function() { return true; }
+          }), "new", { value: 1 });
+        } catch (error) {
+          sealed_rejected = error instanceof TypeError;
+        }
+
+        var fixed = {};
+        Object.defineProperty(fixed, "value", {
+          value: 1,
+          writable: false,
+          configurable: false
+        });
+        var fixed_rejected = false;
+        try {
+          Reflect.defineProperty(new Proxy(fixed, {
+            defineProperty: function() { return true; }
+          }), "value", { value: 2 });
+        } catch (error) {
+          fixed_rejected = error instanceof TypeError;
+        }
+
+        globalThis.proxy_define_ok = accepted
+          && observed
+          && target.virtual === undefined
+          && sealed_rejected
+          && fixed_rejected;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("proxy_define_ok"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn proxy_has_and_delete_traps_enforce_invariants() {
+    let (vm, _globals) = run_script(
+      r#"
+        var target = { value: 1 };
+        var proxy = new Proxy(target, {
+          has: function() { return false; },
+          deleteProperty: function() { return true; }
+        });
+        var virtual_has = "value" in proxy;
+        var virtual_delete = Reflect.deleteProperty(proxy, "value");
+
+        var fixed = {};
+        Object.defineProperty(fixed, "value", { configurable: false });
+        var fixed_has_rejected = false;
+        var fixed_delete_rejected = false;
+        try {
+          "value" in new Proxy(fixed, { has: function() { return false; } });
+        } catch (error) {
+          fixed_has_rejected = error instanceof TypeError;
+        }
+        try {
+          Reflect.deleteProperty(new Proxy(fixed, {
+            deleteProperty: function() { return true; }
+          }), "value");
+        } catch (error) {
+          fixed_delete_rejected = error instanceof TypeError;
+        }
+
+        var sealed = { value: 1 };
+        Object.preventExtensions(sealed);
+        var sealed_has_rejected = false;
+        var sealed_delete_rejected = false;
+        try {
+          "value" in new Proxy(sealed, { has: function() { return false; } });
+        } catch (error) {
+          sealed_has_rejected = error instanceof TypeError;
+        }
+        try {
+          Reflect.deleteProperty(new Proxy(sealed, {
+            deleteProperty: function() { return true; }
+          }), "value");
+        } catch (error) {
+          sealed_delete_rejected = error instanceof TypeError;
+        }
+
+        globalThis.proxy_has_delete_ok = virtual_has === false
+          && virtual_delete === true
+          && target.value === 1
+          && fixed_has_rejected
+          && fixed_delete_rejected
+          && sealed_has_rejected
+          && sealed_delete_rejected;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("proxy_has_delete_ok"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn proxy_extensibility_traps_enforce_target_state() {
+    let (vm, _globals) = run_script(
+      r#"
+        var target = {};
+        var proxy = new Proxy(target, {
+          isExtensible: function(target) {
+            return Reflect.isExtensible(target);
+          },
+          preventExtensions: function(target) {
+            return Reflect.preventExtensions(target);
+          }
+        });
+        var initially_extensible = Reflect.isExtensible(proxy);
+        var prevented = Reflect.preventExtensions(proxy);
+        var finally_extensible = Object.isExtensible(proxy);
+
+        var bad_is_extensible = false;
+        try {
+          Reflect.isExtensible(new Proxy({}, {
+            isExtensible: function() { return false; }
+          }));
+        } catch (error) {
+          bad_is_extensible = error instanceof TypeError;
+        }
+
+        var bad_prevent_extensions = false;
+        try {
+          Reflect.preventExtensions(new Proxy({}, {
+            preventExtensions: function() { return true; }
+          }));
+        } catch (error) {
+          bad_prevent_extensions = error instanceof TypeError;
+        }
+
+        globalThis.proxy_extensibility_ok = initially_extensible
+          && prevented
+          && !finally_extensible
+          && bad_is_extensible
+          && bad_prevent_extensions;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("proxy_extensibility_ok"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn proxy_prototype_traps_and_reflect_methods_enforce_invariants() {
+    let (vm, _globals) = run_script(
+      r#"
+        var target = {};
+        var reported = {};
+        var proxy = new Proxy(target, {
+          getPrototypeOf: function() { return reported; },
+          setPrototypeOf: function() { return true; }
+        });
+        var extensible_get = Reflect.getPrototypeOf(proxy) === reported;
+        var extensible_set = Reflect.setPrototypeOf(proxy, reported);
+        var target_unchanged = Reflect.getPrototypeOf(target) !== reported;
+
+        Object.preventExtensions(target);
+        var invalid_get = false;
+        var invalid_set = false;
+        try {
+          Reflect.getPrototypeOf(proxy);
+        } catch (error) {
+          invalid_get = error instanceof TypeError;
+        }
+        try {
+          Reflect.setPrototypeOf(proxy, reported);
+        } catch (error) {
+          invalid_set = error instanceof TypeError;
+        }
+
+        var actual = Reflect.getPrototypeOf(target);
+        var valid = new Proxy(target, {
+          getPrototypeOf: function() { return actual; },
+          setPrototypeOf: function() { return true; }
+        });
+        var matching_get = Object.getPrototypeOf(valid) === actual;
+        var matching_set = Reflect.setPrototypeOf(valid, actual);
+
+        globalThis.proxy_prototype_ok = extensible_get
+          && extensible_set
+          && target_unchanged
+          && invalid_get
+          && invalid_set
+          && matching_get
+          && matching_set;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("proxy_prototype_ok"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn object_integrity_operations_use_proxy_internal_methods() {
+    let (vm, _globals) = run_script(
+      r#"
+        var target = { value: 1 };
+        var prevented = false;
+        var described = false;
+        var defined = false;
+        var proxy = new Proxy(target, {
+          preventExtensions: function(target) {
+            prevented = true;
+            return Reflect.preventExtensions(target);
+          },
+          ownKeys: function(target) {
+            return Reflect.ownKeys(target);
+          },
+          getOwnPropertyDescriptor: function(target, key) {
+            described = true;
+            return Reflect.getOwnPropertyDescriptor(target, key);
+          },
+          defineProperty: function(target, key, desc) {
+            defined = true;
+            return Reflect.defineProperty(target, key, desc);
+          },
+          isExtensible: function(target) {
+            return Reflect.isExtensible(target);
+          }
+        });
+        var frozen_result = Object.freeze(proxy) === proxy;
+        var descriptor = Object.getOwnPropertyDescriptor(target, "value");
+        var frozen = Object.isFrozen(proxy);
+
+        var primitive_behavior = Object.freeze(1) === 1
+          && Object.seal("x") === "x"
+          && Object.isFrozen(undefined)
+          && Object.isSealed(null)
+          && !Object.isExtensible(1);
+
+        globalThis.proxy_integrity_ok = frozen_result
+          && prevented
+          && described
+          && defined
+          && frozen
+          && descriptor.writable === false
+          && descriptor.configurable === false
+          && primitive_behavior;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("proxy_integrity_ok"), Some(Value::Bool(true)));
+  }
+
+  #[test]
   fn builtin_object_property_lookup_uses_props_and_prototype() {
     let proto = Rc::new(RefCell::new(ObjectData::new()));
     proto.borrow_mut().properties.insert(
@@ -1929,7 +2563,7 @@ mod test {
   #[test]
   fn for_in_keys_walks_prototype_chain_without_duplicates() {
     let globals = test_globals();
-    let vm = Vm::new(globals);
+    let mut vm = Vm::new(globals);
 
     let mut proto = ObjectData::new();
     proto.properties.insert(

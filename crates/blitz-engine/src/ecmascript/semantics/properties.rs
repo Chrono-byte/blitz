@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::Vm;
@@ -62,80 +63,6 @@ fn array_length(props: &ObjectData) -> usize {
       _ => None,
     })
     .unwrap_or(0)
-}
-
-/// Gets all enumerable own property keys of an object.
-pub(crate) fn own_enumerable_keys(obj: &Value) -> Vec<PropertyKey> {
-  fn enumerable_prop_keys(
-    props: &RefCell<ObjectData>,
-    skip_length: bool,
-  ) -> Vec<PropertyKey> {
-    let mut index_keys: Vec<u64> = Vec::new();
-    let mut string_keys: Vec<String> = Vec::new();
-    let mut symbol_keys: Vec<PropertyKey> = Vec::new();
-    for (key, desc) in &props.borrow().properties {
-      let enumerable = match desc {
-        PropertyDescriptor::Data { enumerable, .. }
-        | PropertyDescriptor::Accessor { enumerable, .. } => *enumerable,
-      };
-      if !enumerable {
-        continue;
-      }
-      match key {
-        PropertyKey::String(name) => {
-          if skip_length && name == "length" {
-            continue;
-          }
-          if let Some(idx) = canonical_index_key(name) {
-            index_keys.push(idx);
-          } else {
-            string_keys.push(name.clone());
-          }
-        }
-        PropertyKey::Symbol(_) => symbol_keys.push(key.clone()),
-      }
-    }
-    index_keys.sort_unstable();
-    index_keys.dedup();
-    let mut out: Vec<PropertyKey> = index_keys
-      .into_iter()
-      .map(|idx| PropertyKey::String(decimal_u64_string(idx)))
-      .collect();
-    out.extend(string_keys.into_iter().map(PropertyKey::String));
-    out.extend(symbol_keys);
-    out
-  }
-
-  let mut keys = Vec::new();
-  match obj {
-    Value::Object(data) => keys.extend(enumerable_prop_keys(data, false)),
-    Value::Proxy(proxy) => {
-      let proxy = proxy.borrow();
-      if !proxy.is_revoked() {
-        keys.extend(own_enumerable_keys(&proxy.target));
-      }
-    }
-    Value::Array(arr, props) => {
-      for (idx, slot) in arr.borrow().iter().enumerate() {
-        if slot.is_some() {
-          keys.push(PropertyKey::String(usize_to_decimal_string(idx)));
-        }
-      }
-      keys.extend(enumerable_prop_keys(props, true));
-    }
-    Value::Closure { .. } | Value::BuiltinObject(..) | Value::Builtin(_) => {
-      let p = match obj {
-        Value::Closure { props, .. } => Some(props),
-        Value::BuiltinObject(_, props) => Some(props),
-        _ => None,
-      };
-      if let Some(props) = p {
-        keys.extend(enumerable_prop_keys(props, false));
-      }
-    }
-    _ => {}
-  }
-  keys
 }
 
 /// Creates a non-enumerable data property descriptor.
@@ -267,9 +194,7 @@ pub(crate) fn own_property_keys(obj: &Value) -> Vec<PropertyKey> {
   let mut keys = Vec::new();
   match obj {
     Value::Object(data) => {
-      for key in data.borrow().properties.keys() {
-        keys.push(key.clone());
-      }
+      keys.extend(data.borrow().properties.keys().cloned());
     }
     Value::Proxy(proxy) => {
       let proxy = proxy.borrow();
@@ -278,21 +203,53 @@ pub(crate) fn own_property_keys(obj: &Value) -> Vec<PropertyKey> {
       }
     }
     Value::Array(arr, props) => {
-      for idx in 0..arr.borrow().len() {
-        keys.push(PropertyKey::String(usize_to_decimal_string(idx)));
+      for (idx, slot) in arr.borrow().iter().enumerate() {
+        if slot.is_some() {
+          keys.push(PropertyKey::String(usize_to_decimal_string(idx)));
+        }
       }
-      for key in props.borrow().properties.keys() {
-        keys.push(key.clone());
-      }
+      keys.extend(props.borrow().properties.keys().cloned());
     }
     Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
-      for key in props.borrow().properties.keys() {
-        keys.push(key.clone());
-      }
+      keys.extend(props.borrow().properties.keys().cloned());
     }
     _ => {}
   }
-  keys
+  order_property_keys(keys)
+}
+
+fn order_property_keys(keys: Vec<PropertyKey>) -> Vec<PropertyKey> {
+  let mut indices = Vec::new();
+  let mut strings = Vec::new();
+  let mut symbols = Vec::new();
+  let mut seen = HashSet::new();
+
+  for key in keys {
+    if !seen.insert(key.clone()) {
+      continue;
+    }
+    match &key {
+      PropertyKey::String(name) => match array_index_from_string(name) {
+        Some(index) => indices.push((index, key)),
+        None => strings.push(key),
+      },
+      PropertyKey::Symbol(_) => symbols.push(key),
+    }
+  }
+
+  indices.sort_unstable_by_key(|(index, _)| *index);
+  indices
+    .into_iter()
+    .map(|(_, key)| key)
+    .chain(strings)
+    .chain(symbols)
+    .collect()
+}
+
+fn array_index_from_string(name: &str) -> Option<u32> {
+  let index = canonical_index_key(name)?;
+  let index = u32::try_from(index).ok()?;
+  (index != u32::MAX).then_some(index)
 }
 
 /// Converts a PropertyKey to its corresponding Value.

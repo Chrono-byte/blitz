@@ -21,7 +21,7 @@ pub(super) fn install(
     set(&environment, &name, Value::String(value));
   }
 
-  let versions = object(object_prototype.clone());
+  let versions = object(object_prototype);
   set(
     &versions,
     "blitz",

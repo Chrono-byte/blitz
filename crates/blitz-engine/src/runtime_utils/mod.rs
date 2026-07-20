@@ -38,9 +38,9 @@
 //!     does not produce a proper iterator over elements (iterator `next`
 //!     semantics are simplified). Implementing a proper iterator object is
 //!     required for conformance.
-//! - Object own-key ordering is built from HashMap iteration and thus does
-//!   not follow the spec ordering rules for integer indices / string keys /
-//!   symbols.
+//! - Ordinary objects and arrays use ECMAScript own-key ordering, but several
+//!   exotic object kinds still share ordinary storage instead of defining
+//!   their own complete internal-method behavior.
 //! - TypeScript slot-type runtime checks are a non-standard extension: the
 //!   VM can optionally enforce compile-time slot types at runtime; this is
 //!   not part of ECMA-262.

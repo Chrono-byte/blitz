@@ -843,7 +843,7 @@ impl Vm {
   /// Return enumerable string keys for `for-in`, walking the prototype
   /// chain and skipping duplicates.
   pub fn for_in_keys_of_value(
-    &self,
+    &mut self,
     v: &Value,
   ) -> Result<Vec<String>, RuntimeError> {
     let mut keys = Vec::new();
@@ -858,7 +858,7 @@ impl Vm {
         ));
       }
 
-      for key in crate::runtime_utils::own_enumerable_keys(&current) {
+      for key in self.own_enumerable_keys_value(&current)? {
         if let PropertyKey::String(name) = key
           && seen.insert(name.clone())
         {
@@ -2544,7 +2544,7 @@ impl Vm {
     Ok(
       left
         .partial_cmp(&right)
-        .map(|order| order.is_lt()),
+        .map(std::cmp::Ordering::is_lt),
     )
   }
 

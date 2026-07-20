@@ -49,57 +49,6 @@ fn json_value_identity(value: &Value) -> Option<usize> {
   }
 }
 
-fn with_object_data_mut<T>(
-  value: &Value,
-  f: impl FnOnce(&mut ObjectData) -> T,
-) -> Option<T> {
-  match value {
-    Value::Object(obj) => Some(f(&mut obj.borrow_mut())),
-    Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
-      Some(f(&mut props.borrow_mut()))
-    }
-    Value::Proxy(proxy) => {
-      let proxy = proxy.borrow();
-      if proxy.is_revoked() {
-        None
-      } else if let Value::Object(obj) = &proxy.target {
-        Some(f(&mut obj.borrow_mut()))
-      } else if let Value::Array(_, props) = &proxy.target {
-        Some(f(&mut props.borrow_mut()))
-      } else if let Value::Closure { props, .. } = &proxy.target {
-        Some(f(&mut props.borrow_mut()))
-      } else if let Value::BuiltinObject(_, props) = &proxy.target {
-        Some(f(&mut props.borrow_mut()))
-      } else {
-        None
-      }
-    }
-    _ => None,
-  }
-}
-
-fn own_properties_all_non_configurable(value: &Value) -> bool {
-  own_property_keys(value).into_iter().all(|key| {
-    own_property_descriptor(value, &key).is_some_and(|desc| match desc {
-      PropertyDescriptor::Data { configurable, .. }
-      | PropertyDescriptor::Accessor { configurable, .. } => !configurable,
-    })
-  })
-}
-
-fn own_properties_frozen(value: &Value) -> bool {
-  own_property_keys(value).into_iter().all(|key| {
-    own_property_descriptor(value, &key).is_some_and(|desc| match desc {
-      PropertyDescriptor::Data {
-        writable,
-        configurable,
-        ..
-      } => !writable && !configurable,
-      PropertyDescriptor::Accessor { configurable, .. } => !configurable,
-    })
-  })
-}
-
 fn array_like_length(
   vm: &mut Vm,
   receiver: &Value,
@@ -153,7 +102,7 @@ fn collect_indexed_snapshot(
 ) -> Result<(Vec<usize>, HashMap<usize, Value>), RuntimeError> {
   let mut keys = Vec::new();
   let mut values = HashMap::new();
-  for key in own_property_keys(receiver) {
+  for key in vm.own_property_keys_value(receiver)? {
     let PropertyKey::String(s) = key else {
       continue;
     };
@@ -261,7 +210,7 @@ fn json_stringify_value(
         return Err(vm.throw_type_error("Converting circular structure to JSON"));
       }
       let mut parts = Vec::new();
-      for key in own_enumerable_keys(value) {
+      for key in vm.own_enumerable_keys_value(value)? {
         let PropertyKey::String(name) = key else {
           continue;
         };

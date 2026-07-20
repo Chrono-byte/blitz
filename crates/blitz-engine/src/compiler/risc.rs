@@ -508,26 +508,7 @@ pub(crate) fn lower_chunk(chunk: &Chunk) -> Result<Chunk, CompilerError> {
       .and_then(|target| *target)
       .ok_or_else(|| CompilerError::from("branch targets unreachable stack IR"))?;
     let offset = target as i64 - (patch.risc_ip as i64 + 1);
-    let word =
-      match patch.kind {
-        BranchKind::Jump | BranchKind::Handler => {
-          let op = if matches!(patch.kind, BranchKind::Handler) {
-            Op::PushHandler
-          } else {
-            Op::Jump
-          };
-          if !(-(1 << 23)..(1 << 23)).contains(&offset) {
-            return Err(CompilerError::from("RISC long branch exceeds signed i24"));
-          }
-          op as u32 | (((offset as u32) & 0x00FF_FFFF) << 8)
-        }
-        BranchKind::Conditional(op, register) => encode_risc_cond_jump(op, register, offset as i32)
-          .ok_or_else(|| CompilerError::from("RISC conditional branch exceeds signed i20"))?,
-        BranchKind::Compare(condition, left, right) => {
-          encode_compare_jump(condition, left, right, offset as i16)
-            .ok_or_else(|| CompilerError::from("RISC compare branch exceeds signed i13"))?
-        }
-      };
+    let word = encode_branch_patch(patch.kind, offset)?;
     lowered.code[patch.risc_ip] = word;
   }
 
@@ -542,6 +523,39 @@ pub(crate) fn lower_chunk(chunk: &Chunk) -> Result<Chunk, CompilerError> {
     .collect::<Result<Vec<_>, CompilerError>>()?;
 
   Ok(lowered)
+}
+
+fn encode_branch_patch(
+  kind: BranchKind,
+  offset: i64,
+) -> Result<u32, CompilerError> {
+  match kind {
+    BranchKind::Jump | BranchKind::Handler => {
+      let op = if matches!(kind, BranchKind::Handler) {
+        Op::PushHandler
+      } else {
+        Op::Jump
+      };
+      let offset = i32::try_from(offset)
+        .map_err(|_| CompilerError::from("RISC long branch exceeds signed i24"))?;
+      if !(-(1 << 23)..(1 << 23)).contains(&offset) {
+        return Err(CompilerError::from("RISC long branch exceeds signed i24"));
+      }
+      Ok(op as u32 | ((offset.cast_unsigned() & 0x00FF_FFFF) << 8))
+    }
+    BranchKind::Conditional(op, register) => {
+      let offset = i32::try_from(offset)
+        .map_err(|_| CompilerError::from("RISC conditional branch exceeds signed i20"))?;
+      encode_risc_cond_jump(op, register, offset)
+        .ok_or_else(|| CompilerError::from("RISC conditional branch exceeds signed i20"))
+    }
+    BranchKind::Compare(condition, left, right) => {
+      let offset = i16::try_from(offset)
+        .map_err(|_| CompilerError::from("RISC compare branch exceeds signed i13"))?;
+      encode_compare_jump(condition, left, right, offset)
+        .ok_or_else(|| CompilerError::from("RISC compare branch exceeds signed i13"))
+    }
+  }
 }
 
 fn risc_executor_supports(op: Op) -> bool {
@@ -1006,6 +1020,17 @@ mod tests {
         .any(|word| { matches!(Op::from_byte((*word & 0xFF) as u8), Some(Op::CompareJump)) })
     );
     chunk.verify().expect("verified RISC chunk");
+  }
+
+  #[test]
+  fn rejects_branch_offsets_before_narrowing() {
+    let conditional = encode_branch_patch(BranchKind::Conditional(Op::JumpIfFalse, 0), 1_i64 << 32)
+      .expect_err("offset must not wrap to i32");
+    assert!(conditional.message.contains("signed i20"));
+
+    let comparison = encode_branch_patch(BranchKind::Compare(0, 0, 0), 1_i64 << 16)
+      .expect_err("offset must not wrap to i16");
+    assert!(comparison.message.contains("signed i13"));
   }
 
   #[test]
