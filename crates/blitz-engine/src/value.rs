@@ -667,10 +667,14 @@ impl Value {
 
   /// Returns true if the value is a callable type.
   pub fn is_callable(&self) -> bool {
-    matches!(
-      self,
-      Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
-    )
+    match self {
+      Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _) => true,
+      Value::Proxy(proxy) => {
+        let proxy = proxy.borrow();
+        !proxy.is_revoked() && proxy.target.is_callable()
+      }
+      _ => false,
+    }
   }
 
   /// Returns the type name of the value as a static string

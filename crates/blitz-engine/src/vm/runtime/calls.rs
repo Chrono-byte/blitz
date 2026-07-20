@@ -251,6 +251,23 @@ impl Vm {
   /// # Errors
   ///
   /// Returns a [`crate::errors::RuntimeError`] if the construction fails.
+  pub(crate) fn construct_value_with_new_target(
+    &mut self,
+    callee: &Value,
+    args: &[Value],
+    new_target: Value,
+  ) -> Result<Value, RuntimeError> {
+    let previous_new_target = self.construct_new_target.replace(new_target);
+    let result = self.construct_value(callee, args);
+    self.construct_new_target = previous_new_target;
+    result
+  }
+
+  /// Host hook: construct a callable with `new` semantics.
+  ///
+  /// # Errors
+  ///
+  /// Returns a [`crate::errors::RuntimeError`] if the construction fails.
   #[allow(clippy::too_many_lines)]
   pub fn construct_value(
     &mut self,
@@ -327,6 +344,42 @@ impl Vm {
       )));
     }
     match callee {
+      Value::Proxy(proxy) => {
+        let result = (|| -> Result<Value, RuntimeError> {
+          let (target, handler) = {
+            let proxy = proxy.borrow();
+            let Some(handler) = proxy.handler.clone() else {
+              return Err(self.throw_type_error("Cannot construct a revoked proxy"));
+            };
+            (proxy.target.clone(), handler)
+          };
+          let trap =
+            self.get_property_value(&handler, &PropertyKey::String("construct".to_string()))?;
+          let new_target = self
+            .construct_new_target
+            .clone()
+            .unwrap_or_else(|| callee.clone());
+          if matches!(trap, Value::Undefined | Value::Null) {
+            let previous_new_target = self.construct_new_target.replace(new_target);
+            let result = self.construct_value(&target, args);
+            self.construct_new_target = previous_new_target;
+            return result;
+          }
+          if !Self::is_callable_value(&trap) {
+            return Err(self.throw_type_error("Proxy construct trap is not callable"));
+          }
+
+          let arguments = self.new_array(args.iter().cloned().map(Some).collect());
+          let trap_result =
+            self.call_with_this(&trap, &handler, &[target, arguments, new_target])?;
+          if !trap_result.is_object() {
+            return Err(self.throw_type_error("Proxy construct trap must return an object"));
+          }
+          Ok(trap_result)
+        })();
+        self.gc_temp_roots.truncate(temp_root_base);
+        result
+      }
       Value::Closure { .. } => {
         let is_derived_constructor = match callee {
           Value::Closure { proto, .. } => proto.is_derived_constructor,
@@ -666,6 +719,33 @@ impl Vm {
     self.gc_temp_roots.extend(args.iter().cloned());
     let result = (|| -> Result<Value, RuntimeError> {
       match callee {
+        Value::Proxy(proxy) => {
+          let (target, handler) = {
+            let proxy = proxy.borrow();
+            let Some(handler) = proxy.handler.clone() else {
+              return Err(self.throw_type_error("Cannot call a revoked proxy"));
+            };
+            (proxy.target.clone(), handler)
+          };
+          if !target.is_callable() {
+            return Err(self.throw_type_error("Proxy target is not callable"));
+          }
+          let trap =
+            self.get_property_value(&handler, &PropertyKey::String("apply".to_string()))?;
+          if matches!(trap, Value::Undefined | Value::Null) {
+            return self.call_with_this(&target, &this_arg_owned, args);
+          }
+          if !Self::is_callable_value(&trap) {
+            return Err(self.throw_type_error("Proxy apply trap is not callable"));
+          }
+
+          let arguments = self.new_array(args.iter().cloned().map(Some).collect());
+          self.call_with_this(
+            &trap,
+            &handler,
+            &[target, this_arg_owned.clone(), arguments],
+          )
+        }
         Value::Builtin(f) => {
           // For builtins invoked with an explicit `this`, pass the receiver
           // as the first argument so native functions that expect the

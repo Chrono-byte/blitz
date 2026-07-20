@@ -771,6 +771,140 @@ mod test {
   }
 
   #[test]
+  fn proxy_apply_trap_and_fallback_preserve_call_semantics() {
+    let (vm, _globals) = run_script(
+      r#"
+        function target(a, b) { return this.base + a + b; }
+        var receiver = { base: 10 };
+        var observed = false;
+        var proxy = new Proxy(target, {
+          apply: function(actual_target, this_arg, arguments_list) {
+            observed = actual_target === target
+              && this_arg === receiver
+              && Array.isArray(arguments_list)
+              && arguments_list.length === 2;
+            return this_arg.base + arguments_list[0] * arguments_list[1];
+          }
+        });
+        var trapped = proxy.call(receiver, 2, 3);
+
+        var fallback = new Proxy(target, {});
+        var forwarded = fallback.call(receiver, 4, 5);
+
+        var non_callable_trap_rejected = false;
+        try {
+          new Proxy(target, { apply: 1 })();
+        } catch (error) {
+          non_callable_trap_rejected = error instanceof TypeError;
+        }
+
+        var non_callable_target_rejected = false;
+        try {
+          new Proxy({}, { apply: function() { return 1; } })();
+        } catch (error) {
+          non_callable_target_rejected = error instanceof TypeError;
+        }
+
+        var revocable = Proxy.revocable(target, {});
+        revocable.revoke();
+        var revoked_rejected = false;
+        try {
+          revocable.proxy();
+        } catch (error) {
+          revoked_rejected = error instanceof TypeError;
+        }
+
+        globalThis.proxy_apply_ok = trapped === 16
+          && forwarded === 19
+          && observed
+          && non_callable_trap_rejected
+          && non_callable_target_rejected
+          && revoked_rejected;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("proxy_apply_ok"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn proxy_construct_trap_and_fallback_preserve_new_target() {
+    let (vm, _globals) = run_script(
+      r#"
+        function Target(value) { this.value = value; }
+        function Alternate() {}
+        var direct_new_target_ok = false;
+        var reflected_new_target_ok = false;
+        var proxy;
+        proxy = new Proxy(Target, {
+          construct: function(actual_target, arguments_list, new_target) {
+            direct_new_target_ok = direct_new_target_ok || new_target === proxy;
+            reflected_new_target_ok = reflected_new_target_ok || new_target === Alternate;
+            return {
+              target_ok: actual_target === Target,
+              value: arguments_list[0]
+            };
+          }
+        });
+
+        var direct = new proxy(7);
+        var reflected = Reflect.construct(proxy, [8], Alternate);
+
+        var fallback = new Proxy(Target, {});
+        var forwarded = Reflect.construct(fallback, [9], Alternate);
+
+        var primitive_rejected = false;
+        try {
+          new new Proxy(Target, {
+            construct: function() { return 1; }
+          })();
+        } catch (error) {
+          primitive_rejected = error instanceof TypeError;
+        }
+
+        var non_callable_trap_rejected = false;
+        try {
+          new new Proxy(Target, { construct: 1 })();
+        } catch (error) {
+          non_callable_trap_rejected = error instanceof TypeError;
+        }
+
+        var non_constructor_target_rejected = false;
+        try {
+          new new Proxy({}, {
+            construct: function() { return {}; }
+          })();
+        } catch (error) {
+          non_constructor_target_rejected = error instanceof TypeError;
+        }
+
+        var revocable = Proxy.revocable(Target, {});
+        revocable.revoke();
+        var revoked_rejected = false;
+        try {
+          new revocable.proxy();
+        } catch (error) {
+          revoked_rejected = error instanceof TypeError;
+        }
+
+        globalThis.proxy_construct_ok = direct.target_ok
+          && direct.value === 7
+          && reflected.target_ok
+          && reflected.value === 8
+          && direct_new_target_ok
+          && reflected_new_target_ok
+          && forwarded.value === 9
+          && Object.getPrototypeOf(forwarded) === Alternate.prototype
+          && primitive_rejected
+          && non_callable_trap_rejected
+          && non_constructor_target_rejected
+          && revoked_rejected;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("proxy_construct_ok"), Some(Value::Bool(true)));
+  }
+
+  #[test]
   fn proxy_define_property_trap_and_invariants() {
     let (vm, _globals) = run_script(
       r#"

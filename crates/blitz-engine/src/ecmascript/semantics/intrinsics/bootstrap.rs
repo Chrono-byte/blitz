@@ -2093,6 +2093,42 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     Rc::clone(&object_proto_map),
   ))));
   reflect_obj.borrow_mut().properties.insert(
+    PKey::String("apply".to_string()),
+    PropertyDescriptor::data(builtin_object(
+      Rc::new(|vm, args| {
+        let off = static_builtin_arg_offset(vm, args, "Reflect");
+        let target = args.get(off).cloned().unwrap_or(Value::Undefined);
+        let this_arg = args
+          .get(off + 1)
+          .cloned()
+          .unwrap_or(Value::Undefined);
+        let arguments_list = args
+          .get(off + 2)
+          .cloned()
+          .unwrap_or(Value::Undefined);
+        if !Vm::is_callable_value(&target) {
+          return Err(vm.throw_type_error("Reflect.apply: target is not callable"));
+        }
+        if !arguments_list.is_object() {
+          return Err(vm.throw_type_error("Reflect.apply: argumentsList is not an object"));
+        }
+
+        let length =
+          vm.get_property_host(&arguments_list, &PropertyKey::String("length".to_string()))?;
+        let length = to_length(vm, &length)?;
+        let mut call_args = Vec::with_capacity(length);
+        for index in 0..length {
+          call_args.push(vm.get_property_host(
+            &arguments_list,
+            &PropertyKey::String(usize_to_decimal_string(index)),
+          )?);
+        }
+        vm.call_value_with_this(&target, &this_arg, &call_args)
+      }),
+      &function_proto_map,
+    )),
+  );
+  reflect_obj.borrow_mut().properties.insert(
     PKey::String("construct".to_string()),
     PropertyDescriptor::data(builtin_object(
       Rc::new(|vm, args| {
@@ -2130,7 +2166,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           _ => Vec::new(),
         };
 
-        let result = vm.construct_value(&target, &args_vec)?;
+        let result = vm.construct_value_with_new_target(&target, &args_vec, new_target.clone())?;
         if matches!(new_target, Value::Undefined) {
           return Ok(result);
         }

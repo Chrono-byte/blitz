@@ -153,14 +153,7 @@ impl Vm {
 
   /// Returns `true` if the given value is a callable value.
   pub(crate) fn is_callable_value(value: &Value) -> bool {
-    match value {
-      Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _) => true,
-      Value::Proxy(proxy) => {
-        let proxy = proxy.borrow();
-        !proxy.is_revoked() && proxy.target.is_callable()
-      }
-      _ => false,
-    }
+    value.is_callable()
   }
 
   /// Creates an intrinsic error value with the given name and message.

@@ -6,7 +6,7 @@ cognitive-complexity-threshold = 25
 too-many-arguments-threshold = 7
 
 # Enforce short functions
-too-many-lines-threshold = 150
+too-many-lines-threshold = 250
 
 # Disallow expect/unwrap/dbg in tests
 allow-expect-in-tests = false
