@@ -24,7 +24,7 @@ Executables
 
 ```powershell
 # Run an application with the Blitz runtime.
-cargo run -p blitz-cli -- crates/blitz-runtime/examples/simple_demo.js
+cargo run -p blitz-cli -- crates/blitz-runtime/examples/hello.js
 
 # Exercise the raw engine without host capabilities.
 cargo run -p blitz-engine --bin blitz-engine -- path/to/engine-test.js
