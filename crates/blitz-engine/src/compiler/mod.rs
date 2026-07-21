@@ -22,7 +22,8 @@
 //! - Dead code elimination
 //! - Constant folding
 
-use crate::bytecode::{Chunk, Op};
+use crate::bytecode::Chunk;
+use emit::FrontendOp as Op;
 use oxc_ast::ast as oast;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -34,6 +35,7 @@ pub(crate) use core::{
 };
 mod binding;
 mod declaration;
+mod emit;
 mod expression;
 mod pre_declare;
 mod risc;
@@ -55,30 +57,9 @@ pub fn compile(
   program: &oast::Program<'_>,
   source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
-  let stack_chunk = compile_stack_ir(program, source)?;
-  risc::lower_chunk(&stack_chunk)
-}
-
-pub(crate) fn compile_stack_ir(
-  program: &oast::Program<'_>,
-  source: &str,
-) -> Result<Chunk, crate::errors::CompilerError> {
   let source_text = Rc::new(source.to_string());
   let mut c = Compiler::new(source_text);
   c.compile_oxc(program, None)
-}
-
-/// Compile a parsed program through verified compiler IR into RISC v2 bytecode.
-///
-/// # Errors
-///
-/// Returns an error when stack verification or RISC lowering fails.
-pub fn compile_risc(
-  program: &oast::Program<'_>,
-  source: &str,
-) -> Result<Chunk, crate::errors::CompilerError> {
-  let stack_chunk = compile_stack_ir(program, source)?;
-  risc::lower_chunk(&stack_chunk)
 }
 
 /// Compile an oxc AST Program.
@@ -92,8 +73,7 @@ pub fn compile_oxc(
 ) -> Result<Chunk, crate::errors::CompilerError> {
   let source_text = Rc::new(source.to_string());
   let mut c = Compiler::new(source_text);
-  let stack_chunk = c.compile_oxc(program, None)?;
-  risc::lower_chunk(&stack_chunk)
+  c.compile_oxc(program, None)
 }
 
 /// Compile an oxc AST Program with an optional ModuleContext.
@@ -108,8 +88,7 @@ pub fn compile_oxc_with_ctx(
 ) -> Result<Chunk, crate::errors::CompilerError> {
   let source_text = Rc::new(source.to_string());
   let mut c = Compiler::new(source_text);
-  let stack_chunk = c.compile_oxc(program, ctx)?;
-  risc::lower_chunk(&stack_chunk)
+  c.compile_oxc(program, ctx)
 }
 
 /// Compile an oxc AST Program in REPL mode.
@@ -125,8 +104,7 @@ pub fn compile_oxc_repl(
 ) -> Result<Chunk, crate::errors::CompilerError> {
   let source_text = Rc::new(source.to_string());
   let mut c = Compiler::new(source_text);
-  let stack_chunk = c.compile_oxc_with_mode(program, None, true)?;
-  risc::lower_chunk(&stack_chunk)
+  c.compile_oxc_with_mode(program, None, true)
 }
 
 impl Compiler {
@@ -528,7 +506,9 @@ impl Compiler {
       self.chunk.root_slot_immutable = self.local_immutable.clone();
       self.chunk.root_strict = self.strict_context;
     }
-    Ok(std::mem::take(&mut self.chunk))
+    let chunk = std::mem::take(&mut self.chunk);
+    let builder = std::mem::take(&mut self.risc);
+    risc::RiscBuilder::finish(chunk, builder)
   }
 }
 
@@ -540,7 +520,8 @@ mod test {
   use std::collections::{HashMap, HashSet};
   use std::rc::Rc;
 
-  use crate::compiler::compile_stack_ir as compile;
+  use crate::bytecode::{decode_compare_jump, decode_rd, decode_rs};
+  use crate::compiler::compile;
   use crate::{Chunk, Compiler, ModuleContext, ObjectData, Op, Value, Vm, compile_oxc_with_ctx};
 
   #[cfg(test)]
@@ -632,32 +613,35 @@ mod test {
   }
 
   #[test]
-  fn static_member_ic_slots_are_unique_per_site() {
+  fn static_member_cache_sites_have_distinct_risc_instructions() {
     let src = "a.x; a.y; a.x;";
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
 
-    let mut slots = Vec::new();
-    let mut i = 0usize;
-    while i < chunk.code.len() {
-      if let Some(op) = Op::from_byte((chunk.code[i] & 0xFF) as u8) {
-        if matches!(op, Op::GetProperty) {
-          let instr = chunk
-            .code
-            .get(i)
-            .copied()
-            .expect("instruction word");
-          let slot = (instr >> 8_u32) & 0xFF;
-          slots.push(slot);
-        }
-        i += opcode_width(op);
-      } else {
-        i += 1;
-      }
-    }
+    let sites = walk_chunk_ops(&chunk)
+      .into_iter()
+      .filter_map(|(ip, op)| {
+        (op == Op::GetProperty).then(|| {
+          let word = chunk.code[ip];
+          (ip, decode_rd(word), decode_rs(word))
+        })
+      })
+      .collect::<Vec<_>>();
 
-    assert_eq!(slots, vec![0, 1, 2]);
+    assert_eq!(
+      sites.len(),
+      3,
+      "expected one property access per source site"
+    );
+    assert!(
+      sites.windows(2).all(|pair| pair[0].0 < pair[1].0),
+      "inline caches are keyed by distinct RISC instruction addresses"
+    );
+    assert!(
+      sites.iter().all(|(_, object, key)| object != key),
+      "GetProperty must decode distinct object/result and key registers"
+    );
   }
 
   #[test]
@@ -919,16 +903,9 @@ mod test {
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
 
-    let saw_pop = chunk
-      .code
-      .iter()
-      .filter_map(|b| Op::from_byte((*b & 0xFF) as u8))
-      .any(|op| matches!(op, Op::Pop));
-
-    assert!(
-      saw_pop,
-      "expected sequence expression to emit Pop for intermediate values"
-    );
+    chunk
+      .verify()
+      .expect("sequence expression emits valid RISC");
   }
 
   #[test]
@@ -1013,22 +990,20 @@ mod test {
     let program = session.program();
 
     let chunk = compile(program, session.source()).expect("compile ok");
-    let compare = chunk
+    let (condition, left, right, offset) = chunk
       .code
       .iter()
-      .find_map(|instr| {
-        let op = Op::from_byte((*instr & 0xFF) as u8)?;
-        if matches!(op, Op::CompareJump) {
-          Some((instr >> 8_i32) & 0xFF)
-        } else {
-          None
-        }
+      .find_map(|word| {
+        (Op::from_byte((*word & 0xFF) as u8) == Some(Op::CompareJump))
+          .then(|| decode_compare_jump(*word))
       })
       .expect("expected CompareJump in while loop");
     assert_eq!(
-      compare, 2,
+      condition, 2,
       "while condition should preserve LessThan compare op"
     );
+    assert_ne!(left, right, "comparison inputs must use distinct registers");
+    assert!(offset > 0, "false comparison must branch out of the loop");
   }
 
   #[test]
@@ -1057,7 +1032,6 @@ mod test {
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
-    let chunk = super::risc::lower_chunk(&chunk).expect("lower ok");
 
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
@@ -1083,7 +1057,6 @@ mod test {
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
-    let chunk = super::risc::lower_chunk(&chunk).expect("lower ok");
 
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
@@ -1109,7 +1082,6 @@ mod test {
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
-    let chunk = super::risc::lower_chunk(&chunk).expect("lower ok");
 
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
@@ -1130,7 +1102,6 @@ mod test {
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
-    let chunk = super::risc::lower_chunk(&chunk).expect("lower ok");
 
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     let mut vm = Vm::new(globals);

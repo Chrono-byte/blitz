@@ -1,4 +1,4 @@
-use crate::bytecode::Op;
+use super::emit::FrontendOp as Op;
 use crate::value::Value;
 use oxc_ast::ast as oast;
 
@@ -74,14 +74,14 @@ impl super::Compiler {
     F: FnOnce(&mut Self) -> Result<(), crate::errors::CompilerError>,
   {
     self.compile_expr_oast(object)?;
-    self.emit(Op::Dup, LINE);
+    self.emit(Op::Copy, LINE);
     self.emit(Op::JumpIfNullish, LINE);
-    let skip_nullish = self.chunk.code.len();
+    let skip_nullish = self.current_ip();
     self.emit_jump_placeholder();
-    self.emit(Op::Pop, LINE);
+    self.emit(Op::Discard, LINE);
     self.emit(Op::Null, LINE);
     self.emit(Op::Jump, LINE);
-    let after_null_check = self.chunk.code.len();
+    let after_null_check = self.current_ip();
     self.emit_jump_placeholder();
     self.patch_jump(skip_nullish);
     emit_access(self)?;
@@ -191,7 +191,7 @@ impl super::Compiler {
 
       if m.optional {
         self.compile_optional_member_access(&m.object, |this| {
-          this.emit(Op::Dup, LINE);
+          this.emit(Op::Copy, LINE);
           this.emit_constant(Value::String(m.property.name.to_string()), LINE);
           this.emit(Op::GetProperty, LINE);
           let slot = this.alloc_ic_slot()?;
@@ -200,7 +200,7 @@ impl super::Compiler {
         })?;
       } else {
         self.compile_expr_oast(&m.object)?;
-        self.emit(Op::Dup, LINE);
+        self.emit(Op::Copy, LINE);
         self.emit_constant(Value::String(m.property.name.to_string()), LINE);
         self.emit(Op::GetProperty, LINE);
         let slot = self.alloc_ic_slot()?;
@@ -217,14 +217,14 @@ impl super::Compiler {
 
       if m.optional {
         self.compile_optional_member_access(&m.object, |this| {
-          this.emit(Op::Dup, LINE);
+          this.emit(Op::Copy, LINE);
           this.compile_expr_oast(&m.expression)?;
           this.emit(Op::GetProperty, LINE);
           Ok(())
         })?;
       } else {
         self.compile_expr_oast(&m.object)?;
-        self.emit(Op::Dup, LINE);
+        self.emit(Op::Copy, LINE);
         self.compile_expr_oast(&m.expression)?;
         self.emit(Op::GetProperty, LINE);
       }
@@ -239,7 +239,7 @@ impl super::Compiler {
 
       if m.optional {
         self.compile_optional_member_access(&m.object, |this| {
-          this.emit(Op::Dup, LINE);
+          this.emit(Op::Copy, LINE);
           let key = this.ensure_private_name_constant(&m.field.name);
           this.emit_constant(key, LINE);
           this.emit(Op::GetProperty, LINE);
@@ -247,7 +247,7 @@ impl super::Compiler {
         })?;
       } else {
         self.compile_expr_oast(&m.object)?;
-        self.emit(Op::Dup, LINE);
+        self.emit(Op::Copy, LINE);
         let key = self.ensure_private_name_constant(&m.field.name);
         self.emit_constant(key, LINE);
         self.emit(Op::GetProperty, LINE);
@@ -261,14 +261,14 @@ impl super::Compiler {
     if c.optional {
       // Optional calls short-circuit to `undefined` if the callee is nullish.
       self.compile_expr_oast(&c.callee)?;
-      self.emit(Op::Dup, LINE);
+      self.emit(Op::Copy, LINE);
       self.emit(Op::JumpIfNullish, LINE);
-      let skip_nullish = self.chunk.code.len();
+      let skip_nullish = self.current_ip();
       self.emit_jump_placeholder();
-      self.emit(Op::Pop, LINE);
+      self.emit(Op::Discard, LINE);
       self.emit(Op::Null, LINE);
       self.emit(Op::Jump, LINE);
-      let end = self.chunk.code.len();
+      let end = self.current_ip();
       self.emit_jump_placeholder();
       self.patch_jump(skip_nullish);
       let arg_count = self.compile_call_arguments(&c.arguments)?;
@@ -298,7 +298,7 @@ impl super::Compiler {
     }
     self.emit(Op::BuildArray, LINE);
     self.emit_byte(self.checked_arg_count(t.quasi.quasis.len())?, LINE);
-    self.emit(Op::Dup, LINE);
+    self.emit(Op::Copy, LINE);
     self.emit_constant(Value::String("raw".to_string()), LINE);
     for quasi in &t.quasi.quasis {
       self.emit_constant(Value::String(quasi.value.raw.to_string()), LINE);
@@ -308,7 +308,7 @@ impl super::Compiler {
     self.emit(Op::SetProperty, LINE);
     let slot = self.alloc_ic_slot()?;
     self.emit_byte(slot, LINE);
-    self.emit(Op::Pop, LINE);
+    self.emit(Op::Discard, LINE);
     let mut arg_count = 1usize;
     for sub in &t.quasi.expressions {
       self.compile_expr_oast(sub)?;
@@ -333,7 +333,7 @@ impl super::Compiler {
             self.compile_expr_oast_tail(expr)?;
           } else {
             self.compile_expr_oast(expr)?;
-            self.emit(Op::Pop, LINE);
+            self.emit(Op::Discard, LINE);
           }
         }
         if len == 0 {
@@ -344,37 +344,37 @@ impl super::Compiler {
       OExpr::LogicalExpression(l) => match l.operator {
         oast::LogicalOperator::And => {
           self.compile_expr_oast(&l.left)?;
-          self.emit(Op::Dup, LINE);
+          self.emit(Op::Copy, LINE);
           self.emit(Op::JumpIfFalse, LINE);
-          let jump_end = self.chunk.code.len();
+          let jump_end = self.current_ip();
           self.emit_jump_placeholder();
-          self.emit(Op::Pop, LINE);
+          self.emit(Op::Discard, LINE);
           self.compile_expr_oast_tail(&l.right)?;
           self.patch_jump(jump_end);
           Ok(())
         }
         oast::LogicalOperator::Or => {
           self.compile_expr_oast(&l.left)?;
-          self.emit(Op::Dup, LINE);
+          self.emit(Op::Copy, LINE);
           self.emit(Op::JumpIfTrue, LINE);
-          let jump_end = self.chunk.code.len();
+          let jump_end = self.current_ip();
           self.emit_jump_placeholder();
-          self.emit(Op::Pop, LINE);
+          self.emit(Op::Discard, LINE);
           self.compile_expr_oast_tail(&l.right)?;
           self.patch_jump(jump_end);
           Ok(())
         }
         oast::LogicalOperator::Coalesce => {
           self.compile_expr_oast(&l.left)?;
-          self.emit(Op::Dup, LINE);
+          self.emit(Op::Copy, LINE);
           self.emit(Op::JumpIfNullish, LINE);
-          let jump_right = self.chunk.code.len();
+          let jump_right = self.current_ip();
           self.emit_jump_placeholder();
           self.emit(Op::Jump, LINE);
-          let jump_end = self.chunk.code.len();
+          let jump_end = self.current_ip();
           self.emit_jump_placeholder();
           self.patch_jump(jump_right);
-          self.emit(Op::Pop, LINE);
+          self.emit(Op::Discard, LINE);
           self.compile_expr_oast_tail(&l.right)?;
           self.patch_jump(jump_end);
           Ok(())
@@ -384,7 +384,7 @@ impl super::Compiler {
         if let Some(jump_else) = self.try_emit_compare_jump_if_false(&c.test)? {
           self.compile_expr_oast_tail(&c.consequent)?;
           self.emit(Op::Jump, LINE);
-          let jump_end = self.chunk.code.len();
+          let jump_end = self.current_ip();
           self.emit_jump_placeholder();
           self.patch_jump(jump_else);
           self.compile_expr_oast_tail(&c.alternate)?;
@@ -392,11 +392,11 @@ impl super::Compiler {
         } else {
           self.compile_expr_oast(&c.test)?;
           self.emit(Op::JumpIfFalse, LINE);
-          let jump_else = self.chunk.code.len();
+          let jump_else = self.current_ip();
           self.emit_jump_placeholder();
           self.compile_expr_oast_tail(&c.consequent)?;
           self.emit(Op::Jump, LINE);
-          let jump_end = self.chunk.code.len();
+          let jump_end = self.current_ip();
           self.emit_jump_placeholder();
           self.patch_jump(jump_else);
           self.compile_expr_oast_tail(&c.alternate)?;

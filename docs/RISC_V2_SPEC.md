@@ -1,6 +1,6 @@
 # RISC v2 bytecode contract
 
-This document is the authoritative contract for the RISC migration. Older
+This document is the authoritative contract for the RISC v2 backend. Older
 notes on `risc-docs` are design inputs; where they disagree with this file,
 this file wins.
 
@@ -9,9 +9,9 @@ this file wins.
 - Bytecode instructions are fixed-width 32-bit words.
 - Serialized or cached bytecode carries the RISC format version.
 - Every public compiler frontend emits `RiscV2` or returns a compiler error.
-  There is no executable fallback format.
+  There is no compiler or executable fallback format.
 - The verifier, executor, disassembler, profiler, hotpatch helpers, and tests
-  must decode through the same version-aware instruction API.
+  decode through the same instruction API.
 
 ## Register machine
 
@@ -43,19 +43,17 @@ must not depend on whether a value resides in a register or slot.
 
 ## Compiler pipeline
 
-The frontend emits private compiler IR which is never accepted by `Vm::run`.
-RISC lowering recursively processes the root and every nested function,
-performing control-flow discovery, exact stack-height verification,
-virtual-register construction, allocation/spilling, and final encoding. A
-merge with conflicting stack heights is a compiler error, not a runtime fixup.
-Generators preserve an explicit RISC register/spill continuation across
-`yield`; exceptions, async functions, direct eval, and ordinary calls all use
-the RISC executor.
+The frontend builds explicit RISC values, labels, branches, and operand
+windows for the root and every nested function. Finalization allocates
+temporary values to `r8..r15` or spill slots, patches control-flow and side
+metadata, and emits verified RISC v2 words. No stack-shaped compiler IR or
+lowering pass exists. Generators preserve an explicit register/spill
+continuation across `yield`; exceptions, async functions, direct eval, and
+ordinary calls all use the same RISC executor.
 
-## Cutover gates
+## Backend invariants
 
-RISC selection at the public script frontend is guarded by all of the
-following:
+The RISC-only backend is guarded by all of the following:
 
 1. RISC execution preserves values, thrown errors, and observable side effects
    for the unit corpus and targeted Test262 cases.

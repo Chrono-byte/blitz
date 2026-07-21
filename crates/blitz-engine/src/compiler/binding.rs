@@ -8,7 +8,7 @@
 //! The binding phase processes variable declarations and manages the storage
 //! of binding identifiers in local scopes.
 
-use crate::bytecode::Op;
+use super::emit::FrontendOp as Op;
 use crate::value::Value;
 use oxc_ast::ast as oast;
 
@@ -157,7 +157,7 @@ impl super::Compiler {
       self.mark_local_immutable(slot);
     }
     if mirror_global {
-      self.emit(Op::Dup, LINE);
+      self.emit(Op::Copy, LINE);
     }
     self.emit(Op::StoreLocal, LINE);
     self.emit_byte(self.slot_to_u8(slot)?, LINE);
@@ -255,7 +255,7 @@ impl super::Compiler {
     self.emit(Op::SetProperty, LINE);
     let slot = self.alloc_ic_slot()?;
     self.emit_byte(slot, LINE);
-    self.emit(Op::Pop, LINE);
+    self.emit(Op::Discard, LINE);
     Ok(())
   }
 
@@ -271,7 +271,7 @@ impl super::Compiler {
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
     self.emit(Op::SetProperty, LINE);
-    self.emit(Op::Pop, LINE);
+    self.emit(Op::Discard, LINE);
     Ok(())
   }
 
@@ -289,7 +289,7 @@ impl super::Compiler {
         self.emit(Op::Undefined, LINE);
         // Use CompareJump: cond_type 6 = StrictEq, jump if true
         self.emit_with_payload(Op::CompareJump, 6, LINE);
-        let skip_default = self.chunk.code.len();
+        let skip_default = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.compile_expr_oast(&a.init)?;
@@ -339,12 +339,12 @@ impl super::Compiler {
     a: &oast::ArrayAssignmentTarget<'_>,
   ) -> Result<(), crate::errors::CompilerError> {
     self.emit_get_builtin_name("requireObjectCoercible");
-    self.emit(Op::Swap, LINE);
+    self.emit(Op::Exchange, LINE);
     self.emit(Op::Call, LINE);
     self.emit_byte(1, LINE);
 
     let iterator_slot = self.alloc_temp_local("array_assign_iterator");
-    self.emit(Op::Dup, LINE);
+    self.emit(Op::Copy, LINE);
     self.emit_get_global_name("Symbol");
     self.emit_constant(Value::String("iterator".to_string()), LINE);
     self.emit(Op::GetProperty, LINE);
@@ -361,34 +361,34 @@ impl super::Compiler {
       self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
       self.emit(Op::IteratorNext, LINE);
       if let Some(el) = el {
-        self.emit(Op::Dup, LINE);
+        self.emit(Op::Copy, LINE);
         self.emit_constant(Value::String("done".to_string()), LINE);
         self.emit(Op::GetProperty, LINE);
         self.emit(Op::JumpIfTrue, LINE);
-        let done_jump = self.chunk.code.len();
+        let done_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.emit_constant(Value::String("value".to_string()), LINE);
         self.emit(Op::GetProperty, LINE);
         self.compile_assignment_target_maybe_default_oast(el)?;
         self.emit(Op::Jump, LINE);
-        let after_jump = self.chunk.code.len();
+        let after_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.patch_jump(done_jump);
-        self.emit(Op::Pop, LINE);
+        self.emit(Op::Discard, LINE);
         self.emit(Op::Undefined, LINE);
         self.compile_assignment_target_maybe_default_oast(el)?;
         self.patch_jump(after_jump);
       } else {
-        self.emit(Op::Pop, LINE);
+        self.emit(Op::Discard, LINE);
       }
     }
     if let Some(rest) = &a.rest {
       self.emit(Op::LoadLocal, LINE);
       self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
       self.emit_get_builtin_name("iteratorToArray");
-      self.emit(Op::Swap, LINE);
+      self.emit(Op::Exchange, LINE);
       self.emit(Op::Call, LINE);
       self.emit_byte(1, LINE);
       self.compile_assignment_target_oast(&rest.target)?;
@@ -396,7 +396,7 @@ impl super::Compiler {
       self.emit(Op::LoadLocal, LINE);
       self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
       self.emit(Op::IteratorClose, LINE);
-      self.emit(Op::Pop, LINE);
+      self.emit(Op::Discard, LINE);
     }
     Ok(())
   }
@@ -408,7 +408,7 @@ impl super::Compiler {
     for prop in &o.properties {
       match prop {
         oast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(p) => {
-          self.emit(Op::Dup, LINE);
+          self.emit(Op::Copy, LINE);
           self.emit_constant(Value::String(p.binding.name.to_string()), LINE);
           self.emit(Op::GetProperty, LINE);
           if let Some(init) = &p.init {
@@ -420,7 +420,7 @@ impl super::Compiler {
             self.emit(Op::Undefined, LINE);
             // Use CompareJump: cond_type 6 = StrictEq, jump if true
             self.emit_with_payload(Op::CompareJump, 6, LINE);
-            let skip_default = self.chunk.code.len();
+            let skip_default = self.current_ip();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             self.compile_expr_oast(init)?;
@@ -446,7 +446,7 @@ impl super::Compiler {
           let key = Self::binding_property_key_to_value(&p.name).ok_or_else(|| {
             crate::errors::CompilerError::from("unsupported object assignment key")
           })?;
-          self.emit(Op::Dup, LINE);
+          self.emit(Op::Copy, LINE);
           self.emit_constant(key, LINE);
           self.emit(Op::GetProperty, LINE);
           self.compile_assignment_target_maybe_default_oast(&p.binding)?;
@@ -454,10 +454,10 @@ impl super::Compiler {
       }
     }
     if let Some(rest) = &o.rest {
-      self.emit(Op::Dup, LINE);
+      self.emit(Op::Copy, LINE);
       self.compile_assignment_target_oast(&rest.target)?;
     }
-    self.emit(Op::Pop, LINE);
+    self.emit(Op::Discard, LINE);
     Ok(())
   }
 
@@ -501,7 +501,7 @@ impl super::Compiler {
         self.emit(Op::Undefined, LINE);
         // Use CompareJump: cond_type 6 = StrictEq, jump if true
         self.emit_with_payload(Op::CompareJump, 6, LINE);
-        let skip_default = self.chunk.code.len();
+        let skip_default = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.compile_expr_oast(&a.right)?;
@@ -526,11 +526,11 @@ impl super::Compiler {
       }
       oast::BindingPattern::ArrayPattern(a) => {
         self.emit_get_builtin_name("requireObjectCoercible");
-        self.emit(Op::Swap, LINE);
+        self.emit(Op::Exchange, LINE);
         self.emit(Op::Call, LINE);
         self.emit_byte(1, LINE);
         let iterator_slot = self.alloc_temp_local("array_binding_iterator");
-        self.emit(Op::Dup, LINE);
+        self.emit(Op::Copy, LINE);
         self.emit_get_global_name("Symbol");
         self.emit_constant(Value::String("iterator".to_string()), LINE);
         self.emit(Op::GetProperty, LINE);
@@ -548,27 +548,27 @@ impl super::Compiler {
           self.emit(Op::IteratorNext, LINE);
 
           if let Some(el) = el {
-            self.emit(Op::Dup, LINE);
+            self.emit(Op::Copy, LINE);
             self.emit_constant(Value::String("done".to_string()), LINE);
             self.emit(Op::GetProperty, LINE);
             self.emit(Op::JumpIfTrue, LINE);
-            let done_jump = self.chunk.code.len();
+            let done_jump = self.current_ip();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             self.emit_constant(Value::String("value".to_string()), LINE);
             self.emit(Op::GetProperty, LINE);
             self.compile_binding_pattern_assignment_oast(el, kind)?;
             self.emit(Op::Jump, LINE);
-            let after_jump = self.chunk.code.len();
+            let after_jump = self.current_ip();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             self.patch_jump(done_jump);
-            self.emit(Op::Pop, LINE);
+            self.emit(Op::Discard, LINE);
             self.emit(Op::Undefined, LINE);
             self.compile_binding_pattern_assignment_oast(el, kind)?;
             self.patch_jump(after_jump);
           } else {
-            self.emit(Op::Pop, LINE);
+            self.emit(Op::Discard, LINE);
           }
         }
 
@@ -576,7 +576,7 @@ impl super::Compiler {
           self.emit(Op::LoadLocal, LINE);
           self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
           self.emit_get_builtin_name("iteratorToArray");
-          self.emit(Op::Swap, LINE);
+          self.emit(Op::Exchange, LINE);
           self.emit(Op::Call, LINE);
           self.emit_byte(1, LINE);
           self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
@@ -584,27 +584,27 @@ impl super::Compiler {
           self.emit(Op::LoadLocal, LINE);
           self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
           self.emit(Op::IteratorClose, LINE);
-          self.emit(Op::Pop, LINE);
+          self.emit(Op::Discard, LINE);
         }
       }
       oast::BindingPattern::ObjectPattern(o) => {
         self.emit_get_builtin_name("requireObjectCoercible");
-        self.emit(Op::Swap, LINE);
+        self.emit(Op::Exchange, LINE);
         self.emit(Op::Call, LINE);
         self.emit_byte(1, LINE);
         for prop in &o.properties {
           let key = Self::binding_property_key_to_value(&prop.key)
             .ok_or_else(|| crate::errors::CompilerError::from("unsupported object binding key"))?;
-          self.emit(Op::Dup, LINE);
+          self.emit(Op::Copy, LINE);
           self.emit_constant(key, LINE);
           self.emit(Op::GetProperty, LINE);
           self.compile_binding_pattern_assignment_oast(&prop.value, kind)?;
         }
         if let Some(rest) = &o.rest {
-          self.emit(Op::Dup, LINE);
+          self.emit(Op::Copy, LINE);
           self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
         }
-        self.emit(Op::Pop, LINE);
+        self.emit(Op::Discard, LINE);
       }
     }
     Ok(())

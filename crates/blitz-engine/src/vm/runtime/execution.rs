@@ -1,8 +1,8 @@
 #![allow(trivial_numeric_casts)]
 
 use crate::bytecode::{
-  BytecodeFormat, Chunk, OP_COUNT, Op, decode_aux8, decode_compare_jump, decode_rd,
-  decode_risc_aux16, decode_risc_cond_offset, decode_rs,
+  Chunk, OP_COUNT, Op, decode_aux8, decode_compare_jump, decode_rd, decode_risc_aux16,
+  decode_risc_cond_offset, decode_rs,
 };
 use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
@@ -957,11 +957,6 @@ impl Vm {
     chunk
       .verify()
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
-    if chunk.format != BytecodeFormat::RiscV2 {
-      return Err(RuntimeError::from(
-        "compiler IR cannot be executed; lower it to RISC v2 first",
-      ));
-    }
     self.run_risc_root(chunk)
   }
 
@@ -1713,15 +1708,6 @@ impl Vm {
             }
             return Ok(Some(RiscRunOutcome::Return(result)));
           }
-          unsupported => {
-            if self.call_stack.is_empty() {
-              self.finish_opcode_profile_run("risc-error");
-            }
-            return Err(RuntimeError::from(format!(
-              "RISC executor does not yet support {}",
-              unsupported.name()
-            )));
-          }
         }
         Ok(None)
       })();
@@ -1752,11 +1738,6 @@ impl Vm {
     chunk
       .verify()
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
-    if chunk.format != BytecodeFormat::RiscV2 {
-      return Err(RuntimeError::from(
-        "nested execution requires RISC v2 bytecode",
-      ));
-    }
     let saved_chunk = Rc::clone(&self.chunk);
     let saved_ip = self.ip;
     let saved_stack = self.stack.snapshot();

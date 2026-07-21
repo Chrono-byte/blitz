@@ -102,14 +102,17 @@ impl ICEntry {
   }
 }
 
-/// Bytecode execution format carried by every chunk.
+/// Version marker carried by every bytecode chunk.
+///
+/// Blitz has a single executable bytecode contract. The explicit marker is
+/// retained so serialized chunks can be rejected cleanly if the contract is
+/// changed in the future.
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum BytecodeFormat {
-  /// Internal compiler IR. This format is verified and lowered, never executed.
-  #[default]
-  CompilerIr,
+pub enum BytecodeVersion {
   /// Fixed-width encoding interpreted with the 16-register RISC v2 semantics.
-  RiscV2,
+  #[default]
+  RiscV2 = 2,
 }
 
 /// A decoded fixed-width instruction.
@@ -148,10 +151,15 @@ impl DecodedInstruction {
   /// Relative branch offset, accounting for opcode-specific payload layouts.
   pub fn branch_offset(self) -> Option<i32> {
     match self.op {
-      Op::CompareJump => Some(((self.payload >> 8) as u16 as i16) as i32),
-      Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => {
-        Some(self.operand_i24())
+      Op::CompareJump => {
+        let word = self.op as u32 | ((self.payload & 0x00FF_FFFF) << 8);
+        Some(decode_compare_jump(word).3 as i32)
       }
+      Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
+        let word = self.op as u32 | ((self.payload & 0x00FF_FFFF) << 8);
+        Some(decode_risc_cond_offset(word))
+      }
+      Op::Jump | Op::PushHandler => Some(self.operand_i24()),
       _ => None,
     }
   }
@@ -160,8 +168,8 @@ impl DecodedInstruction {
 /// A chunk of bytecode containing opcodes, constants, and metadata
 #[derive(Clone, Debug)]
 pub struct Chunk {
-  /// Execution semantics for the encoded instruction words.
-  pub format: BytecodeFormat,
+  /// Version of the encoded instruction words.
+  pub version: BytecodeVersion,
   /// Instructions stored as fixed-width 32-bit words. Each u32 contains
   /// opcode in the low 8 bits and a 24-bit payload in the upper bits.
   pub code: Vec<u32>,
@@ -266,29 +274,16 @@ pub struct FunctionProto {
   pub is_async: bool,
   /// Whether this function was declared as a generator (`function*`).
   pub is_generator: bool,
-  /// Unified inline cache table for this function.
-  /// Stack v1 sites currently use an 8-bit site index. RISC v2 sites use
-  /// side metadata so the register operand fields do not cap the site count.
+  /// Unified inline cache table for this function. Sites use side metadata so
+  /// the register operand fields do not cap the site count.
   pub ic_table: Vec<ICEntry>,
 }
 
 impl Chunk {
   /// Creates a new empty chunk
   pub fn new(source_text: Rc<String>) -> Self {
-    Self::new_with_format(source_text, BytecodeFormat::RiscV2)
-  }
-
-  /// Creates a private frontend IR chunk which must be lowered before use.
-  pub(crate) fn new_compiler_ir(source_text: Rc<String>) -> Self {
-    Self::new_with_format(source_text, BytecodeFormat::CompilerIr)
-  }
-
-  fn new_with_format(
-    source_text: Rc<String>,
-    format: BytecodeFormat,
-  ) -> Self {
     Self {
-      format,
+      version: BytecodeVersion::RiscV2,
       code: Vec::new(),
       constants: Vec::new(),
       functions: Vec::new(),
@@ -307,7 +302,7 @@ impl Chunk {
     }
   }
 
-  /// Decode one instruction through the format-independent word decoder.
+  /// Decode one RISC v2 instruction word.
   pub fn decode_at(
     &self,
     ip: usize,
@@ -333,51 +328,31 @@ impl Chunk {
   ) -> Result<String, String> {
     let instruction = self.decode_at(ip)?;
     let word = self.code[ip];
-    let detail = match self.format {
-      BytecodeFormat::RiscV2 if instruction.op == Op::CompareJump => {
+    let detail = match instruction.op {
+      Op::CompareJump => {
         let (condition, left, right, offset) = decode_compare_jump(word);
         format!(
           "compare={} r{} r{} offset={}",
           condition, left, right, offset
         )
       }
-      BytecodeFormat::RiscV2
-        if matches!(
-          instruction.op,
-          Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish
-        ) =>
-      {
+      Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
         format!(
           "r{} offset={}",
           decode_rd(word),
           decode_risc_cond_offset(word)
         )
       }
-      BytecodeFormat::RiscV2 => format!(
+      Op::Jump | Op::PushHandler => {
+        format!("offset={}", instruction.operand_i24())
+      }
+      _ => format!(
         "r{} r{} aux={} aux2={}",
         decode_rd(word),
         decode_rs(word),
         decode_aux8(word),
         decode_aux8_2(word)
       ),
-      BytecodeFormat::CompilerIr => match instruction.op {
-        Op::Const | Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal => {
-          instruction.operand_u16().to_string()
-        }
-        Op::CompareJump => format!(
-          "compare={} offset={}",
-          instruction.operand_u8(0).unwrap_or_default(),
-          instruction.branch_offset().unwrap_or_default()
-        ),
-        Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish | Op::PushHandler => {
-          format!("offset={}", instruction.branch_offset().unwrap_or_default())
-        }
-        _ if instruction.payload != 0 => instruction
-          .operand_u8(0)
-          .unwrap_or_default()
-          .to_string(),
-        _ => String::new(),
-      },
     };
     if detail.is_empty() {
       Ok(format!("{:#06} {}", ip, instruction.op.name()))
@@ -397,20 +372,12 @@ impl Chunk {
     }
     for ip in 0..self.code.len() {
       let instruction = self.decode_at(ip)?;
-      let branch_offset = match self.format {
-        BytecodeFormat::CompilerIr => instruction.branch_offset(),
-        BytecodeFormat::RiscV2 if instruction.op == Op::CompareJump => {
-          Some(decode_compare_jump(self.code[ip]).3 as i32)
-        }
-        BytecodeFormat::RiscV2
-          if matches!(
-            instruction.op,
-            Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish
-          ) =>
-        {
+      let branch_offset = match instruction.op {
+        Op::CompareJump => Some(decode_compare_jump(self.code[ip]).3 as i32),
+        Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
           Some(decode_risc_cond_offset(self.code[ip]))
         }
-        BytecodeFormat::RiscV2 => instruction.branch_offset(),
+        _ => instruction.branch_offset(),
       };
       if let Some(offset) = branch_offset {
         let target = ip as i64 + 1 + offset as i64;
@@ -421,10 +388,7 @@ impl Chunk {
           ));
         }
       }
-      let pool_index = match self.format {
-        BytecodeFormat::CompilerIr => instruction.operand_u16(),
-        BytecodeFormat::RiscV2 => decode_risc_aux16(self.code[ip]),
-      };
+      let pool_index = decode_risc_aux16(self.code[ip]);
       match instruction.op {
         Op::Const if pool_index as usize >= self.constants.len() => {
           return Err(format!(
@@ -543,13 +507,7 @@ impl Chunk {
     self.write_i24_payload_at(idx, val as i32)
   }
 
-  /// Helper: returns the instruction index of the jump target for a jump located at `ip`.
-  /// `ip` is the index of the opcode byte. Returns `None` if `ip` is out of bounds,
-  /// the opcode at `ip` is not a jump, or the computed target is out of bounds.
-  /// Given an instruction-index `ip`, return the instruction index of the
-  /// jump target if the instruction at `ip` is a jump. In the new fixed
-  /// width layout the next instruction is always `ip + 1` and the signed
-  /// 24-bit payload is the relative offset.
+  /// Return the instruction-index target of a RISC branch at `ip`.
   pub fn jump_target_from_ip(
     &self,
     ip: usize,
@@ -560,17 +518,51 @@ impl Chunk {
     if !op.is_jump() {
       return None;
     }
-    // read signed 24-bit payload from instruction at ip
-    let offset = self.read_i24_payload_at(ip)?;
-    // next instruction index is always ip + 1 (fixed-width u32 words)
+    let offset = self.decode_at(ip).ok()?.branch_offset()?;
     let next = ip as i64 + 1;
     let target = next.checked_add(offset as i64)?;
     if target < 0 || target >= (self.code.len() as i64) {
       return None;
     }
-    // convert safely to usize after bounds check to avoid truncation on smaller platforms
-    let target_usize = usize::try_from(target).ok()?;
-    Some(target_usize)
+    usize::try_from(target).ok()
+  }
+
+  /// Patch the relative offset of a RISC branch without changing its operands.
+  fn write_branch_offset(
+    &mut self,
+    ip: usize,
+    offset: i32,
+  ) -> bool {
+    let Some(word) = self.code.get(ip).copied() else {
+      return false;
+    };
+    let Some(op) = Op::from_byte(opcode_from_instr(word)) else {
+      return false;
+    };
+    let patched = match op {
+      Op::CompareJump => {
+        let (condition, left, right, _) = decode_compare_jump(word);
+        let Ok(offset) = i16::try_from(offset) else {
+          return false;
+        };
+        encode_compare_jump(condition, left, right, offset)
+      }
+      Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
+        encode_risc_cond_jump(op, decode_rd(word), offset)
+      }
+      Op::Jump => {
+        if !(-(1 << 23)..(1 << 23)).contains(&offset) {
+          return false;
+        }
+        Some(op as u32 | (((offset as u32) & 0x00FF_FFFF) << 8))
+      }
+      _ => None,
+    };
+    let Some(patched) = patched else {
+      return false;
+    };
+    self.code[ip] = patched;
+    true
   }
 
   /// Hotwire the jump at `ip` so it jumps to the following instruction (i.e. becomes a no-op jump).
@@ -584,8 +576,7 @@ impl Chunk {
     if !op.is_jump() {
       return None;
     }
-    // set payload to 0
-    if self.write_i24_payload_at(ip, 0) {
+    if self.write_branch_offset(ip, 0) {
       Some(op)
     } else {
       None
@@ -602,9 +593,11 @@ impl Chunk {
     let op = Op::from_byte((instr & 0xFF) as u8)?;
     match op {
       Op::JumpIfFalse => {
-        // replace opcode byte
-        let new = (instr & 0xFFFF_FF00) | (Op::Jump.to_byte() as u32);
-        self.code[ip] = new;
+        let offset = decode_risc_cond_offset(instr);
+        if !(-(1 << 23)..(1 << 23)).contains(&offset) {
+          return None;
+        }
+        self.code[ip] = Op::Jump as u32 | (((offset as u32) & 0x00FF_FFFF) << 8);
         Some(op)
       }
       Op::Jump => Some(op),
@@ -630,13 +623,8 @@ impl Chunk {
     // next instruction is ip + 1
     let next = (ip as i64) + 1;
     let offset = (target_ip as i64).checked_sub(next)?;
-    // convert to i32 only after verifying it fits in i32 to avoid truncation
     let offset_i32 = i32::try_from(offset).ok()?;
-    // ensure fits in signed 24-bit
-    if !(-(1 << 23_i32)..(1 << 23_i32)).contains(&offset) {
-      return None;
-    }
-    if self.write_i24_payload_at(ip, offset_i32) {
+    if self.write_branch_offset(ip, offset_i32) {
       Some(op)
     } else {
       None
@@ -978,20 +966,10 @@ pub enum Op {
   /// ArrayFromSpread: build array with spread
   ArrayFromSpread,
 
-  // === Stack Management (4) ===
-  /// Pop: discard top of stack
-  Pop,
-  /// PopN: pop count values from stack. Aux: count (u8)
-  PopN,
-  /// Dup: duplicate rd to stack
-  Dup,
-  /// Swap: swap top 2 stack values
-  Swap,
-
   // === Exception Handling (3) ===
   /// Throw rd
-  Throw,
-  /// PushHandler: push exception handler. Aux: offset_i16 (bits 16-31)
+  Throw = 54,
+  /// PushHandler: push exception handler. Payload: offset_i24 (bits 8-31)
   PushHandler,
   /// PopHandler: pop exception handler
   PopHandler,
@@ -1118,10 +1096,6 @@ impl Op {
       Op::BuildArray => "BuildArray",
       Op::BuildObject => "BuildObject",
       Op::ArrayFromSpread => "ArrayFromSpread",
-      Op::Pop => "Pop",
-      Op::PopN => "PopN",
-      Op::Dup => "Dup",
-      Op::Swap => "Swap",
       Op::Throw => "Throw",
       Op::PushHandler => "PushHandler",
       Op::PopHandler => "PopHandler",
@@ -1174,12 +1148,6 @@ impl Op {
   /// Returns whether this opcode is a logical or boolean operator.
   pub fn is_logical(&self) -> bool {
     matches!(self, Op::And | Op::Or | Op::Not)
-  }
-
-  /// Returns whether this opcode manipulates the value stack directly
-  /// without invoking arithmetic or logical semantics.
-  pub fn is_stack_operation(&self) -> bool {
-    matches!(self, Op::Pop | Op::PopN | Op::Dup | Op::Swap)
   }
 }
 
@@ -1240,10 +1208,6 @@ impl TryFrom<u8> for Op {
       47 => Ok(BuildArray),
       48 => Ok(BuildObject),
       49 => Ok(ArrayFromSpread),
-      50 => Ok(Pop),
-      51 => Ok(PopN),
-      52 => Ok(Dup),
-      53 => Ok(Swap),
       54 => Ok(Throw),
       55 => Ok(PushHandler),
       56 => Ok(PopHandler),
@@ -1287,12 +1251,25 @@ mod tests {
   #[test]
   fn op_round_trip() {
     for i in 0u8..=Op::BitNot as u8 {
-      let op = Op::try_from(i).expect("valid op");
+      let Ok(op) = Op::try_from(i) else {
+        assert!((50..=53).contains(&i), "unexpected opcode gap at {i}");
+        continue;
+      };
       let b = u8::from(op);
       assert_eq!(b, i);
       let op2 = Op::from_byte(b).expect("from_byte");
       assert_eq!(op2, op);
     }
+    for retired in 50..=53 {
+      assert!(Op::from_byte(retired).is_none());
+    }
+  }
+
+  #[test]
+  fn chunks_have_a_fixed_risc_v2_version() {
+    let chunk = Chunk::default();
+    assert_eq!(chunk.version, BytecodeVersion::RiscV2);
+    assert_eq!(chunk.version as u8, 2);
   }
 
   #[test]
@@ -1317,13 +1294,21 @@ mod tests {
   }
 
   #[test]
-  fn compare_jump_decoder_uses_its_signed_i16_offset() {
-    let payload = 2_u32 | ((-3_i16 as u16 as u32) << 8);
+  fn decoded_branch_offsets_follow_risc_layouts() {
+    let compare_word = encode_compare_jump(2, 3, 4, -3).expect("compare jump");
     let instruction = DecodedInstruction {
       op: Op::CompareJump,
-      payload,
+      payload: compare_word >> 8,
     };
     assert_eq!(instruction.branch_offset(), Some(-3));
+
+    let conditional_word =
+      encode_risc_cond_jump(Op::JumpIfFalse, 7, -42).expect("conditional jump");
+    let instruction = DecodedInstruction {
+      op: Op::JumpIfFalse,
+      payload: conditional_word >> 8,
+    };
+    assert_eq!(instruction.branch_offset(), Some(-42));
   }
 
   #[test]
@@ -1331,5 +1316,48 @@ mod tests {
     let word = encode_compare_jump(6, 3, 14, -4096).expect("encodable branch");
     assert_eq!(decode_compare_jump(word), (6, 3, 14, -4096));
     assert!(encode_compare_jump(0, 0, 0, 4096).is_none());
+  }
+
+  #[test]
+  fn risc_hotpatching_preserves_conditional_operands() {
+    let mut chunk = Chunk::default();
+    chunk.write_instr(
+      encode_risc_cond_jump(Op::JumpIfFalse, 9, 1).expect("conditional jump"),
+      1,
+    );
+    chunk.write_instr(Op::Undefined as u32, 1);
+    chunk.write_instr(Op::Return as u32, 1);
+
+    assert_eq!(chunk.jump_target_from_ip(0), Some(2));
+    assert_eq!(chunk.hotwire_redirect(0, 1), Some(Op::JumpIfFalse));
+    assert_eq!(decode_rd(chunk.code[0]), 9);
+    assert_eq!(decode_risc_cond_offset(chunk.code[0]), 0);
+
+    assert_eq!(chunk.hotwire_make_unconditional(0), Some(Op::JumpIfFalse));
+    assert_eq!(
+      Op::from_byte(opcode_from_instr(chunk.code[0])),
+      Some(Op::Jump)
+    );
+    assert_eq!(chunk.jump_target_from_ip(0), Some(1));
+  }
+
+  #[test]
+  fn verifier_uses_risc_conditional_branch_layout() {
+    let mut chunk = Chunk::default();
+    chunk.write_instr(
+      encode_risc_cond_jump(Op::JumpIfTrue, 15, 1).expect("conditional jump"),
+      1,
+    );
+    chunk.write_instr(Op::Undefined as u32, 1);
+    chunk.write_instr(Op::Return as u32, 1);
+    assert!(chunk.verify().is_ok());
+
+    chunk.code[0] = encode_risc_cond_jump(Op::JumpIfTrue, 15, 10).expect("conditional jump");
+    assert!(
+      chunk
+        .verify()
+        .unwrap_err()
+        .contains("out-of-bounds instruction")
+    );
   }
 }

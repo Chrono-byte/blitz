@@ -4,7 +4,9 @@
 //! along with fundamental helper methods for scope management, local variable tracking,
 //! and basic bytecode emission.
 
-use crate::bytecode::{Chunk, Op, UpvalueSpec};
+use super::emit::FrontendOp as Op;
+use super::risc::RiscBuilder;
+use crate::bytecode::{Chunk, UpvalueSpec};
 use crate::errors::CompilerError;
 use crate::typecheck::Type;
 use crate::value::Value;
@@ -42,6 +44,9 @@ pub struct ModuleContext {
 pub struct Compiler {
   /// Current chunk being compiled
   pub chunk: Chunk,
+  /// Compiler-owned virtual instruction stream. Frontend operations never
+  /// enter `Chunk::code`; only finalized RISC v2 words are stored there.
+  pub(crate) risc: RiscBuilder,
   /// Original source text for this compilation unit
   pub source_text: Rc<String>,
   /// Local variable names
@@ -199,19 +204,19 @@ pub struct LabelPatchState {
 }
 
 impl Compiler {
+  /// Current frontend instruction position. Labels and metadata are expressed
+  /// in this compiler-owned coordinate space until RISC finalization.
+  pub(crate) fn current_ip(&mut self) -> usize {
+    self.risc.len()
+  }
+
   /// Resolves the patch index for a jump offset, accounting for fixed-width
   /// mode where jumps are patched in place rather than emitted separately.
   fn resolve_jump_patch_index(
     &self,
     offset: usize,
   ) -> usize {
-    let op_at = |idx: usize| {
-      self
-        .chunk
-        .code
-        .get(idx)
-        .and_then(|instr| Op::from_byte((instr & 0xFF) as u8))
-    };
+    let op_at = |idx: usize| self.risc.op_at(idx);
     let is_patchable_jump_at =
       |idx: usize| op_at(idx).is_some_and(|op| op.is_jump() || matches!(op, Op::PushHandler));
 
@@ -230,11 +235,12 @@ impl Compiler {
     let (allow_new_target, allow_super) = COMPILE_CONTEXT_OVERRIDE
       .with(|override_state| *override_state.borrow())
       .unwrap_or((false, false));
-    let mut chunk = Chunk::new_compiler_ir(Rc::clone(&source_text));
+    let mut chunk = Chunk::new(Rc::clone(&source_text));
     chunk.allow_new_target = allow_new_target;
     chunk.allow_super = allow_super;
     Self {
       chunk,
+      risc: RiscBuilder::new(),
       source_text,
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -278,8 +284,7 @@ impl Compiler {
     line: u32,
   ) {
     // Emit an instruction word with opcode in low 8 bits and zero payload.
-    let instr = (op.to_byte() as u32) & 0xFF;
-    self.chunk.write_instr(instr, line);
+    self.risc.emit(op, 0, line);
     // Reset pending operand byte counter for this new instruction.
     self.pending_operand_bytes = 0;
   }
@@ -293,8 +298,7 @@ impl Compiler {
     payload24: u32,
     line: u32,
   ) {
-    let instr = ((payload24 & 0x00FF_FFFF) << 8_u32) | ((op.to_byte() as u32) & 0xFF);
-    self.chunk.write_instr(instr, line);
+    self.risc.emit(op, payload24, line);
     // We're writing the full instruction at once so reset pending bytes.
     self.pending_operand_bytes = 0;
   }
@@ -311,10 +315,9 @@ impl Compiler {
   ) {
     // Pack a single operand byte into the previous instruction's 24-bit payload
     // using little-endian order: first emitted byte occupies bits 8..15, next 16..23, etc.
-    if self.chunk.code.is_empty() {
+    if self.risc.is_empty() {
       return;
     }
-    let idx = self.chunk.code.len() - 1;
     if self.pending_operand_bytes >= 3 {
       // Defensive: avoid corrupting the instruction payload. In debug
       // builds we assert so developers notice the incorrect emission pattern;
@@ -325,13 +328,10 @@ impl Compiler {
       );
       return;
     }
-    let shift = 8 + (self.pending_operand_bytes * 8);
-    let instr = self.chunk.code[idx];
-    let new = instr | ((byte as u32) << shift);
-    self.chunk.code[idx] = new;
+    self
+      .risc
+      .append_operand_byte(self.pending_operand_bytes, byte, line);
     self.pending_operand_bytes += 1;
-    assert_eq!(self.chunk.lines.len(), self.chunk.code.len());
-    self.chunk.lines[idx] = line;
   }
 
   /// Emits a u16 value as a 24-bit payload in a single instruction word,
@@ -351,21 +351,8 @@ impl Compiler {
     // rather than calling write_instr again. If there is no previous
     // instruction, fall back to writing a full instruction with a
     // zero opcode (shouldn't happen in normal compilation).
-    if self.chunk.code.is_empty() {
-      // Defensive: write a full word with payload and no-op opcode 0.
-      let instr = (payload & 0x00FF_FFFF) << 8_i32;
-      self.chunk.write_instr(instr, line);
-    } else {
-      let idx = self.chunk.code.len() - 1;
-      let instr = self.chunk.code[idx];
-      // Clear any existing payload bits and OR in our payload.
-      let base = instr & 0xFF;
-      let new = base | ((payload & 0x00FF_FFFF) << 8_i32);
-      self.chunk.code[idx] = new;
-      // Keep line table aligned: one line entry already exists for the opcode,
-      // so do not push another. Reset pending counter.
-      self.pending_operand_bytes = 0;
-    }
+    self.risc.set_last_payload(payload, line);
+    self.pending_operand_bytes = 0;
   }
 
   /// Emits a constant value as a `Const` instruction with the constant index
@@ -1016,14 +1003,14 @@ impl Compiler {
     &mut self,
     home_slot: usize,
   ) -> Result<(), CompilerError> {
-    self.emit(Op::Dup, LINE);
+    self.emit(Op::Copy, LINE);
     self.emit_constant(Value::String("[[HomeObject]]".to_string()), LINE);
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(u8::try_from(home_slot).expect("home_slot fits in u8"), LINE);
     self.emit(Op::SetProperty, LINE);
     let slot = self.alloc_ic_slot()?;
     self.emit_byte(slot, LINE);
-    self.emit(Op::Pop, LINE);
+    self.emit(Op::Discard, LINE);
     Ok(())
   }
 
@@ -1063,7 +1050,7 @@ impl Compiler {
     // before adding operand bytes). The relative offset is computed in
     // instruction units: target - (offset + 1)
     let patch_idx = self.resolve_jump_patch_index(offset);
-    let target = self.chunk.code.len() as isize;
+    let target = self.current_ip() as isize;
     let rel = target - (patch_idx as isize) - 1;
     let val = i32::try_from(rel).expect("jump offset overflow");
     self.apply_jump_patch(patch_idx, val);
@@ -1075,26 +1062,7 @@ impl Compiler {
     patch_idx: usize,
     val: i32,
   ) {
-    let ok = if self
-      .chunk
-      .code
-      .get(patch_idx)
-      .is_some_and(|instr| Op::from_byte((instr & 0xFF) as u8) == Some(Op::CompareJump))
-    {
-      // Preserve compare-op byte in payload byte 0 and patch signed i16
-      // offset into payload bytes 1..2.
-      let rel16 = i16::try_from(val).expect("compare jump offset overflow");
-      let instr = self.chunk.code[patch_idx];
-      let compare_byte = (instr >> 8_i32) & 0xFF;
-      let rel_u16 = rel16.cast_unsigned();
-      let payload = compare_byte | (((rel_u16 as u32) & 0xFFFF) << 8_i32);
-      let new_instr = (instr & 0xFF) | ((payload & 0x00FF_FFFF) << 8_i32);
-      self.chunk.code[patch_idx] = new_instr;
-      true
-    } else {
-      self.chunk.write_i24_payload_at(patch_idx, val)
-    };
-    assert!(ok, "failed to write jump payload");
+    self.risc.patch_branch(patch_idx, val);
   }
 
   /// Patches a jump instruction at the given offset to jump to the target instruction.
@@ -1118,12 +1086,8 @@ impl Compiler {
     // Store signed jump offsets as sign-extended i24 payload so runtime
     // jump decoding (`read_i24_payload_at`) preserves negative back-jumps.
     let v = i32::try_from(val).expect("val fits in i32");
-    let idx = self.chunk.code.len().saturating_sub(1);
-    let ok = self.chunk.write_i24_payload_at(idx, v);
-    assert!(ok, "failed to write signed jump payload");
-    if idx < self.chunk.lines.len() {
-      self.chunk.lines[idx] = line;
-    }
+    let idx = self.current_ip().saturating_sub(1);
+    self.risc.patch_branch_line(idx, v, line);
     self.pending_operand_bytes = 0;
   }
 

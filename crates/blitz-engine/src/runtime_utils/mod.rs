@@ -119,19 +119,14 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
       return Rc::clone(existing);
     }
 
-    // Rebuild the chunk fields, replacing functions with cleared slot types.
-    let mut new_chunk = bytecode::Chunk::new(Rc::clone(&rc_chunk.source_text));
-    new_chunk.format = rc_chunk.format;
-    new_chunk.code = rc_chunk.code.clone();
-    new_chunk.constants = rc_chunk.constants.clone();
-    new_chunk.lines = rc_chunk.lines.clone();
+    // Clone the complete chunk so bytecode metadata is preserved as the format
+    // evolves, then replace only the annotations and nested function chunks.
+    let mut new_chunk = (**rc_chunk).clone();
     new_chunk.root_slot_types = rc_chunk
       .root_slot_types
       .iter()
       .map(|_| None)
       .collect();
-    new_chunk.root_slot_names = rc_chunk.root_slot_names.clone();
-    new_chunk.root_lexical_tdz = rc_chunk.root_lexical_tdz.clone();
     // Slot/global type annotations removed in JS-first mode; nothing to do.
 
     // Process functions

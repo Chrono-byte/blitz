@@ -10,8 +10,8 @@
 //! that function declarations and variable bindings are visible throughout their
 //! scope, matching JavaScript's hoisting semantics.
 
+use super::emit::FrontendOp as Op;
 use crate::Compiler;
-use crate::bytecode::Op;
 use oxc_ast::ast as oast;
 
 const LINE: u32 = 1;
@@ -169,7 +169,7 @@ impl Compiler {
               self.add_local_with_mirror(fname.clone(), None, self.is_root)
             };
             if self.is_root {
-              self.emit(Op::Dup, LINE);
+              self.emit(Op::Copy, LINE);
             }
             self.emit(Op::StoreLocal, LINE);
             self.emit_byte(self.slot_to_u8(slot)?, LINE);
@@ -198,7 +198,7 @@ impl Compiler {
               self.add_local_with_mirror(fname.clone(), None, self.is_root)
             };
             if self.is_root {
-              self.emit(Op::Dup, LINE);
+              self.emit(Op::Copy, LINE);
             }
             self.emit(Op::StoreLocal, LINE);
             self.emit_byte(self.slot_to_u8(slot)?, LINE);
@@ -226,7 +226,7 @@ impl Compiler {
                 self.add_local_with_mirror(fname.clone(), None, self.is_root)
               };
               if self.is_root {
-                self.emit(Op::Dup, LINE);
+                self.emit(Op::Copy, LINE);
               }
               self.emit(Op::StoreLocal, LINE);
               self.emit_byte(self.slot_to_u8(slot)?, LINE);

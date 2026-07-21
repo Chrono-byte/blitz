@@ -9,8 +9,9 @@
 //! The declaration phase compiles all declaration-type statements into bytecode,
 //! managing function closures, parameter initialization, and class instantiation.
 
+use super::emit::FrontendOp as Op;
 use crate::Compiler;
-use crate::bytecode::{Chunk, FunctionProto, Op};
+use crate::bytecode::{Chunk, FunctionProto};
 use crate::typecheck::Type;
 use crate::value::Value;
 use oxc_ast::ast as oast;
@@ -41,7 +42,7 @@ impl Compiler {
       self.emit(Op::LoadLocal, LINE);
       self.emit_byte(self.slot_to_u8(slot)?, LINE);
       self.emit(Op::IteratorClose, LINE);
-      self.emit(Op::Pop, LINE);
+      self.emit(Op::Discard, LINE);
     }
     Ok(())
   }
@@ -79,7 +80,7 @@ impl Compiler {
       }
 
       if self.is_root {
-        self.emit(Op::Dup, LINE);
+        self.emit(Op::Copy, LINE);
       }
       self.emit(Op::StoreLocal, LINE);
       self.emit_byte(self.slot_to_u8(slot)?, LINE);
@@ -219,7 +220,7 @@ impl Compiler {
           self.emit(Op::StoreLocal, LINE);
           self.emit_byte(self.slot_to_u8(slot)?, LINE);
         } else if !skip_pop {
-          self.emit(Op::Pop, LINE);
+          self.emit(Op::Discard, LINE);
         }
       }
       OStmt::LabeledStatement(l) => {
@@ -255,7 +256,7 @@ impl Compiler {
           ));
         }
         if !label_state.break_patches.is_empty() {
-          let target = self.chunk.code.len();
+          let target = self.current_ip();
           self.patch_jump_list(label_state.break_patches, target);
         }
       }
@@ -269,7 +270,7 @@ impl Compiler {
         self.emit(Op::PushWithEnv, LINE);
         self.with_depth += 1;
         self.emit(Op::PushHandler, LINE);
-        let handler_jump = self.chunk.code.len();
+        let handler_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
@@ -285,17 +286,17 @@ impl Compiler {
         self.emit(Op::PopEnv, LINE);
         self.with_depth = self.with_depth.saturating_sub(1);
         self.emit(Op::Jump, LINE);
-        let skip_handler_jump = self.chunk.code.len();
+        let skip_handler_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
-        let _handler_start = self.chunk.code.len();
+        let _handler_start = self.current_ip();
         self.patch_jump(handler_jump);
 
         self.emit(Op::PopEnv, LINE);
         self.with_depth = self.with_depth.saturating_sub(1);
         self.emit(Op::Throw, LINE);
-        let _after_handler = self.chunk.code.len();
+        let _after_handler = self.current_ip();
 
         self.patch_jump(skip_handler_jump);
       }
@@ -311,7 +312,7 @@ impl Compiler {
           self.compile_statement_oast_with_mode(&i.consequent, false, completion_slot)?;
           if let Some(alt) = &i.alternate {
             self.emit(Op::Jump, LINE);
-            let jump_else = self.chunk.code.len();
+            let jump_else = self.current_ip();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             self.patch_jump(jump_over);
@@ -323,13 +324,13 @@ impl Compiler {
         } else {
           self.compile_expr_oast(&i.test)?;
           self.emit(Op::JumpIfFalse, LINE);
-          let jump_over = self.chunk.code.len();
+          let jump_over = self.current_ip();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           self.compile_statement_oast_with_mode(&i.consequent, false, completion_slot)?;
           if let Some(alt) = &i.alternate {
             self.emit(Op::Jump, LINE);
-            let jump_else = self.chunk.code.len();
+            let jump_else = self.current_ip();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             self.patch_jump(jump_over);
@@ -362,12 +363,12 @@ impl Compiler {
             self.compile_expr_oast(test)?;
             // Use CompareJump: cond_type 6 = StrictEq, jump if false (negated)
             self.emit_with_payload(Op::CompareJump, 6, LINE);
-            let skip_jump = self.chunk.code.len();
+            let skip_jump = self.current_ip();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
 
             self.emit(Op::Jump, LINE);
-            let body_jump = self.chunk.code.len();
+            let body_jump = self.current_ip();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             case_body_jumps.push((case_idx, body_jump));
@@ -380,7 +381,7 @@ impl Compiler {
 
         // If no case matched, jump to default (if any), else to end.
         self.emit(Op::Jump, LINE);
-        let no_match_jump = self.chunk.code.len();
+        let no_match_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
@@ -388,12 +389,12 @@ impl Compiler {
         // represented naturally by layout.
         let mut case_starts: Vec<usize> = vec![0; s.cases.len()];
         for (case_idx, case) in s.cases.iter().enumerate() {
-          case_starts[case_idx] = self.chunk.code.len();
+          case_starts[case_idx] = self.current_ip();
           for stmt in &case.consequent {
             self.compile_statement_oast_with_mode(stmt, false, completion_slot)?;
           }
         }
-        let switch_end = self.chunk.code.len();
+        let switch_end = self.current_ip();
 
         // Patch successful-case jumps to case body starts.
         for (case_idx, jump_pos) in case_body_jumps {
@@ -425,13 +426,13 @@ impl Compiler {
           self.emit_byte(self.slot_to_u8(slot)?, LINE);
           slot
         };
-        let loop_start = self.chunk.code.len();
+        let loop_start = self.current_ip();
         let exit_jump = if let Some(jump_over) = self.try_emit_compare_jump_if_false(&w.test)? {
           Some(jump_over)
         } else {
           self.compile_expr_oast(&w.test)?;
           self.emit(Op::JumpIfFalse, LINE);
-          let exit_jump = self.chunk.code.len();
+          let exit_jump = self.current_ip();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           Some(exit_jump)
@@ -440,16 +441,16 @@ impl Compiler {
         self.compile_statement_oast_with_mode(&w.body, false, Some(loop_completion_slot))?;
         self.exit_scope();
         self.emit(Op::Jump, LINE);
-        let _back_jump_pos = self.chunk.code.len();
+        let _back_jump_pos = self.current_ip();
         // back_offset in instruction units: loop_start - (current_ip + 1)
-        let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
+        let back_offset = loop_start as isize - (self.current_ip() as isize);
         self.emit_short_signed(back_offset, LINE);
         if let Some(patches) = self.continue_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, loop_start);
           }
         }
-        let cleanup_start = self.chunk.code.len();
+        let cleanup_start = self.current_ip();
         if owns_completion_slot {
           self.emit(Op::LoadLocal, LINE);
           self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
@@ -496,31 +497,31 @@ impl Compiler {
           self.emit_byte(self.slot_to_u8(slot)?, LINE);
           slot
         };
-        let loop_start = self.chunk.code.len();
+        let loop_start = self.current_ip();
         self.enter_block_scope();
         self.compile_statement_oast_with_mode(&d.body, false, Some(loop_completion_slot))?;
         self.exit_scope();
-        let test_start = self.chunk.code.len();
+        let test_start = self.current_ip();
         let exit_jump = if let Some(jump_over) = self.try_emit_compare_jump_if_false(&d.test)? {
           Some(jump_over)
         } else {
           self.compile_expr_oast(&d.test)?;
           self.emit(Op::JumpIfFalse, LINE);
-          let exit_jump = self.chunk.code.len();
+          let exit_jump = self.current_ip();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           Some(exit_jump)
         };
         self.emit(Op::Jump, LINE);
-        let _back_jump_pos = self.chunk.code.len();
-        let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
+        let _back_jump_pos = self.current_ip();
+        let back_offset = loop_start as isize - (self.current_ip() as isize);
         self.emit_short_signed(back_offset, LINE);
         if let Some(patches) = self.continue_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, test_start);
           }
         }
-        let cleanup_start = self.chunk.code.len();
+        let cleanup_start = self.current_ip();
         if owns_completion_slot {
           self.emit(Op::LoadLocal, LINE);
           self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
@@ -601,7 +602,7 @@ impl Compiler {
                   per_iteration_slots.push(slot);
                 }
                 if mirror_global {
-                  self.emit(Op::Dup, LINE);
+                  self.emit(Op::Copy, LINE);
                 }
                 self.emit(Op::StoreLocal, LINE);
                 self.emit_byte(self.slot_to_u8(slot)?, LINE);
@@ -615,7 +616,7 @@ impl Compiler {
                 crate::errors::CompilerError::from("unsupported for-loop initializer")
               })?;
               self.compile_expr_oast(expr)?;
-              self.emit(Op::Pop, LINE);
+              self.emit(Op::Discard, LINE);
             }
           }
         }
@@ -625,14 +626,14 @@ impl Compiler {
           self.emit_byte(self.slot_to_u8(slot)?, LINE);
         }
 
-        let loop_start = self.chunk.code.len();
+        let loop_start = self.current_ip();
         let exit_jump = if let Some(test) = &f.test {
           if let Some(jump_over) = self.try_emit_compare_jump_if_false(test)? {
             Some(jump_over)
           } else {
             self.compile_expr_oast(test)?;
             self.emit(Op::JumpIfFalse, LINE);
-            let exit_jump = self.chunk.code.len();
+            let exit_jump = self.current_ip();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
             Some(exit_jump)
@@ -645,7 +646,7 @@ impl Compiler {
         self.compile_statement_oast_with_mode(&f.body, false, completion_slot)?;
         self.exit_scope();
 
-        let update_start = self.chunk.code.len();
+        let update_start = self.current_ip();
         if let Some(patches) = self.continue_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, update_start);
@@ -659,17 +660,17 @@ impl Compiler {
 
         if let Some(update) = &f.update {
           self.compile_expr_oast(update)?;
-          self.emit(Op::Pop, LINE);
+          self.emit(Op::Discard, LINE);
         }
 
         self.emit(Op::Jump, LINE);
-        let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
+        let back_offset = loop_start as isize - (self.current_ip() as isize);
         self.emit_short_signed(back_offset, LINE);
 
         if let Some(exit_jump) = exit_jump {
           self.patch_jump(exit_jump);
         }
-        let loop_end = self.chunk.code.len();
+        let loop_end = self.current_ip();
         if let Some(patches) = self.break_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, loop_end);
@@ -688,7 +689,7 @@ impl Compiler {
           None
         };
         if let Some((continue_patches, break_patches)) = label_patches {
-          let loop_end = self.chunk.code.len();
+          let loop_end = self.current_ip();
           self.patch_jump_list(continue_patches, update_start);
           self.patch_jump_list(break_patches, loop_end);
         }
@@ -711,7 +712,7 @@ impl Compiler {
 
         // iterable -> iterator via iterable[Symbol.iterator]()
         self.compile_expr_oast(&f.right)?;
-        self.emit(Op::Dup, LINE);
+        self.emit(Op::Copy, LINE);
         self.emit_get_global_name("Symbol");
         self.emit_constant(Value::String("iterator".to_string()), LINE);
         self.emit(Op::GetProperty, LINE);
@@ -749,22 +750,22 @@ impl Compiler {
 
         let thrown_slot = self.alloc_temp_local("forof_thrown");
         self.emit(Op::PushHandler, LINE);
-        let handler_jump = self.chunk.code.len();
+        let handler_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
-        let loop_start = self.chunk.code.len();
+        let loop_start = self.current_ip();
 
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
         self.emit(Op::IteratorNext, LINE);
-        self.emit(Op::Dup, LINE);
+        self.emit(Op::Copy, LINE);
         self.emit_constant(Value::String("done".to_string()), LINE);
         self.emit(Op::GetProperty, LINE);
         let done_slot = self.alloc_ic_slot()?;
         self.emit_byte(done_slot, LINE);
         self.emit(Op::JumpIfTrue, LINE);
-        let exit_jump = self.chunk.code.len() - 1;
+        let exit_jump = self.current_ip() - 1;
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.emit_constant(Value::String("value".to_string()), LINE);
@@ -836,20 +837,20 @@ impl Compiler {
         }
 
         self.emit(Op::Jump, LINE);
-        let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
+        let back_offset = loop_start as isize - (self.current_ip() as isize);
         self.emit_short_signed(back_offset, LINE);
 
         self.patch_jump(exit_jump);
         // Normal iterator exhaustion should not perform IteratorClose.
         // Also discard the final iterator result object left on stack.
-        self.emit(Op::Pop, LINE);
+        self.emit(Op::Discard, LINE);
         self.emit(Op::PopHandler, LINE);
         self.emit(Op::Jump, LINE);
-        let done_end_jump = self.chunk.code.len();
+        let done_end_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
-        let break_cleanup = self.chunk.code.len();
+        let break_cleanup = self.current_ip();
         if let Some(patches) = self.break_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, break_cleanup);
@@ -874,9 +875,9 @@ impl Compiler {
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
         self.emit(Op::IteratorClose, LINE);
-        self.emit(Op::Pop, LINE);
+        self.emit(Op::Discard, LINE);
         self.emit(Op::Jump, LINE);
-        let end_jump = self.chunk.code.len();
+        let end_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
@@ -884,20 +885,20 @@ impl Compiler {
         self.emit(Op::StoreLocal, LINE);
         self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
         self.emit(Op::PushHandler, LINE);
-        let close_handler_jump = self.chunk.code.len();
+        let close_handler_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
         self.emit(Op::IteratorClose, LINE);
-        self.emit(Op::Pop, LINE);
+        self.emit(Op::Discard, LINE);
         self.emit(Op::PopHandler, LINE);
         self.emit(Op::Jump, LINE);
-        let close_done_jump = self.chunk.code.len();
+        let close_done_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.patch_jump(close_handler_jump);
-        self.emit(Op::Pop, LINE);
+        self.emit(Op::Discard, LINE);
         self.patch_jump(close_done_jump);
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
@@ -976,7 +977,7 @@ impl Compiler {
           }
         }
 
-        let loop_start = self.chunk.code.len();
+        let loop_start = self.current_ip();
 
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
@@ -986,7 +987,7 @@ impl Compiler {
         self.emit(Op::GetProperty, LINE);
         // Use CompareJump: cond_type 2 = Lt, jump if true
         self.emit_with_payload(Op::CompareJump, 2, LINE);
-        let exit_jump = self.chunk.code.len();
+        let exit_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
@@ -1047,7 +1048,7 @@ impl Compiler {
         self.compile_statement_oast_with_mode(&f.body, false, completion_slot)?;
         self.exit_scope();
 
-        let update_start = self.chunk.code.len();
+        let update_start = self.current_ip();
         if let Some(patches) = self.continue_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, update_start);
@@ -1062,11 +1063,11 @@ impl Compiler {
         self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
 
         self.emit(Op::Jump, LINE);
-        let back_offset = loop_start as isize - (self.chunk.code.len() as isize);
+        let back_offset = loop_start as isize - (self.current_ip() as isize);
         self.emit_short_signed(back_offset, LINE);
 
         self.patch_jump(exit_jump);
-        let loop_end = self.chunk.code.len();
+        let loop_end = self.current_ip();
         if let Some(patches) = self.break_patches.pop() {
           for patch_pos in patches {
             self.patch_jump_to_target(patch_pos, loop_end);
@@ -1085,7 +1086,7 @@ impl Compiler {
           None
         };
         if let Some((continue_patches, break_patches)) = label_patches {
-          let loop_end = self.chunk.code.len();
+          let loop_end = self.current_ip();
           self.patch_jump_list(continue_patches, update_start);
           self.patch_jump_list(break_patches, loop_end);
         }
@@ -1112,7 +1113,7 @@ impl Compiler {
           self.emit(Op::StoreLocal, LINE);
           self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
           self.emit(Op::Jump, LINE);
-          let patch_pos = self.chunk.code.len();
+          let patch_pos = self.current_ip();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           if let Some(state) = self.finally_patches.last_mut() {
@@ -1158,7 +1159,7 @@ impl Compiler {
           self.emit_iterator_closes_above(target_loop_depth)?;
           self.emit_with_env_pops();
           self.emit(Op::Jump, LINE);
-          let patch_pos = self.chunk.code.len();
+          let patch_pos = self.current_ip();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           self.label_patches[idx]
@@ -1172,7 +1173,7 @@ impl Compiler {
           }
           self.emit_with_env_pops();
           self.emit(Op::Jump, LINE);
-          let patch_pos = self.chunk.code.len();
+          let patch_pos = self.current_ip();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           if let Some(patches) = self.continue_patches.last_mut() {
@@ -1197,7 +1198,7 @@ impl Compiler {
           self.emit_iterator_closes_above(target_loop_depth)?;
           self.emit_with_env_pops();
           self.emit(Op::Jump, LINE);
-          let patch_pos = self.chunk.code.len();
+          let patch_pos = self.current_ip();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           self.label_patches[idx]
@@ -1211,7 +1212,7 @@ impl Compiler {
           }
           self.emit_with_env_pops();
           self.emit(Op::Jump, LINE);
-          let patch_pos = self.chunk.code.len();
+          let patch_pos = self.current_ip();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           if let Some(patches) = self.break_patches.last_mut() {
@@ -1266,9 +1267,9 @@ impl Compiler {
           .as_ref()
           .map(|_| self.finally_patches.len().saturating_sub(1));
 
-        let push_handler_ip = self.chunk.code.len();
+        let push_handler_ip = self.current_ip();
         self.emit(Op::PushHandler, LINE);
-        let handler_jump = self.chunk.code.len();
+        let handler_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
@@ -1291,7 +1292,7 @@ impl Compiler {
               .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
             state.in_finalizer = true;
           }
-          let body_start = self.chunk.code.len();
+          let body_start = self.current_ip();
           self.enter_block_scope_with_vars(&fin.body);
           for stmt in &fin.body {
             self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
@@ -1324,7 +1325,7 @@ impl Compiler {
           self.emit(Op::LoadLocal, LINE);
           self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
           self.emit(Op::JumpIfFalse, LINE);
-          let skip_return = self.chunk.code.len();
+          let skip_return = self.current_ip();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
           self.emit(Op::LoadLocal, LINE);
@@ -1341,7 +1342,7 @@ impl Compiler {
           self.patch_jump(skip_return);
         }
         self.emit(Op::Jump, LINE);
-        let end_jump = self.chunk.code.len();
+        let end_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
@@ -1356,6 +1357,14 @@ impl Compiler {
                 _ => "__catch_pattern".to_string(),
               };
               self.enter_block_scope_with_vars(&handler.body.body);
+              if !matches!(param.pattern, OPat::BindingIdentifier(_)) {
+                let mut binding_names = HashSet::new();
+                Self::collect_binding_names(&param.pattern, &mut binding_names);
+                for binding_name in binding_names {
+                  let slot = self.add_local_with_mirror(binding_name, None, false);
+                  self.mark_local_tdz(slot);
+                }
+              }
               let slot = self.add_local_with_mirror(name, None, false);
               self.emit(Op::StoreLocal, LINE);
               self.emit_byte(self.slot_to_u8(slot)?, LINE);
@@ -1366,14 +1375,13 @@ impl Compiler {
                   &param.pattern,
                   oxc_ast::ast::VariableDeclarationKind::Let,
                 )?;
-                self.emit(Op::Pop, LINE);
               }
               for stmt in &handler.body.body {
                 self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
               }
               self.exit_scope();
             } else {
-              self.emit(Op::Pop, LINE);
+              self.emit(Op::Discard, LINE);
               self.enter_block_scope_with_vars(&handler.body.body);
               for stmt in &handler.body.body {
                 self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
@@ -1484,7 +1492,7 @@ impl Compiler {
     }
 
     if self.is_root {
-      self.emit(Op::Dup, LINE);
+      self.emit(Op::Copy, LINE);
     }
     self.emit(Op::StoreLocal, LINE);
     self.emit_byte(self.slot_to_u8(slot)?, LINE);
@@ -1569,7 +1577,7 @@ impl Compiler {
         self.emit(Op::Undefined, LINE);
         // Use CompareJump: cond_type 6 = StrictEq, jump if true
         self.emit_with_payload(Op::CompareJump, 6, LINE);
-        let skip_jump = self.chunk.code.len();
+        let skip_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
         self.compile_expr_oast(init)?;
@@ -1617,7 +1625,7 @@ impl Compiler {
       self.emit(Op::Undefined, LINE);
       // Use CompareJump: cond_type 6 = StrictEq, jump if true
       self.emit_with_payload(Op::CompareJump, 6, LINE);
-      let skip_jump = self.chunk.code.len();
+      let skip_jump = self.current_ip();
       self.emit_byte(0, LINE);
       self.emit_byte(0, LINE);
       self.compile_expr_oast(init)?;
@@ -1665,9 +1673,9 @@ impl Compiler {
 
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(self.slot_to_u8(target_slot)?, LINE);
-    self.emit(Op::Dup, LINE);
+    self.emit(Op::Copy, LINE);
     self.emit_get_builtin_name("objectDefineProperty");
-    self.emit(Op::Swap, LINE);
+    self.emit(Op::Exchange, LINE);
 
     if let Some(ref key_name) = method_name {
       if matches!(md.key, oast::PropertyKey::PrivateIdentifier(_)) {
@@ -1729,8 +1737,8 @@ impl Compiler {
     self.emit_byte(prop_count, LINE);
     self.emit(Op::Call, LINE);
     self.emit_byte(3, LINE);
-    self.emit(Op::Pop, LINE);
-    self.emit(Op::Pop, LINE);
+    self.emit(Op::Discard, LINE);
+    self.emit(Op::Discard, LINE);
     Ok(())
   }
 
@@ -1765,12 +1773,13 @@ impl Compiler {
       proto.is_class_constructor = true;
       proto
     } else {
-      let mut ctor_chunk = Chunk::new_compiler_ir(Rc::clone(&self.source_text));
+      let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
       if class_has_super {
         ctor_chunk.allow_new_target = true;
         ctor_chunk.allow_super = true;
         let mut inner = Compiler {
           chunk: ctor_chunk,
+          risc: super::risc::RiscBuilder::new(),
           source_text: Rc::clone(&self.source_text),
           locals: Vec::new(),
           local_types: Vec::new(),
@@ -1817,10 +1826,13 @@ impl Compiler {
         inner.emit_byte(0, LINE);
         inner.emit(Op::SuperConstruct, LINE);
         inner.emit_byte(1, LINE);
-        inner.emit(Op::Pop, LINE);
+        inner.emit(Op::Discard, LINE);
         inner.emit(Op::GetThis, LINE);
         inner.emit(Op::Return, LINE);
-        ctor_chunk = std::mem::take(&mut inner.chunk);
+        ctor_chunk = super::risc::RiscBuilder::finish(
+          std::mem::take(&mut inner.chunk),
+          std::mem::take(&mut inner.risc),
+        )?;
         FunctionProto {
           name: class_name.clone(),
           span: c.span,
@@ -1848,8 +1860,10 @@ impl Compiler {
           ic_table: Vec::new(),
         }
       } else {
-        ctor_chunk.write(Op::GetThis as u8, LINE);
-        ctor_chunk.write(Op::Return as u8, LINE);
+        let mut builder = super::risc::RiscBuilder::new();
+        builder.emit(Op::GetThis, 0, LINE);
+        builder.emit(Op::Return, 0, LINE);
+        ctor_chunk = super::risc::RiscBuilder::finish(ctor_chunk, builder)?;
         FunctionProto {
           name: class_name.clone(),
           span: c.span,
@@ -1884,14 +1898,14 @@ impl Compiler {
     self.emit_byte(self.function_index_to_u8(idx)?, LINE);
     if let Some(super_class) = &c.super_class {
       self.emit_get_builtin_name("classInitExtends");
-      self.emit(Op::Swap, LINE);
+      self.emit(Op::Exchange, LINE);
       self.compile_expr_oast(super_class)?;
       self.emit(Op::Call, LINE);
       self.emit_byte(2, LINE);
     }
 
     let ctor_slot = self.alloc_temp_local("class_ctor_tmp");
-    self.emit(Op::Dup, LINE);
+    self.emit(Op::Copy, LINE);
     self.emit(Op::StoreLocal, LINE);
     self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
 
@@ -2025,7 +2039,8 @@ impl Compiler {
     }
 
     let mut inner = Compiler {
-      chunk: Chunk::new_compiler_ir(Rc::clone(&self.source_text)),
+      chunk: Chunk::new(Rc::clone(&self.source_text)),
+      risc: super::risc::RiscBuilder::new(),
       source_text: Rc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -2151,7 +2166,10 @@ impl Compiler {
 
     inner.emit(Op::Undefined, LINE);
     inner.emit(Op::Return, LINE);
-    let mut chunk = std::mem::take(&mut inner.chunk);
+    let mut chunk = super::risc::RiscBuilder::finish(
+      std::mem::take(&mut inner.chunk),
+      std::mem::take(&mut inner.risc),
+    )?;
     chunk.allow_new_target = inner.allow_new_target;
     chunk.allow_super = inner.allow_super;
     let has_rest = func.params.rest.is_some();
@@ -2281,7 +2299,8 @@ impl Compiler {
     }
 
     let mut inner = Compiler {
-      chunk: Chunk::new_compiler_ir(Rc::clone(&self.source_text)),
+      chunk: Chunk::new(Rc::clone(&self.source_text)),
+      risc: super::risc::RiscBuilder::new(),
       source_text: Rc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
@@ -2426,7 +2445,10 @@ impl Compiler {
       }
     }
 
-    let mut chunk = std::mem::take(&mut inner.chunk);
+    let mut chunk = super::risc::RiscBuilder::finish(
+      std::mem::take(&mut inner.chunk),
+      std::mem::take(&mut inner.risc),
+    )?;
     chunk.allow_new_target = inner.allow_new_target;
     chunk.allow_super = inner.allow_super;
     let has_rest = func.params.rest.is_some();

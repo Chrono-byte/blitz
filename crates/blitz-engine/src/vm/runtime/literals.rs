@@ -112,7 +112,7 @@ impl Vm {
     Ok(object)
   }
 
-  /// Creates a closure without coupling the result to compiler-IR operand state.
+  /// Creates a closure without coupling the result to compiler emission state.
   #[allow(clippy::too_many_lines)]
   pub(super) fn make_closure_value(
     &mut self,

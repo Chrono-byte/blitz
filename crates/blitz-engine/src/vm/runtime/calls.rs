@@ -708,7 +708,7 @@ impl Vm {
 
   /// Calls a function without an explicit receiver.
   ///
-  /// Native builtins use the same argument convention as the compiler IR
+  /// Native builtins use the same argument convention as RISC v2 bytecode
   /// `Call` opcode: user arguments begin at index zero. Closures still pass
   /// through ordinary ECMAScript `this` preparation.
   pub(super) fn call_value(

@@ -178,25 +178,66 @@ mod test {
   }
 
   #[test]
-  fn risc_core_execution_is_stable_across_compiler_entrypoints() {
+  fn labeled_loop_breaks_complete_through_risc_cleanup() {
+    for source in [
+      r#"
+        var labeled_loop_result = 0;
+        outer: while (true) {
+          try {} finally { break outer; }
+        }
+        labeled_loop_result = 1;
+      "#,
+      r#"
+        var labeled_loop_result = 0;
+        outer: do {
+          try {} finally { break outer; }
+        } while (true);
+        labeled_loop_result = 1;
+      "#,
+    ] {
+      let (vm, _) = run_script(source);
+      assert_eq!(
+        vm.get_global("labeled_loop_result"),
+        Some(Value::Number(1.0))
+      );
+    }
+  }
+
+  #[test]
+  fn array_destructuring_in_for_of_preserves_the_bound_value() {
+    for source in [
+      r#"
+        var x;
+        for ([x] of [[1]]) { break; }
+        var array_destructuring_result = x;
+      "#,
+      r#"
+        for (var [x] of [[1]]) { break; }
+        var array_destructuring_result = x;
+      "#,
+    ] {
+      let (vm, _) = run_script(source);
+      assert_eq!(
+        vm.get_global("array_destructuring_result"),
+        Some(Value::Number(1.0))
+      );
+    }
+  }
+
+  #[test]
+  fn risc_core_execution_handles_control_flow() {
     let source = r#"
       var x = 1;
       while (x < 5) x = x + 1;
       var result = x * 2;
     "#;
     let session = Parser::parse_source(source).expect("parse");
-    let stack_chunk = compiler::compile(session.program(), session.source()).expect("stack");
-    let risc_chunk = compiler::compile_risc(session.program(), session.source()).expect("risc");
-
-    let stack_globals = test_globals();
-    let mut stack_vm = Vm::new(Rc::clone(&stack_globals));
-    stack_vm.run(stack_chunk).expect("stack run");
+    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
 
     let risc_globals = test_globals();
     let mut risc_vm = Vm::new(Rc::clone(&risc_globals));
-    risc_vm.run(risc_chunk).expect("risc run");
+    risc_vm.run(chunk).expect("risc run");
 
-    assert_eq!(stack_vm.get_global("result"), risc_vm.get_global("result"));
     assert!(matches!(
       risc_vm.get_global("result"),
       Some(Value::Number(10.0_f64))
@@ -239,18 +280,12 @@ mod test {
       var result = sum(array[0], array[1], array[2], object.value, object.other, 6, 7, 8);
     "#;
     let session = Parser::parse_source(source).expect("parse");
-    let stack_chunk = compiler::compile(session.program(), session.source()).expect("stack");
-    let risc_chunk = compiler::compile_risc(session.program(), session.source()).expect("risc");
-
-    let stack_globals = test_globals();
-    let mut stack_vm = Vm::new(Rc::clone(&stack_globals));
-    stack_vm.run(stack_chunk).expect("stack run");
+    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
 
     let risc_globals = test_globals();
     let mut risc_vm = Vm::new(Rc::clone(&risc_globals));
-    risc_vm.run(risc_chunk).expect("risc run");
+    risc_vm.run(chunk).expect("risc run");
 
-    assert_eq!(stack_vm.get_global("result"), risc_vm.get_global("result"));
     assert!(matches!(
       risc_vm.get_global("result"),
       Some(Value::Number(36.0_f64))
@@ -310,28 +345,24 @@ mod test {
   }
 
   #[test]
-  fn relational_comparison_applies_to_primitive_across_compiler_entrypoints() {
+  fn relational_comparison_applies_to_primitive() {
     let source = r#"
       var left = { valueOf: function () { return 1; } };
       var relational_result = left < 2;
     "#;
     let session = Parser::parse_source(source).expect("parse");
-    let stack_chunk = compiler::compile(session.program(), session.source()).expect("stack");
-    let risc_chunk = compiler::compile_risc(session.program(), session.source()).expect("risc");
-
-    for chunk in [stack_chunk, risc_chunk] {
-      let globals = test_globals();
-      let mut vm = Vm::new(globals);
-      vm.run(chunk).expect("run");
-      assert_eq!(vm.get_global("relational_result"), Some(Value::Bool(true)));
-    }
+    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    vm.run(chunk).expect("run");
+    assert_eq!(vm.get_global("relational_result"), Some(Value::Bool(true)));
   }
 
   #[test]
   fn risc_ordinary_builtin_call_does_not_prepend_receiver() {
     let source = "var builtin_argument = capture(\"expected\");";
     let session = Parser::parse_source(source).expect("parse");
-    let chunk = compiler::compile_risc(session.program(), session.source()).expect("risc");
+    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
     let globals = test_globals();
     globals.borrow_mut().properties.insert(
       PropertyKey::String("capture".to_string()),
@@ -2422,6 +2453,31 @@ mod test {
     assert_eq!(*calls.borrow(), 0);
     assert!(matches!(result, Value::Undefined));
     assert!(matches!(vm.get_global("x"), Some(Value::Number(n)) if n == 1.0_f64));
+  }
+
+  #[test]
+  fn conditional_expression_merges_both_arms_and_nested_results() {
+    let (vm, _globals) = run_script(
+      r#"
+        var truthy = true ? 11 : 12;
+        var falsy = false ? 21 : 22;
+        var nested_left = true ? (false ? 31 : 32) : 33;
+        var nested_right = false ? 41 : (true ? 42 : 43);
+      "#,
+    );
+
+    assert_eq!(vm.get_global("truthy"), Some(Value::Number(11.0)));
+    assert_eq!(vm.get_global("falsy"), Some(Value::Number(22.0)));
+    assert_eq!(vm.get_global("nested_left"), Some(Value::Number(32.0)));
+    assert_eq!(vm.get_global("nested_right"), Some(Value::Number(42.0)));
+  }
+
+  #[test]
+  fn catch_handler_receives_thrown_value_at_cfg_entry() {
+    let (vm, _globals) =
+      run_script("var caught; try { throw 42; } catch (error) { caught = error; }");
+
+    assert_eq!(vm.get_global("caught"), Some(Value::Number(42.0)));
   }
 
   #[test]
