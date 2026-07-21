@@ -20,6 +20,7 @@ CLI (preferred over env):
 - --es-version edition [,edition...] (repeatable)
 - --limit number
 - --workers number
+- --quiet
 
 Segments may be labels like: language, built-ins, intl402, staging
 or paths relative to test262/test (e.g. built-ins/Array).
@@ -29,12 +30,12 @@ APIs.
 */
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, exit};
+use std::process::{Child, Command, ExitStatus, Stdio, exit};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -545,9 +546,25 @@ struct RunnerOptions {
   /// Hidden internal JSON report path written by subprocess batches.
   #[arg(long = "report-json", value_name = "PATH", hide = true)]
   report_json: Option<PathBuf>,
+  /// Write a stable, reusable manifest of the selected tests and exit.
+  #[arg(long = "write-manifest", value_name = "PATH")]
+  write_manifest: Option<PathBuf>,
+  /// Run the exact tests listed in a previously generated manifest.
+  #[arg(long = "manifest", value_name = "PATH")]
+  manifest: Option<PathBuf>,
+  /// Write a categorized machine-readable conformance summary.
+  #[arg(long = "summary-json", value_name = "PATH")]
+  summary_json: Option<PathBuf>,
   /// Number of exact-file tests to hand to each subprocess batch.
   #[arg(long = "batch-size", value_name = "N", default_value_t = 200)]
   batch_size: usize,
+  /// Maximum runtime for a subprocess batch before recursively isolating it.
+  #[arg(
+    long = "subprocess-timeout",
+    value_name = "SECONDS",
+    default_value_t = 45
+  )]
+  subprocess_timeout: u64,
   /// List of test segments to include.
   #[arg(
     long = "segment",
@@ -588,6 +605,9 @@ struct RunnerOptions {
   /// Emit per-test start/finish logs.
   #[arg(long = "log-tests", action)]
   log_tests: bool,
+  /// Suppress individual failure details while retaining aggregate output.
+  #[arg(long = "quiet", action)]
+  quiet: bool,
   /// Run a single hard-coded test and dump globals in the error handler style.
   #[arg(long = "dump-scopes", action)]
   dump_scopes: bool,
@@ -646,6 +666,95 @@ fn load_file_list(path: &Path) -> Result<Vec<PathBuf>, String> {
   )
 }
 
+/// Returns a platform-independent path relative to the Test262 test root.
+fn manifest_path(
+  test_root: &Path,
+  path: &Path,
+) -> Result<String, String> {
+  let relative = path.strip_prefix(test_root).map_err(|_| {
+    format!(
+      "Test path {} is outside {}",
+      path.display(),
+      test_root.display()
+    )
+  })?;
+  Ok(
+    relative
+      .components()
+      .map(|component| component.as_os_str().to_string_lossy())
+      .collect::<Vec<_>>()
+      .join("/"),
+  )
+}
+
+/// Writes selected tests in stable lexical order, relative to `test262/test`.
+fn write_manifest(
+  path: &Path,
+  test_root: &Path,
+  files: &[PathBuf],
+) -> Result<(), String> {
+  let mut entries = files
+    .iter()
+    .map(|file| manifest_path(test_root, file))
+    .collect::<Result<Vec<_>, _>>()?;
+  entries.sort();
+  entries.dedup();
+
+  let mut contents = String::from("# Blitz Test262 manifest v1\n");
+  for entry in entries {
+    contents.push_str(&entry);
+    contents.push('\n');
+  }
+  if let Some(parent) = path.parent()
+    && !parent.as_os_str().is_empty()
+  {
+    fs::create_dir_all(parent)
+      .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+  }
+  fs::write(path, contents).map_err(|e| format!("Failed to write manifest {}: {e}", path.display()))
+}
+
+/// Loads a stable manifest and resolves every entry beneath `test262/test`.
+fn load_manifest(
+  path: &Path,
+  test_root: &Path,
+) -> Result<Vec<PathBuf>, String> {
+  let contents = fs::read_to_string(path)
+    .map_err(|e| format!("Failed to read manifest {}: {e}", path.display()))?;
+  let mut files = Vec::new();
+  for (line_index, raw_line) in contents.lines().enumerate() {
+    let line = raw_line.trim();
+    if line.is_empty() || line.starts_with('#') {
+      continue;
+    }
+    let relative = Path::new(line);
+    if relative.is_absolute()
+      || relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+      return Err(format!(
+        "Invalid manifest entry at {}:{}: {line}",
+        path.display(),
+        line_index + 1
+      ));
+    }
+    let file = test_root.join(relative);
+    if !file.is_file() {
+      return Err(format!(
+        "Manifest entry does not exist at {}:{}: {}",
+        path.display(),
+        line_index + 1,
+        file.display()
+      ));
+    }
+    files.push(file);
+  }
+  files.sort();
+  files.dedup();
+  Ok(files)
+}
+
 /// Returns a unique temporary path for the given prefix and extension.
 fn unique_temp_path(
   prefix: &str,
@@ -698,6 +807,71 @@ fn subprocess_crash_result(status: &ExitStatus) -> TestResult {
   TestResult::Panic(format!("subprocess exited with status {status}"))
 }
 
+/// Outcome of waiting for an isolated subprocess batch.
+enum SubprocessOutcome {
+  /// The subprocess exited normally or crashed with the contained status.
+  Exited(ExitStatus),
+  /// The subprocess exceeded the parent-enforced deadline and was terminated.
+  TimedOut,
+}
+
+trait ChildControl {
+  fn try_wait(&mut self) -> Result<Option<ExitStatus>, std::io::Error>;
+  fn kill(&mut self) -> Result<(), std::io::Error>;
+  fn wait(&mut self) -> Result<ExitStatus, std::io::Error>;
+}
+
+impl ChildControl for Child {
+  fn try_wait(&mut self) -> Result<Option<ExitStatus>, std::io::Error> {
+    Child::try_wait(self)
+  }
+
+  fn kill(&mut self) -> Result<(), std::io::Error> {
+    Child::kill(self)
+  }
+
+  fn wait(&mut self) -> Result<ExitStatus, std::io::Error> {
+    Child::wait(self)
+  }
+}
+
+/// Waits for a child without allowing a CPU-bound test to hang the parent runner.
+fn wait_for_child(
+  child: &mut impl ChildControl,
+  timeout: Duration,
+) -> Result<SubprocessOutcome, std::io::Error> {
+  let started = Instant::now();
+  loop {
+    if let Some(status) = child.try_wait()? {
+      return Ok(SubprocessOutcome::Exited(status));
+    }
+
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+      return match child.kill() {
+        Ok(()) => {
+          child.wait()?;
+          Ok(SubprocessOutcome::TimedOut)
+        }
+        Err(kill_error) => match child.try_wait()? {
+          Some(status) => Ok(SubprocessOutcome::Exited(status)),
+          None => Err(kill_error),
+        },
+      };
+    }
+    thread::sleep(remaining.min(Duration::from_millis(10)));
+  }
+}
+
+/// Spawns and waits for a subprocess with a parent-enforced deadline.
+fn wait_for_subprocess(
+  command: &mut Command,
+  timeout: Duration,
+) -> Result<SubprocessOutcome, std::io::Error> {
+  let mut child = command.spawn()?;
+  wait_for_child(&mut child, timeout)
+}
+
 /// Runs selected tests via subprocess batches and returns the results.
 #[allow(clippy::too_many_lines)]
 fn run_selected_tests_via_subprocess_batches(
@@ -705,6 +879,7 @@ fn run_selected_tests_via_subprocess_batches(
   job_count: usize,
   log_tests: bool,
   batch_size: usize,
+  subprocess_timeout: Duration,
 ) -> Result<Vec<(usize, PathBuf, TestResult)>, String> {
   let exe = env::current_exe().map_err(|e| format!("Failed to resolve current exe: {e}"))?;
   let effective_batch_size = batch_size.max(1);
@@ -764,14 +939,18 @@ fn run_selected_tests_via_subprocess_batches(
         command.arg("--workers").arg("1");
         if log_tests {
           command.arg("--log-tests");
+        } else {
+          command.stdout(Stdio::null());
+          command.stderr(Stdio::null());
         }
 
-        let status = command.status();
+        let status = wait_for_subprocess(&mut command, subprocess_timeout);
         drop(fs::remove_file(&file_list_path));
 
         match status {
-          Ok(status) if status.success() || status.code() == Some(1_i32) => {}
-          Ok(status) => {
+          Ok(SubprocessOutcome::Exited(status))
+            if status.success() || status.code() == Some(1_i32) => {}
+          Ok(SubprocessOutcome::Exited(status)) => {
             drop(fs::remove_file(&report_path));
             let crashed_count = chunk_files.len();
             if crashed_count > 1 {
@@ -802,6 +981,47 @@ fn run_selected_tests_via_subprocess_batches(
               .lock()
               .expect("subprocess results poisoned")
               .push((chunk_start, file, subprocess_crash_result(&status)));
+            continue;
+          }
+          Ok(SubprocessOutcome::TimedOut) => {
+            drop(fs::remove_file(&report_path));
+            let timed_out_count = chunk_files.len();
+            if timed_out_count > 1 {
+              let (left, right) = bisect_subprocess_batch(chunk_start, chunk_files)
+                .expect("a multi-test subprocess batch can be split");
+              eprintln!(
+                "Subprocess batch timed out after {}s for {} tests; retrying smaller batches",
+                subprocess_timeout.as_secs(),
+                timed_out_count
+              );
+              let mut guard = queue
+                .lock()
+                .expect("subprocess chunk queue poisoned");
+              guard.push_front(right);
+              guard.push_front(left);
+              continue;
+            }
+
+            let file = chunk_files
+              .into_iter()
+              .next()
+              .expect("a subprocess batch always contains a test");
+            eprintln!(
+              "Subprocess test timed out after {}s: {}",
+              subprocess_timeout.as_secs(),
+              file.display()
+            );
+            shared_results
+              .lock()
+              .expect("subprocess results poisoned")
+              .push((
+                chunk_start,
+                file,
+                TestResult::Fail(format!(
+                  "subprocess timed out after {} seconds",
+                  subprocess_timeout.as_secs()
+                )),
+              ));
             continue;
           }
           Err(e) => {
@@ -962,6 +1182,229 @@ struct Meta {
   includes: Option<Vec<String>>,
   /// The negative metadata of the test.
   negative: Option<Negative>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConformanceSummary {
+  schema_version: u8,
+  selected: usize,
+  outcomes: BTreeMap<String, usize>,
+  categories: BTreeMap<String, BucketStatsReport>,
+  failure_classes: BTreeMap<String, usize>,
+  tests: Vec<TestCaseSummary>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct BucketStatsReport {
+  pass: usize,
+  fail: usize,
+  skip: usize,
+  crash: usize,
+  hang: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct TestCaseSummary {
+  path: String,
+  categories: Vec<String>,
+  outcome: String,
+  failure_class: Option<String>,
+  detail: Option<String>,
+}
+
+fn test_categories(
+  test_root: &Path,
+  path: &Path,
+  meta: Option<&Meta>,
+) -> Vec<String> {
+  let relative = path.strip_prefix(test_root).unwrap_or(path);
+  let is_annex_b = path_has_segment(relative, "annexB");
+  let is_staging = path_has_segment(relative, "staging");
+  let flags = meta
+    .and_then(|meta| meta.flags.as_deref())
+    .unwrap_or(&[]);
+  let mut categories = Vec::new();
+
+  if !is_annex_b && !is_staging {
+    categories.push("normative".to_string());
+  }
+  if is_annex_b {
+    categories.push("annex-b".to_string());
+  }
+  if is_staging {
+    categories.push("staging".to_string());
+  }
+  if flags.iter().any(|flag| flag == "module") {
+    categories.push("module".to_string());
+  }
+  if flags.iter().any(|flag| flag == "async") {
+    categories.push("async".to_string());
+  }
+  if let Some(negative) = meta.and_then(|meta| meta.negative.as_ref()) {
+    if matches!(negative.phase.as_str(), "parse" | "early") {
+      categories.push("negative-parse".to_string());
+    } else {
+      categories.push("negative-runtime".to_string());
+    }
+  }
+  categories
+}
+
+fn failure_class(result: &TestResult) -> Option<&'static str> {
+  let message = match result {
+    TestResult::Pass => return None,
+    TestResult::Skip(_) => return Some("unsupported"),
+    TestResult::StackOverflow => return Some("stack-or-control-flow"),
+    TestResult::Panic(_) => return Some("crash"),
+    TestResult::Fail(message) => failure_diagnostic(message).to_ascii_lowercase(),
+  };
+
+  if message.contains("timed out") || message.contains("timeout") {
+    Some("hang")
+  } else if message.contains("parse error")
+    || message.contains("compile error")
+    || message.contains("syntaxerror")
+  {
+    Some("parser-or-compiler")
+  } else if message.contains("stack")
+    || message.contains("opcode")
+    || message.contains("jump target")
+    || message.contains("instruction pointer")
+  {
+    Some("stack-or-control-flow")
+  } else if message.contains("descriptor")
+    || message.contains("configurable")
+    || message.contains("enumerable")
+    || message.contains("writable")
+  {
+    Some("incorrect-descriptor")
+  } else if message.contains("iterator")
+    || message.contains("constructor")
+    || message.contains("toprimitive")
+    || message.contains("property key")
+  {
+    Some("missing-abstract-operation")
+  } else if message.contains("exception")
+    || message.contains("wrong error")
+    || message.contains("expected throw")
+  {
+    Some("exception-propagation")
+  } else if message.contains("realm")
+    || message.contains("microtask")
+    || message.contains("job queue")
+    || message.contains("async test")
+  {
+    Some("realm-or-job-queue")
+  } else if message.contains("not defined")
+    || message.contains("not a function")
+    || message.contains("unsupported")
+  {
+    Some("missing-intrinsic")
+  } else {
+    Some("assertion-or-semantics")
+  }
+}
+
+/// Removes the Test262 path and strictness prefix before diagnostic classification.
+fn failure_diagnostic(message: &str) -> &str {
+  if let Some((_, diagnostic)) = message.split_once("): ") {
+    return diagnostic;
+  }
+  if let Some(path_end) = message.find(".js: ") {
+    return &message[path_end + ".js: ".len()..];
+  }
+  message
+}
+
+fn result_parts(result: &TestResult) -> (&'static str, Option<String>) {
+  match result {
+    TestResult::Pass => ("pass", None),
+    TestResult::Skip(message) => ("skip", Some(message.clone())),
+    TestResult::Fail(message) => ("fail", Some(message.clone())),
+    TestResult::StackOverflow => ("crash", Some("stack overflow".to_string())),
+    TestResult::Panic(message) => ("crash", Some(message.clone())),
+  }
+}
+
+fn build_conformance_summary(
+  test_root: &Path,
+  results: &[(usize, PathBuf, TestResult)],
+) -> Result<ConformanceSummary, String> {
+  let mut outcomes = BTreeMap::from([
+    ("crash".to_string(), 0),
+    ("fail".to_string(), 0),
+    ("hang".to_string(), 0),
+    ("pass".to_string(), 0),
+    ("skip".to_string(), 0),
+  ]);
+  let mut category_counts: BTreeMap<String, BucketStatsReport> = BTreeMap::new();
+  let mut failure_classes = BTreeMap::new();
+  let mut tests = Vec::with_capacity(results.len());
+
+  for (_, path, result) in results {
+    let source = fs::read_to_string(path)
+      .map_err(|e| format!("Failed to read test metadata {}: {e}", path.display()))?;
+    let meta = parse_meta(&source);
+    let categories = test_categories(test_root, path, meta.as_ref());
+    let class = failure_class(result).map(str::to_string);
+    let (raw_outcome, detail) = result_parts(result);
+    let outcome = if class.as_deref() == Some("hang") {
+      "hang"
+    } else {
+      raw_outcome
+    };
+    *outcomes.entry(outcome.to_string()).or_insert(0) += 1;
+    if let Some(class) = &class {
+      *failure_classes.entry(class.clone()).or_insert(0) += 1;
+    }
+    for category in &categories {
+      let counts = category_counts
+        .entry(category.clone())
+        .or_default();
+      match (outcome, class.as_deref()) {
+        ("pass", _) => counts.pass += 1,
+        ("skip", _) => counts.skip += 1,
+        ("crash", _) => counts.crash += 1,
+        (_, Some("hang")) => counts.hang += 1,
+        _ => counts.fail += 1,
+      }
+    }
+    tests.push(TestCaseSummary {
+      path: manifest_path(test_root, path)?,
+      categories,
+      outcome: outcome.to_string(),
+      failure_class: class,
+      detail,
+    });
+  }
+
+  tests.sort_by(|a, b| a.path.cmp(&b.path));
+  Ok(ConformanceSummary {
+    schema_version: 2,
+    selected: results.len(),
+    outcomes,
+    categories: category_counts,
+    failure_classes,
+    tests,
+  })
+}
+
+fn write_conformance_summary(
+  path: &Path,
+  test_root: &Path,
+  results: &[(usize, PathBuf, TestResult)],
+) -> Result<(), String> {
+  let summary = build_conformance_summary(test_root, results)?;
+  let json = serde_json::to_string_pretty(&summary)
+    .map_err(|e| format!("Failed to serialize conformance summary: {e}"))?;
+  if let Some(parent) = path.parent()
+    && !parent.as_os_str().is_empty()
+  {
+    fs::create_dir_all(parent)
+      .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+  }
+  fs::write(path, format!("{json}\n"))
+    .map_err(|e| format!("Failed to write summary {}: {e}", path.display()))
 }
 
 /// A minimal subset of test262 error information.
@@ -2697,6 +3140,14 @@ fn main() {
         exit(2);
       }
     }
+  } else if let Some(manifest) = &opts.manifest {
+    match load_manifest(manifest, &test_root) {
+      Ok(files) => files,
+      Err(msg) => {
+        eprintln!("{}", msg);
+        exit(2);
+      }
+    }
   } else {
     select_files_to_run(
       files,
@@ -2707,6 +3158,18 @@ fn main() {
       opts.limit,
     )
   };
+  if let Some(manifest) = &opts.write_manifest {
+    if let Err(msg) = write_manifest(manifest, &test_root, &files_to_run) {
+      eprintln!("{}", msg);
+      exit(2);
+    }
+    eprintln!(
+      "Wrote {} tests to {}",
+      files_to_run.len(),
+      manifest.display()
+    );
+    exit(0);
+  }
   let job_count = resolve_job_count(
     opts.jobs,
     files_to_run.len(),
@@ -2720,6 +3183,7 @@ fn main() {
       job_count,
       opts.log_tests,
       opts.batch_size,
+      Duration::from_secs(opts.subprocess_timeout.max(1)),
     ) {
       Ok(results) => results,
       Err(msg) => {
@@ -2782,9 +3246,10 @@ fn main() {
   }
 
   let internal_report_mode = opts.report_json.is_some();
+  let suppress_failure_details = internal_report_mode || opts.quiet;
   failed_cases.sort_by_key(|(idx, _, _)| *idx);
   for (_, f, msg) in failed_cases {
-    if !internal_report_mode {
+    if !suppress_failure_details {
       if msg == "Stack overflow" {
         if let Ok(rel) = f.strip_prefix(&test262_dir) {
           eprintln!("STACKOVERFLOW: {}", rel.display());
@@ -2812,6 +3277,13 @@ fn main() {
   };
 
   let exit_code = if failed.is_empty() { 0_i32 } else { 1_i32 };
+
+  if let Some(summary_path) = &opts.summary_json
+    && let Err(msg) = write_conformance_summary(summary_path, &test_root, &test_results)
+  {
+    eprintln!("{}", msg);
+    exit(2);
+  }
 
   if !internal_report_mode {
     eprintln!(
@@ -2853,6 +3325,11 @@ fn main() {
 mod tests {
   use super::*;
   use std::fs;
+  use std::io;
+  #[cfg(unix)]
+  use std::os::unix::process::ExitStatusExt;
+  #[cfg(windows)]
+  use std::os::windows::process::ExitStatusExt;
   use std::path::{Path, PathBuf};
   use std::sync::{Mutex, OnceLock};
   use std::time::{SystemTime, UNIX_EPOCH};
@@ -2947,6 +3424,118 @@ mod tests {
   #[test]
   fn bisect_subprocess_batch_leaves_single_test_for_failure_reporting() {
     assert!(bisect_subprocess_batch(3, vec![PathBuf::from("only.js")]).is_none());
+  }
+
+  struct ScriptedChild {
+    try_wait_results: VecDeque<io::Result<Option<ExitStatus>>>,
+    kill_result: Option<io::Result<()>>,
+    wait_result: Option<io::Result<ExitStatus>>,
+    wait_calls: usize,
+  }
+
+  impl ChildControl for ScriptedChild {
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+      self
+        .try_wait_results
+        .pop_front()
+        .expect("unexpected try_wait call")
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+      self
+        .kill_result
+        .take()
+        .expect("unexpected kill call")
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+      self.wait_calls += 1;
+      self
+        .wait_result
+        .take()
+        .expect("unexpected wait call")
+    }
+  }
+
+  fn successful_exit_status() -> ExitStatus {
+    ExitStatus::from_raw(0)
+  }
+
+  #[test]
+  fn parent_enforces_subprocess_timeout() {
+    let exe = env::current_exe().expect("current test executable");
+    let mut command = Command::new(exe);
+    command
+      .arg("--exact")
+      .arg("tests::subprocess_timeout_fixture")
+      .arg("--nocapture")
+      .env("BLITZ_TEST262_TIMEOUT_FIXTURE", "1");
+
+    let outcome =
+      wait_for_subprocess(&mut command, Duration::from_millis(100)).expect("spawn timeout fixture");
+
+    assert!(matches!(outcome, SubprocessOutcome::TimedOut));
+  }
+
+  #[test]
+  fn timeout_race_returns_exit_when_kill_loses_to_child_exit() {
+    let mut child = ScriptedChild {
+      try_wait_results: VecDeque::from([Ok(None), Ok(Some(successful_exit_status()))]),
+      kill_result: Some(Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "child already exited",
+      ))),
+      wait_result: None,
+      wait_calls: 0,
+    };
+
+    let outcome = wait_for_child(&mut child, Duration::ZERO).expect("observe boundary exit");
+
+    assert!(matches!(outcome, SubprocessOutcome::Exited(status) if status.success()));
+    assert_eq!(child.wait_calls, 0);
+  }
+
+  #[test]
+  fn timeout_kills_and_reaps_running_child() {
+    let mut child = ScriptedChild {
+      try_wait_results: VecDeque::from([Ok(None)]),
+      kill_result: Some(Ok(())),
+      wait_result: Some(Ok(successful_exit_status())),
+      wait_calls: 0,
+    };
+
+    let outcome = wait_for_child(&mut child, Duration::ZERO).expect("terminate child");
+
+    assert!(matches!(outcome, SubprocessOutcome::TimedOut));
+    assert_eq!(child.wait_calls, 1);
+  }
+
+  #[test]
+  fn timeout_returns_kill_error_without_blocking_if_child_is_running() {
+    let mut child = ScriptedChild {
+      try_wait_results: VecDeque::from([Ok(None), Ok(None)]),
+      kill_result: Some(Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "kill denied",
+      ))),
+      wait_result: None,
+      wait_calls: 0,
+    };
+
+    let error = match wait_for_child(&mut child, Duration::ZERO) {
+      Ok(_) => panic!("kill must fail while the child is still running"),
+      Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(child.wait_calls, 0);
+  }
+
+  #[test]
+  fn subprocess_timeout_fixture() {
+    if env::var_os("BLITZ_TEST262_TIMEOUT_FIXTURE").is_some() {
+      thread::sleep(Duration::from_secs(5));
+    }
   }
 
   #[test]
@@ -3053,6 +3642,149 @@ const ok = 1;
     );
 
     assert_eq!(selected, vec![es5_file]);
+  }
+
+  #[test]
+  fn manifests_are_stable_relative_and_reusable() {
+    let root = temp_dir("manifest");
+    let _guard = TempDirGuard(root.clone());
+    let test_root = root.join("test");
+    let first = test_root.join("built-ins/Map/basic.js");
+    let second = test_root.join("language/expressions/arrow-function/basic.js");
+    let manifest = root.join("es6-smoke.txt");
+    write_file(&first, "/*---\nfeatures: [Map]\n---*/\n");
+    write_file(&second, "/*---\nfeatures: [arrow-function]\n---*/\n");
+
+    write_manifest(
+      &manifest,
+      &test_root,
+      &[second.clone(), first.clone(), first.clone()],
+    )
+    .expect("write manifest");
+
+    assert_eq!(
+      fs::read_to_string(&manifest).expect("read manifest"),
+      "# Blitz Test262 manifest v1\nbuilt-ins/Map/basic.js\nlanguage/expressions/arrow-function/basic.js\n"
+    );
+    assert_eq!(
+      load_manifest(&manifest, &test_root).expect("load manifest"),
+      vec![first, second]
+    );
+  }
+
+  #[test]
+  fn manifest_rejects_parent_directory_entries() {
+    let root = temp_dir("manifest-parent");
+    let _guard = TempDirGuard(root.clone());
+    let manifest = root.join("invalid.txt");
+    write_file(&manifest, "../outside.js\n");
+
+    let error = load_manifest(&manifest, &root.join("test")).expect_err("invalid manifest");
+
+    assert!(error.contains("Invalid manifest entry"));
+  }
+
+  #[test]
+  fn manifest_rejects_non_normal_path_components() {
+    let root = temp_dir("manifest-components");
+    let _guard = TempDirGuard(root.clone());
+    let manifest = root.join("invalid.txt");
+    write_file(&manifest, "./inside.js\n");
+
+    let error = load_manifest(&manifest, &root.join("test")).expect_err("invalid manifest");
+
+    assert!(error.contains("Invalid manifest entry"));
+  }
+
+  #[test]
+  fn test_categories_keeps_plain_staging() {
+    let root = PathBuf::from("/repo/test262/test");
+    let path = root.join("staging/language/plain.js");
+
+    assert_eq!(test_categories(&root, &path, None), vec!["staging"]);
+  }
+
+  #[test]
+  fn test_categories_preserves_staging_with_overlapping_tags() {
+    let root = PathBuf::from("/repo/test262/test");
+    let path = root.join("staging/annexB/language/overlap.js");
+    let source =
+      "/*---\nflags: [module, async]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/";
+    let meta = parse_meta(source).expect("parse metadata");
+
+    assert_eq!(
+      test_categories(&root, &path, Some(&meta)),
+      vec!["annex-b", "staging", "module", "async", "negative-parse"]
+    );
+  }
+
+  #[test]
+  fn conformance_summary_separates_categories_and_failure_classes() {
+    let root = temp_dir("summary");
+    let _guard = TempDirGuard(root.clone());
+    let normative = root.join("language/expressions/arrow-function/basic.js");
+    let negative_module = root.join("language/module-code/negative.js");
+    let annex = root.join("annexB/language/basic.js");
+    let timed_out = root.join("built-ins/Promise/all/hang.js");
+    write_file(&normative, "/*---\nfeatures: [arrow-function]\n---*/\n");
+    write_file(
+      &negative_module,
+      "/*---\nflags: [module, async]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\n",
+    );
+    write_file(&annex, "/*---\nfeatures: [class]\n---*/\n");
+    write_file(&timed_out, "/*---\nfeatures: [Promise]\n---*/\n");
+    let results = vec![
+      (0, normative, TestResult::Pass),
+      (
+        1,
+        negative_module,
+        TestResult::Fail("unexpected parse error: nope".to_string()),
+      ),
+      (2, annex, TestResult::Panic("worker died".to_string())),
+      (
+        3,
+        timed_out,
+        TestResult::Fail("subprocess timed out after 35 seconds".to_string()),
+      ),
+    ];
+
+    let summary = build_conformance_summary(&root, &results).expect("summary");
+
+    assert_eq!(summary.schema_version, 2);
+    assert_eq!(summary.selected, 4);
+    assert_eq!(summary.outcomes["pass"], 1);
+    assert_eq!(summary.outcomes["fail"], 1);
+    assert_eq!(summary.outcomes["skip"], 0);
+    assert_eq!(summary.outcomes["crash"], 1);
+    assert_eq!(summary.outcomes["hang"], 1);
+    assert_eq!(summary.categories["normative"].pass, 1);
+    assert_eq!(summary.categories["normative"].hang, 1);
+    assert_eq!(summary.categories["module"].fail, 1);
+    assert_eq!(summary.categories["async"].fail, 1);
+    assert_eq!(summary.categories["negative-parse"].fail, 1);
+    assert_eq!(summary.categories["annex-b"].crash, 1);
+    assert_eq!(summary.failure_classes["parser-or-compiler"], 1);
+    assert_eq!(summary.failure_classes["crash"], 1);
+    assert_eq!(summary.failure_classes["hang"], 1);
+    assert_eq!(
+      summary
+        .tests
+        .iter()
+        .find(|test| test.path.ends_with("hang.js"))
+        .expect("timeout test")
+        .outcome,
+      "hang"
+    );
+  }
+
+  #[test]
+  fn failure_class_ignores_feature_names_in_test_paths() {
+    let result = TestResult::Fail(
+      "C:\\test262\\test\\built-ins\\Error\\prototype\\stack\\getter.js (strict): unexpected runtime error: ordinary semantic mismatch"
+        .to_string(),
+    );
+
+    assert_eq!(failure_class(&result), Some("assertion-or-semantics"));
   }
 
   #[test]
