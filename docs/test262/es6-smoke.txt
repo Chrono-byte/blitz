@@ -1,0 +1,16 @@
+# Blitz Test262 manifest v1
+# Keep this list small, deterministic, and representative of the ES6 roadmap.
+annexB/built-ins/Date/prototype/getYear/B.2.4.js
+built-ins/Array/from/Array.from_arity.js
+built-ins/Map/constructor.js
+built-ins/Promise/constructor.js
+built-ins/Proxy/constructor.js
+built-ins/Reflect/object-prototype.js
+built-ins/Set/constructor.js
+built-ins/Symbol/constructor.js
+built-ins/TypedArray/length.js
+language/expressions/arrow-function/cannot-override-this-with-thisArg.js
+language/expressions/class/accessor-name-inst-computed-in.js
+language/expressions/generators/default-proto.js
+language/module-code/early-dup-export-decl.js
+language/statements/for-of/array.js
