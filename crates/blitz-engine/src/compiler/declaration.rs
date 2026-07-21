@@ -1204,6 +1204,7 @@ impl Compiler {
           .as_ref()
           .map(|_| self.finally_patches.len().saturating_sub(1));
 
+        let push_handler_ip = self.chunk.code.len();
         self.emit(Op::PushHandler, LINE);
         let handler_jump = self.chunk.code.len();
         self.emit_byte(0, LINE);
@@ -1249,6 +1250,15 @@ impl Compiler {
           for patch_pos in return_jumps {
             self.patch_jump_to_target(patch_pos, body_start);
           }
+          self
+            .chunk
+            .finally_handlers
+            .push(crate::bytecode::FinallyHandler {
+              push_ip: push_handler_ip,
+              finalizer_ip: body_start,
+              return_slot,
+              did_return_slot,
+            });
           self.emit(Op::LoadLocal, LINE);
           self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
           self.emit(Op::JumpIfFalse, LINE);
@@ -2067,6 +2077,7 @@ impl Compiler {
       }
     }
 
+    inner.emit(Op::Undefined, LINE);
     inner.emit(Op::Return, LINE);
     let mut chunk = std::mem::take(&mut inner.chunk);
     chunk.allow_new_target = inner.allow_new_target;
@@ -2301,6 +2312,7 @@ impl Compiler {
               inner.compile_statement_oast(stmt)?;
             }
           }
+          inner.emit(Op::Undefined, LINE);
           inner.emit(Op::Return, LINE);
         }
       } else {
@@ -2311,6 +2323,7 @@ impl Compiler {
           }
           inner.compile_statement_oast(stmt)?;
         }
+        inner.emit(Op::Undefined, LINE);
         inner.emit(Op::Return, LINE);
       }
     } else {
@@ -2325,6 +2338,7 @@ impl Compiler {
               inner.compile_statement_oast(stmt)?;
             }
           }
+          inner.emit(Op::Undefined, LINE);
           inner.emit(Op::Return, LINE);
         }
       } else {
@@ -2334,6 +2348,7 @@ impl Compiler {
           }
           inner.compile_statement_oast(stmt)?;
         }
+        inner.emit(Op::Undefined, LINE);
         inner.emit(Op::Return, LINE);
       }
     }

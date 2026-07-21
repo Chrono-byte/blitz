@@ -18,6 +18,20 @@ use std::rc::Rc;
 use std::sync::Mutex;
 
 impl Vm {
+  fn propagate_generator_error(
+    &mut self,
+    runner: &mut GeneratorRunner,
+    fallback: RuntimeError,
+  ) -> RuntimeError {
+    let Some(thrown) = runner.vm.last_uncaught_exception.take() else {
+      return fallback;
+    };
+    self
+      .throw_value(thrown)
+      .err()
+      .unwrap_or_else(|| RuntimeError::from("JS exception"))
+  }
+
   fn throw_class_constructor_call_error(
     &mut self,
     proto: &FunctionProto,
@@ -101,7 +115,7 @@ impl Vm {
     );
     match child.run_risc_state(&mut risc_state, true)? {
       RiscRunOutcome::Initialized => {}
-      RiscRunOutcome::Return(_) | RiscRunOutcome::Yield(_) => {
+      RiscRunOutcome::Return(_) | RiscRunOutcome::Yield(_) | RiscRunOutcome::YieldStar(_) => {
         return Err(RuntimeError::from(
           "generator body reached a suspension before initialization",
         ));
@@ -142,19 +156,27 @@ impl Vm {
           if !runner.started {
             runner.started = true;
           } else {
-            runner.risc_state.resume_with(first_arg);
+            runner.resume_next(first_arg);
           }
 
-          let GeneratorRunner { vm, risc_state, .. } = &mut *runner;
-          match vm.run_risc_state(risc_state, false)? {
-            RiscRunOutcome::Yield(value) => Ok(Self::make_iterator_result(value, false)),
-            RiscRunOutcome::Return(value) => {
+          let outcome = {
+            let GeneratorRunner { vm, risc_state, .. } = &mut *runner;
+            vm.run_risc_state(risc_state, false)
+          };
+          match outcome {
+            Ok(RiscRunOutcome::Yield(value)) => Ok(Self::make_iterator_result(value, false)),
+            Ok(RiscRunOutcome::YieldStar(result)) => Ok(result),
+            Ok(RiscRunOutcome::Return(value)) => {
               runner.completed = true;
               Ok(Self::make_iterator_result(value, true))
             }
-            RiscRunOutcome::Initialized => Err(RuntimeError::from(
+            Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
               "generator initialization marker executed twice",
             )),
+            Err(error) => {
+              runner.completed = true;
+              Err(vm.propagate_generator_error(&mut runner, error))
+            }
           }
         }
       }))),
@@ -181,24 +203,33 @@ impl Vm {
             runner.vm.format_uncaught_thrown_value(&thrown)
           )))
         } else {
-          if let Err(err) = runner.vm.throw_value(thrown) {
+          let delegated = runner.resume_throw(thrown.clone());
+          if !delegated && let Err(err) = runner.vm.throw_value(thrown) {
             runner.completed = true;
-            Err(err)
-          } else {
-            let GeneratorRunner { vm, risc_state, .. } = &mut *runner;
-            match vm.run_risc_state(risc_state, false) {
-              Ok(RiscRunOutcome::Yield(value)) => Ok(Self::make_iterator_result(value, false)),
-              Ok(RiscRunOutcome::Return(value)) => {
-                runner.completed = true;
-                Ok(Self::make_iterator_result(value, true))
-              }
-              Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
-                "generator initialization marker executed twice",
-              )),
-              Err(error) => {
-                runner.completed = true;
-                Err(error)
-              }
+            return Err(vm.propagate_generator_error(&mut runner, err));
+          }
+
+          let outcome = {
+            let GeneratorRunner {
+              vm: generator_vm,
+              risc_state,
+              ..
+            } = &mut *runner;
+            generator_vm.run_risc_state(risc_state, false)
+          };
+          match outcome {
+            Ok(RiscRunOutcome::Yield(value)) => Ok(Self::make_iterator_result(value, false)),
+            Ok(RiscRunOutcome::YieldStar(result)) => Ok(result),
+            Ok(RiscRunOutcome::Return(value)) => {
+              runner.completed = true;
+              Ok(Self::make_iterator_result(value, true))
+            }
+            Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
+              "generator initialization marker executed twice",
+            )),
+            Err(error) => {
+              runner.completed = true;
+              Err(vm.propagate_generator_error(&mut runner, error))
             }
           }
         }
@@ -219,8 +250,30 @@ impl Vm {
           .first()
           .cloned()
           .unwrap_or(Value::Undefined);
-        runner.completed = true;
-        Ok(Self::make_iterator_result(result_value, true))
+        if !runner.resume_return(result_value.clone()) {
+          runner.completed = true;
+          return Ok(Self::make_iterator_result(result_value, true));
+        }
+
+        let outcome = {
+          let GeneratorRunner { vm, risc_state, .. } = &mut *runner;
+          vm.run_risc_state(risc_state, false)
+        };
+        match outcome {
+          Ok(RiscRunOutcome::Yield(value)) => Ok(Self::make_iterator_result(value, false)),
+          Ok(RiscRunOutcome::YieldStar(result)) => Ok(result),
+          Ok(RiscRunOutcome::Return(value)) => {
+            runner.completed = true;
+            Ok(Self::make_iterator_result(value, true))
+          }
+          Ok(RiscRunOutcome::Initialized) => Err(RuntimeError::from(
+            "generator initialization marker executed twice",
+          )),
+          Err(error) => {
+            runner.completed = true;
+            Err(vm.propagate_generator_error(&mut runner, error))
+          }
+        }
       }))),
     );
     gen_obj.borrow_mut().properties.insert(
@@ -1022,7 +1075,7 @@ impl Vm {
     self.current_slot_names = Some(proto.slot_names.clone());
     self.current_slot_immutable = Some(proto.slot_immutable.clone());
     self.current_slot_sloppy_immutable_silent = Some(proto.slot_sloppy_immutable_silent.clone());
-    self.yield_star_queue = None;
+    self.yield_star_state = None;
     self.this_value = if proto.is_derived_constructor {
       Value::Uninitialized
     } else {
@@ -1214,7 +1267,7 @@ impl Vm {
       stack_base,
       is_strict: caller_strict_mode,
       lexical_env: Rc::clone(&self.lexical_env),
-      yield_star_queue: self.yield_star_queue.take(),
+      yield_star_state: self.yield_star_state.take(),
       arguments_object: self.current_arguments_object.take(),
       arguments_mapped_count: self.current_arguments_mapped_count,
     });

@@ -51,12 +51,14 @@ mod generator_runner;
 mod handler;
 mod partial_descriptor;
 mod stack;
+mod yield_star;
 
 pub(crate) use frame::Frame;
 pub(crate) use generator_runner::GeneratorRunner;
-pub(crate) use handler::{HandlerRecord, RiscExecutionState, RiscRunOutcome};
+pub(crate) use handler::{FinallyHandlerRecord, HandlerRecord, RiscExecutionState, RiscRunOutcome};
 pub(crate) use partial_descriptor::PartialDescriptor;
 pub(crate) use stack::{CallStack, HandlerStack};
+pub(crate) use yield_star::{YieldStarResume, YieldStarState};
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -405,8 +407,10 @@ pub struct Vm {
   pub(super) lexical_env: Rc<RefCell<EnvironmentRecord>>,
   /// Store of global environment records for the current execution context.
   pub(super) global_env: Rc<RefCell<EnvironmentRecord>>,
-  /// Queue of values for the current `yield*` expression, if any.
-  pub(super) yield_star_queue: Option<VecDeque<Value>>,
+  /// Iterator delegation state for the current `yield*` expression, if any.
+  pub(super) yield_star_state: Option<YieldStarState>,
+  /// Frame depth of a generator return completion currently crossing finalizers.
+  pub(super) generator_return_frame_count: Option<usize>,
   /// Live arguments object for the currently executing frame, if any.
   pub(super) current_arguments_object: Option<Value>,
   /// Number of leading arguments currently mapped to local slots.

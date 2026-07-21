@@ -18,6 +18,14 @@ pub(crate) struct HandlerRecord {
   pub(crate) frame_count: usize,
   /// The saved lexical environment for unwinding.
   pub(crate) saved_lexical_env: Rc<RefCell<EnvironmentRecord>>,
+  /// Finalizer control data when this protected region has a `finally` clause.
+  pub(crate) finally: Option<FinallyHandlerRecord>,
+}
+
+pub(crate) struct FinallyHandlerRecord {
+  pub(crate) finalizer_ip: usize,
+  pub(crate) return_slot: usize,
+  pub(crate) did_return_slot: usize,
 }
 
 /// Register and spill state that survives a suspended RISC execution.
@@ -56,4 +64,5 @@ pub(crate) enum RiscRunOutcome {
   Initialized,
   Return(Value),
   Yield(Value),
+  YieldStar(Value),
 }

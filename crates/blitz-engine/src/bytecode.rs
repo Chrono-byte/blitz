@@ -191,6 +191,21 @@ pub struct Chunk {
   pub allow_new_target: bool,
   /// Whether `super` property access/calls are valid in this chunk.
   pub allow_super: bool,
+  /// Finalizer entry points used to inject generator `return` completions.
+  pub finally_handlers: Vec<FinallyHandler>,
+}
+
+#[derive(Clone, Debug)]
+/// Control-flow metadata for a protected region with a `finally` clause.
+pub struct FinallyHandler {
+  /// Instruction that installs the protected region's exception handler.
+  pub push_ip: usize,
+  /// First instruction in the normal finalizer body.
+  pub finalizer_ip: usize,
+  /// Local slot that carries an injected generator return value.
+  pub return_slot: usize,
+  /// Local slot indicating that the finalizer must complete with a return.
+  pub did_return_slot: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -288,6 +303,7 @@ impl Chunk {
       root_strict: false,
       allow_new_target: false,
       allow_super: false,
+      finally_handlers: Vec::new(),
     }
   }
 

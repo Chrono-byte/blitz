@@ -1,7 +1,7 @@
 //! Stack-v1 analysis and lowering support for the RISC v2 backend.
 
 use crate::bytecode::{
-  BytecodeFormat, Chunk, Op, encode_compare_jump, encode_rd, encode_risc_aux16,
+  BytecodeFormat, Chunk, FinallyHandler, Op, encode_compare_jump, encode_rd, encode_risc_aux16,
   encode_risc_cond_jump, encode_risc_registers,
 };
 use crate::errors::CompilerError;
@@ -512,6 +512,27 @@ pub(crate) fn lower_chunk(chunk: &Chunk) -> Result<Chunk, CompilerError> {
     lowered.code[patch.risc_ip] = word;
   }
 
+  lowered.finally_handlers = chunk
+    .finally_handlers
+    .iter()
+    .map(|handler| {
+      let push_ip = old_to_new
+        .get(handler.push_ip)
+        .and_then(|ip| *ip)
+        .ok_or_else(|| CompilerError::from("finally handler push is unreachable"))?;
+      let finalizer_ip = old_to_new
+        .get(handler.finalizer_ip)
+        .and_then(|ip| *ip)
+        .ok_or_else(|| CompilerError::from("finally body is unreachable"))?;
+      Ok(FinallyHandler {
+        push_ip,
+        finalizer_ip,
+        return_slot: handler.return_slot,
+        did_return_slot: handler.did_return_slot,
+      })
+    })
+    .collect::<Result<Vec<_>, CompilerError>>()?;
+
   lowered.functions = chunk
     .functions
     .iter()
@@ -861,6 +882,13 @@ pub(crate) fn analyze_stack(chunk: &Chunk) -> Result<StackAnalysis, CompilerErro
       Op::PushHandler => {
         // An exception unwinder restores the pre-try height and pushes the thrown value.
         enqueue(&mut work, branch_target, height + 1);
+        if let Some(finally) = chunk
+          .finally_handlers
+          .iter()
+          .find(|handler| handler.push_ip == ip)
+        {
+          enqueue(&mut work, Some(finally.finalizer_ip), height);
+        }
         enqueue(
           &mut work,
           (fallthrough < chunk.code.len()).then_some(fallthrough),

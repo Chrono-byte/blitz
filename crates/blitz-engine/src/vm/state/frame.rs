@@ -3,7 +3,6 @@ use crate::environment::EnvironmentRecord;
 use crate::typecheck::Type;
 use crate::value::{SharedValue, Value};
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Mutex;
 
@@ -42,8 +41,8 @@ pub(crate) struct Frame {
   pub(crate) is_strict: bool,
   /// The lexical environment for this frame.
   pub(crate) lexical_env: Rc<RefCell<EnvironmentRecord>>,
-  /// The yield star queue for this frame.
-  pub(crate) yield_star_queue: Option<VecDeque<Value>>,
+  /// The active yield-star delegation for this frame.
+  pub(crate) yield_star_state: Option<super::YieldStarState>,
   /// The live arguments object for this frame, if the function uses mapped
   /// arguments semantics.
   pub(crate) arguments_object: Option<Value>,

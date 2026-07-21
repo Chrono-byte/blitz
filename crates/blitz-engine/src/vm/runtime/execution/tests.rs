@@ -2491,6 +2491,195 @@ mod test {
   }
 
   #[test]
+  fn yield_star_delegates_through_the_iterator_protocol() {
+    let src = r#"
+            var nextCount = 0;
+            var initialArgumentCount = -1;
+            var initialArgument = 1;
+            var resumedArgument = 0;
+            var delegatedResult = { value: 4 };
+            var iterable = {};
+            iterable[Symbol.iterator] = function() {
+              return {
+                next: function(value) {
+                  nextCount += 1;
+                  if (nextCount === 1) {
+                    initialArgumentCount = arguments.length;
+                    initialArgument = value;
+                    return delegatedResult;
+                  }
+                  resumedArgument = value;
+                  return { done: true, value: 9 };
+                }
+              };
+            };
+            function* delegate() { return yield* iterable; }
+            var iterator = delegate();
+            var first = iterator.next(123);
+            var second = iterator.next(42);
+            var preservedResult = first === delegatedResult;
+            var completionValue = second.value;
+            var observedInitialArgumentCount = initialArgumentCount;
+            var observedInitialArgument = initialArgument;
+            var observedResumedArgument = resumedArgument;
+
+            function* stringDelegate() { yield* 'ab'; }
+            var stringIterator = stringDelegate();
+            var firstCharacter = stringIterator.next().value;
+            var secondCharacter = stringIterator.next().value;
+
+            var sparse = [, 2];
+            function* arrayDelegate() { yield* sparse; }
+            var arrayIterator = arrayDelegate();
+            var holeResult = arrayIterator.next();
+            sparse[1] = 3;
+            var liveArrayValue = arrayIterator.next().value;
+        "#;
+    let session = Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compiler::compile(program, session.source()).expect("compile ok");
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    vm.run(chunk).expect("run ok");
+
+    let initial_argument_count = vm.get_global("observedInitialArgumentCount");
+    assert!(
+      matches!(initial_argument_count, Some(Value::Number(1.0))),
+      "unexpected initial argument count: {initial_argument_count:?}"
+    );
+    assert!(matches!(
+      vm.get_global("observedInitialArgument"),
+      Some(Value::Undefined)
+    ));
+    assert!(matches!(
+      vm.get_global("observedResumedArgument"),
+      Some(Value::Number(42.0))
+    ));
+    assert!(matches!(
+      vm.get_global("preservedResult"),
+      Some(Value::Bool(true))
+    ));
+    assert!(matches!(
+      vm.get_global("completionValue"),
+      Some(Value::Number(9.0))
+    ));
+    assert!(matches!(vm.get_global("firstCharacter"), Some(Value::String(value)) if value == "a"));
+    assert!(matches!(vm.get_global("secondCharacter"), Some(Value::String(value)) if value == "b"));
+    assert!(matches!(
+      vm.get_global("holeResult"),
+      Some(result)
+        if matches!(
+          get_property(&result, &PropertyKey::String("value".to_string()), 0),
+          Ok(Value::Undefined)
+        )
+    ));
+    assert!(matches!(
+      vm.get_global("liveArrayValue"),
+      Some(Value::Number(3.0))
+    ));
+  }
+
+  #[test]
+  fn generator_abrupt_completions_run_catch_and_finally() {
+    let (vm, _globals) = run_script(
+      r#"
+        var thrown = {};
+        var caught;
+        var badIterable = {};
+        badIterable[Symbol.iterator] = function() {
+          return { next: function() { throw thrown; } };
+        };
+        function* catchesDelegatedError() {
+          try { yield* badIterable; } catch (error) { caught = error; }
+        }
+        var caughtResult = catchesDelegatedError().next();
+
+        var delegatedFinalized = false;
+        var returnReceived;
+        var returnIterable = {};
+        returnIterable[Symbol.iterator] = function() {
+          return {
+            next: function() { return { done: false }; },
+            return: function(value) {
+              returnReceived = value;
+              return { done: true, value: 333 };
+            }
+          };
+        };
+        function* delegatesReturn() {
+          try { yield* returnIterable; } finally { delegatedFinalized = true; }
+        }
+        var delegatedIterator = delegatesReturn();
+        delegatedIterator.next();
+        var delegatedReturnResult = delegatedIterator.return(222);
+
+        var directFinalized = false;
+        function* directReturn() {
+          try { yield 1; } finally { directFinalized = true; }
+        }
+        var directIterator = directReturn();
+        directIterator.next();
+        var directReturnResult = directIterator.return(7);
+
+        var innerFinalized = false;
+        var outerFinalized = false;
+        function* nestedReturn() {
+          try {
+            try { yield 1; } finally { innerFinalized = true; }
+          } finally {
+            outerFinalized = true;
+          }
+        }
+        var nestedIterator = nestedReturn();
+        nestedIterator.next();
+        var nestedReturnResult = nestedIterator.return(8);
+
+        var overrideOuterFinalized = false;
+        function* overrideReturn() {
+          try {
+            try { yield 1; } finally { return 9; }
+          } finally {
+            overrideOuterFinalized = true;
+          }
+        }
+        var overrideIterator = overrideReturn();
+        overrideIterator.next();
+        var overrideReturnResult = overrideIterator.return(8);
+
+        globalThis.generator_abrupt_completion_ok =
+          caught === thrown
+          && caughtResult.done === true
+          && caughtResult.value === undefined
+          && delegatedFinalized
+          && returnReceived === 222
+          && delegatedReturnResult.done === true
+          && delegatedReturnResult.value === 333
+          && directFinalized
+          && directReturnResult.done === true
+          && directReturnResult.value === 7
+          && innerFinalized
+          && outerFinalized
+          && nestedReturnResult.done === true
+          && nestedReturnResult.value === 8
+          && overrideOuterFinalized
+          && overrideReturnResult.done === true
+          && overrideReturnResult.value === 9;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("innerFinalized"), Some(Value::Bool(true)));
+    assert_eq!(vm.get_global("outerFinalized"), Some(Value::Bool(true)));
+    assert_eq!(
+      vm.get_global("overrideOuterFinalized"),
+      Some(Value::Bool(true))
+    );
+    assert_eq!(
+      vm.get_global("generator_abrupt_completion_ok"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
   fn harness_property_helper_works_across_multiple_runs() {
     let globals = test_globals();
     globals.borrow_mut().properties.insert(

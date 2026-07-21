@@ -27,6 +27,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+enum YieldStarStep {
+  Yield(Value),
+  Complete(Value),
+  Return(Value),
+}
+
 impl Vm {
   fn gc_trace_enabled() -> bool {
     std::env::var_os("TSBLITZ_GC_TRACE").is_some() || crate::trace::enabled()
@@ -98,7 +104,8 @@ impl Vm {
       unhandled_rejection_hook: None,
       lexical_env: Rc::clone(&global_env),
       global_env,
-      yield_star_queue: None,
+      yield_star_state: None,
+      generator_return_frame_count: None,
       current_arguments_object: None,
       current_arguments_mapped_count: 0,
       current_strict_mode: false,
@@ -165,7 +172,8 @@ impl Vm {
       unhandled_rejection_hook: self.unhandled_rejection_hook.clone(),
       lexical_env: Rc::clone(&self.lexical_env),
       global_env: Rc::clone(&self.global_env),
-      yield_star_queue: None,
+      yield_star_state: None,
+      generator_return_frame_count: None,
       current_arguments_object: None,
       current_arguments_mapped_count: 0,
       current_strict_mode: self.current_strict_mode,
@@ -437,8 +445,9 @@ impl Vm {
     if let Some(value) = &self.last_uncaught_exception {
       roots.push(value.clone());
     }
-    if let Some(queue) = &self.yield_star_queue {
-      roots.extend(queue.iter().cloned());
+    if let Some(state) = &self.yield_star_state {
+      roots.push(state.iterator.clone());
+      roots.push(state.next_method.clone());
     }
     if let Some(env) = &self.current_closure_env {
       env_roots.push(Rc::clone(env));
@@ -484,8 +493,9 @@ impl Vm {
       if let Some(value) = &frame.arguments_object {
         roots.push(value.clone());
       }
-      if let Some(queue) = &frame.yield_star_queue {
-        roots.extend(queue.iter().cloned());
+      if let Some(state) = &frame.yield_star_state {
+        roots.push(state.iterator.clone());
+        roots.push(state.next_method.clone());
       }
       if let Some(env) = &frame.closure_env {
         env_roots.push(Rc::clone(env));
@@ -919,7 +929,8 @@ impl Vm {
     self.pending_closure_env = None;
     self.gc_temp_roots.clear();
     self.lexical_env = Rc::clone(&self.global_env);
-    self.yield_star_queue = None;
+    self.yield_star_state = None;
+    self.generator_return_frame_count = None;
     self.ip = 0;
     self.chunk = Rc::new(Chunk::new(Rc::new(String::new())));
     self.obj_generations.clear();
@@ -979,7 +990,8 @@ impl Vm {
     self.pending_closure_env = None;
     self.gc_temp_roots.clear();
     self.lexical_env = Rc::clone(&self.global_env);
-    self.yield_star_queue = None;
+    self.yield_star_state = None;
+    self.generator_return_frame_count = None;
     self.this_value = self
       .globals
       .borrow()
@@ -1007,7 +1019,9 @@ impl Vm {
     );
     match self.run_risc_state(&mut state, false)? {
       RiscRunOutcome::Return(value) => Ok(value),
-      RiscRunOutcome::Yield(_) => Err(RuntimeError::from("yield outside generator execution")),
+      RiscRunOutcome::Yield(_) | RiscRunOutcome::YieldStar(_) => {
+        Err(RuntimeError::from("yield outside generator execution"))
+      }
       RiscRunOutcome::Initialized => Err(RuntimeError::from(
         "generator boundary outside generator execution",
       )),
@@ -1573,6 +1587,16 @@ impl Vm {
             };
             let handler_ip = usize::try_from(self.ip as i64 + offset as i64)
               .map_err(|_| RuntimeError::from("negative RISC handler target"))?;
+            let finally = self
+              .chunk
+              .finally_handlers
+              .iter()
+              .find(|handler| handler.push_ip == instruction_ip)
+              .map(|handler| FinallyHandlerRecord {
+                finalizer_ip: handler.finalizer_ip,
+                return_slot: handler.return_slot,
+                did_return_slot: handler.did_return_slot,
+              });
             self.handlers.push(HandlerRecord {
               chunk: Rc::clone(&self.chunk),
               handler_ip,
@@ -1580,6 +1604,7 @@ impl Vm {
               saved_locals_len: self.locals.len(),
               frame_count: self.call_stack.len(),
               saved_lexical_env: Rc::clone(&self.lexical_env),
+              finally,
             });
           }
           Op::PopHandler => {
@@ -1625,26 +1650,21 @@ impl Vm {
             return Ok(Some(RiscRunOutcome::Yield(registers[rd].clone())));
           }
           Op::YieldStar => {
-            if self.yield_star_queue.is_none() {
-              let mut queue = VecDeque::new();
-              match registers[rd].clone() {
-                Value::Array(array, _) => {
-                  for value in array.borrow().iter().flatten() {
-                    queue.push_back(value.clone());
-                  }
-                }
-                other => queue.push_back(other),
+            if self.yield_star_state.is_none() {
+              self.yield_star_state = Some(self.create_yield_star_state(registers[rd].clone())?);
+            }
+            match self.resume_yield_star()? {
+              YieldStarStep::Yield(value) => {
+                self.ip = self.ip.saturating_sub(1);
+                return Ok(Some(RiscRunOutcome::YieldStar(value)));
               }
-              self.yield_star_queue = Some(queue);
+              YieldStarStep::Complete(value) => registers[rd] = value,
+              YieldStarStep::Return(value) => {
+                if !self.begin_generator_return(value.clone()) {
+                  return Ok(Some(RiscRunOutcome::Return(value)));
+                }
+              }
             }
-            if let Some(queue) = &mut self.yield_star_queue
-              && let Some(value) = queue.pop_front()
-            {
-              self.ip = self.ip.saturating_sub(1);
-              return Ok(Some(RiscRunOutcome::Yield(value)));
-            }
-            self.yield_star_queue = None;
-            registers[rd] = Value::Undefined;
           }
           Op::AwaitPromise => {
             let awaited = registers[rd].clone();
@@ -1680,6 +1700,12 @@ impl Vm {
           }
           Op::Return => {
             let result = registers[rd].clone();
+            if self.generator_return_frame_count == Some(self.call_stack.len()) {
+              if self.begin_generator_return(result.clone()) {
+                return Ok(None);
+              }
+              self.generator_return_frame_count = None;
+            }
             if self.call_stack.is_empty() {
               self.run_microtasks_if_needed()?;
               let _ = self.collect_garbage_prototype();
@@ -1740,7 +1766,7 @@ impl Vm {
     let saved_pending_closure_env = self.pending_closure_env.clone();
     let saved_gc_temp_roots = self.gc_temp_roots.clone();
     let saved_this_value = self.this_value.clone();
-    let saved_yield_star_queue = self.yield_star_queue.clone();
+    let saved_yield_star_state = self.yield_star_state.clone();
     let saved_current_arguments_object = self.current_arguments_object.clone();
     let saved_current_arguments_mapped_count = self.current_arguments_mapped_count;
     let saved_recent_return_value = self.recent_return_value.clone();
@@ -1808,7 +1834,7 @@ impl Vm {
     self.stack.clear();
     self.current_strict_mode = self.chunk.root_strict;
     self.gc_temp_roots.clear();
-    self.yield_star_queue = None;
+    self.yield_star_state = None;
     if self.chunk.root_slot_names.is_empty() {
       if !direct_eval {
         self.locals.clear();
@@ -1845,7 +1871,7 @@ impl Vm {
     self.pending_closure_env = saved_pending_closure_env;
     self.gc_temp_roots = saved_gc_temp_roots;
     self.this_value = saved_this_value;
-    self.yield_star_queue = saved_yield_star_queue;
+    self.yield_star_state = saved_yield_star_state;
     self.current_arguments_object = saved_current_arguments_object;
     self.current_arguments_mapped_count = saved_current_arguments_mapped_count;
     self.recent_return_value = saved_recent_return_value;
@@ -2588,7 +2614,7 @@ impl Vm {
     self.this_value = frame.this_value;
     self.current_closure_env = frame.closure_env;
     self.lexical_env = frame.lexical_env;
-    self.yield_star_queue = frame.yield_star_queue;
+    self.yield_star_state = frame.yield_star_state;
     self.current_arguments_object = frame.arguments_object;
     self.current_arguments_mapped_count = frame.arguments_mapped_count;
     self.current_strict_mode = frame.is_strict;
@@ -2674,6 +2700,130 @@ impl Vm {
     }
     self.stack.push(result);
     Ok(())
+  }
+
+  fn create_yield_star_state(
+    &mut self,
+    iterable: Value,
+  ) -> Result<YieldStarState, RuntimeError> {
+    let iterator_method = self.get_property_host(
+      &iterable,
+      &PropertyKey::Symbol(SymbolId::well_known_iterator()),
+    )?;
+    if !Self::is_callable_value(&iterator_method) {
+      return Err(self.throw_type_error("Yield-star value is not iterable"));
+    }
+
+    let iterator = self.call_value_with_this(&iterator_method, &iterable, &[])?;
+    if !iterator.is_object() {
+      return Err(self.throw_type_error("Iterator method must return an object"));
+    }
+
+    let next_method =
+      self.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
+    if !Self::is_callable_value(&next_method) {
+      return Err(self.throw_type_error("Iterator next method is not callable"));
+    }
+
+    Ok(YieldStarState {
+      iterator,
+      next_method,
+      resume: Some(YieldStarResume::Next(Value::Undefined)),
+    })
+  }
+
+  pub(crate) fn begin_generator_return(
+    &mut self,
+    value: Value,
+  ) -> bool {
+    let Some(handler_index) = self.handlers.iter().rposition(|handler| {
+      handler.frame_count == self.call_stack.len()
+        && Rc::ptr_eq(&handler.chunk, &self.chunk)
+        && handler.finally.is_some()
+    }) else {
+      return false;
+    };
+    let handler = self.handlers.remove(handler_index);
+    self.handlers.truncate(handler_index);
+    let finally = handler.finally.expect("checked above");
+    ensure_slot(&mut self.locals, finally.return_slot);
+    ensure_slot(&mut self.locals, finally.did_return_slot);
+    *self.locals[finally.return_slot].borrow_mut() = value;
+    *self.locals[finally.did_return_slot].borrow_mut() = Value::Bool(true);
+    self.lexical_env = handler.saved_lexical_env;
+    self.ip = finally.finalizer_ip;
+    self.yield_star_state = None;
+    self
+      .generator_return_frame_count
+      .get_or_insert(self.call_stack.len());
+    true
+  }
+
+  fn resume_yield_star(&mut self) -> Result<YieldStarStep, RuntimeError> {
+    let mut state = self
+      .yield_star_state
+      .take()
+      .ok_or_else(|| RuntimeError::from("Missing yield-star state"))?;
+    let resume = state
+      .resume
+      .take()
+      .ok_or_else(|| RuntimeError::from("Missing yield-star resume operation"))?;
+    let is_return = matches!(resume, YieldStarResume::Return(_));
+
+    let result = match resume {
+      YieldStarResume::Next(value) => {
+        self.call_value_with_this(&state.next_method, &state.iterator, &[value])?
+      }
+      YieldStarResume::Throw(value) => {
+        let throw_method =
+          self.get_property_host(&state.iterator, &PropertyKey::String("throw".to_string()))?;
+        if matches!(throw_method, Value::Undefined | Value::Null) {
+          let return_method =
+            self.get_property_host(&state.iterator, &PropertyKey::String("return".to_string()))?;
+          if !matches!(return_method, Value::Undefined | Value::Null) {
+            if !Self::is_callable_value(&return_method) {
+              return Err(self.throw_type_error("Iterator return method is not callable"));
+            }
+            let close_result = self.call_value_with_this(&return_method, &state.iterator, &[])?;
+            if !close_result.is_object() {
+              return Err(self.throw_type_error("Iterator return method must return an object"));
+            }
+          }
+          return Err(self.throw_type_error("Delegated iterator has no throw method"));
+        }
+        if !Self::is_callable_value(&throw_method) {
+          return Err(self.throw_type_error("Iterator throw method is not callable"));
+        }
+        self.call_value_with_this(&throw_method, &state.iterator, &[value])?
+      }
+      YieldStarResume::Return(value) => {
+        let return_method =
+          self.get_property_host(&state.iterator, &PropertyKey::String("return".to_string()))?;
+        if matches!(return_method, Value::Undefined | Value::Null) {
+          return Ok(YieldStarStep::Return(value));
+        }
+        if !Self::is_callable_value(&return_method) {
+          return Err(self.throw_type_error("Iterator return method is not callable"));
+        }
+        self.call_value_with_this(&return_method, &state.iterator, &[value])?
+      }
+    };
+
+    if !result.is_object() {
+      return Err(self.throw_type_error("Iterator result must be an object"));
+    }
+    let done = self.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+    if self.to_boolean(&done) {
+      let value = self.get_property_host(&result, &PropertyKey::String("value".to_string()))?;
+      if is_return {
+        Ok(YieldStarStep::Return(value))
+      } else {
+        Ok(YieldStarStep::Complete(value))
+      }
+    } else {
+      self.yield_star_state = Some(state);
+      Ok(YieldStarStep::Yield(result))
+    }
   }
 
   fn iterator_close_op(&mut self) -> Result<(), RuntimeError> {

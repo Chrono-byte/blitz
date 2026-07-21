@@ -104,6 +104,17 @@ impl HandlerStack {
     self.records.last()
   }
 
+  pub(crate) fn iter(&self) -> std::slice::Iter<'_, HandlerRecord> {
+    self.records.iter()
+  }
+
+  pub(crate) fn remove(
+    &mut self,
+    index: usize,
+  ) -> HandlerRecord {
+    self.records.remove(index)
+  }
+
   /// Truncates the stack to the specified length.
   pub(crate) fn truncate(
     &mut self,

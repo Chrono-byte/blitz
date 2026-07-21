@@ -472,6 +472,70 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     PKey::String("toString".to_string()),
     PropertyDescriptor::data(string_to_string),
   );
+  let string_iterator_function_proto = Rc::clone(function_proto_map);
+  let string_iterator_object_proto = Rc::clone(object_proto_map);
+  let string_iterator = builtin_object(
+    Rc::new(move |vm, args| {
+      let undefined = Value::Undefined;
+      let receiver = args.first().unwrap_or(&undefined);
+      require_object_coercible(vm, receiver)?;
+      let characters = this_string_value_ref(vm, receiver)?
+        .chars()
+        .map(|character| character.to_string())
+        .collect::<Vec<_>>();
+      let position = Rc::new(RefCell::new(0usize));
+      let iterator = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+        Rc::clone(&string_iterator_object_proto),
+      ))));
+
+      let next_characters = characters;
+      let next_position = Rc::clone(&position);
+      let next = builtin_object(
+        Rc::new(move |_vm, _args| {
+          let mut index = next_position.borrow_mut();
+          let result = Rc::new(RefCell::new(ObjectData::new()));
+          let value = next_characters
+            .get(*index)
+            .cloned()
+            .map(Value::String)
+            .unwrap_or(Value::Undefined);
+          let done = *index >= next_characters.len();
+          if !done {
+            *index += 1;
+          }
+          result.borrow_mut().properties.insert(
+            PKey::String("value".to_string()),
+            PropertyDescriptor::data(value),
+          );
+          result.borrow_mut().properties.insert(
+            PKey::String("done".to_string()),
+            PropertyDescriptor::data(Value::Bool(done)),
+          );
+          Ok(Value::Object(result))
+        }),
+        &string_iterator_function_proto,
+      );
+      iterator.borrow_mut().properties.insert(
+        PKey::String("next".to_string()),
+        PropertyDescriptor::data(next),
+      );
+      iterator.borrow_mut().properties.insert(
+        PKey::Symbol(SymbolId::well_known_iterator()),
+        PropertyDescriptor::data(builtin_object(
+          Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+          &string_iterator_function_proto,
+        )),
+      );
+      Ok(Value::Object(iterator))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_iterator, "[Symbol.iterator]");
+  set_builtin_length(&string_iterator, 0.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::Symbol(SymbolId::well_known_iterator()),
+    PropertyDescriptor::data(string_iterator),
+  );
   let string_index_of = builtin_object(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;
