@@ -477,9 +477,8 @@ impl Compiler {
           None
         };
         if let Some((continue_patches, break_patches)) = label_patches {
-          let loop_end = self.chunk.code.len();
           self.patch_jump_list(continue_patches, loop_start);
-          self.patch_jump_list(break_patches, loop_end);
+          self.patch_jump_list(break_patches, cleanup_start);
         }
         self.loop_depth = self.loop_depth.saturating_sub(1);
       }
@@ -548,10 +547,9 @@ impl Compiler {
         } else {
           None
         };
-        let loop_end = self.chunk.code.len();
         if let Some((continue_patches, break_patches)) = label_patches {
           self.patch_jump_list(continue_patches, test_start);
-          self.patch_jump_list(break_patches, loop_end);
+          self.patch_jump_list(break_patches, cleanup_start);
         }
         self.loop_depth = self.loop_depth.saturating_sub(1);
       }

@@ -1030,6 +1030,28 @@ mod tests {
   }
 
   #[test]
+  fn labeled_breaks_share_loop_completion_cleanup_height() {
+    for source in [
+      "outer: while (true) { try {} finally { break outer; } } 1;",
+      "outer: do { try {} finally { break outer; } } while (true); 1;",
+    ] {
+      let analysis = analyze(source);
+      assert!(analysis.max_height > 0);
+    }
+  }
+
+  #[test]
+  fn array_destructuring_does_not_leak_stack_values_across_iterations() {
+    for source in [
+      "var x; for ([x] of [[1]]) { break; }",
+      "for (var [x] of [[1]]) { break; }",
+    ] {
+      let analysis = analyze(source);
+      assert!(analysis.max_height > 0);
+    }
+  }
+
+  #[test]
   fn analyzes_calls_properties_and_spread_as_fixed_value_groups() {
     let analysis = analyze("let a = [1, 2]; Math.max(...a) + ({x: 1}).x;");
     assert!(analysis.max_height >= 3);

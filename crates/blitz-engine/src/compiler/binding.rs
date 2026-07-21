@@ -351,7 +351,7 @@ impl super::Compiler {
     let iterator_ic = self.alloc_ic_slot()?;
     self.emit_byte(iterator_ic, LINE);
     self.emit(Op::GetProperty, LINE);
-    self.emit(Op::Call, LINE);
+    self.emit(Op::CallBuiltin, LINE);
     self.emit_byte(0, LINE);
     self.emit(Op::StoreLocal, LINE);
     self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
@@ -537,7 +537,7 @@ impl super::Compiler {
         let iterator_ic = self.alloc_ic_slot()?;
         self.emit_byte(iterator_ic, LINE);
         self.emit(Op::GetProperty, LINE);
-        self.emit(Op::Call, LINE);
+        self.emit(Op::CallBuiltin, LINE);
         self.emit_byte(0, LINE);
         self.emit(Op::StoreLocal, LINE);
         self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
