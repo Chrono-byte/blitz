@@ -100,6 +100,84 @@ mod test {
   }
 
   #[test]
+  fn for_of_closes_iterators_for_abrupt_completions() {
+    let (vm, _) = run_script(
+      r#"
+        function iterableWithReturn(returnValue) {
+          var iterable = {};
+          iterable[Symbol.iterator] = function() {
+            return {
+              next: function() { return { value: 1, done: false }; },
+              return: returnValue
+            };
+          };
+          return iterable;
+        }
+
+        var nullReturnCompleted = false;
+        for (var value of iterableWithReturn(null)) {
+          nullReturnCompleted = true;
+          break;
+        }
+
+        var originalError = {};
+        var observedError;
+        var throwingReturn = {};
+        throwingReturn[Symbol.iterator] = function() {
+          var iterator = {
+            next: function() { return { value: 1, done: false }; }
+          };
+          Object.defineProperty(iterator, "return", {
+            get: function() { throw {}; }
+          });
+          return iterator;
+        };
+        try {
+          for (var value of throwingReturn) throw originalError;
+        } catch (error) {
+          observedError = error;
+        }
+
+        var returnClosed = false;
+        var finallyRanBeforeClose = false;
+        function returnFromLoop() {
+          var iterable = iterableWithReturn(function() {
+            finallyRanBeforeClose = finallyRanBeforeClose === "finalized";
+            returnClosed = true;
+            return {};
+          });
+          for (var value of iterable) {
+            try {
+              return 42;
+            } finally {
+              finallyRanBeforeClose = "finalized";
+            }
+          }
+        }
+
+        var continueClosed = false;
+        var continueIterable = iterableWithReturn(function() {
+          continueClosed = true;
+          return {};
+        });
+        outer: do {
+          for (var value of continueIterable) continue outer;
+        } while (false);
+
+        globalThis.for_of_close_ok =
+          nullReturnCompleted
+          && observedError === originalError
+          && returnFromLoop() === 42
+          && returnClosed
+          && finallyRanBeforeClose === true
+          && continueClosed;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("for_of_close_ok"), Some(Value::Bool(true)));
+  }
+
+  #[test]
   fn risc_core_execution_is_stable_across_compiler_entrypoints() {
     let source = r#"
       var x = 1;

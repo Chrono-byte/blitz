@@ -79,6 +79,8 @@ pub struct Compiler {
   /// statements in the protected region can run the finalizer before
   /// unwinding.
   pub finally_patches: Vec<FinallyPatchState>,
+  /// Active `for...of` iterators that abrupt control flow must close.
+  pub iterator_close_stack: Vec<IteratorCloseState>,
   /// Stack of active labels for `break`/`continue` resolution.
   pub label_patches: Vec<LabelPatchState>,
   /// Optional module context when compiling a module
@@ -172,6 +174,15 @@ pub struct FinallyPatchState {
   pub in_finalizer: bool,
 }
 
+#[derive(Debug)]
+/// An active `for...of` iterator and the loop nesting level that owns it.
+pub struct IteratorCloseState {
+  /// Local slot containing the iterator object.
+  pub iterator_slot: usize,
+  /// Loop depth of the owning `for...of` statement.
+  pub loop_depth: usize,
+}
+
 /// State for patching labeled break/continue statements.
 #[derive(Debug)]
 pub struct LabelPatchState {
@@ -245,6 +256,7 @@ impl Compiler {
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
       finally_patches: Vec::new(),
+      iterator_close_stack: Vec::new(),
       label_patches: Vec::new(),
       current_module: None,
       next_ic_slot: 0,

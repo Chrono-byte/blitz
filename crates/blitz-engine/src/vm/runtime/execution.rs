@@ -2870,26 +2870,15 @@ impl Vm {
     }
     let return_fn =
       self.get_property_host(&iterator, &PropertyKey::String("return".to_string()))?;
-    if matches!(return_fn, Value::Undefined) {
+    if matches!(return_fn, Value::Undefined | Value::Null) {
       self.stack.push(iterator);
       return Ok(());
     }
-    let is_callable = matches!(
-      return_fn,
-      Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
-    );
-    if !is_callable {
+    if !Self::is_callable_value(&return_fn) {
       return Err(self.throw_type_error("Iterator return is not callable"));
     }
     let ret = self.call_value_with_this(&return_fn, &iterator, &[])?;
-    if !matches!(
-      ret,
-      Value::Object(_)
-        | Value::Array(..)
-        | Value::Closure { .. }
-        | Value::BuiltinObject(_, _)
-        | Value::Promise(_)
-    ) {
+    if !ret.is_object() {
       return Err(self.throw_type_error("Iterator return result is not an object"));
     }
     self.stack.push(iterator);

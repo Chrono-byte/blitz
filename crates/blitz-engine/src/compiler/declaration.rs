@@ -26,6 +26,26 @@ impl Compiler {
     }
   }
 
+  fn emit_iterator_closes_above(
+    &mut self,
+    target_loop_depth: usize,
+  ) -> Result<(), crate::errors::CompilerError> {
+    let slots = self
+      .iterator_close_stack
+      .iter()
+      .rev()
+      .filter(|state| state.loop_depth > target_loop_depth)
+      .map(|state| state.iterator_slot)
+      .collect::<Vec<_>>();
+    for slot in slots {
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(slot)?, LINE);
+      self.emit(Op::IteratorClose, LINE);
+      self.emit(Op::Pop, LINE);
+    }
+    Ok(())
+  }
+
   /// Compile a function declaration statement into bytecode.
   ///
   /// Creates a closure from the function and assigns it to a local slot,
@@ -205,7 +225,11 @@ impl Compiler {
       OStmt::LabeledStatement(l) => {
         let can_continue = matches!(
           &l.body,
-          OStmt::WhileStatement(_) | OStmt::ForStatement(_) | OStmt::ForInStatement(_)
+          OStmt::WhileStatement(_)
+            | OStmt::DoWhileStatement(_)
+            | OStmt::ForStatement(_)
+            | OStmt::ForInStatement(_)
+            | OStmt::ForOfStatement(_)
         );
         self
           .label_patches
@@ -796,7 +820,14 @@ impl Compiler {
         }
 
         self.enter_block_scope();
+        self
+          .iterator_close_stack
+          .push(crate::compiler::IteratorCloseState {
+            iterator_slot,
+            loop_depth: self.loop_depth,
+          });
         self.compile_statement_oast_with_mode(&f.body, false, Some(loop_completion_slot))?;
+        self.iterator_close_stack.pop();
         self.exit_scope();
 
         let update_start = loop_start;
@@ -854,10 +885,22 @@ impl Compiler {
         self.patch_jump(handler_jump);
         self.emit(Op::StoreLocal, LINE);
         self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+        self.emit(Op::PushHandler, LINE);
+        let close_handler_jump = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
         self.emit(Op::IteratorClose, LINE);
         self.emit(Op::Pop, LINE);
+        self.emit(Op::PopHandler, LINE);
+        self.emit(Op::Jump, LINE);
+        let close_done_jump = self.chunk.code.len();
+        self.emit_byte(0, LINE);
+        self.emit_byte(0, LINE);
+        self.patch_jump(close_handler_jump);
+        self.emit(Op::Pop, LINE);
+        self.patch_jump(close_done_jump);
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
         self.emit(Op::Throw, LINE);
@@ -1064,7 +1107,6 @@ impl Compiler {
           } else {
             self.emit(Op::Undefined, LINE);
           }
-          self.emit(Op::Dup, LINE);
           self.emit(Op::StoreLocal, LINE);
           self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
           self.emit_with_env_pops();
@@ -1085,15 +1127,18 @@ impl Compiler {
         } else {
           self.emit(Op::Undefined, LINE);
         }
+        if !self.iterator_close_stack.is_empty() {
+          let return_slot = self.alloc_temp_local("return_value");
+          self.emit(Op::StoreLocal, LINE);
+          self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+          self.emit_iterator_closes_above(0)?;
+          self.emit(Op::LoadLocal, LINE);
+          self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+        }
         self.emit_with_env_pops();
         self.emit(Op::Return, LINE);
       }
       OStmt::ContinueStatement(c) => {
-        self.emit_with_env_pops();
-        self.emit(Op::Jump, LINE);
-        let patch_pos = self.chunk.code.len();
-        self.emit_byte(0, LINE);
-        self.emit_byte(0, LINE);
         if let Some(label) = &c.label {
           let label_name = label.name.to_string();
           let idx = self
@@ -1111,6 +1156,13 @@ impl Compiler {
               "SyntaxError: 'continue' used with non-iteration label",
             ));
           }
+          let target_loop_depth = self.label_patches[idx].owner_loop_depth;
+          self.emit_iterator_closes_above(target_loop_depth)?;
+          self.emit_with_env_pops();
+          self.emit(Op::Jump, LINE);
+          let patch_pos = self.chunk.code.len();
+          self.emit_byte(0, LINE);
+          self.emit_byte(0, LINE);
           self.label_patches[idx]
             .continue_patches
             .push(patch_pos);
@@ -1120,17 +1172,17 @@ impl Compiler {
               "SyntaxError: 'continue' used outside of a loop",
             ));
           }
+          self.emit_with_env_pops();
+          self.emit(Op::Jump, LINE);
+          let patch_pos = self.chunk.code.len();
+          self.emit_byte(0, LINE);
+          self.emit_byte(0, LINE);
           if let Some(patches) = self.continue_patches.last_mut() {
             patches.push(patch_pos);
           }
         }
       }
       OStmt::BreakStatement(b) => {
-        self.emit_with_env_pops();
-        self.emit(Op::Jump, LINE);
-        let patch_pos = self.chunk.code.len();
-        self.emit_byte(0, LINE);
-        self.emit_byte(0, LINE);
         if let Some(label) = &b.label {
           let label_name = label.name.to_string();
           let idx = self
@@ -1143,6 +1195,13 @@ impl Compiler {
                 label_name
               ))
             })?;
+          let target_loop_depth = self.label_patches[idx].owner_loop_depth;
+          self.emit_iterator_closes_above(target_loop_depth)?;
+          self.emit_with_env_pops();
+          self.emit(Op::Jump, LINE);
+          let patch_pos = self.chunk.code.len();
+          self.emit_byte(0, LINE);
+          self.emit_byte(0, LINE);
           self.label_patches[idx]
             .break_patches
             .push(patch_pos);
@@ -1152,6 +1211,11 @@ impl Compiler {
               "SyntaxError: 'break' used outside of a loop",
             ));
           }
+          self.emit_with_env_pops();
+          self.emit(Op::Jump, LINE);
+          let patch_pos = self.chunk.code.len();
+          self.emit_byte(0, LINE);
+          self.emit_byte(0, LINE);
           if let Some(patches) = self.break_patches.last_mut() {
             patches.push(patch_pos);
           }
@@ -1267,6 +1331,14 @@ impl Compiler {
           self.emit_byte(0, LINE);
           self.emit(Op::LoadLocal, LINE);
           self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+          if !self.iterator_close_stack.is_empty() {
+            let pending_return_slot = self.alloc_temp_local("finally_return_value");
+            self.emit(Op::StoreLocal, LINE);
+            self.emit_byte(self.slot_to_u8(pending_return_slot)?, LINE);
+            self.emit_iterator_closes_above(0)?;
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(pending_return_slot)?, LINE);
+          }
           self.emit(Op::Return, LINE);
           self.patch_jump(skip_return);
         }
@@ -1722,6 +1794,7 @@ impl Compiler {
           continue_patches: Vec::new(),
           break_patches: Vec::new(),
           finally_patches: Vec::new(),
+          iterator_close_stack: Vec::new(),
           label_patches: Vec::new(),
           current_module: self.current_module.clone(),
           next_ic_slot: 0,
@@ -1976,6 +2049,7 @@ impl Compiler {
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
       finally_patches: Vec::new(),
+      iterator_close_stack: Vec::new(),
       label_patches: Vec::new(),
       current_module: self.current_module.clone(),
       next_ic_slot: 0,
@@ -2231,6 +2305,7 @@ impl Compiler {
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
       finally_patches: Vec::new(),
+      iterator_close_stack: Vec::new(),
       label_patches: Vec::new(),
       current_module: self.current_module.clone(),
       next_ic_slot: 0,

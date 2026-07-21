@@ -29,8 +29,8 @@ use std::rc::Rc;
 
 pub mod core;
 pub(crate) use core::{
-  Compiler, FinallyPatchState, LabelPatchState, ModuleContext, Scope, ScopeKind,
-  with_compile_context_override,
+  Compiler, FinallyPatchState, IteratorCloseState, LabelPatchState, ModuleContext, Scope,
+  ScopeKind, with_compile_context_override,
 };
 mod binding;
 mod declaration;
