@@ -36,9 +36,10 @@ impl RuntimeOptions {
         )
       })
       .collect();
-    let exec_path = env::current_exe()
-      .map(|path| path.to_string_lossy().into_owned())
-      .unwrap_or_else(|_| argv.first().cloned().unwrap_or_default());
+    let exec_path = env::current_exe().map_or_else(
+      |_| argv.first().cloned().unwrap_or_default(),
+      |path| path.to_string_lossy().into_owned(),
+    );
 
     Self {
       argv,
