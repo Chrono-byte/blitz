@@ -12,12 +12,42 @@ use std::collections::HashMap;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ValueId(usize);
 
-#[derive(Clone)]
 struct PendingInstruction {
   op: Op,
   payload: u32,
-  inputs: Vec<ValueId>,
+  inputs: InstructionInputs,
   output: Option<ValueId>,
+}
+
+enum InstructionInputs {
+  None,
+  One(ValueId),
+  Two([ValueId; 2]),
+  Many(Box<[ValueId]>),
+}
+
+impl InstructionInputs {
+  fn from_slice(values: &[ValueId]) -> Self {
+    match values {
+      [] => Self::None,
+      [value] => Self::One(*value),
+      [left, right] => Self::Two([*left, *right]),
+      _ => Self::Many(values.into()),
+    }
+  }
+
+  fn as_slice(&self) -> &[ValueId] {
+    match self {
+      Self::None => &[],
+      Self::One(value) => std::slice::from_ref(value),
+      Self::Two(values) => values,
+      Self::Many(values) => values,
+    }
+  }
+
+  fn is_empty(&self) -> bool {
+    matches!(self, Self::None)
+  }
 }
 
 impl PendingInstruction {
@@ -56,6 +86,7 @@ impl PendingInstruction {
   ) -> Result<ValueId, CompilerError> {
     self
       .inputs
+      .as_slice()
       .get(index)
       .copied()
       .ok_or_else(|| CompilerError::from(format!("missing input {index} for {}", self.op.name())))
@@ -71,11 +102,10 @@ impl PendingInstruction {
 fn pending_instruction(
   builder: &RiscBuilder,
   ip: usize,
-) -> Result<PendingInstruction, CompilerError> {
+) -> Result<&PendingInstruction, CompilerError> {
   builder
     .instructions
     .get(ip)
-    .cloned()
     .ok_or_else(|| CompilerError::from("virtual instruction out of bounds"))
 }
 
@@ -181,6 +211,7 @@ pub(crate) struct RiscBuilder {
   values: Vec<ValueId>,
   max_values: usize,
   branch_values: HashMap<usize, Vec<ValueId>>,
+  #[cfg(debug_assertions)]
   entry_values: HashMap<usize, Vec<ValueId>>,
   reachable: bool,
 }
@@ -296,11 +327,14 @@ impl RiscBuilder {
           self.values = edge;
           self.reachable = true;
         }
-      } else if let Some(entry) = self.entry_values.get(&target) {
-        assert!(
-          entry.starts_with(&edge) || edge.starts_with(entry),
-          "conflicting explicit value homes at branch merge"
-        );
+      } else {
+        #[cfg(debug_assertions)]
+        if let Some(entry) = self.entry_values.get(&target) {
+          assert!(
+            entry.starts_with(&edge) || edge.starts_with(entry),
+            "conflicting explicit value homes at branch merge"
+          );
+        }
       }
     }
   }
@@ -330,8 +364,11 @@ impl RiscBuilder {
       "frontend value underflow for {}",
       op.name()
     );
+    let entry_value_count = self.values.len();
+    #[cfg(debug_assertions)]
     let entry_values = self.values.clone();
-    let inputs = self.values[self.values.len() - shape.input_count..].to_vec();
+    let inputs =
+      InstructionInputs::from_slice(&self.values[self.values.len() - shape.input_count..]);
     self
       .values
       .truncate(self.values.len() - shape.input_count);
@@ -344,9 +381,10 @@ impl RiscBuilder {
     };
     self.max_values = self
       .max_values
-      .max(entry_values.len())
+      .max(entry_value_count)
       .max(self.values.len());
     let index = self.instructions.len();
+    #[cfg(debug_assertions)]
     self.entry_values.insert(index, entry_values);
     self.instructions.push(PendingInstruction {
       op,
@@ -424,8 +462,7 @@ impl RiscBuilder {
       .instructions
       .iter()
       .enumerate()
-      .filter_map(|(ip, _)| {
-        let instruction = pending_instruction(&builder, ip).ok()?;
+      .filter_map(|(ip, instruction)| {
         (instruction.op == Op::PushHandler)
           .then(|| instruction.branch_offset())
           .flatten()
@@ -623,7 +660,7 @@ impl RiscBuilder {
           stage_window(
             &mut lowered,
             &plan,
-            &instruction.inputs[1 + count.min(6)..],
+            &instruction.inputs.as_slice()[1 + count.min(6)..],
             line,
           )?;
           move_location_to_register(&mut lowered, plan.get(instruction.input(0)?)?, 0, line);
@@ -647,7 +684,7 @@ impl RiscBuilder {
           stage_window(
             &mut lowered,
             &plan,
-            &instruction.inputs[2 + count.min(6)..],
+            &instruction.inputs.as_slice()[2 + count.min(6)..],
             line,
           )?;
           move_location_to_register(&mut lowered, plan.get(instruction.input(0)?)?, 1, line);
@@ -669,7 +706,7 @@ impl RiscBuilder {
         }
         Op::BuildArray => {
           let count = arg as usize;
-          stage_window(&mut lowered, &plan, &instruction.inputs, line)?;
+          stage_window(&mut lowered, &plan, instruction.inputs.as_slice(), line)?;
           let destination = plan.get(instruction.output()?)?;
           let rd = destination_register(destination, 0);
           emit(
@@ -681,7 +718,7 @@ impl RiscBuilder {
         }
         Op::BuildObject => {
           let count = arg as usize;
-          stage_window(&mut lowered, &plan, &instruction.inputs, line)?;
+          stage_window(&mut lowered, &plan, instruction.inputs.as_slice(), line)?;
           let destination = plan.get(instruction.output()?)?;
           let rd = destination_register(destination, 0);
           emit(
@@ -693,7 +730,7 @@ impl RiscBuilder {
         }
         Op::SuperConstruct => {
           let count = arg as usize;
-          stage_window(&mut lowered, &plan, &instruction.inputs, line)?;
+          stage_window(&mut lowered, &plan, instruction.inputs.as_slice(), line)?;
           let destination = plan.get(instruction.output()?)?;
           let rd = destination_register(destination, 0);
           emit(
