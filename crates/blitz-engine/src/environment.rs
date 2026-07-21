@@ -31,16 +31,21 @@ pub struct EnvironmentRecord {
   bindings: HashMap<String, Binding>,
   binding_object: Option<Value>,
   with_environment: bool,
+  has_object_environment: bool,
 }
 
 impl EnvironmentRecord {
   /// Create a new declarative environment with an optional outer link.
   pub fn new(outer: Option<Rc<RefCell<EnvironmentRecord>>>) -> Self {
+    let has_object_environment = outer
+      .as_ref()
+      .is_some_and(|outer| outer.borrow().has_object_environment);
     Self {
       outer: outer.map(|outer| Rc::downgrade(&outer)),
       bindings: HashMap::new(),
       binding_object: None,
       with_environment: false,
+      has_object_environment,
     }
   }
 
@@ -55,6 +60,7 @@ impl EnvironmentRecord {
       bindings: HashMap::new(),
       binding_object: Some(binding_object),
       with_environment,
+      has_object_environment: true,
     }
   }
 
@@ -71,6 +77,11 @@ impl EnvironmentRecord {
   /// Return whether this object environment applies `with` / @@unscopables rules.
   pub fn is_with_environment(&self) -> bool {
     self.with_environment
+  }
+
+  /// Return whether this record or one of its outers is object-backed.
+  pub fn has_object_environment(&self) -> bool {
+    self.has_object_environment
   }
 
   /// Create a mutable binding in this record.

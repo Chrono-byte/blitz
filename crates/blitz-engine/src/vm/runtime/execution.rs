@@ -1109,14 +1109,14 @@ impl Vm {
           Op::StoreLocal => {
             let slot = decode_risc_aux16(word) as usize;
             ensure_slot(&mut self.locals, slot);
+            let was_uninitialized = matches!(*self.locals[slot].borrow(), Value::Uninitialized);
             let immutable = self
               .current_slot_immutable
               .as_ref()
               .and_then(|flags| flags.get(slot))
               .copied()
               .unwrap_or(false);
-            let initializes =
-              immutable && matches!(*self.locals[slot].borrow(), Value::Uninitialized);
+            let initializes = immutable && was_uninitialized;
             if immutable && !initializes {
               let sloppy_silent = self
                 .current_slot_sloppy_immutable_silent
@@ -1128,26 +1128,32 @@ impl Vm {
                 return Err(self.throw_type_error("Assignment to constant variable"));
               }
             } else {
-              let slot_name = self
-                .current_slot_names
-                .as_ref()
-                .and_then(|names| names.get(slot))
-                .and_then(Clone::clone)
-                .or_else(|| {
+              let has_object_environment = self.lexical_env.borrow().has_object_environment();
+              let slot_name = (has_object_environment || was_uninitialized)
+                .then(|| {
                   self
-                    .chunk
-                    .root_slot_names
-                    .get(slot)
+                    .current_slot_names
+                    .as_ref()
+                    .and_then(|names| names.get(slot))
                     .and_then(Clone::clone)
-                });
-              let wrote_with_environment = if let Some(name) = slot_name.as_ref() {
-                self.set_with_env_binding_value(name, registers[rd].clone())?
-              } else {
-                false
-              };
+                    .or_else(|| {
+                      self
+                        .chunk
+                        .root_slot_names
+                        .get(slot)
+                        .and_then(Clone::clone)
+                    })
+                })
+                .flatten();
+              let wrote_with_environment =
+                if has_object_environment && let Some(name) = slot_name.as_ref() {
+                  self.set_with_env_binding_value(name, registers[rd].clone())?
+                } else {
+                  false
+                };
               if !wrote_with_environment {
                 *self.locals[slot].borrow_mut() = registers[rd].clone();
-                if let Some(name) = slot_name {
+                if was_uninitialized && let Some(name) = slot_name {
                   let _ = self
                     .lexical_env
                     .borrow_mut()
@@ -2887,6 +2893,28 @@ impl Vm {
     name: &str,
     value: Value,
   ) -> Result<(), RuntimeError> {
+    // Root bindings mirrored onto the global object have already been written
+    // by the StoreLocal immediately preceding SetGlobal. Avoid resolving and
+    // writing that same lexical cell a second time in the common script path.
+    let is_root_binding = self.call_stack.is_empty()
+      && self.direct_eval_outer_slot_names.is_none()
+      && !self.lexical_env.borrow().has_object_environment()
+      && self
+        .current_slot_names
+        .as_ref()
+        .is_some_and(|names| {
+          names
+            .iter()
+            .any(|maybe_name| maybe_name.as_deref() == Some(name))
+        });
+    if is_root_binding {
+      self.globals.borrow_mut().properties.insert(
+        PropertyKey::String(name.to_string()),
+        PropertyDescriptor::data(value),
+      );
+      return Ok(());
+    }
+
     if self.set_lexical_identifier_value(name, value.clone())?
       || self.set_current_frame_local_by_name(name, value.clone())?
     {
