@@ -437,29 +437,12 @@ pub(crate) fn shadowrealm_import_value(
           .map_err(|err| format!("module instantiate failed: {}", err))?;
         entry
       };
-      let chunk = {
-        let rec = entry.borrow();
-        let module_index = rec
-          .module_index
-          .ok_or_else(|| "module missing index".to_string())?;
-        let module_ctx = ModuleContext {
-          module_index,
-          imports: rec.import_sources.clone(),
-          exports: rec.exports.keys().cloned().collect(),
-        };
-        compiler::compile_oxc_with_ctx(
-          rec.session.program(),
-          Some(&module_ctx),
-          rec.session.source(),
-        )
-        .map_err(|err| format!("module compile failed: {}", err))?
-      };
-      let chunk = clear_slot_types_in_chunk(chunk);
+      let entry_path = entry.borrow().path.clone();
       {
         let mut inner_vm = record_handle.borrow_vm();
-        inner_vm
-          .run(chunk)
-          .map_err(|err| format!("module runtime failed: {}", err))?;
+        let loader_handle = inner_vm.module_loader_handle();
+        crate::module::evaluate_entry_shared(&loader_handle, &entry_path, &mut inner_vm, false)
+          .map_err(|err| format!("module runtime failed: {err}"))?;
       }
       let slot = entry
         .borrow()

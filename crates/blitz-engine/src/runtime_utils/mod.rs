@@ -60,7 +60,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::compiler;
-use crate::compiler::ModuleContext;
 use crate::gc;
 use crate::mutex_compat::MutexBorrowExt;
 use crate::parser::Parser;

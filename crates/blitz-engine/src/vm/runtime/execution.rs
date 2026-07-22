@@ -767,6 +767,22 @@ impl Vm {
     self.module_loader.borrow_mut()
   }
 
+  /// Validate and register a parser-free prelinked graph in this VM's realm.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error for invalid graph metadata or a specifier/index
+  /// collision with an existing module registration.
+  pub fn register_prelinked_graph(
+    &self,
+    graph: crate::prelinked::PrelinkedModuleGraph,
+  ) -> Result<(), crate::errors::BundlerError> {
+    self
+      .module_loader
+      .borrow_mut()
+      .register_prelinked_graph(graph)
+  }
+
   /// Register one host-provided virtual module in this VM's realm loader.
   ///
   /// # Errors
