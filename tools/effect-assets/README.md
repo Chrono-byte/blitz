@@ -7,11 +7,19 @@ aliases. Internal imports are rewritten to `blitz-internal:effect/...`, so the
 VM caches one module identity across root and deep imports.
 
 Generated files are committed at
-`crates/blitz-runtime/assets/effect/3.16.7/`. Generation never runs at Rust
-build or runtime and does not access the network. The full upstream ESM graph
-is retained for runtime identity, while declarations are curated and emitted
+`crates/blitz-runtime/assets/effect/3.16.7/` and
+`crates/blitz-runtime/assets/stdlib/`. Generation never runs at Rust build or
+runtime and does not access the network. The full upstream ESM graph is
+retained for runtime identity, while declarations are curated and emitted
 only for the eight supported public specifiers; private internal modules do
 not carry duplicate upstream declaration graphs.
+
+The stdlib manifest is data-driven from `src/stdlib-manifest.ts`. It records
+the currently implemented `blitz:match`, `blitz:app`, and private application
+transport modules, including ordered dependencies, visibility, source and
+declaration hashes, pinned Effect/runtime/host ABIs, and host primitive
+requirements. It is input metadata for the committed prelinked runtime graph;
+the Rust `effect-bytecode` workspace tool owns that final binary.
 
 ## Commands
 
@@ -25,12 +33,21 @@ pnpm typecheck
 pnpm test
 ```
 
-`verify` checks the manifest, SHA-256 hashes, canonical import closure, pinned
-package integrity, and byte-for-byte deterministic regeneration.
+`verify` checks both manifests, SHA-256 hashes, canonical import closure,
+visibility and ABI metadata, pinned package integrity, and byte-for-byte
+deterministic regeneration.
 
 The generated graph includes Effect's static runtime dependencies required by
 the root export (currently `fast-check` and its static dependencies). Optional
 or host-specific package imports are rejected rather than silently retained.
 
-The `src/` and `declarations/` Blitz files are Phase 1 type boundaries for the
-later application and RPC phases; they are not installed as runtime assets yet.
+The remaining `src/` and `declarations/` Blitz files are Phase 1 type
+boundaries for later application and RPC phases; they are not runtime assets
+until an implemented JavaScript facade is added to the manifest input list.
+
+After changing either manifest, regenerate and verify the final artifact:
+
+```sh
+cargo run -p effect-bytecode -- generate
+cargo run -p effect-bytecode -- generate --check
+```

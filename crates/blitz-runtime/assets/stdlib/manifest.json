@@ -1,0 +1,103 @@
+{
+  "format": 1,
+  "package": {
+    "name": "blitz-stdlib",
+    "version": "1",
+    "effect_version": "3.16.7",
+    "runtime_abi_version": 1,
+    "host_abi_version": 1
+  },
+  "host_primitive_catalog": [
+    {
+      "name": "app-transport",
+      "abi_version": 1,
+      "methods": [
+        "openAppServer",
+        "closeAppServer",
+        "awaitShutdown"
+      ]
+    }
+  ],
+  "entries": [
+    {
+      "specifier": "blitz-internal:app-transport",
+      "visibility": "private",
+      "source": {
+        "path": "modules/facades/blitz-internal-app-transport.js",
+        "sha256": "9161fbf4e1f3b3a6f7d46eca32884fb93c9f44cfa91b419494315f39d9c211a1"
+      },
+      "dependencies": [],
+      "host_primitives": [
+        {
+          "name": "app-transport",
+          "abi_version": 1,
+          "methods": [
+            "openAppServer",
+            "closeAppServer",
+            "awaitShutdown"
+          ]
+        }
+      ]
+    },
+    {
+      "specifier": "blitz:app",
+      "visibility": "public",
+      "source": {
+        "path": "modules/facades/blitz-app.js",
+        "sha256": "0e7bf2b3ecfa02d9af423c17854380a3528f6b5d343f434a7819768c2a2505bf"
+      },
+      "declaration": {
+        "path": "declarations/blitz-app-runtime.d.ts",
+        "sha256": "5385e12ba67770a72293928f15f55c80fce67ab10bce36e9cdf262bab3b58381"
+      },
+      "dependencies": [
+        "effect/Effect",
+        "effect/Layer",
+        "blitz-internal:app-transport"
+      ],
+      "host_primitives": []
+    },
+    {
+      "specifier": "blitz:match",
+      "visibility": "public",
+      "source": {
+        "path": "modules/facades/blitz-match.js",
+        "sha256": "fd6a17394f6a9f472b0ea14acd68ceb47ea420bd48a5002c2195f483fcb1df8c"
+      },
+      "declaration": {
+        "path": "declarations/blitz-match.d.ts",
+        "sha256": "fd6a17394f6a9f472b0ea14acd68ceb47ea420bd48a5002c2195f483fcb1df8c"
+      },
+      "dependencies": [
+        "effect/Match"
+      ],
+      "host_primitives": []
+    }
+  ],
+  "files": [
+    {
+      "path": "declarations/blitz-app-runtime.d.ts",
+      "sha256": "5385e12ba67770a72293928f15f55c80fce67ab10bce36e9cdf262bab3b58381"
+    },
+    {
+      "path": "declarations/blitz-match.d.ts",
+      "sha256": "fd6a17394f6a9f472b0ea14acd68ceb47ea420bd48a5002c2195f483fcb1df8c"
+    },
+    {
+      "path": "embedded.rs",
+      "sha256": "19ec3236fabe6ebcdb09c8009479b028e3bc0647f6c4cde6dfc90882ea8312be"
+    },
+    {
+      "path": "modules/facades/blitz-app.js",
+      "sha256": "0e7bf2b3ecfa02d9af423c17854380a3528f6b5d343f434a7819768c2a2505bf"
+    },
+    {
+      "path": "modules/facades/blitz-internal-app-transport.js",
+      "sha256": "9161fbf4e1f3b3a6f7d46eca32884fb93c9f44cfa91b419494315f39d9c211a1"
+    },
+    {
+      "path": "modules/facades/blitz-match.js",
+      "sha256": "fd6a17394f6a9f472b0ea14acd68ceb47ea420bd48a5002c2195f483fcb1df8c"
+    }
+  ]
+}

@@ -156,6 +156,16 @@ impl AppServerResource {
       self.closed.notify_waiters();
     }
   }
+
+  /// Owned close operation suitable for a background runtime future.
+  pub(crate) async fn close_owned(self: Arc<Self>) {
+    self.close().await;
+  }
+
+  /// Owned shutdown wait suitable for a background runtime future.
+  pub(crate) async fn await_shutdown_owned(self: Arc<Self>) {
+    self.await_shutdown().await;
+  }
 }
 
 /// Acquire an application transport around the existing `HttpServer`.

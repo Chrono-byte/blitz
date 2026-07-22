@@ -13,16 +13,26 @@ pub mod scheduler;
 mod server;
 mod terminal;
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::rc::{Rc, Weak};
+use std::sync::Arc;
 
 use blitz::Vm;
 use blitz::errors::RuntimeError;
+use blitz::gc;
+use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use tokio::sync::mpsc;
 
+use crate::app_transport::{AppServerResource, AppTransportOptions, open_app_server};
 use crate::net::http::HttpRequestEvent;
 use crate::net::websocket::WebSocketEvent;
+use crate::runtime_graph::{
+  APP_TRANSPORT_METHODS, APP_TRANSPORT_PRIMITIVE, HOST_BRIDGE_ABI_VERSION, HostBridgeCapabilities,
+  RuntimeGraphError,
+};
 use event_loop::{EventRegistry, EventSender, ResourceHandle};
 use terminal::TerminalEvent;
 
@@ -174,21 +184,123 @@ impl RuntimeHandle {
   }
 }
 
+/// Failure while installing the immutable runtime graph and host bridge.
+#[derive(Debug)]
+pub enum RuntimeInstallError {
+  /// The committed artifact could not be decoded or failed pinned policy.
+  Artifact(String),
+  /// The artifact is incompatible with the host installed by this runtime.
+  Policy(RuntimeGraphError),
+  /// The VM's module loader rejected the graph before it became visible.
+  Registration(String),
+  /// This VM already owns the singleton runtime graph.
+  AlreadyInstalled,
+}
+
+impl std::fmt::Display for RuntimeInstallError {
+  fn fmt(
+    &self,
+    formatter: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
+    match self {
+      Self::Artifact(message) => write!(formatter, "runtime artifact error: {message}"),
+      Self::Policy(error) => error.fmt(formatter),
+      Self::Registration(message) => {
+        write!(formatter, "runtime graph registration failed: {message}")
+      }
+      Self::AlreadyInstalled => {
+        write!(formatter, "runtime graph is already installed in this VM")
+      }
+    }
+  }
+}
+
+impl std::error::Error for RuntimeInstallError {}
+
+thread_local! {
+  static INSTALLED_GRAPHS: RefCell<Vec<Weak<RefCell<blitz::ModuleLoader>>>> =
+    const { RefCell::new(Vec::new()) };
+}
+
 /// Install the default Blitz runtime APIs into an initialized VM.
 ///
 /// # Panics
 ///
 /// Panics if checked-in generated runtime assets violate their verified
-/// canonical-specifier invariants.
+/// canonical-specifier invariants or if this VM already has the runtime.
 pub fn install_runtime(
   vm: &mut Vm,
   options: RuntimeOptions,
 ) -> RuntimeHandle {
-  crate::effect_assets::install_runtime_modules(vm)
-    .unwrap_or_else(|error| panic!("invalid embedded runtime module graph: {error}"));
+  try_install_runtime(vm, options)
+    .unwrap_or_else(|error| panic!("runtime installation failed: {error}"))
+}
+
+/// Fallible runtime installation used by embedders that need atomic policy
+/// errors instead of the convenience panic from [`install_runtime`].
+///
+/// # Errors
+///
+/// Returns an error before graph visibility when artifact, policy, host ABI,
+/// declaration, collision, or singleton validation fails.
+///
+/// # Panics
+///
+/// Panics only if the compile-time nonzero event-queue capacity is rejected.
+pub fn try_install_runtime(
+  vm: &mut Vm,
+  options: RuntimeOptions,
+) -> Result<RuntimeHandle, RuntimeInstallError> {
+  let loader_handle = vm.module_loader_handle();
+  let already_installed = INSTALLED_GRAPHS.with(|installed| {
+    let mut installed = installed.borrow_mut();
+    installed.retain(|loader| loader.strong_count() > 0);
+    installed
+      .iter()
+      .any(|loader| loader.ptr_eq(&Rc::downgrade(&loader_handle)))
+  });
+  if already_installed {
+    return Err(RuntimeInstallError::AlreadyInstalled);
+  }
+  let timing_enabled = env::var_os("BLITZ_RUNTIME_TIMINGS").is_some();
+  let decode_started = std::time::Instant::now();
+  let bundle = crate::runtime_graph::validate_embedded_runtime_bundle()
+    .map_err(|error| RuntimeInstallError::Artifact(error.to_string()))?;
+  let decode_and_validation = decode_started.elapsed();
   let (requests_tx, requests_rx) = mpsc::channel(64);
   let (websocket_events_tx, websocket_events_rx) = mpsc::channel(64);
   let (terminal_events_tx, terminal_events_rx) = mpsc::channel(64);
+  let previous_bridge = vm.get_global("__blitz_host_v1");
+  let capabilities = install_host_bridge(vm, requests_tx.clone(), websocket_events_tx.clone());
+  let policy_started = std::time::Instant::now();
+  if let Err(error) = bundle.validate_pinned_for_host(
+    &capabilities,
+    crate::effect_assets::EFFECT_MANIFEST_BYTES,
+    crate::effect_assets::STDLIB_MANIFEST_BYTES,
+  ) {
+    restore_host_bridge(vm, previous_bridge);
+    return Err(RuntimeInstallError::Policy(error));
+  }
+  let policy_validation = policy_started.elapsed();
+  let registration_started = std::time::Instant::now();
+  if let Err(error) = vm.register_prelinked_graph_with_declarations(
+    bundle.graph.clone(),
+    crate::effect_assets::public_declaration_sources(),
+  ) {
+    restore_host_bridge(vm, previous_bridge);
+    return Err(RuntimeInstallError::Registration(error.to_string()));
+  }
+  let graph_registration = registration_started.elapsed();
+  if timing_enabled {
+    eprintln!(
+      "blitz runtime graph: decode+generic-validation={decode_and_validation:?} policy-validation={policy_validation:?} registration={graph_registration:?}"
+    );
+  }
+  INSTALLED_GRAPHS.with(|installed| {
+    installed
+      .borrow_mut()
+      .push(Rc::downgrade(&loader_handle));
+  });
   let events = EventRegistry::new(64).expect("runtime event capacity is non-zero");
   let event_sender = events.sender();
   forward_events(vm, requests_rx, event_sender.clone(), |event| {
@@ -205,11 +317,259 @@ pub fn install_runtime(
   let terminal = terminal::install(vm, terminal_events_tx);
   console::install(vm);
   process::install(vm, options);
-  RuntimeHandle {
+  Ok(RuntimeHandle {
     server,
     events,
     terminal,
+  })
+}
+
+/// Install the ABI object consumed by the prelinked private adapter.
+///
+/// The existing transport owns binding and lifecycle correctly. Its
+/// transitional limitation remains that it forwards requests to the ordinary
+/// runtime event channel rather than invoking the `blitz:app` router/layers;
+/// that behavior is deliberately not hidden by host capability validation.
+fn install_host_bridge(
+  vm: &mut Vm,
+  requests: mpsc::Sender<HttpRequestEvent>,
+  websocket_events: mpsc::Sender<WebSocketEvent>,
+) -> HostBridgeCapabilities {
+  let app_transport = object(vm.realm().object_prototype());
+  set(
+    &app_transport,
+    "openAppServer",
+    Value::Builtin(open_app_server_method(requests, websocket_events)),
+  );
+  set(
+    &app_transport,
+    "closeAppServer",
+    Value::Builtin(close_app_server_method()),
+  );
+  set(
+    &app_transport,
+    "awaitShutdown",
+    Value::Builtin(await_shutdown_method()),
+  );
+  if let Value::Object(object) = &app_transport {
+    object.borrow_mut().extensible = false;
   }
+  let bridge = object(vm.realm().object_prototype());
+  set(
+    &bridge,
+    "abiVersion",
+    Value::Number(f64::from(HOST_BRIDGE_ABI_VERSION)),
+  );
+  set(&bridge, "appTransport", app_transport);
+  if let Value::Object(object) = &bridge {
+    object.borrow_mut().extensible = false;
+  }
+  vm.realm()
+    .global()
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::String("__blitz_host_v1".to_string()),
+      PropertyDescriptor::Data {
+        value: bridge,
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      },
+    );
+  HostBridgeCapabilities::new(HOST_BRIDGE_ABI_VERSION).with_primitive(
+    APP_TRANSPORT_PRIMITIVE,
+    HOST_BRIDGE_ABI_VERSION,
+    APP_TRANSPORT_METHODS.iter().copied(),
+  )
+}
+
+fn restore_host_bridge(
+  vm: &mut Vm,
+  previous: Option<Value>,
+) {
+  if let Some(previous) = previous {
+    vm.realm().set_global("__blitz_host_v1", previous);
+  } else {
+    vm.realm()
+      .global()
+      .borrow_mut()
+      .properties
+      .shift_remove(&PropertyKey::String("__blitz_host_v1".to_string()));
+  }
+}
+
+fn object(prototype: Value) -> Value {
+  Value::Object(gc::track_object(Rc::new(RefCell::new(
+    ObjectData::with_prototype(prototype),
+  ))))
+}
+
+fn set(
+  target: &Value,
+  name: &str,
+  value: Value,
+) {
+  if let Value::Object(object) = target {
+    object.borrow_mut().properties.insert(
+      PropertyKey::String(name.to_string()),
+      PropertyDescriptor::Data {
+        value,
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      },
+    );
+  }
+}
+
+fn effect_function(
+  vm: &mut Vm,
+  name: &str,
+) -> Result<Value, RuntimeError> {
+  let record = {
+    let loader = vm.module_loader_handle();
+    let loader = loader.borrow();
+    loader
+      .map
+      .values()
+      .find(|record| record.borrow().specifier == "effect/Effect")
+      .cloned()
+  };
+  let record = record.ok_or_else(|| RuntimeError::from("effect/Effect is not instantiated"))?;
+  let slot = record
+    .borrow()
+    .exports
+    .get(name)
+    .cloned()
+    .ok_or_else(|| RuntimeError::from(format!("effect/Effect has no {name} export")))?;
+  Ok(
+    slot
+      .lock()
+      .map_err(|_| RuntimeError::from("effect/Effect export lock is poisoned"))?
+      .clone(),
+  )
+}
+
+fn effect_sync(
+  vm: &mut Vm,
+  thunk: BuiltinFn,
+) -> Result<Value, RuntimeError> {
+  let sync = effect_function(vm, "sync")?;
+  vm.call_value_with_this(&sync, &Value::Undefined, &[Value::Builtin(thunk)])
+}
+
+fn transport_options(
+  vm: &mut Vm,
+  value: &Value,
+) -> Result<AppTransportOptions, RuntimeError> {
+  let hostname_value = vm.get_property_host(value, &PropertyKey::String("hostname".to_string()))?;
+  let hostname = vm.to_string(&hostname_value)?;
+  let port_value = vm.get_property_host(value, &PropertyKey::String("port".to_string()))?;
+  let port_number = vm.to_number_value(&port_value)?.trunc();
+  if !port_number.is_finite() || !(0.0_f64..=f64::from(u16::MAX)).contains(&port_number) {
+    return Err(RuntimeError::from("application transport port is invalid"));
+  }
+  let port = port_number
+    .to_string()
+    .parse::<u16>()
+    .map_err(|_| RuntimeError::from("application transport port is invalid"))?;
+  let rpc_path_value = vm.get_property_host(value, &PropertyKey::String("rpcPath".to_string()))?;
+  let rpc_path = vm.to_string(&rpc_path_value)?;
+  Ok(AppTransportOptions {
+    hostname,
+    port,
+    rpc_path,
+  })
+}
+
+fn open_app_server_method(
+  requests: mpsc::Sender<HttpRequestEvent>,
+  websocket_events: mpsc::Sender<WebSocketEvent>,
+) -> BuiltinFn {
+  Rc::new(move |vm, args| {
+    let options = transport_options(
+      vm,
+      args
+        .get(1)
+        .ok_or_else(|| RuntimeError::from("openAppServer requires options"))?,
+    )?;
+    let thunk: BuiltinFn = {
+      let requests = requests.clone();
+      let websocket_events = websocket_events.clone();
+      Rc::new(move |vm, _args| {
+        let resource = vm
+          .block_on(open_app_server(
+            options.clone(),
+            requests.clone(),
+            websocket_events.clone(),
+          ))?
+          .map_err(|error| RuntimeError::from(error.to_string()))?;
+        Ok(resource_value(vm, Arc::new(resource)))
+      })
+    };
+    effect_sync(vm, thunk)
+  })
+}
+
+fn resource_value(
+  vm: &mut Vm,
+  resource: Arc<AppServerResource>,
+) -> Value {
+  let server = object(vm.realm().object_prototype());
+  set(
+    &server,
+    "localAddr",
+    Value::String(resource.local_addr().to_string()),
+  );
+  let close_resource = Arc::clone(&resource);
+  let close: BuiltinFn = Rc::new(move |vm, _args| {
+    vm.block_on(Arc::clone(&close_resource).close_owned())?;
+    Ok(Value::Undefined)
+  });
+  let await_resource = resource;
+  let await_shutdown: BuiltinFn = Rc::new(move |vm, _args| {
+    vm.block_on(Arc::clone(&await_resource).await_shutdown_owned())?;
+    Ok(Value::Undefined)
+  });
+  set(&server, "__blitz_close", Value::Builtin(close));
+  set(
+    &server,
+    "__blitz_await_shutdown",
+    Value::Builtin(await_shutdown),
+  );
+  server
+}
+
+fn close_app_server_method() -> BuiltinFn {
+  Rc::new(|vm, args| {
+    let server = args
+      .get(1)
+      .ok_or_else(|| RuntimeError::from("closeAppServer requires a server"))?;
+    let close = vm.get_property_host(server, &PropertyKey::String("__blitz_close".to_string()))?;
+    let thunk = match close {
+      Value::Builtin(close) => close,
+      _ => return Err(RuntimeError::from("invalid application server resource")),
+    };
+    effect_sync(vm, thunk)
+  })
+}
+
+fn await_shutdown_method() -> BuiltinFn {
+  Rc::new(|vm, args| {
+    let server = args
+      .get(1)
+      .ok_or_else(|| RuntimeError::from("awaitShutdown requires a server"))?;
+    let await_shutdown = vm.get_property_host(
+      server,
+      &PropertyKey::String("__blitz_await_shutdown".to_string()),
+    )?;
+    let thunk = match await_shutdown {
+      Value::Builtin(await_shutdown) => await_shutdown,
+      _ => return Err(RuntimeError::from("invalid application server resource")),
+    };
+    effect_sync(vm, thunk)
+  })
 }
 
 fn forward_events<T>(
@@ -265,6 +625,55 @@ mod tests {
     ) {
       tokio::spawn(future);
     }
+  }
+
+  #[test]
+  fn second_runtime_installation_is_rejected_before_side_effects() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let options = RuntimeOptions::from_host(vec!["blitz-test".to_string()]);
+    let _runtime = install_runtime(&mut vm, options.clone());
+    let result = try_install_runtime(&mut vm, options);
+    assert!(matches!(result, Err(RuntimeInstallError::AlreadyInstalled)));
+  }
+
+  #[test]
+  fn private_host_bridge_is_immutable_and_non_enumerable() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(Rc::clone(&globals));
+    let _runtime = install_runtime(
+      &mut vm,
+      RuntimeOptions::from_host(vec!["blitz-test".to_string()]),
+    );
+    let descriptor = globals
+      .borrow()
+      .properties
+      .get(&PropertyKey::String("__blitz_host_v1".to_string()))
+      .cloned()
+      .expect("host bridge descriptor");
+    let PropertyDescriptor::Data {
+      value: Value::Object(bridge),
+      writable,
+      enumerable,
+      configurable,
+    } = descriptor
+    else {
+      panic!("host bridge is an object data property");
+    };
+    assert!(!writable);
+    assert!(!enumerable);
+    assert!(!configurable);
+    assert!(!bridge.borrow().extensible);
+    let app_transport = bridge
+      .borrow()
+      .properties
+      .get(&PropertyKey::String("appTransport".to_string()))
+      .and_then(|descriptor| match descriptor {
+        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+        PropertyDescriptor::Accessor { .. } => None,
+      })
+      .expect("app transport primitive");
+    assert!(matches!(app_transport, Value::Object(object) if !object.borrow().extensible));
   }
 
   #[test]

@@ -1,0 +1,21 @@
+[package]
+name = "effect-bytecode"
+version.workspace = true
+edition.workspace = true
+description = "Deterministic Effect and Blitz runtime graph precompiler"
+
+[[bin]]
+name = "effect-bytecode"
+path = "src/main.rs"
+
+[dependencies]
+blitz.workspace = true
+blitz-runtime.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+oxc_span.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

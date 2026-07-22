@@ -8,6 +8,7 @@ pub mod effect_assets;
 pub mod host;
 pub mod net;
 pub mod rpc;
+pub mod runtime_graph;
 
 pub use app::{App, AppError, AppOptions, Layer, ServeConfig, ServeOptions};
 pub use rpc::{

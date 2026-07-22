@@ -3,6 +3,7 @@ members = [
   "crates/blitz-cli",
   "crates/blitz-engine",
   "crates/blitz-runtime",
+  "tools/effect-bytecode",
 ]
 resolver = "2"
 
@@ -39,6 +40,7 @@ rustyline = "18"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+sha2 = "0.11"
 thiserror = "2.0"
 tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
 
