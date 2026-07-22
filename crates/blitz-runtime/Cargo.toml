@@ -6,6 +6,12 @@ description = "Application JavaScript runtime powered by the Blitz engine"
 
 [dependencies]
 blitz.workspace = true
+bytes.workspace = true
+fastwebsockets.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

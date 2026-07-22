@@ -76,6 +76,7 @@ arguments without source changes.
 
 ### 4. Network and Web platform
 
+- Detailed design and rollout: [`NETWORKING_INTEGRATION_PLAN.md`](NETWORKING_INTEGRATION_PLAN.md)
 - `URL`, `URLSearchParams`, encoding, events, and abort signals
 - `fetch`, `Headers`, `Request`, `Response`, and streams
 - TCP, TLS, DNS, and an HTTP server API

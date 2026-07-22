@@ -13,10 +13,15 @@ edition = "2024"
 [workspace.dependencies]
 blitz = { package = "blitz-engine", path = "crates/blitz-engine" }
 blitz-runtime = { path = "crates/blitz-runtime" }
+bytes = "1"
 clap = { version = "4.5.57", features = ["derive"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+fastwebsockets = { version = "0.10", features = ["upgrade"] }
 fastrand = "2.1"
 futures = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 indexmap = "2"
 num-bigint = "0.4"
 num-traits = "0.2"
@@ -35,7 +40,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 thiserror = "2.0"
-tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [workspace.lints.clippy]
 blocks_in_conditions = "warn"
