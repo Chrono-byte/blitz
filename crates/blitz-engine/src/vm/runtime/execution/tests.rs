@@ -44,6 +44,48 @@ mod test {
   use super::*;
 
   #[test]
+  fn risc_registers_keep_new_closure_environments_alive_during_gc() {
+    let (vm, _) = run_script(
+      r#"
+        const closures = [];
+        for (let index = 0; index < 500; index += 1) {
+          const captured = index;
+          closures.push(() => captured);
+        }
+        let total = 0;
+        for (let index = 0; index < closures.length; index += 1) {
+          total += closures[index]();
+        }
+        globalThis.closure_total = total;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("closure_total"),
+      Some(Value::Number(124_750.0))
+    );
+  }
+
+  #[test]
+  fn optional_member_access_short_circuits_to_undefined() {
+    let (vm, _) = run_script(
+      r#"
+        let missing;
+        let computed = false;
+        globalThis.static_result = missing?.value;
+        globalThis.computed_result = missing?.[computed = true];
+        globalThis.present_result = ({ value: 42 })?.value;
+        globalThis.computed_ran = computed;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("static_result"), Some(Value::Undefined));
+    assert_eq!(vm.get_global("computed_result"), Some(Value::Undefined));
+    assert_eq!(vm.get_global("present_result"), Some(Value::Number(42.0)));
+    assert_eq!(vm.get_global("computed_ran"), Some(Value::Bool(false)));
+  }
+
+  #[test]
   fn arrays_retain_all_pushed_objects_across_function_calls() {
     let (vm, _) = run_script(
       r#"

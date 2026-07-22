@@ -27,5 +27,8 @@ for (const entry of manifest.entries.filter(entry => entry.specifier.startsWith(
 for (const entry of manifest.entries) {
   const source = readFileSync(join(ASSETS, entry.source.path), "utf8");
   for (const imported of canonicalImports(source)) assert(entries.has(imported), `${entry.specifier} imports missing ${imported}`);
+  assert(!source.includes("new WeakMap"), `${entry.specifier} uses unsupported WeakMap methods`);
 }
+const hashSource = readFileSync(join(ASSETS, entries.get("blitz-internal:effect/dist/esm/Hash.js")!.source.path), "utf8");
+assert(hashSource.includes('typeof URL!=="undefined"'), "Effect Hash must guard the optional URL host global");
 console.log(`Effect asset tests passed (${entries.size} manifest entries).`);

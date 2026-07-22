@@ -1560,20 +1560,18 @@ impl super::Compiler {
           if m.optional {
             self.emit(Op::Copy, LINE);
             self.emit(Op::JumpIfNullish, LINE);
-            let skip_nullish = self.current_ip();
-            self.emit_byte(0, LINE);
-            self.emit_byte(0, LINE);
-            self.emit(Op::Discard, LINE);
-            self.emit(Op::Null, LINE);
-            self.emit(Op::Jump, LINE);
-            let end = self.current_ip();
-            self.emit_byte(0, LINE);
-            self.emit_byte(0, LINE);
-            self.patch_jump(skip_nullish);
+            let nullish = self.current_ip();
+            self.emit_jump_placeholder();
             self.emit_constant(Value::String(m.property.name.to_string()), LINE);
             self.emit(Op::GetProperty, LINE);
             let slot = self.alloc_ic_slot()?;
             self.emit_byte(slot, LINE);
+            self.emit(Op::Jump, LINE);
+            let end = self.current_ip();
+            self.emit_jump_placeholder();
+            self.patch_jump(nullish);
+            self.emit(Op::Discard, LINE);
+            self.emit(Op::Undefined, LINE);
             self.patch_jump(end);
           } else {
             self.emit_constant(Value::String(m.property.name.to_string()), LINE);
@@ -1596,18 +1594,16 @@ impl super::Compiler {
           if m.optional {
             self.emit(Op::Copy, LINE);
             self.emit(Op::JumpIfNullish, LINE);
-            let skip_nullish = self.current_ip();
-            self.emit_byte(0, LINE);
-            self.emit_byte(0, LINE);
-            self.emit(Op::Discard, LINE);
-            self.emit(Op::Null, LINE);
-            self.emit(Op::Jump, LINE);
-            let end = self.current_ip();
-            self.emit_byte(0, LINE);
-            self.emit_byte(0, LINE);
-            self.patch_jump(skip_nullish);
+            let nullish = self.current_ip();
+            self.emit_jump_placeholder();
             self.compile_expr_oast(&m.expression)?;
             self.emit(Op::GetProperty, LINE);
+            self.emit(Op::Jump, LINE);
+            let end = self.current_ip();
+            self.emit_jump_placeholder();
+            self.patch_jump(nullish);
+            self.emit(Op::Discard, LINE);
+            self.emit(Op::Undefined, LINE);
             self.patch_jump(end);
           } else {
             self.compile_expr_oast(&m.expression)?;
@@ -1631,20 +1627,18 @@ impl super::Compiler {
               if m.optional {
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::JumpIfNullish, LINE);
-                let skip_nullish = self.current_ip();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-                self.emit(Op::Discard, LINE);
-                self.emit(Op::Null, LINE);
-                self.emit(Op::Jump, LINE);
-                let end = self.current_ip();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-                self.patch_jump(skip_nullish);
+                let nullish = self.current_ip();
+                self.emit_jump_placeholder();
                 self.emit_constant(Value::String(m.property.name.to_string()), LINE);
                 self.emit(Op::GetProperty, LINE);
                 let slot = self.alloc_ic_slot()?;
                 self.emit_byte(slot, LINE);
+                self.emit(Op::Jump, LINE);
+                let end = self.current_ip();
+                self.emit_jump_placeholder();
+                self.patch_jump(nullish);
+                self.emit(Op::Discard, LINE);
+                self.emit(Op::Undefined, LINE);
                 self.patch_jump(end);
               } else {
                 self.emit_constant(Value::String(m.property.name.to_string()), LINE);
@@ -1667,18 +1661,16 @@ impl super::Compiler {
               if m.optional {
                 self.emit(Op::Copy, LINE);
                 self.emit(Op::JumpIfNullish, LINE);
-                let skip_nullish = self.current_ip();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-                self.emit(Op::Discard, LINE);
-                self.emit(Op::Null, LINE);
-                self.emit(Op::Jump, LINE);
-                let end = self.current_ip();
-                self.emit_byte(0, LINE);
-                self.emit_byte(0, LINE);
-                self.patch_jump(skip_nullish);
+                let nullish = self.current_ip();
+                self.emit_jump_placeholder();
                 self.compile_expr_oast(&m.expression)?;
                 self.emit(Op::GetProperty, LINE);
+                self.emit(Op::Jump, LINE);
+                let end = self.current_ip();
+                self.emit_jump_placeholder();
+                self.patch_jump(nullish);
+                self.emit(Op::Discard, LINE);
+                self.emit(Op::Undefined, LINE);
                 self.patch_jump(end);
               } else {
                 self.compile_expr_oast(&m.expression)?;
@@ -1779,20 +1771,18 @@ impl super::Compiler {
             if m.optional {
               self.emit(Op::Copy, LINE);
               self.emit(Op::JumpIfNullish, LINE);
-              let skip_nullish = self.current_ip();
-              self.emit_byte(0, LINE);
-              self.emit_byte(0, LINE);
-              self.emit(Op::Discard, LINE);
-              self.emit(Op::Null, LINE);
-              self.emit(Op::Jump, LINE);
-              let end_jump = self.current_ip();
-              self.emit_byte(0, LINE);
-              self.emit_byte(0, LINE);
-              self.patch_jump(skip_nullish);
+              let nullish = self.current_ip();
+              self.emit_jump_placeholder();
               let key = self.ensure_private_name_constant(&m.field.name);
               self.emit_constant(key, LINE);
               self.emit(Op::GetProperty, LINE);
-              self.patch_jump(end_jump);
+              self.emit(Op::Jump, LINE);
+              let end = self.current_ip();
+              self.emit_jump_placeholder();
+              self.patch_jump(nullish);
+              self.emit(Op::Discard, LINE);
+              self.emit(Op::Undefined, LINE);
+              self.patch_jump(end);
             } else {
               let key = self.ensure_private_name_constant(&m.field.name);
               self.emit_constant(key, LINE);

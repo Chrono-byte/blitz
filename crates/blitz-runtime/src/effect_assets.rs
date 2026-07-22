@@ -430,6 +430,9 @@ impl VirtualBuiltinRegistry {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+  use std::cell::RefCell;
+  use std::rc::Rc;
 
   #[test]
   fn manifest_is_pinned_and_has_unique_specifiers() {
@@ -523,6 +526,58 @@ mod tests {
         .len(),
       EMBEDDED_EFFECT_MODULES.len()
     );
+  }
+
+  #[test]
+  fn effect_graph_imports_and_constructs_a_synchronous_effect() {
+    std::thread::Builder::new()
+      .name("effect-smoke".to_string())
+      .stack_size(16 * 1024 * 1024)
+      .spawn(|| {
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        globals.borrow_mut().properties.insert(
+          PropertyKey::String("globalThis".to_string()),
+          PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+        );
+        let mut vm = blitz::Vm::new(globals);
+        let _runtime = crate::host::install_runtime(
+          &mut vm,
+          crate::host::RuntimeOptions::from_host(vec!["blitz-test".to_string()]),
+        );
+
+        let directory =
+          std::env::temp_dir().join(format!("blitz-effect-smoke-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("create Effect smoke directory");
+        let entry = directory.join("entry.mjs");
+        std::fs::write(
+          &entry,
+          r#"
+        import * as Effect from 'effect/Effect';
+        const effect = Effect.map(Effect.succeed(41), value => value + 1);
+        globalThis.effect_constructed = effect._op === "OnSuccess";
+      "#,
+        )
+        .expect("write Effect smoke entry");
+
+        let loader_handle = vm.module_loader_handle();
+        {
+          let mut loader = loader_handle.borrow_mut();
+          loader
+            .construct(&directory, "./entry.mjs")
+            .expect("construct Effect graph");
+          loader
+            .instantiate_all()
+            .expect("instantiate Effect graph");
+        }
+        blitz::module::evaluate_entry_shared(&loader_handle, &entry, &mut vm, false)
+          .expect("execute Effect graph");
+        std::fs::remove_dir_all(&directory).expect("remove Effect smoke directory");
+
+        assert_eq!(vm.get_global("effect_constructed"), Some(Value::Bool(true)));
+      })
+      .expect("spawn Effect smoke thread")
+      .join()
+      .expect("Effect smoke thread succeeds");
   }
 
   #[test]

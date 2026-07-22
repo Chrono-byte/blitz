@@ -307,17 +307,44 @@ pub(crate) fn install_bigint_and_number_builtins(
       configurable: false,
     },
   );
-  number_ctor_map.borrow_mut().properties.insert(
-    PKey::String("isNaN".to_string()),
-    non_enum_data(builtin_object(
-      Rc::new(|_vm, args| {
-        let value_idx = if args.len() > 1 { 1 } else { 0 };
-        let is_nan = matches!(args.get(value_idx), Some(Value::Number(n)) if n.is_nan());
-        Ok(Value::Bool(is_nan))
-      }),
-      function_proto_map,
-    )),
-  );
+  for (name, value) in [
+    ("MAX_SAFE_INTEGER", 9_007_199_254_740_991.0),
+    ("MIN_SAFE_INTEGER", -9_007_199_254_740_991.0),
+  ] {
+    number_ctor_map.borrow_mut().properties.insert(
+      PKey::String(name.to_string()),
+      PropertyDescriptor::Data {
+        value: Value::Number(value),
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      },
+    );
+  }
+  let number_predicates: [(&str, fn(f64) -> bool); 4] = [
+    ("isNaN", f64::is_nan),
+    ("isFinite", f64::is_finite),
+    ("isInteger", |value: f64| {
+      value.is_finite() && value.fract() == 0.0
+    }),
+    ("isSafeInteger", |value: f64| {
+      value.is_finite() && value.fract() == 0.0 && value.abs() <= 9_007_199_254_740_991.0
+    }),
+  ];
+  for (name, predicate) in number_predicates {
+    number_ctor_map.borrow_mut().properties.insert(
+      PKey::String(name.to_string()),
+      non_enum_data(builtin_object(
+        Rc::new(move |_vm, args| {
+          let value_idx = usize::from(args.len() > 1);
+          let result =
+            matches!(args.get(value_idx), Some(Value::Number(value)) if predicate(*value));
+          Ok(Value::Bool(result))
+        }),
+        function_proto_map,
+      )),
+    );
+  }
   globals.properties.insert(
     PKey::String("Number".to_string()),
     PropertyDescriptor::data(number_ctor_val),

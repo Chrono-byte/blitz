@@ -78,14 +78,14 @@ impl super::Compiler {
     self.emit(Op::JumpIfNullish, LINE);
     let skip_nullish = self.current_ip();
     self.emit_jump_placeholder();
-    self.emit(Op::Discard, LINE);
-    self.emit(Op::Null, LINE);
+    emit_access(self)?;
     self.emit(Op::Jump, LINE);
-    let after_null_check = self.current_ip();
+    let after_access = self.current_ip();
     self.emit_jump_placeholder();
     self.patch_jump(skip_nullish);
-    emit_access(self)?;
-    self.patch_jump(after_null_check);
+    self.emit(Op::Discard, LINE);
+    self.emit(Op::Undefined, LINE);
+    self.patch_jump(after_access);
     Ok(())
   }
 

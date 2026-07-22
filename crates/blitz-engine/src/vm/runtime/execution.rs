@@ -1291,7 +1291,12 @@ impl Vm {
               environment
                 .get(index)
                 .map(|cell| cell.borrow().clone())
-                .ok_or("Bad upvalue index")?
+                .ok_or_else(|| {
+                  format!(
+                    "Bad upvalue index {index} (closure environment has {} entries)",
+                    environment.len()
+                  )
+                })?
             };
             if matches!(value, Value::Uninitialized) {
               return Err(
@@ -1322,11 +1327,15 @@ impl Vm {
                 .current_closure_env
                 .as_ref()
                 .ok_or("SetUpvalue without closure environment")?;
-              let cell = environment
-                .borrow()
-                .get(index)
-                .cloned()
-                .ok_or("Bad upvalue index")?;
+              let cell = {
+                let environment = environment.borrow();
+                environment.get(index).cloned().ok_or_else(|| {
+                  format!(
+                    "Bad upvalue index {index} (closure environment has {} entries)",
+                    environment.len()
+                  )
+                })?
+              };
               *cell.borrow_mut() = registers[rd].clone();
               if let Some(name) = mirror_global_name {
                 let current = cell.borrow().clone();
@@ -1802,8 +1811,11 @@ impl Vm {
               self.generator_return_frame_count = None;
             }
             if self.call_stack.is_empty() {
+              let temp_root_base = self.gc_temp_roots.len();
+              self.gc_temp_roots.push(result.clone());
               self.run_microtasks_if_needed()?;
               let _ = self.collect_garbage_prototype();
+              self.gc_temp_roots.truncate(temp_root_base);
               self.finish_opcode_profile_run("risc-return");
             }
             return Ok(Some(RiscRunOutcome::Return(result)));
@@ -1821,7 +1833,15 @@ impl Vm {
         }
         Err(error) => return Err(error),
       }
-      self.maybe_collect_garbage_prototype();
+      if gc::allocation_pressure() >= gc_allocation_pressure_threshold() {
+        let temp_root_base = self.gc_temp_roots.len();
+        self
+          .gc_temp_roots
+          .extend(registers.iter().cloned());
+        self.gc_temp_roots.extend(spills.iter().cloned());
+        self.maybe_collect_garbage_prototype();
+        self.gc_temp_roots.truncate(temp_root_base);
+      }
     }
   }
 

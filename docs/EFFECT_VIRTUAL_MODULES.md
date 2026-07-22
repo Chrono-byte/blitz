@@ -42,8 +42,20 @@ reviewable.
 `blitz:match` and `blitz:app` facades. The raw engine does not install these
 modules, preserving the engine/runtime boundary.
 
-Asset generation, registration, construction, and compilation are landed.
-Executing the Effect smoke graph currently reaches a remaining engine closure
-capture error (`Bad upvalue index`); scheduler and `App.serve` transport work
-must not treat the compatibility milestone as complete until that engine bug
-is fixed.
+Asset generation, registration, import, and Effect construction are landed. A
+runtime regression test imports `effect/Effect` and constructs a mapped
+synchronous Effect.
+
+Executing a fiber is still blocked by missing public class-field initialization
+in the engine: Effect's scheduler and metric registry rely on fields such as
+`buckets = []` and `map = empty()`, which Blitz currently ignores. Lowering
+fields in generated assets exposes a second gap, spread `super(...arguments)`
+construction, so this should be fixed at the engine's class semantics rather
+than hidden in runtime presentation.
+
+The generated graph currently substitutes `Map` for Effect's internal
+`WeakMap` identity caches because Blitz exposes only a placeholder `WeakMap`.
+This preserves results but retains cache keys strongly; replace the transform
+when the engine implements faithful weak collections. Effect's optional `URL`
+hash branch is also guarded because `URL` is a runtime host API rather than an
+ECMAScript engine intrinsic.

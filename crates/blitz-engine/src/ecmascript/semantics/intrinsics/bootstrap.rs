@@ -2610,6 +2610,18 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     PKey::String("prototype".to_string()),
     PropertyDescriptor::data(Value::Object(Rc::clone(&date_proto_map))),
   );
+  date_ctor_map.borrow_mut().properties.insert(
+    PKey::String("now".to_string()),
+    non_enum_data(builtin_object(
+      Rc::new(|_vm, _args| {
+        let millis = std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .map_or(f64::NAN, |duration| duration.as_secs_f64() * 1_000.0);
+        Ok(Value::Number(millis))
+      }),
+      &function_proto_map,
+    )),
+  );
   date_proto_map.borrow_mut().properties.insert(
     PKey::String("constructor".to_string()),
     PropertyDescriptor::data(date_ctor_val.clone()),
@@ -4601,21 +4613,70 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let (_uri_error_name, uri_error_ctor_val) = _make_error_ctor("URIError", &uri_error_proto_map);
 
   let math = Rc::new(RefCell::new(ObjectData::new()));
-  math.borrow_mut().properties.insert(
-    PKey::String("pow".to_string()),
-    non_enum_data({
-      let builtin = builtin_object(
-        Rc::new(|vm, args| {
-          let x = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
-          let y = vm.to_number_value(args.get(2).unwrap_or(&Value::Undefined))?;
-          Ok(Value::Number(number_exponentiate(x, y)))
-        }),
-        &function_proto_map,
-      );
-      set_builtin_length(&builtin, 2.0);
-      builtin
+  let install_math = |name: &str, length: f64, function: BuiltinFn| {
+    let builtin = builtin_object(function, &function_proto_map);
+    set_builtin_name(&builtin, name);
+    set_builtin_length(&builtin, length);
+    math
+      .borrow_mut()
+      .properties
+      .insert(PKey::String(name.to_string()), non_enum_data(builtin));
+  };
+  install_math(
+    "pow",
+    2.0,
+    Rc::new(|vm, args| {
+      let x = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+      let y = vm.to_number_value(args.get(2).unwrap_or(&Value::Undefined))?;
+      Ok(Value::Number(number_exponentiate(x, y)))
     }),
   );
+  let unary_math_operations: [(&str, fn(f64) -> f64); 3] = [
+    ("abs", f64::abs),
+    ("floor", f64::floor),
+    ("round", |value: f64| (value + 0.5).floor()),
+  ];
+  for (name, operation) in unary_math_operations {
+    install_math(
+      name,
+      1.0,
+      Rc::new(move |vm, args| {
+        let value = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+        Ok(Value::Number(operation(value)))
+      }),
+    );
+  }
+  install_math(
+    "random",
+    0.0,
+    Rc::new(|_vm, _args| Ok(Value::Number(fastrand::f64()))),
+  );
+  install_math(
+    "imul",
+    2.0,
+    Rc::new(|vm, args| {
+      let left = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))? as i32;
+      let right = vm.to_number_value(args.get(2).unwrap_or(&Value::Undefined))? as i32;
+      Ok(Value::Number(f64::from(left.wrapping_mul(right))))
+    }),
+  );
+  let variadic_math_operations: [(&str, f64, fn(f64, f64) -> f64); 2] = [
+    ("min", f64::INFINITY, f64::min),
+    ("max", f64::NEG_INFINITY, f64::max),
+  ];
+  for (name, identity, operation) in variadic_math_operations {
+    install_math(
+      name,
+      2.0,
+      Rc::new(move |vm, args| {
+        let mut result = identity;
+        for value in args.iter().skip(1) {
+          result = operation(result, vm.to_number_value(value)?);
+        }
+        Ok(Value::Number(result))
+      }),
+    );
+  }
   for (name, value) in [
     ("E", std::f64::consts::E),
     ("LN10", std::f64::consts::LN_10),
