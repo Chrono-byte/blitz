@@ -505,7 +505,12 @@ impl super::Compiler {
         let mut count = 0usize;
         let mut computed_indices: Vec<usize> = Vec::new();
         let mut accessor_indices: Vec<usize> = Vec::new();
+        let mut spread_indices: Vec<usize> = Vec::new();
         for (pi, prop) in obj.properties.iter().enumerate() {
+          if matches!(prop, oast::ObjectPropertyKind::SpreadProperty(_)) {
+            spread_indices.push(pi);
+            continue;
+          }
           if let oast::ObjectPropertyKind::ObjectProperty(p) = prop {
             if p.computed {
               if !matches!(p.kind, oast::PropertyKind::Init) {
@@ -671,6 +676,22 @@ impl super::Compiler {
             self.emit_byte(3, LINE);
             self.emit(Op::Call, LINE);
             self.emit_byte(3, LINE);
+          }
+        }
+
+        for idx in spread_indices {
+          if let oast::ObjectPropertyKind::SpreadProperty(spread) = &obj.properties[idx] {
+            self.emit(Op::Copy, LINE);
+            self.emit_get_global_name("Object");
+            self.emit_constant(Value::String("assign".to_string()), LINE);
+            self.emit(Op::GetProperty, LINE);
+            let slot = self.alloc_ic_slot()?;
+            self.emit_byte(slot, LINE);
+            self.emit(Op::Exchange, LINE);
+            self.compile_expr_oast(&spread.argument)?;
+            self.emit(Op::Call, LINE);
+            self.emit_byte(2, LINE);
+            self.emit(Op::Discard, LINE);
           }
         }
       }

@@ -445,6 +445,38 @@ pub(crate) fn install_map_set_constructors(
       function_proto_map,
     )),
   );
+  set_proto_map.borrow_mut().properties.insert(
+    PKey::String("delete".to_string()),
+    PropertyDescriptor::data(builtin_object(
+      Rc::new(|vm, args| {
+        let undefined = Value::Undefined;
+        let this = args.first().unwrap_or(&undefined);
+        let value = args.get(1).cloned().unwrap_or(Value::Undefined);
+        let values =
+          vm.get_property_host(this, &PropertyKey::String("__set_values".to_string()))?;
+        let Value::Array(values, _) = values else {
+          return Ok(Value::Bool(false));
+        };
+        let index = values.borrow().iter().position(|existing| {
+          existing
+            .as_ref()
+            .is_some_and(|existing| strict_equal(existing, &value))
+        });
+        let Some(index) = index else {
+          return Ok(Value::Bool(false));
+        };
+        values.borrow_mut().remove(index);
+        let size = values.borrow().len();
+        drop(vm.set_property_host(
+          this,
+          &Value::String("size".to_string()),
+          Value::Number(usize_to_f64(size)),
+        )?);
+        Ok(Value::Bool(true))
+      }),
+      function_proto_map,
+    )),
+  );
   let function_proto_for_set_iter = Rc::clone(function_proto_map);
   set_proto_map.borrow_mut().properties.insert(
     PKey::Symbol(SymbolId::well_known_iterator()),

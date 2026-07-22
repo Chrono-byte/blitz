@@ -100,6 +100,7 @@ impl Vm {
       current_module_specifier: None,
       construct_new_target: None,
       recent_return_value: None,
+      derived_constructor_this: Vec::new(),
       last_uncaught_exception: None,
       microtasks: VecDeque::new(),
       dynamic_import_jobs: VecDeque::new(),
@@ -170,6 +171,7 @@ impl Vm {
       current_module_specifier: None,
       construct_new_target: None,
       recent_return_value: None,
+      derived_constructor_this: Vec::new(),
       last_uncaught_exception: None,
       microtasks: VecDeque::new(),
       dynamic_import_jobs: VecDeque::new(),
@@ -478,6 +480,12 @@ impl Vm {
     if let Some(value) = &self.recent_return_value {
       roots.push(value.clone());
     }
+    roots.extend(
+      self
+        .derived_constructor_this
+        .iter()
+        .filter_map(Clone::clone),
+    );
     if let Some(value) = &self.last_uncaught_exception {
       roots.push(value.clone());
     }

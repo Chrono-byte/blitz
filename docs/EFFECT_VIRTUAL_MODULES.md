@@ -42,9 +42,9 @@ reviewable.
 `blitz:match` and `blitz:app` facades. The raw engine does not install these
 modules, preserving the engine/runtime boundary.
 
-Asset generation, registration, import, and Effect construction are landed. A
-runtime regression test imports `effect/Effect` and constructs a mapped
-synchronous Effect.
+Asset generation, registration, import, and synchronous Effect execution are
+landed. A runtime regression test imports `effect/Effect`, executes a mapped
+Effect through `Effect.runFork`, and observes its successful value.
 
 The engine now initializes public, private, computed, and static class fields,
 including Effect's scheduler and metric-registry state such as `buckets = []`
@@ -52,10 +52,11 @@ and `map = empty()`. Computed names are evaluated once at class definition,
 and public fields use own-property definition semantics rather than inherited
 setter assignment.
 
-`Effect.runFork` now advances beyond registry and class initialization. Its
-next engine blocker is a later call path that resolves a required callable to
-`undefined`. Spread `super(...arguments)` remains a separate unsupported
-constructor form.
+The execution path also depends on object spread preserving enumerable string
+and symbol properties, derived-constructor `this` surviving nested calls after
+`super()`, and the standard `Set.prototype.delete` operation. These are now
+implemented. Spread `super(...arguments)` remains a separate unsupported
+constructor form outside the generated path exercised here.
 
 The generated graph currently substitutes `Map` for Effect's internal
 `WeakMap` identity caches because Blitz exposes only a placeholder `WeakMap`.

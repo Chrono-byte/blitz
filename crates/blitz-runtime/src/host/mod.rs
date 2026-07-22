@@ -564,6 +564,24 @@ mod tests {
   }
 
   #[test]
+  fn effect_irc_chat_v2_scripts_parse_and_compile() {
+    let server = include_str!("../../examples/irc-chat-v2/server.mjs");
+    let session = JsParser::parse_source_with_type(server, oxc_span::SourceType::mjs())
+      .expect("parse Effect IRC server module");
+    compiler::compile_oxc(session.program(), server).expect("compile Effect IRC server module");
+
+    for (name, source) in [
+      ("alice", include_str!("../../examples/irc-chat-v2/alice.js")),
+      ("bob", include_str!("../../examples/irc-chat-v2/bob.js")),
+    ] {
+      let session = JsParser::parse_source(source)
+        .unwrap_or_else(|error| panic!("parse Effect IRC {name} client: {error}"));
+      compiler::compile_oxc(session.program(), source)
+        .unwrap_or_else(|error| panic!("compile Effect IRC {name} client: {error}"));
+    }
+  }
+
+  #[test]
   fn irc_chat_server_runs_join_and_message_protocol() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     let mut vm = Vm::new(globals);

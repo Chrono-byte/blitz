@@ -471,11 +471,21 @@ impl Vm {
           .clone()
           .unwrap_or_else(|| callee.clone());
         self.construct_new_target = Some(active_new_target);
+        if is_derived_constructor {
+          self.derived_constructor_this.push(None);
+        }
         let result = self.call_with_this(callee, &instance, args);
         self.construct_new_target = prev_new_target;
-        let result = result?;
-        let initialized_this = self.recent_return_value.take();
+        let initialized_this = if is_derived_constructor {
+          self
+            .derived_constructor_this
+            .pop()
+            .expect("derived constructor state must remain balanced")
+        } else {
+          None
+        };
         self.recent_return_value = prev_recent_return;
+        let result = result?;
         let result = match result {
           Value::Object(_)
           | Value::Array(..)
@@ -702,6 +712,9 @@ impl Vm {
     self.construct_new_target = previous_new_target;
     let result = result?;
     self.this_value = result.clone();
+    if let Some(initialized_this) = self.derived_constructor_this.last_mut() {
+      *initialized_this = Some(result.clone());
+    }
     self.recent_return_value = Some(result.clone());
     Ok(result)
   }

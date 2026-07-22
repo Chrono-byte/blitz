@@ -529,7 +529,7 @@ mod tests {
   }
 
   #[test]
-  fn effect_graph_imports_and_constructs_a_synchronous_effect() {
+  fn effect_graph_executes_a_synchronous_effect() {
     std::thread::Builder::new()
       .name("effect-smoke".to_string())
       .stack_size(16 * 1024 * 1024)
@@ -553,8 +553,11 @@ mod tests {
           &entry,
           r#"
         import * as Effect from 'effect/Effect';
-        const effect = Effect.map(Effect.succeed(41), value => value + 1);
-        globalThis.effect_constructed = effect._op === "OnSuccess";
+        const fiber = Effect.runFork(
+          Effect.map(Effect.succeed(41), value => value + 1)
+        );
+        const exit = fiber.unsafePoll();
+        globalThis.effect_result = exit === null ? undefined : exit.value;
       "#,
         )
         .expect("write Effect smoke entry");
@@ -573,7 +576,7 @@ mod tests {
           .expect("execute Effect graph");
         std::fs::remove_dir_all(&directory).expect("remove Effect smoke directory");
 
-        assert_eq!(vm.get_global("effect_constructed"), Some(Value::Bool(true)));
+        assert_eq!(vm.get_global("effect_result"), Some(Value::Number(42.0)));
       })
       .expect("spawn Effect smoke thread")
       .join()

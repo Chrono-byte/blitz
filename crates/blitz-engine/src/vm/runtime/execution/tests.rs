@@ -3143,6 +3143,62 @@ mod test {
   }
 
   #[test]
+  fn object_spread_and_set_delete_support_effect_runtime_patterns() {
+    let src = r#"
+      const marker = Symbol.for("spread-marker");
+      const methods = {
+        get: () => 1,
+        update: () => 2,
+        [marker]: 3
+      };
+      const hook = {
+        pipe() { return 4; },
+        ...methods
+      };
+      const roots = new Set([hook]);
+      const deleted = roots.delete(hook);
+      globalThis.runtimePatternsOk = hook.get() === 1
+        && hook.update() === 2
+        && hook[marker] === 3
+        && hook.pipe() === 4
+        && deleted
+        && roots.size === 0
+        && !roots.has(hook);
+    "#;
+    let session = Parser::parse_source(src).expect("parse runtime patterns");
+    let chunk =
+      compiler::compile(session.program(), session.source()).expect("compile runtime patterns");
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    vm.run(chunk).expect("run runtime patterns");
+    assert_eq!(vm.get_global("runtimePatternsOk"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn derived_constructor_this_survives_nested_calls_after_super() {
+    let src = r#"
+      const helper = () => 1;
+      class Base {}
+      class Middle extends Base {}
+      class Derived extends Middle {
+        field = helper();
+        constructor() {
+          super();
+          helper();
+        }
+      }
+      globalThis.derivedThisOk = new Derived().field === 1;
+    "#;
+    let session = Parser::parse_source(src).expect("parse derived constructor");
+    let chunk =
+      compiler::compile(session.program(), session.source()).expect("compile derived constructor");
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    vm.run(chunk).expect("run derived constructor");
+    assert_eq!(vm.get_global("derivedThisOk"), Some(Value::Bool(true)));
+  }
+
+  #[test]
   fn super_property_access_uses_home_object_and_lexical_this() {
     let src = r#"
             class C {
