@@ -15,7 +15,7 @@ use crate::vm::state::{
 };
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 impl Vm {
   fn propagate_generator_error(
@@ -386,8 +386,9 @@ impl Vm {
         }
         // Print a short constant pool summary
         eprintln!("[trace]   constants (len={}):", self.chunk.constants.len());
-        for (i, c) in self.chunk.constants.iter().enumerate().take(32) {
-          crate::trace::value_string(&format!("[trace]     const[{}]", i), c);
+        for (i, constant) in self.chunk.constants.iter().enumerate().take(32) {
+          let value = constant.to_value();
+          crate::trace::value_string(&format!("[trace]     const[{}]", i), &value);
         }
       }
       self.gc_temp_roots.truncate(temp_root_base);
@@ -925,7 +926,7 @@ impl Vm {
                 proto.name
               );
             }
-            let caller_chunk = Rc::clone(&self.chunk);
+            let caller_chunk = Arc::clone(&self.chunk);
             let caller_ip = self.ip;
             let caller_locals = self.locals.clone();
             let caller_this = self.this_value.clone();
@@ -1080,7 +1081,7 @@ impl Vm {
       }
     }
 
-    self.chunk = Rc::clone(&proto.chunk);
+    self.chunk = Arc::clone(&proto.chunk);
     self.ip = 0;
     self.stack.clear();
     self.current_closure_env = Some(Rc::clone(closure_env));
@@ -1258,7 +1259,7 @@ impl Vm {
     }
 
     self.call_stack.push(Frame {
-      chunk: Rc::clone(&self.chunk),
+      chunk: Arc::clone(&self.chunk),
       ip: self.ip,
       stack: caller_stack,
       locals: std::mem::replace(

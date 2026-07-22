@@ -17,7 +17,7 @@ use crate::value::Value;
 use oxc_ast::ast as oast;
 use oxc_span::{GetSpan, SourceType};
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::Arc;
 
 const LINE: u32 = 1;
 
@@ -742,6 +742,8 @@ impl Compiler {
           };
           let mut names = HashSet::new();
           self.add_var_names_from_binding(&dec.id, &mut names);
+          let mut names: Vec<_> = names.into_iter().collect();
+          names.sort();
           for name in names {
             if self.resolve_local(&name).is_none() {
               self.add_local_with_mirror(name.clone(), None, false);
@@ -788,6 +790,8 @@ impl Compiler {
             ) {
               let mut names = HashSet::new();
               self.add_var_names_from_binding(&dec.id, &mut names);
+              let mut names: Vec<_> = names.into_iter().collect();
+              names.sort();
               for name in &names {
                 if let Some(slot) = self.resolve_local(name) {
                   self.emit(Op::ResetLocalCell, LINE);
@@ -971,6 +975,8 @@ impl Compiler {
           };
           let mut names = HashSet::new();
           self.add_var_names_from_binding(&dec.id, &mut names);
+          let mut names: Vec<_> = names.into_iter().collect();
+          names.sort();
           for name in names {
             if self.resolve_local(&name).is_none() {
               self.add_local_with_mirror(name.clone(), None, false);
@@ -1012,6 +1018,8 @@ impl Compiler {
             ) {
               let mut names = HashSet::new();
               self.add_var_names_from_binding(&dec.id, &mut names);
+              let mut names: Vec<_> = names.into_iter().collect();
+              names.sort();
               for name in &names {
                 if let Some(slot) = self.resolve_local(name) {
                   self.emit(Op::ResetLocalCell, LINE);
@@ -1361,6 +1369,8 @@ impl Compiler {
               if !matches!(param.pattern, OPat::BindingIdentifier(_)) {
                 let mut binding_names = HashSet::new();
                 Self::collect_binding_names(&param.pattern, &mut binding_names);
+                let mut binding_names: Vec<_> = binding_names.into_iter().collect();
+                binding_names.sort();
                 for binding_name in binding_names {
                   let slot = self.add_local_with_mirror(binding_name, None, false);
                   self.mark_local_tdz(slot);
@@ -1919,14 +1929,14 @@ impl Compiler {
       proto.is_class_constructor = true;
       proto
     } else {
-      let mut ctor_chunk = Chunk::new(Rc::clone(&self.source_text));
+      let mut ctor_chunk = Chunk::new(Arc::clone(&self.source_text));
       if class_has_super {
         ctor_chunk.allow_new_target = true;
         ctor_chunk.allow_super = true;
         let mut inner = Compiler {
           chunk: ctor_chunk,
           risc: super::risc::RiscBuilder::new(),
-          source_text: Rc::clone(&self.source_text),
+          source_text: Arc::clone(&self.source_text),
           locals: Vec::new(),
           local_types: Vec::new(),
           local_tdz: Vec::new(),
@@ -1985,7 +1995,7 @@ impl Compiler {
           name: class_name.clone(),
           span: c.span,
           arity: 0,
-          chunk: Rc::new(ctor_chunk),
+          chunk: Arc::new(ctor_chunk),
           slot_types: inner.local_types,
           slot_names: inner.locals.into_iter().map(Some).collect(),
           lexical_tdz: inner.local_tdz,
@@ -2008,7 +2018,7 @@ impl Compiler {
           ic_table: Vec::new(),
         }
       } else {
-        let mut inner = Compiler::new(Rc::clone(&self.source_text));
+        let mut inner = Compiler::new(Arc::clone(&self.source_text));
         inner.is_root = false;
         inner.strict_context = true;
         inner.current_module = self.current_module.clone();
@@ -2026,7 +2036,7 @@ impl Compiler {
           name: class_name.clone(),
           span: c.span,
           arity: 0,
-          chunk: Rc::new(ctor_chunk),
+          chunk: Arc::new(ctor_chunk),
           slot_types: inner.local_types,
           slot_names: inner.locals.into_iter().map(Some).collect(),
           lexical_tdz: inner.local_tdz,
@@ -2214,6 +2224,8 @@ impl Compiler {
       for p in &func.params.items {
         let mut names = HashSet::new();
         Self::collect_binding_names(&p.pattern, &mut names);
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort();
         for name in names {
           if !seen.insert(name) {
             return Err(crate::errors::CompilerError::from(
@@ -2225,6 +2237,8 @@ impl Compiler {
       if let Some(rest) = &func.params.rest {
         let mut names = HashSet::new();
         Self::collect_binding_names(&rest.rest.argument, &mut names);
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort();
         for name in names {
           if !seen.insert(name) {
             return Err(crate::errors::CompilerError::from(
@@ -2236,9 +2250,9 @@ impl Compiler {
     }
 
     let mut inner = Compiler {
-      chunk: Chunk::new(Rc::clone(&self.source_text)),
+      chunk: Chunk::new(Arc::clone(&self.source_text)),
       risc: super::risc::RiscBuilder::new(),
-      source_text: Rc::clone(&self.source_text),
+      source_text: Arc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
       local_tdz: Vec::new(),
@@ -2385,7 +2399,7 @@ impl Compiler {
         name: name.to_string(),
         span: func.span,
         arity: func.params.items.len() + if has_rest { 1 } else { 0 },
-        chunk: Rc::new(chunk),
+        chunk: Arc::new(chunk),
         slot_types,
         slot_names,
         lexical_tdz,
@@ -2478,6 +2492,8 @@ impl Compiler {
       for p in &func.params.items {
         let mut names = HashSet::new();
         Self::collect_binding_names(&p.pattern, &mut names);
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort();
         for name in names {
           if !seen.insert(name) {
             return Err(crate::errors::CompilerError::from(
@@ -2489,6 +2505,8 @@ impl Compiler {
       if let Some(rest) = &func.params.rest {
         let mut names = HashSet::new();
         Self::collect_binding_names(&rest.rest.argument, &mut names);
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort();
         for name in names {
           if !seen.insert(name) {
             return Err(crate::errors::CompilerError::from(
@@ -2500,9 +2518,9 @@ impl Compiler {
     }
 
     let mut inner = Compiler {
-      chunk: Chunk::new(Rc::clone(&self.source_text)),
+      chunk: Chunk::new(Arc::clone(&self.source_text)),
       risc: super::risc::RiscBuilder::new(),
-      source_text: Rc::clone(&self.source_text),
+      source_text: Arc::clone(&self.source_text),
       locals: Vec::new(),
       local_types: Vec::new(),
       local_tdz: Vec::new(),
@@ -2662,7 +2680,7 @@ impl Compiler {
         name: name.to_string(),
         span: func.span,
         arity: func.params.items.len() + if has_rest { 1 } else { 0 },
-        chunk: Rc::new(chunk),
+        chunk: Arc::new(chunk),
         slot_types,
         slot_names,
         lexical_tdz,

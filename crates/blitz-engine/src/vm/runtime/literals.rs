@@ -7,6 +7,7 @@ use crate::vm::Vm;
 use crate::vm::runtime::execution::{ensure_slot, get_property};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 impl Vm {
@@ -301,7 +302,7 @@ impl Vm {
           "[trace] make_closure: created Closure props_ptr={:p} proto_idx={} proto_chunk_ptr={:p} ip={}",
           Rc::as_ptr(props),
           idx,
-          Rc::as_ptr(&closure_proto.chunk),
+          Arc::as_ptr(&closure_proto.chunk),
           self.ip.saturating_sub(1)
         );
       }

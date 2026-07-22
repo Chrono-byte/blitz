@@ -677,14 +677,14 @@ mod tests {
 
   use oxc_span::Span;
 
-  use std::sync::Mutex;
+  use std::sync::{Arc, Mutex};
 
   fn make_dummy_closure(env: Rc<Mutex<Vec<SharedValue>>>) -> Value {
     let proto = Rc::new(FunctionProto {
       name: "gc_test".to_string(),
       span: Span::new(0, 0),
       arity: 0,
-      chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
+      chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
       slot_types: Vec::new(),
       slot_names: Vec::new(),
       lexical_tdz: Vec::new(),

@@ -415,7 +415,7 @@ impl Vm {
       .get(&receiver_identity)
       .copied()
       .unwrap_or(0);
-    let site = (std::rc::Rc::as_ptr(&self.chunk) as usize, instruction_ip);
+    let site = (std::sync::Arc::as_ptr(&self.chunk) as usize, instruction_ip);
 
     if let Some(entry) = self.property_get_ic.get(&site)
       && entry.receiver_identity == receiver_identity

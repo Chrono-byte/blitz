@@ -70,7 +70,7 @@ impl Vm {
     let module_loader = shared_module_loader_for(&globals);
     let mut vm = Self {
       realm,
-      chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
+      chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
       ip: 0,
       stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
       locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
@@ -141,7 +141,7 @@ impl Vm {
       .unwrap_or(Value::Undefined);
     Self {
       realm: self.realm.clone(),
-      chunk: Rc::new(Chunk::new(Rc::new(String::new()))),
+      chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
       ip: 0,
       stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
       locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
@@ -1036,7 +1036,7 @@ impl Vm {
     self.yield_star_state = None;
     self.generator_return_frame_count = None;
     self.ip = 0;
-    self.chunk = Rc::new(Chunk::new(Rc::new(String::new())));
+    self.chunk = Arc::new(Chunk::new(Arc::new(String::new())));
     self.obj_generations.clear();
     self.property_get_ic.clear();
     gc::reset_allocation_pressure();
@@ -1068,8 +1068,8 @@ impl Vm {
     &mut self,
     chunk: Chunk,
   ) -> Result<Value, RuntimeError> {
-    let chunk_rc = Rc::new(chunk);
-    self.root_chunk = Some(Rc::clone(&chunk_rc));
+    let chunk_rc = Arc::new(chunk);
+    self.root_chunk = Some(Arc::clone(&chunk_rc));
     self.chunk = chunk_rc;
     self.ip = 0;
     self.stack.clear();
@@ -1132,11 +1132,11 @@ impl Vm {
     state: &mut RiscExecutionState,
     stop_at_generator_init: bool,
   ) -> Result<RiscRunOutcome, RuntimeError> {
-    let execution_chunk = Rc::clone(&self.chunk);
+    let execution_chunk = Arc::clone(&self.chunk);
     let registers = &mut state.registers;
     let spills = &mut state.spills;
 
-    if self.pending_exception && Rc::ptr_eq(&self.chunk, &execution_chunk) {
+    if self.pending_exception && Arc::ptr_eq(&self.chunk, &execution_chunk) {
       self.pending_exception = false;
       registers[7] = self.stack.pop().unwrap_or(Value::Undefined);
     }
@@ -1173,7 +1173,7 @@ impl Vm {
               .chunk
               .constants
               .get(decode_risc_aux16(word) as usize)
-              .cloned()
+              .map(crate::bytecode::Constant::to_value)
               .ok_or_else(|| RuntimeError::from("RISC constant index out of bounds"))?;
           }
           Op::Null => registers[rd] = Value::Null,
@@ -1710,7 +1710,7 @@ impl Vm {
                 did_return_slot: handler.did_return_slot,
               });
             self.handlers.push(HandlerRecord {
-              chunk: Rc::clone(&self.chunk),
+              chunk: Arc::clone(&self.chunk),
               handler_ip,
               saved_stack_len: self.stack.len(),
               saved_locals_len: self.locals.len(),
@@ -1834,7 +1834,7 @@ impl Vm {
       match step_result {
         Ok(Some(result)) => return Ok(result),
         Ok(None) => {}
-        Err(_error) if self.pending_exception && Rc::ptr_eq(&self.chunk, &execution_chunk) => {
+        Err(_error) if self.pending_exception && Arc::ptr_eq(&self.chunk, &execution_chunk) => {
           self.pending_exception = false;
           registers[7] = self.stack.pop().unwrap_or(Value::Undefined);
           continue;
@@ -1866,7 +1866,7 @@ impl Vm {
     chunk
       .verify()
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
-    let saved_chunk = Rc::clone(&self.chunk);
+    let saved_chunk = Arc::clone(&self.chunk);
     let saved_ip = self.ip;
     let saved_stack = self.stack.snapshot();
     let saved_root_chunk = self.root_chunk.clone();
@@ -1936,8 +1936,8 @@ impl Vm {
         self.current_slot_sloppy_immutable_silent.clone();
     }
 
-    let chunk_rc = Rc::new(chunk);
-    self.root_chunk = Some(Rc::clone(&chunk_rc));
+    let chunk_rc = Arc::new(chunk);
+    self.root_chunk = Some(Arc::clone(&chunk_rc));
     self.chunk = chunk_rc;
     self.ip = 0;
     self.stack.clear();
@@ -2847,7 +2847,7 @@ impl Vm {
   ) -> bool {
     let Some(handler_index) = self.handlers.iter().rposition(|handler| {
       handler.frame_count == self.call_stack.len()
-        && Rc::ptr_eq(&handler.chunk, &self.chunk)
+        && Arc::ptr_eq(&handler.chunk, &self.chunk)
         && handler.finally.is_some()
     }) else {
       return false;
@@ -3087,7 +3087,7 @@ impl Vm {
     idx: usize,
   ) -> Result<String, RuntimeError> {
     match self.chunk.constants.get(idx) {
-      Some(Value::String(value)) => Ok(value.clone()),
+      Some(crate::bytecode::Constant::String(value)) => Ok(value.clone()),
       Some(_) => Err(RuntimeError::from("Constant is not a string")),
       None => Err(RuntimeError::from("String constant index out of bounds")),
     }

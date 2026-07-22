@@ -4,12 +4,12 @@ use crate::typecheck::Type;
 use crate::value::{SharedValue, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Call frame.
 pub(crate) struct Frame {
   /// The chunk containing the bytecode for this frame.
-  pub(crate) chunk: Rc<Chunk>,
+  pub(crate) chunk: Arc<Chunk>,
   /// The current instruction pointer within the chunk.
   pub(crate) ip: usize,
   /// The stack of values for this frame.

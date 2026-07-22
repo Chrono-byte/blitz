@@ -332,7 +332,7 @@ pub struct Vm {
   /// The ECMAScript Realm this VM operates in.
   pub(super) realm: Realm,
   /// Chunk being executed.
-  pub(super) chunk: Rc<Chunk>,
+  pub(super) chunk: Arc<Chunk>,
   /// Instruction pointer within the chunk.
   pub(super) ip: usize,
   /// Operand stack. Shared across all frames; each frame records its base
@@ -359,7 +359,7 @@ pub struct Vm {
   /// Call-frame stack component.
   pub(super) call_stack: CallStack,
   /// Root chunk (kept alive for global type metadata).
-  pub(super) root_chunk: Option<Rc<Chunk>>,
+  pub(super) root_chunk: Option<Arc<Chunk>>,
   /// Slot-type annotations for the current function (formerly used by TS checks).
   pub(super) current_slot_types: Option<Vec<Option<Type>>>,
   /// Slot names for the current function.

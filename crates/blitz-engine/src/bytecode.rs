@@ -32,17 +32,18 @@
 //!
 //! ```
 //! use blitz::bytecode::{Chunk, Op};
-//! use std::rc::Rc;
+//! use std::sync::Arc;
 //!
-//! let mut chunk = Chunk::new(Rc::new(String::new()));
+//! let mut chunk = Chunk::new(Arc::new(String::new()));
 //! chunk.write_instr(Op::Const as u32, 1); // constant index 0
 //! ```
 
 use crate::typecheck::Type;
-use crate::value::Value;
+use crate::value::{SymbolId, Value};
+use num_bigint::BigInt;
 use oxc_span::Span;
 use std::convert::TryFrom;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// Description of a captured binding for a closure.
 #[derive(Clone, Debug)]
@@ -165,6 +166,62 @@ impl DecodedInstruction {
   }
 }
 
+/// An immutable literal stored in compiled bytecode.
+///
+/// Runtime-owned objects are deliberately excluded so compiled chunks can be
+/// transferred from compiler workers to the single VM thread.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Constant {
+  /// Internal sentinel for temporal dead zone bindings.
+  Uninitialized,
+  /// Number literal.
+  Number(f64),
+  /// String literal.
+  String(String),
+  /// Boolean literal.
+  Bool(bool),
+  /// Undefined literal.
+  Undefined,
+  /// BigInt literal.
+  BigInt(BigInt),
+  /// Symbol literal.
+  Symbol(SymbolId, Option<String>),
+  /// Null literal.
+  Null,
+}
+
+impl Constant {
+  /// Materialize this compiler-owned literal as a runtime value.
+  pub fn to_value(&self) -> Value {
+    match self {
+      Self::Uninitialized => Value::Uninitialized,
+      Self::Number(value) => Value::Number(*value),
+      Self::String(value) => Value::String(value.clone()),
+      Self::Bool(value) => Value::Bool(*value),
+      Self::Undefined => Value::Undefined,
+      Self::BigInt(value) => Value::BigInt(value.clone()),
+      Self::Symbol(id, description) => Value::Symbol(id.clone(), description.clone()),
+      Self::Null => Value::Null,
+    }
+  }
+}
+
+impl From<Value> for Constant {
+  fn from(value: Value) -> Self {
+    match value {
+      Value::Uninitialized => Self::Uninitialized,
+      Value::Number(value) => Self::Number(value),
+      Value::String(value) => Self::String(value),
+      Value::Bool(value) => Self::Bool(value),
+      Value::Undefined => Self::Undefined,
+      Value::BigInt(value) => Self::BigInt(value),
+      Value::Symbol(id, description) => Self::Symbol(id, description),
+      Value::Null => Self::Null,
+      _ => panic!("runtime-owned values cannot be stored in bytecode constants"),
+    }
+  }
+}
+
 /// A chunk of bytecode containing opcodes, constants, and metadata
 #[derive(Clone, Debug)]
 pub struct Chunk {
@@ -174,13 +231,13 @@ pub struct Chunk {
   /// opcode in the low 8 bits and a 24-bit payload in the upper bits.
   pub code: Vec<u32>,
   /// Constant pool values
-  pub constants: Vec<Value>,
+  pub constants: Vec<Constant>,
   /// Function prototypes
   pub functions: Vec<FunctionProto>,
   /// Line number information for debugging
   pub lines: Vec<u32>,
   /// Original source text for this chunk
-  pub source_text: Rc<String>,
+  pub source_text: Arc<String>,
   /// Root script slot type annotations.
   pub root_slot_types: Vec<Option<Type>>,
   /// Root script binding names.
@@ -226,7 +283,7 @@ pub struct FunctionProto {
   /// Number of parameters
   pub arity: usize,
   /// Compiled bytecode for this function
-  pub chunk: Rc<Chunk>,
+  pub chunk: Arc<Chunk>,
   /// NOTE: slot type annotations have been removed in JS-first mode; the
   /// runtime no longer enforces TypeScript annotations.
   pub slot_types: Vec<Option<Type>>,
@@ -281,7 +338,7 @@ pub struct FunctionProto {
 
 impl Chunk {
   /// Creates a new empty chunk
-  pub fn new(source_text: Rc<String>) -> Self {
+  pub fn new(source_text: Arc<String>) -> Self {
     Self {
       version: BytecodeVersion::RiscV2,
       code: Vec::new(),
@@ -441,7 +498,7 @@ impl Chunk {
     &mut self,
     value: Value,
   ) -> usize {
-    self.constants.push(value);
+    self.constants.push(value.into());
     self.constants.len() - 1
   }
 
@@ -815,7 +872,7 @@ impl FunctionProto {
 
 impl Default for Chunk {
   fn default() -> Self {
-    Self::new(Rc::new(String::new()))
+    Self::new(Arc::new(String::new()))
   }
 }
 
@@ -1249,6 +1306,12 @@ impl From<Op> for u8 {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn compiled_chunks_are_sendable_between_threads() {
+    fn assert_send<T: Send>() {}
+    assert_send::<Chunk>();
+  }
 
   #[test]
   fn op_round_trip() {

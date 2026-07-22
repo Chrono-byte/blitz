@@ -81,6 +81,8 @@ impl Compiler {
         for dec in &v.declarations {
           let mut names = HashSet::new();
           Self::collect_binding_names(&dec.id, &mut names);
+          let mut names: Vec<_> = names.into_iter().collect();
+          names.sort();
           for name in names {
             let slot = if let Some(slot) = self.resolve_local(&name) {
               slot

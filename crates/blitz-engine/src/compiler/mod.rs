@@ -26,7 +26,7 @@ use crate::bytecode::Chunk;
 use emit::FrontendOp as Op;
 use oxc_ast::ast as oast;
 use std::collections::HashSet;
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub mod core;
 pub(crate) use core::{
@@ -57,7 +57,7 @@ pub fn compile(
   program: &oast::Program<'_>,
   source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
-  let source_text = Rc::new(source.to_string());
+  let source_text = Arc::new(source.to_string());
   let mut c = Compiler::new(source_text);
   c.compile_oxc(program, None)
 }
@@ -71,7 +71,7 @@ pub fn compile_oxc(
   program: &oast::Program<'_>,
   source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
-  let source_text = Rc::new(source.to_string());
+  let source_text = Arc::new(source.to_string());
   let mut c = Compiler::new(source_text);
   c.compile_oxc(program, None)
 }
@@ -86,7 +86,7 @@ pub fn compile_oxc_with_ctx(
   ctx: Option<&ModuleContext>,
   source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
-  let source_text = Rc::new(source.to_string());
+  let source_text = Arc::new(source.to_string());
   let mut c = Compiler::new(source_text);
   c.compile_oxc(program, ctx)
 }
@@ -102,7 +102,7 @@ pub fn compile_oxc_repl(
   program: &oast::Program<'_>,
   source: &str,
 ) -> Result<Chunk, crate::errors::CompilerError> {
-  let source_text = Rc::new(source.to_string());
+  let source_text = Arc::new(source.to_string());
   let mut c = Compiler::new(source_text);
   c.compile_oxc_with_mode(program, None, true)
 }
@@ -325,6 +325,8 @@ impl Compiler {
       }
       let mut names = HashSet::new();
       Self::lexical_declared_names_of_statement(stmt, &mut names);
+      let mut names: Vec<_> = names.into_iter().collect();
+      names.sort();
       for name in names {
         if !seen_lexical.insert(name.clone()) {
           return Err(crate::errors::CompilerError::from(format!(
@@ -519,6 +521,7 @@ mod test {
   use std::cell::RefCell;
   use std::collections::{HashMap, HashSet};
   use std::rc::Rc;
+  use std::sync::Arc;
 
   use crate::bytecode::{decode_compare_jump, decode_rd, decode_rs};
   use crate::compiler::compile;
@@ -646,7 +649,7 @@ mod test {
 
   #[test]
   fn inline_cache_slot_allocation_rejects_overflow() {
-    let mut compiler = Compiler::new(Rc::new(String::new()));
+    let mut compiler = Compiler::new(Arc::new(String::new()));
     for expected in 0_u16..=u8::MAX as u16 {
       assert_eq!(
         compiler.alloc_ic_slot().expect("slot available") as u16,

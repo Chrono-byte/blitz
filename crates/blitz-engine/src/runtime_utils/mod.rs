@@ -57,6 +57,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::compiler;
 use crate::compiler::ModuleContext;
@@ -111,12 +112,12 @@ const MAX_ARRAY_LENGTH_F: f64 = 4294967295.0_f64;
 pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
   // Recursive helper that rebuilds chunks and their nested function chunks.
   fn rebuild(
-    rc_chunk: &Rc<bytecode::Chunk>,
-    visited: &mut HashMap<*const bytecode::Chunk, Rc<bytecode::Chunk>>,
-  ) -> Rc<bytecode::Chunk> {
-    let key = Rc::as_ptr(rc_chunk);
+    rc_chunk: &Arc<bytecode::Chunk>,
+    visited: &mut HashMap<*const bytecode::Chunk, Arc<bytecode::Chunk>>,
+  ) -> Arc<bytecode::Chunk> {
+    let key = Arc::as_ptr(rc_chunk);
     if let Some(existing) = visited.get(&key) {
-      return Rc::clone(existing);
+      return Arc::clone(existing);
     }
 
     // Clone the complete chunk so bytecode metadata is preserved as the format
@@ -143,15 +144,15 @@ pub fn clear_slot_types_in_chunk(chunk: bytecode::Chunk) -> bytecode::Chunk {
     }
     new_chunk.functions = new_funcs;
 
-    let rc_new = Rc::new(new_chunk);
-    visited.insert(key, Rc::clone(&rc_new));
+    let rc_new = Arc::new(new_chunk);
+    visited.insert(key, Arc::clone(&rc_new));
     rc_new
   }
 
-  let rc = Rc::new(chunk);
-  let mut visited: HashMap<*const bytecode::Chunk, Rc<bytecode::Chunk>> = HashMap::new();
+  let rc = Arc::new(chunk);
+  let mut visited: HashMap<*const bytecode::Chunk, Arc<bytecode::Chunk>> = HashMap::new();
   let rc_cleared = rebuild(&rc, &mut visited);
-  Rc::try_unwrap(rc_cleared).unwrap_or_else(|rc| (*rc).clone())
+  Arc::try_unwrap(rc_cleared).unwrap_or_else(|rc| (*rc).clone())
 }
 
 /// Determines if two values are strictly equal according to ES6 semantics.

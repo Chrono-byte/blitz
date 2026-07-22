@@ -81,6 +81,8 @@ impl super::Compiler {
       ) {
         let mut names = HashSet::new();
         self.add_var_names_from_binding(&dec.id, &mut names);
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort();
         for name in names {
           let slot = self.predeclare_lexical_binding(&name, v.kind)?;
           // A loop body can execute the same bytecode repeatedly. Each entry

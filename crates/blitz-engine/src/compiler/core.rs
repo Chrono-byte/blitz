@@ -6,13 +6,13 @@
 
 use super::emit::FrontendOp as Op;
 use super::risc::RiscBuilder;
-use crate::bytecode::{Chunk, UpvalueSpec};
+use crate::bytecode::{Chunk, Constant, UpvalueSpec};
 use crate::errors::CompilerError;
 use crate::typecheck::Type;
 use crate::value::Value;
 use oxc_ast::ast as oast;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::Arc;
 
 const LINE: u32 = 1;
 
@@ -48,7 +48,7 @@ pub struct Compiler {
   /// enter `Chunk::code`; only finalized RISC v2 words are stored there.
   pub(crate) risc: RiscBuilder,
   /// Original source text for this compilation unit
-  pub source_text: Rc<String>,
+  pub source_text: Arc<String>,
   /// Local variable names
   pub locals: Vec<String>,
   /// Type annotations for local variables
@@ -255,11 +255,11 @@ impl Compiler {
   }
 
   /// Creates a new compiler instance
-  pub fn new(source_text: Rc<String>) -> Self {
+  pub fn new(source_text: Arc<String>) -> Self {
     let (allow_new_target, allow_super) = COMPILE_CONTEXT_OVERRIDE
       .with(|override_state| *override_state.borrow())
       .unwrap_or((false, false));
-    let mut chunk = Chunk::new(Rc::clone(&source_text));
+    let mut chunk = Chunk::new(Arc::clone(&source_text));
     chunk.allow_new_target = allow_new_target;
     chunk.allow_super = allow_super;
     Self {
@@ -426,13 +426,13 @@ impl Compiler {
     module_index: usize,
     name: &str,
   ) -> Result<u16, CompilerError> {
-    let descriptor = Value::String(format!("{module_index}\0{name}"));
+    let descriptor = Constant::String(format!("{module_index}\0{name}"));
     let index = self
       .chunk
       .constants
       .iter()
       .position(|value| value == &descriptor)
-      .unwrap_or_else(|| self.chunk.add_constant(descriptor));
+      .unwrap_or_else(|| self.chunk.add_constant(descriptor.to_value()));
     u16::try_from(index)
       .map_err(|_| CompilerError::from(format!("Too many constants (max 65535, got {index})")))
   }
@@ -810,7 +810,8 @@ impl Compiler {
     // deeper nested functions. Root bindings must remain capturable so
     // callbacks created inside a top-level function can still see the
     // surrounding module scope after that function returns.
-    let outer_names: Vec<String> = self.outer_bindings.keys().cloned().collect();
+    let mut outer_names: Vec<String> = self.outer_bindings.keys().cloned().collect();
+    outer_names.sort();
     for name in outer_names {
       if bindings.contains_key(&name) {
         continue;
@@ -1141,6 +1142,6 @@ impl Compiler {
 
 impl Default for Compiler {
   fn default() -> Self {
-    Self::new(Rc::new(String::new()))
+    Self::new(Arc::new(String::new()))
   }
 }

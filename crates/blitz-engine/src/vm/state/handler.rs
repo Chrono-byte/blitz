@@ -3,11 +3,12 @@ use crate::environment::EnvironmentRecord;
 use crate::value::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Exception handler record.
 pub(crate) struct HandlerRecord {
   /// The chunk containing the handler code.
-  pub(crate) chunk: Rc<Chunk>,
+  pub(crate) chunk: Arc<Chunk>,
   /// The instruction pointer where the handler jumps to.
   pub(crate) handler_ip: usize,
   /// The saved operand stack length for unwinding.

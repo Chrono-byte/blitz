@@ -249,7 +249,7 @@ impl Vm {
     let env = Rc::clone(env);
     let promise_for_job = Rc::clone(&promise);
     let saved_stack = self.stack.snapshot();
-    let caller_chunk = Rc::clone(&self.chunk);
+    let caller_chunk = Arc::clone(&self.chunk);
     let caller_ip = self.ip;
     let caller_locals = self.locals.clone();
     let caller_this = self.this_value.clone();
