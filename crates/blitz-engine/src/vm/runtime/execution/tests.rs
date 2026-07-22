@@ -3093,6 +3093,56 @@ mod test {
   }
 
   #[test]
+  fn class_fields_initialize_instances_and_static_properties_in_source_order() {
+    let src = r#"
+      let keyCalls = 0;
+      const key = () => { keyCalls += 1; return "computed"; };
+      let setterCalls = 0;
+      class Base {
+        inherited = 1;
+        set shadowed(value) { setterCalls += value; }
+      }
+      class Fields extends Base {
+        first = 2;
+        shadowed = 9;
+        #secret = 5;
+        [key()] = this.first + 1;
+        missing;
+        static answer = 42;
+        readSecret() { return this.#secret; }
+        constructor(useFirstBranch) {
+          if (useFirstBranch) {
+            super();
+          } else {
+            super();
+          }
+          this.after = this.computed + 1;
+        }
+      }
+      const one = new Fields(true);
+      const two = new Fields(false);
+      globalThis.fieldsOk = one.inherited === 1
+        && one.first === 2
+        && one.shadowed === 9
+        && setterCalls === 0
+        && one.readSecret() === 5
+        && one.computed === 3
+        && one.after === 4
+        && one.missing === undefined
+        && two.computed === 3
+        && Fields.answer === 42
+        && keyCalls === 1;
+    "#;
+    let session = Parser::parse_source(src).expect("parse class fields");
+    let chunk =
+      compiler::compile(session.program(), session.source()).expect("compile class fields");
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    vm.run(chunk).expect("run class fields");
+    assert_eq!(vm.get_global("fieldsOk"), Some(Value::Bool(true)));
+  }
+
+  #[test]
   fn super_property_access_uses_home_object_and_lexical_this() {
     let src = r#"
             class C {

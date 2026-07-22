@@ -114,6 +114,30 @@ pub struct Compiler {
   /// Tracks whether SetProperty was emitted in the current object literal.
   /// Used to determine if we need to emit a Pop after variable declaration.
   pub object_expr_had_set_property: bool,
+  /// Instance fields awaiting initialization after `super()` in a derived constructor.
+  pub pending_instance_fields: Vec<PreparedClassField>,
+}
+
+/// A class field prepared for constructor or static initialization.
+#[derive(Clone)]
+pub struct PreparedClassField {
+  /// Field name, already reduced to a stable constructor-visible form.
+  pub key: PreparedClassFieldKey,
+  /// Initializer expression; absent fields initialize to `undefined`.
+  pub initializer_source: Option<String>,
+  /// Whether this field is installed on the constructor rather than instances.
+  pub is_static: bool,
+}
+
+/// Stable representation of a class field key.
+#[derive(Clone)]
+pub enum PreparedClassFieldKey {
+  /// Ordinary identifier property name.
+  Named(String),
+  /// Private field's synthetic hidden key.
+  Private(String),
+  /// Outer local holding a computed property key evaluated during class definition.
+  Computed(String),
 }
 
 /// Source of a captured variable in a closure.
@@ -274,6 +298,7 @@ impl Compiler {
       captured_upvalues: Vec::new(),
       private_names: HashMap::new(),
       object_expr_had_set_property: false,
+      pending_instance_fields: Vec::new(),
     }
   }
 

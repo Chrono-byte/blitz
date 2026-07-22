@@ -1611,6 +1611,29 @@ impl super::Compiler {
           }
         }
       }
+      OExpr::PrivateFieldExpression(m) => {
+        self.compile_expr_oast(&m.object)?;
+        if m.optional {
+          self.emit(Op::Copy, LINE);
+          self.emit(Op::JumpIfNullish, LINE);
+          let nullish = self.current_ip();
+          self.emit_jump_placeholder();
+          let key = self.ensure_private_name_constant(&m.field.name);
+          self.emit_constant(key, LINE);
+          self.emit(Op::GetProperty, LINE);
+          self.emit(Op::Jump, LINE);
+          let end = self.current_ip();
+          self.emit_jump_placeholder();
+          self.patch_jump(nullish);
+          self.emit(Op::Discard, LINE);
+          self.emit(Op::Undefined, LINE);
+          self.patch_jump(end);
+        } else {
+          let key = self.ensure_private_name_constant(&m.field.name);
+          self.emit_constant(key, LINE);
+          self.emit(Op::GetProperty, LINE);
+        }
+      }
       OExpr::ChainExpression(c) => {
         use oast::ChainElement as CE;
         match &c.expression {
@@ -1830,6 +1853,7 @@ impl super::Compiler {
           }
           let arg_count = self.compile_call_arguments(&c.arguments)?;
           self.emit_call_with_arg_count(Op::SuperConstruct, arg_count)?;
+          self.emit_pending_instance_field_initializers()?;
           return Ok(());
         }
 

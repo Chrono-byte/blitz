@@ -155,6 +155,7 @@ impl super::Compiler {
       }
       let arg_count = self.compile_call_arguments(&c.arguments)?;
       self.emit_call_with_arg_count(Op::SuperConstruct, arg_count)?;
+      self.emit_pending_instance_field_initializers()?;
       return Ok(());
     }
 

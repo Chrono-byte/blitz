@@ -46,12 +46,16 @@ Asset generation, registration, import, and Effect construction are landed. A
 runtime regression test imports `effect/Effect` and constructs a mapped
 synchronous Effect.
 
-Executing a fiber is still blocked by missing public class-field initialization
-in the engine: Effect's scheduler and metric registry rely on fields such as
-`buckets = []` and `map = empty()`, which Blitz currently ignores. Lowering
-fields in generated assets exposes a second gap, spread `super(...arguments)`
-construction, so this should be fixed at the engine's class semantics rather
-than hidden in runtime presentation.
+The engine now initializes public, private, computed, and static class fields,
+including Effect's scheduler and metric-registry state such as `buckets = []`
+and `map = empty()`. Computed names are evaluated once at class definition,
+and public fields use own-property definition semantics rather than inherited
+setter assignment.
+
+`Effect.runFork` now advances beyond registry and class initialization. Its
+next engine blocker is a later call path that resolves a required callable to
+`undefined`. Spread `super(...arguments)` remains a separate unsupported
+constructor form.
 
 The generated graph currently substitutes `Map` for Effect's internal
 `WeakMap` identity caches because Blitz exposes only a placeholder `WeakMap`.

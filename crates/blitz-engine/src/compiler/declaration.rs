@@ -15,6 +15,7 @@ use crate::bytecode::{Chunk, FunctionProto};
 use crate::typecheck::Type;
 use crate::value::Value;
 use oxc_ast::ast as oast;
+use oxc_span::{GetSpan, SourceType};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -1636,6 +1637,97 @@ impl Compiler {
     Ok(())
   }
 
+  fn compile_class_initializer_source(
+    &mut self,
+    source: &str,
+  ) -> Result<(), crate::errors::CompilerError> {
+    let wrapped = format!("({source})");
+    let session = crate::parser::Parser::parse_source_with_type(&wrapped, SourceType::tsx())
+      .map_err(|error| crate::errors::CompilerError::from(error.to_string()))?;
+    let Some(oast::Statement::ExpressionStatement(statement)) = session.program().body.first()
+    else {
+      return Err(crate::errors::CompilerError::from(
+        "class field initializer did not parse as an expression",
+      ));
+    };
+    self.compile_expr_oast(&statement.expression)
+  }
+
+  fn emit_prepared_class_field_key(
+    &mut self,
+    key: &crate::compiler::core::PreparedClassFieldKey,
+  ) {
+    match key {
+      crate::compiler::core::PreparedClassFieldKey::Named(name) => {
+        self.emit_constant(Value::String(name.clone()), LINE);
+      }
+      crate::compiler::core::PreparedClassFieldKey::Private(name) => {
+        self.emit_constant(Value::String(name.clone()), LINE);
+      }
+      crate::compiler::core::PreparedClassFieldKey::Computed(binding) => {
+        self.emit_get_binding(binding);
+      }
+    }
+  }
+
+  fn emit_static_class_field(
+    &mut self,
+    target_slot: usize,
+    field: &crate::compiler::core::PreparedClassField,
+  ) -> Result<(), crate::errors::CompilerError> {
+    self.emit_get_builtin_name("objectDefineProperty");
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(target_slot)?, LINE);
+    self.emit_prepared_class_field_key(&field.key);
+    self.emit_constant(Value::String("value".to_string()), LINE);
+    if let Some(source) = &field.initializer_source {
+      self.compile_class_initializer_source(source)?;
+    } else {
+      self.emit(Op::Undefined, LINE);
+    }
+    self.emit_constant(Value::String("writable".to_string()), LINE);
+    self.emit_constant(Value::Bool(true), LINE);
+    self.emit_constant(Value::String("enumerable".to_string()), LINE);
+    self.emit_constant(Value::Bool(true), LINE);
+    self.emit_constant(Value::String("configurable".to_string()), LINE);
+    self.emit_constant(Value::Bool(true), LINE);
+    self.emit(Op::BuildObject, LINE);
+    self.emit_byte(4, LINE);
+    self.emit(Op::Call, LINE);
+    self.emit_byte(3, LINE);
+    self.emit(Op::Discard, LINE);
+    Ok(())
+  }
+
+  pub(super) fn emit_pending_instance_field_initializers(
+    &mut self
+  ) -> Result<(), crate::errors::CompilerError> {
+    let fields = self.pending_instance_fields.clone();
+    for field in fields.iter().filter(|field| !field.is_static) {
+      self.emit_get_builtin_name("objectDefineProperty");
+      self.emit(Op::GetThis, LINE);
+      self.emit_prepared_class_field_key(&field.key);
+      self.emit_constant(Value::String("value".to_string()), LINE);
+      if let Some(source) = &field.initializer_source {
+        self.compile_class_initializer_source(source)?;
+      } else {
+        self.emit(Op::Undefined, LINE);
+      }
+      self.emit_constant(Value::String("writable".to_string()), LINE);
+      self.emit_constant(Value::Bool(true), LINE);
+      self.emit_constant(Value::String("enumerable".to_string()), LINE);
+      self.emit_constant(Value::Bool(true), LINE);
+      self.emit_constant(Value::String("configurable".to_string()), LINE);
+      self.emit_constant(Value::Bool(true), LINE);
+      self.emit(Op::BuildObject, LINE);
+      self.emit_byte(4, LINE);
+      self.emit(Op::Call, LINE);
+      self.emit_byte(3, LINE);
+      self.emit(Op::Discard, LINE);
+    }
+    Ok(())
+  }
+
   /// Lower a class method/getter/setter installation to a property
   /// definition with a real descriptor object.
   pub(super) fn emit_class_member_installation(
@@ -1756,6 +1848,54 @@ impl Compiler {
       .or_else(|| declaration_name.map(ToString::to_string))
       .unwrap_or_else(|| "<anonymous>".to_string());
 
+    let mut prepared_fields = Vec::new();
+    for (index, element) in c.body.body.iter().enumerate() {
+      let oast::ClassElement::PropertyDefinition(field) = element else {
+        continue;
+      };
+      let key = if field.computed {
+        let slot = self.alloc_temp_local(&format!("class_field_key_{index}"));
+        crate::compiler::core::PreparedClassFieldKey::Computed(self.locals[slot].clone())
+      } else {
+        match &field.key {
+          oast::PropertyKey::StaticIdentifier(identifier) => {
+            crate::compiler::core::PreparedClassFieldKey::Named(identifier.name.to_string())
+          }
+          oast::PropertyKey::Identifier(identifier) => {
+            crate::compiler::core::PreparedClassFieldKey::Named(identifier.name.to_string())
+          }
+          oast::PropertyKey::StringLiteral(literal) => {
+            crate::compiler::core::PreparedClassFieldKey::Named(literal.value.to_string())
+          }
+          oast::PropertyKey::NumericLiteral(literal) => {
+            crate::compiler::core::PreparedClassFieldKey::Named(super::numeric_property_key(
+              literal.value,
+            ))
+          }
+          oast::PropertyKey::PrivateIdentifier(identifier) => {
+            let Value::String(key) = self.ensure_private_name_constant(&identifier.name) else {
+              unreachable!("private names use string keys")
+            };
+            crate::compiler::core::PreparedClassFieldKey::Private(key)
+          }
+          _ => {
+            return Err(crate::errors::CompilerError::from(
+              "unsupported non-computed class field key",
+            ));
+          }
+        }
+      };
+      let initializer_source = field.value.as_ref().map(|value| {
+        let span = value.span();
+        self.source_text[span.start as usize..span.end as usize].to_string()
+      });
+      prepared_fields.push(crate::compiler::core::PreparedClassField {
+        key,
+        initializer_source,
+        is_static: field.r#static,
+      });
+    }
+
     let constructor_method = c.body.body.iter().find_map(|element| {
       if let oast::ClassElement::MethodDefinition(md) = element
         && matches!(md.kind, oast::MethodDefinitionKind::Constructor)
@@ -1766,8 +1906,14 @@ impl Compiler {
     });
     let class_has_super = c.super_class.is_some();
     let proto = if let Some(md) = constructor_method {
-      let (mut proto, _env_len) =
-        self.compile_function(&class_name, None, &md.value, None, class_has_super)?;
+      let (mut proto, _env_len) = self.compile_function_with_instance_fields(
+        &class_name,
+        None,
+        &md.value,
+        None,
+        class_has_super,
+        &prepared_fields,
+      )?;
       proto.is_strict = true;
       proto.is_derived_constructor = class_has_super;
       proto.is_class_constructor = true;
@@ -1813,6 +1959,7 @@ impl Compiler {
           captured_upvalues: Vec::new(),
           private_names: self.private_names.clone(),
           object_expr_had_set_property: false,
+          pending_instance_fields: prepared_fields.clone(),
         };
         inner.add_local_with_mirror("arguments".to_string(), None, false);
         inner.emit(Op::GetGlobal, LINE);
@@ -1826,6 +1973,7 @@ impl Compiler {
         inner.emit_byte(0, LINE);
         inner.emit(Op::SuperConstruct, LINE);
         inner.emit_byte(1, LINE);
+        inner.emit_pending_instance_field_initializers()?;
         inner.emit(Op::Discard, LINE);
         inner.emit(Op::GetThis, LINE);
         inner.emit(Op::Return, LINE);
@@ -1860,21 +2008,31 @@ impl Compiler {
           ic_table: Vec::new(),
         }
       } else {
-        let mut builder = super::risc::RiscBuilder::new();
-        builder.emit(Op::GetThis, 0, LINE);
-        builder.emit(Op::Return, 0, LINE);
-        ctor_chunk = super::risc::RiscBuilder::finish(ctor_chunk, builder)?;
+        let mut inner = Compiler::new(Rc::clone(&self.source_text));
+        inner.is_root = false;
+        inner.strict_context = true;
+        inner.current_module = self.current_module.clone();
+        inner.outer_bindings = self.visible_bindings_snapshot();
+        inner.private_names = self.private_names.clone();
+        inner.pending_instance_fields = prepared_fields.clone();
+        inner.emit_pending_instance_field_initializers()?;
+        inner.emit(Op::GetThis, LINE);
+        inner.emit(Op::Return, LINE);
+        let ctor_chunk = super::risc::RiscBuilder::finish(
+          std::mem::take(&mut inner.chunk),
+          std::mem::take(&mut inner.risc),
+        )?;
         FunctionProto {
           name: class_name.clone(),
           span: c.span,
           arity: 0,
           chunk: Rc::new(ctor_chunk),
-          slot_types: Vec::new(),
-          slot_names: Vec::new(),
-          lexical_tdz: Vec::new(),
-          slot_immutable: Vec::new(),
-          slot_sloppy_immutable_silent: Vec::new(),
-          upvalues: Vec::new(),
+          slot_types: inner.local_types,
+          slot_names: inner.locals.into_iter().map(Some).collect(),
+          lexical_tdz: inner.local_tdz,
+          slot_immutable: inner.local_immutable,
+          slot_sloppy_immutable_silent: inner.local_sloppy_immutable_silent,
+          upvalues: inner.captured_upvalues,
           has_rest: false,
           has_prototype_property: true,
           captures_this: false,
@@ -1927,14 +2085,41 @@ impl Compiler {
       None
     };
 
+    let mut prepared_field_iter = prepared_fields.iter();
     for element in &c.body.body {
-      if let oast::ClassElement::MethodDefinition(md) = element {
-        let target_slot = if md.r#static {
-          ctor_slot
-        } else {
-          instance_home_slot.expect("instance home slot")
-        };
-        self.emit_class_member_installation(target_slot, md)?;
+      match element {
+        oast::ClassElement::MethodDefinition(method) => {
+          let target_slot = if method.r#static {
+            ctor_slot
+          } else {
+            instance_home_slot.expect("instance home slot")
+          };
+          self.emit_class_member_installation(target_slot, method)?;
+        }
+        oast::ClassElement::PropertyDefinition(property) => {
+          let field = prepared_field_iter
+            .next()
+            .expect("every class property has a prepared field");
+          if property.computed {
+            let crate::compiler::core::PreparedClassFieldKey::Computed(binding) = &field.key else {
+              unreachable!("computed class fields have prepared key bindings")
+            };
+            let key = property
+              .key
+              .as_expression()
+              .expect("computed class field key must be an expression");
+            self.compile_expr_oast(key)?;
+            let slot = self
+              .resolve_local(binding)
+              .expect("computed class field key binding must be local");
+            self.emit(Op::StoreLocal, LINE);
+            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          }
+          if field.is_static {
+            self.emit_static_class_field(ctor_slot, field)?;
+          }
+        }
+        _ => {}
       }
     }
 
@@ -1954,6 +2139,18 @@ impl Compiler {
     func: &oast::Function,
     return_type: Option<Type>,
     allow_super: bool,
+  ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
+    self.compile_function_with_instance_fields(name, self_name, func, return_type, allow_super, &[])
+  }
+
+  fn compile_function_with_instance_fields(
+    &mut self,
+    name: &str,
+    self_name: Option<&str>,
+    func: &oast::Function,
+    return_type: Option<Type>,
+    allow_super: bool,
+    instance_fields: &[crate::compiler::core::PreparedClassField],
   ) -> Result<(FunctionProto, usize), crate::errors::CompilerError> {
     let _env_len = self.locals.len();
     let function_is_strict = self.strict_context
@@ -2074,6 +2271,7 @@ impl Compiler {
       captured_upvalues: Vec::new(),
       private_names: self.private_names.clone(),
       object_expr_had_set_property: false,
+      pending_instance_fields: instance_fields.to_vec(),
     };
     inner.strict_context = function_is_strict;
     inner.chunk.allow_new_target = inner.allow_new_target;
@@ -2152,6 +2350,9 @@ impl Compiler {
     }
     if func.generator {
       inner.emit(Op::GeneratorInitDone, LINE);
+    }
+    if !allow_super {
+      inner.emit_pending_instance_field_initializers()?;
     }
 
     // Compile function body statements into inner compiler.
@@ -2334,6 +2535,7 @@ impl Compiler {
       captured_upvalues: Vec::new(),
       private_names: self.private_names.clone(),
       object_expr_had_set_property: false,
+      pending_instance_fields: Vec::new(),
     };
     inner.strict_context = function_is_strict;
     inner.chunk.allow_new_target = inner.allow_new_target;
