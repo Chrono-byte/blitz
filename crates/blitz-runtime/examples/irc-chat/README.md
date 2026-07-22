@@ -4,10 +4,20 @@ This demo runs one Blitz WebSocket server and two terminal clients. Incoming
 messages are printed through Rustyline's external-printer path, so they appear
 above the prompt without destroying text currently being edited.
 
-From the repository root, either build Blitz once in the parent shell and
-launch all three executables in separate Windows terminals. The launcher uses
-a cached build directory and copies the executable to a unique per-run temp
-directory, so an earlier chat process cannot lock the next Cargo build:
+From the repository root, use the platform launcher to build Blitz once and
+launch all three processes. The launchers use a cached build directory and copy
+the executable to a unique per-run temp directory, so an earlier chat process
+cannot lock the next Cargo build.
+
+On macOS, the shell launcher uses Ghostty 1.3.0 or newer to open a split layout:
+the server on the left, with Alice and Bob stacked on the right. macOS may ask
+for Automation permission the first time the script controls Ghostty.
+
+```sh
+./crates/blitz-runtime/examples/irc-chat/run-demo.sh
+```
+
+On Windows:
 
 ```powershell
 .\crates\blitz-runtime\examples\irc-chat\run-demo.ps1

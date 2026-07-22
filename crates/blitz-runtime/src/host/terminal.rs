@@ -5,10 +5,10 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use blitz::Vm;
 use blitz::errors::RuntimeError;
 use blitz::gc;
 use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use blitz::{HostRoot, Vm};
 use rustyline::{DefaultEditor, ExternalPrinter};
 use tokio::sync::mpsc;
 
@@ -20,8 +20,8 @@ pub(super) enum TerminalEvent {
 }
 
 struct TerminalInner {
-  callback: Option<Value>,
-  close_callback: Option<Value>,
+  line_callback: HostRoot,
+  close_callback: HostRoot,
   started: bool,
   active: bool,
   prompt: Arc<Mutex<String>>,
@@ -45,7 +45,7 @@ impl TerminalState {
   ) -> Result<(), RuntimeError> {
     match event {
       TerminalEvent::Line(line) => {
-        let callback = self.0.borrow().callback.clone();
+        let callback = vm.host_root(self.0.borrow().line_callback);
         if let Some(callback) = callback.filter(Value::is_callable)
           && let Err(error) =
             vm.call_value_with_this(&callback, &Value::Undefined, &[Value::String(line)])
@@ -54,11 +54,11 @@ impl TerminalState {
         }
       }
       TerminalEvent::Eof => {
-        let callback = {
+        let callback = vm.host_root({
           let mut inner = self.0.borrow_mut();
           inner.active = false;
-          inner.close_callback.clone()
-        };
+          inner.close_callback
+        });
         if let Some(callback) = callback.filter(Value::is_callable)
           && let Err(error) = vm.call_value_with_this(&callback, &Value::Undefined, &[])
         {
@@ -80,9 +80,11 @@ pub(super) fn install(
   vm: &mut Vm,
   events: mpsc::Sender<TerminalEvent>,
 ) -> TerminalState {
+  let line_callback = vm.create_host_root(Value::Undefined);
+  let close_callback = vm.create_host_root(Value::Undefined);
   let state = TerminalState(Rc::new(RefCell::new(TerminalInner {
-    callback: None,
-    close_callback: None,
+    line_callback,
+    close_callback,
     started: false,
     active: false,
     prompt: Arc::new(Mutex::new("> ".to_string())),
@@ -93,7 +95,7 @@ pub(super) fn install(
   let stdout = object(vm.realm().object_prototype());
 
   let line_state = state.clone();
-  let on_line: BuiltinFn = Rc::new(move |_vm, args| {
+  let on_line: BuiltinFn = Rc::new(move |vm, args| {
     let callback = args
       .get(1)
       .cloned()
@@ -103,14 +105,14 @@ pub(super) fn install(
         "Blitz.stdin.onLine callback must be callable",
       ));
     }
-    line_state.0.borrow_mut().callback = Some(callback);
+    vm.set_host_root(line_state.0.borrow().line_callback, callback)?;
     start_input(&line_state);
     Ok(Value::Undefined)
   });
   set(&stdin, "onLine", Value::Builtin(on_line));
 
   let close_state = state.clone();
-  let on_close: BuiltinFn = Rc::new(move |_vm, args| {
+  let on_close: BuiltinFn = Rc::new(move |vm, args| {
     let callback = args
       .get(1)
       .cloned()
@@ -120,7 +122,7 @@ pub(super) fn install(
         "Blitz.stdin.onClose callback must be callable",
       ));
     }
-    close_state.0.borrow_mut().close_callback = Some(callback);
+    vm.set_host_root(close_state.0.borrow().close_callback, callback)?;
     Ok(Value::Undefined)
   });
   set(&stdin, "onClose", Value::Builtin(on_close));
@@ -262,7 +264,7 @@ mod tests {
   #[test]
   fn installs_buffered_terminal_api() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
-    let mut vm = Vm::new(globals);
+    let mut vm = Vm::new(Rc::clone(&globals));
     let blitz = object(vm.realm().object_prototype());
     vm.realm().set_global("Blitz", blitz);
     let (events, _receiver) = mpsc::channel(1);
@@ -313,13 +315,91 @@ mod tests {
     let chunk =
       compiler::compile_oxc(session.program(), source).expect("compile terminal callback");
     vm.run(chunk).expect("define terminal callback");
-    state.0.borrow_mut().callback = vm.get_global("handleInput");
+    let callback = vm
+      .get_global("handleInput")
+      .expect("terminal callback");
+    vm.set_host_root(state.0.borrow().line_callback, callback)
+      .expect("retain terminal callback");
     state
       .dispatch(&mut vm, TerminalEvent::Line("  meow  ".to_string()))
       .expect("dispatch terminal line");
     assert_eq!(
       vm.get_global("sentLine"),
       Some(Value::String("MSG meow".to_string()))
+    );
+  }
+
+  #[test]
+  fn dispatches_irc_line_handler_after_sibling_socket_callbacks() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    globals.borrow_mut().properties.insert(
+      PropertyKey::String("globalThis".to_string()),
+      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+    );
+    let mut vm = Vm::new(Rc::clone(&globals));
+    let blitz = object(vm.realm().object_prototype());
+    vm.realm().set_global("Blitz", blitz);
+    let (events, _receiver) = mpsc::channel(1);
+    let state = install(&mut vm, events);
+    let source = r#"
+      globalThis.WebSocket = { OPEN: 1 };
+      globalThis.sentLine = "";
+      const socket = {
+        readyState: 1,
+        send: function(value) { globalThis.sentLine = value; }
+      };
+
+      socket.onopen = () => socket.send("JOIN Bob");
+      socket.onmessage = (event) => String(event.data);
+      socket.onerror = (event) => String(event.message);
+      socket.onclose = () => undefined;
+
+      globalThis.handleInput = (line) => {
+        const message = line.trim();
+        if (message === "/quit") {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send("QUIT");
+          }
+          return;
+        }
+        if (message.length === 0) {
+          return;
+        }
+        if (socket.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        socket.send(`MSG ${message}`);
+      };
+
+      globalThis.handleClose = () => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.close(1000, "stdin closed");
+        }
+      };
+    "#;
+    let session = JsParser::parse_source(source).expect("parse IRC terminal callback");
+    let chunk =
+      compiler::compile_oxc(session.program(), source).expect("compile IRC terminal callback");
+    vm.run(chunk)
+      .expect("define IRC terminal callback");
+    let callback = vm
+      .get_global("handleInput")
+      .expect("IRC terminal callback");
+    vm.set_host_root(state.0.borrow().line_callback, callback)
+      .expect("retain IRC terminal callback");
+    globals
+      .borrow_mut()
+      .properties
+      .shift_remove(&PropertyKey::String("handleInput".to_string()));
+    vm.collect_garbage_prototype();
+
+    state
+      .dispatch(&mut vm, TerminalEvent::Line("hello".to_string()))
+      .expect("dispatch IRC terminal line");
+
+    assert_eq!(
+      vm.get_global("sentLine"),
+      Some(Value::String("MSG hello".to_string()))
     );
   }
 }

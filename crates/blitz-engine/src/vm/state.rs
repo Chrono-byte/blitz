@@ -352,6 +352,8 @@ pub struct Vm {
   /// Temporary roots for values that are in flight through host helpers or
   /// call setup and are not yet anchored in the VM state.
   pub(super) gc_temp_roots: Vec<Value>,
+  /// Persistent values retained by host integrations outside the JS object graph.
+  pub(super) host_roots: Vec<Value>,
   /// Global variables (derived from realm.global_object for convenience).
   pub(super) globals: Rc<RefCell<ObjectData>>,
   /// Call-frame stack component.
@@ -425,6 +427,10 @@ pub struct Vm {
   /// Run start timestamp for the current profiling window.
   pub(super) run_started_at: Option<Instant>,
 }
+
+/// Opaque handle to a value retained by the VM for a host integration.
+#[derive(Clone, Copy)]
+pub struct HostRoot(pub(super) usize);
 
 thread_local! {
     static SHARED_MODULE_LOADERS: RefCell<HashMap<usize, Weak<RefCell<ModuleLoader>>>> =

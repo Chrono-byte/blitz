@@ -79,6 +79,7 @@ impl Vm {
       current_closure_env: None,
       pending_closure_env: None,
       gc_temp_roots: Vec::new(),
+      host_roots: Vec::new(),
       globals,
       call_stack: CallStack::with_capacity(FRAMES_INITIAL_CAPACITY),
       root_chunk: None,
@@ -147,6 +148,7 @@ impl Vm {
       current_closure_env: None,
       pending_closure_env: None,
       gc_temp_roots: Vec::new(),
+      host_roots: self.host_roots.clone(),
       globals,
       call_stack: CallStack::with_capacity(FRAMES_INITIAL_CAPACITY),
       root_chunk: None,
@@ -181,6 +183,38 @@ impl Vm {
       opcode_counts: [0; OP_COUNT],
       run_started_at: None,
     }
+  }
+
+  /// Retain a value that is owned by a host integration rather than the JS object graph.
+  pub fn create_host_root(
+    &mut self,
+    value: Value,
+  ) -> HostRoot {
+    let root = HostRoot(self.host_roots.len());
+    self.host_roots.push(value);
+    root
+  }
+
+  /// Replace a retained host value.
+  pub fn set_host_root(
+    &mut self,
+    root: HostRoot,
+    value: Value,
+  ) -> Result<(), RuntimeError> {
+    let slot = self
+      .host_roots
+      .get_mut(root.0)
+      .ok_or_else(|| RuntimeError::from("Invalid host root"))?;
+    *slot = value;
+    Ok(())
+  }
+
+  /// Read a retained host value.
+  pub fn host_root(
+    &self,
+    root: HostRoot,
+  ) -> Option<Value> {
+    self.host_roots.get(root.0).cloned()
   }
 
   fn begin_opcode_profile_run(&mut self) {
@@ -468,6 +502,7 @@ impl Vm {
       );
     }
     roots.extend(self.gc_temp_roots.iter().cloned());
+    roots.extend(self.host_roots.iter().cloned());
     roots.extend(
       self
         .property_get_ic
