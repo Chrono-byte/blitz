@@ -84,8 +84,9 @@ arguments without source changes.
 
 ### 5. TypeScript and tooling
 
-- Zero-configuration TypeScript stripping through Oxc
-- `blitz check`, `fmt`, `lint`, `test`, and `bundle`
+- Extend the initial Oxc TypeScript stripping support across the full syntax surface
+- Expand the in-process Oxc checker with cross-file symbols, narrowing, overloads, and tsconfig semantics
+- Add `fmt`, `lint`, `test`, and `bundle` commands
 - Source maps and useful async stack traces
 - Watch mode and inspector protocol
 

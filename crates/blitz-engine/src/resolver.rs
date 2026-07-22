@@ -16,8 +16,16 @@ pub fn resolve_specifier(
   specifier: &str,
 ) -> Result<PathBuf, crate::errors::BundlerError> {
   let options = oxc_resolver::ResolveOptions {
-    // Support common JS module extensions and Node resolution conditions.
-    extensions: vec![".js".into()],
+    // Keep JavaScript precedence while allowing TypeScript module graphs.
+    extensions: vec![
+      ".js".into(),
+      ".mjs".into(),
+      ".cjs".into(),
+      ".ts".into(),
+      ".mts".into(),
+      ".cts".into(),
+      ".tsx".into(),
+    ],
     condition_names: vec!["import".into()],
     ..Default::default()
   };

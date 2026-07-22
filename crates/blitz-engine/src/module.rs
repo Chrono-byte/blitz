@@ -66,8 +66,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Mutex;
 
-fn source_type_for_module_path(_path: &Path) -> SourceType {
-  SourceType::mjs()
+fn source_type_for_module_path(path: &Path) -> SourceType {
+  crate::parser::Parser::source_type_for_path(path, true)
 }
 
 #[derive(Debug, PartialEq, Eq)]

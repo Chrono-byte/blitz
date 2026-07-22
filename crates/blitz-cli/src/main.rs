@@ -4,8 +4,9 @@
 //! `process` before evaluating user code. Use `blitz-engine` when testing the
 //! host-neutral ECMAScript engine directly.
 //!
-//! The runtime CLI provides two main interfaces:
-//! - **File execution**: Run a JavaScript file directly
+//! The runtime CLI provides three main interfaces:
+//! - **File execution**: Run a JavaScript or TypeScript file directly
+//! - **Type checking**: Check TypeScript in-process from the OXC syntax tree
 //! - **REPL**: Interactive read-eval-print loop with history
 //!
 //! # Bootstrapping
@@ -26,7 +27,7 @@
 //! TSBLITZ_TRACE=1 cargo run -p blitz-cli -- file.js
 //! ```
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use std::cell::RefCell;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -74,8 +75,12 @@ fn run_source_repl(
 
 /// Command line arguments for the Blitz executable.
 #[derive(Parser, Debug)]
-#[command(name = "blitz", about = "Blitz")]
+#[command(name = "blitz", about = "Blitz", subcommand_precedence_over_arg = true)]
 struct Cli {
+  /// Explicit toolchain or execution command.
+  #[command(subcommand)]
+  command: Option<CliCommand>,
+
   /// JavaScript file to execute. If omitted the REPL will be started.
   #[arg(value_name = "FILE")]
   file: Option<PathBuf>,
@@ -101,15 +106,224 @@ struct Cli {
   args: Vec<String>,
 }
 
+#[derive(Subcommand, Debug)]
+/// Explicit Blitz commands.
+enum CliCommand {
+  /// Run a JavaScript or TypeScript file.
+  Run(RunArgs),
+  /// Type-check a project or source files with Blitz's in-process checker.
+  Check(CheckArgs),
+}
+
+#[derive(Args, Debug)]
+/// Arguments for explicit file execution.
+struct RunArgs {
+  /// JavaScript or TypeScript file to execute.
+  #[arg(value_name = "FILE")]
+  file: PathBuf,
+
+  /// Type-check the file before executing it.
+  #[arg(long, action)]
+  check: bool,
+
+  /// Enable strict checking, including implicit-any diagnostics.
+  #[arg(long, action)]
+  strict: bool,
+
+  /// Run the file with Test262 host globals (`print`, `$262`, etc.).
+  #[arg(long, action)]
+  test262_harness: bool,
+
+  /// Treat the input file as an ECMAScript module.
+  #[arg(long, action)]
+  module: bool,
+
+  /// Arguments passed to the JavaScript program.
+  #[arg(
+    value_name = "ARGS",
+    trailing_var_arg = true,
+    allow_hyphen_values = true
+  )]
+  args: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+/// Arguments for TypeScript project checking.
+struct CheckArgs {
+  /// Source files to check. The current directory is scanned when omitted.
+  #[arg(value_name = "FILE")]
+  paths: Vec<PathBuf>,
+
+  /// Check a project directory or the directory containing a tsconfig file.
+  #[arg(short, long, value_name = "PROJECT")]
+  project: Option<PathBuf>,
+
+  /// Enable strict checking, including implicit-any diagnostics.
+  #[arg(long, action)]
+  strict: bool,
+}
+
+#[derive(Debug)]
+/// Normalized execution options shared by legacy and explicit invocations.
+struct ExecutionArgs {
+  /// File to execute, or none for the REPL.
+  file: Option<PathBuf>,
+  /// Whether Test262 host globals should be installed.
+  test262_harness: bool,
+  /// Whether the entry should be loaded as an ECMAScript module.
+  module: bool,
+  /// Arguments exposed to the executed program.
+  args: Vec<String>,
+}
+
+/// Returns whether a path has an executable TypeScript extension.
+fn is_typescript_path(path: &Path) -> bool {
+  path
+    .extension()
+    .and_then(|extension| extension.to_str())
+    .is_some_and(|extension| matches!(extension, "ts" | "tsx" | "mts" | "cts"))
+}
+
+/// Recursively collects TypeScript sources while skipping dependency and build trees.
+fn collect_typescript_files(
+  directory: &Path,
+  files: &mut Vec<PathBuf>,
+) -> Result<(), blitz::errors::Error> {
+  let entries = std::fs::read_dir(directory).map_err(|error| {
+    blitz::errors::RuntimeError::from(format!(
+      "Failed to read project directory {}: {}",
+      directory.display(),
+      error
+    ))
+  })?;
+  for entry in entries {
+    let entry = entry.map_err(|error| blitz::errors::RuntimeError::from(error.to_string()))?;
+    let path = entry.path();
+    let file_type = entry
+      .file_type()
+      .map_err(|error| blitz::errors::RuntimeError::from(error.to_string()))?;
+    if file_type.is_symlink() {
+      continue;
+    }
+    if file_type.is_dir() {
+      let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+      if !matches!(name, ".git" | "node_modules" | "target") {
+        collect_typescript_files(&path, files)?;
+      }
+    } else if is_typescript_path(&path) {
+      let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+      if ![".d.ts", ".d.mts", ".d.cts"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+      {
+        files.push(path);
+      }
+    }
+  }
+  Ok(())
+}
+
+/// Resolves explicit files or discovers sources beneath a project root.
+fn typecheck_paths(
+  paths: &[PathBuf],
+  project: Option<&Path>,
+) -> Result<Vec<PathBuf>, blitz::errors::Error> {
+  if project.is_some() && !paths.is_empty() {
+    return Err(
+      blitz::errors::RuntimeError::from("--project cannot be combined with source files").into(),
+    );
+  }
+  if !paths.is_empty() {
+    return Ok(paths.to_vec());
+  }
+
+  let requested = project.unwrap_or_else(|| Path::new("."));
+  let root = if requested.is_file() {
+    requested
+      .parent()
+      .unwrap_or_else(|| Path::new("."))
+  } else {
+    requested
+  };
+  let mut files = Vec::new();
+  collect_typescript_files(root, &mut files)?;
+  files.sort();
+  Ok(files)
+}
+
+/// Parses and checks source files using Blitz's in-process OXC checker.
+fn run_typecheck(
+  paths: &[PathBuf],
+  strict: bool,
+) -> Result<bool, blitz::errors::Error> {
+  let mut success = true;
+  for path in paths {
+    let source = std::fs::read_to_string(path).map_err(|error| {
+      blitz::errors::RuntimeError::from(format!("Failed to read {}: {}", path.display(), error))
+    })?;
+    let source_type = JsParser::source_type_for_path(path, false);
+    match JsParser::parse_source_with_type(&source, source_type) {
+      Ok(session) => {
+        let result = blitz::typecheck::with_strict_override(strict.then_some(true), || {
+          blitz::typecheck::check(session.program())
+        });
+        if let Err(error) = result {
+          eprintln!("{}: {}", path.display(), error);
+          success = false;
+        }
+      }
+      Err(error) => {
+        eprintln!("{}: {}", path.display(), error);
+        success = false;
+      }
+    }
+  }
+  Ok(success)
+}
+
 fn main() -> Result<(), blitz::errors::Error> {
   // Parse CLI early so clap can handle --help/--version before doing work.
   let cli = Cli::parse();
+
+  let execution = match cli.command {
+    Some(CliCommand::Check(check)) => {
+      let paths = typecheck_paths(&check.paths, check.project.as_deref())?;
+      let success = run_typecheck(&paths, check.strict)?;
+      std::process::exit(if success { 0 } else { 1 });
+    }
+    Some(CliCommand::Run(run)) => {
+      if run.check {
+        let success = run_typecheck(std::slice::from_ref(&run.file), run.strict)?;
+        if !success {
+          std::process::exit(1);
+        }
+      }
+      ExecutionArgs {
+        file: Some(run.file),
+        test262_harness: run.test262_harness,
+        module: run.module,
+        args: run.args,
+      }
+    }
+    None => ExecutionArgs {
+      file: cli.file,
+      test262_harness: cli.test262_harness,
+      module: cli.module,
+      args: cli.args,
+    },
+  };
 
   let async_done_state: Rc<RefCell<Option<test262_support::AsyncCompletion>>> =
     Rc::new(RefCell::new(None));
 
   // Public globals visible to user code (populated by the prelude)
-  let globals: Rc<RefCell<blitz::value::ObjectData>> = if cli.test262_harness {
+  let globals: Rc<RefCell<blitz::value::ObjectData>> = if execution.test262_harness {
     let done_state =
       Rc::<RefCell<Option<test262_support::AsyncCompletion>>>::clone(&async_done_state);
     let print_native: blitz::value::NativeFn = Rc::new(move |vm, _this, args| {
@@ -148,18 +362,18 @@ fn main() -> Result<(), blitz::errors::Error> {
   let mut repl_vm = Vm::new(globals);
   let mut runtime_argv = Vec::new();
   runtime_argv.push("blitz".to_string());
-  if let Some(path) = &cli.file {
+  if let Some(path) = &execution.file {
     runtime_argv.push(path.to_string_lossy().into_owned());
   }
-  runtime_argv.extend(cli.args.iter().cloned());
+  runtime_argv.extend(execution.args.iter().cloned());
   let mut runtime = blitz_runtime::host::install_runtime(
     &mut repl_vm,
     blitz_runtime::host::RuntimeOptions::from_host(runtime_argv),
   );
 
   // If a file was provided, run it and exit. Otherwise start REPL.
-  if let Some(path) = cli.file {
-    if cli.module {
+  if let Some(path) = execution.file {
+    if execution.module {
       let loader_handle = repl_vm.module_loader_handle();
       {
         let mut loader = loader_handle.borrow_mut();
@@ -183,14 +397,15 @@ fn main() -> Result<(), blitz::errors::Error> {
       let source = std::fs::read_to_string(&path).map_err(|e| {
         blitz::errors::RuntimeError::from(format!("Failed to read {}: {}", path.display(), e))
       })?;
-      let session = JsParser::parse_source(&source)?;
+      let source_type = JsParser::source_type_for_path(&path, false);
+      let session = JsParser::parse_source_with_type(&source, source_type)?;
       let program = session.program();
       let chunk = compiler::compile_oxc(program, &source).map_err(blitz::errors::Error::from)?;
       repl_vm
         .run(chunk)
         .map_err(blitz::errors::Error::from)?;
 
-      if cli.test262_harness && repl_vm.get_global("$DONE").is_some() {
+      if execution.test262_harness && repl_vm.get_global("$DONE").is_some() {
         let start = Instant::now();
         let timeout = Duration::from_secs(30);
         loop {
@@ -233,7 +448,7 @@ fn main() -> Result<(), blitz::errors::Error> {
     return Ok(());
   }
 
-  // Start REPL (explicit flag or no file provided)
+  // Start REPL (explicit flag or no file provided).
   println!("Blitz REPL. Type exit to quit.");
   let mut rl = rustyline::Editor::<(), rustyline::history::DefaultHistory>::new()
     .map_err(|e| blitz::errors::RuntimeError::from(format!("Readline init error: {}", e)))?;
@@ -276,6 +491,17 @@ mod tests {
   use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
   use std::cell::RefCell;
   use std::rc::Rc;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  static TEMP_DIRECTORY_ID: AtomicUsize = AtomicUsize::new(0);
+
+  fn temporary_directory() -> PathBuf {
+    env::temp_dir().join(format!(
+      "blitz-cli-test-{}-{}",
+      std::process::id(),
+      TEMP_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed)
+    ))
+  }
 
   fn test_globals() -> Rc<RefCell<ObjectData>> {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
@@ -309,5 +535,101 @@ mod tests {
       "expected 3, got {:?}",
       result
     );
+  }
+
+  #[test]
+  fn typescript_annotations_are_erased_for_execution() {
+    let source = r#"
+      interface Answer { value: number }
+      const answer: Answer = { value: 42 };
+      var result: number = answer.value as number;
+    "#;
+    let session = JsParser::parse_source_with_type(
+      source,
+      JsParser::source_type_for_path(Path::new("answer.ts"), false),
+    )
+    .expect("parse TypeScript");
+    let chunk = compiler::compile_oxc(session.program(), source).expect("compile TypeScript");
+    let mut vm = Vm::new(test_globals());
+
+    vm.run(chunk).expect("run TypeScript");
+
+    assert!(
+      matches!(vm.get_global("result"), Some(Value::Number(n)) if (n - 42.0).abs() < f64::EPSILON)
+    );
+  }
+
+  #[test]
+  fn parses_legacy_file_invocation() {
+    let cli = Cli::try_parse_from(["blitz", "program.js", "one"]).expect("parse");
+
+    assert!(cli.command.is_none());
+    assert_eq!(cli.file, Some(PathBuf::from("program.js")));
+    assert_eq!(cli.args, ["one"]);
+  }
+
+  #[test]
+  fn parses_run_with_typecheck() {
+    let cli =
+      Cli::try_parse_from(["blitz", "run", "--check", "program.ts", "--", "one"]).expect("parse");
+
+    assert!(matches!(cli.command, Some(CliCommand::Run(_))));
+    if let Some(CliCommand::Run(run)) = cli.command {
+      assert!(run.check);
+      assert_eq!(run.file, PathBuf::from("program.ts"));
+      assert_eq!(run.args, ["one"]);
+    }
+  }
+
+  #[test]
+  fn keeps_explicit_typecheck_paths() {
+    let paths = vec![PathBuf::from("one.ts"), PathBuf::from("two.ts")];
+
+    assert_eq!(typecheck_paths(&paths, None).expect("paths"), paths);
+  }
+
+  #[test]
+  fn rejects_project_with_source_files() {
+    let result = typecheck_paths(
+      &[PathBuf::from("program.ts")],
+      Some(Path::new("tsconfig.json")),
+    );
+
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn discovers_project_typescript_sources() {
+    let root = temporary_directory();
+    let source_directory = root.join("src").join("nested");
+    std::fs::create_dir_all(&source_directory).expect("create source directory");
+    std::fs::create_dir_all(root.join("node_modules")).expect("create dependency directory");
+    let source = source_directory.join("program.ts");
+    std::fs::write(&source, "let value: number = 1;").expect("write source");
+    std::fs::write(
+      source_directory.join("types.d.ts"),
+      "declare const value: number;",
+    )
+    .expect("write declaration");
+    std::fs::write(root.join("node_modules").join("ignored.ts"), "").expect("write ignored file");
+
+    assert_eq!(typecheck_paths(&[], Some(&root)).expect("paths"), [source]);
+
+    std::fs::remove_dir_all(root).expect("remove test directory");
+  }
+
+  #[test]
+  fn in_process_checker_reports_file_errors() {
+    let root = temporary_directory();
+    std::fs::create_dir_all(&root).expect("create test directory");
+    let valid = root.join("valid.ts");
+    let invalid = root.join("invalid.ts");
+    std::fs::write(&valid, "const answer: number = 42;").expect("write valid source");
+    std::fs::write(&invalid, "const answer: number = 'wrong';").expect("write invalid source");
+
+    assert!(run_typecheck(&[valid], false).expect("check valid source"));
+    assert!(!run_typecheck(&[invalid], false).expect("check invalid source"));
+
+    std::fs::remove_dir_all(root).expect("remove test directory");
   }
 }

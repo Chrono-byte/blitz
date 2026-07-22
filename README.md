@@ -18,6 +18,7 @@ Executables
 
 - `blitz` is the application runtime. It installs host APIs such as `console`,
   `process`, and `Blitz.serve` and is the executable intended for JavaScript
+  and TypeScript
   applications.
 - `blitz-engine` is a host-neutral engine harness. It exposes ECMAScript
   intrinsics and `globalThis`, but deliberately omits OS and runtime APIs.
@@ -25,6 +26,14 @@ Executables
 ```powershell
 # Run an application with the Blitz runtime.
 cargo run -p blitz-cli -- crates/blitz-runtime/examples/hello.js
+
+# Type annotations are stripped during execution.
+cargo run -p blitz-cli -- run path/to/application.ts
+
+# Type checking uses Blitz's in-process OXC-based checker.
+cargo run -p blitz-cli -- check
+cargo run -p blitz-cli -- check --strict
+cargo run -p blitz-cli -- run --check path/to/application.ts
 
 # Exercise the raw engine without host capabilities.
 cargo run -p blitz-engine --bin blitz-engine -- path/to/engine-test.js
@@ -67,6 +76,15 @@ server and two Blitz terminal clients. Interactive applications can use
 `Blitz.stdin.onLine`, `setPrompt`, and `onClose` with
 `Blitz.stdout.writeLine`; incoming output is rendered above the active
 Rustyline prompt without discarding buffered input.
+
+`blitz check` accepts explicit source files or recursively checks TypeScript
+files in the current directory. Dependency, build, and declaration trees are
+skipped. Use `--project <directory-or-tsconfig>` to select another project
+root. The checker currently covers primitive and structural annotations,
+arrays, functions, calls, assignments, returns, unions, interfaces, and type
+aliases; unsupported advanced TypeScript types remain permissive while the
+checker grows. See [the TypeScript model](docs/TYPESCRIPT.md) for the supported
+type language and remaining compatibility layers.
 
 License
 --------------------

@@ -26,6 +26,7 @@ use oxc_parser::{ParseOptions, Parser as OxcParser};
 use oxc_span::SourceType;
 
 use serde_json::Value;
+use std::path::Path;
 
 /// Parser facade. Historically this crate had a token-based parser that took
 /// tokens produced by `Lexer`. We now prefer parsing source text directly
@@ -58,6 +59,29 @@ pub struct ParserSession {
 }
 
 impl Parser {
+  /// Select the parser mode for a source file without changing the historical
+  /// script semantics of `.js` files.
+  #[must_use]
+  pub fn source_type_for_path(
+    path: &Path,
+    module: bool,
+  ) -> SourceType {
+    let is_typescript = path
+      .extension()
+      .and_then(|extension| extension.to_str())
+      .is_some_and(|extension| matches!(extension, "ts" | "tsx" | "mts" | "cts"));
+
+    if is_typescript {
+      SourceType::from_path(path)
+        .unwrap_or_else(|_| SourceType::ts())
+        .with_module(module)
+    } else if module {
+      SourceType::mjs()
+    } else {
+      SourceType::script()
+    }
+  }
+
   /// Construct a parser from a source text string. This is the preferred
   /// constructor: it uses the Oxc parser under the hood.
   pub fn new_from_source(source: &str) -> Self {
