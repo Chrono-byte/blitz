@@ -44,7 +44,9 @@ The Deno-style HTTP server listens on `127.0.0.1:8000` by default. Pass an
 options object or set `BLITZ_HOST`/`BLITZ_PORT` to override it. The new
 immutable Rust application/RPC model is documented in
 [`BLITZ_RUNTIME_RPC_SLICE.md`](docs/BLITZ_RUNTIME_RPC_SLICE.md); it preserves
-`Blitz.serve` as the low-level compatibility API.
+`Blitz.serve` as the low-level compatibility API. The target Effect-native
+host standard library and its migration rules are specified in
+[`EFFECT_STDLIB_DESIGN.md`](docs/EFFECT_STDLIB_DESIGN.md).
 
 ```js
 function callbackFunc(request, info) {
