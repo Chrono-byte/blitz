@@ -113,7 +113,9 @@ fn run_repl(vm: &mut Vm) -> Result<(), blitz::errors::Error> {
         }
         drop(editor.add_history_entry(line.as_str()));
         match run_repl_source(vm, &line) {
-          Ok(value) if !matches!(value, Value::Null | Value::Undefined) => println!("{value}"),
+          Ok(value) if !matches!(value, Value::Null | Value::Undefined) => {
+            println!("{}", blitz::inspect::inspect(&value));
+          }
           Ok(_) => {}
           Err(error) => eprintln!("Error: {error}"),
         }

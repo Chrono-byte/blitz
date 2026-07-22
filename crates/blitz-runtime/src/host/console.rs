@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use blitz::Vm;
 use blitz::gc;
+use blitz::inspect::{InspectOptions, inspect_with_options};
 use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 #[derive(Default)]
@@ -237,7 +238,7 @@ fn format_arguments(
   let Value::String(template) = first else {
     return args
       .iter()
-      .map(|value| stringify(vm, value))
+      .map(|value| format_console_argument(vm, value))
       .collect::<Vec<_>>()
       .join(" ");
   };
@@ -269,7 +270,11 @@ fn format_arguments(
     let value = &args[next_argument];
     next_argument += 1;
     if specifier != 'c' {
-      output.push_str(&stringify(vm, value));
+      if matches!(specifier, 'o' | 'O') {
+        output.push_str(&inspect_console_value(value));
+      } else {
+        output.push_str(&stringify(vm, value));
+      }
     }
   }
 
@@ -277,7 +282,7 @@ fn format_arguments(
     if !output.is_empty() {
       output.push(' ');
     }
-    output.push_str(&stringify(vm, value));
+    output.push_str(&format_console_argument(vm, value));
   }
   output
 }
@@ -288,6 +293,32 @@ fn stringify(
 ) -> String {
   vm.to_string(value)
     .unwrap_or_else(|_| format!("{value}"))
+}
+
+fn format_console_argument(
+  vm: &mut Vm,
+  value: &Value,
+) -> String {
+  match value {
+    Value::Object(_)
+    | Value::Array(..)
+    | Value::Proxy(_)
+    | Value::Closure { .. }
+    | Value::Builtin(_)
+    | Value::BuiltinObject(..)
+    | Value::Promise(_) => inspect_console_value(value),
+    _ => stringify(vm, value),
+  }
+}
+
+fn inspect_console_value(value: &Value) -> String {
+  inspect_with_options(
+    value,
+    InspectOptions {
+      multiline: false,
+      ..InspectOptions::default()
+    },
+  )
 }
 
 fn emit(
@@ -353,5 +384,30 @@ mod tests {
         .unwrap_or_else(|_| panic!("read console.{name}"));
       assert!(method.is_callable(), "console.{name} should be callable");
     }
+  }
+
+  #[test]
+  fn inspects_object_arguments_without_changing_string_coercion() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let mut data = ObjectData::new();
+    data.properties.insert(
+      PropertyKey::String("answer".to_string()),
+      PropertyDescriptor::data(Value::Number(42.0)),
+    );
+    let object = Value::Object(Rc::new(RefCell::new(data)));
+
+    assert_eq!(
+      format_arguments(&mut vm, std::slice::from_ref(&object)),
+      "{ answer: 42 }"
+    );
+    assert_eq!(
+      format_arguments(&mut vm, &[Value::String("%o".to_string()), object.clone()]),
+      "{ answer: 42 }"
+    );
+    assert_eq!(
+      format_arguments(&mut vm, &[Value::String("%s".to_string()), object]),
+      "[object Object]"
+    );
   }
 }

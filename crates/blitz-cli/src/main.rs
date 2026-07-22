@@ -252,7 +252,9 @@ fn main() -> Result<(), blitz::errors::Error> {
           break;
         }
         match run_source_repl(&mut repl_vm, line) {
-          Ok(v) if !matches!(v, Value::Null | Value::Undefined) => println!("{}", v),
+          Ok(v) if !matches!(v, Value::Null | Value::Undefined) => {
+            println!("{}", blitz::inspect::inspect(&v));
+          }
           Ok(_) => {}
           Err(e) => eprintln!("Error: {}", e),
         }
