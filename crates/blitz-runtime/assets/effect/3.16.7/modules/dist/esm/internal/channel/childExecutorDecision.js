@@ -1,0 +1,1 @@
+import{OP_CONTINUE as t}from"blitz-internal:effect/dist/esm/internal/opCodes/channelChildExecutorDecision.js";const c="effect/ChannelChildExecutorDecision";const o=Symbol.for(c);const n={[o]:o};const i=r=>{const e=Object.create(n);e._tag=t;return e};export{o as ChildExecutorDecisionTypeId,i as Continue};

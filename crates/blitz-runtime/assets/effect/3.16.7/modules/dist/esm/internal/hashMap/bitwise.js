@@ -1,0 +1,1 @@
+import{MASK as f}from"blitz-internal:effect/dist/esm/internal/hashMap/config.js";function r(t){t-=t>>1&1431655765;t=(t&858993459)+(t>>2&858993459);t=t+(t>>4)&252645135;t+=t>>8;t+=t>>16;return t&127}function o(t,n){return n>>>t&f}function u(t){return 1<<t}function i(t,n){return r(t&n-1)}export{i as fromBitmap,o as hashFragment,r as popcount,u as toBitmap};

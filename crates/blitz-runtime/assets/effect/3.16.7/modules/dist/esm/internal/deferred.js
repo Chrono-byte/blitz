@@ -1,0 +1,1 @@
+import{OP_STATE_DONE as r,OP_STATE_PENDING as o}from"blitz-internal:effect/dist/esm/internal/opCodes/deferred.js";const t="effect/Deferred";const n=Symbol.for(t);const d={_E:e=>e,_A:e=>e};const f=e=>{return{_tag:o,joiners:e}};const _=e=>{return{_tag:r,effect:e}};export{n as DeferredTypeId,d as deferredVariance,_ as done,f as pending};

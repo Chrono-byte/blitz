@@ -1,0 +1,19 @@
+{
+  "name": "@blitz/effect-assets",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.15.0",
+  "scripts": {
+    "generate": "node --experimental-strip-types scripts/generate.ts",
+    "verify": "node --experimental-strip-types scripts/verify.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types scripts/test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0",
+    "effect": "3.16.7",
+    "esbuild": "0.25.9",
+    "rollup": "4.50.1",
+    "typescript": "5.9.2"
+  }
+}

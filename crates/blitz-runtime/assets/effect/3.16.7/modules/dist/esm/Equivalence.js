@@ -1,0 +1,1 @@
+import{dual as a}from"blitz-internal:effect/dist/esm/Function.js";const o=e=>(r,n)=>r===n||e(r,n);const i=a(2,(e,r)=>o((n,t)=>e(r(n),r(t))));const c=e=>o((r,n)=>{if(r.length!==n.length){return false}for(let t=0;t<r.length;t++){const u=e(r[t],n[t]);if(!u){return false}}return true});export{c as array,o as make,i as mapInput};

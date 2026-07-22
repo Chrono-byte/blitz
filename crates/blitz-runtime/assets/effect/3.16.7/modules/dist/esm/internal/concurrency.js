@@ -1,0 +1,1 @@
+import{fiberRefGetWith as h,currentConcurrency as a}from"blitz-internal:effect/dist/esm/internal/core.js";const d=(t,e,f,i)=>{switch(t){case void 0:return e();case"unbounded":return f();case"inherit":return h(a,r=>r==="unbounded"?f():r>1?i(r):e());default:return t>1?i(t):e()}};export{d as match};

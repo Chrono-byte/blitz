@@ -390,7 +390,9 @@ impl Chunk {
       }
       let pool_index = decode_risc_aux16(self.code[ip]);
       match instruction.op {
-        Op::Const if pool_index as usize >= self.constants.len() => {
+        Op::Const | Op::GetModuleExport | Op::SetModuleExport
+          if pool_index as usize >= self.constants.len() =>
+        {
           return Err(format!(
             "constant index {} at instruction {} is out of bounds",
             pool_index, ip
@@ -999,9 +1001,9 @@ pub enum Op {
   GeneratorInitDone,
 
   // === Module System (2) ===
-  /// GetModuleExport: rd = modules[module_idx].exports[name_idx]
+  /// GetModuleExport: rd = modules[descriptor.module].exports[descriptor.name]
   GetModuleExport,
-  /// SetModuleExport: modules[module_idx].exports[name_idx] = rd
+  /// SetModuleExport: modules[descriptor.module].exports[descriptor.name] = rd
   SetModuleExport,
 
   // === Semantic Operations (4) ===

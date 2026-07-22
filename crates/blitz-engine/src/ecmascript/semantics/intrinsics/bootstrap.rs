@@ -4431,12 +4431,24 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       .unwrap_or(Value::Null);
     let mut inst = ObjectData::new();
     inst.set_prototype_value(proto);
-    if let Some(message) = args.get(1).cloned() {
+    let message = args.get(1).cloned();
+    if let Some(message) = message.clone() {
       inst.properties.insert(
         PKey::String("message".to_string()),
         PropertyDescriptor::data(message),
       );
     }
+    let stack = message.map_or_else(
+      || Ok("Error".to_string()),
+      |message| {
+        vm.to_string(&message)
+          .map(|message| format!("Error: {message}"))
+      },
+    )?;
+    inst.properties.insert(
+      PKey::String("stack".to_string()),
+      PropertyDescriptor::data(Value::String(stack)),
+    );
     inst.properties.insert(
       PKey::String("constructor".to_string()),
       PropertyDescriptor::data(ctor),

@@ -7,7 +7,9 @@
 //! sandboxed host surface without changing VM semantics.
 
 mod console;
+pub mod event_loop;
 mod process;
+pub mod scheduler;
 mod server;
 mod terminal;
 
@@ -21,6 +23,7 @@ use tokio::sync::mpsc;
 
 use crate::net::http::HttpRequestEvent;
 use crate::net::websocket::WebSocketEvent;
+use event_loop::{EventRegistry, EventSender, ResourceHandle};
 use terminal::TerminalEvent;
 
 /// Host configuration installed into a Blitz VM.
@@ -72,10 +75,8 @@ impl RuntimeOptions {
 /// VM-thread driver for runtime-owned asynchronous resources.
 pub struct RuntimeHandle {
   server: server::ServerState,
-  requests: Option<mpsc::Receiver<HttpRequestEvent>>,
-  websocket_events: Option<mpsc::Receiver<WebSocketEvent>>,
+  events: EventRegistry<RuntimeEvent>,
   terminal: terminal::TerminalState,
-  terminal_events: Option<mpsc::Receiver<TerminalEvent>>,
 }
 
 enum RuntimeEvent {
@@ -94,35 +95,17 @@ impl RuntimeHandle {
     &mut self,
     vm: &mut Vm,
   ) -> Result<bool, RuntimeError> {
-    if !self.server.has_resources() && !self.terminal.is_active() {
+    if !self.server.has_resources() && !self.terminal.is_active() && !self.events.is_live() {
       return Ok(false);
     }
-    let Some(receiver) = self.requests.take() else {
+    let Some(mut receiver) = self.events.take_receiver() else {
       return Ok(false);
     };
-    let Some(websocket_events) = self.websocket_events.take() else {
-      self.requests = Some(receiver);
-      return Ok(false);
-    };
-    let Some(terminal_events) = self.terminal_events.take() else {
-      self.requests = Some(receiver);
-      self.websocket_events = Some(websocket_events);
-      return Ok(false);
-    };
-    let (receiver, websocket_events, terminal_events, event) = vm.block_on(async move {
-      let mut receiver = receiver;
-      let mut websocket_events = websocket_events;
-      let mut terminal_events = terminal_events;
-      let event = tokio::select! {
-        event = receiver.recv() => event.map(Box::new).map(RuntimeEvent::Http),
-        event = websocket_events.recv() => event.map(RuntimeEvent::WebSocket),
-        event = terminal_events.recv() => event.map(RuntimeEvent::Terminal),
-      };
-      (receiver, websocket_events, terminal_events, event)
+    let (receiver, event) = vm.block_on(async move {
+      let event = receiver.recv().await;
+      (receiver, event)
     })?;
-    self.requests = Some(receiver);
-    self.websocket_events = Some(websocket_events);
-    self.terminal_events = Some(terminal_events);
+    self.events.put_receiver(receiver);
     let Some(event) = event else {
       return Ok(false);
     };
@@ -154,6 +137,26 @@ impl RuntimeHandle {
     self.server.local_addr()
   }
 
+  /// Register a VM-thread-owned resource that participates in runtime liveness.
+  ///
+  /// The returned handle is intentionally lightweight and can be retained by a
+  /// host adapter. Resource cleanup remains owned by that adapter; calling
+  /// [`ResourceHandle::close`] only updates the scheduler's liveness state.
+  pub fn register_resource(
+    &self,
+    name: impl Into<String>,
+    referenced: bool,
+  ) -> ResourceHandle {
+    self.events.register(name, referenced)
+  }
+
+  /// Whether the server, terminal, queued events, or a referenced resource
+  /// keeps this runtime alive.
+  #[must_use]
+  pub fn is_live(&self) -> bool {
+    self.server.has_resources() || self.terminal.is_active() || self.events.is_live()
+  }
+
   /// Stop the HTTP server and release its listener.
   ///
   /// # Errors
@@ -172,24 +175,58 @@ impl RuntimeHandle {
 }
 
 /// Install the default Blitz runtime APIs into an initialized VM.
+///
+/// # Panics
+///
+/// Panics if checked-in generated runtime assets violate their verified
+/// canonical-specifier invariants.
 pub fn install_runtime(
   vm: &mut Vm,
   options: RuntimeOptions,
 ) -> RuntimeHandle {
+  crate::effect_assets::install_runtime_modules(vm)
+    .unwrap_or_else(|error| panic!("invalid embedded runtime module graph: {error}"));
   let (requests_tx, requests_rx) = mpsc::channel(64);
   let (websocket_events_tx, websocket_events_rx) = mpsc::channel(64);
   let (terminal_events_tx, terminal_events_rx) = mpsc::channel(64);
+  let events = EventRegistry::new(64).expect("runtime event capacity is non-zero");
+  let event_sender = events.sender();
+  forward_events(vm, requests_rx, event_sender.clone(), |event| {
+    RuntimeEvent::Http(Box::new(event))
+  });
+  forward_events(
+    vm,
+    websocket_events_rx,
+    event_sender.clone(),
+    RuntimeEvent::WebSocket,
+  );
+  forward_events(vm, terminal_events_rx, event_sender, RuntimeEvent::Terminal);
   let server = server::install(vm, options.listen_addr, requests_tx, websocket_events_tx);
   let terminal = terminal::install(vm, terminal_events_tx);
   console::install(vm);
   process::install(vm, options);
   RuntimeHandle {
     server,
-    requests: Some(requests_rx),
-    websocket_events: Some(websocket_events_rx),
+    events,
     terminal,
-    terminal_events: Some(terminal_events_rx),
   }
+}
+
+fn forward_events<T>(
+  vm: &Vm,
+  mut receiver: mpsc::Receiver<T>,
+  sender: EventSender<RuntimeEvent>,
+  map: fn(T) -> RuntimeEvent,
+) where
+  T: Send + 'static,
+{
+  vm.spawn_bg(async move {
+    while let Some(event) = receiver.recv().await {
+      if sender.send(map(event)).await.is_err() {
+        break;
+      }
+    }
+  });
 }
 
 #[cfg(test)]
@@ -228,6 +265,29 @@ mod tests {
     ) {
       tokio::spawn(future);
     }
+  }
+
+  #[test]
+  fn runtime_handle_tracks_additional_resource_liveness() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let runtime = install_runtime(
+      &mut vm,
+      RuntimeOptions {
+        argv: vec!["blitz".to_string()],
+        env: BTreeMap::new(),
+        exec_path: "blitz".to_string(),
+        listen_addr: "127.0.0.1:0"
+          .parse()
+          .expect("test listen address"),
+      },
+    );
+    assert!(!runtime.is_live());
+    let resource = runtime.register_resource("test-resource", true);
+    assert!(runtime.is_live());
+    resource.unreference();
+    assert!(!runtime.is_live());
+    assert!(resource.close());
   }
 
   #[test]

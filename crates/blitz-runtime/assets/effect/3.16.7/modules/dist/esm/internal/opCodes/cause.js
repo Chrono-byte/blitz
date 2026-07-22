@@ -1,0 +1,1 @@
+const t="Die";const P="Empty";const n="Fail";const o="Interrupt";const E="Parallel";const c="Sequential";export{t as OP_DIE,P as OP_EMPTY,n as OP_FAIL,o as OP_INTERRUPT,E as OP_PARALLEL,c as OP_SEQUENTIAL};

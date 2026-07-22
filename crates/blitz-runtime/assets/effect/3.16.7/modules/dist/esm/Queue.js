@@ -1,0 +1,1 @@
+import{bounded as o,shutdown as n,unbounded as s,offer as e,size as d,take as t}from"blitz-internal:effect/dist/esm/internal/queue.js";const u=o;const a=s;const f=d;const b=n;const c=e;const r=t;export{u as bounded,c as offer,b as shutdown,f as size,r as take,a as unbounded};

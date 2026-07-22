@@ -97,6 +97,7 @@ impl Vm {
       pending_exception: false,
       module_loader,
       module_table: Vec::new(),
+      current_module_specifier: None,
       construct_new_target: None,
       recent_return_value: None,
       last_uncaught_exception: None,
@@ -166,6 +167,7 @@ impl Vm {
       pending_exception: false,
       module_loader: Rc::clone(&self.module_loader),
       module_table: Vec::new(),
+      current_module_specifier: None,
       construct_new_target: None,
       recent_return_value: None,
       last_uncaught_exception: None,
@@ -757,6 +759,65 @@ impl Vm {
     self.module_loader.borrow_mut()
   }
 
+  /// Register one host-provided virtual module in this VM's realm loader.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error for an invalid or duplicate specifier.
+  pub fn register_virtual_module(
+    &self,
+    module: crate::module::VirtualModule,
+  ) -> Result<(), crate::errors::BundlerError> {
+    self
+      .module_loader
+      .borrow_mut()
+      .register_virtual_module(module)
+  }
+
+  /// Register an alias for a host-provided virtual module.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the target is not registered or the alias collides.
+  pub fn register_virtual_module_alias(
+    &self,
+    alias: impl Into<String>,
+    canonical_specifier: impl Into<String>,
+  ) -> Result<(), crate::errors::BundlerError> {
+    self
+      .module_loader
+      .borrow_mut()
+      .register_virtual_alias(alias, canonical_specifier)
+  }
+
+  /// Register a host-provided virtual module registry in this VM's realm loader.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error for an invalid or duplicate module or alias.
+  pub fn register_virtual_modules(
+    &self,
+    registry: crate::module::VirtualModuleRegistry,
+  ) -> Result<(), crate::errors::BundlerError> {
+    self
+      .module_loader
+      .borrow_mut()
+      .register_virtual_modules(registry)
+  }
+
+  /// Return the canonical specifier of the module currently being evaluated.
+  pub(crate) fn current_module_specifier(&self) -> Option<&str> {
+    self.current_module_specifier.as_deref()
+  }
+
+  /// Set the canonical specifier of the module currently being evaluated.
+  pub(crate) fn set_current_module_specifier(
+    &mut self,
+    specifier: Option<String>,
+  ) {
+    self.current_module_specifier = specifier;
+  }
+
   /// Return a shared handle to the module loader for this VM's realm.
   pub fn module_loader_handle(&self) -> Rc<RefCell<ModuleLoader>> {
     Rc::clone(&self.module_loader)
@@ -1305,9 +1366,8 @@ impl Vm {
             registers[rd] = value;
           }
           Op::GetModuleExport => {
-            let module_index = decode_aux8(word) as usize;
-            let name_index = crate::bytecode::decode_aux8_2(word) as usize;
-            let name = self.string_constant(name_index)?;
+            let (module_index, name) =
+              self.module_export_descriptor(decode_risc_aux16(word) as usize)?;
             registers[rd] = self
               .module_table
               .get(module_index)
@@ -1315,9 +1375,8 @@ impl Vm {
               .map_or(Value::Undefined, |slot| slot.borrow().clone());
           }
           Op::SetModuleExport => {
-            let module_index = decode_aux8(word) as usize;
-            let name_index = crate::bytecode::decode_aux8_2(word) as usize;
-            let name = self.string_constant(name_index)?;
+            let (module_index, name) =
+              self.module_export_descriptor(decode_risc_aux16(word) as usize)?;
             while self.module_table.len() <= module_index {
               self.module_table.push(HashMap::new());
             }
@@ -3004,6 +3063,21 @@ impl Vm {
       Some(_) => Err(RuntimeError::from("Constant is not a string")),
       None => Err(RuntimeError::from("String constant index out of bounds")),
     }
+  }
+
+  #[inline(always)]
+  fn module_export_descriptor(
+    &self,
+    index: usize,
+  ) -> Result<(usize, String), RuntimeError> {
+    let descriptor = self.string_constant(index)?;
+    let (module, name) = descriptor
+      .split_once('\0')
+      .ok_or_else(|| RuntimeError::from("Invalid module export descriptor"))?;
+    let module = module
+      .parse::<usize>()
+      .map_err(|_| RuntimeError::from("Invalid module export index"))?;
+    Ok((module, name.to_string()))
   }
 
   #[inline(always)]

@@ -767,12 +767,10 @@ impl super::Compiler {
                     .as_ref()
                     .map(|c| c.module_index)
                     .expect("module_index expected");
-                  let cname_idx = self
-                    .chunk
-                    .add_constant(Value::String(name.to_string()));
+                  let descriptor = self.module_export_descriptor_index(module_index, name)?;
                   self.emit(Op::SetModuleExport, LINE);
-                  self.emit_byte(self.module_index_to_u8(module_index)?, LINE);
-                  self.emit_byte(self.constant_index_to_u8(cname_idx)?, LINE);
+                  self.emit_byte(descriptor.to_le_bytes()[0], LINE);
+                  self.emit_byte(descriptor.to_le_bytes()[1], LINE);
                 }
               } else if let Some(upvalue) = self.resolve_upvalue(name) {
                 self.emit(Op::SetUpvalue, LINE);
@@ -802,6 +800,13 @@ impl super::Compiler {
                 self.compile_expr_oast(&a.right)?;
                 self.emit(Op::SetProperty, LINE);
               }
+            }
+            oast::SimpleAssignmentTarget::PrivateFieldExpression(m) => {
+              self.compile_expr_oast(&m.object)?;
+              let key = self.ensure_private_name_constant(&m.field.name);
+              self.emit_constant(key, LINE);
+              self.compile_expr_oast(&a.right)?;
+              self.emit(Op::SetProperty, LINE);
             }
             _ => {
               return Err(crate::errors::CompilerError::from(

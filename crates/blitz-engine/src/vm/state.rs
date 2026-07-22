@@ -390,6 +390,8 @@ pub struct Vm {
   pub(super) module_loader: Rc<RefCell<ModuleLoader>>,
   /// Per-VM module table: vector indexed by module index, each mapping export name -> shared slot
   pub(super) module_table: Vec<HashMap<String, SharedValue>>,
+  /// Current canonical module specifier while evaluating module code.
+  pub(super) current_module_specifier: Option<String>,
   /// Current [[NewTarget]] while evaluating a constructor call.
   pub(super) construct_new_target: Option<Value>,
   /// Recently returned heap value, kept alive across the return boundary

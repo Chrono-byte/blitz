@@ -1,0 +1,1 @@
+import{StructuralPrototype as o}from"blitz-internal:effect/dist/esm/internal/effectable.js";const u=(function(){function t(r){if(r){Object.assign(this,r)}}t.prototype=o;return t})();export{u as Structural};

@@ -391,6 +391,27 @@ impl Compiler {
       .map_err(|_| CompilerError::from(format!("Too many functions (max 255, got {})", idx)))
   }
 
+  /// Add a compact module-index/export-name descriptor to the constant pool.
+  ///
+  /// Module instructions dedicate their sixteen auxiliary bits to this
+  /// descriptor, avoiding separate eight-bit limits for module and export
+  /// indices while retaining the fixed-width RISC encoding.
+  pub(crate) fn module_export_descriptor_index(
+    &mut self,
+    module_index: usize,
+    name: &str,
+  ) -> Result<u16, CompilerError> {
+    let descriptor = Value::String(format!("{module_index}\0{name}"));
+    let index = self
+      .chunk
+      .constants
+      .iter()
+      .position(|value| value == &descriptor)
+      .unwrap_or_else(|| self.chunk.add_constant(descriptor));
+    u16::try_from(index)
+      .map_err(|_| CompilerError::from(format!("Too many constants (max 65535, got {index})")))
+  }
+
   /// Safely converts a constant index (usize) to u8, checking that it doesn't exceed 255.
   pub(crate) fn constant_index_to_u8(
     &self,
@@ -398,15 +419,6 @@ impl Compiler {
   ) -> Result<u8, CompilerError> {
     u8::try_from(idx)
       .map_err(|_| CompilerError::from(format!("Too many constants (max 255, got {})", idx)))
-  }
-
-  /// Safely converts a module index (usize) to u8, checking that it doesn't exceed 255.
-  pub(crate) fn module_index_to_u8(
-    &self,
-    idx: usize,
-  ) -> Result<u8, CompilerError> {
-    u8::try_from(idx)
-      .map_err(|_| CompilerError::from(format!("Too many modules (max 255, got {})", idx)))
   }
 
   /// Safely converts a global index (usize) to u16, checking that it doesn't exceed 65535.
@@ -826,12 +838,12 @@ impl Compiler {
       .as_ref()
       .and_then(|c| c.imports.get(name).map(|(i, n)| (*i, n.clone())))
     {
-      let cname_idx = self
-        .chunk
-        .add_constant(Value::String(exported_name));
+      let descriptor = self
+        .module_export_descriptor_index(src_idx, &exported_name)
+        .expect("module export descriptor fits in the constant pool");
       self.emit(Op::GetModuleExport, LINE);
-      self.emit_byte(u8::try_from(src_idx).expect("src_idx fits in u8"), LINE);
-      self.emit_byte(u8::try_from(cname_idx).expect("cname_idx fits in u8"), LINE);
+      self.emit_byte(descriptor.to_le_bytes()[0], LINE);
+      self.emit_byte(descriptor.to_le_bytes()[1], LINE);
     } else {
       self.emit_get_global_name(name);
     }
@@ -847,15 +859,10 @@ impl Compiler {
       .as_ref()
       .map(|c| c.module_index)
       .ok_or_else(|| CompilerError::from("module_index expected"))?;
-    let cname_idx = self
-      .chunk
-      .add_constant(Value::String(export_name.to_string()));
+    let descriptor = self.module_export_descriptor_index(module_index, export_name)?;
     self.emit(Op::SetModuleExport, LINE);
-    self.emit_byte(
-      u8::try_from(module_index).expect("module_index fits in u8"),
-      LINE,
-    );
-    self.emit_byte(u8::try_from(cname_idx).expect("cname_idx fits in u8"), LINE);
+    self.emit_byte(descriptor.to_le_bytes()[0], LINE);
+    self.emit_byte(descriptor.to_le_bytes()[1], LINE);
     Ok(())
   }
 

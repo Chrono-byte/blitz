@@ -1,0 +1,1 @@
+const n="And";const t="Or";const A="InvalidData";const O="MissingData";const o="SourceUnavailable";const s="Unsupported";export{n as OP_AND,A as OP_INVALID_DATA,O as OP_MISSING_DATA,t as OP_OR,o as OP_SOURCE_UNAVAILABLE,s as OP_UNSUPPORTED};

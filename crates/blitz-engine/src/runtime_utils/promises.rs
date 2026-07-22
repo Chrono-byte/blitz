@@ -568,13 +568,14 @@ pub(crate) fn dynamic_import_value(
   };
 
   let base_dir = resolve_shadowrealm_base_dir(vm);
+  let importer_specifier = vm.current_module_specifier().map(str::to_owned);
   let mut import_vm = Vm::new(vm.globals_rc());
   let loader_handle = import_vm.module_loader_handle();
   let result = (|| -> Result<Value, Value> {
     let entry = {
       let mut loader = loader_handle.borrow_mut();
       let entry = loader
-        .construct(&base_dir, &specifier_str)
+        .construct_from_importer(&base_dir, importer_specifier.as_deref(), &specifier_str)
         .map_err(|err| {
           host_error_object(
             vm,

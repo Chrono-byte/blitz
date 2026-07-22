@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use num_traits::ToPrimitive;
@@ -14,6 +15,11 @@ use crate::runtime_utils::{
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
+
+thread_local! {
+  /// Agent-wide symbol registry used by `Symbol.for` and `Symbol.keyFor`.
+  static SYMBOL_REGISTRY: RefCell<HashMap<String, SymbolId>> = RefCell::new(HashMap::new());
+}
 
 fn utf16_encode_code_point(cp: u32) -> String {
   if cp <= 0xFFFF {
@@ -125,6 +131,53 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   symbol_ctor_map.borrow_mut().properties.insert(
     PKey::String("prototype".to_string()),
     PropertyDescriptor::data(Value::Object(Rc::clone(&symbol_proto_map))),
+  );
+  symbol_ctor_map.borrow_mut().properties.insert(
+    PKey::String("for".to_string()),
+    non_enum_data({
+      let symbol_for = builtin_object(
+        Rc::new(|vm, args| {
+          let offset = static_builtin_arg_offset(vm, args, "Symbol");
+          let key = vm.to_string(args.get(offset).unwrap_or(&Value::Undefined))?;
+          let id = SYMBOL_REGISTRY.with(|registry| {
+            registry
+              .borrow_mut()
+              .entry(key.clone())
+              .or_insert_with(SymbolId::new)
+              .clone()
+          });
+          Ok(Value::Symbol(id, Some(key)))
+        }),
+        function_proto_map,
+      );
+      set_builtin_name(&symbol_for, "for");
+      set_builtin_length(&symbol_for, 1.0);
+      symbol_for
+    }),
+  );
+  symbol_ctor_map.borrow_mut().properties.insert(
+    PKey::String("keyFor".to_string()),
+    non_enum_data({
+      let key_for = builtin_object(
+        Rc::new(|vm, args| {
+          let offset = static_builtin_arg_offset(vm, args, "Symbol");
+          let Some(Value::Symbol(id, _)) = args.get(offset) else {
+            return Err(vm.throw_type_error("Symbol.keyFor requires a symbol"));
+          };
+          Ok(SYMBOL_REGISTRY.with(|registry| {
+            registry
+              .borrow()
+              .iter()
+              .find_map(|(key, registered)| (registered == id).then(|| Value::String(key.clone())))
+              .unwrap_or(Value::Undefined)
+          }))
+        }),
+        function_proto_map,
+      );
+      set_builtin_name(&key_for, "keyFor");
+      set_builtin_length(&key_for, 1.0);
+      key_for
+    }),
   );
   let symbol_ctor_val =
     Value::BuiltinObject(Rc::clone(&symbol_ctor_fn), Rc::clone(&symbol_ctor_map));

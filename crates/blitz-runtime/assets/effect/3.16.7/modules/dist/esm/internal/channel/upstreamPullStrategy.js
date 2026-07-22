@@ -1,0 +1,1 @@
+import{OP_PULL_AFTER_NEXT as o}from"blitz-internal:effect/dist/esm/internal/opCodes/channelUpstreamPullStrategy.js";const a="effect/ChannelUpstreamPullStrategy";const r=Symbol.for(a);const l={_A:t=>t};const c={[r]:l};const n=t=>{const e=Object.create(c);e._tag=o;e.emitSeparator=t;return e};export{n as PullAfterNext,r as UpstreamPullStrategyTypeId};

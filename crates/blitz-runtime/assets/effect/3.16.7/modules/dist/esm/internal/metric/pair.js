@@ -1,0 +1,1 @@
+import{pipeArguments as i}from"blitz-internal:effect/dist/esm/Pipeable.js";const c="effect/MetricPair";const r=Symbol.for(c);const n={_Type:e=>e};const o=(e,t)=>{return{[r]:n,metricKey:e,metricState:t,pipe(){return i(this,arguments)}}};export{r as MetricPairTypeId,o as unsafeMake};

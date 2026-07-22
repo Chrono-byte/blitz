@@ -1,0 +1,1 @@
+import{globalValue as e}from"blitz-internal:effect/dist/esm/GlobalValue.js";import{fiberRefUnsafeMake as r}from"blitz-internal:effect/dist/esm/internal/core.js";const f=e(Symbol.for("effect/FiberRef/currentRequestMap"),()=>r(new Map));export{f as currentRequestMap};

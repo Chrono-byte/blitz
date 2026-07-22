@@ -1,0 +1,1 @@
+const l="Sequential";const t="Parallel";const e="ParallelN";const n={_tag:l};const s={_tag:t};const o=a=>({_tag:e,parallelism:a});const _=a=>a._tag===l;const c=a=>a._tag===t;export{t as OP_PARALLEL,e as OP_PARALLEL_N,l as OP_SEQUENTIAL,c as isParallel,_ as isSequential,s as parallel,o as parallelN,n as sequential};

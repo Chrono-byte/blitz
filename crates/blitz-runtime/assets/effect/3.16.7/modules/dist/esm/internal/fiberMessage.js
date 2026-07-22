@@ -1,0 +1,1 @@
+const n="InterruptSignal";const e="Stateful";const o="Resume";const s="YieldNow";const _=t=>({_tag:n,cause:t});const a=t=>({_tag:e,onFiber:t});const c=t=>({_tag:o,effect:t});const g=()=>({_tag:s});export{n as OP_INTERRUPT_SIGNAL,o as OP_RESUME,e as OP_STATEFUL,s as OP_YIELD_NOW,_ as interruptSignal,c as resume,a as stateful,g as yieldNow};

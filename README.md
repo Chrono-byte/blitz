@@ -8,7 +8,8 @@ Key layers
 
 - `crates/blitz-engine/` — the host-neutral parser, compiler, VM, ECMAScript
   builtins, raw engine executable, Test262 runner, and benchmarks.
-- `crates/blitz-runtime/` — reusable host capabilities and application examples.
+- `crates/blitz-runtime/` — reusable host capabilities, application primitives,
+  RPC routing, and application examples.
 - `crates/blitz-cli/` — the `blitz` executable and home for the toolchain,
   project commands, and package management.
 - `docs/` and `test262/` — design material and the vendored conformance suite.
@@ -40,7 +41,10 @@ cargo run -p blitz-engine --bin blitz-engine -- path/to/engine-test.js
 ```
 
 The Deno-style HTTP server listens on `127.0.0.1:8000` by default. Pass an
-options object or set `BLITZ_HOST`/`BLITZ_PORT` to override it.
+options object or set `BLITZ_HOST`/`BLITZ_PORT` to override it. The new
+immutable Rust application/RPC model is documented in
+[`BLITZ_RUNTIME_RPC_SLICE.md`](docs/BLITZ_RUNTIME_RPC_SLICE.md); it preserves
+`Blitz.serve` as the low-level compatibility API.
 
 ```js
 function callbackFunc(request, info) {

@@ -1,0 +1,1 @@
+import{dual as m}from"blitz-internal:effect/dist/esm/Function.js";const t=o=>(n,r)=>n===r?0:o(n,r);const c=t((o,n)=>o<n?-1:1);const e=m(2,(o,n)=>t((r,a)=>o(n(r),n(a))));const p=o=>m(2,(n,r)=>o(n,r)===1);export{p as greaterThan,t as make,e as mapInput,c as number};

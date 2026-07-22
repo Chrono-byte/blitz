@@ -1,0 +1,1 @@
+class t{self;called=false;constructor(e){this.self=e}next(e){return this.called?{value:e,done:true}:(this.called=true,{value:this.self,done:false})}return(e){return{value:e,done:true}}throw(e){throw e}[Symbol.iterator](){return new t(this.self)}}export{t as SingleShotGen};

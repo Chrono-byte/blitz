@@ -1,0 +1,1 @@
+import{OP_AWAIT as c}from"blitz-internal:effect/dist/esm/internal/opCodes/channelMergeDecision.js";const n="effect/ChannelMergeDecision";const t=Symbol.for(n);const r={[t]:{_R:e=>e,_E0:e=>e,_Z0:e=>e,_E:e=>e,_Z:e=>e}};const i=e=>{const o=Object.create(r);o._tag=c;o.f=e;return o};export{i as Await,t as MergeDecisionTypeId};

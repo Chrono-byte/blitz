@@ -1,0 +1,1 @@
+import{exhaustive as s,orElse as a,tag as e,type as t,typeTags as o,value as n,valueTags as g,when as l}from"blitz-internal:effect/dist/esm/internal/matcher.js";const u=t;const v=n;const c=g;const p=o;const $=l;const h=e;const r=a;const y=s;export{y as exhaustive,r as orElse,h as tag,u as type,p as typeTags,v as value,c as valueTags,$ as when};
