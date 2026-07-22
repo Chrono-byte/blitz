@@ -1,23 +1,26 @@
-# Full Effect module-graph prebundling plan
+# Full Effect and Blitz stdlib graph prebundling plan
 
 ## Status
 
-In progress. Phases 1–2 are implemented in the engine: validated host-neutral
-prelinked graph metadata, parser-free module records, canonical live-binding
-allocation, mixed source/prelinked linking, reserved indices, and bundled-edge
-evaluation. Phases 3–5 remain.
+Implemented through runtime cutover. The committed versioned runtime graph
+contains the canonical Effect graph plus every manifest-listed public and
+private Blitz stdlib JavaScript module. Engine records are parser-free, indices
+and live bindings are prelinked, visibility is enforced by public roots, and
+runtime installation validates pinned manifests and host ABI before atomic
+registration.
 
-The foundation for sendable chunks, parallel compilation, deterministic
-compiler output, and versioned bytecode serialization is landed. The current
-local `effect.blitzbc` experiment is only a bytecode cache: it still requires
-Effect source parsing and AST-based linking at startup. It must not be
-considered the final artifact.
+The transitional bytecode-only `effect.blitzbc` experiment has been removed.
+The final `runtime-graph.blitzpg` contains graph metadata and verified chunks;
+it is not a heap snapshot, so module initializers still execute at startup.
+Startup counters distinguish user source work and assert zero bundled parsing,
+import extraction, AST/ESTree linking, typechecking, and compilation.
 
 ## Objective
 
-Produce one deterministic, committed, network-free Effect artifact containing
+Produce one deterministic, committed, network-free runtime artifact containing
 everything required to instantiate and execute the supported Effect 3.16.7
-module graph without parsing or compiling Effect JavaScript at runtime.
+graph and stable Blitz stdlib JavaScript modules without parsing or compiling
+any bundled JavaScript at runtime.
 
 At runtime Blitz should only:
 
@@ -27,13 +30,15 @@ At runtime Blitz should only:
 4. traverse the bundled dependency graph in specification order; and
 5. execute verified bytecode on the single VM thread.
 
-User modules and small Blitz-owned facades may continue through the ordinary
-source parser, linker, and compiler. JavaScript evaluation remains
-single-threaded.
+User application modules may continue through the ordinary source parser,
+linker, and compiler. Stable `blitz:*` facades and `blitz-internal:*`
+JavaScript bridge adapters are part of the prelinked runtime graph. JavaScript
+evaluation remains single-threaded.
 
 ## Non-goals
 
 - Combining Effect into one JavaScript module.
+- Bundling a second copy of Effect for Blitz stdlib modules.
 - Curating a smaller Effect facade or removing supported Effect exports.
 - Reimplementing Effect in Rust.
 - Evaluating JavaScript on compiler workers.
@@ -48,8 +53,9 @@ still a material startup cost after full graph prebundling.
 
 - **Bytecode bundle**: compiled chunks only. It still needs source-derived graph
   construction and linking metadata.
-- **Prelinked graph bundle**: bytecode plus dependency, module, import, export,
-  and canonical live-binding metadata. It requires no source parsing.
+- **Prelinked runtime graph bundle**: bytecode plus dependency, module, import,
+  export, canonical live-binding, Effect provenance, stdlib manifest, and host
+  ABI metadata. It requires no bundled-source parsing.
 - **Heap snapshot**: serialized state after module evaluation. This is outside
   this plan.
 
@@ -63,19 +69,40 @@ still a material startup cost after full graph prebundling.
 6. Numeric module indices embedded in bytecode remain stable.
 7. Source modules loaded before or after Effect cannot collide with reserved
    prelinked indices.
-8. The raw engine does not install Effect-specific modules.
-9. Cargo builds and runtime execution require no package-manager or network
-   access.
-10. Generation from the pinned assets is byte-for-byte deterministic.
-11. Corrupt, stale, incompatible, or internally inconsistent bundles fail
+8. The raw engine does not install Effect- or Blitz-specific modules.
+9. Every manifest-listed public `blitz:*` facade and private
+   `blitz-internal:*` JavaScript adapter is in the same graph as Effect and
+   cannot introduce a second Effect identity. “Bundled” means exactly the
+   manifest entries; no unmanifested module may appear in the artifact.
+10. Rust host primitives are installed before graph evaluation and are matched
+    by an explicit host ABI version.
+11. Cargo builds and runtime execution require no package-manager or network
+    access.
+12. Generation from all pinned Effect and stdlib inputs is byte-for-byte
+    deterministic.
+13. Corrupt, stale, incompatible, or internally inconsistent bundles fail
     before any module initializer executes.
 
 ## Final bundle model
 
-The existing versioned bytecode envelope should be extended or wrapped with a
-prelinked graph payload. Conceptually:
+The existing versioned bytecode envelope should be replaced by a runtime
+wrapper around the host-neutral engine graph. The wrapper owns package
+provenance and host compatibility while `PrelinkedModuleGraph` remains generic.
+Conceptually:
 
 ```rust
+struct RuntimePrelinkedBundle {
+  format_version: u16,
+  runtime_abi_version: u16,
+  host_bridge_abi_version: u16,
+  effect_version: String,
+  effect_manifest_hash: [u8; 32],
+  stdlib_manifest_hash: [u8; 32],
+  // Public specifiers correspond exactly to graph.public_roots. All other
+  // manifest entries are internal-only and reachable only by bundled edges.
+  graph: PrelinkedModuleGraph,
+}
+
 struct PrelinkedModuleGraph {
   format_version: u16,
   engine_bytecode_version: BytecodeVersion,
@@ -123,9 +150,15 @@ evaluation. It must include dependencies introduced by:
 - namespace re-exports; and
 - export-all declarations.
 
-The generated Effect graph is static. Dynamic imports must not silently become
+The generated runtime graph is static. Dynamic imports must not silently become
 untracked graph edges; generation should reject them unless an explicit future
 bundle contract supports them.
+
+Every bundled JavaScript dependency must resolve inside this graph. Private
+bridge adapters access Rust-installed host primitives through the versioned host
+ABI; they must not create untracked source-module dependencies. Support for
+external prelinked graphs or native-module imports is a future format change,
+not an implicit fallback.
 
 ### Canonical binding IDs
 
@@ -154,13 +187,15 @@ This preserves cycles and live re-exports without AST-based linking.
 
 ### Module indices
 
-Effect module indices must be deterministic and reserved as a range before any
-ordinary source module receives an index. The simplest first format requires
-Effect modules to use contiguous indices beginning at zero.
+Bundled runtime module indices must be deterministic and reserved as a range
+before any ordinary source module receives an index. The first format requires
+all Effect and Blitz stdlib graph modules to use contiguous indices beginning
+at zero.
 
 Ordinary source modules then begin at `max_reserved_index + 1`, even if only a
-subset of Effect modules has been constructed. Late dynamic import of Effect
-must not collide with an index previously assigned to a user module.
+subset of runtime modules has been constructed. Late imports of Effect or Blitz
+stdlib modules must not collide with an index previously assigned to a user
+module.
 
 ### Source and debugging data
 
@@ -197,11 +232,17 @@ and typechecker access must be possible only for the source-backed variant.
 
 - reject duplicate specifiers and module indices;
 - reserve the complete module-index range;
-- retain lookup by canonical specifier and index; and
+- retain every module by index for bundled dependency traversal;
+- expose canonical-specifier lookup to source importers only for
+  `public_roots`; private modules remain constructible only through bundled
+  dependency indices; and
 - avoid constructing runtime slots until the graph is needed by a VM realm.
 
-The engine API must remain Effect-agnostic. Effect-specific package/version
-checks belong in `blitz-runtime`.
+The engine API must remain Effect-agnostic and may support multiple generic
+graphs for other embedders. `blitz-runtime` enforces its stronger policy: one
+runtime graph registration per VM, with a second runtime-graph installation
+rejected before mutation. Every dependency edge remains within its owning
+graph.
 
 ### 3. Construct records without parsing
 
@@ -216,7 +257,11 @@ A prelinked module may depend only on another module in the same validated
 prelinked graph for the first format. Mixed dependencies from prelinked code to
 runtime source modules should be rejected during generation.
 
-Source modules may import prelinked Effect modules normally.
+User source modules may import only prelinked modules listed in
+`public_roots`. Bundled modules traverse private dependencies by module index;
+direct source imports of non-root specifiers fail even when the module exists
+in the graph. This public-root capability is the private-resolution enforcement
+mechanism and does not depend on a forgeable importer string.
 
 ### 4. Instantiate from binding metadata
 
@@ -263,35 +308,47 @@ edges, names, source bytes, chunk depth, and total bytecode.
 ### Bytecode descriptor validation
 
 The validator should inspect module-access instructions and their descriptor
-constants. Every encoded `(module_index, export_name)` target must exist in the
-prelinked graph. This ensures bytecode and graph metadata cannot drift while
-still passing independent structural checks.
+constants. Cross-module `(module_index, export_name)` targets must name a
+bundled dependency export. Owner-module descriptors may name compiler-generated
+module-private top-level bindings; those remain outside the public export map
+and namespace object. Writes may never target another module or the synthetic
+`*` namespace. This keeps bytecode and graph metadata aligned without exposing
+module-private closure state.
 
 ## Generator changes
 
-Create or evolve `tools/effect-bytecode` into the sole Rust graph precompiler.
-It should:
+Create or evolve `tools/effect-bytecode` into the sole Rust runtime-graph
+precompiler. It should:
 
-1. read the pinned Effect manifest and generated ESM files;
-2. verify source hashes before compilation;
-3. register every canonical module source;
-4. construct every public root and its closed static graph;
-5. instantiate the full graph with deterministic indices;
-6. capture ordered dependency edges;
-7. derive canonical binding IDs from instantiated live slots;
-8. compile all modules, using bounded parallel workers where beneficial;
-9. clear type metadata once during generation;
-10. verify every chunk and module descriptor;
-11. encode the final prelinked graph; and
-12. atomically write the committed artifact.
+1. read the pinned Effect manifest, generated ESM files, and Blitz stdlib
+   manifest;
+2. verify every Effect, public facade, private adapter, declaration, and license
+   hash before compilation;
+3. reject duplicate specifiers and invalid public/private visibility metadata;
+4. register every canonical Effect and Blitz JavaScript module source;
+5. construct every public and private runtime root and its closed static graph;
+6. reject dependencies outside that graph and unsupported dynamic imports;
+7. instantiate the full graph with deterministic indices;
+8. capture ordered dependency edges;
+9. derive canonical binding IDs from instantiated live slots;
+10. compile all modules, using bounded parallel workers where beneficial;
+11. clear type metadata once during generation;
+12. verify every chunk and module descriptor;
+13. encode Effect provenance, stdlib manifest hash, and host ABI compatibility
+    with the final prelinked graph; and
+14. atomically write the committed artifact.
 
 `--check` must regenerate in memory and byte-compare against the committed
 bundle. Generation must be deterministic across repeated processes, not only
-within one process.
+within one process. The precompiler is a checked workspace tool with an
+explicit output path consumed by `include_bytes!`; its crate, CLI contract, and
+artifact location land before runtime cutover.
 
 The TypeScript asset generator remains responsible for producing canonical
-source and declarations. The Rust precompiler runs after source generation.
-Neither runs from `build.rs`.
+Effect source and declarations. A data-driven stdlib asset step owns Blitz
+facade/adapter source, declarations, visibility, hashes, and host ABI metadata.
+The Rust precompiler runs only after both input manifests verify. None runs from
+`build.rs`.
 
 ## Runtime integration
 
@@ -300,13 +357,19 @@ once with `OnceLock` or an equivalent immutable process cache.
 
 Installation should:
 
-1. validate the generic bundle in `blitz-engine`;
-2. validate Effect package/version and manifest hashes in `blitz-runtime`;
-3. register the prelinked graph into the VM's module loader; and
-4. register Blitz-owned source facades separately.
+1. decode and validate the complete wrapper without installing records;
+2. validate the generic graph in `blitz-engine`;
+3. validate Effect version/hash, stdlib manifest hash, runtime ABI, and host
+   bridge ABI in `blitz-runtime`;
+4. install all required Rust host primitives;
+5. atomically register the one prelinked runtime graph together with generated
+   declarations for public roots; and
+6. expose only manifest-public specifiers to user resolution.
 
-The finalized runtime path must not register Effect modules through
-`VirtualModule::javascript` or the transitional source-backed
+These steps are atomic: any duplicate, missing bridge, visibility, ABI, hash,
+or graph failure occurs before records are visible or initializers execute.
+The finalized runtime path must not register bundled Effect or Blitz stdlib
+modules through `VirtualModule::javascript` or the transitional source-backed
 `VirtualModule::precompiled` path.
 
 ## Testing strategy
@@ -340,25 +403,31 @@ retained debug source, proving that execution does not compile or run source.
 
 ### No-parser/no-compiler regression
 
-Add test-only parser and compiler counters or explicit hooks. The Effect smoke
-test must assert that constructing, instantiating, and evaluating the bundled
-Effect graph performs:
+Add test-only parser, import-extraction, typechecker, and compiler counters or
+explicit hooks. Runtime smoke tests must distinguish user-module work from the
+reserved runtime graph and assert that constructing, instantiating, and
+evaluating all bundled Effect and Blitz stdlib modules performs:
 
-- zero Effect parser invocations;
-- zero Effect import-extraction parses;
-- zero Effect compiler invocations; and
-- zero Effect typechecker invocations.
+- zero bundled-module parser invocations;
+- zero bundled-module import-extraction parses;
+- zero bundled-module compiler invocations; and
+- zero bundled-module typechecker invocations.
 
 Do not infer this only from elapsed time.
 
 ### Runtime tests
 
-- bundle entries and manifest entries match exactly;
+- Effect and stdlib bundle entries match their manifests exactly;
+- public `blitz:*` entries resolve and private `blitz-internal:*` entries are
+  rejected by user resolution;
+- duplicate specifiers, a second runtime-graph installation, missing host
+  primitives, and Effect/runtime/host ABI mismatches fail atomically before side
+  effects;
 - synchronous `Effect.runFork` still observes `42`;
 - root and deep imports share runtime identities;
 - corruption fails before module side effects;
-- raw `blitz-engine` still lacks Effect modules;
-- Blitz source facades can import prelinked Effect exports;
+- raw `blitz-engine` still lacks Effect and Blitz stdlib modules;
+- prelinked Blitz facades import the canonical prelinked Effect exports;
 - IRC chat v2 starts and serves `/health` with the final bundle.
 
 ## Performance measurement
@@ -374,13 +443,26 @@ Add phase timing behind an opt-in diagnostic flag, covering:
 Record a baseline before replacing the transitional bundle. Acceptance for the
 full-prelink milestone is based on behavior, not a fixed machine-specific time:
 
-- Effect parse time is zero;
-- Effect compile time is zero;
-- Effect AST/ESTree linking time is zero; and
+- bundled Effect and stdlib parse time is zero;
+- bundled Effect and stdlib compile time is zero;
+- bundled Effect and stdlib AST/ESTree linking time is zero; and
 - server readiness improves measurably in repeated warm and cold runs.
 
 If evaluation dominates afterward, report it separately rather than claiming
 that prebundling can eliminate it.
+
+### Current result
+
+The first committed runtime graph is 37,246,595 bytes including retained debug
+source. On the implementation machine, three warm CLI runs of the synchronous
+Effect `42` smoke took 6.40–7.00 seconds end to end. With
+`BLITZ_RUNTIME_TIMINGS=1`, one representative run reported 3.42 seconds for
+decode plus generic validation, 158 milliseconds for pinned runtime/host policy
+validation, and 47 milliseconds for graph/declaration registration; the
+remaining time is primarily module initialization. Pipeline counters confirm
+that bundled parsing, import extraction, AST/ESTree linking, typechecking, and
+compilation are zero. This is a correctness milestone, not a claim that
+initializer or artifact-size optimization is complete.
 
 ## Migration phases
 
@@ -399,27 +481,32 @@ that prebundling can eliminate it.
 - [x] Instantiate live slots from canonical binding IDs.
 - [x] Evaluate through bundled dependency edges.
 
-### Phase 3: Full Effect generator
+### Phase 3: Full runtime-graph generator — complete
 
-- Emit dependency, binding, root, hash, and bytecode metadata.
-- Add descriptor validation.
+- Establish the data-driven Blitz stdlib manifest, visibility model, and host
+  ABI before adding new stdlib modules.
+- Emit dependency, binding, root, hash, visibility, provenance, ABI, and
+  bytecode metadata for Effect plus Blitz stdlib JavaScript.
+- Add descriptor and closed-graph validation.
 - Prove cross-process deterministic output.
-- Generate the final artifact under
-  `crates/blitz-runtime/assets/effect/3.16.7/`.
+- Generate the final artifact under a versioned `blitz-runtime` asset path.
 
-### Phase 4: Runtime cutover
+### Phase 4: Runtime cutover — complete
 
-- Embed and cache the final graph bundle.
-- Remove source-backed Effect registration.
-- Keep Blitz facades source-backed.
-- Add no-parser/no-compiler and identity regressions.
+- Embed and cache the final runtime graph bundle.
+- Install host primitives before atomic graph registration.
+- Remove source-backed Effect and Blitz stdlib registration.
+- Enforce public/private resolution visibility.
+- Add no-parser/no-compiler, ABI, atomic-failure, and identity regressions.
 
-### Phase 5: Remove transitional work
+### Phase 5: Remove transitional work — complete
 
 - Delete the bytecode-only Effect artifact and transitional generator behavior.
+- Delete duplicated Rust facade source/constants and source-backed stdlib
+  registration.
 - Remove documentation claiming that bytecode-only caching is full
   precompilation.
-- Ensure asset verification understands only the final artifact.
+- Ensure asset verification understands only the final runtime artifact.
 - Commit the final bundle together with generator, runtime loader, tests, and
   documentation.
 
@@ -432,7 +519,7 @@ Recommended commits:
 
 1. engine prelinked graph model and validation;
 2. parser-free construction, instantiation, and evaluation;
-3. deterministic Effect graph generator and verifier;
+3. deterministic runtime graph and stdlib-manifest generator and verifier;
 4. runtime cutover plus final committed bundle; and
 5. documentation and measured startup results.
 
@@ -443,13 +530,15 @@ Every commit should pass formatting, workspace checks, relevant tests, Clippy,
 
 The work is complete when:
 
-- the committed Effect artifact is reproducible byte-for-byte;
-- no Effect source is parsed, import-scanned, linked through ESTree, typechecked,
-  or compiled at runtime;
+- the committed runtime graph artifact is reproducible byte-for-byte;
+- no bundled Effect or Blitz stdlib source is parsed, import-scanned, linked
+  through ESTree, typechecked, or compiled at runtime;
 - live bindings, cycles, re-exports, namespaces, and shared identities pass;
 - bytecode and graph metadata are validated before side effects;
 - source and late dynamic modules cannot collide with Effect indices;
 - synchronous Effect execution and IRC chat v2 still work;
-- the raw engine remains Effect-agnostic; and
+- public/private visibility, singleton runtime-graph installation, and
+  Effect/runtime/host ABI checks fail atomically;
+- the raw engine remains Effect- and Blitz-agnostic; and
 - documentation accurately distinguishes prelinked bytecode from a heap
   snapshot.

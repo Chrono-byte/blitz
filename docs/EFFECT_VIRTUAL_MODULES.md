@@ -1,8 +1,9 @@
-# Effect virtual-module manifest
+# Effect and Blitz runtime-graph manifest
 
-`blitz-runtime::effect_assets` is the small, host-side manifest for the first
-application-runtime Effect surface. It pins the generated assets to
-`effect@3.16.7` and keeps the engine unaware of Effect-specific specifiers.
+`blitz-runtime` installs one generated, prelinked runtime graph for the first
+application-runtime Effect surface. It pins `effect@3.16.7`, includes the
+manifest-listed Blitz facades/private adapters, and keeps the raw engine unaware
+of Effect- and Blitz-specific specifiers.
 
 The manifest currently supports:
 
@@ -17,10 +18,13 @@ The manifest currently supports:
 | `effect/Schedule` | Effect 3.16.7 generated subpath |
 | `effect/Match` | Effect 3.16.7 generated subpath |
 | `blitz:match` | Blitz facade over `effect/Match` |
+| `blitz:app` | Blitz application facade |
+| `blitz-internal:app-transport` | Private host-ABI adapter |
 
-`VirtualBuiltinRegistry::get` performs exact, case-sensitive lookup. It does
-not normalize or fall back to arbitrary `effect/*` imports, so adding a new
-supported subpath is an explicit manifest change.
+Public-root resolution is exact and case-sensitive. It does not normalize or
+fall back to arbitrary `effect/*` or `blitz:*` imports. Non-root modules remain
+reachable only through bundled dependency indices; direct user imports of
+`blitz-internal:*` fail.
 
 ## Asset contract
 
@@ -31,20 +35,23 @@ public declarations under `crates/blitz-runtime/assets/effect/3.16.7/`.
 Private runtime modules intentionally have no declaration assets; Blitz does
 not vendor Effect's complete upstream declaration graph.
 
-`blitz:match` is represented separately as `AssetOrigin::BlitzFacade`. Its
-runtime source is the literal re-export of upstream `effect/Match`, while
-`BLITZ_MATCH_SUPPORTED_EXPORTS` identifies the initial curated declaration
-surface (`value`, `type`, `valueTags`, `typeTags`, and `exhaustive`). This keeps
-runtime Match behavior upstream-owned and leaves type-surface expansion
-reviewable.
+The separate stdlib manifest under
+`crates/blitz-runtime/assets/stdlib/` owns facade source, declarations,
+visibility, dependencies, hashes, and host primitive requirements.
+`BLITZ_MATCH_SUPPORTED_EXPORTS` identifies the initial curated Match declaration
+surface (`value`, `type`, `valueTags`, `typeTags`, and `exhaustive`).
 
-`install_runtime` embeds and registers the generated graph plus the
-`blitz:match` and `blitz:app` facades. The raw engine does not install these
-modules, preserving the engine/runtime boundary.
+The checked Rust `effect-bytecode` tool combines both verified manifests into
+`assets/runtime/v1/runtime-graph.blitzpg`. `install_runtime` decodes and caches
+that artifact, validates exact manifest hashes and runtime/host ABI, installs
+host primitives, and atomically registers graph plus public declarations. It
+does not register bundled JavaScript through source-backed virtual modules.
 
-Asset generation, registration, import, and synchronous Effect execution are
-landed. A runtime regression test imports `effect/Effect`, executes a mapped
-Effect through `Effect.runFork`, and observes its successful value.
+Asset generation, parser-free registration, import, and synchronous Effect
+execution are landed. Pipeline counters assert zero bundled parses, import
+extraction, AST/ESTree linking, typechecks, and compilations. A runtime
+regression imports `effect/Effect`, executes a mapped Effect through
+`Effect.runFork`, and observes its successful value.
 
 The engine now initializes public, private, computed, and static class fields,
 including Effect's scheduler and metric-registry state such as `buckets = []`

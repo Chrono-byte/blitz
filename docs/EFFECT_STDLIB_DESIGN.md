@@ -5,7 +5,17 @@
 This document defines the target public TypeScript API for `blitz-runtime`.
 It covers Blitz-owned host capabilities, not ECMAScript semantics. It replaces
 callback-first Blitz APIs as the recommended application API while preserving
-standards compatibility at the appropriate boundaries.
+standards compatibility at the appropriate boundaries. The phased delivery
+sequence is tracked in
+[`EFFECT_STDLIB_IMPLEMENTATION_PLAN.md`](EFFECT_STDLIB_IMPLEMENTATION_PLAN.md).
+The bundled Effect runtime must also satisfy the parser-free artifact contract
+in [`EFFECT_FULL_PREBUNDLING_PLAN.md`](EFFECT_FULL_PREBUNDLING_PLAN.md).
+
+Today the canonical Effect graph and manifest-listed Blitz stdlib JavaScript
+are committed in one versioned prelinked runtime artifact. Runtime installation
+validates pinned source manifests and host ABI, exposes only public roots, and
+performs no bundled parsing, import extraction, AST/ESTree linking, typechecking,
+or compilation. The artifact is not a heap snapshot; initializers still run.
 
 ## Goals
 
@@ -19,6 +29,8 @@ standards compatibility at the appropriate boundaries.
 - The VM owns JavaScript state. Rust owns OS resources and operates on opaque
   resource identifiers; background tasks never mutate JavaScript values.
 - Web and Node compatibility do not distort the primary Blitz API.
+- The canonical Effect graph starts without runtime source parsing,
+  import-scanning, typechecking, ESTree linking, or compilation.
 
 ## Non-goals
 
@@ -162,9 +174,11 @@ in-memory or deterministic Layers.
 A service method is already an Effect and never throws expected host failures:
 
 ```ts
+export type Path = string | URL
+
 export interface FileSystem {
   readonly readFile: (
-    path: string,
+    path: Path,
     options?: ReadFileOptions,
   ) => Effect.Effect<Uint8Array, FileSystemError>
 }
@@ -172,7 +186,7 @@ export interface FileSystem {
 export declare const FileSystem: Context.Tag<FileSystem>
 
 export declare const readFile: (
-  path: string,
+  path: Path,
   options?: ReadFileOptions,
 ) => Effect.Effect<Uint8Array, FileSystemError, FileSystem>
 
@@ -251,6 +265,12 @@ follow documented deterministic rules. Provide explicit `posix` and `windows`
 namespaces rather than ambient surprises in portable libraries.
 
 ### `blitz:fs`
+
+All filesystem APIs use one public alias:
+
+```ts
+export type Path = string | URL
+```
 
 - `readFile`, `readTextFile`, `writeFile`, `writeTextFile`
 - `open` as a scoped resource
@@ -402,19 +422,56 @@ connections are scoped and expose Stream-based reads plus backpressured writes.
 
 ## Bundled Effect surface
 
-Blitz currently embeds `effect@3.16.7` as one canonical ESM graph, compiles it
-to `effect.blitzbc`, and exposes small public aliases. Keep that architecture:
+Blitz pins `effect@3.16.7` and generates one canonical ESM source graph. The
+final runtime form is one complete, deterministic prelinked module-graph
+artifact containing that Effect graph plus every manifest-listed public and
+private Blitz stdlib JavaScript module—not a bytecode-only cache. The artifact contains verified
+chunks, ordered static dependencies, stable module indices, imports, exports,
+public roots, visibility, source integrity, Effect provenance, runtime/host ABI
+metadata, and canonical live-binding IDs.
 
-- pin exact versions;
-- generate assets only in `tools/effect-assets`;
-- commit source, license, integrity, manifest, declarations, and bytecode;
-- register one canonical private module identity;
-- never download or compile packages during Cargo build or runtime startup;
-- keep Effect execution in upstream JavaScript.
+Keep these rules:
 
-The current curated aliases are too small for the stdlib. Expand them before
-building facades. At minimum support the upstream modules and operations needed
-for:
+- pin exact package, graph-format, runtime ABI, and host bridge ABI versions;
+- let `tools/effect-assets` generate canonical source, licenses, integrity,
+  manifest, declarations, and embedding metadata;
+- let a data-driven stdlib asset step own Blitz facade/adapter source,
+  declarations, visibility, hashes, and host ABI metadata;
+- let the Rust graph precompiler alone generate the final graph artifact from
+  the verified Effect and stdlib inputs;
+- commit all reproducibility inputs and the final prelinked artifact;
+- make generation deterministic, atomic, network-free, and absent from
+  `build.rs` and runtime startup;
+- register one canonical private module identity graph in `blitz-runtime` while
+  keeping raw `blitz-engine` environments free of Effect and Blitz modules;
+- allocate canonical live slots before evaluation so cycles, re-exports,
+  namespaces, and root/deep import identity remain correct;
+- validate format, bytecode, graph edges, descriptors, indices, binding IDs,
+  visibility, package provenance, source hashes, and ABI versions before any
+  initializer executes;
+- retain source only for regeneration and diagnostics, never as a runtime
+  fallback;
+- install versioned Rust host primitives before atomically registering the
+  graph, and reject missing primitives or ABI mismatches before side effects;
+- permit runtime decode, validation, host installation, record installation,
+  slot allocation, and initializer execution, but perform zero bundled Effect
+  or Blitz stdlib parsing, import extraction, typechecking, ESTree linking, or
+  compilation; and
+- keep Effect and stdlib execution in upstream JavaScript on the single VM
+  thread.
+
+Changing supported Effect aliases/exports or any Blitz facade/private adapter
+changes the prelinked graph. Such a change is incomplete unless source and
+stdlib-manifest generation, graph precompilation, byte-for-byte `--check`,
+descriptor/visibility/ABI validation, identity tests, atomic-failure tests, and
+explicit no-parser/no-compiler regressions all pass together. Runtime
+registration must never fall back to `VirtualModule::javascript` or
+source-backed `VirtualModule::precompiled` for bundled Effect or stdlib modules.
+
+The current curated aliases are too small for the stdlib. Expand them only
+after the runtime cutover to full prebundling, and regenerate the complete
+runtime graph with every Effect or stdlib expansion. At minimum support the
+upstream modules and operations needed for:
 
 - `Cause`, `Exit`, `Option`, `Either`, `Duration`, and `Function`;
 - `Fiber`, `Scope`, `Ref`, `Deferred`, `Queue`, `PubSub`, and interruption;
@@ -492,7 +549,15 @@ Every module ships with:
 6. finalizer tests for success, failure, defect, and interruption;
 7. bounded queue and backpressure tests;
 8. raw-engine tests proving Blitz modules are absent without runtime install;
-9. tests proving no public declaration degrades to `any`.
+9. tests proving no public declaration degrades to `any`;
+10. bundle tests proving corrupt or stale metadata fails validation before side
+    effects;
+11. manifest coverage tests proving every entry is prelinked and reachable and
+    no unmanifested module is bundled;
+12. direct-import tests proving private entries are inaccessible to user source;
+13. explicit counters or hooks proving bundled Effect and stdlib startup
+    performs zero parser, import-extraction, typechecker, and compiler
+    invocations.
 
 ## Practices encouraged by the API
 
@@ -521,22 +586,28 @@ Discouraged or rejected by API design:
 
 ## Migration from the current runtime
 
-1. Expand and test the bundled upstream Effect surface.
-2. Add a generic cancellable host-operation/resource bridge and resource IDs.
-3. Implement `blitz:runtime`, including `layerLive` and `runMain`.
-4. Implement foundational `blitz:path`, `blitz:fs`, `blitz:process`, and
+1. **Complete:** deterministic runtime-graph generation and wire format for
+   Effect plus the stdlib manifest, visibility, and host ABI; parser-free
+   runtime cutover; and removal of transitional source-backed/bytecode-only
+   installation.
+2. Expand and test the bundled upstream Effect and Blitz stdlib surfaces,
+   regenerating and byte-comparing the complete graph for every change.
+3. Add a generic cancellable host-operation/resource bridge and resource IDs.
+4. Implement `blitz:runtime`, including `layerLive` and `runMain`.
+5. Implement foundational `blitz:path`, `blitz:fs`, `blitz:process`, and
    `blitz:terminal` services.
-5. Replace the current Effect-wrapped `Blitz.serve` example with scoped
+6. Replace the current Effect-wrapped `Blitz.serve` example with scoped
    `blitz:http` and `blitz:websocket` APIs.
-6. Rebuild `blitz:app` and `blitz:rpc` on those public services.
-7. Add crypto, subprocess, signals, outbound networking, and lower-level socket
+7. Rebuild `blitz:app` and `blitz:rpc` on those public services.
+8. Add crypto, subprocess, signals, outbound networking, and lower-level socket
    modules.
-8. Build standards and Node compatibility adapters over the same host resource
+9. Build standards and Node compatibility adapters over the same host resource
    layer.
-9. Deprecate `Blitz.serve`, `Blitz.upgradeWebSocket`, and terminal globals only
-   after equivalent stable APIs and migration documentation exist.
+10. Deprecate `Blitz.serve`, `Blitz.upgradeWebSocket`, and terminal globals only
+    after equivalent stable APIs and migration documentation exist.
 
-The first implementation slice should be `blitz:runtime` plus `blitz:fs` read
-operations. It proves service requirements, live/test Layers, host completion,
+The first implementation slice is `blitz:runtime`, pure `blitz:path`, and
+`blitz:fs` read operations. It proves service requirements, live/test Layers,
+host completion,
 cancellation, structured errors, generated declarations, and the single Effect
 module identity without depending on server complexity.

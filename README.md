@@ -46,7 +46,9 @@ immutable Rust application/RPC model is documented in
 [`BLITZ_RUNTIME_RPC_SLICE.md`](docs/BLITZ_RUNTIME_RPC_SLICE.md); it preserves
 `Blitz.serve` as the low-level compatibility API. The target Effect-native
 host standard library and its migration rules are specified in
-[`EFFECT_STDLIB_DESIGN.md`](docs/EFFECT_STDLIB_DESIGN.md).
+[`EFFECT_STDLIB_DESIGN.md`](docs/EFFECT_STDLIB_DESIGN.md), with phased work
+tracked in
+[`EFFECT_STDLIB_IMPLEMENTATION_PLAN.md`](docs/EFFECT_STDLIB_IMPLEMENTATION_PLAN.md).
 
 ```js
 function callbackFunc(request, info) {
