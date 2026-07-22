@@ -667,6 +667,55 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     non_enum_data(string_slice),
   );
 
+  let install_trim = |name: &str, trim_start: bool, trim_end: bool| {
+    let trim = builtin_object(
+      Rc::new(move |vm, args| {
+        let undefined = Value::Undefined;
+        let receiver = args.first().unwrap_or(&undefined);
+        require_object_coercible(vm, receiver)?;
+        let value = this_string_value_ref(vm, receiver)?;
+        let is_trimmable = |character: char| {
+          matches!(
+            character,
+            '\u{0009}'
+              | '\u{000A}'
+              | '\u{000B}'
+              | '\u{000C}'
+              | '\u{000D}'
+              | '\u{0020}'
+              | '\u{00A0}'
+              | '\u{1680}'
+              | '\u{2000}'
+              ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
+          )
+        };
+        let trimmed = match (trim_start, trim_end) {
+          (true, true) => value.trim_matches(is_trimmable),
+          (true, false) => value.trim_start_matches(is_trimmable),
+          (false, true) => value.trim_end_matches(is_trimmable),
+          (false, false) => value.as_ref(),
+        };
+        Ok(Value::String(trimmed.to_string()))
+      }),
+      function_proto_map,
+    );
+    set_builtin_name(&trim, name);
+    set_builtin_length(&trim, 0.0);
+    string_proto_map
+      .borrow_mut()
+      .properties
+      .insert(PKey::String(name.to_string()), non_enum_data(trim));
+  };
+  install_trim("trim", true, true);
+  install_trim("trimStart", true, false);
+  install_trim("trimEnd", false, true);
+
   let string_split = builtin_object(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;

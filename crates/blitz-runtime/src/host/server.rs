@@ -141,7 +141,7 @@ impl ServerState {
           &socket,
           "open",
           event_object(vm, "open"),
-        );
+        )?;
       }
       WebSocketEvent::Text {
         connection_id,
@@ -152,7 +152,7 @@ impl ServerState {
         };
         let message = event_object(vm, "message");
         set(&message, "data", Value::String(text));
-        dispatch_socket_event(vm, &self.0, connection_id, &socket, "message", message);
+        dispatch_socket_event(vm, &self.0, connection_id, &socket, "message", message)?;
       }
       WebSocketEvent::Binary {
         connection_id,
@@ -163,7 +163,7 @@ impl ServerState {
         };
         let message = event_object(vm, "message");
         set(&message, "data", byte_array(vm, data));
-        dispatch_socket_event(vm, &self.0, connection_id, &socket, "message", message);
+        dispatch_socket_event(vm, &self.0, connection_id, &socket, "message", message)?;
       }
       WebSocketEvent::Drain {
         connection_id,
@@ -202,7 +202,7 @@ impl ServerState {
         );
         set(&close, "reason", Value::String(reason));
         set(&close, "wasClean", Value::Bool(code.is_some()));
-        dispatch_socket_event(vm, &self.0, connection_id, &socket, "close", close);
+        dispatch_socket_event(vm, &self.0, connection_id, &socket, "close", close)?;
         self
           .0
           .borrow_mut()
@@ -218,7 +218,7 @@ impl ServerState {
         };
         let error = event_object(vm, "error");
         set(&error, "message", Value::String(message));
-        dispatch_socket_event(vm, &self.0, connection_id, &socket, "error", error);
+        dispatch_socket_event(vm, &self.0, connection_id, &socket, "error", error)?;
       }
     }
     Ok(())
@@ -255,16 +255,20 @@ pub(super) fn install(
     next_client_id: 1_u64 << 53,
   })));
   let blitz = object(vm.realm().object_prototype());
+  let websocket_prototype = object(vm.realm().object_prototype());
   set(&blitz, "serve", Value::Builtin(serve_method(state.clone())));
   set(
     &blitz,
     "upgradeWebSocket",
-    Value::Builtin(upgrade_websocket_method(state.clone())),
+    Value::Builtin(upgrade_websocket_method(
+      state.clone(),
+      websocket_prototype.clone(),
+    )),
   );
   vm.realm().set_global("Blitz", blitz);
   install_response_constructor(vm);
   install_headers_constructor(vm);
-  install_websocket_constructor(vm, state.clone());
+  install_websocket_constructor(vm, state.clone(), websocket_prototype);
   state
 }
 
@@ -307,7 +311,10 @@ fn serve_method(state: ServerState) -> BuiltinFn {
   })
 }
 
-fn upgrade_websocket_method(state: ServerState) -> BuiltinFn {
+fn upgrade_websocket_method(
+  state: ServerState,
+  prototype: Value,
+) -> BuiltinFn {
   Rc::new(move |vm, args| {
     let request = args
       .get(1)
@@ -333,7 +340,7 @@ fn upgrade_websocket_method(state: ServerState) -> BuiltinFn {
     let url = vm
       .to_string(&url)?
       .replacen("http://", "ws://", 1);
-    let socket = websocket_object(vm, state.clone(), id, &url);
+    let socket = websocket_object(state.clone(), id, &url, prototype.clone());
     state.0.borrow_mut().websockets.insert(
       id,
       WebSocketResource {
@@ -440,12 +447,12 @@ fn request_object(
 }
 
 fn websocket_object(
-  vm: &Vm,
   state: ServerState,
   connection_id: u64,
   url: &str,
+  prototype: Value,
 ) -> Value {
-  let socket = object(vm.realm().object_prototype());
+  let socket = object(prototype);
   set(&socket, "readyState", Value::Number(0.0));
   set(&socket, "bufferedAmount", Value::Number(0.0));
   set(
@@ -658,12 +665,12 @@ fn dispatch_socket_event(
   socket: &Value,
   event_type: &str,
   event: Value,
-) {
+) -> Result<(), RuntimeError> {
   let property = format!("on{event_type}");
   if let Ok(callback) = vm.get_property_host(socket, &PropertyKey::String(property))
     && callback.is_callable()
   {
-    let _result = vm.call_value_with_this(&callback, socket, std::slice::from_ref(&event));
+    vm.call_value_with_this(&callback, socket, std::slice::from_ref(&event))?;
   }
   let listeners = state
     .borrow()
@@ -673,8 +680,9 @@ fn dispatch_socket_event(
     .cloned()
     .unwrap_or_default();
   for listener in listeners {
-    let _result = vm.call_value_with_this(&listener, socket, std::slice::from_ref(&event));
+    vm.call_value_with_this(&listener, socket, std::slice::from_ref(&event))?;
   }
+  Ok(())
 }
 
 fn event_object(
@@ -903,8 +911,9 @@ fn response_from_value(
 fn install_websocket_constructor(
   vm: &mut Vm,
   state: ServerState,
+  prototype: Value,
 ) {
-  let prototype = object(vm.realm().object_prototype());
+  let instance_prototype = prototype.clone();
   let constructor_state = state;
   let constructor: BuiltinFn = Rc::new(move |vm, args| {
     let url = args
@@ -925,7 +934,12 @@ fn install_websocket_constructor(
         .ok_or_else(|| RuntimeError::from("WebSocket connection ID overflow"))?;
       (connection_id, inner.websocket_events.clone())
     };
-    let socket = websocket_object(vm, constructor_state.clone(), connection_id, &url);
+    let socket = websocket_object(
+      constructor_state.clone(),
+      connection_id,
+      &url,
+      instance_prototype.clone(),
+    );
     let (shutdown, shutdown_rx) = watch::channel(false);
     constructor_state
       .0

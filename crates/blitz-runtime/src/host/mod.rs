@@ -320,6 +320,9 @@ mod tests {
           return new Response("upgrade required", { status: 426 });
         }
         const upgraded = Blitz.upgradeWebSocket(request);
+        globalThis.serverSocketHasWebSocketPrototype =
+          Object.getPrototypeOf(upgraded.socket) === WebSocket.prototype &&
+          upgraded.socket instanceof WebSocket;
         upgraded.socket.addEventListener("open", function() {
           upgraded.socket.send("ready");
         });
@@ -389,6 +392,10 @@ mod tests {
         .run_once(&mut vm)
         .expect("dispatch upgrade request")
     );
+    assert_eq!(
+      vm.get_global("serverSocketHasWebSocketPrototype"),
+      Some(Value::Bool(true))
+    );
     assert!(
       runtime
         .run_once(&mut vm)
@@ -444,6 +451,9 @@ mod tests {
         return upgraded.response;
       });
       const client = new WebSocket("ws://127.0.0.1:" + server.port + "/chat");
+      globalThis.clientSocketHasWebSocketPrototype =
+        Object.getPrototypeOf(client) === WebSocket.prototype &&
+        client instanceof WebSocket;
       client.onopen = () => client.send("hello");
       client.onmessage = (event) => {
         globalThis.clientResult = event.data;
@@ -455,6 +465,10 @@ mod tests {
       compiler::compile_oxc(session.program(), source).expect("compile WebSocket client script");
     vm.run(chunk)
       .expect("evaluate WebSocket client script");
+    assert_eq!(
+      vm.get_global("clientSocketHasWebSocketPrototype"),
+      Some(Value::Bool(true))
+    );
 
     for _step in 0..16 {
       assert!(
@@ -510,6 +524,32 @@ mod tests {
     vm.run(chunk).expect("evaluate IRC server");
 
     let address = runtime.local_addr().expect("IRC server address");
+    let wrong_route = thread::spawn(move || {
+      let mut stream = TcpStream::connect(address).expect("connect to IRC HTTP server");
+      write!(
+        stream,
+        "GET /wrong HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+      )
+      .expect("write wrong-route request");
+      let mut response = String::new();
+      stream
+        .read_to_string(&mut response)
+        .expect("read wrong-route response");
+      response
+    });
+    assert!(
+      runtime
+        .run_once(&mut vm)
+        .expect("dispatch wrong-route request")
+    );
+    let wrong_route = wrong_route
+      .join()
+      .expect("wrong-route client thread");
+    assert!(
+      wrong_route.starts_with("HTTP/1.1 404"),
+      "unexpected wrong-route response: {wrong_route}"
+    );
+
     let client = thread::spawn(move || {
       tokio::runtime::Builder::new_current_thread()
         .enable_all()

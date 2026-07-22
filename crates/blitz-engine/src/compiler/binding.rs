@@ -11,6 +11,7 @@
 use super::emit::FrontendOp as Op;
 use crate::value::Value;
 use oxc_ast::ast as oast;
+use std::collections::HashSet;
 
 const LINE: u32 = 1;
 
@@ -74,6 +75,27 @@ impl super::Compiler {
         continue;
       }
 
+      if matches!(
+        v.kind,
+        oxc_ast::ast::VariableDeclarationKind::Let | oxc_ast::ast::VariableDeclarationKind::Const
+      ) {
+        let mut names = HashSet::new();
+        self.add_var_names_from_binding(&dec.id, &mut names);
+        for name in names {
+          let slot = self.predeclare_lexical_binding(&name, v.kind)?;
+          // A loop body can execute the same bytecode repeatedly. Each entry
+          // creates fresh lexical bindings in the TDZ before any initializer
+          // is evaluated. Ordinary blocks and function bodies already start
+          // with fresh frame cells; replacing those would detach closures
+          // created during declaration instantiation from the initialized
+          // binding.
+          if self.loop_depth > 0 {
+            self.emit(Op::ResetLocalCell, LINE);
+            self.emit_byte(self.slot_to_u8(slot)?, LINE);
+          }
+        }
+      }
+
       if let Some(init) = &dec.init {
         self.compile_expr_oast(init)?;
       } else {
@@ -83,6 +105,32 @@ impl super::Compiler {
     }
 
     Ok(())
+  }
+
+  fn predeclare_lexical_binding(
+    &mut self,
+    name: &str,
+    kind: oxc_ast::ast::VariableDeclarationKind,
+  ) -> Result<usize, crate::errors::CompilerError> {
+    if let Some(err) = Self::strict_binding_name_error(self.strict_context, name) {
+      return Err(err);
+    }
+    let scope_index = self.scopes.len() - 1;
+    if self.scopes[scope_index]
+      .lexical_bindings
+      .contains(name)
+    {
+      return Err(crate::errors::CompilerError::from(format!(
+        "SyntaxError: redeclaration of lexical binding `{name}`"
+      )));
+    }
+    let slot = self.add_local_with_mirror(name.to_string(), None, false);
+    self.mark_local_tdz(slot);
+    self.add_lexical_binding(name);
+    if matches!(kind, oxc_ast::ast::VariableDeclarationKind::Const) {
+      self.mark_local_immutable(slot);
+    }
+    Ok(slot)
   }
 
   /// Convert an object binding key to a string value.
@@ -136,16 +184,6 @@ impl super::Compiler {
       .get(name)
       .copied()
     {
-      // Check for duplicate lexical declaration (const/let with same name)
-      if self.scopes[self.scopes.len() - 1]
-        .lexical_bindings
-        .contains(name)
-      {
-        return Err(crate::errors::CompilerError::from(format!(
-          "SyntaxError: redeclaration of lexical binding `{}`",
-          name
-        )));
-      }
       slot
     } else {
       let slot = self.add_local_with_mirror(name.to_string(), None, mirror_global);

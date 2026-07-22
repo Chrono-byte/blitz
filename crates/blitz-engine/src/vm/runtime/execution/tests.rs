@@ -44,6 +44,183 @@ mod test {
   use super::*;
 
   #[test]
+  fn arrays_retain_all_pushed_objects_across_function_calls() {
+    let (vm, _) = run_script(
+      r#"
+        const clients = [];
+        function addClient(name) {
+          clients.push({ name });
+        }
+        function listClients() {
+          let names = "";
+          for (let index = 0; index < clients.length; index += 1) {
+            names += clients[index].name + ",";
+          }
+          return names;
+        }
+        addClient("Alice");
+        addClient("Bob");
+        globalThis.client_count = clients.length;
+        globalThis.second_client = clients[1].name;
+        globalThis.client_names = listClients();
+      "#,
+    );
+
+    assert_eq!(vm.get_global("client_count"), Some(Value::Number(2.0)));
+    assert_eq!(
+      vm.get_global("second_client"),
+      Some(Value::String("Bob".to_string()))
+    );
+    assert_eq!(
+      vm.get_global("client_names"),
+      Some(Value::String("Alice,Bob,".to_string()))
+    );
+  }
+
+  #[test]
+  fn loop_body_lexical_bindings_are_recreated_each_iteration() {
+    let (vm, _) = run_script(
+      r#"
+        const clients = [{ name: "Alice" }, { name: "Bob" }];
+        const readers = [];
+        let names = "";
+        for (let index = 0; index < clients.length; index += 1) {
+          const client = clients[index];
+          names += client.name + ",";
+          readers.push(() => client.name);
+        }
+        globalThis.loop_body_names = names;
+        globalThis.loop_body_captures = readers[0]() + "," + readers[1]();
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("loop_body_names"),
+      Some(Value::String("Alice,Bob,".to_string()))
+    );
+    assert_eq!(
+      vm.get_global("loop_body_captures"),
+      Some(Value::String("Alice,Bob".to_string()))
+    );
+  }
+
+  #[test]
+  fn host_can_invoke_a_long_lived_closure_with_captured_bindings() {
+    let (mut vm, _) = run_script(
+      r#"
+        const prefix = "message:";
+        const suffix = "!";
+        globalThis.inputHandler = (line) => prefix + line + suffix;
+      "#,
+    );
+    let handler = vm
+      .get_global("inputHandler")
+      .expect("input handler");
+
+    let result = vm
+      .call_value_with_this(
+        &handler,
+        &Value::Undefined,
+        &[Value::String("hello".to_string())],
+      )
+      .expect("invoke retained closure");
+
+    assert_eq!(result, Value::String("message:hello!".to_string()));
+  }
+
+  #[test]
+  fn nested_event_handlers_created_by_host_calls_keep_their_environments() {
+    let (mut vm, _) = run_script(
+      r#"
+        const clients = [];
+        function clientNames() {
+          let names = "";
+          for (let index = 0; index < clients.length; index += 1) {
+            names += clients[index].nickname + ",";
+          }
+          return names;
+        }
+        function handler(socket) {
+          let nickname = null;
+          socket.onmessage = (message) => {
+            if (nickname === null) {
+              nickname = message;
+              clients.push({ socket, nickname });
+              return clientNames();
+            }
+            return nickname + ":" + message;
+          };
+        }
+        globalThis.handler = handler;
+      "#,
+    );
+    let handler = vm.get_global("handler").expect("host handler");
+    let first_socket = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
+    let second_socket = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
+    for socket in [&first_socket, &second_socket] {
+      vm.call_value_with_this(&handler, &Value::Undefined, std::slice::from_ref(socket))
+        .expect("create event handler");
+    }
+    let onmessage_key = PropertyKey::String("onmessage".to_string());
+    let first_callback = vm
+      .get_property_host(&first_socket, &onmessage_key)
+      .expect("first event handler");
+    let second_callback = vm
+      .get_property_host(&second_socket, &onmessage_key)
+      .expect("second event handler");
+
+    let first_result = vm
+      .call_value_with_this(
+        &first_callback,
+        &first_socket,
+        &[Value::String("Alice".to_string())],
+      )
+      .expect("invoke first event handler");
+    let second_result = vm
+      .call_value_with_this(
+        &second_callback,
+        &second_socket,
+        &[Value::String("Bob".to_string())],
+      )
+      .expect("invoke second event handler");
+
+    assert_eq!(first_result, Value::String("Alice,".to_string()));
+    assert_eq!(second_result, Value::String("Alice,Bob,".to_string()));
+    let repeat_result = vm
+      .call_value_with_this(
+        &first_callback,
+        &first_socket,
+        &[Value::String("hello".to_string())],
+      )
+      .expect("invoke first event handler again");
+    assert_eq!(repeat_result, Value::String("Alice:hello".to_string()));
+  }
+
+  #[test]
+  fn string_trim_removes_ecmascript_whitespace() {
+    let (vm, _) = run_script(
+      r#"
+        globalThis.trimmed = "\uFEFF \t\nhello\r\n \u00A0".trim();
+        globalThis.trimmed_start = "  hello  ".trimStart();
+        globalThis.trimmed_end = "  hello  ".trimEnd();
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("trimmed"),
+      Some(Value::String("hello".to_string()))
+    );
+    assert_eq!(
+      vm.get_global("trimmed_start"),
+      Some(Value::String("hello  ".to_string()))
+    );
+    assert_eq!(
+      vm.get_global("trimmed_end"),
+      Some(Value::String("  hello".to_string()))
+    );
+  }
+
+  #[test]
   fn const_bindings_initialize_once_and_reject_reassignment() {
     let (vm, _) = run_script(
       r#"

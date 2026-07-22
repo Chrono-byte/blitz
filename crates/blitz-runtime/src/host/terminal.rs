@@ -286,7 +286,7 @@ mod tests {
   }
 
   #[test]
-  fn dispatches_line_to_capture_free_persistent_handler() {
+  fn dispatches_line_to_persistent_handler_with_captured_bindings() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       PropertyKey::String("globalThis".to_string()),
@@ -299,15 +299,15 @@ mod tests {
     let state = install(&mut vm, events);
     let source = r#"
       globalThis.sentLine = "";
-      globalThis.chatSocket = {
+      const prefix = "MSG ";
+      const chatSocket = {
         OPEN: 1,
         readyState: 1,
         send: function(value) { globalThis.sentLine = value; }
       };
-      function handleInput(line) {
-        const activeSocket = globalThis.chatSocket;
-        activeSocket.send(`MSG ${line}`);
-      }
+      globalThis.handleInput = (line) => {
+        chatSocket.send(prefix + line.trim());
+      };
     "#;
     let session = JsParser::parse_source(source).expect("parse terminal callback");
     let chunk =
@@ -315,7 +315,7 @@ mod tests {
     vm.run(chunk).expect("define terminal callback");
     state.0.borrow_mut().callback = vm.get_global("handleInput");
     state
-      .dispatch(&mut vm, TerminalEvent::Line("meow".to_string()))
+      .dispatch(&mut vm, TerminalEvent::Line("  meow  ".to_string()))
       .expect("dispatch terminal line");
     assert_eq!(
       vm.get_global("sentLine"),

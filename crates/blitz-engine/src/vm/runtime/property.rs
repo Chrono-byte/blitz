@@ -398,7 +398,11 @@ impl Vm {
     key: &PropertyKey,
   ) -> Result<Value, RuntimeError> {
     let receiver_identity = match obj {
-      Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::BuiltinObject(_, _) => {
+      // Dense array elements and `length` are mutated by native array
+      // methods as well as ordinary property writes. Until those mutations
+      // all flow through the tracked property path, caching array reads can
+      // retain a stale length or element value.
+      Value::Object(_) | Value::Closure { .. } | Value::BuiltinObject(_, _) => {
         super::execution::object_identity(obj)
       }
       _ => None,

@@ -1,7 +1,6 @@
 const nickname = "Bob";
 const url = process.env.BLITZ_CHAT_URL || "ws://127.0.0.1:8000/chat";
 const socket = new WebSocket(url);
-globalThis.chatSocket = socket;
 
 Blitz.stdin.setPrompt(`[${nickname}] > `);
 Blitz.stdout.writeLine(`Connecting to ${url}...`);
@@ -23,31 +22,26 @@ socket.onclose = (event) => {
   Blitz.stdin.close();
 };
 
-function handleInput(line) {
-  const message = line;
-  const activeSocket = globalThis.chatSocket;
+Blitz.stdin.onLine((line) => {
+  const message = line.trim();
   if (message === "/quit") {
-    if (activeSocket.readyState === activeSocket.OPEN) {
-      activeSocket.send("QUIT");
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send("QUIT");
     }
     return;
   }
   if (message.length === 0) {
     return;
   }
-  if (activeSocket.readyState !== activeSocket.OPEN) {
+  if (socket.readyState !== WebSocket.OPEN) {
     Blitz.stdout.writeLine("Still connecting; try again in a moment.");
     return;
   }
-  activeSocket.send(`MSG ${message}`);
-}
+  socket.send(`MSG ${message}`);
+});
 
-function handleInputClose() {
-  const activeSocket = globalThis.chatSocket;
-  if (activeSocket.readyState === activeSocket.OPEN) {
-    activeSocket.close(1000, "stdin closed");
+Blitz.stdin.onClose(() => {
+  if (socket.readyState === WebSocket.OPEN) {
+    socket.close(1000, "stdin closed");
   }
-}
-
-Blitz.stdin.onLine(handleInput);
-Blitz.stdin.onClose(handleInputClose);
+});

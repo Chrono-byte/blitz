@@ -1,38 +1,45 @@
-globalThis.chatClients = null;
+const clients = [];
 
 function broadcast(message, excludedSocket) {
-  let client = globalThis.chatClients;
-  while (client !== null) {
+  for (let index = 0; index < clients.length; index += 1) {
+    const client = clients[index];
     if (
       client.socket !== excludedSocket &&
-      client.socket.readyState === client.socket.OPEN
+      client.socket.readyState === WebSocket.OPEN
     ) {
       client.socket.send(message);
     }
-    client = client.next;
   }
   console.log(message);
 }
 
 function removeClient(socket) {
-  let previous = null;
-  let client = globalThis.chatClients;
-  while (client !== null) {
-    if (client.socket === socket) {
-      if (previous === null) {
-        globalThis.chatClients = client.next;
-      } else {
-        previous.next = client.next;
-      }
-      return client;
+  for (let index = 0; index < clients.length; index += 1) {
+    if (clients[index].socket === socket) {
+      return clients.splice(index, 1)[0];
     }
-    previous = client;
-    client = client.next;
   }
   return null;
 }
 
+function requestPath(url) {
+  const authorityStart = url.indexOf("://");
+  const pathStart = url.indexOf("/", authorityStart === -1 ? 0 : authorityStart + 3);
+  if (pathStart === -1) {
+    return "/";
+  }
+  const queryStart = url.indexOf("?", pathStart);
+  return queryStart === -1 ? url.slice(pathStart) : url.slice(pathStart, queryStart);
+}
+
 function handler(request) {
+  if (requestPath(request.url) !== "/chat") {
+    return new Response("Not Found\n", {
+      status: 404,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
+  }
+
   if (request.headers.get("upgrade") !== "websocket") {
     return new Response("Blitz IRC chat is available over WebSocket.\n", {
       status: 426,
@@ -47,11 +54,7 @@ function handler(request) {
     const message = event.data;
     if (message.slice(0, 5) === "JOIN " && nickname === null) {
       nickname = message.slice(5, 25) || "anonymous";
-      globalThis.chatClients = {
-        socket,
-        nickname,
-        next: globalThis.chatClients,
-      };
+      clients.push({ socket, nickname });
       socket.send(`* Welcome, ${nickname}. Type /quit to leave.`);
       broadcast(`* ${nickname} joined the room`, socket);
       return;
