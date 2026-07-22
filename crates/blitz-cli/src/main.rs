@@ -152,7 +152,7 @@ fn main() -> Result<(), blitz::errors::Error> {
     runtime_argv.push(path.to_string_lossy().into_owned());
   }
   runtime_argv.extend(cli.args.iter().cloned());
-  blitz_runtime::host::install_runtime(
+  let mut runtime = blitz_runtime::host::install_runtime(
     &mut repl_vm,
     blitz_runtime::host::RuntimeOptions::from_host(runtime_argv),
   );
@@ -227,6 +227,9 @@ fn main() -> Result<(), blitz::errors::Error> {
         }
       }
     }
+    runtime
+      .run(&mut repl_vm)
+      .map_err(blitz::errors::Error::from)?;
     return Ok(());
   }
 

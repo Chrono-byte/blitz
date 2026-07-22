@@ -15,17 +15,37 @@ use bytes::Bytes;
 use fastwebsockets::{Frame, OpCode, Payload, WebSocketError};
 use http_body_util::Empty;
 use hyper::body::Incoming;
+use hyper::header::{CONNECTION, UPGRADE};
+use hyper::rt::Executor;
 use hyper::service::service_fn;
+use hyper::upgrade::Upgraded;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
+use std::future::Future;
+
 /// Default maximum WebSocket message size: 1 MiB.
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 /// Default capacity of each connection's outbound command queue.
 pub const DEFAULT_COMMAND_CAPACITY: usize = 64;
+
+struct SpawnExecutor;
+
+impl<Fut> Executor<Fut> for SpawnExecutor
+where
+  Fut: Future + Send + 'static,
+  Fut::Output: Send + 'static,
+{
+  fn execute(
+    &self,
+    future: Fut,
+  ) {
+    tokio::spawn(future);
+  }
+}
 
 /// Configuration for a WebSocket server.
 #[derive(Clone, Debug)]
@@ -84,6 +104,13 @@ pub enum WebSocketEvent {
     connection_id: u64,
     /// Owned message bytes.
     data: Vec<u8>,
+  },
+  /// Bytes from the runtime command queue were written to the socket.
+  Drain {
+    /// Connection whose outbound queue drained.
+    connection_id: u64,
+    /// Number of payload bytes written.
+    bytes: usize,
   },
   /// A connection ended.
   Close {
@@ -303,6 +330,11 @@ async fn run_connection<S>(
         let Some(command) = command else {
           break;
         };
+        let sent_bytes = match &command {
+          WebSocketCommand::Text(text) => text.len(),
+          WebSocketCommand::Binary(data) => data.len(),
+          WebSocketCommand::Close { .. } => 0,
+        };
         let close = match &command {
           WebSocketCommand::Close { code, reason } => Some((*code, reason.clone())),
           _ => None,
@@ -310,6 +342,14 @@ async fn run_connection<S>(
         if let Err(error) = write_command(&mut socket, command).await {
           emit_error(&events, connection_id, &error).await;
           break;
+        }
+        if sent_bytes > 0 {
+          let _result = events
+            .send(WebSocketEvent::Drain {
+              connection_id,
+              bytes: sent_bytes,
+            })
+            .await;
         }
         if let Some((code, reason)) = close {
           emit_close(&events, connection_id, Some(code), &reason).await;
@@ -342,6 +382,86 @@ async fn run_connection<S>(
   if !close_emitted {
     emit_close(&events, connection_id, None, "").await;
   }
+}
+
+/// Complete an HTTP upgrade and run the resulting WebSocket connection.
+pub(crate) async fn run_upgrade(
+  connection_id: u64,
+  upgrade: fastwebsockets::upgrade::UpgradeFut,
+  events: mpsc::Sender<WebSocketEvent>,
+  options: WebSocketServerOptions,
+  shutdown: watch::Receiver<bool>,
+) {
+  if let Ok(socket) = upgrade.await {
+    run_connection(connection_id, socket, events, options, shutdown).await;
+  }
+}
+
+/// Connect a client WebSocket and feed it into the shared runtime event path.
+pub(crate) async fn connect_client(
+  connection_id: u64,
+  url: String,
+  events: mpsc::Sender<WebSocketEvent>,
+  options: WebSocketServerOptions,
+  shutdown: watch::Receiver<bool>,
+) {
+  let result = async {
+    let (authority, path) = parse_client_url(&url)?;
+    let stream = TcpStream::connect(&authority)
+      .await
+      .map_err(|error| error.to_string())?;
+    let request = Request::builder()
+      .method("GET")
+      .uri(format!("http://{authority}{path}"))
+      .header("Host", &authority)
+      .header(UPGRADE, "websocket")
+      .header(CONNECTION, "upgrade")
+      .header(
+        "Sec-WebSocket-Key",
+        fastwebsockets::handshake::generate_key(),
+      )
+      .header("Sec-WebSocket-Version", "13")
+      .body(Empty::<Bytes>::new())
+      .map_err(|error| error.to_string())?;
+    let (socket, response): (fastwebsockets::WebSocket<TokioIo<Upgraded>>, _) =
+      fastwebsockets::handshake::client(&SpawnExecutor, request, stream)
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+      return Err(format!("WebSocket server returned {}", response.status()));
+    }
+    run_connection(connection_id, socket, events.clone(), options, shutdown).await;
+    Ok::<(), String>(())
+  }
+  .await;
+  if let Err(message) = result {
+    let _result = events
+      .send(WebSocketEvent::Error {
+        connection_id,
+        message,
+      })
+      .await;
+    emit_close(&events, connection_id, None, "").await;
+  }
+}
+
+fn parse_client_url(url: &str) -> Result<(String, String), String> {
+  let remainder = url
+    .strip_prefix("ws://")
+    .ok_or_else(|| "only ws:// WebSocket URLs are supported".to_string())?;
+  let (authority, path) = remainder.split_once('/').map_or_else(
+    || (remainder, "/".to_string()),
+    |(authority, path)| (authority, format!("/{path}")),
+  );
+  if authority.is_empty() {
+    return Err("WebSocket URL requires a host".to_string());
+  }
+  let authority = if authority.contains(':') {
+    authority.to_string()
+  } else {
+    format!("{authority}:80")
+  };
+  Ok((authority, path))
 }
 
 async fn write_command<S>(
@@ -626,6 +746,16 @@ mod tests {
       .expect("read server frame");
     assert_eq!(frame.opcode, OpCode::Binary);
     assert_eq!(frame.payload.as_ref(), &[1, 2, 3]);
+    match next_event(&mut events_rx).await {
+      WebSocketEvent::Drain {
+        connection_id: actual_id,
+        bytes,
+      } => {
+        assert_eq!(actual_id, connection_id);
+        assert_eq!(bytes, 3);
+      }
+      event => panic!("expected drain, got {event:?}"),
+    }
 
     client
       .write_frame(Frame::close(1000, b"finished"))

@@ -172,7 +172,7 @@ impl Vm {
 
   /// Resolve a value through the runtime's promise machinery and wait for it
   /// to settle using the existing microtask queue.
-  pub(crate) fn await_value(
+  pub fn await_value(
     &mut self,
     value: Value,
   ) -> Result<Value, crate::errors::RuntimeError> {

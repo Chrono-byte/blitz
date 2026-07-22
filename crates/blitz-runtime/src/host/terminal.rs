@@ -1,0 +1,325 @@
+//! Buffered terminal input and prompt-safe output for interactive applications.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+use blitz::Vm;
+use blitz::errors::RuntimeError;
+use blitz::gc;
+use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use rustyline::{DefaultEditor, ExternalPrinter};
+use tokio::sync::mpsc;
+
+/// Owned input emitted by the dedicated line-editor thread.
+pub(super) enum TerminalEvent {
+  Line(String),
+  Eof,
+  Error(String),
+}
+
+struct TerminalInner {
+  callback: Option<Value>,
+  close_callback: Option<Value>,
+  started: bool,
+  active: bool,
+  prompt: Arc<Mutex<String>>,
+  printer: Arc<Mutex<Option<Box<dyn ExternalPrinter + Send>>>>,
+  events: mpsc::Sender<TerminalEvent>,
+}
+
+/// VM-thread terminal callback and line-editor state.
+#[derive(Clone)]
+pub(super) struct TerminalState(Rc<RefCell<TerminalInner>>);
+
+impl TerminalState {
+  pub(super) fn is_active(&self) -> bool {
+    self.0.borrow().active
+  }
+
+  pub(super) fn dispatch(
+    &self,
+    vm: &mut Vm,
+    event: TerminalEvent,
+  ) -> Result<(), RuntimeError> {
+    match event {
+      TerminalEvent::Line(line) => {
+        let callback = self.0.borrow().callback.clone();
+        if let Some(callback) = callback.filter(Value::is_callable)
+          && let Err(error) =
+            vm.call_value_with_this(&callback, &Value::Undefined, &[Value::String(line)])
+        {
+          print_external(self, format!("Input handler error: {error}"));
+        }
+      }
+      TerminalEvent::Eof => {
+        let callback = {
+          let mut inner = self.0.borrow_mut();
+          inner.active = false;
+          inner.close_callback.clone()
+        };
+        if let Some(callback) = callback.filter(Value::is_callable)
+          && let Err(error) = vm.call_value_with_this(&callback, &Value::Undefined, &[])
+        {
+          print_external(self, format!("Input close handler error: {error}"));
+        }
+      }
+      TerminalEvent::Error(message) => {
+        self.0.borrow_mut().active = false;
+        return Err(RuntimeError::from(format!(
+          "terminal input failed: {message}"
+        )));
+      }
+    }
+    Ok(())
+  }
+}
+
+pub(super) fn install(
+  vm: &mut Vm,
+  events: mpsc::Sender<TerminalEvent>,
+) -> TerminalState {
+  let state = TerminalState(Rc::new(RefCell::new(TerminalInner {
+    callback: None,
+    close_callback: None,
+    started: false,
+    active: false,
+    prompt: Arc::new(Mutex::new("> ".to_string())),
+    printer: Arc::new(Mutex::new(None)),
+    events,
+  })));
+  let stdin = object(vm.realm().object_prototype());
+  let stdout = object(vm.realm().object_prototype());
+
+  let line_state = state.clone();
+  let on_line: BuiltinFn = Rc::new(move |_vm, args| {
+    let callback = args
+      .get(1)
+      .cloned()
+      .ok_or_else(|| RuntimeError::from("Blitz.stdin.onLine requires a callback"))?;
+    if !callback.is_callable() {
+      return Err(RuntimeError::from(
+        "Blitz.stdin.onLine callback must be callable",
+      ));
+    }
+    line_state.0.borrow_mut().callback = Some(callback);
+    start_input(&line_state);
+    Ok(Value::Undefined)
+  });
+  set(&stdin, "onLine", Value::Builtin(on_line));
+
+  let close_state = state.clone();
+  let on_close: BuiltinFn = Rc::new(move |_vm, args| {
+    let callback = args
+      .get(1)
+      .cloned()
+      .ok_or_else(|| RuntimeError::from("Blitz.stdin.onClose requires a callback"))?;
+    if !callback.is_callable() {
+      return Err(RuntimeError::from(
+        "Blitz.stdin.onClose callback must be callable",
+      ));
+    }
+    close_state.0.borrow_mut().close_callback = Some(callback);
+    Ok(Value::Undefined)
+  });
+  set(&stdin, "onClose", Value::Builtin(on_close));
+
+  let prompt_state = state.clone();
+  let set_prompt: BuiltinFn = Rc::new(move |vm, args| {
+    let prompt = args
+      .get(1)
+      .map_or_else(|| Ok(String::new()), |value| vm.to_string(value))?;
+    if let Ok(mut current) = prompt_state.0.borrow().prompt.lock() {
+      *current = prompt;
+    }
+    Ok(Value::Undefined)
+  });
+  set(&stdin, "setPrompt", Value::Builtin(set_prompt));
+
+  let stop_state = state.clone();
+  let close: BuiltinFn = Rc::new(move |_vm, _args| {
+    stop_state.0.borrow_mut().active = false;
+    Ok(Value::Undefined)
+  });
+  set(&stdin, "close", Value::Builtin(close));
+
+  let output_state = state.clone();
+  let write_line: BuiltinFn = Rc::new(move |vm, args| {
+    let message = args
+      .get(1)
+      .map_or_else(|| Ok(String::new()), |value| vm.to_string(value))?;
+    print_external(&output_state, message);
+    Ok(Value::Undefined)
+  });
+  set(&stdout, "write", Value::Builtin(Rc::clone(&write_line)));
+  set(&stdout, "writeLine", Value::Builtin(write_line));
+
+  if let Some(blitz) = vm.realm().get_global("Blitz") {
+    set(&blitz, "stdin", stdin);
+    set(&blitz, "stdout", stdout);
+  }
+  state
+}
+
+fn start_input(state: &TerminalState) {
+  let (events, prompt, printer) = {
+    let mut inner = state.0.borrow_mut();
+    if inner.started {
+      return;
+    }
+    inner.started = true;
+    inner.active = true;
+    (
+      inner.events.clone(),
+      Arc::clone(&inner.prompt),
+      Arc::clone(&inner.printer),
+    )
+  };
+  drop(thread::spawn(move || {
+    let mut editor = match DefaultEditor::new() {
+      Ok(editor) => editor,
+      Err(error) => {
+        let _result = events.blocking_send(TerminalEvent::Error(error.to_string()));
+        return;
+      }
+    };
+    if let Ok(external_printer) = editor.create_external_printer()
+      && let Ok(mut slot) = printer.lock()
+    {
+      *slot = Some(Box::new(external_printer));
+    }
+    loop {
+      let current_prompt = prompt
+        .lock()
+        .map_or_else(|_| "> ".to_string(), |value| value.clone());
+      match editor.readline(&current_prompt) {
+        Ok(line) => {
+          if !line.is_empty() {
+            let _result = editor.add_history_entry(line.as_str());
+          }
+          if events
+            .blocking_send(TerminalEvent::Line(line))
+            .is_err()
+          {
+            break;
+          }
+        }
+        Err(rustyline::error::ReadlineError::Interrupted) => continue,
+        Err(rustyline::error::ReadlineError::Eof) => {
+          let _result = events.blocking_send(TerminalEvent::Eof);
+          break;
+        }
+        Err(error) => {
+          let _result = events.blocking_send(TerminalEvent::Error(error.to_string()));
+          break;
+        }
+      }
+    }
+  }));
+}
+
+fn print_external(
+  state: &TerminalState,
+  message: String,
+) {
+  let printer = Arc::clone(&state.0.borrow().printer);
+  if let Ok(mut printer) = printer.lock()
+    && let Some(printer) = printer.as_mut()
+    && printer.print(message.clone()).is_ok()
+  {
+    return;
+  }
+  println!("{message}");
+}
+
+fn object(prototype: Value) -> Value {
+  Value::Object(gc::track_object(Rc::new(RefCell::new(
+    ObjectData::with_prototype(prototype),
+  ))))
+}
+
+fn set(
+  target: &Value,
+  name: &str,
+  value: Value,
+) {
+  let Value::Object(properties) = target else {
+    return;
+  };
+  properties.borrow_mut().properties.insert(
+    PropertyKey::String(name.to_string()),
+    PropertyDescriptor::data(value),
+  );
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use blitz::compiler;
+  use blitz::parser::Parser as JsParser;
+
+  #[test]
+  fn installs_buffered_terminal_api() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let blitz = object(vm.realm().object_prototype());
+    vm.realm().set_global("Blitz", blitz);
+    let (events, _receiver) = mpsc::channel(1);
+    let state = install(&mut vm, events);
+    assert!(!state.is_active());
+    let blitz = vm.get_global("Blitz").expect("Blitz global");
+    for (container, methods) in [
+      ("stdin", &["onLine", "onClose", "setPrompt", "close"][..]),
+      ("stdout", &["write", "writeLine"][..]),
+    ] {
+      let object = vm
+        .get_property_host(&blitz, &PropertyKey::String(container.to_string()))
+        .unwrap_or_else(|_| panic!("read Blitz.{container}"));
+      for method in methods {
+        let value = vm
+          .get_property_host(&object, &PropertyKey::String((*method).to_string()))
+          .unwrap_or_else(|_| panic!("read Blitz.{container}.{method}"));
+        assert!(value.is_callable());
+      }
+    }
+  }
+
+  #[test]
+  fn dispatches_line_to_capture_free_persistent_handler() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    globals.borrow_mut().properties.insert(
+      PropertyKey::String("globalThis".to_string()),
+      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+    );
+    let mut vm = Vm::new(globals);
+    let blitz = object(vm.realm().object_prototype());
+    vm.realm().set_global("Blitz", blitz);
+    let (events, _receiver) = mpsc::channel(1);
+    let state = install(&mut vm, events);
+    let source = r#"
+      globalThis.sentLine = "";
+      globalThis.chatSocket = {
+        OPEN: 1,
+        readyState: 1,
+        send: function(value) { globalThis.sentLine = value; }
+      };
+      function handleInput(line) {
+        const activeSocket = globalThis.chatSocket;
+        activeSocket.send(`MSG ${line}`);
+      }
+    "#;
+    let session = JsParser::parse_source(source).expect("parse terminal callback");
+    let chunk =
+      compiler::compile_oxc(session.program(), source).expect("compile terminal callback");
+    vm.run(chunk).expect("define terminal callback");
+    state.0.borrow_mut().callback = vm.get_global("handleInput");
+    state
+      .dispatch(&mut vm, TerminalEvent::Line("meow".to_string()))
+      .expect("dispatch terminal line");
+    assert_eq!(
+      vm.get_global("sentLine"),
+      Some(Value::String("MSG meow".to_string()))
+    );
+  }
+}

@@ -132,6 +132,9 @@ mod tests {
         ],
         env: BTreeMap::from([("BLITZ_HOST_TEST".to_string(), "works".to_string())]),
         exec_path: "/runtime/blitz".to_string(),
+        listen_addr: "127.0.0.1:0"
+          .parse()
+          .expect("test listen address"),
       },
     );
 

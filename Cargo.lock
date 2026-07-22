@@ -170,6 +170,8 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rustyline",
+ "serde_json",
  "tokio",
 ]
 

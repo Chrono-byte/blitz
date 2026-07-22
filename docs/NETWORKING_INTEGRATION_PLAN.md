@@ -4,9 +4,9 @@
 
 Add production-grade networking without moving host policy into
 `blitz-engine` or allowing I/O tasks to mutate VM state. The first implemented
-slice is a runtime-owned WebSocket server transport. HTTP serving, outbound
-`fetch`, WebSocket clients, TLS, and Node compatibility build on the same
-runtime event boundary.
+slice includes runtime-owned WebSocket client/server and HTTP server transports
+plus a VM-thread `Blitz.serve` route API. Outbound `fetch`, TLS, and Node
+compatibility build on the same runtime event boundary.
 
 ## Decisions
 
@@ -36,9 +36,48 @@ runtime event boundary.
 - graceful server shutdown using close code 1001; and
 - accounting that waits for active upgraded connections to finish.
 
-The implementation intentionally does not install a JavaScript global yet.
-The VM event-loop/resource registry must land before callbacks are exposed so
-network activity, promises, microtasks, and CLI liveness share one scheduler.
+`crates/blitz-runtime/src/net/http.rs` and the host adapter now provide:
+
+- bounded HTTP request handoff to the VM thread;
+- Deno-style `Blitz.serve(handler)` and `Blitz.serve(options, handler)` calls;
+- handlers receiving `(request, info)` with remote TCP address metadata;
+- request objects with `url`, `method`, `path`, `query`, UTF-8 `body`, `text()`,
+  `json()`, and mutable `Headers`;
+- returned `Response` objects, including synchronously settling async handlers,
+  with body, status, status text, headers, `ok`, `text()`, and `json()`;
+- Deno-style `Blitz.upgradeWebSocket(request)` on the HTTP listener;
+- VM-thread WebSocket `open`, `message`, `close`, and `error` dispatch through
+  both `on*` properties and `addEventListener`;
+- bounded `send()`, validated `close()`, binary byte arrays, lifecycle state,
+  and buffered-byte accounting;
+- outbound `new WebSocket("ws://...")` clients over the same event path;
+- prompt-safe buffered terminal input/output through `Blitz.stdin` and
+  `Blitz.stdout`;
+- a CLI runtime driver that keeps scripts with an HTTP server alive; and
+- `BLITZ_HOST`/`BLITZ_PORT` configuration, defaulting to `127.0.0.1:8000`.
+
+Pass the handler function directly:
+
+```js
+function callbackFunc(request, info) {
+  return new Response(
+    `Hello from ${request.url} via ${info.remoteAddr.transport}`,
+  );
+}
+
+Blitz.serve({ hostname: "127.0.0.1", port: 8000 }, callbackFunc);
+```
+
+```js
+Blitz.serve((request) => {
+  const { socket, response } = Blitz.upgradeWebSocket(request);
+  socket.onmessage = (event) => socket.send(event.data);
+  return response;
+});
+```
+
+The engine supplies the host-neutral WebSocket ready-state and buffered-byte
+state machine. Concrete sockets and all I/O remain in `blitz-runtime`.
 
 ## Target architecture
 
@@ -172,9 +211,11 @@ semantics.
 
 ## Known gaps after the first slice
 
-- No JavaScript server API or runtime event-loop driver yet.
-- No TLS or HTTP request handling beyond WebSocket upgrades.
-- No WebSocket client API.
+- HTTP requests are currently buffered up to 1 MiB; streaming bodies and
+  responses are not implemented yet.
+- WebSocket clients currently support unencrypted `ws://` URLs only.
+- WebSocket subprotocol negotiation, compression, and idle-timeout options are
+  not exposed to JavaScript yet.
 - No listen/connect permission model.
 - FastWebSockets' per-frame guard and the runtime's aggregate fragmented-message
   guard are separate. Keep both layers covered as configuration evolves.

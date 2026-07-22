@@ -315,6 +315,7 @@ pub(super) fn get_global_bg_runtime() -> Arc<Runtime> {
     let rt = tokio::runtime::Builder::new_multi_thread()
       .worker_threads(threads)
       .thread_name("blitz-bg")
+      .enable_all()
       .build()
       .expect("Failed to build Tokio runtime for VM background tasks");
 

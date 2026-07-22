@@ -1,0 +1,1178 @@
+//! `Blitz.serve` HTTP routing and VM callback bridge.
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::rc::Rc;
+
+use blitz::Vm;
+use blitz::errors::RuntimeError;
+use blitz::gc;
+use blitz::value::{
+  ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value,
+};
+use blitz::websocket::{WebSocketReadyState, WebSocketState};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::watch;
+
+use crate::net::http::{HttpRequestEvent, HttpResponse, HttpServer};
+use crate::net::websocket::{
+  WebSocketCommand, WebSocketEvent, WebSocketServerOptions, connect_client,
+};
+
+struct WebSocketResource {
+  object: Value,
+  state: WebSocketState,
+  commands: Option<mpsc::Sender<WebSocketCommand>>,
+  shutdown: Option<watch::Sender<bool>>,
+  listeners: BTreeMap<String, Vec<Value>>,
+}
+
+struct ServerInner {
+  listen_addr: SocketAddr,
+  local_addr: Option<SocketAddr>,
+  handler: Option<Value>,
+  requests: mpsc::Sender<HttpRequestEvent>,
+  websocket_events: mpsc::Sender<WebSocketEvent>,
+  server: Option<HttpServer>,
+  current_websocket_id: Option<u64>,
+  websockets: BTreeMap<u64, WebSocketResource>,
+  next_client_id: u64,
+}
+
+/// VM-thread state for registered routes and the server resource.
+#[derive(Clone)]
+pub(super) struct ServerState(Rc<RefCell<ServerInner>>);
+
+impl ServerState {
+  pub(super) fn has_server(&self) -> bool {
+    self.0.borrow().server.is_some()
+  }
+
+  pub(super) fn has_resources(&self) -> bool {
+    let inner = self.0.borrow();
+    inner.server.is_some() || !inner.websockets.is_empty()
+  }
+
+  pub(super) fn shutdown_websockets(&self) {
+    let inner = self.0.borrow();
+    for resource in inner.websockets.values() {
+      if let Some(shutdown) = &resource.shutdown {
+        let _result = shutdown.send(true);
+      }
+    }
+  }
+
+  pub(super) fn local_addr(&self) -> Option<SocketAddr> {
+    self.0.borrow().local_addr
+  }
+
+  pub(super) fn take_server(&self) -> Option<HttpServer> {
+    let mut inner = self.0.borrow_mut();
+    inner.local_addr = None;
+    inner.server.take()
+  }
+
+  pub(super) fn dispatch(
+    &self,
+    vm: &mut Vm,
+    event: HttpRequestEvent,
+  ) -> Result<(), RuntimeError> {
+    let callback = self.0.borrow().handler.clone();
+    let Some(callback) = callback else {
+      event.respond(HttpResponse::text(404, "Not Found"));
+      return Ok(());
+    };
+
+    let websocket_id = event.websocket_id();
+    self.0.borrow_mut().current_websocket_id = websocket_id;
+    let request = request_object(vm, &event);
+    let info = handler_info_object(vm, event.remote_addr);
+    let result = match vm.call_value_with_this(&callback, &Value::Undefined, &[request, info]) {
+      Ok(result) => result,
+      Err(_error) => {
+        self.0.borrow_mut().current_websocket_id = None;
+        event.respond(HttpResponse::text(500, "Internal Server Error"));
+        return Ok(());
+      }
+    };
+    let result = match vm.await_value(result) {
+      Ok(result) => result,
+      Err(_error) => {
+        self.0.borrow_mut().current_websocket_id = None;
+        event.respond(HttpResponse::text(500, "Internal Server Error"));
+        return Ok(());
+      }
+    };
+    self.0.borrow_mut().current_websocket_id = None;
+    match response_from_value(vm, &result) {
+      Ok(HandlerResponse::Http(response)) => event.respond(response),
+      Ok(HandlerResponse::WebSocket) => event.respond_websocket(),
+      Err(_) => event.respond(HttpResponse::text(500, "handler must return a Response")),
+    }
+    Ok(())
+  }
+
+  pub(super) fn dispatch_websocket(
+    &self,
+    vm: &mut Vm,
+    event: WebSocketEvent,
+  ) -> Result<(), RuntimeError> {
+    match event {
+      WebSocketEvent::Open {
+        connection_id,
+        commands,
+      } => {
+        let socket = {
+          let mut inner = self.0.borrow_mut();
+          let Some(resource) = inner.websockets.get_mut(&connection_id) else {
+            return Ok(());
+          };
+          resource.commands = Some(commands);
+          resource.state.open();
+          set_socket_state(resource);
+          resource.object.clone()
+        };
+        dispatch_socket_event(
+          vm,
+          &self.0,
+          connection_id,
+          &socket,
+          "open",
+          event_object(vm, "open"),
+        );
+      }
+      WebSocketEvent::Text {
+        connection_id,
+        text,
+      } => {
+        let Some(socket) = self.socket_object(connection_id) else {
+          return Ok(());
+        };
+        let message = event_object(vm, "message");
+        set(&message, "data", Value::String(text));
+        dispatch_socket_event(vm, &self.0, connection_id, &socket, "message", message);
+      }
+      WebSocketEvent::Binary {
+        connection_id,
+        data,
+      } => {
+        let Some(socket) = self.socket_object(connection_id) else {
+          return Ok(());
+        };
+        let message = event_object(vm, "message");
+        set(&message, "data", byte_array(vm, data));
+        dispatch_socket_event(vm, &self.0, connection_id, &socket, "message", message);
+      }
+      WebSocketEvent::Drain {
+        connection_id,
+        bytes,
+      } => {
+        if let Some(resource) = self
+          .0
+          .borrow_mut()
+          .websockets
+          .get_mut(&connection_id)
+        {
+          resource.state.drain_bytes(bytes);
+          set_socket_state(resource);
+        }
+      }
+      WebSocketEvent::Close {
+        connection_id,
+        code,
+        reason,
+      } => {
+        let socket = {
+          let mut inner = self.0.borrow_mut();
+          let Some(resource) = inner.websockets.get_mut(&connection_id) else {
+            return Ok(());
+          };
+          resource.state.finish_close();
+          resource.commands = None;
+          set_socket_state(resource);
+          resource.object.clone()
+        };
+        let close = event_object(vm, "close");
+        set(
+          &close,
+          "code",
+          Value::Number(f64::from(code.unwrap_or(1005))),
+        );
+        set(&close, "reason", Value::String(reason));
+        set(&close, "wasClean", Value::Bool(code.is_some()));
+        dispatch_socket_event(vm, &self.0, connection_id, &socket, "close", close);
+        self
+          .0
+          .borrow_mut()
+          .websockets
+          .remove(&connection_id);
+      }
+      WebSocketEvent::Error {
+        connection_id,
+        message,
+      } => {
+        let Some(socket) = self.socket_object(connection_id) else {
+          return Ok(());
+        };
+        let error = event_object(vm, "error");
+        set(&error, "message", Value::String(message));
+        dispatch_socket_event(vm, &self.0, connection_id, &socket, "error", error);
+      }
+    }
+    Ok(())
+  }
+
+  fn socket_object(
+    &self,
+    connection_id: u64,
+  ) -> Option<Value> {
+    self
+      .0
+      .borrow()
+      .websockets
+      .get(&connection_id)
+      .map(|resource| resource.object.clone())
+  }
+}
+
+pub(super) fn install(
+  vm: &mut Vm,
+  listen_addr: SocketAddr,
+  requests: mpsc::Sender<HttpRequestEvent>,
+  websocket_events: mpsc::Sender<WebSocketEvent>,
+) -> ServerState {
+  let state = ServerState(Rc::new(RefCell::new(ServerInner {
+    listen_addr,
+    local_addr: None,
+    handler: None,
+    requests,
+    websocket_events,
+    server: None,
+    current_websocket_id: None,
+    websockets: BTreeMap::new(),
+    next_client_id: 1_u64 << 53,
+  })));
+  let blitz = object(vm.realm().object_prototype());
+  set(&blitz, "serve", Value::Builtin(serve_method(state.clone())));
+  set(
+    &blitz,
+    "upgradeWebSocket",
+    Value::Builtin(upgrade_websocket_method(state.clone())),
+  );
+  vm.realm().set_global("Blitz", blitz);
+  install_response_constructor(vm);
+  install_headers_constructor(vm);
+  install_websocket_constructor(vm, state.clone());
+  state
+}
+
+fn serve_method(state: ServerState) -> BuiltinFn {
+  Rc::new(move |vm, args| {
+    let actual = args.get(1..).unwrap_or_default();
+    let default_addr = state.0.borrow().listen_addr;
+    let (address, callback) = serve_arguments(vm, actual, default_addr)?;
+
+    let needs_server = !state.has_server();
+    if needs_server {
+      let requests = state.0.borrow().requests.clone();
+      let websocket_events = state.0.borrow().websocket_events.clone();
+      let server = vm
+        .block_on(HttpServer::bind(
+          address,
+          requests,
+          websocket_events,
+          WebSocketServerOptions::default(),
+        ))?
+        .map_err(|error| RuntimeError::from(format!("failed to bind HTTP server: {error}")))?;
+      let local_addr = server.local_addr();
+      let mut inner = state.0.borrow_mut();
+      inner.local_addr = Some(local_addr);
+      inner.server = Some(server);
+    }
+    state.0.borrow_mut().handler = Some(callback);
+
+    let local_addr = state
+      .local_addr()
+      .ok_or_else(|| RuntimeError::from("HTTP server did not expose a bound address"))?;
+    let handle = object(vm.realm().object_prototype());
+    set(
+      &handle,
+      "hostname",
+      Value::String(local_addr.ip().to_string()),
+    );
+    set(&handle, "port", Value::Number(f64::from(local_addr.port())));
+    Ok(handle)
+  })
+}
+
+fn upgrade_websocket_method(state: ServerState) -> BuiltinFn {
+  Rc::new(move |vm, args| {
+    let request = args
+      .get(1)
+      .ok_or_else(|| RuntimeError::from("Blitz.upgradeWebSocket requires a Request"))?;
+    let id = vm.get_property_host(
+      request,
+      &PropertyKey::String("__blitz_websocket_id".to_string()),
+    )?;
+    let Value::String(id) = id else {
+      return Err(RuntimeError::from("request cannot be upgraded"));
+    };
+    let id = id
+      .parse::<u64>()
+      .map_err(|_| RuntimeError::from("invalid WebSocket request"))?;
+    {
+      let inner = state.0.borrow();
+      if inner.current_websocket_id != Some(id) || inner.websockets.contains_key(&id) {
+        return Err(RuntimeError::from("request cannot be upgraded"));
+      }
+    }
+
+    let url = vm.get_property_host(request, &PropertyKey::String("url".to_string()))?;
+    let url = vm
+      .to_string(&url)?
+      .replacen("http://", "ws://", 1);
+    let socket = websocket_object(vm, state.clone(), id, &url);
+    state.0.borrow_mut().websockets.insert(
+      id,
+      WebSocketResource {
+        object: socket.clone(),
+        state: WebSocketState::default(),
+        commands: None,
+        shutdown: None,
+        listeners: BTreeMap::new(),
+      },
+    );
+    let response = object(vm.realm().object_prototype());
+    set(&response, "__blitz_response", Value::Bool(true));
+    set(&response, "__blitz_upgrade_response", Value::Bool(true));
+    set(&response, "status", Value::Number(101.0));
+    set(&response, "body", Value::String(String::new()));
+    let result = object(vm.realm().object_prototype());
+    set(&result, "socket", socket);
+    set(&result, "response", response);
+    Ok(result)
+  })
+}
+
+fn serve_arguments(
+  vm: &mut Vm,
+  actual: &[Value],
+  default_addr: SocketAddr,
+) -> Result<(SocketAddr, Value), RuntimeError> {
+  let first = actual
+    .first()
+    .ok_or_else(|| RuntimeError::from("Blitz.serve requires a handler"))?;
+  if first.is_callable() {
+    return Ok((default_addr, first.clone()));
+  }
+
+  let callback = actual
+    .get(1)
+    .cloned()
+    .ok_or_else(|| RuntimeError::from("Blitz.serve requires a handler"))?;
+  if !callback.is_callable() {
+    return Err(RuntimeError::from("Blitz.serve handler must be callable"));
+  }
+  let Value::Object(_) = first else {
+    return Err(RuntimeError::from(
+      "Blitz.serve expects a handler or an options object and handler",
+    ));
+  };
+  let hostname = vm.get_property_host(first, &PropertyKey::String("hostname".to_string()))?;
+  let hostname = match hostname {
+    Value::Undefined => default_addr.ip().to_string(),
+    value => vm.to_string(&value)?,
+  };
+  let port = vm.get_property_host(first, &PropertyKey::String("port".to_string()))?;
+  let port = match port {
+    Value::Undefined => default_addr.port(),
+    Value::Number(port) if port.is_finite() && port.fract() == 0.0 => port
+      .to_string()
+      .parse::<u16>()
+      .map_err(|_| RuntimeError::from("Blitz.serve port must be between 0 and 65535"))?,
+    _ => return Err(RuntimeError::from("Blitz.serve port must be an integer")),
+  };
+  let address = format!("{hostname}:{port}")
+    .parse::<SocketAddr>()
+    .map_err(|_| RuntimeError::from("Blitz.serve hostname must be an IP address"))?;
+  Ok((address, callback))
+}
+
+fn request_object(
+  vm: &Vm,
+  event: &HttpRequestEvent,
+) -> Value {
+  let request = object(vm.realm().object_prototype());
+  set(&request, "method", Value::String(event.method.clone()));
+  set(&request, "path", Value::String(event.path.clone()));
+  set(&request, "url", Value::String(event.url.clone()));
+  if let Some(id) = event.websocket_id() {
+    set(
+      &request,
+      "__blitz_websocket_id",
+      Value::String(id.to_string()),
+    );
+  }
+  set(&request, "headers", headers_object(vm, &event.headers));
+  set(
+    &request,
+    "query",
+    event
+      .query
+      .as_ref()
+      .map_or(Value::Null, |query| Value::String(query.clone())),
+  );
+  set(
+    &request,
+    "body",
+    Value::String(String::from_utf8_lossy(&event.body).into_owned()),
+  );
+  let body = String::from_utf8_lossy(&event.body).into_owned();
+  let text: BuiltinFn =
+    Rc::new(move |_vm, _args| Ok(resolved_promise(Value::String(body.clone()))));
+  set(&request, "text", Value::Builtin(text));
+  let body = String::from_utf8_lossy(&event.body).into_owned();
+  let json: BuiltinFn = Rc::new(move |vm, _args| Ok(json_promise(vm, &body)));
+  set(&request, "json", Value::Builtin(json));
+  request
+}
+
+fn websocket_object(
+  vm: &Vm,
+  state: ServerState,
+  connection_id: u64,
+  url: &str,
+) -> Value {
+  let socket = object(vm.realm().object_prototype());
+  set(&socket, "readyState", Value::Number(0.0));
+  set(&socket, "bufferedAmount", Value::Number(0.0));
+  set(
+    &socket,
+    "binaryType",
+    Value::String("arraybuffer".to_string()),
+  );
+  set(&socket, "protocol", Value::String(String::new()));
+  set(&socket, "extensions", Value::String(String::new()));
+  set(&socket, "url", Value::String(url.to_string()));
+  set(&socket, "CONNECTING", Value::Number(0.0));
+  set(&socket, "OPEN", Value::Number(1.0));
+  set(&socket, "CLOSING", Value::Number(2.0));
+  set(&socket, "CLOSED", Value::Number(3.0));
+
+  let send_state = state.clone();
+  let send: BuiltinFn = Rc::new(move |vm, args| {
+    let data = args
+      .get(1)
+      .ok_or_else(|| RuntimeError::from("WebSocket.send requires data"))?;
+    let command = match data {
+      Value::Array(elements, _) => {
+        let mut bytes = Vec::new();
+        for element in elements.borrow().clone_elements() {
+          let Some(Value::Number(value)) = element else {
+            return Err(RuntimeError::from(
+              "binary WebSocket data must contain bytes",
+            ));
+          };
+          let byte = value
+            .to_string()
+            .parse::<u8>()
+            .map_err(|_| RuntimeError::from("binary WebSocket data must contain bytes"))?;
+          bytes.push(byte);
+        }
+        WebSocketCommand::Binary(bytes)
+      }
+      value => WebSocketCommand::Text(vm.to_string(value)?),
+    };
+    send_websocket_command(&send_state, connection_id, command)?;
+    Ok(Value::Undefined)
+  });
+  set(&socket, "send", Value::Builtin(send));
+
+  let close_state = state.clone();
+  let close: BuiltinFn = Rc::new(move |vm, args| {
+    let code = match args.get(1) {
+      None | Some(Value::Undefined) => 1000,
+      Some(Value::Number(code)) if code.fract() == 0.0 => code
+        .to_string()
+        .parse::<u16>()
+        .map_err(|_| RuntimeError::from("invalid WebSocket close code"))?,
+      _ => return Err(RuntimeError::from("invalid WebSocket close code")),
+    };
+    if code != 1000 && !(3000..=4999).contains(&code) {
+      return Err(RuntimeError::from("invalid WebSocket close code"));
+    }
+    let reason = args
+      .get(2)
+      .map_or_else(|| Ok(String::new()), |value| vm.to_string(value))?;
+    if reason.len() > 123 {
+      return Err(RuntimeError::from(
+        "WebSocket close reason exceeds 123 bytes",
+      ));
+    }
+    send_websocket_command(
+      &close_state,
+      connection_id,
+      WebSocketCommand::Close { code, reason },
+    )?;
+    if let Some(resource) = close_state
+      .0
+      .borrow_mut()
+      .websockets
+      .get_mut(&connection_id)
+    {
+      resource.state.begin_close();
+      set_socket_state(resource);
+    }
+    Ok(Value::Undefined)
+  });
+  set(&socket, "close", Value::Builtin(close));
+
+  let listener_state = state.clone();
+  let add_listener: BuiltinFn = Rc::new(move |vm, args| {
+    let event_type = args
+      .get(1)
+      .ok_or_else(|| RuntimeError::from("addEventListener requires an event type"))?;
+    let callback = args
+      .get(2)
+      .cloned()
+      .ok_or_else(|| RuntimeError::from("addEventListener requires a callback"))?;
+    if !callback.is_callable() {
+      return Ok(Value::Undefined);
+    }
+    let event_type = vm.to_string(event_type)?;
+    if let Some(resource) = listener_state
+      .0
+      .borrow_mut()
+      .websockets
+      .get_mut(&connection_id)
+    {
+      resource
+        .listeners
+        .entry(event_type)
+        .or_default()
+        .push(callback);
+    }
+    Ok(Value::Undefined)
+  });
+  set(&socket, "addEventListener", Value::Builtin(add_listener));
+
+  let listener_state = state;
+  let remove_listener: BuiltinFn = Rc::new(move |vm, args| {
+    let Some(event_type) = args.get(1) else {
+      return Ok(Value::Undefined);
+    };
+    let Some(callback) = args.get(2) else {
+      return Ok(Value::Undefined);
+    };
+    let event_type = vm.to_string(event_type)?;
+    if let Some(listeners) = listener_state
+      .0
+      .borrow_mut()
+      .websockets
+      .get_mut(&connection_id)
+      .and_then(|resource| resource.listeners.get_mut(&event_type))
+    {
+      listeners.retain(|listener| listener != callback);
+    }
+    Ok(Value::Undefined)
+  });
+  set(
+    &socket,
+    "removeEventListener",
+    Value::Builtin(remove_listener),
+  );
+  socket
+}
+
+fn send_websocket_command(
+  state: &ServerState,
+  connection_id: u64,
+  command: WebSocketCommand,
+) -> Result<(), RuntimeError> {
+  let amount = match &command {
+    WebSocketCommand::Text(text) => text.len(),
+    WebSocketCommand::Binary(data) => data.len(),
+    WebSocketCommand::Close { .. } => 0,
+  };
+  let commands = {
+    let mut inner = state.0.borrow_mut();
+    let resource = inner
+      .websockets
+      .get_mut(&connection_id)
+      .ok_or_else(|| RuntimeError::from("WebSocket is closed"))?;
+    if resource.state.ready_state() != WebSocketReadyState::Open {
+      return Err(RuntimeError::from("WebSocket is not open"));
+    }
+    if amount > 0 && !resource.state.queue_bytes(amount) {
+      return Err(RuntimeError::from("WebSocket buffered amount overflow"));
+    }
+    set_socket_state(resource);
+    resource
+      .commands
+      .clone()
+      .ok_or_else(|| RuntimeError::from("WebSocket is not open"))?
+  };
+  commands.try_send(command).map_err(|error| {
+    if let Some(resource) = state
+      .0
+      .borrow_mut()
+      .websockets
+      .get_mut(&connection_id)
+    {
+      resource.state.drain_bytes(amount);
+      set_socket_state(resource);
+    }
+    match error {
+      TrySendError::Full(_) => RuntimeError::from("WebSocket send queue is full"),
+      TrySendError::Closed(_) => RuntimeError::from("WebSocket is closed"),
+    }
+  })
+}
+
+fn set_socket_state(resource: &WebSocketResource) {
+  set(
+    &resource.object,
+    "readyState",
+    Value::Number(f64::from(resource.state.ready_state() as u8)),
+  );
+  set(
+    &resource.object,
+    "bufferedAmount",
+    Value::Number(
+      resource
+        .state
+        .buffered_amount()
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or(f64::MAX),
+    ),
+  );
+}
+
+fn dispatch_socket_event(
+  vm: &mut Vm,
+  state: &Rc<RefCell<ServerInner>>,
+  connection_id: u64,
+  socket: &Value,
+  event_type: &str,
+  event: Value,
+) {
+  let property = format!("on{event_type}");
+  if let Ok(callback) = vm.get_property_host(socket, &PropertyKey::String(property))
+    && callback.is_callable()
+  {
+    let _result = vm.call_value_with_this(&callback, socket, std::slice::from_ref(&event));
+  }
+  let listeners = state
+    .borrow()
+    .websockets
+    .get(&connection_id)
+    .and_then(|resource| resource.listeners.get(event_type))
+    .cloned()
+    .unwrap_or_default();
+  for listener in listeners {
+    let _result = vm.call_value_with_this(&listener, socket, std::slice::from_ref(&event));
+  }
+}
+
+fn event_object(
+  vm: &Vm,
+  event_type: &str,
+) -> Value {
+  let event = object(vm.realm().object_prototype());
+  set(&event, "type", Value::String(event_type.to_string()));
+  event
+}
+
+fn byte_array(
+  vm: &Vm,
+  data: Vec<u8>,
+) -> Value {
+  let elements = data
+    .into_iter()
+    .map(|byte| Some(Value::Number(f64::from(byte))))
+    .collect();
+  Value::Array(
+    gc::track_array(Rc::new(RefCell::new(ArrayData::new(elements)))),
+    gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
+      vm.realm().array_prototype(),
+    )))),
+  )
+}
+
+fn headers_object(
+  vm: &Vm,
+  entries: &[(String, String)],
+) -> Value {
+  let values = Rc::new(RefCell::new(
+    entries
+      .iter()
+      .cloned()
+      .collect::<BTreeMap<_, _>>(),
+  ));
+  let headers = object(vm.realm().object_prototype());
+  for (name, value) in entries {
+    set(&headers, name, Value::String(value.clone()));
+  }
+
+  let get_values = Rc::clone(&values);
+  let get: BuiltinFn = Rc::new(move |vm, args| {
+    let Some(name) = args.get(1) else {
+      return Ok(Value::Null);
+    };
+    let name = vm.to_string(name)?.to_ascii_lowercase();
+    Ok(
+      get_values
+        .borrow()
+        .get(&name)
+        .map_or(Value::Null, |value| Value::String(value.clone())),
+    )
+  });
+  set(&headers, "get", Value::Builtin(get));
+
+  let has_values = Rc::clone(&values);
+  let has: BuiltinFn = Rc::new(move |vm, args| {
+    let Some(name) = args.get(1) else {
+      return Ok(Value::Bool(false));
+    };
+    let name = vm.to_string(name)?.to_ascii_lowercase();
+    Ok(Value::Bool(has_values.borrow().contains_key(&name)))
+  });
+  set(&headers, "has", Value::Builtin(has));
+
+  let set_values = Rc::clone(&values);
+  let set_header: BuiltinFn = Rc::new(move |vm, args| {
+    let name = args
+      .get(1)
+      .ok_or_else(|| RuntimeError::from("Headers.set requires a name"))?;
+    let value = args
+      .get(2)
+      .ok_or_else(|| RuntimeError::from("Headers.set requires a value"))?;
+    let name = vm.to_string(name)?.to_ascii_lowercase();
+    let value = vm.to_string(value)?;
+    set_values
+      .borrow_mut()
+      .insert(name.clone(), value.clone());
+    if let Some(receiver) = args.first() {
+      set(receiver, &name, Value::String(value));
+    }
+    Ok(Value::Undefined)
+  });
+  set(&headers, "set", Value::Builtin(set_header));
+
+  let append_values = Rc::clone(&values);
+  let append: BuiltinFn = Rc::new(move |vm, args| {
+    let name = args
+      .get(1)
+      .ok_or_else(|| RuntimeError::from("Headers.append requires a name"))?;
+    let value = args
+      .get(2)
+      .ok_or_else(|| RuntimeError::from("Headers.append requires a value"))?;
+    let name = vm.to_string(name)?.to_ascii_lowercase();
+    let value = vm.to_string(value)?;
+    let combined = {
+      let mut values = append_values.borrow_mut();
+      let entry = values.entry(name.clone()).or_default();
+      if !entry.is_empty() {
+        entry.push_str(", ");
+      }
+      entry.push_str(&value);
+      entry.clone()
+    };
+    if let Some(receiver) = args.first() {
+      set(receiver, &name, Value::String(combined));
+    }
+    Ok(Value::Undefined)
+  });
+  set(&headers, "append", Value::Builtin(append));
+
+  let delete_values = Rc::clone(&values);
+  let delete: BuiltinFn = Rc::new(move |vm, args| {
+    let Some(name) = args.get(1) else {
+      return Ok(Value::Undefined);
+    };
+    let name = vm.to_string(name)?.to_ascii_lowercase();
+    delete_values.borrow_mut().remove(&name);
+    if let Some(Value::Object(receiver)) = args.first() {
+      receiver
+        .borrow_mut()
+        .properties
+        .shift_remove(&PropertyKey::String(name));
+    }
+    Ok(Value::Undefined)
+  });
+  set(&headers, "delete", Value::Builtin(delete));
+
+  let for_each_values = values;
+  let for_each: BuiltinFn = Rc::new(move |vm, args| {
+    let callback = args
+      .get(1)
+      .ok_or_else(|| RuntimeError::from("Headers.forEach requires a callback"))?;
+    if !callback.is_callable() {
+      return Err(RuntimeError::from(
+        "Headers.forEach callback must be callable",
+      ));
+    }
+    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+    for (name, value) in for_each_values.borrow().clone() {
+      vm.call_value_with_this(
+        callback,
+        &Value::Undefined,
+        &[Value::String(value), Value::String(name), receiver.clone()],
+      )?;
+    }
+    Ok(Value::Undefined)
+  });
+  set(&headers, "forEach", Value::Builtin(for_each));
+  headers
+}
+
+fn handler_info_object(
+  vm: &Vm,
+  remote_addr: SocketAddr,
+) -> Value {
+  let info = object(vm.realm().object_prototype());
+  let address = object(vm.realm().object_prototype());
+  set(
+    &address,
+    "hostname",
+    Value::String(remote_addr.ip().to_string()),
+  );
+  set(
+    &address,
+    "port",
+    Value::Number(f64::from(remote_addr.port())),
+  );
+  set(&address, "transport", Value::String("tcp".to_string()));
+  set(&info, "remoteAddr", address);
+  info
+}
+
+enum HandlerResponse {
+  Http(HttpResponse),
+  WebSocket,
+}
+
+fn response_from_value(
+  vm: &mut Vm,
+  value: &Value,
+) -> Result<HandlerResponse, RuntimeError> {
+  match value {
+    Value::Object(_) => {
+      let marker =
+        vm.get_property_host(value, &PropertyKey::String("__blitz_response".to_string()))?;
+      if !matches!(marker, Value::Bool(true)) {
+        return Err(RuntimeError::from("handler must return a Response"));
+      }
+      let upgrade = vm.get_property_host(
+        value,
+        &PropertyKey::String("__blitz_upgrade_response".to_string()),
+      )?;
+      if matches!(upgrade, Value::Bool(true)) {
+        return Ok(HandlerResponse::WebSocket);
+      }
+      let status = vm.get_property_host(value, &PropertyKey::String("status".to_string()))?;
+      let status = match status {
+        Value::Number(status)
+          if status.is_finite() && status.fract() == 0.0 && (100.0..=599.0).contains(&status) =>
+        {
+          status.to_string().parse::<u16>().unwrap_or(200)
+        }
+        _ => 200,
+      };
+      let body = vm.get_property_host(value, &PropertyKey::String("body".to_string()))?;
+      let body = if matches!(body, Value::Undefined) {
+        String::new()
+      } else {
+        vm.to_string(&body)?
+      };
+      let headers = vm.get_property_host(value, &PropertyKey::String("headers".to_string()))?;
+      let mut response = HttpResponse::text(status, body);
+      let supplied_headers = extract_header_entries(vm, &headers)?;
+      if !supplied_headers.is_empty() {
+        response.headers = supplied_headers;
+      }
+      Ok(HandlerResponse::Http(response))
+    }
+    _ => Err(RuntimeError::from("handler must return a Response")),
+  }
+}
+
+fn install_websocket_constructor(
+  vm: &mut Vm,
+  state: ServerState,
+) {
+  let prototype = object(vm.realm().object_prototype());
+  let constructor_state = state;
+  let constructor: BuiltinFn = Rc::new(move |vm, args| {
+    let url = args
+      .get(1)
+      .ok_or_else(|| RuntimeError::from("WebSocket requires a URL"))?;
+    let url = vm.to_string(url)?;
+    if !url.starts_with("ws://") {
+      return Err(RuntimeError::from(
+        "WebSocket currently supports ws:// URLs only",
+      ));
+    }
+    let (connection_id, events) = {
+      let mut inner = constructor_state.0.borrow_mut();
+      let connection_id = inner.next_client_id;
+      inner.next_client_id = inner
+        .next_client_id
+        .checked_add(1)
+        .ok_or_else(|| RuntimeError::from("WebSocket connection ID overflow"))?;
+      (connection_id, inner.websocket_events.clone())
+    };
+    let socket = websocket_object(vm, constructor_state.clone(), connection_id, &url);
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    constructor_state
+      .0
+      .borrow_mut()
+      .websockets
+      .insert(
+        connection_id,
+        WebSocketResource {
+          object: socket.clone(),
+          state: WebSocketState::default(),
+          commands: None,
+          shutdown: Some(shutdown),
+          listeners: BTreeMap::new(),
+        },
+      );
+    vm.spawn_bg(connect_client(
+      connection_id,
+      url,
+      events,
+      WebSocketServerOptions::default(),
+      shutdown_rx,
+    ));
+    Ok(socket)
+  });
+  let props = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
+    vm.realm().function_prototype(),
+  ))));
+  for (name, value) in [
+    ("CONNECTING", 0.0),
+    ("OPEN", 1.0),
+    ("CLOSING", 2.0),
+    ("CLOSED", 3.0),
+  ] {
+    props.borrow_mut().properties.insert(
+      PropertyKey::String(name.to_string()),
+      PropertyDescriptor::data(Value::Number(value)),
+    );
+  }
+  props.borrow_mut().properties.insert(
+    PropertyKey::String("prototype".to_string()),
+    PropertyDescriptor::data(prototype),
+  );
+  vm.realm()
+    .set_global("WebSocket", Value::BuiltinObject(constructor, props));
+}
+
+fn install_response_constructor(vm: &mut Vm) {
+  let object_prototype = vm.realm().object_prototype();
+  let prototype = object(object_prototype);
+  let instance_prototype = prototype.clone();
+  let constructor: BuiltinFn = Rc::new(move |vm, args| {
+    let actual = args.get(1..).unwrap_or_default();
+    let response = object(instance_prototype.clone());
+    let body = match actual.first() {
+      None | Some(Value::Null | Value::Undefined) => String::new(),
+      Some(value) => vm.to_string(value)?,
+    };
+    let status = if let Some(init @ Value::Object(_)) = actual.get(1) {
+      match vm.get_property_host(init, &PropertyKey::String("status".to_string()))? {
+        Value::Number(status) => status,
+        _ => 200.0,
+      }
+    } else {
+      200.0
+    };
+    if !status.is_finite() || status.fract() != 0.0 || !(200.0..=599.0).contains(&status) {
+      return Err(RuntimeError::from(
+        "Response status must be between 200 and 599",
+      ));
+    }
+    let (status_text, header_entries) = if let Some(init @ Value::Object(_)) = actual.get(1) {
+      let status_text =
+        vm.get_property_host(init, &PropertyKey::String("statusText".to_string()))?;
+      let status_text = if matches!(status_text, Value::Undefined) {
+        String::new()
+      } else {
+        vm.to_string(&status_text)?
+      };
+      let headers = vm.get_property_host(init, &PropertyKey::String("headers".to_string()))?;
+      (status_text, extract_header_entries(vm, &headers)?)
+    } else {
+      (String::new(), Vec::new())
+    };
+    let headers = headers_object(vm, &header_entries);
+    set(&response, "__blitz_response", Value::Bool(true));
+    set(&response, "body", Value::String(body.clone()));
+    set(&response, "status", Value::Number(status));
+    set(&response, "statusText", Value::String(status_text));
+    set(&response, "headers", headers);
+    set(
+      &response,
+      "ok",
+      Value::Bool((200.0..=299.0).contains(&status)),
+    );
+    set(&response, "redirected", Value::Bool(false));
+    set(&response, "type", Value::String("default".to_string()));
+    set(&response, "url", Value::String(String::new()));
+    set(&response, "bodyUsed", Value::Bool(false));
+    let text: BuiltinFn =
+      Rc::new(move |_vm, _args| Ok(resolved_promise(Value::String(body.clone()))));
+    set(&response, "text", Value::Builtin(text));
+    let json_body =
+      match vm.get_property_host(&response, &PropertyKey::String("body".to_string()))? {
+        Value::String(body) => body,
+        _ => String::new(),
+      };
+    let json: BuiltinFn = Rc::new(move |vm, _args| Ok(json_promise(vm, &json_body)));
+    set(&response, "json", Value::Builtin(json));
+    Ok(response)
+  });
+  let props = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
+    vm.realm().function_prototype(),
+  ))));
+  props.borrow_mut().properties.insert(
+    PropertyKey::String("prototype".to_string()),
+    PropertyDescriptor::data(prototype),
+  );
+  vm.realm()
+    .set_global("Response", Value::BuiltinObject(constructor, props));
+}
+
+fn install_headers_constructor(vm: &mut Vm) {
+  let prototype = object(vm.realm().object_prototype());
+  let constructor: BuiltinFn = Rc::new(move |vm, args| {
+    let entries = match args.get(1) {
+      None | Some(Value::Undefined | Value::Null) => Vec::new(),
+      Some(init) => extract_header_entries(vm, init)?,
+    };
+    Ok(headers_object(vm, &entries))
+  });
+  let props = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
+    vm.realm().function_prototype(),
+  ))));
+  props.borrow_mut().properties.insert(
+    PropertyKey::String("prototype".to_string()),
+    PropertyDescriptor::data(prototype),
+  );
+  vm.realm()
+    .set_global("Headers", Value::BuiltinObject(constructor, props));
+}
+
+fn extract_header_entries(
+  vm: &mut Vm,
+  value: &Value,
+) -> Result<Vec<(String, String)>, RuntimeError> {
+  let Value::Object(properties) = value else {
+    if matches!(value, Value::Undefined | Value::Null) {
+      return Ok(Vec::new());
+    }
+    return Err(RuntimeError::from("headers must be an object"));
+  };
+  // Collect first so the object borrow is released before string conversion mutates the VM.
+  #[allow(clippy::needless_collect)]
+  let entries = properties
+    .borrow()
+    .properties
+    .iter()
+    .filter_map(|(key, descriptor)| {
+      let PropertyKey::String(name) = key else {
+        return None;
+      };
+      let PropertyDescriptor::Data { value, .. } = descriptor else {
+        return None;
+      };
+      if value.is_callable() || name.starts_with("__blitz_") {
+        return None;
+      }
+      Some((name.to_ascii_lowercase(), value.clone()))
+    })
+    .collect::<Vec<_>>();
+  entries
+    .into_iter()
+    .map(|(name, value)| vm.to_string(&value).map(|value| (name, value)))
+    .collect()
+}
+
+fn resolved_promise(value: Value) -> Value {
+  Value::Promise(gc::track_promise(Rc::new(RefCell::new(
+    PromiseState::Fulfilled(value),
+  ))))
+}
+
+fn json_promise(
+  vm: &mut Vm,
+  body: &str,
+) -> Value {
+  match serde_json::from_str::<serde_json::Value>(body) {
+    Ok(value) => resolved_promise(json_to_value(vm, value)),
+    Err(error) => {
+      let reason = Value::String(error.to_string());
+      Value::Promise(gc::track_promise(Rc::new(RefCell::new(
+        PromiseState::Rejected {
+          reason,
+          handled: true,
+        },
+      ))))
+    }
+  }
+}
+
+fn json_to_value(
+  vm: &Vm,
+  value: serde_json::Value,
+) -> Value {
+  match value {
+    serde_json::Value::Null => Value::Null,
+    serde_json::Value::Bool(value) => Value::Bool(value),
+    serde_json::Value::Number(value) => Value::Number(value.as_f64().unwrap_or(f64::NAN)),
+    serde_json::Value::String(value) => Value::String(value),
+    serde_json::Value::Array(values) => {
+      let elements = values
+        .into_iter()
+        .map(|value| Some(json_to_value(vm, value)))
+        .collect();
+      Value::Array(
+        gc::track_array(Rc::new(RefCell::new(ArrayData::new(elements)))),
+        gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
+          vm.realm().array_prototype(),
+        )))),
+      )
+    }
+    serde_json::Value::Object(values) => {
+      let object = object(vm.realm().object_prototype());
+      for (name, value) in values {
+        set(&object, &name, json_to_value(vm, value));
+      }
+      object
+    }
+  }
+}
+
+fn object(prototype: Value) -> Value {
+  Value::Object(gc::track_object(Rc::new(RefCell::new(
+    ObjectData::with_prototype(prototype),
+  ))))
+}
+
+fn set(
+  target: &Value,
+  name: &str,
+  value: Value,
+) {
+  let Value::Object(properties) = target else {
+    return;
+  };
+  properties.borrow_mut().properties.insert(
+    PropertyKey::String(name.to_string()),
+    PropertyDescriptor::data(value),
+  );
+}
