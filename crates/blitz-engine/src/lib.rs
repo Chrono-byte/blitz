@@ -67,7 +67,6 @@ pub mod trace;
 pub mod typecheck;
 pub mod value;
 pub mod vm;
-pub mod websocket;
 
 // Re-export oxc_ast::ast under the `ast` namespace for compatibility.
 pub use bytecode::*;

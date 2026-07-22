@@ -11,7 +11,6 @@ use blitz::gc;
 use blitz::value::{
   ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value,
 };
-use blitz::websocket::{WebSocketReadyState, WebSocketState};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::watch;
@@ -20,6 +19,80 @@ use crate::net::http::{HttpRequestEvent, HttpResponse, HttpServer};
 use crate::net::websocket::{
   WebSocketCommand, WebSocketEvent, WebSocketServerOptions, connect_client,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum WebSocketReadyState {
+  Connecting = 0,
+  Open = 1,
+  Closing = 2,
+  Closed = 3,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WebSocketState {
+  ready_state: WebSocketReadyState,
+  buffered_amount: usize,
+}
+
+impl Default for WebSocketState {
+  fn default() -> Self {
+    Self {
+      ready_state: WebSocketReadyState::Connecting,
+      buffered_amount: 0,
+    }
+  }
+}
+
+impl WebSocketState {
+  const fn ready_state(&self) -> WebSocketReadyState {
+    self.ready_state
+  }
+
+  const fn buffered_amount(&self) -> usize {
+    self.buffered_amount
+  }
+
+  fn open(&mut self) -> bool {
+    if self.ready_state != WebSocketReadyState::Connecting {
+      return false;
+    }
+    self.ready_state = WebSocketReadyState::Open;
+    true
+  }
+
+  fn begin_close(&mut self) {
+    if self.ready_state != WebSocketReadyState::Closed {
+      self.ready_state = WebSocketReadyState::Closing;
+    }
+  }
+
+  fn finish_close(&mut self) {
+    self.ready_state = WebSocketReadyState::Closed;
+    self.buffered_amount = 0;
+  }
+
+  fn queue_bytes(
+    &mut self,
+    amount: usize,
+  ) -> bool {
+    if self.ready_state != WebSocketReadyState::Open {
+      return false;
+    }
+    let Some(total) = self.buffered_amount.checked_add(amount) else {
+      return false;
+    };
+    self.buffered_amount = total;
+    true
+  }
+
+  fn drain_bytes(
+    &mut self,
+    amount: usize,
+  ) {
+    self.buffered_amount = self.buffered_amount.saturating_sub(amount);
+  }
+}
 
 struct WebSocketResource {
   object: Value,
@@ -1189,4 +1262,26 @@ fn set(
     PropertyKey::String(name.to_string()),
     PropertyDescriptor::data(value),
   );
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn websocket_state_tracks_lifecycle_and_buffered_bytes() {
+    let mut state = WebSocketState::default();
+    assert_eq!(state.ready_state(), WebSocketReadyState::Connecting);
+    assert!(!state.queue_bytes(4));
+    assert!(state.open());
+    assert!(state.queue_bytes(7));
+    state.drain_bytes(2);
+    assert_eq!(state.buffered_amount(), 5);
+    state.begin_close();
+    assert_eq!(state.ready_state(), WebSocketReadyState::Closing);
+    assert!(!state.queue_bytes(1));
+    state.finish_close();
+    assert_eq!(state.ready_state(), WebSocketReadyState::Closed);
+    assert_eq!(state.buffered_amount(), 0);
+  }
 }

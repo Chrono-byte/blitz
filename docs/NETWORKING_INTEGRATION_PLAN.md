@@ -76,8 +76,9 @@ Blitz.serve((request) => {
 });
 ```
 
-The engine supplies the host-neutral WebSocket ready-state and buffered-byte
-state machine. Concrete sockets and all I/O remain in `blitz-runtime`.
+The runtime host adapter owns the WebSocket ready-state and buffered-byte state
+machine. Concrete sockets and all I/O also remain in `blitz-runtime`;
+`blitz-engine` has no WebSocket-specific behavior.
 
 ## Target architecture
 
