@@ -66,6 +66,75 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
+/// A point-in-time count of source-module work performed by a module loader.
+///
+/// The counters belong to one [`ModuleLoader`] and do not include work for
+/// records created from a prelinked module graph.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ModuleLoaderPipelineSnapshot {
+  /// Number of source AST parses.
+  pub source_parses: usize,
+  /// Number of parses performed to extract import requests.
+  pub import_extraction_parses: usize,
+  /// Number of source AST/ESTree passes used for linking and instantiation.
+  pub source_linking_passes: usize,
+  /// Number of source typechecks.
+  pub source_typechecks: usize,
+  /// Number of source-to-bytecode compilations.
+  pub source_compilations: usize,
+}
+
+#[derive(Default)]
+struct ModuleLoaderPipelineCounters {
+  source_parses: AtomicUsize,
+  import_extraction_parses: AtomicUsize,
+  source_linking_passes: AtomicUsize,
+  source_typechecks: AtomicUsize,
+  source_compilations: AtomicUsize,
+}
+
+impl ModuleLoaderPipelineCounters {
+  fn snapshot(&self) -> ModuleLoaderPipelineSnapshot {
+    ModuleLoaderPipelineSnapshot {
+      source_parses: self.source_parses.load(Ordering::Relaxed),
+      import_extraction_parses: self
+        .import_extraction_parses
+        .load(Ordering::Relaxed),
+      source_linking_passes: self.source_linking_passes.load(Ordering::Relaxed),
+      source_typechecks: self.source_typechecks.load(Ordering::Relaxed),
+      source_compilations: self.source_compilations.load(Ordering::Relaxed),
+    }
+  }
+
+  fn source_parse(&self) {
+    self.source_parses.fetch_add(1, Ordering::Relaxed);
+  }
+
+  fn import_extraction_parse(&self) {
+    self
+      .import_extraction_parses
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  fn source_linking_pass(&self) {
+    self
+      .source_linking_passes
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  fn source_typecheck(&self) {
+    self
+      .source_typechecks
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  fn source_compilation(&self) {
+    self
+      .source_compilations
+      .fetch_add(1, Ordering::Relaxed);
+  }
+}
+
 fn source_type_for_module_path(path: &Path) -> SourceType {
   crate::parser::Parser::source_type_for_path(path, true)
 }
@@ -512,6 +581,7 @@ impl ModuleRecord {
     dependencies: Vec<usize>,
     module_index: usize,
     chunk: Chunk,
+    declaration_source: Option<String>,
     content_hash: u64,
   ) -> Self {
     let mut record = Self::new(
@@ -519,7 +589,7 @@ impl ModuleRecord {
       specifier,
       ModuleRecordPayload::Prelinked { dependencies },
       Some(chunk),
-      None,
+      declaration_source,
       Some(content_hash),
     );
     record.module_index = Some(module_index);
@@ -584,6 +654,7 @@ struct PrelinkedModuleLocation {
 
 struct RegisteredPrelinkedGraph {
   graph: Arc<PrelinkedModuleGraph>,
+  declarations: HashMap<String, String>,
   binding_slots: Option<Vec<SharedValue>>,
 }
 
@@ -599,10 +670,14 @@ pub struct ModuleLoader {
   records_by_specifier: HashMap<String, Rc<RefCell<ModuleRecord>>>,
   /// Validated prelinked graphs registered for this realm.
   prelinked_graphs: Vec<RegisteredPrelinkedGraph>,
-  /// Canonical prelinked module lookup without constructing runtime records.
+  /// Canonical prelinked module identity index, including private modules.
   prelinked_by_specifier: HashMap<String, PrelinkedModuleLocation>,
+  /// Prelinked modules that source-facing resolution is allowed to reach.
+  prelinked_public_by_specifier: HashMap<String, PrelinkedModuleLocation>,
   /// Reserved prelinked module-index lookup, including unconstructed modules.
   prelinked_by_index: HashMap<usize, PrelinkedModuleLocation>,
+  /// Per-loader source pipeline counters shared with parallel compile workers.
+  pipeline_counters: Arc<ModuleLoaderPipelineCounters>,
 }
 
 impl Default for ModuleLoader {
@@ -620,8 +695,16 @@ impl ModuleLoader {
       records_by_specifier: HashMap::new(),
       prelinked_graphs: Vec::new(),
       prelinked_by_specifier: HashMap::new(),
+      prelinked_public_by_specifier: HashMap::new(),
       prelinked_by_index: HashMap::new(),
+      pipeline_counters: Arc::new(ModuleLoaderPipelineCounters::default()),
     }
+  }
+
+  /// Return a snapshot of this loader's source pipeline counters.
+  #[must_use]
+  pub fn pipeline_snapshot(&self) -> ModuleLoaderPipelineSnapshot {
+    self.pipeline_counters.snapshot()
   }
 
   /// Register a validated, host-neutral prelinked graph for this realm.
@@ -638,9 +721,60 @@ impl ModuleLoader {
     &mut self,
     graph: PrelinkedModuleGraph,
   ) -> Result<(), BundlerError> {
+    self.register_prelinked_graph_with_declarations(graph, std::iter::empty::<(String, String)>())
+  }
+
+  /// Register a parser-free graph and declaration sources atomically.
+  ///
+  /// Declaration sources are keyed by canonical specifier. Every target must
+  /// be a unique public root of `graph`; declarations for private or unknown
+  /// modules are rejected before this loader is mutated.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if graph validation, declaration validation, or the
+  /// normal graph registration checks fail.
+  pub fn register_prelinked_graph_with_declarations<I, S, T>(
+    &mut self,
+    graph: PrelinkedModuleGraph,
+    declarations: I,
+  ) -> Result<(), BundlerError>
+  where
+    I: IntoIterator<Item = (S, T)>,
+    S: Into<String>,
+    T: Into<String>,
+  {
     graph
       .validate()
       .map_err(|error| BundlerError::from(error.to_string()))?;
+
+    let public_specifiers = graph
+      .public_roots
+      .iter()
+      .filter_map(|root| {
+        graph
+          .module(*root)
+          .map(|module| module.specifier.as_str())
+      })
+      .collect::<HashSet<_>>();
+    let mut declarations_by_specifier = HashMap::new();
+    for (specifier, source) in declarations {
+      let specifier = specifier.into();
+      let source = source.into();
+      if !public_specifiers.contains(specifier.as_str()) {
+        return Err(BundlerError::from(format!(
+          "Prelinked declaration target {specifier:?} is not a public root"
+        )));
+      }
+      if declarations_by_specifier
+        .insert(specifier.clone(), source)
+        .is_some()
+      {
+        return Err(BundlerError::from(format!(
+          "Duplicate prelinked declaration target: {specifier}"
+        )));
+      }
+    }
 
     let fixed_indices = self.fixed_module_indices();
     for module in &graph.modules {
@@ -684,6 +818,11 @@ impl ModuleLoader {
     }
 
     let graph_id = self.prelinked_graphs.len();
+    let public_roots = graph
+      .public_roots
+      .iter()
+      .copied()
+      .collect::<HashSet<_>>();
     let graph = Arc::new(graph);
     for (module_position, module) in graph.modules.iter().enumerate() {
       let module_index = usize::try_from(module.module_index).map_err(|_| {
@@ -699,6 +838,11 @@ impl ModuleLoader {
       self
         .prelinked_by_specifier
         .insert(module.specifier.clone(), location);
+      if public_roots.contains(&module.module_index) {
+        self
+          .prelinked_public_by_specifier
+          .insert(module.specifier.clone(), location);
+      }
       self
         .prelinked_by_index
         .insert(module_index, location);
@@ -707,6 +851,7 @@ impl ModuleLoader {
       .prelinked_graphs
       .push(RegisteredPrelinkedGraph {
         graph,
+        declarations: declarations_by_specifier,
         binding_slots: None,
       });
     Ok(())
@@ -783,7 +928,16 @@ impl ModuleLoader {
     &self,
     specifier: &str,
   ) -> Option<&str> {
-    self.virtual_modules.declaration_source(specifier)
+    self
+      .virtual_modules
+      .declaration_source(specifier)
+      .or_else(|| {
+        self
+          .prelinked_graphs
+          .iter()
+          .find_map(|registration| registration.declarations.get(specifier))
+          .map(String::as_str)
+      })
   }
 
   /// Return declaration source using its canonical specifier.
@@ -849,12 +1003,18 @@ impl ModuleLoader {
       .collect::<Result<Vec<_>, _>>()?;
     let virtual_path = virtual_module_path(&module.specifier);
     let content_hash = stable_hash_bytes(module.source_sha256);
+    let declaration_source = self
+      .prelinked_graphs
+      .get(location.graph_id)
+      .and_then(|registration| registration.declarations.get(&module.specifier))
+      .cloned();
     let record = Rc::new(RefCell::new(ModuleRecord::new_prelinked(
       virtual_path.clone(),
       module.specifier.clone(),
       dependencies.clone(),
       module_index,
       module.chunk,
+      declaration_source,
       content_hash,
     )));
     // Preallocate the record identity before traversing bundled edges so
@@ -917,11 +1077,19 @@ impl ModuleLoader {
       |name| resolve_virtual_relative(name, spec),
     );
     if let Some(location) = self
-      .prelinked_by_specifier
+      .prelinked_public_by_specifier
       .get(&requested)
       .copied()
     {
       return self.construct_prelinked_at(location);
+    }
+    if self
+      .prelinked_by_specifier
+      .contains_key(&requested)
+    {
+      return Err(BundlerError::from(format!(
+        "Prelinked module specifier {requested:?} is private and cannot be imported"
+      )));
     }
     if let Some(module) = self.virtual_modules.resolve(&requested).cloned() {
       let canonical = module.canonical_specifier.clone();
@@ -930,10 +1098,12 @@ impl ModuleLoader {
       }
 
       let source = module.source.as_javascript().unwrap_or_default();
+      self.pipeline_counters.source_parse();
       let session = crate::parser::Parser::parse_source_with_type(source, module.source_type)
         .map_err(|error| {
           BundlerError::from(format!("Parse error virtual module {canonical}: {error}"))
         })?;
+      self.pipeline_counters.import_extraction_parse();
       let imports =
         crate::parser::Parser::extract_imports_from_source_with_type(source, module.source_type)
           .map_err(|error| {
@@ -1002,10 +1172,12 @@ impl ModuleLoader {
       ))
     })?;
     let source_type = source_type_for_module_path(&resolved_canon);
+    self.pipeline_counters.source_parse();
     let session =
       crate::parser::Parser::parse_source_with_type(&src, source_type).map_err(|error| {
         BundlerError::from(format!("Parse error {}: {error}", resolved_canon.display()))
       })?;
+    self.pipeline_counters.import_extraction_parse();
     let imports = crate::parser::Parser::extract_imports_from_source_with_type(&src, source_type)
       .map_err(|error| {
       BundlerError::from(format!("Parse error {}: {error}", resolved_canon.display()))
@@ -1302,6 +1474,7 @@ impl ModuleLoader {
         // source-backed records. Prelinked records never own parser state.
         let estree = match &rec.payload {
           ModuleRecordPayload::Source { session, .. } => {
+            self.pipeline_counters.source_linking_pass();
             session.program().to_pretty_estree_ts_json(false)
           }
           ModuleRecordPayload::Prelinked { .. } => continue,
@@ -1431,6 +1604,7 @@ impl ModuleLoader {
         let rec = rec_rc.borrow();
         match &rec.payload {
           ModuleRecordPayload::Source { session, .. } => {
+            self.pipeline_counters.source_linking_pass();
             session.program().to_pretty_estree_ts_json(false)
           }
           ModuleRecordPayload::Prelinked { .. } => continue,
@@ -1599,7 +1773,7 @@ impl ModuleLoader {
       entry.to_path_buf()
     } else if let Some(specifier) = entry.to_str()
       && self
-        .prelinked_by_specifier
+        .prelinked_public_by_specifier
         .contains_key(specifier)
     {
       virtual_module_path(specifier)
@@ -1675,6 +1849,7 @@ impl ModuleLoader {
           BundlerError::from(format!("Failed to read module {}: {error}", path.display()))
         })?;
         let source_type = source_type_for_module_path(path);
+        loader.pipeline_counters.import_extraction_parse();
         let requests =
           crate::parser::Parser::extract_imports_from_source_with_type(&source, source_type)
             .map_err(|error| {
@@ -1736,7 +1911,7 @@ impl ModuleLoader {
         .resolve(entry.to_string_lossy().as_ref())
         .is_some()
         || self
-          .prelinked_by_specifier
+          .prelinked_public_by_specifier
           .contains_key(entry.to_string_lossy().as_ref())
       {
         self.construct(base_dir, entry.to_string_lossy().as_ref())?;
@@ -1887,6 +2062,7 @@ impl ModuleLoader {
             ModuleRecordPayload::Source { session, .. } => {
               let program = session.program();
               if enable_typecheck {
+                self.pipeline_counters.source_typecheck();
                 crate::typecheck::check(program).map_err(|error| {
                   crate::errors::RuntimeError::from(format!("Typecheck failed: {error}"))
                 })?;
@@ -1902,6 +2078,7 @@ impl ModuleLoader {
               let chunk = if let Some(chunk) = rec.bytecode.clone() {
                 chunk
               } else {
+                self.pipeline_counters.source_compilation();
                 crate::compiler::compile_oxc_with_ctx(program, Some(&context), session.source())
                   .map_err(|error| {
                     crate::errors::RuntimeError::from(format!("Compile failed: {error}"))
@@ -1952,6 +2129,7 @@ impl ModuleLoader {
           ModuleRecordPayload::Source { session, .. } => {
             let program = session.program();
             if enable_typecheck {
+              self.pipeline_counters.source_typecheck();
               crate::typecheck::check(program).map_err(|error| {
                 crate::errors::RuntimeError::from(format!("Typecheck failed: {error}"))
               })?;
@@ -1959,6 +2137,7 @@ impl ModuleLoader {
             let chunk = if let Some(chunk) = rec.bytecode.clone() {
               chunk
             } else {
+              self.pipeline_counters.source_compilation();
               crate::compiler::compile_oxc_with_ctx(program, None, session.source()).map_err(
                 |error| crate::errors::RuntimeError::from(format!("Compile failed: {error}")),
               )?
@@ -1985,7 +2164,8 @@ struct ModuleCompileJob {
 }
 
 fn compile_modules_parallel(
-  jobs: Vec<ModuleCompileJob>
+  jobs: Vec<ModuleCompileJob>,
+  pipeline_counters: Arc<ModuleLoaderPipelineCounters>,
 ) -> Result<HashMap<PathBuf, Chunk>, crate::errors::RuntimeError> {
   if jobs.len() < 2 {
     return Ok(HashMap::new());
@@ -2004,6 +2184,7 @@ fn compile_modules_parallel(
       let jobs = Arc::clone(&jobs);
       let sender = sender.clone();
       let next_job = &next_job;
+      let pipeline_counters = Arc::clone(&pipeline_counters);
       std::thread::Builder::new()
         .name("blitz-module-compiler".to_string())
         .stack_size(16 * 1024 * 1024)
@@ -2014,9 +2195,11 @@ fn compile_modules_parallel(
               break;
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+              pipeline_counters.source_parse();
               crate::parser::Parser::parse_source_with_type(&job.source, job.source_type)
                 .map_err(|error| format!("Parse failed: {error}"))
                 .and_then(|session| {
+                  pipeline_counters.source_compilation();
                   crate::compiler::compile_oxc_with_ctx(
                     session.program(),
                     Some(&job.context),
@@ -2136,7 +2319,11 @@ pub fn evaluate_entry_shared(
       })
       .collect()
   };
-  let mut compiled = compile_modules_parallel(compile_jobs)?;
+  let pipeline_counters = {
+    let loader_ref = loader.borrow();
+    Arc::clone(&loader_ref.pipeline_counters)
+  };
+  let mut compiled = compile_modules_parallel(compile_jobs, pipeline_counters)?;
 
   for path in order {
     let maybe_chunk = {
@@ -2159,6 +2346,7 @@ pub fn evaluate_entry_shared(
           ModuleRecordPayload::Source { session, .. } => {
             let program = session.program();
             if enable_typecheck {
+              loader_ref.pipeline_counters.source_typecheck();
               crate::typecheck::check(program).map_err(|error| {
                 crate::errors::RuntimeError::from(format!("Typecheck failed: {error}"))
               })?;
@@ -2176,6 +2364,7 @@ pub fn evaluate_entry_shared(
             } else if let Some(chunk) = compiled.remove(&path) {
               chunk
             } else {
+              loader_ref.pipeline_counters.source_compilation();
               let chunk =
                 crate::compiler::compile_oxc_with_ctx(program, Some(&context), session.source())
                   .map_err(|error| {
@@ -2368,6 +2557,87 @@ mod tests {
       .evaluate_entry(&entry_path, &mut vm, false)
       .expect("virtual graph evaluates");
     assert_eq!(vm.get_global("result"), Some(Value::Number(42.0)));
+  }
+
+  #[test]
+  fn source_pipeline_snapshot_counts_source_work() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    vm.register_virtual_module(VirtualModule::javascript(
+      "test:counters",
+      "globalThis.result = 42;",
+      SourceType::mjs(),
+      None,
+    ))
+    .expect("source module registers");
+    let loader = vm.module_loader_handle();
+    let entry = loader
+      .borrow_mut()
+      .construct(Path::new("."), "test:counters")
+      .expect("source module constructs");
+    loader
+      .borrow_mut()
+      .instantiate_all()
+      .expect("source module instantiates");
+    let entry_path = entry.borrow().path.clone();
+    loader
+      .borrow_mut()
+      .evaluate_entry(&entry_path, &mut vm, true)
+      .expect("source module evaluates");
+
+    let expected = ModuleLoaderPipelineSnapshot {
+      source_parses: 1,
+      import_extraction_parses: 1,
+      source_linking_passes: 2,
+      source_typechecks: 1,
+      source_compilations: 1,
+    };
+    assert_eq!(loader.borrow().pipeline_snapshot(), expected);
+    assert_eq!(vm.module_loader_pipeline_snapshot(), expected);
+    assert_eq!(vm.get_global("result"), Some(Value::Number(42.0)));
+  }
+
+  #[test]
+  fn source_pipeline_snapshot_counts_parallel_compilation() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    vm.register_virtual_module(VirtualModule::javascript(
+      "test:parallel-dependency",
+      "globalThis.dependencyLoaded = true;",
+      SourceType::mjs(),
+      None,
+    ))
+    .expect("dependency module registers");
+    vm.register_virtual_module(VirtualModule::javascript(
+      "test:parallel-entry",
+      "import 'test:parallel-dependency'; globalThis.parallelResult = 42;",
+      SourceType::mjs(),
+      None,
+    ))
+    .expect("entry module registers");
+    let loader = vm.module_loader_handle();
+    let entry = loader
+      .borrow_mut()
+      .construct(Path::new("."), "test:parallel-entry")
+      .expect("source graph constructs");
+    loader
+      .borrow_mut()
+      .instantiate_all()
+      .expect("source graph instantiates");
+    let entry_path = entry.borrow().path.clone();
+    evaluate_entry_shared(&loader, &entry_path, &mut vm, true).expect("source graph evaluates");
+
+    assert_eq!(
+      loader.borrow().pipeline_snapshot(),
+      ModuleLoaderPipelineSnapshot {
+        source_parses: 4,
+        import_extraction_parses: 2,
+        source_linking_passes: 4,
+        source_typechecks: 2,
+        source_compilations: 2,
+      }
+    );
+    assert_eq!(vm.get_global("parallelResult"), Some(Value::Number(42.0)));
   }
 
   #[test]
@@ -2622,6 +2892,349 @@ mod tests {
     evaluate_entry_shared(&loader, &entry_path, &mut vm, true)
       .expect("prelinked graph evaluates from bytecode only");
     assert_eq!(vm.get_global("prelinkedResult"), Some(Value::Number(42.0)));
+    assert_eq!(
+      loader.borrow().pipeline_snapshot(),
+      ModuleLoaderPipelineSnapshot::default()
+    );
+  }
+
+  #[test]
+  fn source_import_can_reach_a_public_prelinked_root() {
+    let graph = synthetic_graph(
+      vec![PrelinkedModule {
+        specifier: "visibility:public".to_string(),
+        module_index: 0,
+        source_sha256: [1; 32],
+        dependencies: vec![],
+        exports: vec![export("answer", 0)],
+        imports: vec![],
+        chunk: compile_prelinked_chunk("export const answer = 42;", 0, &[], &["answer"]),
+      }],
+      1,
+      vec![0],
+    );
+    let mut loader = ModuleLoader::new();
+    loader
+      .register_prelinked_graph(graph)
+      .expect("visibility graph registers");
+    loader
+      .register_virtual_module(VirtualModule::javascript(
+        "visibility:source-entry",
+        "import { answer } from 'visibility:public'; globalThis.visibilityResult = answer;",
+        SourceType::mjs(),
+        None,
+      ))
+      .expect("source entry registers");
+
+    let entry = loader
+      .construct(Path::new("."), "visibility:source-entry")
+      .expect("source import of public root constructs");
+    loader
+      .instantiate_all()
+      .expect("source import graph instantiates");
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let entry_path = entry.borrow().path.clone();
+    loader
+      .evaluate_entry(&entry_path, &mut vm, false)
+      .expect("source import graph evaluates");
+    assert_eq!(vm.get_global("visibilityResult"), Some(Value::Number(42.0)));
+  }
+
+  #[test]
+  fn prelinked_public_root_attaches_declaration_source() {
+    let graph = synthetic_graph(
+      vec![PrelinkedModule {
+        specifier: "declarations:public".to_string(),
+        module_index: 0,
+        source_sha256: [1; 32],
+        dependencies: vec![],
+        exports: vec![],
+        imports: vec![],
+        chunk: compile_prelinked_chunk("", 0, &[], &[]),
+      }],
+      0,
+      vec![0],
+    );
+    let mut loader = ModuleLoader::new();
+    loader
+      .register_prelinked_graph_with_declarations(
+        graph,
+        vec![(
+          "declarations:public".to_string(),
+          "export declare const answer: number;".to_string(),
+        )],
+      )
+      .expect("graph and declaration register atomically");
+
+    let record = loader
+      .construct(Path::new("."), "declarations:public")
+      .expect("public root constructs");
+    assert_eq!(
+      record.borrow().declaration_source.as_deref(),
+      Some("export declare const answer: number;")
+    );
+    assert_eq!(
+      loader.declaration_source("declarations:public"),
+      Some("export declare const answer: number;")
+    );
+  }
+
+  #[test]
+  fn prelinked_declarations_reject_private_and_unknown_targets_without_installing_graph() {
+    let graph = synthetic_graph(
+      vec![
+        PrelinkedModule {
+          specifier: "declarations:private".to_string(),
+          module_index: 0,
+          source_sha256: [1; 32],
+          dependencies: vec![],
+          exports: vec![],
+          imports: vec![],
+          chunk: compile_prelinked_chunk("", 0, &[], &[]),
+        },
+        PrelinkedModule {
+          specifier: "declarations:public".to_string(),
+          module_index: 1,
+          source_sha256: [2; 32],
+          dependencies: vec![],
+          exports: vec![],
+          imports: vec![],
+          chunk: compile_prelinked_chunk("", 1, &[], &[]),
+        },
+      ],
+      0,
+      vec![1],
+    );
+
+    for target in ["declarations:private", "declarations:unknown"] {
+      let mut loader = ModuleLoader::new();
+      let error = loader
+        .register_prelinked_graph_with_declarations(
+          graph.clone(),
+          vec![(
+            target.to_string(),
+            "declare const value: number;".to_string(),
+          )],
+        )
+        .expect_err("invalid declaration target is rejected");
+      assert!(error.to_string().contains("not a public root"));
+      assert!(loader.prelinked_graphs.is_empty());
+      assert!(loader.prelinked_by_specifier.is_empty());
+    }
+  }
+
+  #[test]
+  fn prelinked_declarations_reject_duplicate_targets_without_installing_graph() {
+    let graph = synthetic_graph(
+      vec![PrelinkedModule {
+        specifier: "declarations:public".to_string(),
+        module_index: 0,
+        source_sha256: [1; 32],
+        dependencies: vec![],
+        exports: vec![],
+        imports: vec![],
+        chunk: compile_prelinked_chunk("", 0, &[], &[]),
+      }],
+      0,
+      vec![0],
+    );
+    let mut loader = ModuleLoader::new();
+    let error = loader
+      .register_prelinked_graph_with_declarations(
+        graph,
+        vec![
+          (
+            "declarations:public".to_string(),
+            "declare const a: 1;".to_string(),
+          ),
+          (
+            "declarations:public".to_string(),
+            "declare const b: 2;".to_string(),
+          ),
+        ],
+      )
+      .expect_err("duplicate declaration target is rejected");
+    assert!(
+      error
+        .to_string()
+        .contains("Duplicate prelinked declaration target")
+    );
+    assert!(loader.prelinked_graphs.is_empty());
+    assert!(loader.prelinked_by_specifier.is_empty());
+  }
+
+  #[test]
+  fn source_import_cannot_reach_a_private_prelinked_module() {
+    let graph = synthetic_graph(
+      vec![
+        PrelinkedModule {
+          specifier: "visibility:private".to_string(),
+          module_index: 0,
+          source_sha256: [1; 32],
+          dependencies: vec![],
+          exports: vec![],
+          imports: vec![],
+          chunk: compile_prelinked_chunk("", 0, &[], &[]),
+        },
+        PrelinkedModule {
+          specifier: "visibility:public".to_string(),
+          module_index: 1,
+          source_sha256: [2; 32],
+          dependencies: vec![],
+          exports: vec![],
+          imports: vec![],
+          chunk: compile_prelinked_chunk("", 1, &[], &[]),
+        },
+      ],
+      0,
+      vec![1],
+    );
+    let mut loader = ModuleLoader::new();
+    loader
+      .register_prelinked_graph(graph)
+      .expect("visibility graph registers");
+    loader
+      .register_virtual_module(VirtualModule::javascript(
+        "visibility:source-private-entry",
+        "import 'visibility:private';",
+        SourceType::mjs(),
+        None,
+      ))
+      .expect("source entry registers");
+
+    let error = match loader.construct(Path::new("."), "visibility:source-private-entry") {
+      Ok(_) => panic!("source import of private module must fail"),
+      Err(error) => error,
+    };
+    assert!(error.to_string().contains("visibility:private"));
+    assert!(error.to_string().contains("private"));
+  }
+
+  #[test]
+  fn public_prelinked_entry_evaluates_its_private_dependency() {
+    let graph = synthetic_graph(
+      vec![
+        PrelinkedModule {
+          specifier: "visibility:private".to_string(),
+          module_index: 0,
+          source_sha256: [1; 32],
+          dependencies: vec![],
+          exports: vec![export("answer", 0)],
+          imports: vec![],
+          chunk: compile_prelinked_chunk("export const answer = 42;", 0, &[], &["answer"]),
+        },
+        PrelinkedModule {
+          specifier: "visibility:entry".to_string(),
+          module_index: 1,
+          source_sha256: [2; 32],
+          dependencies: vec![0],
+          exports: vec![],
+          imports: vec![import("answer", 0)],
+          chunk: compile_prelinked_chunk(
+            "import { answer } from 'visibility:private'; globalThis.visibilityResult = answer;",
+            1,
+            &[("answer", 0, "answer")],
+            &[],
+          ),
+        },
+      ],
+      1,
+      vec![1],
+    );
+    let mut loader = ModuleLoader::new();
+    loader
+      .register_prelinked_graph(graph)
+      .expect("visibility graph registers");
+    let entry = loader
+      .construct(Path::new("."), "visibility:entry")
+      .expect("public prelinked entry constructs");
+    loader
+      .instantiate_all()
+      .expect("public prelinked entry instantiates");
+
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let entry_path = entry.borrow().path.clone();
+    loader
+      .evaluate_entry(Path::new("visibility:entry"), &mut vm, false)
+      .expect("public prelinked entry resolves and evaluates");
+    assert_eq!(vm.get_global("visibilityResult"), Some(Value::Number(42.0)));
+    assert!(loader.map.contains_key(&entry_path));
+  }
+
+  #[test]
+  fn private_prelinked_specifiers_still_collide() {
+    let graph = synthetic_graph(
+      vec![
+        PrelinkedModule {
+          specifier: "visibility:private".to_string(),
+          module_index: 0,
+          source_sha256: [1; 32],
+          dependencies: vec![],
+          exports: vec![],
+          imports: vec![],
+          chunk: compile_prelinked_chunk("", 0, &[], &[]),
+        },
+        PrelinkedModule {
+          specifier: "visibility:public".to_string(),
+          module_index: 1,
+          source_sha256: [2; 32],
+          dependencies: vec![],
+          exports: vec![],
+          imports: vec![],
+          chunk: compile_prelinked_chunk("", 1, &[], &[]),
+        },
+      ],
+      0,
+      vec![1],
+    );
+    let mut loader = ModuleLoader::new();
+    loader
+      .register_prelinked_graph(graph)
+      .expect("first visibility graph registers");
+    assert!(
+      loader
+        .register_virtual_module(VirtualModule::javascript(
+          "visibility:private",
+          "",
+          SourceType::mjs(),
+          None,
+        ))
+        .is_err(),
+      "private prelinked specifier must collide with a virtual module"
+    );
+
+    let duplicate_graph = synthetic_graph(
+      vec![
+        PrelinkedModule {
+          specifier: "visibility:private".to_string(),
+          module_index: 0,
+          source_sha256: [3; 32],
+          dependencies: vec![],
+          exports: vec![],
+          imports: vec![],
+          chunk: compile_prelinked_chunk("", 0, &[], &[]),
+        },
+        PrelinkedModule {
+          specifier: "visibility:other-public".to_string(),
+          module_index: 1,
+          source_sha256: [4; 32],
+          dependencies: vec![],
+          exports: vec![],
+          imports: vec![],
+          chunk: compile_prelinked_chunk("", 1, &[], &[]),
+        },
+      ],
+      0,
+      vec![1],
+    );
+    assert!(
+      loader
+        .register_prelinked_graph(duplicate_graph)
+        .is_err(),
+      "private prelinked specifier must collide with another graph"
+    );
   }
 
   #[test]

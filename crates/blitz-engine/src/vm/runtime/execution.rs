@@ -767,6 +767,12 @@ impl Vm {
     self.module_loader.borrow_mut()
   }
 
+  /// Return a snapshot of this VM realm's module-loader pipeline counters.
+  #[must_use]
+  pub fn module_loader_pipeline_snapshot(&self) -> crate::module::ModuleLoaderPipelineSnapshot {
+    self.module_loader.borrow().pipeline_snapshot()
+  }
+
   /// Validate and register a parser-free prelinked graph in this VM's realm.
   ///
   /// # Errors
@@ -781,6 +787,31 @@ impl Vm {
       .module_loader
       .borrow_mut()
       .register_prelinked_graph(graph)
+  }
+
+  /// Register a parser-free graph and declaration sources atomically.
+  ///
+  /// Declaration targets must be unique public roots in `graph`; the loader
+  /// remains unchanged when declaration validation fails.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if graph validation, declaration validation, or an
+  /// existing specifier/index collision rejects registration.
+  pub fn register_prelinked_graph_with_declarations<I, S, T>(
+    &self,
+    graph: crate::prelinked::PrelinkedModuleGraph,
+    declarations: I,
+  ) -> Result<(), crate::errors::BundlerError>
+  where
+    I: IntoIterator<Item = (S, T)>,
+    S: Into<String>,
+    T: Into<String>,
+  {
+    self
+      .module_loader
+      .borrow_mut()
+      .register_prelinked_graph_with_declarations(graph, declarations)
   }
 
   /// Register one host-provided virtual module in this VM's realm loader.

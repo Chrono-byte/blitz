@@ -574,7 +574,13 @@ fn validate_chunk_tree(
         format!("instruction {instruction_index} writes the synthetic namespace export"),
       ));
     }
-    let target_binding = if target_name == "*" {
+    // The compiler stores top-level module-private bindings in the owner
+    // module table so nested functions can access them. They are intentionally
+    // absent from the public export map and namespace object. Cross-module
+    // descriptors must still target declared exports.
+    let target_binding = if target_name == "*"
+      || (target_index == owner_index && !target_exports.contains_key(target_name))
+    {
       None
     } else {
       Some(*target_exports.get(target_name).ok_or_else(|| {

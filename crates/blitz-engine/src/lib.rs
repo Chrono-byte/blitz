@@ -60,6 +60,7 @@ pub mod module;
 pub mod mutex_compat;
 pub mod parser;
 pub mod prelinked;
+pub mod prelinked_bundle;
 pub mod realm;
 pub mod resolver;
 pub mod runtime_utils;
@@ -80,6 +81,10 @@ pub use oast as ast;
 pub use oxc_ast::ast as oast;
 pub use parser::*;
 pub use prelinked::*;
+pub use prelinked_bundle::{
+  PRELINKED_GRAPH_WIRE_VERSION, PrelinkedGraphCodecError, decode as decode_prelinked_graph,
+  encode as encode_prelinked_graph,
+};
 pub use realm::*;
 pub use resolver::*;
 pub use trace::*;
