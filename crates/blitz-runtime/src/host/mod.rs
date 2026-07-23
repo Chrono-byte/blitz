@@ -13,6 +13,7 @@ mod process;
 pub mod scheduler;
 mod server;
 mod terminal;
+mod url;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -319,6 +320,7 @@ pub fn try_install_runtime(
   console::install(vm);
   abort::install(vm);
   process::install(vm, options);
+  url::install(vm);
   Ok(RuntimeHandle {
     server,
     events,

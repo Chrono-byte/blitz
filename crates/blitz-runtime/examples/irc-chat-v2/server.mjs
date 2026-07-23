@@ -1,145 +1,204 @@
-import * as Effect from "effect/Effect";
+const MAX_NICKNAME_LENGTH = 20;
+const MAX_MESSAGE_LENGTH = 400;
+const MAX_FRAME_LENGTH = 4_096;
+const RATE_LIMIT_WINDOW_MS = 2_000;
+const RATE_LIMIT_MESSAGES = 8;
 
-const clients = [];
+const clients = new Map();
 
-const runSync = (effect) => {
-  const exit = Effect.runFork(effect).unsafePoll();
-  if (exit === null) {
-    throw new Error("Expected a synchronous Effect");
+function send(socket, message) {
+  if (socket.readyState !== WebSocket.OPEN) {
+    clients.delete(socket);
+    return false;
   }
-  if (exit._op === "Failure") {
-    throw exit.cause;
-  }
-  return exit.value;
-};
 
-function broadcast(message, excludedSocket) {
-  for (let index = 0; index < clients.length; index += 1) {
-    const client = clients[index];
-    if (
-      client.socket !== excludedSocket &&
-      client.socket.readyState === WebSocket.OPEN
-    ) {
-      client.socket.send(message);
-    }
+  try {
+    socket.send(message);
+    return true;
+  } catch {
+    clients.delete(socket);
+    return false;
+  }
+}
+
+function broadcast(message) {
+  for (const socket of clients.keys()) {
+    send(socket, message);
   }
   console.log(message);
 }
 
 function removeClient(socket) {
-  for (let index = 0; index < clients.length; index += 1) {
-    if (clients[index].socket === socket) {
-      return clients.splice(index, 1)[0];
-    }
+  const client = clients.get(socket);
+  if (client === undefined) {
+    return;
   }
-  return null;
+
+  clients.delete(socket);
+  broadcast(`* ${client.nickname} left the room`);
 }
 
-function requestPath(url) {
-  const authorityStart = url.indexOf("://");
-  const pathStart = url.indexOf(
-    "/",
-    authorityStart === -1 ? 0 : authorityStart + 3,
-  );
-  if (pathStart === -1) {
-    return "/";
+function normalizeNickname(input) {
+  const nickname = input.trim();
+  if (
+    nickname.length === 0 ||
+    nickname.length > MAX_NICKNAME_LENGTH ||
+    !/^[A-Za-z0-9_-]+$/.test(nickname)
+  ) {
+    return null;
   }
-  const queryStart = url.indexOf("?", pathStart);
-  return queryStart === -1
-    ? url.slice(pathStart)
-    : url.slice(pathStart, queryStart);
+  return nickname;
 }
 
-const handleChat = (request) =>
-  Effect.sync(() => {
-    if (request.headers.get("upgrade") !== "websocket") {
-      return new Response("Blitz Effect IRC chat is available over WebSocket.\n", {
-        status: 426,
-        headers: { "content-type": "text/plain; charset=utf-8" },
-      });
+function nicknameIsTaken(nickname) {
+  const key = nickname.toLowerCase();
+  for (const client of clients.values()) {
+    if (client.nickname.toLowerCase() === key) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function sanitizeMessage(input) {
+  return input
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+    .trim()
+    .slice(0, MAX_MESSAGE_LENGTH);
+}
+
+function isRateLimited(client) {
+  const now = Date.now();
+  if (now - client.windowStartedAt >= RATE_LIMIT_WINDOW_MS) {
+    client.windowStartedAt = now;
+    client.messageCount = 0;
+  }
+
+  client.messageCount += 1;
+  return client.messageCount > RATE_LIMIT_MESSAGES;
+}
+
+function close(socket, code, reason) {
+  try {
+    socket.close(code, reason);
+  } catch {
+    removeClient(socket);
+  }
+}
+
+function handleChat(request) {
+  const upgrade = request.headers.get("upgrade");
+  if (upgrade === null || upgrade.toLowerCase() !== "websocket") {
+    return new Response("Blitz IRC chat is available over WebSocket.\n", {
+      status: 426,
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        upgrade: "websocket",
+      },
+    });
+  }
+
+  const { socket, response } = Blitz.upgradeWebSocket(request);
+
+  socket.onmessage = (event) => {
+    if (typeof event.data !== "string") {
+      close(socket, 1003, "text frames only");
+      return;
     }
 
-    const { socket, response } = Blitz.upgradeWebSocket(request);
-    let nickname = null;
+    const message = event.data;
+    if (message.length > MAX_FRAME_LENGTH) {
+      close(socket, 1009, "message too large");
+      return;
+    }
 
-    socket.onmessage = (event) =>
-      runSync(
-        Effect.sync(() => {
-          const message = event.data;
-          if (message.slice(0, 5) === "JOIN " && nickname === null) {
-            nickname = message.slice(5, 25) || "anonymous";
-            clients.push({ socket, nickname });
-            socket.send(`* Welcome, ${nickname}. Type /quit to leave.`);
-            broadcast(`* ${nickname} joined the room`, socket);
-            return;
-          }
-
-          if (message.slice(0, 4) === "MSG " && nickname !== null) {
-            const text = message.slice(4, 404);
-            if (text.length > 0) {
-              broadcast(`<${nickname}> ${text}`, socket);
-            }
-            return;
-          }
-
-          if (message === "QUIT") {
-            socket.close(1000, "client quit");
-            return;
-          }
-
-          socket.send("* Send JOIN <name> first, then MSG <text>.");
-        }),
-      );
-
-    socket.onclose = () =>
-      runSync(
-        Effect.sync(() => {
-          const client = removeClient(socket);
-          if (client !== null) {
-            broadcast(`* ${client.nickname} left the room`, socket);
-          }
-        }),
-      );
-
-    return response;
-  });
-
-const handler = (request) =>
-  runSync(
-    Effect.suspend(() => {
-      const path = requestPath(request.url);
-      if (path === "/") {
-        return Effect.succeed(
-          new Response(
-            "Blitz IRC chat v2 is running with Effect. Connect over /chat.\n",
-            {
-              headers: { "content-type": "text/plain; charset=utf-8" },
-            },
-          ),
+    if (message.startsWith("JOIN ") && !clients.has(socket)) {
+      const nickname = normalizeNickname(message.slice(5));
+      if (nickname === null) {
+        send(
+          socket,
+          `* Nicknames must be 1-${MAX_NICKNAME_LENGTH} letters, numbers, underscores, or hyphens.`,
         );
+        return;
       }
-      if (path === "/health") {
-        return Effect.succeed(new Response("ok\n"));
+      if (nicknameIsTaken(nickname)) {
+        send(socket, "* That nickname is already in use.");
+        return;
       }
-      if (path === "/chat") {
-        return handleChat(request);
-      }
-      return Effect.succeed(
-        new Response("Not Found\n", {
-          status: 404,
-          headers: { "content-type": "text/plain; charset=utf-8" },
-        }),
-      );
-    }),
-  );
 
-const server = runSync(
-  Effect.sync(() =>
-    Blitz.serve({ hostname: "127.0.0.1", port: 8000 }, handler),
-  ),
-);
+      const client = {
+        nickname,
+        windowStartedAt: Date.now(),
+        messageCount: 0,
+      };
+      clients.set(socket, client);
+      if (!send(socket, `* Welcome, ${nickname}. Type /quit to leave.`)) {
+        return;
+      }
+      broadcast(`* ${nickname} joined the room`);
+      return;
+    }
 
-console.log(
-  `Blitz Effect IRC chat listening on http://${server.hostname}:${server.port}`,
-);
+    if (message.startsWith("MSG ")) {
+      const client = clients.get(socket);
+      if (client !== undefined) {
+        if (isRateLimited(client)) {
+          send(socket, "* You are sending messages too quickly.");
+          return;
+        }
+
+        const text = sanitizeMessage(message.slice(4));
+        if (text.length > 0) {
+          // Chat messages are authoritative server events, including for the sender.
+          broadcast(`<${client.nickname}> ${text}`);
+        }
+        return;
+      }
+    }
+
+    if (message === "QUIT") {
+      close(socket, 1000, "client quit");
+      return;
+    }
+
+    send(socket, "* Send JOIN <name> first, then MSG <text>.");
+  };
+
+  socket.onerror = () => {
+    removeClient(socket);
+    close(socket, 1011, "socket error");
+  };
+
+  socket.onclose = () => {
+    removeClient(socket);
+  };
+
+  return response;
+}
+
+function handler(request) {
+  const path = new URL(request.url).pathname;
+  if (path === "/") {
+    return new Response(
+      "Blitz IRC chat v2 is running. Connect over /chat.\n",
+      { headers: { "content-type": "text/plain; charset=utf-8" } },
+    );
+  }
+  if (path === "/health") {
+    return new Response("ok\n", {
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
+  }
+  if (path === "/chat") {
+    return handleChat(request);
+  }
+  return new Response("Not Found\n", {
+    status: 404,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
+}
+
+const server = Blitz.serve({ hostname: "127.0.0.1", port: 8000 }, handler);
+
+console.log(`Blitz IRC chat listening on http://${server.hostname}:${server.port}`);
 console.log(`WebSocket endpoint: ws://${server.hostname}:${server.port}/chat`);

@@ -580,7 +580,7 @@ fn websocket_object(
         .map_err(|_| RuntimeError::from("invalid WebSocket close code"))?,
       _ => return Err(RuntimeError::from("invalid WebSocket close code")),
     };
-    if code != 1000 && !(3000..=4999).contains(&code) {
+    if !is_valid_websocket_close_code(code) {
       return Err(RuntimeError::from("invalid WebSocket close code"));
     }
     let reason = args
@@ -729,6 +729,10 @@ fn set_socket_state(resource: &WebSocketResource) {
         .unwrap_or(f64::MAX),
     ),
   );
+}
+
+const fn is_valid_websocket_close_code(code: u16) -> bool {
+  matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999)
 }
 
 fn dispatch_socket_event(
@@ -1283,5 +1287,15 @@ mod tests {
     state.finish_close();
     assert_eq!(state.ready_state(), WebSocketReadyState::Closed);
     assert_eq!(state.buffered_amount(), 0);
+  }
+
+  #[test]
+  fn websocket_close_codes_exclude_reserved_values() {
+    for code in [1000, 1001, 1002, 1003, 1007, 1009, 1011, 3000, 4999] {
+      assert!(is_valid_websocket_close_code(code), "{code}");
+    }
+    for code in [999, 1004, 1005, 1006, 1015, 2999, 5000] {
+      assert!(!is_valid_websocket_close_code(code), "{code}");
+    }
   }
 }
