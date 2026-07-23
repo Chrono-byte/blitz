@@ -1,0 +1,11 @@
+export { decode } from 'blitz-internal:effect/Duration__decode.js';
+export { format } from 'blitz-internal:effect/Duration__format.js';
+export { infinity } from 'blitz-internal:effect/Duration__infinity.js';
+export { isDuration } from 'blitz-internal:effect/Duration__isDuration.js';
+export { millis } from 'blitz-internal:effect/Duration__millis.js';
+export { nanos } from 'blitz-internal:effect/Duration__nanos.js';
+export { seconds } from 'blitz-internal:effect/Duration__seconds.js';
+export { sum } from 'blitz-internal:effect/Duration__sum.js';
+export { toMillis } from 'blitz-internal:effect/Duration__toMillis.js';
+export { toNanos } from 'blitz-internal:effect/Duration__toNanos.js';
+export { zero } from 'blitz-internal:effect/Duration__zero.js';

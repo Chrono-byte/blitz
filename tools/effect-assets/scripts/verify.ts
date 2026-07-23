@@ -8,7 +8,7 @@ import * as ts from "typescript";
 const ROOT = resolve(import.meta.dirname, "..");
 const ASSETS = resolve(ROOT, "../../crates/blitz-runtime/assets/effect/3.16.7");
 const EXPECTED_VERSION = "3.16.7";
-const SUPPORTED = ["effect", "effect/Effect", "effect/Context", "effect/Layer", "effect/Stream", "effect/Scope", "effect/Schedule", "effect/Match"];
+const SUPPORTED = ["effect", "effect/Effect", "effect/Cause", "effect/Exit", "effect/Fiber", "effect/FiberId", "effect/HashSet", "effect/Chunk", "effect/Option", "effect/Either", "effect/Duration", "effect/Function", "effect/Context", "effect/Layer", "effect/Stream", "effect/Scope", "effect/Schedule", "effect/Match"];
 
 const hash = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 const filesUnder = (root: string, current = root): string[] => readdirSync(current, { withFileTypes: true }).flatMap(entry => {

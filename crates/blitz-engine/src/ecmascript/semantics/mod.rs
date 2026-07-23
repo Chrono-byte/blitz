@@ -49,6 +49,31 @@ fn json_value_identity(value: &Value) -> Option<usize> {
   }
 }
 
+/// Creates the argument list for an operation that accepts an array-like object.
+///
+/// This follows `CreateListFromArrayLike`: the length is read once with ordinary
+/// property access and each indexed value is read in order, so holes, accessors,
+/// proxies, and abrupt completions retain their ECMAScript behavior.
+pub(crate) fn create_list_from_array_like(
+  vm: &mut Vm,
+  receiver: &Value,
+) -> Result<Vec<Value>, RuntimeError> {
+  if !receiver.is_object() {
+    return Err(vm.throw_type_error("CreateListFromArrayLike requires an object"));
+  }
+
+  let length = vm.get_property_host(receiver, &PropertyKey::String("length".to_string()))?;
+  let length = to_length(vm, &length)?;
+  let mut values = Vec::with_capacity(length);
+  for index in 0..length {
+    values.push(vm.get_property_host(
+      receiver,
+      &PropertyKey::String(usize_to_decimal_string(index)),
+    )?);
+  }
+  Ok(values)
+}
+
 fn array_like_length(
   vm: &mut Vm,
   receiver: &Value,

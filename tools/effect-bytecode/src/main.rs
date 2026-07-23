@@ -503,6 +503,7 @@ fn compile_record(record: &ModuleRecord) -> Result<Chunk, String> {
     module_index: record.module_index.unwrap_or_default(),
     imports: record.import_sources.clone(),
     exports: record.exports.keys().cloned().collect(),
+    namespace_exports: record.namespace_exports.clone(),
   };
   let chunk = compile_oxc_with_ctx(session.program(), Some(&context), session.source())
     .map_err(|error| format!("compile {}: {error}", record.specifier))?;

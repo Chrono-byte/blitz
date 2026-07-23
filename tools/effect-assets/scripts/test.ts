@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const ASSETS = resolve(ROOT, "../../crates/blitz-runtime/assets/effect/3.16.7");
-const supported = ["effect", "effect/Effect", "effect/Context", "effect/Layer", "effect/Stream", "effect/Scope", "effect/Schedule", "effect/Match"];
+const supported = ["effect", "effect/Effect", "effect/Cause", "effect/Exit", "effect/Fiber", "effect/FiberId", "effect/HashSet", "effect/Chunk", "effect/Option", "effect/Either", "effect/Duration", "effect/Function", "effect/Context", "effect/Layer", "effect/Stream", "effect/Scope", "effect/Schedule", "effect/Match"];
 const manifest = JSON.parse(readFileSync(join(ASSETS, "manifest.json"), "utf8")) as {
   entries: { specifier: string; source: { path: string }; declaration?: { path: string } }[];
   package: { version: string };

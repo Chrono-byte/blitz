@@ -278,9 +278,36 @@ impl Vm {
     self.this_value.clone()
   }
 
-  /// Return whether the current builtin call includes `this` at args[0].
-  pub(crate) fn builtin_this_arg_prepended(&self) -> bool {
+  /// Return whether the current host builtin call includes `this` at `args[0]`.
+  pub fn builtin_this_arg_prepended(&self) -> bool {
     self.builtin_this_arg_prepended
+  }
+
+  /// Return whether a JavaScript exception is currently unwinding to a handler.
+  pub(crate) fn has_pending_exception(&self) -> bool {
+    self.pending_exception
+  }
+
+  /// Close an iterator from a host callback without disturbing its pending
+  /// language-level exception.
+  pub(crate) fn close_iterator_in_fork(
+    &self,
+    iterator: &Value,
+  ) -> Result<(), RuntimeError> {
+    let mut child = self.fork_execution();
+    let return_method =
+      child.get_property_host(iterator, &PropertyKey::String("return".to_string()))?;
+    if matches!(return_method, Value::Undefined | Value::Null) {
+      return Ok(());
+    }
+    if !Self::is_callable_value(&return_method) {
+      return Err(child.throw_type_error("Iterator return is not callable"));
+    }
+    let result = child.call_value_with_this(&return_method, iterator, &[])?;
+    if !result.is_object() {
+      return Err(child.throw_type_error("Iterator return result is not an object"));
+    }
+    Ok(())
   }
 
   /// Return the current `[[NewTarget]]` value.
@@ -3645,7 +3672,7 @@ pub(super) fn set_property(
           a[i] = Some(value);
           p.properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(usize_to_f64(a.len()))),
+            PropertyDescriptor::data(Value::Number(usize_to_f64(next_len))),
           );
         } else {
           p.properties

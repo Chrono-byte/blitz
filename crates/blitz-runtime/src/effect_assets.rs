@@ -97,6 +97,75 @@ mod tests {
   use std::cell::RefCell;
   use std::path::Path;
   use std::rc::Rc;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  static NEXT_EFFECT_COMPATIBILITY_TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
+  fn run_effect_compatibility_entry(
+    source: impl Into<String>,
+    assertion: impl FnOnce(&blitz::Vm) + Send + 'static,
+  ) {
+    let source = source.into();
+    let test_id = NEXT_EFFECT_COMPATIBILITY_TEST_ID.fetch_add(1, Ordering::Relaxed);
+    std::thread::Builder::new()
+      .name("effect-compatibility".to_string())
+      .stack_size(16 * 1024 * 1024)
+      .spawn(move || {
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        globals.borrow_mut().properties.insert(
+          PropertyKey::String("globalThis".to_string()),
+          PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+        );
+        let mut vm = blitz::Vm::new(globals);
+        let _runtime = crate::host::install_runtime(
+          &mut vm,
+          crate::host::RuntimeOptions::from_host(vec!["blitz-effect-compatibility".to_string()]),
+        );
+        assert_eq!(
+          vm.module_loader_pipeline_snapshot(),
+          blitz::module::ModuleLoaderPipelineSnapshot::default(),
+          "installing bundled Effect roots must not use the source pipeline"
+        );
+
+        let directory = std::env::temp_dir().join(format!(
+          "blitz-effect-compatibility-{}-{}",
+          std::process::id(),
+          test_id
+        ));
+        std::fs::create_dir_all(&directory).expect("create Effect compatibility directory");
+        let entry = directory.join("entry.mjs");
+        std::fs::write(&entry, source).expect("write Effect compatibility entry");
+        let loader_handle = vm.module_loader_handle();
+        {
+          let mut loader = loader_handle.borrow_mut();
+          loader
+            .construct(&directory, "./entry.mjs")
+            .expect("construct Effect compatibility graph");
+          loader
+            .instantiate_all()
+            .expect("instantiate Effect compatibility graph");
+        }
+        blitz::module::evaluate_entry_shared(&loader_handle, &entry, &mut vm, false)
+          .expect("execute Effect compatibility graph");
+        std::fs::remove_dir_all(&directory).expect("remove Effect compatibility directory");
+
+        assert_eq!(
+          vm.module_loader_pipeline_snapshot(),
+          blitz::module::ModuleLoaderPipelineSnapshot {
+            source_parses: 1,
+            import_extraction_parses: 1,
+            source_linking_passes: 2,
+            source_typechecks: 0,
+            source_compilations: 1,
+          },
+          "only the compatibility entry may use source tooling"
+        );
+        assertion(&vm);
+      })
+      .expect("spawn Effect compatibility thread")
+      .join()
+      .expect("Effect compatibility thread succeeds");
+  }
 
   #[test]
   fn generated_manifests_cover_embedded_assets() {
@@ -506,6 +575,305 @@ mod tests {
       loader
         .construct(Path::new("."), "effect/Effect")
         .is_err()
+    );
+  }
+
+  #[test]
+  fn expanded_generated_public_roots_are_importable() {
+    let roots = public_declaration_sources();
+    let imports = roots
+      .iter()
+      .enumerate()
+      .map(|(index, (specifier, _))| {
+        format!(
+          "import * as root{index} from '{specifier}';\nglobalThis.effect_public_root_count += typeof root{index} === 'object' ? 1 : 0;\n"
+        )
+      })
+      .collect::<String>();
+    let source = format!("globalThis.effect_public_root_count = 0;\n{imports}");
+    let expected_count = roots.len();
+    run_effect_compatibility_entry(source, move |vm| {
+      assert_eq!(
+        vm.get_global("effect_public_root_count"),
+        Some(Value::Number(expected_count as f64))
+      );
+    });
+  }
+
+  #[test]
+  fn effect_root_and_fiber_await_preserve_identity() {
+    run_effect_compatibility_entry(
+      r#"
+        import * as Root from 'effect';
+        import * as Effect from 'effect/Effect';
+        import * as Fiber from 'effect/Fiber';
+        import * as Exit from 'effect/Exit';
+        const fiber = Effect.runFork(Effect.succeed(41));
+        const awaitedFiber = Effect.runFork(Fiber.await(fiber));
+        const awaited = awaitedFiber.unsafePoll();
+        globalThis.effect_root_identity = Root.Effect.succeed === Effect.succeed;
+        globalThis.fiber_root_identity = Root.Fiber.await === Fiber.await;
+        globalThis.fiber_is_real = Fiber.isFiber(fiber) && Fiber.isRuntimeFiber(fiber);
+        globalThis.fiber_await_observed =
+          awaited !== null &&
+          Exit.isSuccess(awaited) &&
+          Exit.isSuccess(awaited.value) &&
+          awaited.value.value === 41;
+      "#,
+      |vm| {
+        assert_eq!(
+          vm.get_global("effect_root_identity"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(
+          vm.get_global("fiber_root_identity"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(vm.get_global("fiber_is_real"), Some(Value::Bool(true)));
+        assert_eq!(
+          vm.get_global("fiber_await_observed"),
+          Some(Value::Bool(true))
+        );
+      },
+    );
+  }
+
+  #[test]
+  fn exit_and_cause_observation_preserve_failure_shape() {
+    run_effect_compatibility_entry(
+      r#"
+        import * as Effect from 'effect/Effect';
+        import * as Exit from 'effect/Exit';
+        import * as Cause from 'effect/Cause';
+        const outer = Effect.runFork(Effect.exit(Effect.fail('boom'))).unsafePoll();
+        const observed = outer === null ? Exit.fail('missing') : outer.value;
+        const failure = Cause.failureOption(observed.cause);
+        globalThis.exit_is_exit = Exit.isExit(observed);
+        globalThis.exit_is_failure = Exit.isFailure(observed);
+        globalThis.cause_is_cause = Cause.isCause(observed.cause);
+        globalThis.cause_is_failure = Cause.isFailure(observed.cause);
+        globalThis.cause_failure_observed =
+          failure._tag === 'Some' && failure.value === 'boom';
+        globalThis.exit_cause_observed =
+          Exit.causeOption(observed)._tag === 'Some';
+      "#,
+      |vm| {
+        for name in [
+          "exit_is_exit",
+          "exit_is_failure",
+          "cause_is_cause",
+          "cause_is_failure",
+          "cause_failure_observed",
+          "exit_cause_observed",
+        ] {
+          assert_eq!(vm.get_global(name), Some(Value::Bool(true)), "{name}");
+        }
+      },
+    );
+  }
+
+  #[test]
+  fn context_tags_keep_key_identity_and_service_identity() {
+    run_effect_compatibility_entry(
+      r#"
+        import * as Effect from 'effect/Effect';
+        import * as Context from 'effect/Context';
+        const firstTag = Context.GenericTag('blitz/effect-compatibility/service');
+        const equivalentTag = Context.GenericTag('blitz/effect-compatibility/service');
+        const service = { answer: 7 };
+        const context = Context.make(firstTag, service);
+        const observed = Effect.runFork(
+          Effect.provide(
+            Effect.contextWith(current => Context.get(current, equivalentTag)),
+            context
+          )
+        ).unsafePoll();
+        globalThis.context_tag_key_identity = firstTag.key === equivalentTag.key;
+        globalThis.context_tag_shape = Context.isTag(firstTag);
+        globalThis.context_service_identity =
+          observed !== null && observed.value === service;
+      "#,
+      |vm| {
+        assert_eq!(
+          vm.get_global("context_tag_key_identity"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(vm.get_global("context_tag_shape"), Some(Value::Bool(true)));
+        assert_eq!(
+          vm.get_global("context_service_identity"),
+          Some(Value::Bool(true))
+        );
+      },
+    );
+  }
+
+  #[test]
+  fn layers_build_and_provide_context() {
+    run_effect_compatibility_entry(
+      r#"
+        import * as Effect from 'effect/Effect';
+        import * as Context from 'effect/Context';
+        import * as Exit from 'effect/Exit';
+        import * as Layer from 'effect/Layer';
+        const tag = Context.GenericTag('blitz/effect-compatibility/layer');
+        const layer = Layer.succeed(tag, { answer: 13 });
+        const built = Effect.runFork(Effect.scoped(Layer.build(layer))).unsafePoll();
+        globalThis.layer_built = built !== null && Exit.isSuccess(built);
+      "#,
+      |vm| {
+        assert_eq!(vm.get_global("layer_built"), Some(Value::Bool(true)));
+      },
+    );
+  }
+
+  #[test]
+  fn scoped_acquire_release_receives_success_exit() {
+    run_effect_compatibility_entry(
+      r#"
+        import * as Effect from 'effect/Effect';
+        import * as Exit from 'effect/Exit';
+        let acquired = 0;
+        let released = 0;
+        let releaseSawExit = false;
+        let releaseSawSuccess = false;
+        const resource = Effect.acquireRelease(
+          Effect.sync(() => {
+            acquired += 1;
+            return 'resource';
+          }),
+          (value, exit) => Effect.sync(() => {
+            released += value === 'resource' ? 1 : 0;
+            releaseSawExit = Exit.isExit(exit);
+            releaseSawSuccess = Exit.isSuccess(exit);
+          })
+        );
+        const result = Effect.runFork(
+          Effect.exit(Effect.scoped(Effect.map(resource, value => value + '-used')))
+        ).unsafePoll();
+        globalThis.scoped_result =
+          result !== null && Exit.isSuccess(result) && result.value.value === 'resource-used';
+        globalThis.scoped_acquired = acquired === 1;
+        globalThis.scoped_released = released === 1;
+        globalThis.scoped_finalizer_exit = releaseSawExit && releaseSawSuccess;
+      "#,
+      |vm| {
+        assert_eq!(vm.get_global("scoped_result"), Some(Value::Bool(true)));
+        assert_eq!(vm.get_global("scoped_acquired"), Some(Value::Bool(true)));
+        assert_eq!(vm.get_global("scoped_released"), Some(Value::Bool(true)));
+        assert_eq!(
+          vm.get_global("scoped_finalizer_exit"),
+          Some(Value::Bool(true))
+        );
+      },
+    );
+  }
+
+  #[test]
+  fn abort_controller_signal_is_single_shot_and_observable() {
+    run_effect_compatibility_entry(
+      r#"
+        const controller = new AbortController();
+        let calls = 0;
+        controller.signal.addEventListener('abort', () => calls++, { once: true });
+        controller.abort('stop');
+        controller.abort('ignored');
+        const detachedAbort = AbortSignal.abort;
+        const detachedSignal = detachedAbort('detached');
+        globalThis.abort_signal_detached_reason = detachedSignal.reason;
+        globalThis.abort_signal_aborted = controller.signal.aborted;
+        globalThis.abort_signal_reason = controller.signal.reason;
+        globalThis.abort_listener_calls = calls;
+      "#,
+      |vm| {
+        assert_eq!(
+          vm.get_global("abort_signal_detached_reason"),
+          Some(Value::String("detached".to_string()))
+        );
+        assert_eq!(
+          vm.get_global("abort_signal_aborted"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(
+          vm.get_global("abort_signal_reason"),
+          Some(Value::String("stop".to_string()))
+        );
+        assert_eq!(
+          vm.get_global("abort_listener_calls"),
+          Some(Value::Number(1.0))
+        );
+      },
+    );
+  }
+
+  #[test]
+  fn synchronous_effect_async_resumes_without_host_timer() {
+    run_effect_compatibility_entry(
+      r#"
+        import * as Effect from 'effect/Effect';
+        import * as Exit from 'effect/Exit';
+        let callbackCalls = 0;
+        const effect = Effect.async((resume, signal) => {
+          callbackCalls += 1;
+          resume(Effect.succeed(73));
+          globalThis.effect_async_signal_supplied = signal !== undefined;
+        });
+        const result = Effect.runFork(Effect.exit(effect)).unsafePoll();
+        globalThis.effect_async_result =
+          result !== null && Exit.isSuccess(result) && result.value.value === 73;
+        globalThis.effect_async_callback_once = callbackCalls === 1;
+      "#,
+      |vm| {
+        assert_eq!(
+          vm.get_global("effect_async_result"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(
+          vm.get_global("effect_async_callback_once"),
+          Some(Value::Bool(true))
+        );
+      },
+    );
+  }
+
+  #[test]
+  #[ignore = "requires timer and Effect scheduler integration from the runtime-kernel phase"]
+  fn fiber_interrupt_cancellation_uses_supported_scheduler_path() {
+    run_effect_compatibility_entry(
+      r#"
+        import * as Effect from 'effect/Effect';
+        import * as Exit from 'effect/Exit';
+        import * as Fiber from 'effect/Fiber';
+        import * as Cause from 'effect/Cause';
+        const fiber = Effect.runFork(Effect.never);
+        const interrupted = Effect.runFork(Fiber.interrupt(fiber)).unsafePoll();
+        const exit = interrupted === null ? Exit.succeed(undefined) : interrupted.value;
+        globalThis.fiber_cancelled =
+          interrupted !== null &&
+          Exit.isSuccess(interrupted) &&
+          Exit.isInterrupted(exit) &&
+          Cause.isInterrupted(exit.cause);
+      "#,
+      |vm| {
+        assert_eq!(vm.get_global("fiber_cancelled"), Some(Value::Bool(true)));
+      },
+    );
+  }
+
+  #[test]
+  fn runtime_installation_has_zero_bundled_pipeline_counters() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    globals.borrow_mut().properties.insert(
+      PropertyKey::String("globalThis".to_string()),
+      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+    );
+    let mut vm = blitz::Vm::new(globals);
+    let _runtime = crate::host::install_runtime(
+      &mut vm,
+      crate::host::RuntimeOptions::from_host(vec!["blitz-test".to_string()]),
+    );
+    assert_eq!(
+      vm.module_loader_pipeline_snapshot(),
+      blitz::module::ModuleLoaderPipelineSnapshot::default()
     );
   }
 

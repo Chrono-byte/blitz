@@ -145,6 +145,38 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
             Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. }
           );
 
+          // Array.from consumes an explicitly supplied iterator before
+          // falling back to array-like indexed access. This is required for
+          // collection iterators such as Map.prototype.values().
+          if !matches!(source, Value::Array(..)) {
+            let iterator_method =
+              vm.get_property_host(source, &PKey::Symbol(SymbolId::well_known_iterator()))?;
+            if Vm::is_callable_value(&iterator_method) {
+              let items = collect_iterable_values(vm, source)?;
+              let mut out = Vec::with_capacity(items.len());
+              for (index, mut value) in items.into_iter().enumerate() {
+                if has_map_fn {
+                  value = vm.call_value_with_this(
+                    map_fn,
+                    &Value::Undefined,
+                    &[value, Value::Number(usize_to_f64(index))],
+                  )?;
+                }
+                out.push(Some(value));
+              }
+              let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
+              let props = Rc::new(RefCell::new(ObjectData::new()));
+              props
+                .borrow_mut()
+                .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_from)));
+              props.borrow_mut().properties.insert(
+                PKey::String("length".to_string()),
+                array_length_descriptor(arr_rc.borrow().len()),
+              );
+              return Ok(Value::Array(arr_rc, props));
+            }
+          }
+
           let len = match source {
             Value::Array(arr, _) => arr.borrow().len(),
             Value::String(s) => s.chars().count(),

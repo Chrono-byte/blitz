@@ -18,7 +18,7 @@ use oxc_ast::ast as oast;
 // Reintroduce a compact Type enum here (previously in oxc_typecheck) so other
 // modules can reference `crate::typecheck::Type` after removing the duplicate
 // module. Keep it conservative and compatible with existing usage.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Lightweight, conservative representation of types used by the checker.
 ///
@@ -187,6 +187,13 @@ pub enum BuiltinType {
 type Scope = HashMap<String, Type>;
 type TypeEnvironment = HashMap<String, Type>;
 
+#[derive(Debug, Clone, Default)]
+struct ModuleType {
+  values: HashMap<String, Type>,
+  types: HashMap<String, TypeDefinition>,
+  namespaces: HashMap<String, ModuleType>,
+}
+
 const TYPE_EVALUATION_LIMIT: usize = 128;
 
 thread_local! {
@@ -250,9 +257,46 @@ pub fn with_strict_override<R>(
 /// # Errors
 /// Returns a `TypeCheckerError` if type checking fails.
 pub fn check(program: &oast::Program<'_>) -> Result<(), TypeCheckerError> {
+  check_with_declarations(program, &[])
+}
+
+/// A declaration source associated with a public virtual module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VirtualDeclaration {
+  /// Canonical module specifier used by imports.
+  pub specifier: String,
+  /// TypeScript declaration source for the module.
+  pub source: String,
+}
+
+/// Check a program against declarations retained by public virtual modules.
+pub fn check_with_declarations(
+  program: &oast::Program<'_>,
+  declarations: &[VirtualDeclaration],
+) -> Result<(), TypeCheckerError> {
+  check_with_declarations_and_source_imports(program, declarations, &[])
+}
+
+/// Check a program against virtual declarations and imports resolved as source
+/// modules by the module loader.
+///
+/// Source-module imports have no declaration model in this checker. They are
+/// registered as `Unknown` bindings so they do not become declaration-module
+/// lookups or silently acquire `Any` types. Imports whose source is neither a
+/// supplied declaration nor a loader-confirmed source module remain strict
+/// errors.
+pub fn check_with_declarations_and_source_imports(
+  program: &oast::Program<'_>,
+  declarations: &[VirtualDeclaration],
+  source_imports: &[String],
+) -> Result<(), TypeCheckerError> {
   let mut ctx = TypeContext {
     scopes: vec![Scope::new()],
     named_types: HashMap::new(),
+    modules: HashMap::new(),
+    namespace_types: HashMap::new(),
+    source_imports: source_imports.iter().cloned().collect(),
+    check_imports: !declarations.is_empty() || !source_imports.is_empty(),
     expected_returns: Vec::new(),
   };
 
@@ -287,6 +331,8 @@ pub fn check(program: &oast::Program<'_>) -> Result<(), TypeCheckerError> {
     .scope_mut()
     .insert("process".to_string(), Type::Any);
 
+  ctx.register_declarations_sources(declarations)?;
+
   for stmt in &program.body {
     ctx.register_declarations(stmt)?;
   }
@@ -300,10 +346,629 @@ pub fn check(program: &oast::Program<'_>) -> Result<(), TypeCheckerError> {
 struct TypeContext {
   scopes: Vec<Scope>,
   named_types: HashMap<String, TypeDefinition>,
+  modules: HashMap<String, ModuleType>,
+  namespace_types: HashMap<String, TypeDefinition>,
+  source_imports: HashSet<String>,
+  check_imports: bool,
   expected_returns: Vec<Type>,
 }
 
+struct ParsedDeclaration {
+  specifier: String,
+  session: crate::parser::ParserSession,
+}
+
+fn private_type_name(
+  specifier: &str,
+  name: &str,
+) -> String {
+  // The NUL prefix cannot be produced by an ECMAScript identifier, so a
+  // private helper cannot collide with a user-visible type name.
+  format!("\0virtual-module:{specifier}:{name}")
+}
+
+fn qualify_type_definition(
+  specifier: &str,
+  local_types: &HashSet<String>,
+  definition: &TypeDefinition,
+) -> TypeDefinition {
+  let generic_names = definition
+    .parameters
+    .iter()
+    .map(|parameter| parameter.name.clone())
+    .collect();
+  TypeDefinition {
+    parameters: definition
+      .parameters
+      .iter()
+      .map(|parameter| TypeParameter {
+        name: parameter.name.clone(),
+        constraint: parameter
+          .constraint
+          .as_ref()
+          .map(|typ| qualify_type(specifier, local_types, &generic_names, typ)),
+        default: parameter
+          .default
+          .as_ref()
+          .map(|typ| qualify_type(specifier, local_types, &generic_names, typ)),
+      })
+      .collect(),
+    body: qualify_type(specifier, local_types, &generic_names, &definition.body),
+  }
+}
+
+fn qualify_type(
+  specifier: &str,
+  local_types: &HashSet<String>,
+  generic_names: &HashSet<String>,
+  typ: &Type,
+) -> Type {
+  match typ {
+    Type::Array(element) => Type::Array(Box::new(qualify_type(
+      specifier,
+      local_types,
+      generic_names,
+      element,
+    ))),
+    Type::Tuple(elements) => Type::Tuple(
+      elements
+        .iter()
+        .map(|element| qualify_type(specifier, local_types, generic_names, element))
+        .collect(),
+    ),
+    Type::Rest(element) => Type::Rest(Box::new(qualify_type(
+      specifier,
+      local_types,
+      generic_names,
+      element,
+    ))),
+    Type::Function(parameters, result) => Type::Function(
+      parameters
+        .iter()
+        .map(|parameter| qualify_type(specifier, local_types, generic_names, parameter))
+        .collect(),
+      Box::new(qualify_type(specifier, local_types, generic_names, result)),
+    ),
+    Type::Object(properties) => Type::Object(
+      properties
+        .iter()
+        .map(|(name, typ)| {
+          (
+            name.clone(),
+            qualify_type(specifier, local_types, generic_names, typ),
+          )
+        })
+        .collect(),
+    ),
+    Type::TypeReference { name, arguments } => Type::TypeReference {
+      name: if local_types.contains(name) && !generic_names.contains(name) {
+        private_type_name(specifier, name)
+      } else {
+        name.clone()
+      },
+      arguments: arguments
+        .iter()
+        .map(|argument| qualify_type(specifier, local_types, generic_names, argument))
+        .collect(),
+    },
+    Type::Union(types) => Type::Union(
+      types
+        .iter()
+        .map(|typ| qualify_type(specifier, local_types, generic_names, typ))
+        .collect(),
+    ),
+    Type::Intersection(types) => Type::Intersection(
+      types
+        .iter()
+        .map(|typ| qualify_type(specifier, local_types, generic_names, typ))
+        .collect(),
+    ),
+    Type::Conditional {
+      check,
+      extends,
+      true_type,
+      false_type,
+      distributive_parameter,
+    } => Type::Conditional {
+      check: Box::new(qualify_type(specifier, local_types, generic_names, check)),
+      extends: Box::new(qualify_type(specifier, local_types, generic_names, extends)),
+      true_type: Box::new(qualify_type(
+        specifier,
+        local_types,
+        generic_names,
+        true_type,
+      )),
+      false_type: Box::new(qualify_type(
+        specifier,
+        local_types,
+        generic_names,
+        false_type,
+      )),
+      distributive_parameter: distributive_parameter.clone(),
+    },
+    Type::KeyOf(operand) => Type::KeyOf(Box::new(qualify_type(
+      specifier,
+      local_types,
+      generic_names,
+      operand,
+    ))),
+    Type::IndexedAccess { object, index } => Type::IndexedAccess {
+      object: Box::new(qualify_type(specifier, local_types, generic_names, object)),
+      index: Box::new(qualify_type(specifier, local_types, generic_names, index)),
+    },
+    Type::Mapped {
+      parameter,
+      constraint,
+      value,
+    } => {
+      let mut mapped_generics = generic_names.clone();
+      mapped_generics.insert(parameter.clone());
+      Type::Mapped {
+        parameter: parameter.clone(),
+        constraint: Box::new(qualify_type(
+          specifier,
+          local_types,
+          generic_names,
+          constraint,
+        )),
+        value: Box::new(qualify_type(
+          specifier,
+          local_types,
+          &mapped_generics,
+          value,
+        )),
+      }
+    }
+    Type::TemplateLiteral {
+      quasis,
+      substitutions,
+    } => Type::TemplateLiteral {
+      quasis: quasis.clone(),
+      substitutions: substitutions
+        .iter()
+        .map(|typ| qualify_type(specifier, local_types, generic_names, typ))
+        .collect(),
+    },
+    other => other.clone(),
+  }
+}
+
+fn module_declaration_names(
+  declaration: &oast::Declaration<'_>,
+  values: &mut HashSet<String>,
+  types: &mut HashSet<String>,
+) {
+  match declaration {
+    oast::Declaration::TSTypeAliasDeclaration(alias) => {
+      types.insert(alias.id.name.to_string());
+    }
+    oast::Declaration::TSInterfaceDeclaration(interface) => {
+      types.insert(interface.id.name.to_string());
+    }
+    oast::Declaration::VariableDeclaration(variable) => {
+      for declarator in &variable.declarations {
+        if let oast::BindingPattern::BindingIdentifier(identifier) = &declarator.id {
+          values.insert(identifier.name.to_string());
+        }
+      }
+    }
+    oast::Declaration::FunctionDeclaration(function) => {
+      if let Some(identifier) = &function.id {
+        values.insert(identifier.name.to_string());
+      }
+    }
+    _ => {}
+  }
+}
+
 impl TypeContext {
+  fn register_declarations_sources(
+    &mut self,
+    declarations: &[VirtualDeclaration],
+  ) -> Result<(), TypeCheckerError> {
+    let source_type =
+      crate::parser::Parser::source_type_for_path(std::path::Path::new("virtual.d.ts"), false);
+    let mut parsed = Vec::with_capacity(declarations.len());
+    for declaration in declarations {
+      let session = crate::parser::Parser::parse_source_with_type(&declaration.source, source_type)
+        .map_err(|error| {
+          TypeCheckerError::from(format!(
+            "Failed to parse declaration for '{}': {}",
+            declaration.specifier, error
+          ))
+        })?;
+      parsed.push(ParsedDeclaration {
+        specifier: declaration.specifier.clone(),
+        session,
+      });
+    }
+    parsed.sort_by(|left, right| left.specifier.cmp(&right.specifier));
+    if parsed
+      .windows(2)
+      .any(|pair| pair[0].specifier == pair[1].specifier)
+    {
+      return Err(TypeCheckerError::from("Duplicate declaration module"));
+    }
+
+    // Collect every top-level declaration in a module-local table first. Type
+    // annotations are allowed to refer to private helpers, but the public
+    // ModuleType is filtered back to the module's actual exports below.
+    for declaration in &parsed {
+      let mut local = ModuleType::default();
+      let mut exported_values = HashSet::new();
+      let mut exported_types = HashSet::new();
+      let mut export_aliases = Vec::new();
+      for statement in &declaration.session.program().body {
+        match statement {
+          oast::Statement::ExportNamedDeclaration(export) => {
+            if let Some(declaration) = &export.declaration {
+              self.register_module_declaration(declaration, &mut local)?;
+              module_declaration_names(declaration, &mut exported_values, &mut exported_types);
+            } else if export.source.is_none() {
+              for specifier in &export.specifiers {
+                export_aliases.push((
+                  module_export_name(&specifier.local)?,
+                  module_export_name(&specifier.exported)?,
+                ));
+              }
+            }
+          }
+          oast::Statement::TSTypeAliasDeclaration(_)
+          | oast::Statement::TSInterfaceDeclaration(_)
+          | oast::Statement::VariableDeclaration(_)
+          | oast::Statement::FunctionDeclaration(_) => {
+            self.register_module_statement_declaration(statement, &mut local)?;
+          }
+          _ => {}
+        }
+      }
+
+      let local_type_names: HashSet<String> = local.types.keys().cloned().collect();
+      let mut qualified_types = HashMap::new();
+      for (name, definition) in local.types {
+        let definition =
+          qualify_type_definition(&declaration.specifier, &local_type_names, &definition);
+        self.named_types.insert(
+          private_type_name(&declaration.specifier, &name),
+          definition.clone(),
+        );
+        qualified_types.insert(name, definition);
+      }
+      let qualified_values = local
+        .values
+        .into_iter()
+        .map(|(name, typ)| {
+          (
+            name,
+            qualify_type(
+              &declaration.specifier,
+              &local_type_names,
+              &HashSet::new(),
+              &typ,
+            ),
+          )
+        })
+        .collect::<HashMap<_, _>>();
+      let mut public_values = qualified_values
+        .iter()
+        .filter(|(name, _)| exported_values.contains(*name))
+        .map(|(name, typ)| (name.clone(), typ.clone()))
+        .collect::<HashMap<_, _>>();
+      let mut public_types = qualified_types
+        .iter()
+        .filter(|(name, _)| exported_types.contains(*name))
+        .map(|(name, definition)| (name.clone(), definition.clone()))
+        .collect::<HashMap<_, _>>();
+      for (local_name, exported_name) in export_aliases {
+        if let Some(definition) = qualified_types.get(&local_name) {
+          public_types.insert(exported_name, definition.clone());
+        } else if let Some(typ) = qualified_values.get(&local_name) {
+          public_values.insert(exported_name, typ.clone());
+        }
+      }
+      let module = ModuleType {
+        values: public_values,
+        types: public_types,
+        namespaces: HashMap::new(),
+      };
+      self
+        .modules
+        .insert(declaration.specifier.clone(), module);
+    }
+
+    // Public type names remain available to source annotations and namespace
+    // imports. Private helpers are reachable only through the internal names
+    // embedded in the exported definitions above.
+    let mut definitions = Vec::new();
+    for (specifier, module) in &self.modules {
+      definitions.extend(
+        module
+          .types
+          .iter()
+          .map(|(name, definition)| (name.clone(), specifier.clone(), definition.clone())),
+      );
+    }
+    definitions.sort_by(|left, right| {
+      left
+        .0
+        .cmp(&right.0)
+        .then_with(|| left.1.cmp(&right.1))
+    });
+    for (name, _, definition) in definitions {
+      self.named_types.entry(name).or_insert(definition);
+    }
+
+    // Resolve imports and re-exports to a fixed point. The bounded number of
+    // passes is sufficient for the finite declaration graph and deterministic.
+    for _ in 0..=parsed.len() {
+      for declaration in &parsed {
+        let mut module = self
+          .modules
+          .get(&declaration.specifier)
+          .cloned()
+          .expect("direct declaration module was inserted");
+        for statement in &declaration.session.program().body {
+          self.register_module_links(statement, &mut module)?;
+        }
+        self
+          .modules
+          .insert(declaration.specifier.clone(), module);
+      }
+    }
+
+    // Validate re-exported members after all dependency links have converged.
+    for declaration in &parsed {
+      let mut module = self
+        .modules
+        .get(&declaration.specifier)
+        .cloned()
+        .expect("linked declaration module was inserted");
+      for statement in &declaration.session.program().body {
+        self.register_module_links_strict(statement, &mut module)?;
+      }
+      self
+        .modules
+        .insert(declaration.specifier.clone(), module);
+    }
+    Ok(())
+  }
+
+  fn register_module_links(
+    &mut self,
+    statement: &oast::Statement<'_>,
+    module: &mut ModuleType,
+  ) -> Result<(), TypeCheckerError> {
+    match statement {
+      oast::Statement::ImportDeclaration(import) => {
+        self.register_module_import(import, false)?;
+      }
+      oast::Statement::ExportNamedDeclaration(export) => {
+        if let Some(source) = &export.source {
+          self.register_reexport(source.value.as_str(), &export.specifiers, module, false)?;
+        }
+      }
+      oast::Statement::ExportAllDeclaration(export) => {
+        self.register_export_all(export, module)?;
+      }
+      _ => {}
+    }
+    Ok(())
+  }
+
+  fn register_module_links_strict(
+    &mut self,
+    statement: &oast::Statement<'_>,
+    module: &mut ModuleType,
+  ) -> Result<(), TypeCheckerError> {
+    match statement {
+      oast::Statement::ImportDeclaration(import) => {
+        self.register_module_import(import, true)?;
+      }
+      oast::Statement::ExportNamedDeclaration(export) => {
+        if let Some(source) = &export.source {
+          self.register_reexport(source.value.as_str(), &export.specifiers, module, true)?;
+        }
+      }
+      oast::Statement::ExportAllDeclaration(export) => {
+        self.register_export_all(export, module)?;
+      }
+      _ => {}
+    }
+    Ok(())
+  }
+
+  fn register_module_import(
+    &mut self,
+    import: &oast::ImportDeclaration<'_>,
+    strict: bool,
+  ) -> Result<(), TypeCheckerError> {
+    let source = import.source.value.as_str();
+    let module = self.module(source)?.clone();
+    let Some(specifiers) = &import.specifiers else {
+      return Ok(());
+    };
+    for specifier in specifiers {
+      match specifier {
+        oast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
+          register_namespace_types(
+            namespace.local.name.as_str(),
+            &module,
+            &mut self.namespace_types,
+          );
+        }
+        oast::ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => {}
+        oast::ImportDeclarationSpecifier::ImportSpecifier(named) => {
+          let imported = module_export_name(&named.imported)?;
+          if let Some(definition) = module.types.get(&imported) {
+            self
+              .named_types
+              .insert(named.local.name.to_string(), definition.clone());
+          } else if !module.values.contains_key(&imported) && strict {
+            return Err(TypeCheckerError::from(format!(
+              "Module '{source}' has no export '{imported}'"
+            )));
+          }
+        }
+      }
+    }
+    Ok(())
+  }
+
+  fn register_reexport(
+    &mut self,
+    source: &str,
+    specifiers: &[oast::ExportSpecifier<'_>],
+    module: &mut ModuleType,
+    strict: bool,
+  ) -> Result<(), TypeCheckerError> {
+    let imported = self.module(source)?.clone();
+    for specifier in specifiers {
+      let local = module_export_name(&specifier.local)?;
+      let exported = module_export_name(&specifier.exported)?;
+      if let Some(typ) = imported.values.get(&local) {
+        module.values.insert(exported, typ.clone());
+      } else if let Some(definition) = imported.types.get(&local) {
+        module.types.insert(exported, definition.clone());
+      } else if strict {
+        return Err(TypeCheckerError::from(format!(
+          "Module '{source}' has no export '{local}'"
+        )));
+      }
+    }
+    Ok(())
+  }
+
+  fn register_export_all(
+    &mut self,
+    export: &oast::ExportAllDeclaration<'_>,
+    module: &mut ModuleType,
+  ) -> Result<(), TypeCheckerError> {
+    let imported = self.module(export.source.value.as_str())?.clone();
+    if let Some(exported) = &export.exported {
+      module
+        .namespaces
+        .insert(module_export_name(exported)?, imported);
+    } else if export.export_kind == oast::ImportOrExportKind::Type {
+      module.types.extend(imported.types);
+      module.namespaces.extend(imported.namespaces);
+    } else {
+      module.values.extend(imported.values);
+      module.types.extend(imported.types);
+      module.namespaces.extend(imported.namespaces);
+    }
+    Ok(())
+  }
+
+  fn module(
+    &self,
+    source: &str,
+  ) -> Result<&ModuleType, TypeCheckerError> {
+    self
+      .modules
+      .get(source)
+      .ok_or_else(|| TypeCheckerError::from(format!("Unknown declaration module '{source}'")))
+  }
+
+  fn register_module_statement_declaration(
+    &mut self,
+    statement: &oast::Statement<'_>,
+    module: &mut ModuleType,
+  ) -> Result<(), TypeCheckerError> {
+    match statement {
+      oast::Statement::TSTypeAliasDeclaration(alias) => {
+        module.types.insert(
+          alias.id.name.to_string(),
+          type_definition(alias.type_parameters.as_deref(), &alias.type_annotation)?,
+        );
+      }
+      oast::Statement::TSInterfaceDeclaration(interface) => {
+        module.types.insert(
+          interface.id.name.to_string(),
+          TypeDefinition {
+            parameters: convert_type_parameters(interface.type_parameters.as_deref())?,
+            body: self.interface_type(interface)?,
+          },
+        );
+      }
+      oast::Statement::VariableDeclaration(variable) => {
+        for declarator in &variable.declarations {
+          let oast::BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            return Err(TypeCheckerError::from(
+              "unsupported declaration binding pattern",
+            ));
+          };
+          let typ = declarator
+            .type_annotation
+            .as_deref()
+            .map(convert_type_ann)
+            .transpose()?
+            .unwrap_or(Type::Unknown);
+          module
+            .values
+            .insert(identifier.name.to_string(), typ);
+        }
+      }
+      oast::Statement::FunctionDeclaration(function) => {
+        if let Some(identifier) = &function.id {
+          let typ = self.function_type(&function.params, function.return_type.as_deref())?;
+          merge_callable(&mut module.values, identifier.name.as_str(), typ);
+        }
+      }
+      _ => {}
+    }
+    Ok(())
+  }
+
+  fn register_module_declaration(
+    &mut self,
+    declaration: &oast::Declaration<'_>,
+    module: &mut ModuleType,
+  ) -> Result<(), TypeCheckerError> {
+    match declaration {
+      oast::Declaration::TSTypeAliasDeclaration(alias) => {
+        module.types.insert(
+          alias.id.name.to_string(),
+          type_definition(alias.type_parameters.as_deref(), &alias.type_annotation)?,
+        );
+      }
+      oast::Declaration::TSInterfaceDeclaration(interface) => {
+        module.types.insert(
+          interface.id.name.to_string(),
+          TypeDefinition {
+            parameters: convert_type_parameters(interface.type_parameters.as_deref())?,
+            body: self.interface_type(interface)?,
+          },
+        );
+      }
+      oast::Declaration::VariableDeclaration(variable) => {
+        for declarator in &variable.declarations {
+          let oast::BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            return Err(TypeCheckerError::from(
+              "unsupported declaration binding pattern",
+            ));
+          };
+          let typ = declarator
+            .type_annotation
+            .as_deref()
+            .map(convert_type_ann)
+            .transpose()?
+            .unwrap_or(Type::Unknown);
+          module
+            .values
+            .insert(identifier.name.to_string(), typ);
+        }
+      }
+      oast::Declaration::FunctionDeclaration(function) => {
+        if let Some(identifier) = &function.id {
+          let typ = self.function_type(&function.params, function.return_type.as_deref())?;
+          merge_callable(&mut module.values, identifier.name.as_str(), typ);
+        }
+      }
+      _ => {}
+    }
+    Ok(())
+  }
+
   fn scope_mut(&mut self) -> &mut Scope {
     self
       .scopes
@@ -347,8 +1012,29 @@ impl TypeContext {
       oast::Statement::FunctionDeclaration(function) => {
         if let Some(id) = &function.id {
           let typ = self.function_type(&function.params, function.return_type.as_deref())?;
-          self.scope_mut().insert(id.name.to_string(), typ);
+          merge_callable_scope(self.scope_mut(), id.name.as_str(), typ);
         }
+      }
+      oast::Statement::VariableDeclaration(variable) => {
+        for declarator in &variable.declarations {
+          let oast::BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            return Err(TypeCheckerError::from(
+              "unsupported variable binding pattern",
+            ));
+          };
+          let typ = declarator
+            .type_annotation
+            .as_deref()
+            .map(convert_type_ann)
+            .transpose()?
+            .unwrap_or(Type::Unknown);
+          self
+            .scope_mut()
+            .insert(identifier.name.to_string(), typ);
+        }
+      }
+      oast::Statement::ImportDeclaration(import) if self.check_imports => {
+        self.register_import(import)?;
       }
       oast::Statement::ExportNamedDeclaration(export) => {
         if let Some(declaration) = &export.declaration {
@@ -356,6 +1042,100 @@ impl TypeContext {
         }
       }
       _ => {}
+    }
+    Ok(())
+  }
+
+  fn register_source_import(
+    &mut self,
+    import: &oast::ImportDeclaration<'_>,
+  ) {
+    let Some(specifiers) = &import.specifiers else {
+      return;
+    };
+    for specifier in specifiers {
+      match specifier {
+        oast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
+          self
+            .scope_mut()
+            .insert(namespace.local.name.to_string(), Type::Unknown);
+        }
+        oast::ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
+          self
+            .scope_mut()
+            .insert(default.local.name.to_string(), Type::Unknown);
+        }
+        oast::ImportDeclarationSpecifier::ImportSpecifier(named) => {
+          self
+            .scope_mut()
+            .insert(named.local.name.to_string(), Type::Unknown);
+          self.named_types.insert(
+            named.local.name.to_string(),
+            TypeDefinition {
+              parameters: Vec::new(),
+              body: Type::Unknown,
+            },
+          );
+        }
+      }
+    }
+  }
+
+  fn register_import(
+    &mut self,
+    import: &oast::ImportDeclaration<'_>,
+  ) -> Result<(), TypeCheckerError> {
+    let source = import.source.value.as_str();
+    let Some(module) = self.modules.get(source).cloned() else {
+      if self.source_imports.contains(source) {
+        self.register_source_import(import);
+        return Ok(());
+      }
+      return Err(TypeCheckerError::from(format!(
+        "Unknown declaration module '{source}'"
+      )));
+    };
+    let Some(specifiers) = &import.specifiers else {
+      return Ok(());
+    };
+    for specifier in specifiers {
+      match specifier {
+        oast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
+          self.scope_mut().insert(
+            namespace.local.name.to_string(),
+            Type::Object(module_namespace_values(&module)),
+          );
+          register_namespace_types(
+            namespace.local.name.as_str(),
+            &module,
+            &mut self.namespace_types,
+          );
+        }
+        oast::ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
+          let typ = module.values.get("default").ok_or_else(|| {
+            TypeCheckerError::from(format!("Module '{source}' has no default export"))
+          })?;
+          self
+            .scope_mut()
+            .insert(default.local.name.to_string(), typ.clone());
+        }
+        oast::ImportDeclarationSpecifier::ImportSpecifier(named) => {
+          let imported = module_export_name(&named.imported)?;
+          if let Some(typ) = module.values.get(&imported) {
+            self
+              .scope_mut()
+              .insert(named.local.name.to_string(), typ.clone());
+          } else if let Some(definition) = module.types.get(&imported) {
+            self
+              .named_types
+              .insert(named.local.name.to_string(), definition.clone());
+          } else {
+            return Err(TypeCheckerError::from(format!(
+              "Module '{source}' has no export '{imported}'"
+            )));
+          }
+        }
+      }
     }
     Ok(())
   }
@@ -384,7 +1164,25 @@ impl TypeContext {
       oast::Declaration::FunctionDeclaration(function) => {
         if let Some(id) = &function.id {
           let typ = self.function_type(&function.params, function.return_type.as_deref())?;
-          self.scope_mut().insert(id.name.to_string(), typ);
+          merge_callable_scope(self.scope_mut(), id.name.as_str(), typ);
+        }
+      }
+      oast::Declaration::VariableDeclaration(variable) => {
+        for declarator in &variable.declarations {
+          let oast::BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            return Err(TypeCheckerError::from(
+              "unsupported variable binding pattern",
+            ));
+          };
+          let typ = declarator
+            .type_annotation
+            .as_deref()
+            .map(convert_type_ann)
+            .transpose()?
+            .unwrap_or(Type::Unknown);
+          self
+            .scope_mut()
+            .insert(identifier.name.to_string(), typ);
         }
       }
       _ => {}
@@ -397,6 +1195,7 @@ impl TypeContext {
     interface: &oast::TSInterfaceDeclaration<'_>,
   ) -> Result<Type, TypeCheckerError> {
     let mut properties = HashMap::new();
+    let mut call_signatures = Vec::new();
     for signature in &interface.body.body {
       match signature {
         oast::TSSignature::TSPropertySignature(property) => {
@@ -406,8 +1205,15 @@ impl TypeContext {
               .as_deref()
               .map(convert_type_ann)
               .transpose()?
-              .unwrap_or(Type::Any);
-            properties.insert(name, typ);
+              .unwrap_or(Type::Unknown);
+            properties.insert(
+              name,
+              if property.optional {
+                Type::Union(vec![typ, Type::Undefined])
+              } else {
+                typ
+              },
+            );
           }
         }
         oast::TSSignature::TSMethodSignature(method) => {
@@ -418,8 +1224,17 @@ impl TypeContext {
             );
           }
         }
+        oast::TSSignature::TSCallSignatureDeclaration(call) => {
+          call_signatures.push(function_type_from_call_signature(call)?);
+        }
         _ => {}
       }
+    }
+    if !call_signatures.is_empty() {
+      if properties.is_empty() {
+        return Ok(normalize_union(call_signatures));
+      }
+      properties.insert("[[call]]".to_string(), normalize_union(call_signatures));
     }
     Ok(Type::Object(properties))
   }
@@ -471,15 +1286,49 @@ impl TypeContext {
     depth: usize,
   ) -> Type {
     if depth >= TYPE_EVALUATION_LIMIT {
-      return Type::Any;
+      return Type::Unknown;
     }
     match typ {
       Type::TypeReference { name, arguments } => {
         if let Some(bound) = environment.get(name) {
           return self.resolve_type_with_environment(bound, environment, depth + 1);
         }
-        let Some(definition) = self.named_types.get(name).cloned() else {
-          return Type::Any;
+        if name == "Exclude" && arguments.len() >= 2 {
+          let source = self.resolve_type_with_environment(&arguments[0], environment, depth + 1);
+          let excluded = self.resolve_type_with_environment(&arguments[1], environment, depth + 1);
+          return normalize_union(
+            union_members(source)
+              .into_iter()
+              .filter(|member| !assignable(&excluded, member))
+              .collect(),
+          );
+        }
+        if name == "ReadonlyArray"
+          && let Some(element) = arguments.first()
+        {
+          return Type::Array(Box::new(self.resolve_type_with_environment(
+            element,
+            environment,
+            depth + 1,
+          )));
+        }
+        if name == "Record" && arguments.len() >= 2 {
+          let keys = self.resolve_type_with_environment(&arguments[0], environment, depth + 1);
+          let value = self.resolve_type_with_environment(&arguments[1], environment, depth + 1);
+          return Type::Object(
+            union_members(keys)
+              .into_iter()
+              .filter_map(|key| property_key_from_type(&key).map(|key| (key, value.clone())))
+              .collect(),
+          );
+        }
+        let definition = self
+          .namespace_types
+          .get(name)
+          .cloned()
+          .or_else(|| self.named_types.get(name).cloned());
+        let Some(definition) = definition else {
+          return Type::Unknown;
         };
         let mut definition_environment = environment.clone();
         for (index, parameter) in definition.parameters.iter().enumerate() {
@@ -489,7 +1338,7 @@ impl TypeContext {
             .or_else(|| parameter.default.clone());
           let argument = argument
             .map(|typ| self.resolve_type_with_environment(&typ, environment, depth + 1))
-            .unwrap_or(Type::Any);
+            .unwrap_or(Type::Unknown);
           if let Some(constraint) = &parameter.constraint {
             let constraint =
               self.resolve_type_with_environment(constraint, &definition_environment, depth + 1);
@@ -589,7 +1438,7 @@ impl TypeContext {
               .collect(),
           ),
           Type::Array(_) | Type::Tuple(_) => Type::Number,
-          _ => Type::Any,
+          _ => Type::Unknown,
         }
       }
       Type::IndexedAccess { object, index } => {
@@ -946,6 +1795,77 @@ impl TypeContext {
     Ok(())
   }
 
+  fn call_type(
+    &mut self,
+    callee: &Type,
+    call: &oast::CallExpression<'_>,
+  ) -> Result<Type, TypeCheckerError> {
+    let candidates = match callee {
+      Type::Union(types) => types.clone(),
+      other => vec![other.clone()],
+    };
+    let mut arguments = Vec::new();
+    for argument in &call.arguments {
+      let expression = argument
+        .as_expression()
+        .ok_or_else(|| TypeCheckerError::from("Unsupported call argument"))?;
+      arguments.push(self.type_of_expr_oast(expression)?);
+    }
+    let explicit_types = call
+      .type_arguments
+      .as_ref()
+      .map(|arguments| {
+        arguments
+          .params
+          .iter()
+          .map(convert_ts_type)
+          .collect::<Result<Vec<_>, _>>()
+      })
+      .transpose()?;
+    for candidate in candidates {
+      let Type::Function(parameters, return_type) = candidate else {
+        continue;
+      };
+      if !parameters.is_empty() && parameters.len() != arguments.len() {
+        continue;
+      }
+      let mut environment = TypeEnvironment::new();
+      let mut generic_names = Vec::new();
+      for parameter in &parameters {
+        collect_generic_names(parameter, &self.named_types, &mut generic_names);
+      }
+      collect_generic_names(&return_type, &self.named_types, &mut generic_names);
+      if let Some(explicit_types) = &explicit_types {
+        for (name, typ) in generic_names.iter().zip(explicit_types) {
+          environment.insert(name.clone(), typ.clone());
+        }
+      }
+      for (parameter, argument) in parameters.iter().zip(&arguments) {
+        infer_type_parameter(parameter, argument, &mut environment);
+      }
+      for name in &generic_names {
+        environment
+          .entry(name.clone())
+          .or_insert(Type::Never);
+      }
+      let mut compatible = true;
+      for (parameter, argument) in parameters.iter().zip(&arguments) {
+        let parameter = self.resolve_type_with_environment(parameter, &environment, 0);
+        if !self.is_assignable(&parameter, &self.resolve_type(argument)) {
+          compatible = false;
+          break;
+        }
+      }
+      if compatible {
+        return Ok(self.resolve_type_with_environment(&return_type, &environment, 0));
+      }
+    }
+    Err(TypeCheckerError::from(format!(
+      "No overload matches call for {}",
+      type_to_string(callee)
+    )))
+  }
+
   /// Returns the type of the given OAST expression.
   ///
   /// # Errors
@@ -968,7 +1888,9 @@ impl TypeContext {
       OExpr::NullLiteral(_) => Ok(Type::Null),
       OExpr::Identifier(id) => {
         let name = id.name.as_str();
-        Ok(self.lookup(name).unwrap_or(Type::Any))
+        self
+          .lookup(name)
+          .ok_or_else(|| TypeCheckerError::from(format!("Unknown identifier '{name}'")))
       }
       OExpr::UnaryExpression(u) => {
         let a = widen_literal(self.type_of_expr_oast(&u.argument)?);
@@ -1084,35 +2006,13 @@ impl TypeContext {
         } else {
           false
         };
+        if is_console_log {
+          return Ok(Type::Void);
+        }
         match &callee_type {
-          Type::Function(params, ret) => {
-            if !params.is_empty() && params.len() != c.arguments.len() {
-              return Err(TypeCheckerError::from(format!(
-                "Expected {} arguments, got {}",
-                params.len(),
-                c.arguments.len()
-              )));
-            }
-            for (i, (arg, param)) in c.arguments.iter().zip(params.iter()).enumerate() {
-              let arg_expr = arg
-                .as_expression()
-                .ok_or_else(|| TypeCheckerError::from("Unsupported call argument"))?;
-              let arg_type = self.type_of_expr_oast(arg_expr)?;
-              if !self.is_assignable(param, &arg_type) {
-                if is_console_log && *param == Type::String && arg_type == Type::Number {
-                  continue;
-                }
-                return Err(TypeCheckerError::from(format!(
-                  "Argument {}: type {} is not assignable to {}",
-                  i + 1,
-                  type_to_string(&arg_type),
-                  type_to_string(param)
-                )));
-              }
-            }
-            Ok((**ret).clone())
-          }
-          Type::Any | Type::Unknown => Ok(Type::Any),
+          Type::Function(..) | Type::Union(_) => self.call_type(&callee_type, c),
+          Type::Any => Ok(Type::Any),
+          Type::Unknown => Err(TypeCheckerError::from("Cannot call unknown")),
           _ => Err(TypeCheckerError::from(format!(
             "Cannot call non-function type {}",
             type_to_string(&callee_type)
@@ -1121,25 +2021,42 @@ impl TypeContext {
       }
       OExpr::StaticMemberExpression(m) => {
         let inferred_object_type = self.type_of_expr_oast(&m.object)?;
-        let obj_type = self.resolve_type(&inferred_object_type);
+        let obj_type = if matches!(inferred_object_type, Type::Object(_)) {
+          inferred_object_type
+        } else {
+          self.resolve_type(&inferred_object_type)
+        };
         match obj_type {
           Type::Object(ref props) => {
             let key = m.property.name.to_string();
             if let Some(t) = props.get(&key) {
               Ok(t.clone())
             } else {
-              Ok(Type::Any)
+              Err(TypeCheckerError::from(format!(
+                "Property '{}' does not exist on type object",
+                key
+              )))
             }
           }
-          Type::Any | Type::Unknown => Ok(Type::Any),
-          _ => Ok(Type::Any),
+          Type::Any => Ok(Type::Any),
+          Type::Unknown => Err(TypeCheckerError::from(
+            "Cannot read a property from unknown",
+          )),
+          _ => Err(TypeCheckerError::from(format!(
+            "Property '{}' does not exist on type {}",
+            m.property.name,
+            type_to_string(&obj_type)
+          ))),
         }
       }
       OExpr::ComputedMemberExpression(member) => {
         let inferred_object_type = self.type_of_expr_oast(&member.object)?;
         match self.resolve_type(&inferred_object_type) {
           Type::Array(element) => Ok(*element),
-          _ => Ok(Type::Any),
+          Type::Any => Ok(Type::Any),
+          _ => Err(TypeCheckerError::from(
+            "Computed member requires an array or indexable object",
+          )),
         }
       }
       OExpr::ArrayExpression(arr) => {
@@ -1208,7 +2125,9 @@ impl TypeContext {
       OExpr::ArrowFunctionExpression(function) => {
         self.function_type(&function.params, function.return_type.as_deref())
       }
-      _ => Ok(Type::Any),
+      _ => Err(TypeCheckerError::from(
+        "Unsupported expression in type checker",
+      )),
     }
   }
 }
@@ -1259,7 +2178,25 @@ fn convert_ts_type(ty: &oast::TSType<'_>) -> Result<Type, TypeCheckerError> {
           .transpose()?
           .unwrap_or_default(),
       }),
-      _ => Ok(Type::Any),
+      oast::TSTypeName::QualifiedName(qualified) => Ok(Type::TypeReference {
+        name: qualified_type_name(&qualified.left, qualified.right.name.as_str()),
+        arguments: reference
+          .type_arguments
+          .as_ref()
+          .map(|arguments| {
+            arguments
+              .params
+              .iter()
+              .map(convert_ts_type)
+              .collect::<Result<Vec<_>, _>>()
+          })
+          .transpose()?
+          .unwrap_or_default(),
+      }),
+      oast::TSTypeName::ThisExpression(_) => Ok(Type::TypeReference {
+        name: "this".to_string(),
+        arguments: Vec::new(),
+      }),
     },
     TSConditionalType(conditional) => Ok(Type::Conditional {
       distributive_parameter: naked_type_parameter_name(&conditional.check_type),
@@ -1305,7 +2242,7 @@ fn convert_ts_type(ty: &oast::TSType<'_>) -> Result<Type, TypeCheckerError> {
           .as_ref()
           .map(convert_ts_type)
           .transpose()?
-          .unwrap_or(Type::Any),
+          .unwrap_or(Type::Unknown),
       ),
     }),
     TSTemplateLiteralType(template) => Ok(Type::TemplateLiteral {
@@ -1339,7 +2276,7 @@ fn convert_ts_type(ty: &oast::TSType<'_>) -> Result<Type, TypeCheckerError> {
       }
       Ok(Type::Union(variants))
     }
-    _ => Ok(Type::Any),
+    _ => Ok(Type::Unknown),
   }
 }
 
@@ -1403,7 +2340,7 @@ fn convert_literal_type(literal: &oast::TSLiteral<'_>) -> Result<Type, TypeCheck
     oast::TSLiteral::StringLiteral(literal) => Ok(Type::Literal(LiteralType::String(
       literal.value.to_string(),
     ))),
-    _ => Ok(Type::Any),
+    _ => Ok(Type::Unknown),
   }
 }
 
@@ -1427,7 +2364,7 @@ fn convert_tuple_element(element: &oast::TSTupleElement<'_>) -> Result<Type, Typ
     _ => element
       .as_ts_type()
       .map(convert_ts_type)
-      .unwrap_or_else(|| Ok(Type::Any)),
+      .unwrap_or_else(|| Ok(Type::Unknown)),
   }
 }
 
@@ -1529,6 +2466,100 @@ fn widen_literal(typ: Type) -> Type {
   }
 }
 
+fn collect_generic_names(
+  typ: &Type,
+  named_types: &HashMap<String, TypeDefinition>,
+  names: &mut Vec<String>,
+) {
+  match typ {
+    Type::TypeReference { name, arguments } => {
+      if arguments.is_empty()
+        && !name.contains('.')
+        && !named_types.contains_key(name)
+        && !names.contains(name)
+      {
+        names.push(name.clone());
+      }
+      for argument in arguments {
+        collect_generic_names(argument, named_types, names);
+      }
+    }
+    Type::Array(element) | Type::Rest(element) => {
+      collect_generic_names(element, named_types, names)
+    }
+    Type::Tuple(elements) | Type::Union(elements) | Type::Intersection(elements) => {
+      for element in elements {
+        collect_generic_names(element, named_types, names);
+      }
+    }
+    Type::Object(properties) => {
+      for property in properties.values() {
+        collect_generic_names(property, named_types, names);
+      }
+    }
+    Type::Function(parameters, return_type) => {
+      for parameter in parameters {
+        collect_generic_names(parameter, named_types, names);
+      }
+      collect_generic_names(return_type, named_types, names);
+    }
+    _ => {}
+  }
+}
+
+fn infer_type_parameter(
+  parameter: &Type,
+  actual: &Type,
+  environment: &mut TypeEnvironment,
+) {
+  match parameter {
+    Type::TypeReference { name, arguments } if arguments.is_empty() => {
+      environment
+        .entry(name.clone())
+        .or_insert_with(|| actual.clone());
+    }
+    Type::TypeReference { name, arguments } => {
+      if let Type::TypeReference {
+        name: actual_name,
+        arguments: actual_arguments,
+      } = actual
+        && name.rsplit('.').next() == actual_name.rsplit('.').next()
+      {
+        for (parameter, actual) in arguments.iter().zip(actual_arguments) {
+          infer_type_parameter(parameter, actual, environment);
+        }
+      }
+    }
+    Type::Array(parameter) => match actual {
+      Type::Array(actual) => infer_type_parameter(parameter, actual, environment),
+      Type::Tuple(actual) => {
+        for actual in actual {
+          infer_type_parameter(parameter, actual, environment);
+        }
+      }
+      _ => {}
+    },
+    Type::Object(properties) => {
+      if let Type::Object(actual) = actual {
+        for (name, parameter) in properties {
+          if let Some(actual) = actual.get(name) {
+            infer_type_parameter(parameter, actual, environment);
+          }
+        }
+      }
+    }
+    Type::Function(parameters, return_type) => {
+      if let Type::Function(actual_parameters, actual_return_type) = actual {
+        for (parameter, actual) in parameters.iter().zip(actual_parameters) {
+          infer_type_parameter(parameter, actual, environment);
+        }
+        infer_type_parameter(return_type, actual_return_type, environment);
+      }
+    }
+    _ => {}
+  }
+}
+
 fn resolve_indexed_access(
   object: &Type,
   index: &Type,
@@ -1561,7 +2592,16 @@ fn resolve_indexed_access(
       }
     }
     (Type::Tuple(elements), Type::Number) => normalize_union(elements.clone()),
-    _ => Type::Any,
+    _ => Type::Unknown,
+  }
+}
+
+fn is_optional_type(typ: &Type) -> bool {
+  match typ {
+    Type::Union(types) => types
+      .iter()
+      .any(|typ| matches!(typ, Type::Undefined)),
+    _ => false,
   }
 }
 
@@ -1574,6 +2614,7 @@ fn assignable(
     (Type::Never, _) => false,
     (Type::Any, _) | (_, Type::Any) => true,
     (Type::Unknown, _) => true,
+    (_, Type::Unknown) => false,
     (Type::Number, Type::Number) => true,
     (Type::String, Type::String) => true,
     (Type::Boolean, Type::Boolean) => true,
@@ -1601,13 +2642,18 @@ fn assignable(
           if !assignable(t, t2) {
             return false;
           }
-        } else {
+        } else if !is_optional_type(t) {
           return false;
         }
       }
       true
     }
     (Type::Function(a, a_return), Type::Function(b, b_return)) => {
+      // Unannotated source callbacks are intentionally represented as Any;
+      // their bodies are not inferred by this lightweight checker.
+      if matches!(b_return.as_ref(), Type::Any) {
+        return true;
+      }
       a.len() == b.len()
         && a
           .iter()
@@ -1637,7 +2683,7 @@ fn parameter_types(params: &oast::FormalParameters<'_>) -> Result<Vec<Type>, Typ
         .as_deref()
         .map(convert_type_ann)
         .transpose()?
-        .unwrap_or(Type::Any),
+        .unwrap_or(Type::Unknown),
     );
   }
   if let Some(rest) = &params.rest {
@@ -1647,10 +2693,80 @@ fn parameter_types(params: &oast::FormalParameters<'_>) -> Result<Vec<Type>, Typ
         .as_deref()
         .map(convert_type_ann)
         .transpose()?
-        .unwrap_or(Type::Any),
+        .unwrap_or(Type::Unknown),
     );
   }
   Ok(types)
+}
+
+fn qualified_type_name(
+  left: &oast::TSTypeName<'_>,
+  right: &str,
+) -> String {
+  let left = match left {
+    oast::TSTypeName::IdentifierReference(name) => name.name.to_string(),
+    oast::TSTypeName::QualifiedName(name) => {
+      qualified_type_name(&name.left, name.right.name.as_str())
+    }
+    oast::TSTypeName::ThisExpression(_) => "this".to_string(),
+  };
+  format!("{left}.{right}")
+}
+
+fn module_export_name(name: &oast::ModuleExportName<'_>) -> Result<String, TypeCheckerError> {
+  match name {
+    oast::ModuleExportName::IdentifierName(name) => Ok(name.name.to_string()),
+    oast::ModuleExportName::IdentifierReference(name) => Ok(name.name.to_string()),
+    oast::ModuleExportName::StringLiteral(name) => Ok(name.value.to_string()),
+  }
+}
+
+fn module_namespace_values(module: &ModuleType) -> HashMap<String, Type> {
+  let mut values = module.values.clone();
+  for (name, namespace) in &module.namespaces {
+    values.insert(
+      name.clone(),
+      Type::Object(module_namespace_values(namespace)),
+    );
+  }
+  values
+}
+
+fn register_namespace_types(
+  prefix: &str,
+  module: &ModuleType,
+  namespace_types: &mut HashMap<String, TypeDefinition>,
+) {
+  for (name, definition) in &module.types {
+    namespace_types.insert(format!("{prefix}.{name}"), definition.clone());
+  }
+  for (name, nested) in &module.namespaces {
+    register_namespace_types(&format!("{prefix}.{name}"), nested, namespace_types);
+  }
+}
+
+fn merge_callable(
+  values: &mut HashMap<String, Type>,
+  name: &str,
+  typ: Type,
+) {
+  if let Some(existing) = values.remove(name) {
+    values.insert(name.to_string(), Type::Union(vec![existing, typ]));
+  } else {
+    values.insert(name.to_string(), typ);
+  }
+}
+
+fn merge_callable_scope(
+  scope: &mut Scope,
+  name: &str,
+  typ: Type,
+) {
+  if let Some(existing) = scope.remove(name) {
+    scope.insert(name.to_string(), Type::Union(vec![existing, typ]));
+  } else {
+    scope.insert(name.to_string(), typ);
+  }
 }
 
 fn property_name(key: &oast::PropertyKey<'_>) -> Option<String> {
@@ -1661,8 +2777,22 @@ fn property_name(key: &oast::PropertyKey<'_>) -> Option<String> {
   }
 }
 
+fn function_type_from_call_signature(
+  call: &oast::TSCallSignatureDeclaration<'_>
+) -> Result<Type, TypeCheckerError> {
+  let parameters = parameter_types(&call.params)?;
+  let return_type = call
+    .return_type
+    .as_deref()
+    .map(convert_type_ann)
+    .transpose()?
+    .unwrap_or(Type::Unknown);
+  Ok(Type::Function(parameters, Box::new(return_type)))
+}
+
 fn signatures_to_object(signatures: &[oast::TSSignature<'_>]) -> Result<Type, TypeCheckerError> {
   let mut properties = HashMap::new();
+  let mut call_signatures = Vec::new();
   for signature in signatures {
     match signature {
       oast::TSSignature::TSPropertySignature(property) => {
@@ -1672,7 +2802,7 @@ fn signatures_to_object(signatures: &[oast::TSSignature<'_>]) -> Result<Type, Ty
             .as_deref()
             .map(convert_type_ann)
             .transpose()?
-            .unwrap_or(Type::Any);
+            .unwrap_or(Type::Unknown);
           properties.insert(name, typ);
         }
       }
@@ -1683,15 +2813,24 @@ fn signatures_to_object(signatures: &[oast::TSSignature<'_>]) -> Result<Type, Ty
             .as_deref()
             .map(convert_type_ann)
             .transpose()?
-            .unwrap_or(Type::Any);
+            .unwrap_or(Type::Unknown);
           properties.insert(
             name,
             Type::Function(parameter_types(&method.params)?, Box::new(return_type)),
           );
         }
       }
+      oast::TSSignature::TSCallSignatureDeclaration(call) => {
+        call_signatures.push(function_type_from_call_signature(call)?);
+      }
       _ => {}
     }
+  }
+  if !call_signatures.is_empty() {
+    if properties.is_empty() {
+      return Ok(normalize_union(call_signatures));
+    }
+    properties.insert("[[call]]".to_string(), normalize_union(call_signatures));
   }
   Ok(Type::Object(properties))
 }

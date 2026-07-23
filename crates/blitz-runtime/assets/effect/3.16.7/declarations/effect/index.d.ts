@@ -1,4 +1,14 @@
 export * as Effect from "effect/Effect";
+export * as Cause from "effect/Cause";
+export * as Exit from "effect/Exit";
+export * as Fiber from "effect/Fiber";
+export * as FiberId from "effect/FiberId";
+export * as HashSet from "effect/HashSet";
+export * as Chunk from "effect/Chunk";
+export * as Option from "effect/Option";
+export * as Either from "effect/Either";
+export * as Duration from "effect/Duration";
+export * as Function from "effect/Function";
 export * as Context from "effect/Context";
 export * as Layer from "effect/Layer";
 export * as Stream from "effect/Stream";

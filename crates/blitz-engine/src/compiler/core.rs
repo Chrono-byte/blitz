@@ -38,6 +38,8 @@ pub struct ModuleContext {
   pub imports: HashMap<String, (usize, String)>,
   /// Exported local names (set)
   pub exports: HashSet<String>,
+  /// Namespace re-exports: exported name -> dependency module index.
+  pub namespace_exports: HashMap<String, usize>,
 }
 
 /// Compiles AST to bytecode

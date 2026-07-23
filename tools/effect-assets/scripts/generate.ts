@@ -7,14 +7,14 @@ import { rollup } from "rollup";
 import * as ts from "typescript";
 
 const VERSION = "3.16.7";
-const SUPPORTED = ["effect", "effect/Effect", "effect/Context", "effect/Layer", "effect/Stream", "effect/Scope", "effect/Schedule", "effect/Match"] as const;
+const SUPPORTED = ["effect", "effect/Effect", "effect/Cause", "effect/Exit", "effect/Fiber", "effect/FiberId", "effect/HashSet", "effect/Chunk", "effect/Option", "effect/Either", "effect/Duration", "effect/Function", "effect/Context", "effect/Layer", "effect/Stream", "effect/Scope", "effect/Schedule", "effect/Match"] as const;
 const EFFECT_MODULES = SUPPORTED.slice(1);
 const ROOT = resolve(import.meta.dirname, "..");
 const OUTPUT = resolve(process.env.EFFECT_ASSETS_OUTPUT ?? resolve(ROOT, "../../crates/blitz-runtime/assets/effect", VERSION));
 const PACKAGE_NAME = "effect";
 const PACKAGE_PREFIX = "blitz-internal:effect/";
 const RUNTIME_EXPORT_ALIASES: Readonly<Record<string, string>> = {
-  "Effect.join": "fromFiber",
+  "Fiber.await": "_await",
 };
 
 type PackageMetadata = {
@@ -181,7 +181,12 @@ const main = async () => {
       const entryName = `${moduleName}__${exportName}`;
       const entryPath = join(temp, "entries", `${entryName}.ts`);
       const upstreamName = RUNTIME_EXPORT_ALIASES[`${moduleName}.${exportName}`] ?? exportName;
-      writeText(temp, `entries/${entryName}.ts`, `export { ${upstreamName} as ${exportName} } from ${JSON.stringify(sourcePath)};\n`);
+      // Effect's declaration exposes Fiber.await through a private local name,
+      // while the runtime module exports the public alias only.
+      const entrySource = moduleName === "Fiber" && exportName === "await"
+        ? `import { await as ${upstreamName} } from ${JSON.stringify(sourcePath)};\nexport { ${upstreamName} as ${exportName} };\n`
+        : `export { ${upstreamName} as ${exportName} } from ${JSON.stringify(sourcePath)};\n`;
+      writeText(temp, `entries/${entryName}.ts`, entrySource);
       entryPaths[entryName] = entryPath;
     }
   }

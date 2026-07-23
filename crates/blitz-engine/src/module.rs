@@ -181,6 +181,17 @@ fn resolve_virtual_relative(
   }
 }
 
+fn estree_module_export_name(node: Option<&JsonValue>) -> Option<String> {
+  node
+    .and_then(|node| {
+      node
+        .get("name")
+        .and_then(JsonValue::as_str)
+        .or_else(|| node.get("value").and_then(JsonValue::as_str))
+    })
+    .map(ToString::to_string)
+}
+
 fn stable_hash_bytes(bytes: impl IntoIterator<Item = u8>) -> u64 {
   // FNV-1a is deliberately used instead of the process-randomized standard
   // hasher: generated assets must have the same hash across hosts and runs.
@@ -545,6 +556,10 @@ pub struct ModuleRecord {
   pub import_sources: HashMap<String, (usize, String)>,
   /// Indirect export metadata: exported name -> (imported name, source specifier)
   pub indirect_exports: Vec<(String, String, String)>,
+  /// Namespace re-export source metadata: (exported name, source specifier).
+  pub namespace_export_sources: Vec<(String, String)>,
+  /// Resolved namespace re-export targets: exported name -> module index.
+  pub namespace_exports: HashMap<String, usize>,
   /// Star export sources.
   pub star_exports: Vec<String>,
 }
@@ -617,6 +632,8 @@ impl ModuleRecord {
       imports: HashMap::new(),
       import_sources: HashMap::new(),
       indirect_exports: Vec::new(),
+      namespace_export_sources: Vec::new(),
+      namespace_exports: HashMap::new(),
       star_exports: Vec::new(),
     }
   }
@@ -699,6 +716,33 @@ impl ModuleLoader {
       prelinked_by_index: HashMap::new(),
       pipeline_counters: Arc::new(ModuleLoaderPipelineCounters::default()),
     }
+  }
+
+  fn virtual_declarations_for_typecheck(&self) -> Vec<crate::typecheck::VirtualDeclaration> {
+    let mut declarations = HashMap::new();
+    for registration in &self.prelinked_graphs {
+      declarations.extend(
+        registration
+          .declarations
+          .iter()
+          .filter(|(specifier, _)| {
+            specifier.starts_with("effect/") || specifier.as_str() == "blitz:runtime"
+          })
+          .map(|(specifier, source)| (specifier.clone(), source.clone())),
+      );
+    }
+    for record in self.map.values() {
+      let record = record.borrow();
+      if let Some(source) = &record.declaration_source {
+        declarations
+          .entry(record.specifier.clone())
+          .or_insert_with(|| source.clone());
+      }
+    }
+    declarations
+      .into_iter()
+      .map(|(specifier, source)| crate::typecheck::VirtualDeclaration { specifier, source })
+      .collect()
   }
 
   /// Return a snapshot of this loader's source pipeline counters.
@@ -1276,6 +1320,25 @@ impl ModuleLoader {
     Ok(())
   }
 
+  fn initialize_namespace_reexports(
+    &self,
+    vm: &mut Vm,
+  ) {
+    for record in self.map.values() {
+      let record = record.borrow();
+      for (exported, dependency_index) in &record.namespace_exports {
+        let Some(namespace) = vm.module_namespace_value(*dependency_index) else {
+          continue;
+        };
+        if let Some(slot) = record.exports.get(exported)
+          && let Ok(mut value) = slot.lock()
+        {
+          *value = namespace;
+        }
+      }
+    }
+  }
+
   fn instantiate_prelinked_records(&mut self) -> Result<(), BundlerError> {
     let active_graphs = self
       .map
@@ -1570,7 +1633,16 @@ impl ModuleLoader {
                   .and_then(|s| s.get("value"))
                   .and_then(|v| v.as_str())
                 {
-                  rec.star_exports.push(source.to_string());
+                  if let Some(exported) = estree_module_export_name(item.get("exported")) {
+                    rec
+                      .exports
+                      .insert(exported.clone(), Rc::new(Mutex::new(Value::Undefined)));
+                    rec
+                      .namespace_export_sources
+                      .push((exported, source.to_string()));
+                  } else {
+                    rec.star_exports.push(source.to_string());
+                  }
                 }
               }
               _ => {}
@@ -1593,6 +1665,50 @@ impl ModuleLoader {
     // Reserve all registered fixed indices, including prelinked modules which
     // have not been constructed, before assigning any ordinary source index.
     self.assign_module_indices(&module_paths)?;
+
+    // Resolve `export * as name from "module"` to the dependency's module
+    // table index. The compiler emits a `GetModuleExport` for the dependency's
+    // synthetic `*` namespace export, then stores that object in the named
+    // export's live binding cell.
+    for path in &module_paths {
+      let Some(rec_rc) = self.map.get(path).cloned() else {
+        continue;
+      };
+      let (specifier, base_dir, namespace_sources) = {
+        let rec = rec_rc.borrow();
+        (
+          rec.specifier.clone(),
+          rec
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+          rec.namespace_export_sources.clone(),
+        )
+      };
+      let importer = self
+        .map
+        .get(path)
+        .is_some_and(|record| {
+          record
+            .borrow()
+            .path
+            .to_string_lossy()
+            .starts_with(VIRTUAL_PATH_PREFIX)
+        })
+        .then_some(specifier.as_str());
+      for (exported, source_spec) in namespace_sources {
+        let dependency = self.construct_from_importer(&base_dir, importer, &source_spec)?;
+        let dependency_index = dependency.borrow().module_index.ok_or_else(|| {
+          BundlerError::from("Namespace re-export dependency has no module index")
+        })?;
+        rec_rc
+          .borrow_mut()
+          .namespace_exports
+          .insert(exported, dependency_index);
+      }
+    }
+
     for path in &module_paths {
       let rec_rc = match self.map.get(path) {
         Some(r) => Rc::clone(r),
@@ -2039,9 +2155,11 @@ impl ModuleLoader {
         vm.install_module_exports(idx, exports_clone);
       }
     }
+    self.initialize_namespace_reexports(vm);
     let order = self
       .evaluation_order_from(entry)
       .map_err(|e| crate::errors::RuntimeError::from(format!("Module resolution failed: {}", e)))?;
+    let declarations = self.virtual_declarations_for_typecheck();
 
     for path in order {
       if let Some(rec_rc) = self.map.get(&path) {
@@ -2059,11 +2177,20 @@ impl ModuleLoader {
                 "Prelinked module record is missing its validated bytecode chunk",
               )
             })?,
-            ModuleRecordPayload::Source { session, .. } => {
+            ModuleRecordPayload::Source {
+              session,
+              dependencies,
+              ..
+            } => {
               let program = session.program();
               if enable_typecheck {
                 self.pipeline_counters.source_typecheck();
-                crate::typecheck::check(program).map_err(|error| {
+                crate::typecheck::check_with_declarations_and_source_imports(
+                  program,
+                  &declarations,
+                  dependencies,
+                )
+                .map_err(|error| {
                   crate::errors::RuntimeError::from(format!("Typecheck failed: {error}"))
                 })?;
               }
@@ -2074,6 +2201,7 @@ impl ModuleLoader {
                 module_index,
                 imports: rec.import_sources.clone(),
                 exports: rec.exports.keys().cloned().collect(),
+                namespace_exports: rec.namespace_exports.clone(),
               };
               let chunk = if let Some(chunk) = rec.bytecode.clone() {
                 chunk
@@ -2115,6 +2243,8 @@ impl ModuleLoader {
         vm.install_module_exports(module_index, record.exports.clone());
       }
     }
+    self.initialize_namespace_reexports(vm);
+    let declarations = self.virtual_declarations_for_typecheck();
     // For simplicity evaluate modules in insertion order after instantiation.
     for rec_rc in self.map.values() {
       let mut rec = rec_rc.borrow_mut();
@@ -2126,11 +2256,20 @@ impl ModuleLoader {
               "Prelinked module record is missing its validated bytecode chunk",
             )
           })?,
-          ModuleRecordPayload::Source { session, .. } => {
+          ModuleRecordPayload::Source {
+            session,
+            dependencies,
+            ..
+          } => {
             let program = session.program();
             if enable_typecheck {
               self.pipeline_counters.source_typecheck();
-              crate::typecheck::check(program).map_err(|error| {
+              crate::typecheck::check_with_declarations_and_source_imports(
+                program,
+                &declarations,
+                dependencies,
+              )
+              .map_err(|error| {
                 crate::errors::RuntimeError::from(format!("Typecheck failed: {error}"))
               })?;
             }
@@ -2278,6 +2417,7 @@ pub fn evaluate_entry_shared(
         vm.install_module_exports(idx, exports_clone);
       }
     }
+    loader_ref.initialize_namespace_reexports(vm);
   }
 
   let order = {
@@ -2285,6 +2425,11 @@ pub fn evaluate_entry_shared(
     loader_ref
       .evaluation_order_from(entry)
       .map_err(|e| crate::errors::RuntimeError::from(format!("Module resolution failed: {}", e)))?
+  };
+
+  let declarations = {
+    let loader_ref = loader.borrow();
+    loader_ref.virtual_declarations_for_typecheck()
   };
 
   let compile_jobs = {
@@ -2314,6 +2459,7 @@ pub fn evaluate_entry_shared(
               .expect("module_index should be set"),
             imports: record.import_sources.clone(),
             exports: record.exports.keys().cloned().collect(),
+            namespace_exports: record.namespace_exports.clone(),
           },
         })
       })
@@ -2343,11 +2489,20 @@ pub fn evaluate_entry_shared(
               "Prelinked module record is missing its validated bytecode chunk",
             )
           })?,
-          ModuleRecordPayload::Source { session, .. } => {
+          ModuleRecordPayload::Source {
+            session,
+            dependencies,
+            ..
+          } => {
             let program = session.program();
             if enable_typecheck {
               loader_ref.pipeline_counters.source_typecheck();
-              crate::typecheck::check(program).map_err(|error| {
+              crate::typecheck::check_with_declarations_and_source_imports(
+                program,
+                &declarations,
+                dependencies,
+              )
+              .map_err(|error| {
                 crate::errors::RuntimeError::from(format!("Typecheck failed: {error}"))
               })?;
             }
@@ -2358,6 +2513,7 @@ pub fn evaluate_entry_shared(
               module_index,
               imports: rec.import_sources.clone(),
               exports: rec.exports.keys().cloned().collect(),
+              namespace_exports: rec.namespace_exports.clone(),
             };
             let chunk = if let Some(chunk) = rec.bytecode.clone() {
               crate::runtime_utils::clear_slot_types_in_chunk(chunk)
@@ -2438,10 +2594,35 @@ mod tests {
         .iter()
         .map(|name| (*name).to_string())
         .collect(),
+      namespace_exports: HashMap::new(),
     };
     let mut chunk =
       crate::compiler::compile_oxc_with_ctx(session.program(), Some(&context), session.source())
         .expect("synthetic prelinked source compiles during test setup");
+    replace_debug_source(
+      &mut chunk,
+      &Arc::new("!!! invalid debug source; parser/compiler must not read this !!!".to_string()),
+    );
+    chunk
+  }
+
+  fn compile_prelinked_namespace_reexport_chunk(
+    source: &str,
+    module_index: usize,
+    target_index: usize,
+    exported: &str,
+  ) -> Chunk {
+    let session = crate::parser::Parser::parse_source_with_type(source, SourceType::mjs())
+      .expect("synthetic namespace re-export source parses during test setup");
+    let context = ModuleContext {
+      module_index,
+      imports: HashMap::new(),
+      exports: HashSet::from([exported.to_string()]),
+      namespace_exports: HashMap::from([(exported.to_string(), target_index)]),
+    };
+    let mut chunk =
+      crate::compiler::compile_oxc_with_ctx(session.program(), Some(&context), session.source())
+        .expect("synthetic namespace re-export source compiles during test setup");
     replace_debug_source(
       &mut chunk,
       &Arc::new("!!! invalid debug source; parser/compiler must not read this !!!".to_string()),
@@ -2556,6 +2737,49 @@ mod tests {
     loader
       .evaluate_entry(&entry_path, &mut vm, false)
       .expect("virtual graph evaluates");
+    assert_eq!(vm.get_global("result"), Some(Value::Number(42.0)));
+  }
+
+  #[test]
+  fn typecheck_distinguishes_source_imports_from_virtual_declarations() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    vm.register_virtual_module(VirtualModule::javascript(
+      "app/value.js",
+      "export const value = 41;",
+      SourceType::mjs(),
+      None,
+    ))
+    .expect("source dependency registers");
+    vm.register_virtual_module(VirtualModule::javascript(
+      "effect/api",
+      "export const answer = 42;",
+      SourceType::mjs(),
+      Some("export declare const answer: number;".to_string()),
+    ))
+    .expect("declared virtual module registers");
+    vm.register_virtual_module(VirtualModule::javascript(
+      "app/entry.js",
+      "import './value.js'; import { answer } from 'effect/api'; globalThis.result = answer;",
+      SourceType::mjs(),
+      None,
+    ))
+    .expect("source entry registers");
+
+    let loader = vm.module_loader_handle();
+    let entry = loader
+      .borrow_mut()
+      .construct(Path::new("."), "app/entry.js")
+      .expect("multi-source graph constructs");
+    loader
+      .borrow_mut()
+      .instantiate_all()
+      .expect("multi-source graph instantiates");
+    let entry_path = entry.borrow().path.clone();
+    loader
+      .borrow_mut()
+      .evaluate_entry(&entry_path, &mut vm, true)
+      .expect("source imports and virtual declarations typecheck distinctly");
     assert_eq!(vm.get_global("result"), Some(Value::Number(42.0)));
   }
 
@@ -2735,6 +2959,54 @@ mod tests {
       .evaluate_entry(&entry_path, &mut vm, false)
       .expect("reexport graph evaluates");
     assert_eq!(vm.get_global("aliasResult"), Some(Value::Number(11.0)));
+  }
+
+  #[test]
+  fn source_namespace_reexports_preserve_namespace_identity_and_liveness() {
+    let mut loader = ModuleLoader::new();
+    loader
+      .register_virtual_module(VirtualModule::javascript(
+        "namespace-source/base.js",
+        "export let value = 2;",
+        SourceType::mjs(),
+        None,
+      ))
+      .expect("base registration succeeds");
+    loader
+      .register_virtual_module(VirtualModule::javascript(
+        "namespace-source/reexport.js",
+        "export * as ns from './base.js';",
+        SourceType::mjs(),
+        None,
+      ))
+      .expect("namespace re-export registration succeeds");
+    loader
+      .register_virtual_module(VirtualModule::javascript(
+        "namespace-source/entry.js",
+        "import { ns } from './reexport.js'; import * as direct from './base.js'; globalThis.namespaceSame = ns === direct; globalThis.namespaceValue = ns.value; globalThis.namespaceType = typeof direct;",
+        SourceType::mjs(),
+        None,
+      ))
+      .expect("entry registration succeeds");
+
+    let entry = loader
+      .construct(Path::new("."), "namespace-source/entry.js")
+      .expect("namespace source graph constructs");
+    loader
+      .instantiate_all()
+      .expect("namespace source graph instantiates");
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let entry_path = entry.borrow().path.clone();
+    loader
+      .evaluate_entry(&entry_path, &mut vm, false)
+      .expect("namespace source graph evaluates");
+    assert_eq!(vm.get_global("namespaceSame"), Some(Value::Bool(true)));
+    assert_eq!(vm.get_global("namespaceValue"), Some(Value::Number(2.0)));
+    assert_eq!(
+      vm.get_global("namespaceType"),
+      Some(Value::String("object".to_string()))
+    );
   }
 
   #[test]
@@ -3484,6 +3756,95 @@ mod tests {
   }
 
   #[test]
+  fn prelinked_namespace_reexports_use_the_target_namespace_without_parsing() {
+    let base_chunk = compile_prelinked_chunk("export let value = 2;", 0, &[], &["value"]);
+    let reexport_chunk = compile_prelinked_namespace_reexport_chunk(
+      "export * as ns from 'namespace-prelinked:base';",
+      1,
+      0,
+      "ns",
+    );
+    let entry_chunk = compile_prelinked_chunk(
+      "import { ns } from 'namespace-prelinked:reexport'; import * as direct from 'namespace-prelinked:base'; globalThis.prelinkedNamespaceSame = ns === direct; globalThis.prelinkedNamespaceValue = ns.value;",
+      2,
+      &[("ns", 1, "ns"), ("direct", 0, "*")],
+      &[],
+    );
+    let graph = synthetic_graph(
+      vec![
+        PrelinkedModule {
+          specifier: "namespace-prelinked:base".to_string(),
+          module_index: 0,
+          source_sha256: [1; 32],
+          dependencies: vec![],
+          exports: vec![export("value", 0)],
+          imports: vec![],
+          chunk: base_chunk,
+        },
+        PrelinkedModule {
+          specifier: "namespace-prelinked:reexport".to_string(),
+          module_index: 1,
+          source_sha256: [2; 32],
+          dependencies: vec![0],
+          exports: vec![export("ns", 1)],
+          imports: vec![],
+          chunk: reexport_chunk,
+        },
+        PrelinkedModule {
+          specifier: "namespace-prelinked:entry".to_string(),
+          module_index: 2,
+          source_sha256: [3; 32],
+          dependencies: vec![1, 0],
+          exports: vec![],
+          imports: vec![import("ns", 1)],
+          chunk: entry_chunk,
+        },
+      ],
+      2,
+      vec![2],
+    );
+
+    let graph = crate::prelinked_bundle::decode(
+      &crate::prelinked_bundle::encode(&graph).expect("namespace graph encodes"),
+    )
+    .expect("namespace graph decodes");
+    let mut loader = ModuleLoader::new();
+    loader
+      .register_prelinked_graph(graph)
+      .expect("prelinked namespace graph registers");
+    let entry = loader
+      .construct(Path::new("."), "namespace-prelinked:entry")
+      .expect("prelinked namespace graph constructs");
+    loader
+      .instantiate_all()
+      .expect("prelinked namespace graph instantiates");
+    assert!(
+      loader
+        .records_by_specifier
+        .get("namespace-prelinked:base")
+        .expect("base record")
+        .borrow()
+        .parser_session()
+        .is_none()
+    );
+
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let entry_path = entry.borrow().path.clone();
+    loader
+      .evaluate_entry(&entry_path, &mut vm, false)
+      .expect("prelinked namespace graph evaluates");
+    assert_eq!(
+      vm.get_global("prelinkedNamespaceSame"),
+      Some(Value::Bool(true))
+    );
+    assert_eq!(
+      vm.get_global("prelinkedNamespaceValue"),
+      Some(Value::Number(2.0))
+    );
+  }
+
+  #[test]
   fn prelinked_dependency_edges_control_side_effect_order() {
     let modules = vec![
       PrelinkedModule {
@@ -3684,6 +4045,7 @@ mod tests {
       module_index: 7,
       imports: HashMap::new(),
       exports: HashSet::from(["value".to_string()]),
+      namespace_exports: HashMap::new(),
     };
     let chunk =
       crate::compiler::compile_oxc_with_ctx(session.program(), Some(&context), session.source())

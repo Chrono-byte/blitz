@@ -1933,6 +1933,142 @@ mod test {
   }
 
   #[test]
+  fn map_values_is_a_live_self_iterating_iterator() {
+    let (vm, _) = run_script(
+      r#"
+        var map = new Map([["first", 1], ["second", 2]]);
+        var iterator = map.values();
+        var first = iterator.next();
+        var self = iterator[Symbol.iterator]() === iterator;
+        map.delete("second");
+        map.set("third", 3);
+        var second = iterator.next();
+        var third = iterator.next();
+        var done = iterator.next();
+        var iteratorMap = new Map([["a", 1], ["b", 2]]);
+        var reversed = Array.from(iteratorMap.values()).reverse();
+        var keys = Array.from(iteratorMap.keys());
+        var entries = Array.from(iteratorMap.entries());
+        var entriesAlias = iteratorMap.entries === iteratorMap[Symbol.iterator];
+        var chainedMap = new Map([["chained", 4]]);
+        var chainedHolder = { state: { finalizers: chainedMap } };
+        var chained = Array.from(chainedHolder.state.finalizers.values());
+        globalThis.map_values_result =
+          self && first.value === 1 && !first.done &&
+          second.value === 3 && third.done && done.done &&
+          reversed[0] === 2 && reversed[1] === 1 &&
+          keys[0] === "a" && keys[1] === "b" &&
+          entries[0][0] === "a" && entries[0][1] === 1 && entriesAlias &&
+          chained[0] === 4;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("map_values_result"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn map_and_set_constructors_consume_iterables_with_spec_validation() {
+    let (vm, _) = run_script(
+      r#"
+        const source = new Map([['first', 1], ['second', 2]]);
+        const copied = new Map(source);
+        class CountingMap extends Map {
+          set(key, value) {
+            this.calls = (this.calls || 0) + 1;
+            return super.set(key, value);
+          }
+        }
+        const customAdderMap = new CountingMap([['x', 1], ['y', 2]]);
+        const custom = {
+          [Symbol.iterator]() {
+            let index = 0;
+            return {
+              next() {
+                return index < 2
+                  ? { value: { 0: 'custom-' + index, 1: index++ }, done: false }
+                  : { done: true };
+              }
+            };
+          }
+        };
+        const customMap = new Map(custom);
+        const copiedSet = new Set(new Set([1, 2]));
+        const customSet = new Set({
+          [Symbol.iterator]() {
+            let index = 0;
+            return { next() {
+              return index < 2 ? { value: index++, done: false } : { done: true };
+            }};
+          }
+        });
+        const nanMap = new Map([[NaN, 1]]);
+        nanMap.set(NaN, 2);
+        const nanSet = new Set([NaN, NaN]);
+        const liveSet = new Set([1, 2, 3]);
+        const liveSetIterator = liveSet[Symbol.iterator]();
+        const liveSetFirst = liveSetIterator.next();
+        liveSet.delete(1);
+        const liveSetSecond = liveSetIterator.next();
+
+        let malformed = false;
+        try { new Map([1]); } catch (error) { malformed = error instanceof TypeError; }
+        let accessorThrew = false;
+        let closed = 0;
+        const throwing = {
+          [Symbol.iterator]() {
+            return {
+              next() {
+                return { value: { get 0() { throw new Error('entry'); }, 1: 1 }, done: false };
+              },
+              return() { closed += 1; return {}; }
+            };
+          }
+        };
+        try { new Map(throwing); } catch (error) { accessorThrew = error instanceof Error; }
+        globalThis.collection_constructor_result =
+          copied.size === 2 && copied.get('second') === 2 &&
+          customAdderMap.calls === 2 && customAdderMap.get('y') === 2 &&
+          customMap.get('custom-1') === 1 && copiedSet.size === 2 &&
+          customSet.size === 2 && nanMap.size === 1 && nanMap.get(NaN) === 2 &&
+          nanSet.size === 1 && liveSetFirst.value === 1 && liveSetSecond.value === 2 &&
+          malformed && accessorThrew && closed === 1;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("collection_constructor_result"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn reverse_is_generic_and_preserves_sparse_properties() {
+    let (vm, _) = run_script(
+      r#"
+        var array = [];
+        array[1] = "one";
+        array[3] = "three";
+        array.length = 5;
+        array.reverse();
+        var object = { length: 4 };
+        object[0] = "zero";
+        object[2] = "two";
+        Array.prototype.reverse.call(object);
+        globalThis.reverse_sparse_result =
+          array.length === 5 && array[1] === "three" && array[3] === "one" &&
+          !array.hasOwnProperty("0") && !array.hasOwnProperty("2") &&
+          object[1] === "two" && object[3] === "zero" &&
+          !object.hasOwnProperty("0") && !object.hasOwnProperty("2");
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("reverse_sparse_result"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
   fn reverse_with_length_shrink_clears_lower_index() {
     let (mut vm, _) = run_script(
       r#"
@@ -2521,6 +2657,90 @@ mod test {
     let mut vm = Vm::new(globals);
     vm.run(chunk).expect("run ok");
     assert!(matches!(vm.get_global("result"), Some(Value::Bool(true))));
+  }
+
+  #[test]
+  fn function_apply_uses_create_list_from_array_like() {
+    let (vm, _) = run_script(
+      r#"
+        function capture() {
+          return {
+            receiver: this,
+            count: arguments.length,
+            first: arguments[0],
+            hole: arguments[1] === undefined,
+            third: arguments[2]
+          };
+        }
+        function invokeWithArguments() {
+          return capture.apply(this, arguments);
+        }
+        const receiver = { tag: "receiver" };
+        const fromArguments = invokeWithArguments.call(receiver, "a", "b");
+        const fromArrayLike = capture.apply(receiver, { 0: "a", 2: "c", length: 3 });
+        let proxyGets = 0;
+        const proxiedArrayLike = new Proxy({ 0: "proxy", length: 1 }, {
+          get(target, key, receiver) {
+            proxyGets += 1;
+            return Reflect.get(target, key, receiver);
+          }
+        });
+        const fromProxy = capture.apply(receiver, proxiedArrayLike);
+
+        let lengthReads = 0;
+        let indexReads = 0;
+        let abrupt;
+        const accessorArgs = {
+          get length() { lengthReads += 1; return 2.9; },
+          get 0() { indexReads += 1; return "accessor"; },
+          get 1() { indexReads += 1; throw "boom"; }
+        };
+        try {
+          capture.apply(receiver, accessorArgs);
+        } catch (error) {
+          abrupt = error;
+        }
+
+        let nonObjectError;
+        try {
+          capture.apply(receiver, 1);
+        } catch (error) {
+          nonObjectError = error;
+        }
+
+        let lengthTouched = false;
+        let nonCallableError;
+        try {
+          Function.prototype.apply.call({}, receiver, {
+            get length() { lengthTouched = true; throw "length should not be read"; }
+          });
+        } catch (error) {
+          nonCallableError = error;
+        }
+
+        globalThis.apply_result =
+          fromArguments.receiver === receiver
+          && fromArguments.count === 2
+          && fromArguments.first === "a"
+          && fromArrayLike.receiver === receiver
+          && fromArrayLike.count === 3
+          && fromArrayLike.first === "a"
+          && fromArrayLike.hole
+          && fromArrayLike.third === "c"
+          && fromProxy.first === "proxy"
+          && proxyGets === 2
+          && lengthReads === 1
+          && indexReads === 2
+          && abrupt === "boom"
+          && typeof nonObjectError === "object"
+          && typeof nonCallableError === "object"
+          && !lengthTouched
+          && capture.apply(receiver, null).count === 0
+          && capture.apply(receiver, undefined).count === 0;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("apply_result"), Some(Value::Bool(true)));
   }
 
   #[test]

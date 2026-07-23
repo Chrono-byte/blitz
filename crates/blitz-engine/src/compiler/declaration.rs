@@ -136,11 +136,29 @@ impl Compiler {
     use oxc_ast::ast::{BindingPattern as OPat, ForStatementLeft as OForLeft, Statement as OStmt};
     match stmt {
       OStmt::ImportDeclaration(_) => {}
-      OStmt::ExportAllDeclaration(_) => {
-        // export * from "module"
-        // Star exports are resolved by the module loader and export
-        // resolution table, so the declaration itself has no runtime
-        // side effects here.
+      OStmt::ExportAllDeclaration(export) => {
+        if let Some(exported) = &export.exported {
+          let Some(export_name) = Self::module_export_name_to_string(exported) else {
+            return Ok(());
+          };
+          let Some(module_index) = self.current_module.as_ref().and_then(|context| {
+            context
+              .namespace_exports
+              .get(&export_name)
+              .copied()
+          }) else {
+            return Err(crate::errors::CompilerError::from(format!(
+              "missing namespace re-export target for {export_name:?}"
+            )));
+          };
+          let descriptor = self.module_export_descriptor_index(module_index, "*")?;
+          self.emit(Op::GetModuleExport, LINE);
+          self.emit_byte(descriptor.to_le_bytes()[0], LINE);
+          self.emit_byte(descriptor.to_le_bytes()[1], LINE);
+          self.emit_set_own_module_export(&export_name)?;
+        }
+        // Plain `export * from "module"` is resolved by the module loader;
+        // it has no runtime side effects in this module.
       }
       OStmt::ExportNamedDeclaration(export) => {
         // export {  } from "module"

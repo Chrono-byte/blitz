@@ -6,6 +6,7 @@
 //! I/O. Keeping that boundary explicit lets embedders select a smaller or
 //! sandboxed host surface without changing VM semantics.
 
+mod abort;
 mod console;
 pub mod event_loop;
 mod process;
@@ -316,6 +317,7 @@ pub fn try_install_runtime(
   let server = server::install(vm, options.listen_addr, requests_tx, websocket_events_tx);
   let terminal = terminal::install(vm, terminal_events_tx);
   console::install(vm);
+  abort::install(vm);
   process::install(vm, options);
   Ok(RuntimeHandle {
     server,

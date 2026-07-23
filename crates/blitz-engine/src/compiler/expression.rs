@@ -1242,7 +1242,12 @@ impl super::Compiler {
                 self.compile_expr_oast(&u.argument)?;
                 self.emit(Op::Typeof, LINE);
               }
-            } else if self.resolve_upvalue(name).is_some() {
+            } else if self.resolve_upvalue(name).is_some()
+              || self
+                .current_module
+                .as_ref()
+                .is_some_and(|module| module.imports.contains_key(name))
+            {
               self.compile_expr_oast(&u.argument)?;
               self.emit(Op::Typeof, LINE);
             } else {

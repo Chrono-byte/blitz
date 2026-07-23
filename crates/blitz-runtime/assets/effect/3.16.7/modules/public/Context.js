@@ -2,4 +2,8 @@ export { GenericTag } from 'blitz-internal:effect/Context__GenericTag.js';
 export { add } from 'blitz-internal:effect/Context__add.js';
 export { empty } from 'blitz-internal:effect/Context__empty.js';
 export { get } from 'blitz-internal:effect/Context__get.js';
+export { getOption } from 'blitz-internal:effect/Context__getOption.js';
+export { isTag } from 'blitz-internal:effect/Context__isTag.js';
 export { make } from 'blitz-internal:effect/Context__make.js';
+export { merge } from 'blitz-internal:effect/Context__merge.js';
+export { unsafeGet } from 'blitz-internal:effect/Context__unsafeGet.js';

@@ -920,6 +920,7 @@ mod test {
       module_index: 0,
       imports: HashMap::from([(String::from("a"), (1usize, String::from("value")))]),
       exports: HashSet::new(),
+      namespace_exports: HashMap::new(),
     };
 
     let err =

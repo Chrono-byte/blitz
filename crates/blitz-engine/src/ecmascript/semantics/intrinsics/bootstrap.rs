@@ -1758,8 +1758,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
               }
               (Some(low), None) => {
                 let _ = vm.delete_property_host(&receiver, &lower_key)?;
-                vm.set_property_host(&receiver, &upper_key_value, low)?;
                 if let Value::Array(arr, props) = &receiver {
+                  // Keep the dense store consistent with a length mutation
+                  // observed while reading the opposite property.
                   if lower < arr.borrow().len() {
                     arr.borrow_mut()[lower] = None;
                   }
@@ -1768,10 +1769,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     .properties
                     .shift_remove(&lower_key);
                 }
+                vm.set_property_host(&receiver, &upper_key_value, low)?;
               }
               (None, Some(high)) => {
                 let _ = vm.delete_property_host(&receiver, &upper_key)?;
-                vm.set_property_host(&receiver, &lower_key_value, high)?;
                 if let Value::Array(arr, props) = &receiver {
                   if upper < arr.borrow().len() {
                     arr.borrow_mut()[upper] = None;
@@ -1781,6 +1782,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
                     .properties
                     .shift_remove(&upper_key);
                 }
+                vm.set_property_host(&receiver, &lower_key_value, high)?;
               }
               (None, None) => {}
             }
@@ -1957,14 +1959,13 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       Rc::new(|vm, args| {
         let callee = args.first().cloned().unwrap_or(Value::Undefined);
         let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
-        let call_args: Vec<Value> = match args.get(2) {
+        if !Vm::is_callable_value(&callee) {
+          return Err(vm.throw_type_error("Function.prototype.apply called on non-callable"));
+        }
+
+        let call_args = match args.get(2) {
           None | Some(Value::Undefined) | Some(Value::Null) => Vec::new(),
-          Some(Value::Array(arr, _)) => arr
-            .borrow()
-            .iter()
-            .filter_map(Clone::clone)
-            .collect(),
-          Some(_) => Vec::new(),
+          Some(arguments_list) => create_list_from_array_like(vm, arguments_list)?,
         };
         vm.call_value_with_this(&callee, &this_arg, &call_args)
       }),
@@ -2109,20 +2110,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         if !Vm::is_callable_value(&target) {
           return Err(vm.throw_type_error("Reflect.apply: target is not callable"));
         }
-        if !arguments_list.is_object() {
-          return Err(vm.throw_type_error("Reflect.apply: argumentsList is not an object"));
-        }
-
-        let length =
-          vm.get_property_host(&arguments_list, &PropertyKey::String("length".to_string()))?;
-        let length = to_length(vm, &length)?;
-        let mut call_args = Vec::with_capacity(length);
-        for index in 0..length {
-          call_args.push(vm.get_property_host(
-            &arguments_list,
-            &PropertyKey::String(usize_to_decimal_string(index)),
-          )?);
-        }
+        let call_args = create_list_from_array_like(vm, &arguments_list)?;
         vm.call_value_with_this(&target, &this_arg, &call_args)
       }),
       &function_proto_map,
