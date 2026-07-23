@@ -3270,11 +3270,21 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     PropertyDescriptor::data(dataview_ctor_val.clone()),
   );
 
-  let (map_ctor_val, set_ctor_val) =
+  let (map_ctor_val, set_ctor_val, iterator_proto, map_iterator_proto, set_iterator_proto) =
     builtins::collections::install_map_set_constructors(&object_proto_map, &function_proto_map);
   let object_to_string = builtin_object(
-    Rc::new(|_vm, args| {
+    Rc::new(|vm, args| {
       let this = args.first().cloned().unwrap_or(Value::Null);
+      if matches!(this, Value::Undefined) {
+        return Ok(Value::String("[object Undefined]".to_string()));
+      }
+      if matches!(this, Value::Null) {
+        return Ok(Value::String("[object Null]".to_string()));
+      }
+      let tag = vm.get_property_host(&this, &PKey::Symbol(SymbolId::well_known_to_string_tag()))?;
+      if let Value::String(tag) = tag {
+        return Ok(Value::String(format!("[object {tag}]")));
+      }
       if let Value::Object(obj) = &this
         && let Some(PropertyDescriptor::Data { value, .. }) = obj
           .borrow()
@@ -4915,11 +4925,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     arraybuffer_prototype: get_ctor("ArrayBuffer").and_then(|ctor| get_proto(&ctor)),
     shared_array_buffer_prototype: get_ctor("SharedArrayBuffer").and_then(|ctor| get_proto(&ctor)),
     data_view_prototype: get_ctor("DataView").and_then(|ctor| get_proto(&ctor)),
-    iterator_prototype: None,
+    iterator_prototype: Some(iterator_proto),
     async_iterator_prototype: None,
     array_iterator_prototype: Some(Value::Object(array_iterator_proto)),
-    map_iterator_prototype: None,
-    set_iterator_prototype: None,
+    map_iterator_prototype: Some(map_iterator_proto),
+    set_iterator_prototype: Some(set_iterator_proto),
     string_iterator_prototype: None,
     regexp_string_iterator_prototype: None,
     generator_prototype: Some(Value::Object(generator_proto_map)),

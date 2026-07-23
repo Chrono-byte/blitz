@@ -8,13 +8,103 @@ use num_traits::ToPrimitive;
 
 use crate::runtime_utils::{
   array_length_descriptor, builtin_object, canonical_index_key, collect_iterable_values,
-  reject_pending_promise, resolve_promise_with_value, set_builtin_length,
-  static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string, usize_to_f64,
+  non_enum_data, reject_pending_promise, resolve_promise_with_value, set_builtin_length,
+  set_builtin_name, static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string,
+  usize_to_f64,
 };
 use crate::value::{
   ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
 };
 use crate::vm::Vm;
+
+fn create_data_property_or_throw(
+  vm: &mut Vm,
+  target: &Value,
+  key: &Value,
+  value: Value,
+) -> Result<(), crate::errors::RuntimeError> {
+  let dense_index = match (target, key) {
+    (Value::Array(_, _), Value::String(key)) => {
+      canonical_index_key(key).and_then(|index| usize::try_from(index).ok())
+    }
+    _ => None,
+  };
+  if let (Value::Array(_, properties), Some(index)) = (target, dense_index) {
+    let properties = properties.borrow();
+    if let Some(PropertyDescriptor::Data {
+      value: Value::Number(length),
+      writable: false,
+      ..
+    }) = properties
+      .properties
+      .get(&PropertyKey::String("length".to_string()))
+      && usize_to_f64(index) >= *length
+    {
+      return Err(vm.throw_type_error("Array.from cannot extend an array with readonly length"));
+    }
+  }
+
+  let mut descriptor = ObjectData::new();
+  descriptor.properties.insert(
+    PropertyKey::String("value".to_string()),
+    PropertyDescriptor::data(value.clone()),
+  );
+  descriptor.properties.insert(
+    PropertyKey::String("writable".to_string()),
+    PropertyDescriptor::data(Value::Bool(true)),
+  );
+  descriptor.properties.insert(
+    PropertyKey::String("enumerable".to_string()),
+    PropertyDescriptor::data(Value::Bool(true)),
+  );
+  descriptor.properties.insert(
+    PropertyKey::String("configurable".to_string()),
+    PropertyDescriptor::data(Value::Bool(true)),
+  );
+  let descriptor = Value::Object(Rc::new(RefCell::new(descriptor)));
+  if !vm.define_property_value(target, key, &descriptor)? {
+    return Err(vm.throw_type_error("Array.from failed to define element"));
+  }
+
+  // Dense arrays use their element storage as the canonical representation.
+  // `define_property_value` performs all extensibility and descriptor checks;
+  // normalize its successful numeric definition so later array algorithms do
+  // not observe a stale shadow property alongside the dense element.
+  if let (Value::Array(elements, properties), Value::String(key), Some(index)) =
+    (target, key, dense_index)
+  {
+    let mut elements = elements.borrow_mut();
+    if index >= elements.len() {
+      elements.resize(index.saturating_add(1), None);
+    }
+    elements[index] = Some(value);
+    let length = elements.len();
+    drop(elements);
+    let mut properties = properties.borrow_mut();
+    properties
+      .properties
+      .shift_remove(&PropertyKey::String(key.clone()));
+    let length_key = PropertyKey::String("length".to_string());
+    let length_descriptor = match properties.properties.get(&length_key).cloned() {
+      Some(PropertyDescriptor::Data {
+        writable,
+        enumerable,
+        configurable,
+        ..
+      }) => PropertyDescriptor::Data {
+        value: Value::Number(usize_to_f64(length)),
+        writable,
+        enumerable,
+        configurable,
+      },
+      _ => array_length_descriptor(length),
+    };
+    properties
+      .properties
+      .insert(length_key, length_descriptor);
+  }
+  Ok(())
+}
 
 fn is_array_value(value: &Value) -> bool {
   match value {
@@ -131,99 +221,124 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
   );
   array_ctor_map.borrow_mut().properties.insert(
     PKey::String("from".to_string()),
-    PropertyDescriptor::data({
-      let array_proto_for_from = Rc::clone(array_proto_map);
+    non_enum_data({
       let function_proto_map = Rc::clone(function_proto_map);
       let builtin = builtin_object(
         Rc::new(move |vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Array");
-          let undefined = Value::Undefined;
-          let source = args.get(off).unwrap_or(&undefined);
-          let map_fn = args.get(off + 1).unwrap_or(&undefined);
-          let has_map_fn = matches!(
-            map_fn,
-            Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. }
-          );
+          let source = args.get(off).cloned().unwrap_or(Value::Undefined);
+          let map_fn = args
+            .get(off + 1)
+            .cloned()
+            .unwrap_or(Value::Undefined);
+          let this_arg = args
+            .get(off + 2)
+            .cloned()
+            .unwrap_or(Value::Undefined);
+          let constructor = vm.this_value();
 
-          // Array.from consumes an explicitly supplied iterator before
-          // falling back to array-like indexed access. This is required for
-          // collection iterators such as Map.prototype.values().
-          if !matches!(source, Value::Array(..)) {
-            let iterator_method =
-              vm.get_property_host(source, &PKey::Symbol(SymbolId::well_known_iterator()))?;
-            if Vm::is_callable_value(&iterator_method) {
-              let items = collect_iterable_values(vm, source)?;
-              let mut out = Vec::with_capacity(items.len());
-              for (index, mut value) in items.into_iter().enumerate() {
-                if has_map_fn {
-                  value = vm.call_value_with_this(
-                    map_fn,
-                    &Value::Undefined,
-                    &[value, Value::Number(usize_to_f64(index))],
-                  )?;
-                }
-                out.push(Some(value));
-              }
-              let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
-              let props = Rc::new(RefCell::new(ObjectData::new()));
-              props
-                .borrow_mut()
-                .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_from)));
-              props.borrow_mut().properties.insert(
-                PKey::String("length".to_string()),
-                array_length_descriptor(arr_rc.borrow().len()),
-              );
-              return Ok(Value::Array(arr_rc, props));
-            }
+          let source = vm.to_object_value(source)?;
+          if !matches!(map_fn, Value::Undefined) && !Vm::is_callable_value(&map_fn) {
+            return Err(vm.throw_type_error("Array.from mapfn is not callable"));
           }
 
-          let len = match source {
-            Value::Array(arr, _) => arr.borrow().len(),
-            Value::String(s) => s.chars().count(),
-            _ => {
-              let len_v = vm.get_property_host(source, &PKey::String("length".to_string()))?;
-              to_length(vm, &len_v)?
+          let iterator_method = crate::runtime_utils::get_method(
+            vm,
+            &source,
+            &PKey::Symbol(SymbolId::well_known_iterator()),
+          )?;
+          if let Some(iterator_method) = iterator_method {
+            let result = if constructor.is_constructable() {
+              vm.construct_value(&constructor, &[])?
+            } else {
+              vm.new_array(Vec::new())
+            };
+            let (iterator, next) =
+              match crate::runtime_utils::get_iterator_record(vm, &source, &iterator_method) {
+                Ok(record) => record,
+                Err(error) => return Err(error),
+              };
+            let mut index = 0usize;
+            loop {
+              let value = match crate::runtime_utils::iterator_step(vm, &iterator, &next) {
+                Ok(Some(value)) => value,
+                Ok(None) => break,
+                Err(error) => {
+                  // IteratorClose must not replace the original abrupt
+                  // completion with an error from the close operation.
+                  drop(crate::runtime_utils::iterator_close(vm, &iterator));
+                  return Err(error);
+                }
+              };
+              let value = if matches!(map_fn, Value::Undefined) {
+                value
+              } else {
+                match vm.call_value_with_this(
+                  &map_fn,
+                  &this_arg,
+                  &[value, Value::Number(usize_to_f64(index))],
+                ) {
+                  Ok(value) => value,
+                  Err(error) => {
+                    drop(crate::runtime_utils::iterator_close(vm, &iterator));
+                    return Err(error);
+                  }
+                }
+              };
+              let key = Value::String(index.to_string());
+              if let Err(error) = create_data_property_or_throw(vm, &result, &key, value) {
+                drop(crate::runtime_utils::iterator_close(vm, &iterator));
+                return Err(error);
+              }
+              index = match index.checked_add(1) {
+                Some(next_index) => next_index,
+                None => {
+                  let error = vm.throw_type_error("Array.from result is too large");
+                  drop(crate::runtime_utils::iterator_close(vm, &iterator));
+                  return Err(error);
+                }
+              };
             }
+            vm.set_property_host(
+              &result,
+              &Value::String("length".to_string()),
+              Value::Number(usize_to_f64(index)),
+            )?;
+            return Ok(result);
+          }
+
+          let length_value = vm.get_property_host(&source, &PKey::String("length".to_string()))?;
+          let length = to_length(vm, &length_value)?;
+          let result = if constructor.is_constructable() {
+            vm.construct_value(&constructor, &[Value::Number(usize_to_f64(length))])?
+          } else {
+            vm.new_array(vec![None; length])
           };
 
-          let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
-          for i in 0..len {
-            let mut v = match source {
-              Value::Array(arr, _) => arr
-                .borrow()
-                .get(i)
-                .cloned()
-                .flatten()
-                .unwrap_or(Value::Undefined),
-              Value::String(s) => {
-                let ch = s.chars().nth(i).unwrap_or('\0');
-                Value::String(ch.to_string())
-              }
-              _ => vm.get_property_host(source, &PKey::String(i.to_string()))?,
+          for index in 0..length {
+            let key = PKey::String(index.to_string());
+            let value = vm.get_property_host(&source, &key)?;
+            let value = if matches!(map_fn, Value::Undefined) {
+              value
+            } else {
+              vm.call_value_with_this(
+                &map_fn,
+                &this_arg,
+                &[value, Value::Number(usize_to_f64(index))],
+              )?
             };
-            if has_map_fn {
-              v = vm.call_value_with_this(
-                map_fn,
-                &Value::Undefined,
-                &[v, Value::Number(usize_to_f64(i))],
-              )?;
-            }
-            out.push(Some(v));
+            create_data_property_or_throw(vm, &result, &Value::String(index.to_string()), value)?;
           }
-
-          let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
-          let props = Rc::new(RefCell::new(ObjectData::new()));
-          props
-            .borrow_mut()
-            .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_from)));
-          props.borrow_mut().properties.insert(
-            PKey::String("length".to_string()),
-            array_length_descriptor(arr_rc.borrow().len()),
-          );
-          Ok(Value::Array(arr_rc, props))
+          vm.set_property_host(
+            &result,
+            &Value::String("length".to_string()),
+            Value::Number(usize_to_f64(length)),
+          )?;
+          Ok(result)
         }),
         &function_proto_map,
       );
+      set_builtin_name(&builtin, "from");
       set_builtin_length(&builtin, 1.0);
       builtin
     }),

@@ -429,6 +429,8 @@ pub struct ObjectData {
   pub strong_prototype: Option<Value>,
   /// Prototype pointer (weak to prevent reference cycles)
   pub weak_prototype: Option<WeakObject>,
+  /// VM-internal slots that are never exposed through ECMAScript property operations.
+  pub(crate) internal_slots: IndexMap<&'static str, Value>,
   /// Lexical environment captured by function objects, if any.
   pub captured_lexical_env: Option<Rc<RefCell<crate::environment::EnvironmentRecord>>>,
   /// Extensible flag
@@ -454,6 +456,7 @@ impl ObjectData {
       properties: IndexMap::new(),
       strong_prototype: None,
       weak_prototype: None,
+      internal_slots: IndexMap::new(),
       captured_lexical_env: None,
       extensible: true,
     }
@@ -473,6 +476,7 @@ impl ObjectData {
       properties: IndexMap::new(),
       strong_prototype: None,
       weak_prototype: Some(WeakObject::new(prototype)),
+      internal_slots: IndexMap::new(),
       captured_lexical_env: None,
       extensible: true,
     }

@@ -11,6 +11,69 @@ pub(crate) fn promise_constructor_matches(
   Ok(strict_equal(&promise_constructor, constructor))
 }
 
+/// Get a method from an object, treating nullish values as absent.
+pub(crate) fn get_method(
+  vm: &mut Vm,
+  object: &Value,
+  key: &PropertyKey,
+) -> Result<Option<Value>, RuntimeError> {
+  let method = vm.get_property_host(object, key)?;
+  if matches!(method, Value::Undefined | Value::Null) {
+    return Ok(None);
+  }
+  if !Vm::is_callable_value(&method) {
+    return Err(vm.throw_type_error("Iterator method is not callable"));
+  }
+  Ok(Some(method))
+}
+
+/// Get an iterator and its cached `next` method from an iterator method.
+pub(crate) fn get_iterator_record(
+  vm: &mut Vm,
+  object: &Value,
+  method: &Value,
+) -> Result<(Value, Value), RuntimeError> {
+  let iterator = vm.call_value_with_this(method, object, &[])?;
+  if !iterator.is_object() {
+    return Err(vm.throw_type_error("Iterator method did not return an object"));
+  }
+  let next = vm.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
+  if !Vm::is_callable_value(&next) {
+    return Err(vm.throw_type_error("Iterator next is not callable"));
+  }
+  Ok((iterator, next))
+}
+
+/// Advance an iterator, validating each iterator result object.
+pub(crate) fn iterator_step(
+  vm: &mut Vm,
+  iterator: &Value,
+  next: &Value,
+) -> Result<Option<Value>, RuntimeError> {
+  let result = vm.call_value_with_this(next, iterator, &[])?;
+  if !result.is_object() {
+    return Err(vm.throw_type_error("Iterator result is not an object"));
+  }
+  let done = vm.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+  if vm.to_boolean(&done) {
+    return Ok(None);
+  }
+  Ok(Some(vm.get_property_host(
+    &result,
+    &PropertyKey::String("value".to_string()),
+  )?))
+}
+
+/// Perform IteratorClose, including the required return-result validation.
+pub(crate) fn iterator_close(
+  vm: &mut Vm,
+  iterator: &Value,
+) -> Result<(), RuntimeError> {
+  // Closing from a fork keeps a pending exception from a failed `next`, mapfn,
+  // or element definition intact while still observing effects of `return`.
+  vm.close_iterator_in_fork(iterator)
+}
+
 /// Collects values from an iterable into a vector.
 pub(crate) fn collect_iterable_values(
   vm: &mut Vm,

@@ -584,10 +584,10 @@ fn clone_value_across_realms(
           return Ok(Value::Object(target_obj));
         }
 
-        // Map: detect by __map_entries internal slot
-        if let Some(PropertyDescriptor::Data { value: entries, .. }) = borrow
-          .properties
-          .get(&PropertyKey::String("__map_entries".to_string()))
+        // Map: preserve its VM-internal data slot without exposing it as a property.
+        if let Some(entries) = borrow
+          .internal_slots
+          .get(crate::ecmascript::builtins::collections::MAP_DATA_SLOT)
         {
           let mut out = ObjectData::new();
           if let Some(proto) = vm.realm().get_intrinsic_prototype("Map") {
@@ -598,34 +598,20 @@ fn clone_value_across_realms(
           visited.insert(addr, target_val);
 
           let cloned_entries = helper(vm, entries, visited, transfer_set)?;
-          target_obj.borrow_mut().properties.insert(
-            PropertyKey::String("__map_entries".to_string()),
-            PropertyDescriptor::data(cloned_entries),
+          target_obj.borrow_mut().internal_slots.insert(
+            crate::ecmascript::builtins::collections::MAP_DATA_SLOT,
+            cloned_entries,
           );
-          // copy size
-          if let Some(PropertyDescriptor::Data { value, .. }) = borrow
-            .properties
-            .get(&PropertyKey::String("size".to_string()))
-          {
-            let cloned = helper(vm, value, visited, transfer_set)?;
-            target_obj.borrow_mut().properties.insert(
-              PropertyKey::String("size".to_string()),
-              PropertyDescriptor::data(cloned),
-            );
-          }
           return Ok(Value::Object(target_obj));
         }
 
-        // Set: detect by __set_values internal slot
-        if let Some(PropertyDescriptor::Data {
-          value: set_vals, ..
-        }) = borrow
-          .properties
-          .get(&PropertyKey::String("__set_values".to_string()))
+        // Set: preserve its VM-internal data slot without exposing it as a property.
+        if let Some(set_vals) = borrow
+          .internal_slots
+          .get(crate::ecmascript::builtins::collections::SET_DATA_SLOT)
         {
           let mut out = ObjectData::new();
-          if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
-            // No dedicated Set.prototype in intrinsics table; fall back to Array
+          if let Some(proto) = vm.realm().get_intrinsic_prototype("Set") {
             out.set_prototype_value(proto);
           }
           let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
@@ -633,20 +619,10 @@ fn clone_value_across_realms(
           visited.insert(addr, target_val);
 
           let cloned_vals = helper(vm, set_vals, visited, transfer_set)?;
-          target_obj.borrow_mut().properties.insert(
-            PropertyKey::String("__set_values".to_string()),
-            PropertyDescriptor::data(cloned_vals),
+          target_obj.borrow_mut().internal_slots.insert(
+            crate::ecmascript::builtins::collections::SET_DATA_SLOT,
+            cloned_vals,
           );
-          if let Some(PropertyDescriptor::Data { value, .. }) = borrow
-            .properties
-            .get(&PropertyKey::String("size".to_string()))
-          {
-            let cloned = helper(vm, value, visited, transfer_set)?;
-            target_obj.borrow_mut().properties.insert(
-              PropertyKey::String("size".to_string()),
-              PropertyDescriptor::data(cloned),
-            );
-          }
           return Ok(Value::Object(target_obj));
         }
 

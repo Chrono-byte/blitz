@@ -1747,6 +1747,77 @@ mod test {
   }
 
   #[test]
+  fn array_from_follows_iterator_mapping_and_constructor_semantics() {
+    let (vm, _) = run_script(
+      r#"
+        var array = [1, 2];
+        array[Symbol.iterator] = function() {
+          return { next: function() {
+            if (this.i === undefined) this.i = 0;
+            return this.i++ === 0
+              ? { value: 9, done: false }
+              : { value: undefined, done: true };
+          }};
+        };
+        var receiver = { base: 10 };
+        var mapped = Array.from(array, function(value, index) {
+          return this.base + value + index;
+        }, receiver);
+
+        var calls = [];
+        function Constructor(length) {
+          calls.push(arguments.length + ":" + (length === undefined ? "u" : length));
+        }
+        var iterable_result = Array.from.call(Constructor, [3, 4]);
+        var array_like_result = Array.from.call(Constructor, { 0: 5, length: 1 });
+
+        globalThis.array_from_focused =
+          mapped.length === 1 && mapped[0] === 19 &&
+          calls[0] === "0:u" && calls[1] === "1:1" &&
+          iterable_result[0] === 3 && iterable_result[1] === 4 &&
+          array_like_result[0] === 5 && array_like_result.length === 1 &&
+          Array.from.name === "from" && Array.from.length === 1;
+      "#,
+    );
+
+    assert!(matches!(
+      vm.get_global("array_from_focused"),
+      Some(Value::Bool(true))
+    ));
+  }
+
+  #[test]
+  fn array_from_closes_iterators_and_validates_results() {
+    let (vm, _) = run_script(
+      r#"
+        var closed = 0;
+        var source = {};
+        source[Symbol.iterator] = function() {
+          return {
+            next: function() { return { value: 1, done: false }; },
+            return: function() { closed++; return {}; }
+          };
+        };
+        try { Array.from(source, function() { throw "stop"; }); } catch (error) {}
+
+        var invalid = {};
+        invalid[Symbol.iterator] = function() {
+          return { next: function() { return 1; } };
+        };
+        var invalid_threw = false;
+        try { Array.from(invalid); } catch (error) { invalid_threw = true; }
+
+        globalThis.array_from_iterator_checks = closed === 1 && invalid_threw;
+      "#,
+    );
+
+    assert!(matches!(
+      vm.get_global("array_from_iterator_checks"),
+      Some(Value::Bool(true))
+    ));
+  }
+
+  #[test]
   fn same_value_uses_reference_identity_for_objects() {
     let obj = Rc::new(RefCell::new(ObjectData::new()));
     let a = Value::Object(Clone::clone(&obj));
@@ -1933,6 +2004,108 @@ mod test {
   }
 
   #[test]
+  fn map_and_set_iterator_and_brand_conformance() {
+    let (vm, _) = run_script(
+      r#"
+        var map = new Map([["a", 1], ["b", 2]]);
+        var fake = Object.create(Map.prototype);
+        var brand_threw = false;
+        try { Map.prototype.get.call(fake, "a"); } catch (error) { brand_threw = true; }
+
+        var iterator = map.entries();
+        var first = iterator.next();
+        first.value[1] = 99;
+        var source_unchanged = map.get("a") === 1;
+        map.delete("b");
+        map.set("c", 3);
+        var second = iterator.next();
+        var exhausted = iterator.next().done;
+        map.set("d", 4);
+        var permanently_done = iterator.next().done;
+
+        var set = new Set([1, 2]);
+        var set_iterator = set.values();
+        var set_entry = set.entries().next().value;
+        set_entry[0] = 9;
+        var set_pair_fresh = set.has(1) && set_entry[1] === 1;
+        var hidden_slots = Object.getOwnPropertySymbols(map).length === 0 &&
+          Object.getOwnPropertySymbols(set).length === 0 &&
+          Object.getOwnPropertySymbols(iterator).length === 0;
+        var negative_zero_map = new Map([[-0, 1]]);
+        var negative_zero_set = new Set([-0]);
+        var zeros_canonical = 1 / negative_zero_map.keys().next().value === Infinity &&
+          1 / negative_zero_set.values().next().value === Infinity;
+        var iterator_proto = Object.getPrototypeOf(Object.getPrototypeOf(iterator));
+        var iterator_shapes = iterator_proto[Symbol.iterator].call(iterator) === iterator &&
+          Object.getPrototypeOf(first) === Object.prototype &&
+          Object.getPrototypeOf(first.value) === Array.prototype;
+        var invalid_next = false;
+        try { set_iterator.next.call({}); } catch (error) { invalid_next = true; }
+
+        globalThis.collection_focused =
+          brand_threw && source_unchanged && second.value[0] === "c" &&
+          exhausted && permanently_done &&
+          Set.prototype.keys === Set.prototype.values &&
+          Set.prototype.values === Set.prototype[Symbol.iterator] &&
+          set_pair_fresh && hidden_slots && zeros_canonical && iterator_shapes && invalid_next &&
+          Object.prototype.toString.call(map) === "[object Map]" &&
+          Object.prototype.toString.call(set) === "[object Set]" &&
+          Map.prototype.get.name === "get" && Map.prototype.get.length === 1 &&
+          Set.prototype.add.name === "add" && Set.prototype.add.length === 1 &&
+          Object.getOwnPropertyDescriptor(Map.prototype, "get").enumerable === false &&
+          Object.getOwnPropertyDescriptor(Map.prototype, "size").get.length === 0 &&
+          iterator.next.name === "next" && iterator.next.length === 0 &&
+          Object.getOwnPropertyDescriptor(iterator.next, "length").enumerable === false &&
+          iterator.next.hasOwnProperty("length");
+      "#,
+    );
+
+    assert_eq!(vm.get_global("collection_focused"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn map_and_set_clear_and_for_each_follow_live_iteration() {
+    let (vm, _) = run_script(
+      r#"
+        const map = new Map([["a", 1], ["b", 2]]);
+        const mapSeen = [];
+        map.forEach((value, key, receiver) => {
+          mapSeen.push([key, value, receiver === map]);
+          if (key === "a") {
+            map.delete("b");
+            map.set("c", 3);
+          }
+        });
+        const mapReturn = map.clear();
+
+        const set = new Set([1, 2]);
+        const setSeen = [];
+        set.forEach((value, key, receiver) => {
+          setSeen.push([value, key, receiver === set]);
+          if (value === 1) {
+            set.delete(2);
+            set.add(3);
+          }
+        });
+        const setReturn = set.clear();
+
+        globalThis.collection_for_each_result =
+          mapSeen.length === 2 && mapSeen[0][0] === "a" &&
+          mapSeen[1][0] === "c" && mapSeen[1][1] === 3 && mapSeen[1][2] &&
+          mapReturn === undefined && map.size === 0 &&
+          setSeen.length === 2 && setSeen[0][0] === 1 && setSeen[0][1] === 1 &&
+          setSeen[1][0] === 3 && setSeen[1][1] === 3 && setSeen[1][2] &&
+          setReturn === undefined && set.size === 0;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("collection_for_each_result"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
   fn map_values_is_a_live_self_iterating_iterator() {
     let (vm, _) = run_script(
       r#"
@@ -1992,6 +2165,20 @@ mod test {
           }
         };
         const customMap = new Map(custom);
+        let nextGetterCalls = 0;
+        const cachedNextMap = new Map({
+          [Symbol.iterator]() {
+            let done = false;
+            return {
+              get next() {
+                nextGetterCalls += 1;
+                return () => done
+                  ? { done: true }
+                  : (done = true, { value: ["cached", 1], done: false });
+              }
+            };
+          }
+        });
         const copiedSet = new Set(new Set([1, 2]));
         const customSet = new Set({
           [Symbol.iterator]() {
@@ -2028,7 +2215,8 @@ mod test {
         globalThis.collection_constructor_result =
           copied.size === 2 && copied.get('second') === 2 &&
           customAdderMap.calls === 2 && customAdderMap.get('y') === 2 &&
-          customMap.get('custom-1') === 1 && copiedSet.size === 2 &&
+          customMap.get('custom-1') === 1 && cachedNextMap.get('cached') === 1 &&
+          nextGetterCalls === 1 && copiedSet.size === 2 &&
           customSet.size === 2 && nanMap.size === 1 && nanMap.get(NaN) === 2 &&
           nanSet.size === 1 && liveSetFirst.value === 1 && liveSetSecond.value === 2 &&
           malformed && accessorThrew && closed === 1;

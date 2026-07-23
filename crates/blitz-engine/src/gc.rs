@@ -531,6 +531,16 @@ fn mark_object(
       marked_promises,
     );
   }
+  for value in obj_ref.internal_slots.values() {
+    mark_value(
+      value,
+      marked_objects,
+      marked_arrays,
+      marked_proxies,
+      marked_envs,
+      marked_promises,
+    );
+  }
   for desc in obj_ref.properties.values() {
     match desc {
       PropertyDescriptor::Data { value, .. } => mark_value(
@@ -636,6 +646,7 @@ fn mark_environment_record(
 fn clear_object(obj: &Rc<RefCell<ObjectData>>) {
   let mut obj = obj.borrow_mut();
   obj.properties.clear();
+  obj.internal_slots.clear();
   obj.strong_prototype = None;
   obj.weak_prototype = None;
   obj.captured_lexical_env = None;
