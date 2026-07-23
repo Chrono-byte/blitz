@@ -49,6 +49,11 @@ host standard library and its migration rules are specified in
 [`EFFECT_STDLIB_DESIGN.md`](docs/EFFECT_STDLIB_DESIGN.md), with phased work
 tracked in
 [`EFFECT_STDLIB_IMPLEMENTATION_PLAN.md`](docs/EFFECT_STDLIB_IMPLEMENTATION_PLAN.md).
+The corrected contracts and complete plans for the remaining runtime APIs are
+in [`EFFECT_RUNTIME_API_EXPANSION_PLAN.md`](docs/EFFECT_RUNTIME_API_EXPANSION_PLAN.md).
+The runnable examples below use the current legacy `Blitz.*` compatibility API;
+the expanded Effect-native `blitz:*` modules are staged work and are not yet
+available as the complete surface described by those plans.
 
 ```js
 function callbackFunc(request, info) {

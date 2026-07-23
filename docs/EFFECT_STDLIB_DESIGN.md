@@ -8,6 +8,9 @@ callback-first Blitz APIs as the recommended application API while preserving
 standards compatibility at the appropriate boundaries. The phased delivery
 sequence is tracked in
 [`EFFECT_STDLIB_IMPLEMENTATION_PLAN.md`](EFFECT_STDLIB_IMPLEMENTATION_PLAN.md).
+The corrected contracts and full plans for the eleven remaining API/runtime
+workstreams are in
+[`EFFECT_RUNTIME_API_EXPANSION_PLAN.md`](EFFECT_RUNTIME_API_EXPANSION_PLAN.md).
 The bundled Effect runtime must also satisfy the parser-free artifact contract
 in [`EFFECT_FULL_PREBUNDLING_PLAN.md`](EFFECT_FULL_PREBUNDLING_PLAN.md).
 
@@ -183,7 +186,7 @@ export interface FileSystem {
   ) => Effect.Effect<Uint8Array, FileSystemError>
 }
 
-export declare const FileSystem: Context.Tag<FileSystem>
+export declare const FileSystem: Context.Tag<FileSystem, FileSystem>
 
 export declare const readFile: (
   path: Path,
@@ -236,16 +239,28 @@ export interface RunMainOptions {
 
 export declare const layerLive: Layer.Layer<RuntimeServices, RuntimeInitError>
 
-export declare const runMain: <Error>(
-  program: Effect.Effect<void, Error, RuntimeServices>,
+export declare const provideLive: <Success, Error, Requirements>(
+  program: Effect.Effect<Success, Error, Requirements>,
+) => Effect.Effect<
+  Success,
+  Error | RuntimeInitError,
+  Exclude<Requirements, RuntimeServices>
+>
+
+export declare const runMain: <Success, Error>(
+  program: Effect.Effect<Success, Error, never>,
   options?: RunMainOptions,
 ) => void
 ```
 
-`runMain` is the normal executable boundary. It installs the live Layer, starts
-one root fiber, maps SIGINT/SIGTERM to interruption, waits for finalizers, sets
-the exit status, and reports an unhandled Cause once. Libraries never call
-`runMain` or `Effect.runPromise` internally.
+`RuntimeServices` is `never` for the initial runtime milestone and expands only
+when a service tag, facade, live Layer, host ABI, and tests ship together.
+
+`runMain` is the normal executable boundary. It accepts only a closed Effect,
+starts one root fiber, maps SIGINT/SIGTERM to interruption, waits for finalizers,
+sets the exit status, and reports an unhandled Cause once. `provideLive` is the
+explicit convenience that supplies only the shipped runtime service union.
+Libraries never call `runMain` or `Effect.runPromise` internally.
 
 Applications needing custom services compose Layers before this boundary.
 
@@ -256,12 +271,15 @@ perform no filesystem access.
 
 ```ts
 Path.join("var", "log", "app.log")
+Path.resolve("/workspace", "src", "index.ts")
 Path.extname("archive.tar.gz")
-Path.fromFileUrl(url)
+Path.fromFileUrl(url) // Either<string, PathError>
 ```
 
-Invalid structured inputs may return `Either`; ordinary string operations
-follow documented deterministic rules. Provide explicit `posix` and `windows`
+`resolve` takes an explicit base and never reads ambient cwd. File-URL
+conversion returns `Either` for invalid schemes, authorities, encoding, relative
+paths, and platform-incompatible inputs. Ordinary string operations follow
+documented deterministic rules. Provide explicit `posix` and `windows`
 namespaces rather than ambient surprises in portable libraries.
 
 ### `blitz:fs`
@@ -316,24 +334,55 @@ idiomatic TypeScript interchange types. Effect owns execution and lifecycle.
 export type Handler<Error = never, Requirements = never> = (
   request: Request,
   context: RequestContext,
-) => Effect.Effect<Response, Error, Requirements>
+) => Effect.Effect<Response | WebSocketUpgrade, Error, Requirements>
 
-export interface ServeOptions<Error, Requirements> {
+export interface ServeOptions<Error, Requirements, MapperRequirements = never> {
   readonly hostname?: string
   readonly port?: number
   readonly handler: Handler<Error, Requirements>
+  readonly onHandlerError?: (
+    error: Error,
+    request: Request,
+    context: RequestContext,
+  ) => Effect.Effect<Response, never, MapperRequirements>
   readonly requestTimeout?: Duration.DurationInput
   readonly maxRequestBodyBytes?: number
 }
 
-export declare const serve: <Error, Requirements>(
-  options: ServeOptions<Error, Requirements>,
-) => Effect.Effect<never, ListenError | Error, HttpServer | Requirements>
+export declare const serve: <Error, Requirements, MapperRequirements = never>(
+  options: ServeOptions<Error, Requirements, MapperRequirements>,
+) => Effect.Effect<
+  never,
+  ListenError,
+  HttpServer | Requirements | MapperRequirements
+>
+
+export declare const listen: <Error, Requirements, MapperRequirements = never>(
+  options: ServeOptions<Error, Requirements, MapperRequirements>,
+) => Effect.Effect<
+  HttpServerResource,
+  ListenError,
+  HttpServer | Requirements | MapperRequirements | Scope.Scope
+>
 
 export declare const request: (
   input: RequestInfo | URL,
   init?: RequestInit,
-) => Effect.Effect<Response, HttpClientError, HttpClient>
+) => Effect.Effect<
+  Response,
+  HttpClientError,
+  HttpClient | Scope.Scope
+>
+
+export declare const withResponse: <Success, Error, Requirements>(
+  input: RequestInfo | URL,
+  use: (response: Response) => Effect.Effect<Success, Error, Requirements>,
+  init?: RequestInit,
+) => Effect.Effect<
+  Success,
+  HttpClientError | Error,
+  HttpClient | Requirements
+>
 ```
 
 Each request runs in a child Scope. Disconnect and timeout interrupt the handler.
@@ -346,6 +395,10 @@ Effect Streams without changing standard Web values.
 The primary API is connection/Stream based rather than callback-property based:
 
 ```ts
+export interface WebSocketUpgrade {
+  readonly _tag: "WebSocketUpgrade"
+}
+
 export interface Connection {
   readonly protocol: Option.Option<string>
   readonly messages: Stream.Stream<Message, WebSocketError>
@@ -408,7 +461,9 @@ const app = pipe(
   App.provide(Database.layer),
 )
 
-Runtime.runMain(App.serve(app, { port: 8000 }))
+Runtime.runMain(
+  Runtime.provideLive(App.serve(app, { port: 8000 })),
+)
 ```
 
 Builder methods are acceptable where they materially improve contextual generic
@@ -524,8 +579,10 @@ The exact private ABI may be specialized per capability, but it must provide:
 - no JavaScript `Value`, `Rc`, or `RefCell` in Tokio tasks.
 
 Private specifiers use `blitz-internal:*`, have no public declarations, and are
-unavailable to user module resolution. Globals such as
-`__blitz_app_transport` are transitional and should be removed.
+unavailable to user module resolution. The old `__blitz_app_transport` global
+is forbidden. A versioned, immutable, non-enumerable host ABI object may be used
+only as plumbing behind private adapters until the engine supports private
+native-module bindings directly.
 
 ## Permissions
 

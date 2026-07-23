@@ -7,6 +7,11 @@ This plan implements the API direction in
 current Blitz runtime. It is ordered to prove the difficult lifecycle and type
 contracts before adding a broad module surface.
 
+The corrected contracts and full module plans for all eleven remaining
+API/runtime workstreams are specified in
+[`EFFECT_RUNTIME_API_EXPANSION_PLAN.md`](EFFECT_RUNTIME_API_EXPANSION_PLAN.md).
+That plan takes precedence where older signatures below are narrower or stale.
+
 The first shippable vertical slice is:
 
 1. the required real upstream Effect operations;
@@ -54,8 +59,9 @@ Important gaps:
 - There is no generic host-operation registry that can settle an Effect on the
   VM thread and discard cancellation races safely.
 - Existing public host APIs are globals and callback/Promise oriented.
-- `blitz:app` expects a transitional global transport bridge and is not a model
-  for the new stdlib bridge.
+- `blitz:app` uses the versioned `__blitz_host_v1` bridge, but its host thunks
+  still block through `Vm::block_on` inside `Effect.sync`; it is not a model for
+  the cancellable asynchronous stdlib bridge.
 - No `blitz:runtime`, `blitz:path`, or `blitz:fs` virtual modules exist.
 - The TypeScript checker still supports only part of upstream Effect's type
   language, so every declaration expansion needs focused checker fixtures.
@@ -122,9 +128,16 @@ prerequisite for shipping new Effect-backed stdlib modules:
   adapter changes the graph input and requires deterministic regeneration and
   byte-for-byte verification of the final bundle.
 - All public aliases and Blitz modules resolve into the same canonical Effect
-  graph. `blitz-runtime` installs exactly one runtime graph per VM and rejects a
-  second installation before mutation; it never bundles or registers a second
-  Effect copy.
+  graph. The production installer accepts only the complete runtime bundle;
+  manifest-only install plans are test-only or removed. It hashes supplied
+  public declarations and validates each `declaration_sha256` before graph
+  visibility. `blitz-runtime` installs exactly one runtime graph per VM and
+  rejects a second installation before mutation; it never bundles or registers
+  a second Effect copy.
+- All post-registration initialization is infallible, or one transaction rolls
+  back graph records, declarations, host descriptors, roots, channels, tasks,
+  globals, and the singleton marker. Failure injection covers the point after
+  graph registration.
 - Rust host primitives are installed before graph evaluation and must match the
   artifact's host ABI version. Private bridge visibility is enforced by the
   manifest and user resolution.
@@ -180,19 +193,29 @@ export interface RunMainOptions {
   readonly disableSignalHandlers?: boolean
 }
 
-export declare const runMain: <Error>(
-  program: Effect.Effect<void, Error, RuntimeServices>,
+export declare const runMain: <Success, Error>(
+  program: Effect.Effect<Success, Error, never>,
   options?: RunMainOptions,
 ) => void
 
 export declare const layerLive: Layer.Layer<RuntimeServices, RuntimeInitError>
+
+export declare const provideLive: <Success, Error, Requirements>(
+  program: Effect.Effect<Success, Error, Requirements>,
+) => Effect.Effect<
+  Success,
+  Error | RuntimeInitError,
+  Exclude<Requirements, RuntimeServices>
+>
 ```
 
-Validate the exact variance behavior with the Blitz checker and upstream
-TypeScript before committing this signature. If an Effect requiring fewer
-services is not assignable, use an explicit `Runtime.provide` combinator and
-require `Effect<..., never>` at `runMain`; do not loosen requirements to
-`unknown`.
+Validate exact Effect variance with both checkers. `runMain` accepts only a
+closed Effect. `provideLive` explicitly supplies the actual shipped runtime
+service union; neither API may widen unresolved requirements to `unknown`.
+
+`RuntimeServices` is `never` in the initial runtime-only milestone and expands
+only in the same change that ships a real service tag, facade, live Layer, host
+ABI, and tests.
 
 `runMain` is the only operation in this slice allowed to execute an Effect.
 Libraries and stdlib modules never call it.
@@ -203,14 +226,14 @@ Use a small pure surface first:
 
 ```ts
 join(...segments: ReadonlyArray<string>): string
-resolve(...segments: ReadonlyArray<string>): string
+resolve(base: string, ...segments: ReadonlyArray<string>): string
 normalize(path: string): string
 dirname(path: string): string
 basename(path: string, suffix?: string): string
 extname(path: string): string
 isAbsolute(path: string): boolean
-fromFileUrl(url: URL): string
-toFileUrl(path: string): URL
+fromFileUrl(url: URL): Either.Either<string, PathError>
+toFileUrl(path: string): Either.Either<URL, PathError>
 ```
 
 Expose explicit `posix` and `windows` namespaces only after the common contract
@@ -239,7 +262,7 @@ export interface FileSystem {
   ) => Effect.Effect<string, FileSystemError>
 }
 
-export declare const FileSystem: Context.Tag<FileSystem>
+export declare const FileSystem: Context.Tag<FileSystem, FileSystem>
 
 export declare const readFile: (
   path: Path,
@@ -305,12 +328,20 @@ expansion before runtime compatibility is proven.
 
 ### Required additions
 
-Extend `effect/Effect` with the upstream runtime names and accurate curated
+First correct the already-curated models: upstream covariance, `Context.Tag`
+identifier/service generic order, real Fiber types and `Fiber.await` returning
+`Exit`, `acquireRelease` receiving the closing `Exit` with an infallible
+finalizer, precise non-empty `Layer.mergeAll` inference, Layer-to-Layer
+`Layer.provide`, Scope finalizers, and `Stream.runCollect` returning `Chunk`.
+Remove local substitutes and non-upstream aliases rather than expanding them.
+
+Then extend `effect/Effect` with the upstream runtime names and accurate curated
 declarations for:
 
 - `async`
 - `runCallback` or the selected observable root-runner primitive
-- `provideService`
+- `provideService` and `provideServiceEffect`
+- the pinned context/service-access primitives required by generated accessors
 - `catchAll`
 - `mapError`
 - `tap`
@@ -345,8 +376,10 @@ Update all three lists together:
 - `SUPPORTED` in `tools/effect-assets/scripts/verify.ts`
 - `supported` in `tools/effect-assets/scripts/test.ts`
 
-Add one declaration file per public Effect subpath. Generation is a strict
-ordered pipeline:
+Add one declaration file per public Effect subpath. When adding `effect/Fiber`,
+add the runtime alias `"Fiber.await": "_await"`, delete the local Fiber
+substitute, and test root/deep Fiber identity. Generation is a strict ordered
+pipeline:
 
 1. `tools/effect-assets` deterministically writes and verifies canonical Effect
    source, declarations, manifest, licenses, hashes, and embedding metadata.
@@ -546,9 +579,8 @@ source-backed registration path is removed at cutover.
 
 Select an upstream runner (`runCallback`, or a tested fiber observer) that
 supports cancellation. Do not poll private fiber fields as the current IRC
-example does. Before cutover, replace `globalThis.__blitz_app_transport` with
-the versioned private host ABI consumed by bundled adapters; the final artifact
-must not contain that transitional global name.
+example does. Advance the current immutable versioned host ABI for root and
+operation control; do not reintroduce `globalThis.__blitz_app_transport`.
 
 ### Live Layer
 
@@ -680,7 +712,7 @@ const program = FileSystem.readTextFile("./package.json").pipe(
   Effect.map((text) => console.log(text.length)),
 )
 
-Runtime.runMain(program)
+Runtime.runMain(Runtime.provideLive(program))
 ```
 
 An equivalent test using `FileSystem.layerMemory` performs no OS read. Both
@@ -751,7 +783,8 @@ Only after HTTP/WebSocket lifecycle is stable:
 - execute middleware in request child Scopes;
 - provide application Layers once in the root Scope;
 - preserve domain failures and redact defects at transport boundaries;
-- remove the transitional `globalThis.__blitz_app_transport` bridge;
+- migrate the versioned v1 host bridge to the generic cancellable operation ABI
+  and ensure the removed `globalThis.__blitz_app_transport` name never returns;
 - stop presenting the Rust `App`, `Layer`, and RPC builder model as a second
   public application API.
 
