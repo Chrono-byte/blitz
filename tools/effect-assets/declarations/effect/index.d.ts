@@ -11,6 +11,7 @@ export * as Duration from "effect/Duration";
 export * as Function from "effect/Function";
 export * as Context from "effect/Context";
 export * as Layer from "effect/Layer";
+export * as Ref from "effect/Ref";
 export * as Stream from "effect/Stream";
 export * as Scope from "effect/Scope";
 export * as Schedule from "effect/Schedule";

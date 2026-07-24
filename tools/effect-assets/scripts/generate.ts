@@ -7,7 +7,7 @@ import { rollup } from "rollup";
 import * as ts from "typescript";
 
 const VERSION = "3.16.7";
-const SUPPORTED = ["effect", "effect/Effect", "effect/Cause", "effect/Exit", "effect/Fiber", "effect/FiberId", "effect/HashSet", "effect/Chunk", "effect/Option", "effect/Either", "effect/Duration", "effect/Function", "effect/Context", "effect/Layer", "effect/Stream", "effect/Scope", "effect/Schedule", "effect/Match"] as const;
+const SUPPORTED = ["effect", "effect/Effect", "effect/Cause", "effect/Exit", "effect/Fiber", "effect/FiberId", "effect/HashSet", "effect/Chunk", "effect/Option", "effect/Either", "effect/Duration", "effect/Function", "effect/Context", "effect/Layer", "effect/Ref", "effect/Stream", "effect/Scope", "effect/Schedule", "effect/Match"] as const;
 const EFFECT_MODULES = SUPPORTED.slice(1);
 const ROOT = resolve(import.meta.dirname, "..");
 const OUTPUT = resolve(process.env.EFFECT_ASSETS_OUTPUT ?? resolve(ROOT, "../../crates/blitz-runtime/assets/effect", VERSION));

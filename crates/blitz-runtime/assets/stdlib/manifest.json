@@ -44,7 +44,7 @@
       "visibility": "public",
       "source": {
         "path": "modules/facades/blitz-app.js",
-        "sha256": "0e7bf2b3ecfa02d9af423c17854380a3528f6b5d343f434a7819768c2a2505bf"
+        "sha256": "370091ccabca52b8b284d0b3ca3b1c70f6acbff5416a67599ff62e5cc98ed66e"
       },
       "declaration": {
         "path": "declarations/blitz-app-runtime.d.ts",
@@ -85,11 +85,11 @@
     },
     {
       "path": "embedded.rs",
-      "sha256": "19ec3236fabe6ebcdb09c8009479b028e3bc0647f6c4cde6dfc90882ea8312be"
+      "sha256": "5fe140f178db637eada4d7cf9ac0fb6f5bc820f148757831eaf27f7d88fd04b3"
     },
     {
       "path": "modules/facades/blitz-app.js",
-      "sha256": "0e7bf2b3ecfa02d9af423c17854380a3528f6b5d343f434a7819768c2a2505bf"
+      "sha256": "370091ccabca52b8b284d0b3ca3b1c70f6acbff5416a67599ff62e5cc98ed66e"
     },
     {
       "path": "modules/facades/blitz-internal-app-transport.js",

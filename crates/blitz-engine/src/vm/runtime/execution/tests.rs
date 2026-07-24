@@ -263,6 +263,42 @@ mod test {
   }
 
   #[test]
+  fn string_methods_support_chat_server_operations() {
+    let (vm, _) = run_script(
+      r#"
+        globalThis.lowercase = "WebSocket İ".toLowerCase();
+        globalThis.uppercase = "straße".toUpperCase();
+        globalThis.generic = String.prototype.toLowerCase.call(123);
+        globalThis.starts_with = "JOIN Alice".startsWith("JOIN ");
+        globalThis.replaced = "a\nb\tc".replace(/[\u0000-\u001f]/g, "");
+        globalThis.replacement_patterns = "abc".replace("b", "[$&][$`][$']");
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("lowercase"),
+      Some(Value::String("websocket i\u{307}".to_string()))
+    );
+    assert_eq!(
+      vm.get_global("uppercase"),
+      Some(Value::String("STRASSE".to_string()))
+    );
+    assert_eq!(
+      vm.get_global("generic"),
+      Some(Value::String("123".to_string()))
+    );
+    assert_eq!(vm.get_global("starts_with"), Some(Value::Bool(true)));
+    assert_eq!(
+      vm.get_global("replaced"),
+      Some(Value::String("abc".to_string()))
+    );
+    assert_eq!(
+      vm.get_global("replacement_patterns"),
+      Some(Value::String("a[b][a][c]c".to_string()))
+    );
+  }
+
+  #[test]
   fn const_bindings_initialize_once_and_reject_reassignment() {
     let (vm, _) = run_script(
       r#"

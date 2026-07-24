@@ -16,26 +16,30 @@ mod terminal;
 mod url;
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use blitz::Vm;
 use blitz::errors::RuntimeError;
 use blitz::gc;
 use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use blitz::{HostRoot, Vm};
 use tokio::sync::mpsc;
 
-use crate::app_transport::{AppServerResource, AppTransportOptions, open_app_server};
+use crate::app_transport::{
+  AppServerResource, AppTransportError, AppTransportOptions, open_app_server,
+};
 use crate::net::http::HttpRequestEvent;
 use crate::net::websocket::WebSocketEvent;
 use crate::runtime_graph::{
   APP_TRANSPORT_METHODS, APP_TRANSPORT_PRIMITIVE, HOST_BRIDGE_ABI_VERSION, HostBridgeCapabilities,
   RuntimeGraphError,
 };
-use event_loop::{EventRegistry, EventSender, ResourceHandle};
+use event_loop::{EventRegistry, EventSender, ResourceHandle, ResourceRegistry};
+use scheduler::{TimerId, TimerKind, TimerScheduler, WakeupEvent};
 use terminal::TerminalEvent;
 
 /// Host configuration installed into a Blitz VM.
@@ -88,6 +92,7 @@ impl RuntimeOptions {
 pub struct RuntimeHandle {
   server: server::ServerState,
   events: EventRegistry<RuntimeEvent>,
+  scheduler: SchedulerHostState,
   terminal: terminal::TerminalState,
 }
 
@@ -95,6 +100,91 @@ enum RuntimeEvent {
   Http(Box<HttpRequestEvent>),
   WebSocket(WebSocketEvent),
   Terminal(TerminalEvent),
+  Wakeup(WakeupEvent),
+}
+
+struct TimerCallback {
+  callback: HostRoot,
+  arguments: Vec<HostRoot>,
+}
+
+#[derive(Clone)]
+struct SchedulerHostState {
+  scheduler: Rc<RefCell<TimerScheduler<RuntimeEvent>>>,
+  callbacks: Rc<RefCell<HashMap<TimerId, TimerCallback>>>,
+}
+
+impl SchedulerHostState {
+  fn dispatch(
+    &self,
+    vm: &mut Vm,
+    event: WakeupEvent,
+  ) -> Result<(), RuntimeError> {
+    let Some(wakeup) = event.timer() else {
+      return Ok(());
+    };
+    let Some(fired) = self
+      .scheduler
+      .borrow_mut()
+      .handle_wakeup(vm, wakeup, Instant::now())
+    else {
+      return Ok(());
+    };
+
+    let callback = if fired.kind() == TimerKind::Timeout {
+      self.callbacks.borrow_mut().remove(&fired.id())
+    } else {
+      self
+        .callbacks
+        .borrow()
+        .get(&fired.id())
+        .map(|callback| TimerCallback {
+          callback: callback.callback,
+          arguments: callback.arguments.clone(),
+        })
+    };
+    let Some(callback) = callback else {
+      return Ok(());
+    };
+    let function = vm
+      .host_root(callback.callback)
+      .unwrap_or(Value::Undefined);
+    let arguments = callback
+      .arguments
+      .iter()
+      .filter_map(|root| vm.host_root(*root))
+      .collect::<Vec<_>>();
+    if fired.kind() == TimerKind::Timeout {
+      release_timer_roots(vm, &callback)?;
+    }
+    if function.is_callable() {
+      vm.call_value_with_this(&function, &Value::Undefined, &arguments)?;
+    }
+    Ok(())
+  }
+
+  fn clear(
+    &self,
+    vm: &mut Vm,
+    id: TimerId,
+  ) -> Result<(), RuntimeError> {
+    self.scheduler.borrow_mut().clear_timer(id);
+    if let Some(callback) = self.callbacks.borrow_mut().remove(&id) {
+      release_timer_roots(vm, &callback)?;
+    }
+    Ok(())
+  }
+}
+
+fn release_timer_roots(
+  vm: &mut Vm,
+  callback: &TimerCallback,
+) -> Result<(), RuntimeError> {
+  vm.set_host_root(callback.callback, Value::Undefined)?;
+  for root in &callback.arguments {
+    vm.set_host_root(*root, Value::Undefined)?;
+  }
+  Ok(())
 }
 
 impl RuntimeHandle {
@@ -125,6 +215,7 @@ impl RuntimeHandle {
       RuntimeEvent::Http(event) => self.server.dispatch(vm, *event)?,
       RuntimeEvent::WebSocket(event) => self.server.dispatch_websocket(vm, event)?,
       RuntimeEvent::Terminal(event) => self.terminal.dispatch(vm, event)?,
+      RuntimeEvent::Wakeup(event) => self.scheduler.dispatch(vm, event)?,
     }
     vm.flush_microtasks()?;
     Ok(true)
@@ -265,16 +356,22 @@ pub fn try_install_runtime(
     return Err(RuntimeInstallError::AlreadyInstalled);
   }
   let timing_enabled = env::var_os("BLITZ_RUNTIME_TIMINGS").is_some();
-  let decode_started = std::time::Instant::now();
+  let decode_started = Instant::now();
   let bundle = crate::runtime_graph::validate_embedded_runtime_bundle()
     .map_err(|error| RuntimeInstallError::Artifact(error.to_string()))?;
   let decode_and_validation = decode_started.elapsed();
   let (requests_tx, requests_rx) = mpsc::channel(64);
   let (websocket_events_tx, websocket_events_rx) = mpsc::channel(64);
   let (terminal_events_tx, terminal_events_rx) = mpsc::channel(64);
+  let events = EventRegistry::new(64).expect("runtime event capacity is non-zero");
   let previous_bridge = vm.get_global("__blitz_host_v1");
-  let capabilities = install_host_bridge(vm, requests_tx.clone(), websocket_events_tx.clone());
-  let policy_started = std::time::Instant::now();
+  let capabilities = install_host_bridge(
+    vm,
+    requests_tx.clone(),
+    websocket_events_tx.clone(),
+    events.resources(),
+  );
+  let policy_started = Instant::now();
   if let Err(error) = bundle.validate_pinned_for_host(
     &capabilities,
     crate::effect_assets::EFFECT_MANIFEST_BYTES,
@@ -284,7 +381,7 @@ pub fn try_install_runtime(
     return Err(RuntimeInstallError::Policy(error));
   }
   let policy_validation = policy_started.elapsed();
-  let registration_started = std::time::Instant::now();
+  let registration_started = Instant::now();
   if let Err(error) = vm.register_prelinked_graph_with_declarations(
     bundle.graph.clone(),
     crate::effect_assets::public_declaration_sources(),
@@ -303,8 +400,8 @@ pub fn try_install_runtime(
       .borrow_mut()
       .push(Rc::downgrade(&loader_handle));
   });
-  let events = EventRegistry::new(64).expect("runtime event capacity is non-zero");
   let event_sender = events.sender();
+  let scheduler = install_scheduler(vm, events.resources(), event_sender.clone());
   forward_events(vm, requests_rx, event_sender.clone(), |event| {
     RuntimeEvent::Http(Box::new(event))
   });
@@ -324,26 +421,183 @@ pub fn try_install_runtime(
   Ok(RuntimeHandle {
     server,
     events,
+    scheduler,
     terminal,
+  })
+}
+
+fn install_scheduler(
+  vm: &mut Vm,
+  resources: ResourceRegistry,
+  events: EventSender<RuntimeEvent>,
+) -> SchedulerHostState {
+  let state = SchedulerHostState {
+    scheduler: Rc::new(RefCell::new(TimerScheduler::with_event_mapper(
+      resources,
+      events,
+      RuntimeEvent::Wakeup,
+    ))),
+    callbacks: Rc::new(RefCell::new(HashMap::new())),
+  };
+
+  install_global_function(
+    vm,
+    "setTimeout",
+    timer_set_method(state.clone(), TimerKind::Timeout),
+  );
+  install_global_function(
+    vm,
+    "setInterval",
+    timer_set_method(state.clone(), TimerKind::Interval),
+  );
+  install_global_function(vm, "clearTimeout", timer_clear_method(state.clone()));
+  install_global_function(vm, "clearInterval", timer_clear_method(state.clone()));
+
+  let performance = object(vm.realm().object_prototype());
+  let now_state = state.clone();
+  let now: BuiltinFn = Rc::new(move |_vm, _args| {
+    Ok(Value::Number(
+      now_state.scheduler.borrow().clock().now_millis(),
+    ))
+  });
+  set(&performance, "now", Value::Builtin(now));
+  vm.realm()
+    .global()
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::String("performance".to_string()),
+      PropertyDescriptor::Data {
+        value: performance,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      },
+    );
+  state
+}
+
+fn install_global_function(
+  vm: &Vm,
+  name: &str,
+  function: BuiltinFn,
+) {
+  vm.realm()
+    .global()
+    .borrow_mut()
+    .properties
+    .insert(
+      PropertyKey::String(name.to_string()),
+      PropertyDescriptor::Data {
+        value: Value::Builtin(function),
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      },
+    );
+}
+
+fn timer_set_method(
+  state: SchedulerHostState,
+  kind: TimerKind,
+) -> BuiltinFn {
+  Rc::new(move |vm, args| {
+    let callback_index = if args.first().is_some_and(Value::is_callable) {
+      0
+    } else {
+      1
+    };
+    let callback = args
+      .get(callback_index)
+      .cloned()
+      .ok_or_else(|| RuntimeError::from("timer requires a callback"))?;
+    if !callback.is_callable() {
+      return Err(RuntimeError::from("timer callback must be callable"));
+    }
+    let delay = args
+      .get(callback_index + 1)
+      .map(|value| vm.to_number_value(value))
+      .transpose()?
+      .unwrap_or(0.0);
+    let delay = if delay.is_nan() || delay < 0.0 {
+      Duration::ZERO
+    } else {
+      Duration::try_from_secs_f64(delay / 1_000.0)
+        .map_err(|_| RuntimeError::from("timer delay is outside the supported range"))?
+    };
+    let id = match kind {
+      TimerKind::Timeout => state
+        .scheduler
+        .borrow_mut()
+        .set_timeout(vm, delay, true),
+      TimerKind::Interval => state
+        .scheduler
+        .borrow_mut()
+        .set_interval(vm, delay, true),
+    }
+    .map_err(|error| RuntimeError::from(error.to_string()))?;
+    let callback = TimerCallback {
+      callback: vm.create_host_root(callback),
+      arguments: args
+        .iter()
+        .skip(callback_index + 2)
+        .cloned()
+        .map(|value| vm.create_host_root(value))
+        .collect(),
+    };
+    state.callbacks.borrow_mut().insert(id, callback);
+    let numeric_id = id
+      .value()
+      .to_string()
+      .parse::<f64>()
+      .map_err(|_| RuntimeError::from("timer identifier cannot be represented"))?;
+    Ok(Value::Number(numeric_id))
+  })
+}
+
+fn timer_clear_method(state: SchedulerHostState) -> BuiltinFn {
+  Rc::new(move |vm, args| {
+    let Some(value) = args
+      .first()
+      .filter(|value| matches!(value, Value::Number(_)))
+      .or_else(|| args.get(1))
+    else {
+      return Ok(Value::Undefined);
+    };
+    let numeric = vm.to_number_value(value)?.trunc();
+    if !numeric.is_finite() || numeric < 0.0 {
+      return Ok(Value::Undefined);
+    }
+    let Ok(value) = numeric.to_string().parse::<u64>() else {
+      return Ok(Value::Undefined);
+    };
+    state.clear(vm, TimerId::from_value(value))?;
+    Ok(Value::Undefined)
   })
 }
 
 /// Install the ABI object consumed by the prelinked private adapter.
 ///
-/// The existing transport owns binding and lifecycle correctly. Its
-/// transitional limitation remains that it forwards requests to the ordinary
-/// runtime event channel rather than invoking the `blitz:app` router/layers;
-/// that behavior is deliberately not hidden by host capability validation.
+/// Acquisition is lazy, expected validation/bind failures stay in the Effect
+/// error channel, and scoped release closes the listener and active
+/// connections idempotently. The transitional limitation remains that requests
+/// are forwarded to the ordinary runtime event channel rather than invoking
+/// the `blitz:app` router/layers; host capability validation does not hide it.
 fn install_host_bridge(
   vm: &mut Vm,
   requests: mpsc::Sender<HttpRequestEvent>,
   websocket_events: mpsc::Sender<WebSocketEvent>,
+  resources: ResourceRegistry,
 ) -> HostBridgeCapabilities {
   let app_transport = object(vm.realm().object_prototype());
   set(
     &app_transport,
     "openAppServer",
-    Value::Builtin(open_app_server_method(requests, websocket_events)),
+    Value::Builtin(open_app_server_method(
+      requests,
+      websocket_events,
+      resources,
+    )),
   );
   set(
     &app_transport,
@@ -487,38 +741,100 @@ fn transport_options(
   })
 }
 
+fn serve_error_value(
+  vm: &Vm,
+  reason: &str,
+  message: String,
+) -> Value {
+  let error = object(vm.realm().object_prototype());
+  set(&error, "_tag", Value::String("ServeError".to_string()));
+  set(&error, "reason", Value::String(reason.to_string()));
+  set(&error, "message", Value::String(message));
+  error
+}
+
+fn effect_fail(
+  vm: &mut Vm,
+  error: Value,
+) -> Result<Value, RuntimeError> {
+  let fail = effect_function(vm, "fail")?;
+  vm.call_value_with_this(&fail, &Value::Undefined, &[error])
+}
+
+fn effect_succeed(
+  vm: &mut Vm,
+  value: Value,
+) -> Result<Value, RuntimeError> {
+  let succeed = effect_function(vm, "succeed")?;
+  vm.call_value_with_this(&succeed, &Value::Undefined, &[value])
+}
+
+fn effect_suspend(
+  vm: &mut Vm,
+  thunk: BuiltinFn,
+) -> Result<Value, RuntimeError> {
+  let suspend = effect_function(vm, "suspend")?;
+  vm.call_value_with_this(&suspend, &Value::Undefined, &[Value::Builtin(thunk)])
+}
+
 fn open_app_server_method(
   requests: mpsc::Sender<HttpRequestEvent>,
   websocket_events: mpsc::Sender<WebSocketEvent>,
+  resources: ResourceRegistry,
 ) -> BuiltinFn {
   Rc::new(move |vm, args| {
-    let options = transport_options(
-      vm,
-      args
-        .get(1)
-        .ok_or_else(|| RuntimeError::from("openAppServer requires options"))?,
-    )?;
+    let options = match args.get(1) {
+      Some(value) => match transport_options(vm, value) {
+        Ok(options) => options,
+        Err(error) => {
+          let error = serve_error_value(vm, "InvalidOptions", error.to_string());
+          return effect_fail(vm, error);
+        }
+      },
+      None => {
+        let error = serve_error_value(
+          vm,
+          "InvalidOptions",
+          "openAppServer requires options".to_string(),
+        );
+        return effect_fail(vm, error);
+      }
+    };
     let thunk: BuiltinFn = {
       let requests = requests.clone();
       let websocket_events = websocket_events.clone();
+      let resources = resources.clone();
       Rc::new(move |vm, _args| {
-        let resource = vm
-          .block_on(open_app_server(
-            options.clone(),
-            requests.clone(),
-            websocket_events.clone(),
-          ))?
-          .map_err(|error| RuntimeError::from(error.to_string()))?;
-        Ok(resource_value(vm, Arc::new(resource)))
+        match vm.block_on(open_app_server(
+          options.clone(),
+          requests.clone(),
+          websocket_events.clone(),
+        ))? {
+          Ok(resource) => {
+            let resource_handle =
+              resources.register(format!("app-server:{}", resource.local_addr()), true);
+            let resource = resource_value(vm, Arc::new(resource), resource_handle);
+            effect_succeed(vm, resource)
+          }
+          Err(error) => {
+            let reason = match error {
+              AppTransportError::InvalidOptions(_) => "InvalidOptions",
+              AppTransportError::Bind(_) => "Bind",
+            };
+            let error = serve_error_value(vm, reason, error.to_string());
+            effect_fail(vm, error)
+          }
+        }
       })
     };
-    effect_sync(vm, thunk)
+    effect_suspend(vm, thunk)
   })
 }
 
 fn resource_value(
   vm: &mut Vm,
   resource: Arc<AppServerResource>,
+  resource_handle: ResourceHandle,
 ) -> Value {
   let server = object(vm.realm().object_prototype());
   set(
@@ -529,19 +845,10 @@ fn resource_value(
   let close_resource = Arc::clone(&resource);
   let close: BuiltinFn = Rc::new(move |vm, _args| {
     vm.block_on(Arc::clone(&close_resource).close_owned())?;
-    Ok(Value::Undefined)
-  });
-  let await_resource = resource;
-  let await_shutdown: BuiltinFn = Rc::new(move |vm, _args| {
-    vm.block_on(Arc::clone(&await_resource).await_shutdown_owned())?;
+    resource_handle.close();
     Ok(Value::Undefined)
   });
   set(&server, "__blitz_close", Value::Builtin(close));
-  set(
-    &server,
-    "__blitz_await_shutdown",
-    Value::Builtin(await_shutdown),
-  );
   server
 }
 
@@ -564,15 +871,11 @@ fn await_shutdown_method() -> BuiltinFn {
     let server = args
       .get(1)
       .ok_or_else(|| RuntimeError::from("awaitShutdown requires a server"))?;
-    let await_shutdown = vm.get_property_host(
-      server,
-      &PropertyKey::String("__blitz_await_shutdown".to_string()),
-    )?;
-    let thunk = match await_shutdown {
-      Value::Builtin(await_shutdown) => await_shutdown,
-      _ => return Err(RuntimeError::from("invalid application server resource")),
-    };
-    effect_sync(vm, thunk)
+    let close = vm.get_property_host(server, &PropertyKey::String("__blitz_close".to_string()))?;
+    if !matches!(close, Value::Builtin(_)) {
+      return Err(RuntimeError::from("invalid application server resource"));
+    }
+    effect_function(vm, "never")
   })
 }
 
@@ -701,6 +1004,44 @@ mod tests {
     resource.unreference();
     assert!(!runtime.is_live());
     assert!(resource.close());
+  }
+
+  #[test]
+  fn timer_globals_dispatch_callbacks_and_track_liveness() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let mut runtime = install_runtime(
+      &mut vm,
+      RuntimeOptions {
+        argv: vec!["blitz".to_string()],
+        env: BTreeMap::new(),
+        exec_path: "blitz".to_string(),
+        listen_addr: "127.0.0.1:0"
+          .parse()
+          .expect("test listen address"),
+      },
+    );
+    let source = r#"
+      globalThis.timerResult = 0;
+      globalThis.clockIsMonotonic = performance.now() >= 0;
+      const cancelled = setInterval(() => { timerResult = -1; }, 1000);
+      clearInterval(cancelled);
+      clearInterval(cancelled);
+      setTimeout((left, right) => { timerResult = left + right; }, 1, 2, 3);
+    "#;
+    let session = JsParser::parse_source(source).expect("parse timer script");
+    let chunk = compiler::compile_oxc(session.program(), source).expect("compile timer script");
+    vm.run(chunk).expect("evaluate timer script");
+
+    assert!(runtime.is_live());
+    assert!(
+      runtime
+        .run_once(&mut vm)
+        .expect("dispatch timer callback")
+    );
+    assert_eq!(vm.get_global("timerResult"), Some(Value::Number(5.0)));
+    assert_eq!(vm.get_global("clockIsMonotonic"), Some(Value::Bool(true)));
+    assert!(!runtime.is_live());
   }
 
   #[test]
@@ -1099,10 +1440,9 @@ mod tests {
             .read_frame()
             .await
             .expect("read Alice message on Bob");
-          let alice_echoed =
-            tokio::time::timeout(tokio::time::Duration::from_millis(100), alice.read_frame())
-              .await
-              .is_ok();
+          let alice_echoed = tokio::time::timeout(Duration::from_millis(100), alice.read_frame())
+            .await
+            .is_ok();
           alice
             .write_frame(Frame::close(1000, b"done"))
             .await

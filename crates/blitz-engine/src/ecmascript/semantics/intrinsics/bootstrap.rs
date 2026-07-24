@@ -4431,6 +4431,89 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(PKey::String("test".to_string()), non_enum_data(regexp_test));
 
+  let regexp_replace = builtin_object(
+    Rc::new(|vm, args| {
+      let this = args.first().cloned().unwrap_or(Value::Undefined);
+      let subject = vm.to_string(args.get(1).unwrap_or(&Value::Undefined))?;
+      let replacement = args.get(2).cloned().unwrap_or(Value::Undefined);
+      let source = vm.get_property_host(&this, &PKey::String("source".to_string()))?;
+      let flags = vm.get_property_host(&this, &PKey::String("flags".to_string()))?;
+      let pattern = vm.to_string(&source)?;
+      let flags = vm.to_string(&flags)?;
+      let regex = build_regex(&pattern, &flags)?;
+      let global = flags.contains('g');
+
+      let matches = if global {
+        regex.captures_iter(&subject).collect::<Vec<_>>()
+      } else {
+        regex
+          .captures(&subject)
+          .into_iter()
+          .collect::<Vec<_>>()
+      };
+      let mut output = String::new();
+      let mut next_source_position = 0;
+      for captures in matches {
+        let matched = captures
+          .get(0)
+          .ok_or_else(|| RuntimeError::from("RegExp replace missing match"))?;
+        if matched.start() < next_source_position {
+          continue;
+        }
+        output.push_str(&subject[next_source_position..matched.start()]);
+        let capture_values = (1..captures.len())
+          .map(|index| {
+            captures
+              .get(index)
+              .map(|capture| capture.as_str().to_string())
+          })
+          .collect::<Vec<_>>();
+        let replacement_text = if Vm::is_callable_value(&replacement) {
+          let mut call_args = vec![Value::String(matched.as_str().to_string())];
+          call_args.extend(capture_values.iter().map(|capture| {
+            capture
+              .as_ref()
+              .map_or(Value::Undefined, |capture| Value::String(capture.clone()))
+          }));
+          call_args.push(Value::Number(usize_to_f64(
+            subject[..matched.start()].chars().count(),
+          )));
+          call_args.push(Value::String(subject.clone()));
+          let result = vm.call_value_with_this(&replacement, &Value::Undefined, &call_args)?;
+          vm.to_string(&result)?
+        } else {
+          let replacement = vm.to_string(&replacement)?;
+          get_substitution(
+            matched.as_str(),
+            &subject,
+            matched.start(),
+            matched.end(),
+            &capture_values,
+            &replacement,
+          )
+        };
+        output.push_str(&replacement_text);
+        next_source_position = matched.end();
+      }
+      output.push_str(&subject[next_source_position..]);
+      if global {
+        drop(vm.set_property_host(
+          &this,
+          &Value::String("lastIndex".to_string()),
+          Value::Number(0.0),
+        )?);
+      }
+      Ok(Value::String(output))
+    }),
+    &function_proto_map,
+  );
+  set_builtin_name(&regexp_replace, "[Symbol.replace]");
+  set_builtin_length(&regexp_replace, 2.0);
+  regexp_proto_map.borrow_mut().properties.insert(
+    PKey::Symbol(SymbolId::well_known_replace()),
+    non_enum_data(regexp_replace),
+  );
+
   let error_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
     let ctor = vm
       .current_new_target()

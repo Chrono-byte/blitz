@@ -1,8 +1,10 @@
 export { acquireRelease } from 'blitz-internal:effect/Effect__acquireRelease.js';
 export { all } from 'blitz-internal:effect/Effect__all.js';
+export { as } from 'blitz-internal:effect/Effect__as.js';
 export { asVoid } from 'blitz-internal:effect/Effect__asVoid.js';
 export { async } from 'blitz-internal:effect/Effect__async.js';
 export { catchAll } from 'blitz-internal:effect/Effect__catchAll.js';
+export { catchTag } from 'blitz-internal:effect/Effect__catchTag.js';
 export { contextWith } from 'blitz-internal:effect/Effect__contextWith.js';
 export { contextWithEffect } from 'blitz-internal:effect/Effect__contextWithEffect.js';
 export { ensuring } from 'blitz-internal:effect/Effect__ensuring.js';
@@ -25,6 +27,8 @@ export { provideServiceEffect } from 'blitz-internal:effect/Effect__provideServi
 export { runCallback } from 'blitz-internal:effect/Effect__runCallback.js';
 export { runFork } from 'blitz-internal:effect/Effect__runFork.js';
 export { runPromise } from 'blitz-internal:effect/Effect__runPromise.js';
+export { runSync } from 'blitz-internal:effect/Effect__runSync.js';
+export { runSyncExit } from 'blitz-internal:effect/Effect__runSyncExit.js';
 export { scoped } from 'blitz-internal:effect/Effect__scoped.js';
 export { serviceFunctionEffect } from 'blitz-internal:effect/Effect__serviceFunctionEffect.js';
 export { sleep } from 'blitz-internal:effect/Effect__sleep.js';
@@ -32,3 +36,5 @@ export { succeed } from 'blitz-internal:effect/Effect__succeed.js';
 export { suspend } from 'blitz-internal:effect/Effect__suspend.js';
 export { sync } from 'blitz-internal:effect/Effect__sync.js';
 export { tap } from 'blitz-internal:effect/Effect__tap.js';
+export { try } from 'blitz-internal:effect/Effect__try.js';
+export { zipRight } from 'blitz-internal:effect/Effect__zipRight.js';

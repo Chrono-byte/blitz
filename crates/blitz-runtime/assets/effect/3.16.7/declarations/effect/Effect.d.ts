@@ -21,6 +21,11 @@ export interface Effect<Success, Error = never, Requirements = never> {
 export declare const succeed: <Success>(value: Success) => Effect<Success>;
 export declare const fail: <Error>(error: Error) => Effect<never, Error>;
 export declare const sync: <Success>(evaluate: () => Success) => Effect<Success>;
+declare const try_: {
+  <Success, Error>(options: { readonly try: () => Success; readonly catch: (error: unknown) => Error }): Effect<Success, Error>;
+  <Success>(evaluate: () => Success): Effect<Success, Cause.UnknownException>;
+};
+export { try_ as try };
 export declare const suspend: <Success, Error, Requirements>(evaluate: () => Effect<Success, Error, Requirements>) => Effect<Success, Error, Requirements>;
 export declare const async: <Success, Error = never, Requirements = never>(resume: (callback: (effect: Effect<Success, Error, Requirements>) => void, signal: AbortSignal) => void | Effect<void, never, Requirements>, blockingOn?: FiberId.FiberId) => Effect<Success, Error, Requirements>;
 export declare const never: Effect<never>;
@@ -40,6 +45,10 @@ export declare const catchAll: {
   <Error, Output, Error2, Requirements2>(f: (error: Error) => Effect<Output, Error2, Requirements2>): <Success, Requirements>(self: Effect<Success, Error, Requirements>) => Effect<Success | Output, Error2, Requirements | Requirements2>;
   <Success, Error, Requirements, Output, Error2, Requirements2>(self: Effect<Success, Error, Requirements>, f: (error: Error) => Effect<Output, Error2, Requirements2>): Effect<Success | Output, Error2, Requirements | Requirements2>;
 };
+export declare const catchTag: {
+  <Error extends { readonly _tag: string }, Tag extends Error["_tag"], Output, Error2, Requirements2>(tag: Tag, f: (error: Extract<Error, { readonly _tag: Tag }>) => Effect<Output, Error2, Requirements2>): <Success, Requirements>(self: Effect<Success, Error, Requirements>) => Effect<Success | Output, Exclude<Error, { readonly _tag: Tag }> | Error2, Requirements | Requirements2>;
+  <Success, Error extends { readonly _tag: string }, Requirements, Tag extends Error["_tag"], Output, Error2, Requirements2>(self: Effect<Success, Error, Requirements>, tag: Tag, f: (error: Extract<Error, { readonly _tag: Tag }>) => Effect<Output, Error2, Requirements2>): Effect<Success | Output, Exclude<Error, { readonly _tag: Tag }> | Error2, Requirements | Requirements2>;
+};
 export declare const mapError: {
   <Error, Output>(f: (error: Error) => Output): <Success, Requirements>(self: Effect<Success, Error, Requirements>) => Effect<Success, Output, Requirements>;
   <Success, Error, Requirements, Output>(self: Effect<Success, Error, Requirements>, f: (error: Error) => Output): Effect<Success, Output, Requirements>;
@@ -48,7 +57,15 @@ export declare const tap: {
   <Success, Output, Error2, Requirements2>(f: (value: Success) => Effect<Output, Error2, Requirements2>): <Error, Requirements>(self: Effect<Success, Error, Requirements>) => Effect<Success, Error | Error2, Requirements | Requirements2>;
   <Success, Error, Requirements, Output, Error2, Requirements2>(self: Effect<Success, Error, Requirements>, f: (value: Success) => Effect<Output, Error2, Requirements2>): Effect<Success, Error | Error2, Requirements | Requirements2>;
 };
+export declare const as: {
+  <Output>(value: Output): <Success, Error, Requirements>(self: Effect<Success, Error, Requirements>) => Effect<Output, Error, Requirements>;
+  <Success, Error, Requirements, Output>(self: Effect<Success, Error, Requirements>, value: Output): Effect<Output, Error, Requirements>;
+};
 export declare const asVoid: <Success, Error, Requirements>(self: Effect<Success, Error, Requirements>) => Effect<void, Error, Requirements>;
+export declare const zipRight: {
+  <Output, Error2, Requirements2>(that: Effect<Output, Error2, Requirements2>): <Success, Error, Requirements>(self: Effect<Success, Error, Requirements>) => Effect<Output, Error | Error2, Requirements | Requirements2>;
+  <Success, Error, Requirements, Output, Error2, Requirements2>(self: Effect<Success, Error, Requirements>, that: Effect<Output, Error2, Requirements2>): Effect<Output, Error | Error2, Requirements | Requirements2>;
+};
 export declare const ensuring: {
   <FinalizerResult, FinalizerRequirements>(finalizer: Effect<FinalizerResult, never, FinalizerRequirements>): <Success, Error, Requirements>(self: Effect<Success, Error, Requirements>) => Effect<Success, Error, Requirements | FinalizerRequirements>;
   <Success, Error, Requirements, FinalizerResult, FinalizerRequirements>(self: Effect<Success, Error, Requirements>, finalizer: Effect<FinalizerResult, never, FinalizerRequirements>): Effect<Success, Error, Requirements | FinalizerRequirements>;
@@ -68,6 +85,8 @@ export declare const fork: <Success, Error, Requirements>(effect: Effect<Success
 export declare const forkScoped: <Success, Error, Requirements>(effect: Effect<Success, Error, Requirements>) => Effect<Fiber.RuntimeFiber<Success, Error>, never, Scope.Scope | Requirements>;
 export declare const interrupt: Effect<never>;
 export declare const runFork: <Success, Error>(effect: Effect<Success, Error, never>) => Fiber.RuntimeFiber<Success, Error>;
+export declare const runSync: <Success, Error>(effect: Effect<Success, Error, never>) => Success;
+export declare const runSyncExit: <Success, Error>(effect: Effect<Success, Error, never>) => Exit.Exit<Success, Error>;
 export declare const runPromise: <Success, Error>(effect: Effect<Success, Error, never>) => Promise<Success>;
 export declare const fromFiber: <Success, Error>(fiber: Fiber.Fiber<Success, Error>) => Effect<Success, Error>;
 export declare const exit: <Success, Error, Requirements>(effect: Effect<Success, Error, Requirements>) => Effect<Exit.Exit<Success, Error>, never, Requirements>;

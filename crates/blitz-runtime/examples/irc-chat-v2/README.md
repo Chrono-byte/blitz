@@ -34,8 +34,27 @@ Type a message and press Enter to broadcast it. Type `/quit`, press Ctrl-D, or
 close the server to disconnect. Set `BLITZ_CHAT_URL` before starting a client
 to use another `ws://` endpoint.
 
-This example intentionally stays synchronous because `Blitz.serve` and its
-WebSocket callbacks are synchronous host APIs. It does not wrap mutable
-JavaScript operations in `Effect.sync`; a larger application should introduce
-Effect at boundaries where typed errors, services, scopes, or asynchronous
-lifecycle management provide a concrete benefit.
+## Effect boundary
+
+This example intentionally stays synchronous because `Blitz.serve`, WebSocket
+callbacks, and terminal callbacks are synchronous compatibility APIs. The
+currently published Effect facade exposes `Ref`, synchronous typed failure
+boundaries, and scoped `blitz:app` listener acquisition. It does not yet expose
+the generic scoped WebSocket-handler and terminal APIs needed to model this
+interactive chat faithfully.
+
+Following the Effect guidelines, this example therefore:
+
+- keeps nickname and message transformations pure;
+- uses ordinary `try`/`catch` only for direct synchronous WebSocket host calls,
+  not for Effect failures;
+- does not wrap `Map` operations or pure transformations in `Effect.sync`;
+- does not start detached fibers from synchronous callbacks; and
+- leaves listener and socket ownership with the compatibility runtime.
+
+Adding `Effect` wrappers here would hide the lifecycle boundary without adding
+typed failures, testable services, or scoped cleanup. Migrate this example when
+the Effect-native WebSocket-handler and terminal APIs are public; listener
+ownership should use the scoped server boundary, chat state can use `Ref`
+inside an explicit service, and the executable should have one supervised root
+Effect.

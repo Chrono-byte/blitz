@@ -636,6 +636,52 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     non_enum_data(string_index_of),
   );
 
+  let string_starts_with = builtin_object(
+    Rc::new(|vm, args| {
+      let undefined = Value::Undefined;
+      let receiver = args.first().unwrap_or(&undefined);
+      require_object_coercible(vm, receiver)?;
+      let value = vm.to_string(receiver)?;
+      let search = args.get(1).unwrap_or(&undefined);
+      if search.is_object() {
+        let matcher = vm.get_property_host(search, &PKey::Symbol(SymbolId::well_known_match()))?;
+        if !matches!(matcher, Value::Undefined) && vm.to_boolean(&matcher) {
+          return Err(vm.throw_type_error(
+            "First argument to String.prototype.startsWith must not be a RegExp",
+          ));
+        }
+      }
+      let search = vm.to_string(search)?;
+      let length = value.chars().count();
+      let position = match args.get(2) {
+        Some(position) => {
+          let number = vm.to_number_value(position)?;
+          if number.is_nan() || number <= 0.0 {
+            0
+          } else if !number.is_finite() {
+            length
+          } else {
+            number
+              .floor()
+              .to_usize()
+              .unwrap_or(length)
+              .min(length)
+          }
+        }
+        None => 0,
+      };
+      let start = char_index_to_byte_index(&value, position);
+      Ok(Value::Bool(value[start..].starts_with(&search)))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_starts_with, "startsWith");
+  set_builtin_length(&string_starts_with, 1.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("startsWith".to_string()),
+    non_enum_data(string_starts_with),
+  );
+
   let string_char_code_at = builtin_object(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;
@@ -768,6 +814,100 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   install_trim("trim", true, true);
   install_trim("trimStart", true, false);
   install_trim("trimEnd", false, true);
+
+  let install_case_conversion = |name: &str, uppercase: bool| {
+    let conversion = builtin_object(
+      Rc::new(move |vm, args| {
+        let undefined = Value::Undefined;
+        let receiver = args.first().unwrap_or(&undefined);
+        require_object_coercible(vm, receiver)?;
+        let value = vm.to_string(receiver)?;
+        let converted = if uppercase {
+          value
+            .chars()
+            .flat_map(char::to_uppercase)
+            .collect()
+        } else {
+          value
+            .chars()
+            .flat_map(char::to_lowercase)
+            .collect()
+        };
+        Ok(Value::String(converted))
+      }),
+      function_proto_map,
+    );
+    set_builtin_name(&conversion, name);
+    set_builtin_length(&conversion, 0.0);
+    string_proto_map
+      .borrow_mut()
+      .properties
+      .insert(PKey::String(name.to_string()), non_enum_data(conversion));
+  };
+  install_case_conversion("toLowerCase", false);
+  install_case_conversion("toUpperCase", true);
+
+  let string_replace = builtin_object(
+    Rc::new(|vm, args| {
+      let undefined = Value::Undefined;
+      let receiver = args.first().unwrap_or(&undefined);
+      require_object_coercible(vm, receiver)?;
+      let search = args.get(1).cloned().unwrap_or(Value::Undefined);
+      let replacement = args.get(2).cloned().unwrap_or(Value::Undefined);
+      if !matches!(search, Value::Null | Value::Undefined) {
+        let replacer =
+          vm.get_property_host(&search, &PKey::Symbol(SymbolId::well_known_replace()))?;
+        if !matches!(replacer, Value::Undefined | Value::Null) {
+          if !Vm::is_callable_value(&replacer) {
+            return Err(vm.throw_type_error("Symbol.replace method is not callable"));
+          }
+          return vm.call_value_with_this(&replacer, &search, &[receiver.clone(), replacement]);
+        }
+      }
+
+      let subject = vm.to_string(receiver)?;
+      let search = vm.to_string(&search)?;
+      let Some(position) = subject.find(&search) else {
+        return Ok(Value::String(subject));
+      };
+      let end = position + search.len();
+      let replacement = if Vm::is_callable_value(&replacement) {
+        let result = vm.call_value_with_this(
+          &replacement,
+          &Value::Undefined,
+          &[
+            Value::String(search.clone()),
+            Value::Number(usize_to_f64(subject[..position].chars().count())),
+            Value::String(subject.clone()),
+          ],
+        )?;
+        vm.to_string(&result)?
+      } else {
+        let replacement = vm.to_string(&replacement)?;
+        super::super::semantics::get_substitution(
+          &search,
+          &subject,
+          position,
+          end,
+          &[],
+          &replacement,
+        )
+      };
+      Ok(Value::String(format!(
+        "{}{}{}",
+        &subject[..position],
+        replacement,
+        &subject[end..]
+      )))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_replace, "replace");
+  set_builtin_length(&string_replace, 2.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("replace".to_string()),
+    non_enum_data(string_replace),
+  );
 
   let string_split = builtin_object(
     Rc::new(|vm, args| {

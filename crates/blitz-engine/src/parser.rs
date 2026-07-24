@@ -125,9 +125,9 @@ impl Parser {
         })
         .parse();
 
-      if !ret.errors.is_empty() {
+      if !ret.diagnostics.is_empty() {
         let mut msgs = Vec::new();
-        for e in ret.errors {
+        for e in ret.diagnostics {
           let err = e.with_source_code(source.to_string());
           msgs.push(format!("{:?}", err));
         }
@@ -166,9 +166,9 @@ impl Parser {
         })
         .parse();
 
-      if !ret.errors.is_empty() {
+      if !ret.diagnostics.is_empty() {
         let mut msgs = Vec::new();
-        for e in ret.errors {
+        for e in ret.diagnostics {
           let err = e.with_source_code(source.to_string());
           msgs.push(format!("{:?}", err));
         }
@@ -204,16 +204,16 @@ impl Parser {
       })
       .parse();
 
-    if !ret.errors.is_empty() {
+    if !ret.diagnostics.is_empty() {
       let mut msgs = Vec::new();
-      for e in ret.errors {
+      for e in ret.diagnostics {
         let err = e.with_source_code(source.to_string());
         msgs.push(format!("{:?}", err));
       }
       return Err(ParserError::from(msgs.join("\n")));
     }
 
-    let estree_json = ret.program.to_pretty_estree_ts_json(false);
+    let estree_json = ret.program.to_pretty_estree_json(true, false);
     let root: Value = serde_json::from_str(&estree_json)
       .map_err(|e| ParserError::from(format!("Failed to parse Oxc ESTree JSON: {}", e)))?;
 
@@ -262,16 +262,16 @@ impl Parser {
       })
       .parse();
 
-    if !ret.errors.is_empty() {
+    if !ret.diagnostics.is_empty() {
       let mut msgs = Vec::new();
-      for e in ret.errors {
+      for e in ret.diagnostics {
         let err = e.with_source_code(source.to_string());
         msgs.push(format!("{:?}", err));
       }
       return Err(ParserError::from(msgs.join("\n")));
     }
 
-    let estree_json = ret.program.to_pretty_estree_ts_json(false);
+    let estree_json = ret.program.to_pretty_estree_json(true, false);
     let root: Value = serde_json::from_str(&estree_json)
       .map_err(|e| ParserError::from(format!("Failed to parse Oxc ESTree JSON: {}", e)))?;
 

@@ -36,7 +36,7 @@ pub const EMBEDDED_BLITZ_STDLIB_MODULES: &[EmbeddedBlitzStdlibModule] = &[
     specifier: "blitz:app",
     source: include_str!("modules/facades/blitz-app.js"),
     declaration: Some(include_str!("declarations/blitz-app-runtime.d.ts")),
-    source_sha256: "0e7bf2b3ecfa02d9af423c17854380a3528f6b5d343f434a7819768c2a2505bf",
+    source_sha256: "370091ccabca52b8b284d0b3ca3b1c70f6acbff5416a67599ff62e5cc98ed66e",
     declaration_sha256: Some("5385e12ba67770a72293928f15f55c80fce67ab10bce36e9cdf262bab3b58381"),
     visibility: "public",
     dependencies: &["effect/Effect", "effect/Layer", "blitz-internal:app-transport"],

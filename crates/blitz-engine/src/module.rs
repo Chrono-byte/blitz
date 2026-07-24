@@ -1538,7 +1538,9 @@ impl ModuleLoader {
         let estree = match &rec.payload {
           ModuleRecordPayload::Source { session, .. } => {
             self.pipeline_counters.source_linking_pass();
-            session.program().to_pretty_estree_ts_json(false)
+            session
+              .program()
+              .to_pretty_estree_json(true, false)
           }
           ModuleRecordPayload::Prelinked { .. } => continue,
         };
@@ -1721,7 +1723,9 @@ impl ModuleLoader {
         match &rec.payload {
           ModuleRecordPayload::Source { session, .. } => {
             self.pipeline_counters.source_linking_pass();
-            session.program().to_pretty_estree_ts_json(false)
+            session
+              .program()
+              .to_pretty_estree_json(true, false)
           }
           ModuleRecordPayload::Prelinked { .. } => continue,
         }

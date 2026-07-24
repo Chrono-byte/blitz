@@ -1,1 +1,1 @@
-import{make as t,modify as a,get as e,update as o}from"blitz-internal:effect/dist/esm/internal/ref.js";const m=t;const s=e;const d=a;const p=o;export{s as get,m as make,d as modify,p as update};
+import{get as t,make as e,modify as s,set as a,update as o}from"blitz-internal:effect/dist/esm/internal/ref.js";const m=e;const d=t;const c=s;const n=a;const p=o;export{d as get,m as make,c as modify,n as set,p as update};

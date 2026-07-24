@@ -13,6 +13,7 @@ The manifest currently supports:
 | `effect/Effect` | Effect 3.16.7 generated subpath |
 | `effect/Context` | Effect 3.16.7 generated subpath |
 | `effect/Layer` | Effect 3.16.7 generated subpath |
+| `effect/Ref` | Effect 3.16.7 generated subpath |
 | `effect/Stream` | Effect 3.16.7 generated subpath |
 | `effect/Scope` | Effect 3.16.7 generated subpath |
 | `effect/Schedule` | Effect 3.16.7 generated subpath |
@@ -49,9 +50,21 @@ does not register bundled JavaScript through source-backed virtual modules.
 
 Asset generation, parser-free registration, import, and synchronous Effect
 execution are landed. Pipeline counters assert zero bundled parses, import
-extraction, AST/ESTree linking, typechecks, and compilations. A runtime
-regression imports `effect/Effect`, executes a mapped Effect through
-`Effect.runFork`, and observes its successful value.
+extraction, AST/ESTree linking, typechecks, and compilations. Runtime regressions cover asynchronous execution through `Effect.runFork` and
+synchronous host boundaries through `Effect.runSync` / `Effect.runSyncExit`,
+including typed `Effect.try` recovery with `catchTag` and state transitions
+through `Ref`.
+
+`blitz:app` serving is lazy and scoped: listener validation and binding occur
+only when the serve Effect runs, invalid options and bind failures use tagged
+`ServeError` values, and release idempotently closes ingress, active
+connections, and the path forwarder. The listener is registered with runtime
+liveness while acquired. Interruption is supported by VM-thread timer globals
+(`setTimeout`, `clearTimeout`, `setInterval`, and `clearInterval`) backed by the
+runtime event queue; callbacks remain rooted until firing or cancellation, and
+`performance.now()` uses a monotonic clock. RPC router/layer request dispatch
+remains a separate slice; requests currently enter the compatibility event
+channel.
 
 The engine now initializes public, private, computed, and static class fields,
 including Effect's scheduler and metric-registry state such as `buckets = []`

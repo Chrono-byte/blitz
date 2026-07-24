@@ -285,6 +285,63 @@ fn build_regex(
   }
 }
 
+pub(crate) fn get_substitution(
+  matched: &str,
+  subject: &str,
+  start: usize,
+  end: usize,
+  captures: &[Option<String>],
+  replacement: &str,
+) -> String {
+  let mut output = String::new();
+  let mut chars = replacement.chars().peekable();
+  while let Some(character) = chars.next() {
+    if character != '$' {
+      output.push(character);
+      continue;
+    }
+    match chars.peek().copied() {
+      Some('$') => {
+        chars.next();
+        output.push('$');
+      }
+      Some('&') => {
+        chars.next();
+        output.push_str(matched);
+      }
+      Some('`') => {
+        chars.next();
+        output.push_str(&subject[..start]);
+      }
+      Some('\'') => {
+        chars.next();
+        output.push_str(&subject[end..]);
+      }
+      Some(digit @ '1'..='9') => {
+        chars.next();
+        let mut index = digit.to_digit(10).unwrap_or(0) as usize;
+        if let Some(next @ '0'..='9') = chars.peek().copied() {
+          let two_digit = index * 10 + next.to_digit(10).unwrap_or(0) as usize;
+          if two_digit <= captures.len() {
+            chars.next();
+            index = two_digit;
+          }
+        }
+        if index <= captures.len() {
+          if let Some(capture) = &captures[index - 1] {
+            output.push_str(capture);
+          }
+        } else {
+          output.push('$');
+          output.push(digit);
+        }
+      }
+      _ => output.push('$'),
+    }
+  }
+  output
+}
+
 fn sticky_caret_allows(
   subject: &str,
   start_index: usize,

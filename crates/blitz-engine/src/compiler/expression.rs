@@ -32,7 +32,7 @@ impl super::Compiler {
       oast::Expression::NumericLiteral(n) if self.strict_context => {
         let raw = n.raw.as_ref().map_or_else(
           || n.span.source_text(self.source_text.as_str()),
-          oxc_str::Str::as_str,
+          |raw| raw.as_str(),
         );
         let leading_zero = {
           let mut bytes = raw.bytes();
@@ -1854,17 +1854,16 @@ impl super::Compiler {
           "super can only be used in property accesses or calls",
         ));
       }
-      OExpr::MetaProperty(m) => {
-        if m.meta.name.as_str() == "new" && m.property.name.as_str() == "target" {
-          if !self.allow_new_target {
-            return Err(crate::errors::CompilerError::from(
-              "SyntaxError: new.target is only valid inside a function",
-            ));
-          }
-          self.emit(Op::GetNewTarget, LINE);
-        } else {
-          self.emit(Op::Undefined, LINE);
+      OExpr::NewTarget(_) => {
+        if !self.allow_new_target {
+          return Err(crate::errors::CompilerError::from(
+            "SyntaxError: new.target is only valid inside a function",
+          ));
         }
+        self.emit(Op::GetNewTarget, LINE);
+      }
+      OExpr::ImportMeta(_) => {
+        self.emit(Op::Undefined, LINE);
       }
       OExpr::CallExpression(c) => {
         if self.compile_spread_call_tail(c)? {

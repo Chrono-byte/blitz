@@ -11,7 +11,7 @@ Generated files are committed at
 `crates/blitz-runtime/assets/stdlib/`. Generation never runs at Rust build or
 runtime and does not access the network. The full upstream ESM graph is
 retained for runtime identity, while declarations are curated and emitted
-only for the eight supported public specifiers; private internal modules do
+only for the supported public specifiers; private internal modules do
 not carry duplicate upstream declaration graphs.
 
 The stdlib manifest is data-driven from `src/stdlib-manifest.ts`. It records

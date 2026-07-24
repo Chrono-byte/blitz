@@ -23,17 +23,20 @@ const makeDescription = (rpc, layers) => {
       return makeDescription(this.rpc, Object.freeze(this.layers.concat([layer])));
     },
     serve(options = {}) {
-      const transportOptions = Object.freeze({
-        hostname: options.hostname === undefined ? "127.0.0.1" : options.hostname,
-        port: options.port === undefined ? 8000 : options.port,
-        rpcPath: options.rpcPath === undefined ? "/rpc" : options.rpcPath
+      const app = this;
+      return Effect.suspend(() => {
+        const transportOptions = Object.freeze({
+          hostname: options.hostname === undefined ? "127.0.0.1" : options.hostname,
+          port: options.port === undefined ? 8000 : options.port,
+          rpcPath: options.rpcPath === undefined ? "/rpc" : options.rpcPath
+        });
+        return Effect.scoped(
+          Effect.acquireRelease(
+            start(app, transportOptions),
+            (server) => Transport.closeAppServer(server)
+          ).pipe(Effect.flatMap((server) => Transport.awaitShutdown(server)))
+        );
       });
-      return Effect.scoped(
-        Effect.acquireRelease(
-          start(this, transportOptions),
-          (server) => Transport.closeAppServer(server)
-        ).pipe(Effect.flatMap((server) => Transport.awaitShutdown(server)))
-      );
     }
   };
   return Object.freeze(description);

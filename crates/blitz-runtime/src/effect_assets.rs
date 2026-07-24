@@ -451,7 +451,15 @@ mod tests {
     let entry_path = directory.join("entry.mjs");
     std::fs::write(
       &entry_path,
-      "import * as Effect from 'effect/Effect'; globalThis.effect_typecheck = typeof Effect.succeed;",
+      r#"
+        import * as Effect from 'effect/Effect';
+        import * as Ref from 'effect/Ref';
+        globalThis.effect_typecheck =
+          typeof Effect.try === 'function' &&
+          typeof Effect.catchTag === 'function' &&
+          typeof Effect.runSync === 'function' &&
+          typeof Ref.make === 'function';
+      "#,
     )
     .expect("write declaration test entry");
 
@@ -484,10 +492,7 @@ mod tests {
       .expect("typecheck and evaluate source entry");
     std::fs::remove_dir_all(&directory).expect("remove declaration test directory");
 
-    assert_eq!(
-      vm.get_global("effect_typecheck"),
-      Some(Value::String("function".to_string()))
-    );
+    assert_eq!(vm.get_global("effect_typecheck"), Some(Value::Bool(true)));
     assert_eq!(
       vm.module_loader_pipeline_snapshot()
         .source_typechecks,
@@ -639,6 +644,71 @@ mod tests {
   }
 
   #[test]
+  fn ref_and_synchronous_error_boundaries_are_usable() {
+    run_effect_compatibility_entry(
+      r#"
+        import * as Root from 'effect';
+        import * as Effect from 'effect/Effect';
+        import * as Exit from 'effect/Exit';
+        import * as Ref from 'effect/Ref';
+
+        const counter = Effect.runSync(Ref.make(1));
+        Effect.runSync(Ref.update(counter, value => value + 1));
+        const modified = Effect.runSync(
+          Ref.modify(counter, value => [value * 2, value + 3])
+        );
+        const recovered = Effect.runSync(
+          Effect.try({
+            try: () => { throw new Error('host failure'); },
+            catch: cause => ({ _tag: 'BoundaryError', cause })
+          }).pipe(
+            Effect.catchTag('BoundaryError', () => Effect.succeed('recovered'))
+          )
+        );
+        const failed = Effect.runSyncExit(
+          Effect.try({
+            try: () => { throw new Error('expected'); },
+            catch: () => ({ _tag: 'ExpectedFailure' })
+          })
+        );
+        const sequenced = Effect.runSync(
+          Effect.zipRight(Effect.succeed('left'), Effect.as(Effect.succeed(1), 'right'))
+        );
+
+        globalThis.effect_ref_root_identity = Root.Ref.make === Ref.make;
+        globalThis.effect_ref_value = Effect.runSync(Ref.get(counter));
+        globalThis.effect_ref_modified = modified;
+        globalThis.effect_boundary_recovered = recovered;
+        globalThis.effect_boundary_failed = Exit.isFailure(failed);
+        globalThis.effect_boundary_sequenced = sequenced;
+      "#,
+      |vm| {
+        assert_eq!(
+          vm.get_global("effect_ref_root_identity"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(vm.get_global("effect_ref_value"), Some(Value::Number(5.0)));
+        assert_eq!(
+          vm.get_global("effect_ref_modified"),
+          Some(Value::Number(4.0))
+        );
+        assert_eq!(
+          vm.get_global("effect_boundary_recovered"),
+          Some(Value::String("recovered".to_string()))
+        );
+        assert_eq!(
+          vm.get_global("effect_boundary_failed"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(
+          vm.get_global("effect_boundary_sequenced"),
+          Some(Value::String("right".to_string()))
+        );
+      },
+    );
+  }
+
+  #[test]
   fn exit_and_cause_observation_preserve_failure_shape() {
     run_effect_compatibility_entry(
       r#"
@@ -769,6 +839,124 @@ mod tests {
   }
 
   #[test]
+  fn app_transport_is_lazy_typed_and_scoped() {
+    run_effect_compatibility_entry(
+      r#"
+        import * as Cause from 'effect/Cause';
+        import * as Effect from 'effect/Effect';
+        import * as Exit from 'effect/Exit';
+        import * as Fiber from 'effect/Fiber';
+        import { App } from 'blitz:app';
+
+        const transport = globalThis.__blitz_host_v1.appTransport;
+        const options = { hostname: '127.0.0.1', port: 0, rpcPath: '/rpc' };
+        const app = App.make({ rpc: { _tag: 'BlitzRouter' } });
+        const lazyServe = app.serve({ hostname: '127.0.0.1', port: 0 });
+        const server = Effect.runSync(transport.openAppServer(options));
+        const pending = Effect.runFork(transport.awaitShutdown(server));
+        const boundPort = Number(server.localAddr.split(':')[1]);
+        const bindFailure = Effect.runSyncExit(
+          transport.openAppServer({
+            hostname: '127.0.0.1',
+            port: boundPort,
+            rpcPath: '/rpc'
+          })
+        );
+        const bindFailureOption = Exit.isFailure(bindFailure)
+          ? Cause.failureOption(bindFailure.cause)
+          : { _tag: 'None' };
+        const scopedAddress = Effect.runSync(
+          Effect.scoped(
+            Effect.flatMap(
+              Effect.acquireRelease(
+                transport.openAppServer(options),
+                acquired => transport.closeAppServer(acquired)
+              ),
+              acquired => Effect.succeed(acquired.localAddr)
+            )
+          )
+        );
+        Effect.runSync(transport.closeAppServer(server));
+        Effect.runSync(transport.closeAppServer(server));
+
+        const appFiber = Effect.runFork(
+          app.serve({
+            hostname: '127.0.0.1',
+            port: boundPort,
+            rpcPath: '/rpc'
+          })
+        );
+        const interruptedApp = Effect.runSync(Fiber.interrupt(appFiber));
+        const rebound = Effect.runSync(
+          transport.openAppServer({
+            hostname: '127.0.0.1',
+            port: boundPort,
+            rpcPath: '/rpc'
+          })
+        );
+        Effect.runSync(transport.closeAppServer(rebound));
+
+        const invalid = Effect.runSyncExit(
+          app.serve({
+            hostname: '127.0.0.1',
+            port: 0,
+            rpcPath: '/'
+          })
+        );
+        const invalidFailure = Exit.isFailure(invalid)
+          ? Cause.failureOption(invalid.cause)
+          : { _tag: 'None' };
+
+        globalThis.app_serve_is_lazy_effect = typeof lazyServe.pipe === 'function';
+        globalThis.app_transport_address = server.localAddr;
+        globalThis.app_transport_await_is_non_blocking =
+          typeof pending.unsafePoll === 'function';
+        globalThis.app_transport_scoped_address = scopedAddress;
+        globalThis.app_transport_invalid_is_typed =
+          invalidFailure._tag === 'Some' &&
+          invalidFailure.value._tag === 'ServeError' &&
+          invalidFailure.value.reason === 'InvalidOptions';
+        globalThis.app_transport_bind_is_typed =
+          bindFailureOption._tag === 'Some' &&
+          bindFailureOption.value._tag === 'ServeError' &&
+          bindFailureOption.value.reason === 'Bind';
+        globalThis.app_transport_interrupt_released =
+          Exit.isInterrupted(interruptedApp) && rebound.localAddr === server.localAddr;
+      "#,
+      |vm| {
+        assert_eq!(
+          vm.get_global("app_serve_is_lazy_effect"),
+          Some(Value::Bool(true))
+        );
+        assert!(matches!(
+          vm.get_global("app_transport_address"),
+          Some(Value::String(address)) if address.starts_with("127.0.0.1:")
+        ));
+        assert_eq!(
+          vm.get_global("app_transport_await_is_non_blocking"),
+          Some(Value::Bool(true))
+        );
+        assert!(matches!(
+          vm.get_global("app_transport_scoped_address"),
+          Some(Value::String(address)) if address.starts_with("127.0.0.1:")
+        ));
+        assert_eq!(
+          vm.get_global("app_transport_invalid_is_typed"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(
+          vm.get_global("app_transport_bind_is_typed"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(
+          vm.get_global("app_transport_interrupt_released"),
+          Some(Value::Bool(true))
+        );
+      },
+    );
+  }
+
+  #[test]
   fn abort_controller_signal_is_single_shot_and_observable() {
     run_effect_compatibility_entry(
       r#"
@@ -836,7 +1024,6 @@ mod tests {
   }
 
   #[test]
-  #[ignore = "requires timer and Effect scheduler integration from the runtime-kernel phase"]
   fn fiber_interrupt_cancellation_uses_supported_scheduler_path() {
     run_effect_compatibility_entry(
       r#"
