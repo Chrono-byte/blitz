@@ -24,6 +24,14 @@ pub const HOST_BRIDGE_ABI_VERSION: u16 = 1;
 pub const EFFECT_VERSION: &str = "3.16.7";
 /// Stable name of the transitional application transport primitive.
 pub const APP_TRANSPORT_PRIMITIVE: &str = "app-transport";
+/// Stable name of the Effect-native filesystem host primitive.
+pub const FILE_SYSTEM_PRIMITIVE: &str = "file-system";
+/// Stable name of the Effect-native HTTP host primitive.
+pub const HTTP_PRIMITIVE: &str = "http";
+/// Stable name of the Effect-native terminal host primitive.
+pub const TERMINAL_PRIMITIVE: &str = "terminal";
+/// Stable name of the Effect-native WebSocket host primitive.
+pub const WEB_SOCKET_PRIMITIVE: &str = "websocket";
 /// Package name used by a graph containing Effect and Blitz stdlib modules.
 pub const RUNTIME_GRAPH_PACKAGE_NAME: &str = "effect+blitz-stdlib";
 /// Package version used by the pinned combined runtime graph.
@@ -32,6 +40,30 @@ pub const RUNTIME_GRAPH_PACKAGE_VERSION: &str = "effect-3.16.7+runtime-1";
 pub const RUNTIME_BUNDLE_WIRE_VERSION: u16 = 1;
 /// Methods required by the application transport adapter.
 pub const APP_TRANSPORT_METHODS: &[&str] = &["openAppServer", "closeAppServer", "awaitShutdown"];
+/// Methods required by the filesystem adapter.
+pub const FILE_SYSTEM_METHODS: &[&str] =
+  &["readFile", "readTextFile", "writeFile", "writeTextFile"];
+/// Methods required by the HTTP adapter.
+pub const HTTP_METHODS: &[&str] = &["openServer", "closeServer", "awaitShutdown"];
+/// Methods required by the terminal adapter.
+pub const TERMINAL_METHODS: &[&str] = &[
+  "write",
+  "writeLine",
+  "setPrompt",
+  "subscribeLines",
+  "close",
+  "cancel",
+];
+/// Methods required by the WebSocket adapter.
+pub const WEB_SOCKET_METHODS: &[&str] = &[
+  "connect",
+  "prepareUpgrade",
+  "accept",
+  "send",
+  "close",
+  "subscribe",
+  "cancel",
+];
 
 const RUNTIME_GRAPH_ARTIFACT: &[u8] = include_bytes!(concat!(
   env!("CARGO_MANIFEST_DIR"),

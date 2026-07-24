@@ -30,6 +30,7 @@
 use clap::{Args, Parser, Subcommand};
 use std::cell::RefCell;
 use std::env;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::thread;
@@ -113,6 +114,8 @@ enum CliCommand {
   Run(RunArgs),
   /// Type-check a project or source files with Blitz's in-process checker.
   Check(CheckArgs),
+  /// Print compiler-owned editor analysis as JSON.
+  Analyze(AnalyzeArgs),
 }
 
 #[derive(Args, Debug)]
@@ -157,6 +160,22 @@ struct CheckArgs {
   /// Check a project directory or the directory containing a tsconfig file.
   #[arg(short, long, value_name = "PROJECT")]
   project: Option<PathBuf>,
+
+  /// Enable strict checking, including implicit-any diagnostics.
+  #[arg(long, action)]
+  strict: bool,
+}
+
+#[derive(Args, Debug)]
+/// Arguments for machine-readable editor analysis.
+struct AnalyzeArgs {
+  /// Source file to analyze, or `-` to read source from standard input.
+  #[arg(value_name = "FILE")]
+  file: PathBuf,
+
+  /// Filename used to select syntax and module semantics for standard input.
+  #[arg(long, value_name = "PATH")]
+  path: Option<PathBuf>,
 
   /// Enable strict checking, including implicit-any diagnostics.
   #[arg(long, action)]
@@ -310,6 +329,33 @@ fn main() -> Result<(), blitz::errors::Error> {
         module: run.module,
         args: run.args,
       }
+    }
+    Some(CliCommand::Analyze(analyze)) => {
+      let source = if analyze.file == Path::new("-") {
+        let mut source = String::new();
+        std::io::stdin()
+          .read_to_string(&mut source)
+          .map_err(|error| {
+            blitz::errors::RuntimeError::from(format!("Failed to read standard input: {error}"))
+          })?;
+        source
+      } else {
+        std::fs::read_to_string(&analyze.file).map_err(|error| {
+          blitz::errors::RuntimeError::from(format!(
+            "Failed to read {}: {error}",
+            analyze.file.display()
+          ))
+        })?
+      };
+      let path = analyze.path.as_deref().unwrap_or(&analyze.file);
+      let result = blitz::analysis::analyze(&source, path, analyze.strict);
+      println!(
+        "{}",
+        serde_json::to_string(&result).map_err(|error| {
+          blitz::errors::RuntimeError::from(format!("Failed to encode analysis: {error}"))
+        })?
+      );
+      return Ok(());
     }
     None => ExecutionArgs {
       file: cli.file,

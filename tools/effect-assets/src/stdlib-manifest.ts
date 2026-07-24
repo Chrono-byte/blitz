@@ -45,6 +45,85 @@ export const STDLIB_INPUTS = [
     visibility: "public",
     hostPrimitives: [],
   },
+  {
+    specifier: "blitz:fs",
+    source: "facades/blitz-fs.js",
+    declaration: "blitz-fs.d.ts",
+    visibility: "public",
+    hostPrimitives: [],
+  },
+  {
+    specifier: "blitz-internal:file-system",
+    source: "facades/blitz-internal-file-system.js",
+    declaration: undefined,
+    visibility: "private",
+    hostPrimitives: [{
+      name: "file-system",
+      abiVersion: 1,
+      methods: ["readFile", "readTextFile", "writeFile", "writeTextFile"],
+    }],
+  },
+  {
+    specifier: "blitz:http",
+    source: "facades/blitz-http.js",
+    declaration: "blitz-http.d.ts",
+    visibility: "public",
+    hostPrimitives: [],
+  },
+  {
+    specifier: "blitz-internal:http",
+    source: "facades/blitz-internal-http.js",
+    declaration: undefined,
+    visibility: "private",
+    hostPrimitives: [{
+      name: "http",
+      abiVersion: 1,
+      methods: ["openServer", "closeServer", "awaitShutdown"],
+    }],
+  },
+  {
+    specifier: "blitz:websocket",
+    source: "facades/blitz-websocket.js",
+    declaration: "blitz-websocket.d.ts",
+    visibility: "public",
+    hostPrimitives: [],
+  },
+  {
+    specifier: "blitz-internal:websocket",
+    source: "facades/blitz-internal-websocket.js",
+    declaration: undefined,
+    visibility: "private",
+    hostPrimitives: [{
+      name: "websocket",
+      abiVersion: 1,
+      methods: ["connect", "prepareUpgrade", "accept", "send", "close", "subscribe", "cancel"],
+    }],
+  },
+  {
+    specifier: "blitz:terminal",
+    source: "facades/blitz-terminal.js",
+    declaration: "blitz-terminal.d.ts",
+    visibility: "public",
+    hostPrimitives: [],
+  },
+  {
+    specifier: "blitz-internal:terminal",
+    source: "facades/blitz-internal-terminal.js",
+    declaration: undefined,
+    visibility: "private",
+    hostPrimitives: [{
+      name: "terminal",
+      abiVersion: 1,
+      methods: ["write", "writeLine", "setPrompt", "subscribeLines", "close", "cancel"],
+    }],
+  },
+  {
+    specifier: "blitz:runtime",
+    source: "facades/blitz-runtime.js",
+    declaration: "blitz-runtime.d.ts",
+    visibility: "public",
+    hostPrimitives: [],
+  },
 ] as const satisfies readonly StdlibInput[];
 
 export const STDLIB_FORMAT_VERSION = 1;

@@ -26,35 +26,29 @@ Or run each process in a separate terminal:
 
 ```sh
 cargo run -p blitz-cli -- run --module crates/blitz-runtime/examples/irc-chat-v2/server.mjs
-cargo run -p blitz-cli -- crates/blitz-runtime/examples/irc-chat-v2/alice.js
-cargo run -p blitz-cli -- crates/blitz-runtime/examples/irc-chat-v2/bob.js
+cargo run -p blitz-cli -- crates/blitz-runtime/examples/irc-chat-v2/alice.mjs
+cargo run -p blitz-cli -- crates/blitz-runtime/examples/irc-chat-v2/bob.mjs
 ```
 
 Type a message and press Enter to broadcast it. Type `/quit`, press Ctrl-D, or
 close the server to disconnect. Set `BLITZ_CHAT_URL` before starting a client
 to use another `ws://` endpoint.
 
-## Effect boundary
+## Effect design
 
-This example intentionally stays synchronous because `Blitz.serve`, WebSocket
-callbacks, and terminal callbacks are synchronous compatibility APIs. The
-currently published Effect facade exposes `Ref`, synchronous typed failure
-boundaries, and scoped `blitz:app` listener acquisition. It does not yet expose
-the generic scoped WebSocket-handler and terminal APIs needed to model this
-interactive chat faithfully.
+The server and clients use only Effect-native public modules. The dormant
+`Blitz.*` compatibility namespace is not installed.
 
-Following the Effect guidelines, this example therefore:
+- `blitz:runtime` starts one root Effect and supplies the live Layers.
+- `blitz:http` owns the listener in Scope.
+- `blitz:websocket` exposes scoped connections, Effectful sends/closes, and a
+  bounded message Stream.
+- `blitz:terminal` exposes Effectful output and a scoped line Stream.
+- Server client state lives in `Ref<Map<Connection, Client>>`; updates replace
+  the Map rather than mutating module-global state.
+- HTTP request contexts fork connection processors into the listener Scope, so
+  accepted sockets remain supervised and are interrupted during shutdown.
+- Expected transport failures stay in typed Effect error channels.
 
-- keeps nickname and message transformations pure;
-- uses ordinary `try`/`catch` only for direct synchronous WebSocket host calls,
-  not for Effect failures;
-- does not wrap `Map` operations or pure transformations in `Effect.sync`;
-- does not start detached fibers from synchronous callbacks; and
-- leaves listener and socket ownership with the compatibility runtime.
-
-Adding `Effect` wrappers here would hide the lifecycle boundary without adding
-typed failures, testable services, or scoped cleanup. Migrate this example when
-the Effect-native WebSocket-handler and terminal APIs are public; listener
-ownership should use the scoped server boundary, chat state can use `Ref`
-inside an explicit service, and the executable should have one supervised root
-Effect.
+The integration test runs the complete join and message protocol with
+compatibility globals disabled.

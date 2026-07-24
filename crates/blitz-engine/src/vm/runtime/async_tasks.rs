@@ -66,6 +66,40 @@ impl Vm {
     self.unhandled_rejection_hook = Some(Rc::new(RefCell::new(hook)));
   }
 
+  /// Create a pending promise owned by a host integration.
+  ///
+  /// Hosts should settle the returned value with [`Vm::resolve_host_promise`]
+  /// on the VM thread. The promise uses the same reaction and microtask
+  /// machinery as promises created by JavaScript.
+  #[must_use]
+  pub fn create_host_promise(&self) -> Value {
+    Value::Promise(crate::gc::track_promise(Rc::new(RefCell::new(
+      PromiseState::Pending {
+        on_fulfilled: Vec::new(),
+        on_rejected: Vec::new(),
+      },
+    ))))
+  }
+
+  /// Resolve a pending promise previously created for a host integration.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when `promise` is not a Promise or when resolving it
+  /// invokes failing promise machinery.
+  pub fn resolve_host_promise(
+    &mut self,
+    promise: &Value,
+    value: Value,
+  ) -> Result<(), crate::errors::RuntimeError> {
+    let Value::Promise(promise) = promise else {
+      return Err(crate::errors::RuntimeError::from(
+        "host promise settlement requires a Promise",
+      ));
+    };
+    resolve_promise_with_value(self, promise, value)
+  }
+
   /// Invoke the installed unhandled rejection hook, if present.
   pub(crate) fn call_unhandled_rejection(
     &mut self,
@@ -461,6 +495,24 @@ mod tests {
         "Runtime error: microtask failed".to_string()
       )]
     );
+  }
+
+  #[test]
+  fn host_promises_use_the_runtime_promise_state_machine() {
+    let mut vm = test_vm();
+    let promise = vm.create_host_promise();
+    assert!(matches!(
+      &promise,
+      Value::Promise(state) if matches!(*state.borrow(), PromiseState::Pending { .. })
+    ));
+
+    vm.resolve_host_promise(&promise, Value::Number(42.0))
+      .expect("resolve host promise");
+    assert!(matches!(
+      &promise,
+      Value::Promise(state)
+        if matches!(&*state.borrow(), PromiseState::Fulfilled(Value::Number(42.0)))
+    ));
   }
 
   #[test]

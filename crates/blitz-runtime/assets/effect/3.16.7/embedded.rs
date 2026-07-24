@@ -236,14 +236,14 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/Cause.js",
     source: include_str!("modules/dist/esm/Cause.js"),
     declaration: None,
-    source_sha256: "a984b176898c82436a7cb7efecca2783927dca1ccd591553cb611d76544bc969",
+    source_sha256: "7eb02ee8dfd711b873f9d926ff7710492bdd4d7ed2ee441e16e23acd50dfa7cc",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
     specifier: "blitz-internal:effect/dist/esm/Chunk.js",
     source: include_str!("modules/dist/esm/Chunk.js"),
     declaration: None,
-    source_sha256: "bfda953fe3de1e6997f65bf993d38078eac6c034c16e110a42e1b7e3e78b49f8",
+    source_sha256: "4cfa2ffeabf9d00dae818ab7b3180e22b64744524e88a68a2742f233900c51bd",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -285,7 +285,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/Effect.js",
     source: include_str!("modules/dist/esm/Effect.js"),
     declaration: None,
-    source_sha256: "10d4aa45edc1a19ef88024cdedc82e7ec2e3a8a7f3d43951fea7caffe26a2dd2",
+    source_sha256: "3682c2693237a2189350cc48477e90f7d17039791cf553168e1cc988acb1d93f",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -327,7 +327,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/Exit.js",
     source: include_str!("modules/dist/esm/Exit.js"),
     declaration: None,
-    source_sha256: "3e3760d9c1cb70921b326ee93b005e6b1488d97b8b3838773f5b6007f32223e3",
+    source_sha256: "d6bc26ecee342b5f8113887f82975ec8937842338030b0aff9bb65396b834116",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -425,14 +425,14 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/internal/cause.js",
     source: include_str!("modules/dist/esm/internal/cause.js"),
     declaration: None,
-    source_sha256: "1ba39ac457b5e482fb1ddd138fd74ee7b76bea70ba7d300eb64a96845680fed5",
+    source_sha256: "2ed8d9e951c7491aa289b47ef3b202e90d20555331082fc42b7c6f81ad2bf48c",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
     specifier: "blitz-internal:effect/dist/esm/internal/channel.js",
     source: include_str!("modules/dist/esm/internal/channel.js"),
     declaration: None,
-    source_sha256: "d3312928496963ac8adb6f97c181dc1398a81d094c132e89d308584e42ec3a02",
+    source_sha256: "2e844c766358d2c9e55c9815eebc396f02338e9b6945fe2931b197fc0742ef47",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -565,21 +565,21 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/internal/core-effect.js",
     source: include_str!("modules/dist/esm/internal/core-effect.js"),
     declaration: None,
-    source_sha256: "c0ef4330793c536ebefec9087ae1c9da0c3966a310c2245d8ced5d3b813aa83a",
+    source_sha256: "45dcc482e9a92a852802f6d1ef1af23435723f39ba6fb6534313e42083ec8ac9",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
     specifier: "blitz-internal:effect/dist/esm/internal/core-stream.js",
     source: include_str!("modules/dist/esm/internal/core-stream.js"),
     declaration: None,
-    source_sha256: "bc88dca533db33fbdf00b3da13045c8728ff461304f9464734e2a08c1dea182c",
+    source_sha256: "1f3d0ed594e849237c6d5b3b808146b074e7dec6fc328a079cfaf07554dbd529",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
     specifier: "blitz-internal:effect/dist/esm/internal/core.js",
     source: include_str!("modules/dist/esm/internal/core.js"),
     declaration: None,
-    source_sha256: "11abe89996129243aeb629387308f871b71abc4c02a9e60c7cc87f9dc031bf4a",
+    source_sha256: "f47f6b2ffe3d1d45526043caba133647c0f26a94792a6dbdb9c70c0ba93c9c5f",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -663,7 +663,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/internal/effect/circular.js",
     source: include_str!("modules/dist/esm/internal/effect/circular.js"),
     declaration: None,
-    source_sha256: "5965cdc24d8b2dde99462e1e8baba8ce0d855bb99e44910268353e55416a44d6",
+    source_sha256: "380b6633895169eca3fa2201a64fc2b48c69515b69f0fb1773bf495aacb197b2",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -1006,7 +1006,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/internal/queue.js",
     source: include_str!("modules/dist/esm/internal/queue.js"),
     declaration: None,
-    source_sha256: "6ce8c6ac9c970debdad1365458920a4bb3d5f163b9974364ba162b03b264344b",
+    source_sha256: "45189c116debd2c0e464c9e198b5041b8212978af056e4e3374c65c01388f56a",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -1034,7 +1034,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/internal/runtime.js",
     source: include_str!("modules/dist/esm/internal/runtime.js"),
     declaration: None,
-    source_sha256: "a177c573069ec6c8fc43c73fdc912b0a86489ed33b1bfecd6b102b9f5f82577b",
+    source_sha256: "c692305ce160243cde719f5ec3cbf372abdda84a7d30502dfd4ad67405c074d7",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -1090,7 +1090,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/internal/sink.js",
     source: include_str!("modules/dist/esm/internal/sink.js"),
     declaration: None,
-    source_sha256: "2cd96506e58fd979bc115b33ebd5cb5247b43e258987e2cd210fcdcd306b6154",
+    source_sha256: "e107e4d6711a1d41b1b1e3846d6a110abd9d538820a9d941dfe1c12a50773858",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -1104,7 +1104,21 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/internal/stream.js",
     source: include_str!("modules/dist/esm/internal/stream.js"),
     declaration: None,
-    source_sha256: "a4fb00626d8dcd8f310fb8ea0dba382231a382b8660e9206c8c0ccc191e775b3",
+    source_sha256: "6505f5fe5b8ac119c428dc71a7edcc58cc7fba3d38ed6f9fc2afa2fa102fcfcd",
+    declaration_sha256: None,
+  },
+  EmbeddedEffectModule {
+    specifier: "blitz-internal:effect/dist/esm/internal/stream/emit.js",
+    source: include_str!("modules/dist/esm/internal/stream/emit.js"),
+    declaration: None,
+    source_sha256: "880d72212bec613b3b878da68a9b7e5b233e48609a685c8ab7d3b10174bce426",
+    declaration_sha256: None,
+  },
+  EmbeddedEffectModule {
+    specifier: "blitz-internal:effect/dist/esm/internal/stream/pull.js",
+    source: include_str!("modules/dist/esm/internal/stream/pull.js"),
+    declaration: None,
+    source_sha256: "b734396dcab00add9596286f6fa176d1cb00b94b0bec04bd05606ed2a149fa6d",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -1126,6 +1140,13 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     source: include_str!("modules/dist/esm/internal/synchronizedRef.js"),
     declaration: None,
     source_sha256: "0c5bf230cbd238d6b8a9285c4bf4564a1558833c4d33af86d97e1f9e2ed7b956",
+    declaration_sha256: None,
+  },
+  EmbeddedEffectModule {
+    specifier: "blitz-internal:effect/dist/esm/internal/take.js",
+    source: include_str!("modules/dist/esm/internal/take.js"),
+    declaration: None,
+    source_sha256: "a8805517217ff8869b35508a42a8bd7e53faed59341b8d8bcfcefd71d96a76e2",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -1216,7 +1237,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/Option.js",
     source: include_str!("modules/dist/esm/Option.js"),
     declaration: None,
-    source_sha256: "eb4496bba1396916596e76d4f2ed5994a0f7567e00588fb549c2279d15bdfaea",
+    source_sha256: "edbaaa15b27863d04054292e31d58e1261be69f90fefaf7c0e7cb7f2987be675",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -1244,7 +1265,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/Queue.js",
     source: include_str!("modules/dist/esm/Queue.js"),
     declaration: None,
-    source_sha256: "5effec5af1cb121da6fb305c438c46e9f181dbc22823e5218676e4b30d670f39",
+    source_sha256: "e19f8368db858e30c54f03ac9361e1582aafcae4673f5f89a1f083def8721a4e",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -1266,6 +1287,13 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     source: include_str!("modules/dist/esm/RegExp.js"),
     declaration: None,
     source_sha256: "7ef431b30a8a98c22da8fdaecf06824a2857cfc765f8cdaa9abc172477eb63dd",
+    declaration_sha256: None,
+  },
+  EmbeddedEffectModule {
+    specifier: "blitz-internal:effect/dist/esm/Runtime.js",
+    source: include_str!("modules/dist/esm/Runtime.js"),
+    declaration: None,
+    source_sha256: "fcbb944a6afaa6dea01f6191beddfa24ee4828d34ef0ce528cbdf80b0755ce39",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -1321,7 +1349,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/Stream.js",
     source: include_str!("modules/dist/esm/Stream.js"),
     declaration: None,
-    source_sha256: "213811350caafbaf5f1c89fb181283bb91a1e2b02eb82943d467a093f5385df0",
+    source_sha256: "439fdaef0c893f368829317f1db898f7c45004956fd958f217a08e4f0ca87e0a",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -1511,6 +1539,20 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     source: include_str!("modules/Effect__fork.js"),
     declaration: None,
     source_sha256: "12061d78a1ed8d29958e7bc0e20fa0d4e829a8beecce0ee845bbfad333acace8",
+    declaration_sha256: None,
+  },
+  EmbeddedEffectModule {
+    specifier: "blitz-internal:effect/Effect__forkDaemon.js",
+    source: include_str!("modules/Effect__forkDaemon.js"),
+    declaration: None,
+    source_sha256: "6b81665d3dcb83e25f2f06eddb3639d837aac171402dbaa3d5d6fe3416da6361",
+    declaration_sha256: None,
+  },
+  EmbeddedEffectModule {
+    specifier: "blitz-internal:effect/Effect__forkIn.js",
+    source: include_str!("modules/Effect__forkIn.js"),
+    declaration: None,
+    source_sha256: "7de7fce947ba4bdba3998e4a8df186146109f725bd7a224f5b93c6d7f11ce529",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -2333,6 +2375,13 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
+    specifier: "blitz-internal:effect/Stream__asyncScoped.js",
+    source: include_str!("modules/Stream__asyncScoped.js"),
+    declaration: None,
+    source_sha256: "a145ebbe1827e59f1c25cb54b609fb9aa9e41b6f443444758b4c9050626d9c8e",
+    declaration_sha256: None,
+  },
+  EmbeddedEffectModule {
     specifier: "blitz-internal:effect/Stream__empty.js",
     source: include_str!("modules/Stream__empty.js"),
     declaration: None,
@@ -2375,6 +2424,20 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
+    specifier: "blitz-internal:effect/Stream__runForEach.js",
+    source: include_str!("modules/Stream__runForEach.js"),
+    declaration: None,
+    source_sha256: "dee2507ecc7dfb46e5f76e1a8a4b17c6335e792bf290b096c78963220b5da6c8",
+    declaration_sha256: None,
+  },
+  EmbeddedEffectModule {
+    specifier: "blitz-internal:effect/Stream__unwrap.js",
+    source: include_str!("modules/Stream__unwrap.js"),
+    declaration: None,
+    source_sha256: "bd545f6c7fbd9cda7f14ef6b6e85d86c7034ce84984288f63d1cf711ea95a87a",
+    declaration_sha256: None,
+  },
+  EmbeddedEffectModule {
     specifier: "effect",
     source: include_str!("modules/public/index.js"),
     declaration: Some(include_str!("declarations/effect/index.d.ts")),
@@ -2413,8 +2476,8 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "effect/Effect",
     source: include_str!("modules/public/Effect.js"),
     declaration: Some(include_str!("declarations/effect/Effect.d.ts")),
-    source_sha256: "34af0323036519dbecefc7b6a5ceb272c4f516eb6888f256bded33277f9fbfcf",
-    declaration_sha256: Some("3859ae3885aaa7ebe013e260996ae13316b81104589627c4cd38961b3612a253"),
+    source_sha256: "566c767e9d7744645583b99024ee09f381946d0fd7a23856b0a6aeb683dcff9f",
+    declaration_sha256: Some("385b0bac01461e2a973c4697063a1326bf260ded09e7d9b61075ccec85555d37"),
   },
   EmbeddedEffectModule {
     specifier: "effect/Either",
@@ -2504,7 +2567,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "effect/Stream",
     source: include_str!("modules/public/Stream.js"),
     declaration: Some(include_str!("declarations/effect/Stream.d.ts")),
-    source_sha256: "da327aa1fa9e26446d3f005540cefde1adbf916d76c9b97a89ecedf4d21a78c9",
-    declaration_sha256: Some("3a7cc8ef3ffebbad0e8d88fd5c548daf177ab2d3dead0061010cda4347993f1d"),
+    source_sha256: "74afbe5082540574446749efa36e59a83d76408457b71328e8664508702b2cd4",
+    declaration_sha256: Some("0ea219ccdbb898db8be1ef164591b757ad14afc2d5580c70b568fe97c4ca183d"),
   },
 ];

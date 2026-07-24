@@ -38,6 +38,76 @@ impl TerminalState {
     self.0.borrow().active
   }
 
+  pub(super) fn subscribe_lines(
+    &self,
+    vm: &mut Vm,
+    callback: Value,
+  ) -> Result<(), RuntimeError> {
+    if !callback.is_callable() {
+      return Err(RuntimeError::from(
+        "terminal line callback must be callable",
+      ));
+    }
+    vm.set_host_root(self.0.borrow().line_callback, callback)?;
+    start_input(self);
+    Ok(())
+  }
+
+  pub(super) fn subscribe_close(
+    &self,
+    vm: &mut Vm,
+    callback: Value,
+  ) -> Result<(), RuntimeError> {
+    if !callback.is_callable() {
+      return Err(RuntimeError::from(
+        "terminal close callback must be callable",
+      ));
+    }
+    vm.set_host_root(self.0.borrow().close_callback, callback)?;
+    Ok(())
+  }
+
+  pub(super) fn clear_line_subscription(
+    &self,
+    vm: &mut Vm,
+  ) -> Result<(), RuntimeError> {
+    let inner = self.0.borrow();
+    vm.set_host_root(inner.line_callback, Value::Undefined)?;
+    vm.set_host_root(inner.close_callback, Value::Undefined)?;
+    Ok(())
+  }
+
+  pub(super) fn set_prompt(
+    &self,
+    prompt: String,
+  ) {
+    if let Ok(mut current) = self.0.borrow().prompt.lock() {
+      *current = prompt;
+    }
+  }
+
+  pub(super) fn close_and_notify(
+    &self,
+    vm: &mut Vm,
+  ) -> Result<(), RuntimeError> {
+    let callback = vm.host_root({
+      let mut inner = self.0.borrow_mut();
+      inner.active = false;
+      inner.close_callback
+    });
+    if let Some(callback) = callback.filter(Value::is_callable) {
+      vm.call_value_with_this(&callback, &Value::Undefined, &[])?;
+    }
+    Ok(())
+  }
+
+  pub(super) fn write(
+    &self,
+    message: String,
+  ) {
+    print_external(self, message);
+  }
+
   pub(super) fn dispatch(
     &self,
     vm: &mut Vm,

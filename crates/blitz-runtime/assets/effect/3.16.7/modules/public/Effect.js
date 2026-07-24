@@ -12,6 +12,8 @@ export { exit } from 'blitz-internal:effect/Effect__exit.js';
 export { fail } from 'blitz-internal:effect/Effect__fail.js';
 export { flatMap } from 'blitz-internal:effect/Effect__flatMap.js';
 export { fork } from 'blitz-internal:effect/Effect__fork.js';
+export { forkDaemon } from 'blitz-internal:effect/Effect__forkDaemon.js';
+export { forkIn } from 'blitz-internal:effect/Effect__forkIn.js';
 export { forkScoped } from 'blitz-internal:effect/Effect__forkScoped.js';
 export { fromFiber } from 'blitz-internal:effect/Effect__fromFiber.js';
 export { interrupt } from 'blitz-internal:effect/Effect__interrupt.js';

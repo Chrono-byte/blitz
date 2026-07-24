@@ -129,6 +129,7 @@ dependencies = [
  "blitz-runtime",
  "clap",
  "rustyline",
+ "serde_json",
 ]
 
 [[package]]

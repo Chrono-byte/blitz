@@ -82,6 +82,8 @@ export declare const acquireRelease: {
 export declare const scoped: <Success, Error, Requirements>(effect: Effect<Success, Error, Requirements | Scope.Scope>) => Effect<Success, Error, Exclude<Requirements, Scope.Scope>>;
 
 export declare const fork: <Success, Error, Requirements>(effect: Effect<Success, Error, Requirements>) => Effect<Fiber.RuntimeFiber<Success, Error>, never, Requirements>;
+export declare const forkDaemon: <Success, Error, Requirements>(effect: Effect<Success, Error, Requirements>) => Effect<Fiber.RuntimeFiber<Success, Error>, never, Requirements>;
+export declare const forkIn: <Success, Error, Requirements>(effect: Effect<Success, Error, Requirements>, scope: Scope.Scope) => Effect<Fiber.RuntimeFiber<Success, Error>, never, Requirements>;
 export declare const forkScoped: <Success, Error, Requirements>(effect: Effect<Success, Error, Requirements>) => Effect<Fiber.RuntimeFiber<Success, Error>, never, Scope.Scope | Requirements>;
 export declare const interrupt: Effect<never>;
 export declare const runFork: <Success, Error>(effect: Effect<Success, Error, never>) => Fiber.RuntimeFiber<Success, Error>;

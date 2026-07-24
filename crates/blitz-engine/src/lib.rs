@@ -47,6 +47,7 @@
 //!
 //! See individual module documentation for detailed API usage.
 
+pub mod analysis;
 pub mod bytecode;
 pub mod bytecode_bundle;
 pub mod compiler;

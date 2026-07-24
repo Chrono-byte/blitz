@@ -135,6 +135,7 @@ mod tests {
         listen_addr: "127.0.0.1:0"
           .parse()
           .expect("test listen address"),
+        install_compatibility_globals: false,
       },
     );
 

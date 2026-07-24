@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "target": "Deno 2.9.3",
+  "members": [
+    {
+      "path": "Blitz.serve",
+      "deno": "Deno.serve",
+      "status": "partial"
+    },
+    {
+      "path": "Blitz.upgradeWebSocket",
+      "deno": "Deno.upgradeWebSocket",
+      "status": "partial"
+    },
+    {
+      "path": "Blitz.stdin.onLine",
+      "deno": null,
+      "status": "extension"
+    },
+    {
+      "path": "Blitz.stdin.onClose",
+      "deno": null,
+      "status": "extension"
+    },
+    {
+      "path": "Blitz.stdin.setPrompt",
+      "deno": null,
+      "status": "extension"
+    },
+    {
+      "path": "Blitz.stdin.close",
+      "deno": null,
+      "status": "extension"
+    },
+    {
+      "path": "Blitz.stdout.write",
+      "deno": "Deno.stdout.write",
+      "status": "partial"
+    },
+    {
+      "path": "Blitz.stdout.writeLine",
+      "deno": null,
+      "status": "extension"
+    },
+    {
+      "path": "Blitz.serve().addr",
+      "deno": "Deno.HttpServer.addr",
+      "status": "partial"
+    },
+    {
+      "path": "Blitz.serve().finished",
+      "deno": "Deno.HttpServer.finished",
+      "status": "partial"
+    },
+    {
+      "path": "Blitz.serve().shutdown",
+      "deno": "Deno.HttpServer.shutdown",
+      "status": "partial"
+    },
+    {
+      "path": "Blitz.serve().ref",
+      "deno": "Deno.HttpServer.ref",
+      "status": "partial"
+    },
+    {
+      "path": "Blitz.serve().unref",
+      "deno": "Deno.HttpServer.unref",
+      "status": "partial"
+    },
+    {
+      "path": "Blitz.serve().hostname",
+      "deno": null,
+      "status": "extension"
+    },
+    {
+      "path": "Blitz.serve().port",
+      "deno": null,
+      "status": "extension"
+    }
+  ]
+}

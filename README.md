@@ -36,6 +36,9 @@ cargo run -p blitz-cli -- check
 cargo run -p blitz-cli -- check --strict
 cargo run -p blitz-cli -- run --check path/to/application.ts
 
+# Emit compiler-owned JSON for editor tooling (source is read from stdin).
+printf "const answer: number = 42;" | cargo run -p blitz-cli -- analyze --path editor.ts -
+
 # Exercise the raw engine without host capabilities.
 cargo run -p blitz-engine --bin blitz-engine -- path/to/engine-test.js
 ```
@@ -98,6 +101,15 @@ arrays, functions, calls, assignments, returns, unions, interfaces, and type
 aliases; unsupported advanced TypeScript types remain permissive while the
 checker grows. See [the TypeScript model](docs/TYPESCRIPT.md) for the supported
 type language and remaining compatibility layers.
+
+Editor tooling
+--------------
+
+[`language-server/`](language-server/) contains a thin TypeScript LSP adapter
+backed by the compiler's `blitz analyze` JSON API. It currently provides Blitz
+diagnostics, document symbols, completions, hover, and go-to-definition for
+JavaScript, TypeScript, and TSX documents. The local Zed extension lives in
+[`editors/zed/`](editors/zed/) and reuses Zed's built-in JS/TS grammars.
 
 License
 --------------------

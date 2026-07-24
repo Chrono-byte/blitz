@@ -9,6 +9,7 @@
 mod abort;
 mod console;
 pub mod event_loop;
+mod fs;
 mod process;
 pub mod scheduler;
 mod server;
@@ -35,8 +36,9 @@ use crate::app_transport::{
 use crate::net::http::HttpRequestEvent;
 use crate::net::websocket::WebSocketEvent;
 use crate::runtime_graph::{
-  APP_TRANSPORT_METHODS, APP_TRANSPORT_PRIMITIVE, HOST_BRIDGE_ABI_VERSION, HostBridgeCapabilities,
-  RuntimeGraphError,
+  APP_TRANSPORT_METHODS, APP_TRANSPORT_PRIMITIVE, FILE_SYSTEM_METHODS, FILE_SYSTEM_PRIMITIVE,
+  HOST_BRIDGE_ABI_VERSION, HTTP_METHODS, HTTP_PRIMITIVE, HostBridgeCapabilities, RuntimeGraphError,
+  TERMINAL_METHODS, TERMINAL_PRIMITIVE, WEB_SOCKET_METHODS, WEB_SOCKET_PRIMITIVE,
 };
 use event_loop::{EventRegistry, EventSender, ResourceHandle, ResourceRegistry};
 use scheduler::{TimerId, TimerKind, TimerScheduler, WakeupEvent};
@@ -51,8 +53,13 @@ pub struct RuntimeOptions {
   pub env: BTreeMap<String, String>,
   /// Path of the running Blitz executable.
   pub exec_path: String,
-  /// Address used by the first `Blitz.serve` call.
+  /// Address used by the optional compatibility HTTP server.
   pub listen_addr: SocketAddr,
+  /// Install the legacy Deno-shaped `Blitz.*` compatibility namespace.
+  ///
+  /// The default runtime leaves this disabled. Public runtime capabilities are
+  /// exposed through Effect-native `blitz:*` modules instead.
+  pub install_compatibility_globals: bool,
 }
 
 impl RuntimeOptions {
@@ -84,6 +91,7 @@ impl RuntimeOptions {
       env,
       exec_path,
       listen_addr: SocketAddr::new(host, port),
+      install_compatibility_globals: false,
     }
   }
 }
@@ -267,12 +275,9 @@ impl RuntimeHandle {
   /// Returns a runtime error if the background shutdown task fails.
   pub fn shutdown(
     &mut self,
-    vm: &Vm,
+    vm: &mut Vm,
   ) -> Result<(), RuntimeError> {
-    self.server.shutdown_websockets();
-    if let Some(server) = self.server.take_server() {
-      vm.block_on(server.close())?;
-    }
+    let _finished = self.server.close_current(vm)?;
     Ok(())
   }
 }
@@ -364,12 +369,16 @@ pub fn try_install_runtime(
   let (websocket_events_tx, websocket_events_rx) = mpsc::channel(64);
   let (terminal_events_tx, terminal_events_rx) = mpsc::channel(64);
   let events = EventRegistry::new(64).expect("runtime event capacity is non-zero");
+  let server_slot = Rc::new(RefCell::new(None));
+  let terminal_slot = Rc::new(RefCell::new(None));
   let previous_bridge = vm.get_global("__blitz_host_v1");
   let capabilities = install_host_bridge(
     vm,
     requests_tx.clone(),
     websocket_events_tx.clone(),
     events.resources(),
+    Rc::clone(&server_slot),
+    Rc::clone(&terminal_slot),
   );
   let policy_started = Instant::now();
   if let Err(error) = bundle.validate_pinned_for_host(
@@ -412,8 +421,17 @@ pub fn try_install_runtime(
     RuntimeEvent::WebSocket,
   );
   forward_events(vm, terminal_events_rx, event_sender, RuntimeEvent::Terminal);
-  let server = server::install(vm, options.listen_addr, requests_tx, websocket_events_tx);
+  let server = server::install(
+    vm,
+    options.listen_addr,
+    requests_tx,
+    websocket_events_tx,
+    events.resources(),
+    options.install_compatibility_globals,
+  );
+  *server_slot.borrow_mut() = Some(server.clone());
   let terminal = terminal::install(vm, terminal_events_tx);
+  *terminal_slot.borrow_mut() = Some(terminal.clone());
   console::install(vm);
   abort::install(vm);
   process::install(vm, options);
@@ -576,6 +594,466 @@ fn timer_clear_method(state: SchedulerHostState) -> BuiltinFn {
   })
 }
 
+fn http_primitive(
+  vm: &Vm,
+  server: Rc<RefCell<Option<server::ServerState>>>,
+) -> Value {
+  let primitive = object(vm.realm().object_prototype());
+  let open_server = Rc::clone(&server);
+  let open: BuiltinFn = Rc::new(move |vm, args| {
+    let Some(options) = args.get(1).cloned() else {
+      let error = http_error(
+        vm,
+        "InvalidOptions",
+        "listen",
+        "openServer requires options",
+      );
+      return effect_fail(vm, error);
+    };
+    let handler = match vm.get_property_host(&options, &PropertyKey::String("handler".to_string()))
+    {
+      Ok(handler) if handler.is_callable() => handler,
+      _ => {
+        let error = http_error(
+          vm,
+          "InvalidOptions",
+          "listen",
+          "HTTP handler must be callable",
+        );
+        return effect_fail(vm, error);
+      }
+    };
+    let Some(state) = open_server.borrow().clone() else {
+      let error = http_error(vm, "Transport", "listen", "HTTP host is not initialized");
+      return effect_fail(vm, error);
+    };
+    match server::serve_method(state)(vm, &[Value::Undefined, options, handler]) {
+      Ok(handle) => {
+        let local_address = match (
+          vm.get_property_host(&handle, &PropertyKey::String("hostname".to_string())),
+          vm.get_property_host(&handle, &PropertyKey::String("port".to_string())),
+        ) {
+          (Ok(Value::String(hostname)), Ok(Value::Number(port))) => {
+            Value::String(format!("{hostname}:{}", port.trunc()))
+          }
+          _ => Value::String(String::new()),
+        };
+        if let Value::Object(object) = &handle {
+          object.borrow_mut().properties.insert(
+            PropertyKey::String("localAddress".to_string()),
+            PropertyDescriptor::data(local_address),
+          );
+        }
+        effect_succeed(vm, handle)
+      }
+      Err(error) => {
+        let message = error.to_string();
+        let reason = if message.contains("bind") {
+          "Bind"
+        } else {
+          "InvalidOptions"
+        };
+        let error = http_error(vm, reason, "listen", &message);
+        effect_fail(vm, error)
+      }
+    }
+  });
+  set(&primitive, "openServer", Value::Builtin(open));
+
+  let close: BuiltinFn = Rc::new(|vm, args| {
+    let Some(handle) = args.get(1) else {
+      return effect_succeed(vm, Value::Undefined);
+    };
+    let shutdown = vm.get_property_host(handle, &PropertyKey::String("shutdown".to_string()))?;
+    if shutdown.is_callable() {
+      let result = vm.call_value_with_this(&shutdown, handle, &[])?;
+      let _value = vm.await_value(result)?;
+    }
+    effect_succeed(vm, Value::Undefined)
+  });
+  set(&primitive, "closeServer", Value::Builtin(close));
+
+  let await_shutdown: BuiltinFn = Rc::new(|vm, args| {
+    if args.get(1).is_none() {
+      let error = http_error(vm, "Transport", "serve", "awaitShutdown requires a server");
+      return effect_fail(vm, error);
+    }
+    effect_function(vm, "never")
+  });
+  set(&primitive, "awaitShutdown", Value::Builtin(await_shutdown));
+  if let Value::Object(object) = &primitive {
+    object.borrow_mut().extensible = false;
+  }
+  primitive
+}
+
+fn http_error(
+  vm: &Vm,
+  reason: &str,
+  operation: &str,
+  message: &str,
+) -> Value {
+  let error = object(vm.realm().object_prototype());
+  set(&error, "_tag", Value::String("HttpServerError".to_string()));
+  set(&error, "reason", Value::String(reason.to_string()));
+  set(&error, "operation", Value::String(operation.to_string()));
+  set(&error, "message", Value::String(message.to_string()));
+  error
+}
+
+fn websocket_primitive(
+  vm: &Vm,
+  server: Rc<RefCell<Option<server::ServerState>>>,
+) -> Value {
+  let primitive = object(vm.realm().object_prototype());
+
+  let connect: BuiltinFn = Rc::new(|vm, args| {
+    let options = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let complete = args.get(2).cloned().unwrap_or(Value::Undefined);
+    let url = vm.get_property_host(&options, &PropertyKey::String("url".to_string()))?;
+    let constructor = vm
+      .get_global("WebSocket")
+      .ok_or_else(|| RuntimeError::from("WebSocket is not installed"))?;
+    let socket = vm.construct_value(&constructor, &[url])?;
+    let callback_root = vm.create_host_root(complete);
+    let callback_socket = socket.clone();
+    let on_open: BuiltinFn = Rc::new(move |vm, _args| {
+      if let Some(callback) = vm
+        .host_root(callback_root)
+        .filter(Value::is_callable)
+      {
+        complete_success(vm, &callback, callback_socket.clone())?;
+        vm.set_host_root(callback_root, Value::Undefined)?;
+      }
+      Ok(Value::Undefined)
+    });
+    let error_root = callback_root;
+    let on_error: BuiltinFn = Rc::new(move |vm, _args| {
+      if let Some(callback) = vm
+        .host_root(error_root)
+        .filter(Value::is_callable)
+      {
+        complete_failure(vm, &callback, "connect", "WebSocket connection failed")?;
+        vm.set_host_root(error_root, Value::Undefined)?;
+      }
+      Ok(Value::Undefined)
+    });
+    set_socket_handler(vm, &socket, "onopen", Value::Builtin(on_open))?;
+    set_socket_handler(vm, &socket, "onerror", Value::Builtin(on_error))?;
+    Ok(socket)
+  });
+  set(&primitive, "connect", Value::Builtin(connect));
+
+  let upgrade_server = Rc::clone(&server);
+  let prepare_upgrade: BuiltinFn = Rc::new(move |vm, args| {
+    let request = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let complete = args.get(3).cloned().unwrap_or(Value::Undefined);
+    let Some(state) = upgrade_server.borrow().clone() else {
+      complete_failure(
+        vm,
+        &complete,
+        "prepareUpgrade",
+        "WebSocket host is not initialized",
+      )?;
+      return Ok(Value::Undefined);
+    };
+    let prototype = state
+      .websocket_prototype()
+      .unwrap_or_else(|| vm.realm().object_prototype());
+    match server::upgrade_websocket_method(state, prototype)(vm, &[Value::Undefined, request]) {
+      Ok(upgrade) => {
+        if complete.is_callable() {
+          complete_success(vm, &complete, upgrade.clone())?;
+        }
+        Ok(upgrade)
+      }
+      Err(error) if complete.is_callable() => {
+        complete_failure(vm, &complete, "prepareUpgrade", &error.to_string())?;
+        Ok(Value::Undefined)
+      }
+      Err(error) => Err(error),
+    }
+  });
+  set(
+    &primitive,
+    "prepareUpgrade",
+    Value::Builtin(prepare_upgrade),
+  );
+
+  let accept: BuiltinFn = Rc::new(|vm, args| {
+    let upgrade = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let complete = args.get(2).cloned().unwrap_or(Value::Undefined);
+    let socket = vm.get_property_host(&upgrade, &PropertyKey::String("socket".to_string()))?;
+    if complete.is_callable() {
+      complete_success(vm, &complete, socket.clone())?;
+    }
+    Ok(socket)
+  });
+  set(&primitive, "accept", Value::Builtin(accept));
+
+  let send: BuiltinFn = Rc::new(|vm, args| {
+    let socket = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let message = args.get(2).cloned().unwrap_or(Value::Undefined);
+    let complete = args.get(3).cloned().unwrap_or(Value::Undefined);
+    let method = vm.get_property_host(&socket, &PropertyKey::String("send".to_string()))?;
+    match vm.call_value_with_this(&method, &socket, &[message]) {
+      Ok(_) if complete.is_callable() => complete_success(vm, &complete, Value::Undefined)?,
+      Ok(_) => {}
+      Err(error) if complete.is_callable() => {
+        complete_failure(vm, &complete, "send", &error.to_string())?;
+      }
+      Err(error) => return Err(error),
+    }
+    Ok(Value::Undefined)
+  });
+  set(&primitive, "send", Value::Builtin(send));
+
+  let close: BuiltinFn = Rc::new(|vm, args| {
+    let socket = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let options = args.get(2).cloned().unwrap_or(Value::Undefined);
+    let complete = args.get(3).cloned().unwrap_or(Value::Undefined);
+    let code = vm.get_property_host(&options, &PropertyKey::String("code".to_string()))?;
+    let reason = vm.get_property_host(&options, &PropertyKey::String("reason".to_string()))?;
+    let method = vm.get_property_host(&socket, &PropertyKey::String("close".to_string()))?;
+    let arguments = if matches!(code, Value::Undefined) {
+      Vec::new()
+    } else if matches!(reason, Value::Undefined) {
+      vec![code]
+    } else {
+      vec![code, reason]
+    };
+    match vm.call_value_with_this(&method, &socket, &arguments) {
+      Ok(_) if complete.is_callable() => complete_success(vm, &complete, Value::Undefined)?,
+      Ok(_) => {}
+      Err(error) if complete.is_callable() => {
+        complete_failure(vm, &complete, "close", &error.to_string())?;
+      }
+      Err(error) => return Err(error),
+    }
+    Ok(Value::Undefined)
+  });
+  set(&primitive, "close", Value::Builtin(close));
+
+  let subscribe: BuiltinFn = Rc::new(|vm, args| {
+    let socket = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let on_event = args.get(2).cloned().unwrap_or(Value::Undefined);
+    for (property, event_type) in [
+      ("onmessage", "message"),
+      ("onclose", "close"),
+      ("onerror", "error"),
+    ] {
+      let callback = on_event.clone();
+      let event_type = event_type.to_string();
+      let listener: BuiltinFn = Rc::new(move |vm, args| {
+        let source = args.get(1).cloned().unwrap_or(Value::Undefined);
+        let event = object(vm.realm().object_prototype());
+        if event_type == "message" {
+          let data = vm.get_property_host(&source, &PropertyKey::String("data".to_string()))?;
+          let kind = if matches!(data, Value::String(_)) {
+            "text"
+          } else {
+            "binary"
+          };
+          set(&event, "type", Value::String(kind.to_string()));
+          set(&event, "data", data);
+        } else {
+          set(&event, "type", Value::String(event_type.clone()));
+          if event_type == "error" {
+            set(&event, "error", source);
+          }
+        }
+        vm.call_value_with_this(&callback, &Value::Undefined, &[event])?;
+        Ok(Value::Undefined)
+      });
+      set_socket_handler(vm, &socket, property, Value::Builtin(listener))?;
+    }
+    let subscription = object(vm.realm().object_prototype());
+    let cancel_socket = socket.clone();
+    let cancel: BuiltinFn = Rc::new(move |vm, _args| {
+      for property in ["onmessage", "onclose", "onerror"] {
+        set_socket_handler(vm, &cancel_socket, property, Value::Undefined)?;
+      }
+      Ok(Value::Undefined)
+    });
+    set(&subscription, "__cancel", Value::Builtin(cancel));
+    Ok(subscription)
+  });
+  set(&primitive, "subscribe", Value::Builtin(subscribe));
+
+  let cancel: BuiltinFn = Rc::new(|vm, args| {
+    let operation = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let cancel = vm.get_property_host(&operation, &PropertyKey::String("__cancel".to_string()))?;
+    if cancel.is_callable() {
+      vm.call_value_with_this(&cancel, &operation, &[])?;
+    }
+    Ok(Value::Undefined)
+  });
+  set(&primitive, "cancel", Value::Builtin(cancel));
+  if let Value::Object(object) = &primitive {
+    object.borrow_mut().extensible = false;
+  }
+  primitive
+}
+
+fn set_socket_handler(
+  vm: &mut Vm,
+  socket: &Value,
+  property: &str,
+  value: Value,
+) -> Result<(), RuntimeError> {
+  vm.set_property_host(socket, &Value::String(property.to_string()), value)?;
+  Ok(())
+}
+
+fn complete_success(
+  vm: &mut Vm,
+  callback: &Value,
+  value: Value,
+) -> Result<(), RuntimeError> {
+  let result = object(vm.realm().object_prototype());
+  set(&result, "ok", Value::Bool(true));
+  set(&result, "value", value);
+  vm.call_value_with_this(callback, &Value::Undefined, &[result])?;
+  Ok(())
+}
+
+fn complete_failure(
+  vm: &mut Vm,
+  callback: &Value,
+  operation: &str,
+  message: &str,
+) -> Result<(), RuntimeError> {
+  let error = object(vm.realm().object_prototype());
+  set(&error, "_tag", Value::String("WebSocketError".to_string()));
+  set(&error, "reason", Value::String("Host".to_string()));
+  set(&error, "operation", Value::String(operation.to_string()));
+  set(&error, "message", Value::String(message.to_string()));
+  let result = object(vm.realm().object_prototype());
+  set(&result, "ok", Value::Bool(false));
+  set(&result, "error", error);
+  vm.call_value_with_this(callback, &Value::Undefined, &[result])?;
+  Ok(())
+}
+
+fn terminal_primitive(
+  vm: &Vm,
+  terminal: Rc<RefCell<Option<terminal::TerminalState>>>,
+) -> Value {
+  let primitive = object(vm.realm().object_prototype());
+
+  for name in ["write", "writeLine"] {
+    let state = Rc::clone(&terminal);
+    let method: BuiltinFn = Rc::new(move |vm, args| {
+      let text = args
+        .get(1)
+        .map_or_else(|| Ok(String::new()), |value| vm.to_string(value))?;
+      let complete = args.get(2).cloned().unwrap_or(Value::Undefined);
+      if let Some(terminal) = state.borrow().clone() {
+        terminal.write(text);
+        complete_success(vm, &complete, Value::Undefined)?;
+      } else {
+        complete_failure(vm, &complete, "write", "terminal host is not initialized")?;
+      }
+      Ok(Value::Undefined)
+    });
+    set(&primitive, name, Value::Builtin(method));
+  }
+
+  let prompt_state = Rc::clone(&terminal);
+  let set_prompt: BuiltinFn = Rc::new(move |vm, args| {
+    let prompt = args
+      .get(1)
+      .map_or_else(|| Ok(String::new()), |value| vm.to_string(value))?;
+    let complete = args.get(2).cloned().unwrap_or(Value::Undefined);
+    if let Some(terminal) = prompt_state.borrow().clone() {
+      terminal.set_prompt(prompt);
+      complete_success(vm, &complete, Value::Undefined)?;
+    } else {
+      complete_failure(
+        vm,
+        &complete,
+        "setPrompt",
+        "terminal host is not initialized",
+      )?;
+    }
+    Ok(Value::Undefined)
+  });
+  set(&primitive, "setPrompt", Value::Builtin(set_prompt));
+
+  let subscribe_state = Rc::clone(&terminal);
+  let subscribe: BuiltinFn = Rc::new(move |vm, args| {
+    let on_event = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let Some(terminal) = subscribe_state.borrow().clone() else {
+      return Err(RuntimeError::from("terminal host is not initialized"));
+    };
+    let callback_root = vm.create_host_root(on_event);
+    let line: BuiltinFn = Rc::new(move |vm, args| {
+      let event = object(vm.realm().object_prototype());
+      set(&event, "type", Value::String("line".to_string()));
+      set(
+        &event,
+        "line",
+        args
+          .get(1)
+          .cloned()
+          .unwrap_or(Value::String(String::new())),
+      );
+      if let Some(callback) = vm.host_root(callback_root) {
+        vm.call_value_with_this(&callback, &Value::Undefined, &[event])?;
+      }
+      Ok(Value::Undefined)
+    });
+    let close_root = callback_root;
+    let close: BuiltinFn = Rc::new(move |vm, _args| {
+      let event = object(vm.realm().object_prototype());
+      set(&event, "type", Value::String("close".to_string()));
+      if let Some(callback) = vm.host_root(close_root) {
+        vm.call_value_with_this(&callback, &Value::Undefined, &[event])?;
+      }
+      Ok(Value::Undefined)
+    });
+    terminal.subscribe_lines(vm, Value::Builtin(line))?;
+    terminal.subscribe_close(vm, Value::Builtin(close))?;
+    let subscription = object(vm.realm().object_prototype());
+    let cancel_terminal = terminal.clone();
+    let cancel: BuiltinFn = Rc::new(move |vm, _args| {
+      cancel_terminal.clear_line_subscription(vm)?;
+      vm.set_host_root(callback_root, Value::Undefined)?;
+      Ok(Value::Undefined)
+    });
+    set(&subscription, "__cancel", Value::Builtin(cancel));
+    Ok(subscription)
+  });
+  set(&primitive, "subscribeLines", Value::Builtin(subscribe));
+
+  let close_state = Rc::clone(&terminal);
+  let close: BuiltinFn = Rc::new(move |vm, args| {
+    let complete = args.get(1).cloned().unwrap_or(Value::Undefined);
+    if let Some(terminal) = close_state.borrow().clone() {
+      terminal.close_and_notify(vm)?;
+      complete_success(vm, &complete, Value::Undefined)?;
+    } else {
+      complete_failure(vm, &complete, "close", "terminal host is not initialized")?;
+    }
+    Ok(Value::Undefined)
+  });
+  set(&primitive, "close", Value::Builtin(close));
+
+  let cancel: BuiltinFn = Rc::new(|vm, args| {
+    let operation = args.get(1).cloned().unwrap_or(Value::Undefined);
+    let cancel = vm.get_property_host(&operation, &PropertyKey::String("__cancel".to_string()))?;
+    if cancel.is_callable() {
+      vm.call_value_with_this(&cancel, &operation, &[])?;
+    }
+    Ok(Value::Undefined)
+  });
+  set(&primitive, "cancel", Value::Builtin(cancel));
+  if let Value::Object(object) = &primitive {
+    object.borrow_mut().extensible = false;
+  }
+  primitive
+}
+
 /// Install the ABI object consumed by the prelinked private adapter.
 ///
 /// Acquisition is lazy, expected validation/bind failures stay in the Effect
@@ -588,6 +1066,8 @@ fn install_host_bridge(
   requests: mpsc::Sender<HttpRequestEvent>,
   websocket_events: mpsc::Sender<WebSocketEvent>,
   resources: ResourceRegistry,
+  server: Rc<RefCell<Option<server::ServerState>>>,
+  terminal: Rc<RefCell<Option<terminal::TerminalState>>>,
 ) -> HostBridgeCapabilities {
   let app_transport = object(vm.realm().object_prototype());
   set(
@@ -619,6 +1099,10 @@ fn install_host_bridge(
     Value::Number(f64::from(HOST_BRIDGE_ABI_VERSION)),
   );
   set(&bridge, "appTransport", app_transport);
+  set(&bridge, "fileSystem", fs::install(vm));
+  set(&bridge, "http", http_primitive(vm, Rc::clone(&server)));
+  set(&bridge, "webSocket", websocket_primitive(vm, server));
+  set(&bridge, "terminal", terminal_primitive(vm, terminal));
   if let Value::Object(object) = &bridge {
     object.borrow_mut().extensible = false;
   }
@@ -635,11 +1119,32 @@ fn install_host_bridge(
         configurable: false,
       },
     );
-  HostBridgeCapabilities::new(HOST_BRIDGE_ABI_VERSION).with_primitive(
-    APP_TRANSPORT_PRIMITIVE,
-    HOST_BRIDGE_ABI_VERSION,
-    APP_TRANSPORT_METHODS.iter().copied(),
-  )
+  HostBridgeCapabilities::new(HOST_BRIDGE_ABI_VERSION)
+    .with_primitive(
+      APP_TRANSPORT_PRIMITIVE,
+      HOST_BRIDGE_ABI_VERSION,
+      APP_TRANSPORT_METHODS.iter().copied(),
+    )
+    .with_primitive(
+      FILE_SYSTEM_PRIMITIVE,
+      HOST_BRIDGE_ABI_VERSION,
+      FILE_SYSTEM_METHODS.iter().copied(),
+    )
+    .with_primitive(
+      HTTP_PRIMITIVE,
+      HOST_BRIDGE_ABI_VERSION,
+      HTTP_METHODS.iter().copied(),
+    )
+    .with_primitive(
+      TERMINAL_PRIMITIVE,
+      HOST_BRIDGE_ABI_VERSION,
+      TERMINAL_METHODS.iter().copied(),
+    )
+    .with_primitive(
+      WEB_SOCKET_PRIMITIVE,
+      HOST_BRIDGE_ABI_VERSION,
+      WEB_SOCKET_METHODS.iter().copied(),
+    )
 }
 
 fn restore_host_bridge(
@@ -935,6 +1440,62 @@ mod tests {
   }
 
   #[test]
+  fn deno_surface_manifest_is_well_formed_and_tracks_server_lifecycle() {
+    let manifest: serde_json::Value =
+      serde_json::from_str(include_str!("../../compat/deno-surface.json"))
+        .expect("parse Deno surface manifest");
+    assert_eq!(manifest["schemaVersion"], 1);
+    assert_eq!(manifest["target"], "Deno 2.9.3");
+    let members = manifest["members"]
+      .as_array()
+      .expect("surface members are an array");
+    let mut paths = std::collections::BTreeSet::new();
+    for member in members {
+      let path = member["path"].as_str().expect("surface path");
+      assert!(paths.insert(path), "duplicate surface path: {path}");
+      assert!(matches!(
+        member["status"].as_str(),
+        Some("compatible" | "partial" | "extension" | "planned")
+      ));
+    }
+    for required in [
+      "Blitz.serve().addr",
+      "Blitz.serve().finished",
+      "Blitz.serve().shutdown",
+      "Blitz.serve().ref",
+      "Blitz.serve().unref",
+    ] {
+      assert!(
+        paths.contains(required),
+        "missing surface member: {required}"
+      );
+    }
+
+    let declarations = include_str!("../../types/blitz.d.ts");
+    for declaration in [
+      "readonly addr: BlitzNetAddr",
+      "readonly finished: Promise<void>",
+      "shutdown(): Promise<void>",
+      "ref(): void",
+      "unref(): void",
+    ] {
+      assert!(
+        declarations.contains(declaration),
+        "missing host declaration: {declaration}"
+      );
+    }
+  }
+
+  #[test]
+  fn compatibility_globals_are_disabled_by_default() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let options = RuntimeOptions::from_host(vec!["blitz-test".to_string()]);
+    let _runtime = install_runtime(&mut vm, options);
+    assert_eq!(vm.get_global("Blitz"), None);
+  }
+
+  #[test]
   fn second_runtime_installation_is_rejected_before_side_effects() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     let mut vm = Vm::new(globals);
@@ -996,6 +1557,7 @@ mod tests {
         listen_addr: "127.0.0.1:0"
           .parse()
           .expect("test listen address"),
+        install_compatibility_globals: false,
       },
     );
     assert!(!runtime.is_live());
@@ -1019,6 +1581,7 @@ mod tests {
         listen_addr: "127.0.0.1:0"
           .parse()
           .expect("test listen address"),
+        install_compatibility_globals: false,
       },
     );
     let source = r#"
@@ -1045,6 +1608,203 @@ mod tests {
   }
 
   #[test]
+  fn blitz_serve_returns_a_lifecycle_server_handle() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let runtime = install_runtime(
+      &mut vm,
+      RuntimeOptions {
+        argv: vec!["blitz".to_string()],
+        env: BTreeMap::new(),
+        exec_path: "blitz".to_string(),
+        listen_addr: "127.0.0.1:0"
+          .parse()
+          .expect("test listen address"),
+        install_compatibility_globals: true,
+      },
+    );
+    let source = r#"
+      globalThis.serverFinished = false;
+      globalThis.server = Blitz.serve(
+        { hostname: "127.0.0.1", port: 0 },
+        () => new Response("ok")
+      );
+      server.finished.then(() => { serverFinished = true; });
+      globalThis.serverShape =
+        server.addr.transport === "tcp" &&
+        server.addr.hostname === server.hostname &&
+        server.addr.port === server.port &&
+        typeof server.shutdown === "function" &&
+        typeof server.ref === "function" &&
+        typeof server.unref === "function";
+    "#;
+    let session = JsParser::parse_source(source).expect("parse server handle script");
+    let chunk =
+      compiler::compile_oxc(session.program(), source).expect("compile server handle script");
+    vm.run(chunk)
+      .expect("evaluate server handle script");
+    let address = runtime
+      .local_addr()
+      .expect("bound server address");
+    assert_eq!(vm.get_global("serverShape"), Some(Value::Bool(true)));
+    assert!(runtime.is_live());
+
+    let source = r#"
+      server.unref();
+      globalThis.unrefCalled = true;
+    "#;
+    let session = JsParser::parse_source(source).expect("parse server unref script");
+    let chunk = compiler::compile_oxc(session.program(), source).expect("compile unref script");
+    vm.run(chunk).expect("unref server");
+    assert_eq!(vm.get_global("unrefCalled"), Some(Value::Bool(true)));
+    assert!(!runtime.is_live());
+
+    let source = r#"
+      server.ref();
+      globalThis.shutdownIdentity = server.shutdown() === server.finished;
+      server.shutdown();
+    "#;
+    let session = JsParser::parse_source(source).expect("parse server shutdown script");
+    let chunk = compiler::compile_oxc(session.program(), source).expect("compile shutdown script");
+    vm.run(chunk).expect("shut down server");
+    vm.flush_microtasks()
+      .expect("settle server completion");
+    assert_eq!(vm.get_global("shutdownIdentity"), Some(Value::Bool(true)));
+    assert_eq!(vm.get_global("serverFinished"), Some(Value::Bool(true)));
+    assert!(!runtime.is_live());
+
+    let rebound =
+      std::net::TcpListener::bind(address).expect("released server port can be rebound");
+    drop(rebound);
+  }
+
+  #[test]
+  fn deno_server_lifecycle_fixture_matches_blitz() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let runtime = install_runtime(
+      &mut vm,
+      RuntimeOptions {
+        argv: vec!["blitz".to_string()],
+        env: BTreeMap::new(),
+        exec_path: "blitz".to_string(),
+        listen_addr: "127.0.0.1:0"
+          .parse()
+          .expect("test listen address"),
+        install_compatibility_globals: true,
+      },
+    );
+    let source = format!(
+      "{}\nobserveServerLifecycle(Blitz).then((result) => {{\n\
+       globalThis.compatTransport = result.transport;\n\
+       globalThis.compatPort = result.portIsAssigned;\n\
+       globalThis.compatShutdown = result.shutdownReturnsPromise;\n\
+       globalThis.compatFinished = result.finishedSettled;\n\
+       }});",
+      include_str!("../../compat/fixtures/server-lifecycle.js")
+    );
+    let session = JsParser::parse_source(&source).expect("parse Deno compatibility fixture");
+    let chunk =
+      compiler::compile_oxc(session.program(), &source).expect("compile compatibility fixture");
+    vm.run(chunk)
+      .expect("evaluate compatibility fixture");
+    vm.flush_microtasks()
+      .expect("settle compatibility fixture");
+
+    assert_eq!(
+      vm.get_global("compatTransport"),
+      Some(Value::String("tcp".to_string()))
+    );
+    assert_eq!(vm.get_global("compatPort"), Some(Value::Bool(true)));
+    assert_eq!(vm.get_global("compatShutdown"), Some(Value::Bool(true)));
+    assert_eq!(vm.get_global("compatFinished"), Some(Value::Bool(true)));
+    assert!(!runtime.is_live());
+  }
+
+  #[test]
+  fn effect_http_serves_an_effect_handler_without_blitz_globals() {
+    thread::Builder::new()
+      .name("effect-http-host".to_string())
+      .stack_size(16 * 1024 * 1024)
+      .spawn(|| {
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        let mut vm = Vm::new(globals);
+        let mut runtime = install_runtime(
+          &mut vm,
+          RuntimeOptions {
+            argv: vec!["blitz".to_string()],
+            env: BTreeMap::new(),
+            exec_path: "blitz".to_string(),
+            listen_addr: "127.0.0.1:0"
+              .parse()
+              .expect("test listen address"),
+            install_compatibility_globals: false,
+          },
+        );
+        let directory = env::temp_dir().join(format!("blitz-effect-http-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("create Effect HTTP directory");
+        let entry = directory.join("entry.mjs");
+        std::fs::write(
+          &entry,
+          r#"
+        import * as Effect from "effect/Effect";
+        import * as Http from "blitz:http";
+        import * as Runtime from "blitz:runtime";
+
+        Runtime.runMain(Http.serve({
+          hostname: "127.0.0.1",
+          port: 0,
+          handler: () => Effect.succeed(new Response("effect-http"))
+        }));
+      "#,
+        )
+        .expect("write Effect HTTP entry");
+        let loader = vm.module_loader_handle();
+        {
+          let mut loader = loader.borrow_mut();
+          loader
+            .construct(&directory, "./entry.mjs")
+            .expect("construct Effect HTTP graph");
+          loader
+            .instantiate_all()
+            .expect("instantiate Effect HTTP graph");
+        }
+        blitz::module::evaluate_entry_shared(&loader, &entry, &mut vm, false)
+          .expect("evaluate Effect HTTP entry");
+        assert_eq!(vm.get_global("Blitz"), None);
+
+        let address = runtime
+          .local_addr()
+          .expect("Effect HTTP listener address");
+        let client = thread::spawn(move || {
+          let mut stream = TcpStream::connect(address).expect("connect Effect HTTP client");
+          stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .expect("write Effect HTTP request");
+          let mut response = String::new();
+          stream
+            .read_to_string(&mut response)
+            .expect("read Effect HTTP response");
+          response
+        });
+        assert!(
+          runtime
+            .run_once(&mut vm)
+            .expect("dispatch Effect HTTP request")
+        );
+        let response = client.join().expect("Effect HTTP client thread");
+        assert!(response.ends_with("effect-http"), "{response}");
+        runtime
+          .shutdown(&mut vm)
+          .expect("shutdown Effect HTTP server");
+        std::fs::remove_dir_all(directory).expect("remove Effect HTTP directory");
+      })
+      .expect("spawn Effect HTTP host thread")
+      .join()
+      .expect("Effect HTTP host thread succeeds");
+  }
+
+  #[test]
   fn blitz_serve_dispatches_deno_style_callback_over_http() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     let mut vm = Vm::new(globals);
@@ -1057,6 +1817,7 @@ mod tests {
         listen_addr: "127.0.0.1:0"
           .parse()
           .expect("test listen address"),
+        install_compatibility_globals: true,
       },
     );
     let source = r#"
@@ -1110,7 +1871,9 @@ mod tests {
       response.ends_with("POST http://localhost/hello?from=test present tcp payload json"),
       "{response}"
     );
-    runtime.shutdown(&vm).expect("stop HTTP server");
+    runtime
+      .shutdown(&mut vm)
+      .expect("stop HTTP server");
   }
 
   #[test]
@@ -1126,6 +1889,7 @@ mod tests {
         listen_addr: "127.0.0.1:0"
           .parse()
           .expect("test listen address"),
+        install_compatibility_globals: true,
       },
     );
     let source = r#"
@@ -1240,7 +2004,9 @@ mod tests {
     assert_eq!(ready.payload.as_ref(), b"ready");
     assert_eq!(echo.opcode, OpCode::Text);
     assert_eq!(echo.payload.as_ref(), b"echo:hello");
-    runtime.shutdown(&vm).expect("stop HTTP server");
+    runtime
+      .shutdown(&mut vm)
+      .expect("stop HTTP server");
   }
 
   #[test]
@@ -1256,6 +2022,7 @@ mod tests {
         listen_addr: "127.0.0.1:0"
           .parse()
           .expect("test listen address"),
+        install_compatibility_globals: true,
       },
     );
     let source = r#"
@@ -1299,7 +2066,7 @@ mod tests {
       Some(Value::String("echo:hello".to_string()))
     );
     runtime
-      .shutdown(&vm)
+      .shutdown(&mut vm)
       .expect("stop client and server");
   }
 
@@ -1325,10 +2092,13 @@ mod tests {
     compiler::compile_oxc(session.program(), server).expect("compile Effect IRC server module");
 
     for (name, source) in [
-      ("alice", include_str!("../../examples/irc-chat-v2/alice.js")),
-      ("bob", include_str!("../../examples/irc-chat-v2/bob.js")),
+      (
+        "alice",
+        include_str!("../../examples/irc-chat-v2/alice.mjs"),
+      ),
+      ("bob", include_str!("../../examples/irc-chat-v2/bob.mjs")),
     ] {
-      let session = JsParser::parse_source(source)
+      let session = JsParser::parse_source_with_type(source, oxc_span::SourceType::mjs())
         .unwrap_or_else(|error| panic!("parse Effect IRC {name} client: {error}"));
       compiler::compile_oxc(session.program(), source)
         .unwrap_or_else(|error| panic!("compile Effect IRC {name} client: {error}"));
@@ -1336,151 +2106,200 @@ mod tests {
   }
 
   #[test]
-  fn irc_chat_server_runs_join_and_message_protocol() {
-    let globals = Rc::new(RefCell::new(ObjectData::new()));
-    let mut vm = Vm::new(globals);
-    let mut runtime = install_runtime(
-      &mut vm,
-      RuntimeOptions {
-        argv: vec!["blitz".to_string()],
-        env: BTreeMap::new(),
-        exec_path: "blitz".to_string(),
-        listen_addr: "127.0.0.1:0"
-          .parse()
-          .expect("test listen address"),
-      },
-    );
-    let source = include_str!("../../examples/irc-chat/server.js").replace("port: 8000", "port: 0");
-    let session = JsParser::parse_source(&source).expect("parse IRC server");
-    let chunk = compiler::compile_oxc(session.program(), &source).expect("compile IRC server");
-    vm.run(chunk).expect("evaluate IRC server");
+  fn effect_irc_chat_v2_server_runs_join_and_message_protocol() {
+    thread::Builder::new()
+      .name("effect-irc-v2".to_string())
+      .stack_size(16 * 1024 * 1024)
+      .spawn(|| {
+        let globals = Rc::new(RefCell::new(ObjectData::new()));
+        let mut vm = Vm::new(globals);
+        let mut runtime = install_runtime(
+          &mut vm,
+          RuntimeOptions {
+            argv: vec!["blitz".to_string()],
+            env: BTreeMap::new(),
+            exec_path: "blitz".to_string(),
+            listen_addr: "127.0.0.1:0"
+              .parse()
+              .expect("test listen address"),
+            install_compatibility_globals: false,
+          },
+        );
+        let source =
+          include_str!("../../examples/irc-chat-v2/server.mjs").replace("port: 8000", "port: 0");
+        let directory = env::temp_dir().join(format!("blitz-effect-irc-v2-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("create Effect IRC directory");
+        let entry = directory.join("server.mjs");
+        std::fs::write(&entry, source).expect("write Effect IRC server");
+        let loader = vm.module_loader_handle();
+        {
+          let mut loader = loader.borrow_mut();
+          loader
+            .construct(&directory, "./server.mjs")
+            .expect("construct Effect IRC graph");
+          loader
+            .instantiate_all()
+            .expect("instantiate Effect IRC graph");
+        }
+        blitz::module::evaluate_entry_shared(&loader, &entry, &mut vm, false)
+          .expect("evaluate Effect IRC server");
+        assert_eq!(vm.get_global("Blitz"), None);
 
-    let address = runtime.local_addr().expect("IRC server address");
-    let wrong_route = thread::spawn(move || {
-      let mut stream = TcpStream::connect(address).expect("connect to IRC HTTP server");
-      write!(
-        stream,
-        "GET /wrong HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
-      )
-      .expect("write wrong-route request");
-      let mut response = String::new();
-      stream
-        .read_to_string(&mut response)
-        .expect("read wrong-route response");
-      response
-    });
-    assert!(
-      runtime
-        .run_once(&mut vm)
-        .expect("dispatch wrong-route request")
-    );
-    let wrong_route = wrong_route
-      .join()
-      .expect("wrong-route client thread");
-    assert!(
-      wrong_route.starts_with("HTTP/1.1 404"),
-      "unexpected wrong-route response: {wrong_route}"
-    );
-
-    let client = thread::spawn(move || {
-      tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("IRC client runtime")
-        .block_on(async move {
-          async fn connect(address: SocketAddr) -> fastwebsockets::WebSocket<TokioIo<Upgraded>> {
-            let stream = tokio::net::TcpStream::connect(address)
-              .await
-              .expect("connect IRC client");
-            let request = Request::builder()
-              .method("GET")
-              .uri(format!("http://{address}/chat"))
-              .header("Host", address.to_string())
-              .header(UPGRADE, "websocket")
-              .header(CONNECTION, "upgrade")
-              .header(
-                "Sec-WebSocket-Key",
-                fastwebsockets::handshake::generate_key(),
-              )
-              .header("Sec-WebSocket-Version", "13")
-              .body(Empty::<Bytes>::new())
-              .expect("IRC upgrade request");
-            fastwebsockets::handshake::client(&SpawnExecutor, request, stream)
-              .await
-              .expect("IRC handshake")
-              .0
-          }
-
-          let mut alice = connect(address).await;
-          alice
-            .write_frame(Frame::text(Payload::Owned(b"JOIN Alice".to_vec())))
-            .await
-            .expect("send Alice join");
-          let alice_welcome = alice
-            .read_frame()
-            .await
-            .expect("read Alice welcome");
-
-          let mut bob = connect(address).await;
-          bob
-            .write_frame(Frame::text(Payload::Owned(b"JOIN Bob".to_vec())))
-            .await
-            .expect("send Bob join");
-          let bob_welcome = bob.read_frame().await.expect("read Bob welcome");
-          let alice_sees_bob = alice
-            .read_frame()
-            .await
-            .expect("read Bob join on Alice");
-
-          alice
-            .write_frame(Frame::text(Payload::Owned(b"MSG hello".to_vec())))
-            .await
-            .expect("send Alice message");
-          let bob_message = bob
-            .read_frame()
-            .await
-            .expect("read Alice message on Bob");
-          let alice_echoed = tokio::time::timeout(Duration::from_millis(100), alice.read_frame())
-            .await
-            .is_ok();
-          alice
-            .write_frame(Frame::close(1000, b"done"))
-            .await
-            .expect("close Alice");
-          bob
-            .write_frame(Frame::close(1000, b"done"))
-            .await
-            .expect("close Bob");
-          (
-            alice_welcome,
-            bob_welcome,
-            alice_sees_bob,
-            bob_message,
-            alice_echoed,
+        let address = runtime.local_addr().expect("IRC server address");
+        let wrong_route = thread::spawn(move || {
+          let mut stream = TcpStream::connect(address).expect("connect to IRC HTTP server");
+          write!(
+            stream,
+            "GET /wrong HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
           )
-        })
-    });
+          .expect("write wrong-route request");
+          let mut response = String::new();
+          stream
+            .read_to_string(&mut response)
+            .expect("read wrong-route response");
+          response
+        });
+        assert!(
+          runtime
+            .run_once(&mut vm)
+            .expect("dispatch wrong-route request")
+        );
+        let wrong_route = wrong_route
+          .join()
+          .expect("wrong-route client thread");
+        assert!(
+          wrong_route.starts_with("HTTP/1.1 404"),
+          "unexpected wrong-route response: {wrong_route}"
+        );
 
-    for _event in 0..11 {
-      assert!(
+        let client = thread::spawn(move || {
+          tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("IRC client runtime")
+            .block_on(async move {
+              async fn connect(
+                address: SocketAddr
+              ) -> fastwebsockets::WebSocket<TokioIo<Upgraded>> {
+                let stream = tokio::net::TcpStream::connect(address)
+                  .await
+                  .expect("connect IRC client");
+                let request = Request::builder()
+                  .method("GET")
+                  .uri(format!("http://{address}/chat"))
+                  .header("Host", address.to_string())
+                  .header(UPGRADE, "websocket")
+                  .header(CONNECTION, "upgrade")
+                  .header(
+                    "Sec-WebSocket-Key",
+                    fastwebsockets::handshake::generate_key(),
+                  )
+                  .header("Sec-WebSocket-Version", "13")
+                  .body(Empty::<Bytes>::new())
+                  .expect("IRC upgrade request");
+                fastwebsockets::handshake::client(&SpawnExecutor, request, stream)
+                  .await
+                  .expect("IRC handshake")
+                  .0
+              }
+
+              let mut alice = connect(address).await;
+              alice
+                .write_frame(Frame::text(Payload::Owned(b"JOIN Alice".to_vec())))
+                .await
+                .expect("send Alice join");
+              let alice_welcome = alice
+                .read_frame()
+                .await
+                .expect("read Alice welcome");
+              let alice_join = alice.read_frame().await.expect("read Alice join");
+
+              let mut bob = connect(address).await;
+              bob
+                .write_frame(Frame::text(Payload::Owned(b"JOIN Bob".to_vec())))
+                .await
+                .expect("send Bob join");
+              let bob_welcome = bob.read_frame().await.expect("read Bob welcome");
+              let alice_sees_bob = alice
+                .read_frame()
+                .await
+                .expect("read Bob join on Alice");
+              let bob_join = bob
+                .read_frame()
+                .await
+                .expect("read Bob join on Bob");
+
+              alice
+                .write_frame(Frame::text(Payload::Owned(b"MSG hello".to_vec())))
+                .await
+                .expect("send Alice message");
+              let alice_message = alice
+                .read_frame()
+                .await
+                .expect("read Alice message on Alice");
+              let bob_message = bob
+                .read_frame()
+                .await
+                .expect("read Alice message on Bob");
+              alice
+                .write_frame(Frame::close(1000, b"done"))
+                .await
+                .expect("close Alice");
+              bob
+                .write_frame(Frame::close(1000, b"done"))
+                .await
+                .expect("close Bob");
+              (
+                alice_welcome,
+                alice_join,
+                bob_welcome,
+                alice_sees_bob,
+                bob_join,
+                alice_message,
+                bob_message,
+              )
+            })
+        });
+
+        let mut event_count = 0;
+        while !client.is_finished() {
+          assert!(
+            runtime
+              .run_once(&mut vm)
+              .expect("drive IRC event")
+          );
+          event_count += 1;
+          assert!(event_count < 100, "IRC protocol did not quiesce");
+        }
+        let (
+          alice_welcome,
+          alice_join,
+          bob_welcome,
+          alice_sees_bob,
+          bob_join,
+          alice_message,
+          bob_message,
+        ) = client.join().expect("IRC client thread");
+        assert_eq!(
+          alice_welcome.payload.as_ref(),
+          b"* Welcome, Alice. Type /quit to leave."
+        );
+        assert_eq!(
+          bob_welcome.payload.as_ref(),
+          b"* Welcome, Bob. Type /quit to leave."
+        );
+        assert_eq!(alice_join.payload.as_ref(), b"* Alice joined the room");
+        assert_eq!(alice_sees_bob.payload.as_ref(), b"* Bob joined the room");
+        assert_eq!(bob_join.payload.as_ref(), b"* Bob joined the room");
+        assert_eq!(alice_message.payload.as_ref(), b"<Alice> hello");
+        assert_eq!(bob_message.payload.as_ref(), b"<Alice> hello");
         runtime
-          .run_once(&mut vm)
-          .expect("drive IRC event")
-      );
-    }
-    let (alice_welcome, bob_welcome, alice_sees_bob, bob_message, alice_echoed) =
-      client.join().expect("IRC client thread");
-    assert_eq!(
-      alice_welcome.payload.as_ref(),
-      b"* Welcome, Alice. Type /quit to leave."
-    );
-    assert_eq!(
-      bob_welcome.payload.as_ref(),
-      b"* Welcome, Bob. Type /quit to leave."
-    );
-    assert_eq!(alice_sees_bob.payload.as_ref(), b"* Bob joined the room");
-    assert_eq!(bob_message.payload.as_ref(), b"<Alice> hello");
-    assert!(!alice_echoed, "Alice should not receive her own message");
-    runtime.shutdown(&vm).expect("stop IRC server");
+          .shutdown(&mut vm)
+          .expect("stop IRC server");
+        std::fs::remove_dir_all(directory).expect("remove Effect IRC directory");
+      })
+      .expect("spawn Effect IRC thread")
+      .join()
+      .expect("Effect IRC thread succeeds");
   }
 }

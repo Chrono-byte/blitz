@@ -24,7 +24,7 @@ fi
 
 cp -- "$built_blitz" "$blitz"
 
-osascript - "$repo" "$blitz" "$demo/server.mjs" "$demo/alice.js" "$demo/bob.js" <<'APPLESCRIPT'
+osascript - "$repo" "$blitz" "$demo/server.mjs" "$demo/alice.mjs" "$demo/bob.mjs" <<'APPLESCRIPT'
 on run argv
   set repoPath to item 1 of argv
   set blitzPath to item 2 of argv

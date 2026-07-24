@@ -1,44 +1,23 @@
+import * as Effect from "effect/Effect";
+import * as Ref from "effect/Ref";
+import * as Stream from "effect/Stream";
+import * as Http from "blitz:http";
+import * as Runtime from "blitz:runtime";
+import * as WebSocket from "blitz:websocket";
+
 const MAX_NICKNAME_LENGTH = 20;
 const MAX_MESSAGE_LENGTH = 400;
 const MAX_FRAME_LENGTH = 4_096;
 const RATE_LIMIT_WINDOW_MS = 2_000;
 const RATE_LIMIT_MESSAGES = 8;
 
-const clients = new Map();
+const mapSet = (map, key, value) =>
+  new Map([...map, [key, value]]);
 
-function send(socket, message) {
-  if (socket.readyState !== WebSocket.OPEN) {
-    clients.delete(socket);
-    return false;
-  }
+const mapDelete = (map, key) =>
+  new Map([...map].filter(([entry]) => entry !== key));
 
-  try {
-    socket.send(message);
-    return true;
-  } catch {
-    clients.delete(socket);
-    return false;
-  }
-}
-
-function broadcast(message) {
-  for (const socket of clients.keys()) {
-    send(socket, message);
-  }
-  console.log(message);
-}
-
-function removeClient(socket) {
-  const client = clients.get(socket);
-  if (client === undefined) {
-    return;
-  }
-
-  clients.delete(socket);
-  broadcast(`* ${client.nickname} left the room`);
-}
-
-function normalizeNickname(input) {
+const normalizeNickname = (input) => {
   const nickname = input.trim();
   if (
     nickname.length === 0 ||
@@ -48,9 +27,15 @@ function normalizeNickname(input) {
     return null;
   }
   return nickname;
-}
+};
 
-function nicknameIsTaken(nickname) {
+const sanitizeMessage = (input) =>
+  input
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+    .trim()
+    .slice(0, MAX_MESSAGE_LENGTH);
+
+const nicknameIsTaken = (clients, nickname) => {
   const key = nickname.toLowerCase();
   for (const client of clients.values()) {
     if (client.nickname.toLowerCase() === key) {
@@ -58,147 +43,251 @@ function nicknameIsTaken(nickname) {
     }
   }
   return false;
-}
+};
 
-function sanitizeMessage(input) {
-  return input
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
-    .trim()
-    .slice(0, MAX_MESSAGE_LENGTH);
-}
+const detach = (clientsRef, connection) =>
+  Ref.modify(clientsRef, (clients) => [
+    clients.get(connection),
+    mapDelete(clients, connection),
+  ]);
 
-function isRateLimited(client) {
-  const now = Date.now();
-  if (now - client.windowStartedAt >= RATE_LIMIT_WINDOW_MS) {
-    client.windowStartedAt = now;
-    client.messageCount = 0;
-  }
+const closeQuietly = (connection, options) =>
+  connection.close(options).pipe(
+    Effect.catchAll(() => Effect.succeed(undefined)),
+  );
 
-  client.messageCount += 1;
-  return client.messageCount > RATE_LIMIT_MESSAGES;
-}
+const send = (clientsRef, connection, message) =>
+  connection.send(message).pipe(
+    Effect.map(() => true),
+    Effect.catchAll(() => detach(clientsRef, connection).pipe(Effect.as(false))),
+  );
 
-function close(socket, code, reason) {
-  try {
-    socket.close(code, reason);
-  } catch {
-    removeClient(socket);
-  }
-}
+const broadcast = (clientsRef, message) =>
+  Ref.get(clientsRef).pipe(
+    Effect.flatMap((clients) =>
+      Effect.all(
+        [...clients.keys()].map((connection) =>
+          send(clientsRef, connection, message),
+        ),
+      ).pipe(Effect.asVoid),
+    ),
+    Effect.tap(() => Effect.sync(() => console.log(message))),
+  );
 
-function handleChat(request) {
-  const upgrade = request.headers.get("upgrade");
-  if (upgrade === null || upgrade.toLowerCase() !== "websocket") {
-    return new Response("Blitz IRC chat is available over WebSocket.\n", {
-      status: 426,
-      headers: {
-        "content-type": "text/plain; charset=utf-8",
-        upgrade: "websocket",
+const removeClient = (clientsRef, connection) =>
+  detach(clientsRef, connection).pipe(
+    Effect.flatMap((client) =>
+      client === undefined
+        ? Effect.succeed(undefined)
+        : broadcast(clientsRef, `* ${client.nickname} left the room`),
+    ),
+  );
+
+const joinClient = (clientsRef, connection, nickname) =>
+  Ref.modify(clientsRef, (clients) => {
+    if (clients.has(connection)) {
+      return [{ _tag: "AlreadyJoined" }, clients];
+    }
+    if (nicknameIsTaken(clients, nickname)) {
+      return [{ _tag: "Taken" }, clients];
+    }
+
+    const client = {
+      nickname,
+      windowStartedAt: Date.now(),
+      messageCount: 0,
+    };
+    return [
+      { _tag: "Joined", client },
+      mapSet(clients, connection, client),
+    ];
+  });
+
+const registerMessage = (clientsRef, connection) =>
+  Ref.modify(clientsRef, (clients) => {
+    const client = clients.get(connection);
+    if (client === undefined) {
+      return [undefined, clients];
+    }
+
+    const now = Date.now();
+    const reset = now - client.windowStartedAt >= RATE_LIMIT_WINDOW_MS;
+    const updatedClient = {
+      ...client,
+      windowStartedAt: reset ? now : client.windowStartedAt,
+      messageCount: reset ? 1 : client.messageCount + 1,
+    };
+    return [
+      {
+        client: updatedClient,
+        limited: updatedClient.messageCount > RATE_LIMIT_MESSAGES,
       },
-    });
+      mapSet(clients, connection, updatedClient),
+    ];
+  });
+
+const handleMessage = (clientsRef, connection, message) => {
+  if (message._tag === "Binary") {
+    return closeQuietly(connection, { code: 1003, reason: "text frames only" });
   }
 
-  const { socket, response } = Blitz.upgradeWebSocket(request);
+  if (message.data.length > MAX_FRAME_LENGTH) {
+    return closeQuietly(connection, { code: 1009, reason: "message too large" });
+  }
 
-  socket.onmessage = (event) => {
-    if (typeof event.data !== "string") {
-      close(socket, 1003, "text frames only");
-      return;
+  if (message.data.startsWith("JOIN ")) {
+    const nickname = normalizeNickname(message.data.slice(5));
+    if (nickname === null) {
+      return send(
+        clientsRef,
+        connection,
+        `* Nicknames must be 1-${MAX_NICKNAME_LENGTH} letters, numbers, underscores, or hyphens.`,
+      ).pipe(Effect.asVoid);
     }
 
-    const message = event.data;
-    if (message.length > MAX_FRAME_LENGTH) {
-      close(socket, 1009, "message too large");
-      return;
-    }
+    return joinClient(clientsRef, connection, nickname).pipe(
+      Effect.flatMap((result) => {
+        if (result._tag === "AlreadyJoined") {
+          return send(clientsRef, connection, "* You already joined the room.").pipe(
+            Effect.asVoid,
+          );
+        }
+        if (result._tag === "Taken") {
+          return send(clientsRef, connection, "* That nickname is already in use.").pipe(
+            Effect.asVoid,
+          );
+        }
 
-    if (message.startsWith("JOIN ") && !clients.has(socket)) {
-      const nickname = normalizeNickname(message.slice(5));
-      if (nickname === null) {
-        send(
-          socket,
-          `* Nicknames must be 1-${MAX_NICKNAME_LENGTH} letters, numbers, underscores, or hyphens.`,
+        return send(
+          clientsRef,
+          connection,
+          `* Welcome, ${result.client.nickname}. Type /quit to leave.`,
+        ).pipe(
+          Effect.flatMap((sent) =>
+            sent
+              ? broadcast(clientsRef, `* ${result.client.nickname} joined the room`)
+              : Effect.succeed(undefined),
+          ),
         );
-        return;
-      }
-      if (nicknameIsTaken(nickname)) {
-        send(socket, "* That nickname is already in use.");
-        return;
-      }
+      }),
+    );
+  }
 
-      const client = {
-        nickname,
-        windowStartedAt: Date.now(),
-        messageCount: 0,
-      };
-      clients.set(socket, client);
-      if (!send(socket, `* Welcome, ${nickname}. Type /quit to leave.`)) {
-        return;
-      }
-      broadcast(`* ${nickname} joined the room`);
-      return;
-    }
-
-    if (message.startsWith("MSG ")) {
-      const client = clients.get(socket);
-      if (client !== undefined) {
-        if (isRateLimited(client)) {
-          send(socket, "* You are sending messages too quickly.");
-          return;
+  if (message.data.startsWith("MSG ")) {
+    return registerMessage(clientsRef, connection).pipe(
+      Effect.flatMap((result) => {
+        if (result === undefined) {
+          return send(
+            clientsRef,
+            connection,
+            "* Send JOIN <name> first, then MSG <text>.",
+          ).pipe(Effect.asVoid);
+        }
+        if (result.limited) {
+          return send(
+            clientsRef,
+            connection,
+            "* You are sending messages too quickly.",
+          ).pipe(Effect.asVoid);
         }
 
-        const text = sanitizeMessage(message.slice(4));
-        if (text.length > 0) {
-          // Chat messages are authoritative server events, including for the sender.
-          broadcast(`<${client.nickname}> ${text}`);
-        }
-        return;
-      }
-    }
+        const text = sanitizeMessage(message.data.slice(4));
+        return text.length === 0
+          ? Effect.succeed(undefined)
+          : broadcast(clientsRef, `<${result.client.nickname}> ${text}`);
+      }),
+    );
+  }
 
-    if (message === "QUIT") {
-      close(socket, 1000, "client quit");
-      return;
-    }
+  if (message.data === "QUIT") {
+    return closeQuietly(connection, { code: 1000, reason: "client quit" });
+  }
 
-    send(socket, "* Send JOIN <name> first, then MSG <text>.");
-  };
+  return send(
+    clientsRef,
+    connection,
+    "* Send JOIN <name> first, then MSG <text>.",
+  ).pipe(Effect.asVoid);
+};
 
-  socket.onerror = () => {
-    removeClient(socket);
-    close(socket, 1011, "socket error");
-  };
+const processConnection = (clientsRef, connection) =>
+  Stream.runForEach(
+    connection.messages,
+    (message) => handleMessage(clientsRef, connection, message),
+  ).pipe(
+    Effect.catchAll((error) =>
+      Effect.sync(() => console.error(`WebSocket error: ${error.message}`)),
+    ),
+    Effect.ensuring(removeClient(clientsRef, connection)),
+  );
 
-  socket.onclose = () => {
-    removeClient(socket);
-  };
+const handleChat = (clientsRef, request, context) => {
+  const upgradeHeader = request.headers.get("upgrade");
+  if (upgradeHeader === null || upgradeHeader.toLowerCase() !== "websocket") {
+    return Effect.succeed(
+      new Response("Blitz IRC chat is available over WebSocket.\n", {
+        status: 426,
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          upgrade: "websocket",
+        },
+      }),
+    );
+  }
 
-  return response;
-}
+  return WebSocket.upgrade(request).pipe(
+    Effect.flatMap((upgrade) =>
+      context.fork(
+        Effect.scoped(
+          upgrade.accept.pipe(
+            Effect.flatMap((connection) => processConnection(clientsRef, connection)),
+          ),
+        ),
+      ).pipe(Effect.as(upgrade.response)),
+    ),
+  );
+};
 
-function handler(request) {
+const handler = (clientsRef, request, context) => {
   const path = new URL(request.url).pathname;
   if (path === "/") {
-    return new Response(
-      "Blitz IRC chat v2 is running. Connect over /chat.\n",
-      { headers: { "content-type": "text/plain; charset=utf-8" } },
+    return Effect.succeed(
+      new Response("Blitz IRC chat v2 is running. Connect over /chat.\n", {
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      }),
     );
   }
   if (path === "/health") {
-    return new Response("ok\n", {
-      headers: { "content-type": "text/plain; charset=utf-8" },
-    });
+    return Effect.succeed(
+      new Response("ok\n", {
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      }),
+    );
   }
   if (path === "/chat") {
-    return handleChat(request);
+    return handleChat(clientsRef, request, context);
   }
-  return new Response("Not Found\n", {
-    status: 404,
-    headers: { "content-type": "text/plain; charset=utf-8" },
-  });
-}
+  return Effect.succeed(
+    new Response("Not Found\n", {
+      status: 404,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    }),
+  );
+};
 
-const server = Blitz.serve({ hostname: "127.0.0.1", port: 8000 }, handler);
+const serverProgram = Ref.make(new Map()).pipe(
+  Effect.flatMap((clientsRef) => {
+    const announce = Effect.sync(() => {
+      console.log("Blitz IRC chat listening on http://127.0.0.1:8000");
+      console.log("WebSocket endpoint: ws://127.0.0.1:8000/chat");
+    });
+    const serve = Http.serve({
+      hostname: "127.0.0.1",
+      port: 8000,
+      handler: (request, context) => handler(clientsRef, request, context),
+    });
+    return announce.pipe(Effect.zipRight(serve));
+  }),
+);
 
-console.log(`Blitz IRC chat listening on http://${server.hostname}:${server.port}`);
-console.log(`WebSocket endpoint: ws://${server.hostname}:${server.port}/chat`);
+Runtime.runMain(serverProgram);

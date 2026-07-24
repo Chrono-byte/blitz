@@ -48,5 +48,5 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
 if (-not $serverReady) {
   throw "IRC chat v2 server did not become ready within 60 seconds"
 }
-Start-BlitzProcess (Join-Path $demo "alice.js")
-Start-BlitzProcess (Join-Path $demo "bob.js")
+Start-BlitzProcess (Join-Path $demo "alice.mjs")
+Start-BlitzProcess (Join-Path $demo "bob.mjs")

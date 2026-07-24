@@ -19,8 +19,13 @@ The manifest currently supports:
 | `effect/Schedule` | Effect 3.16.7 generated subpath |
 | `effect/Match` | Effect 3.16.7 generated subpath |
 | `blitz:match` | Blitz facade over `effect/Match` |
-| `blitz:app` | Blitz application facade |
-| `blitz-internal:app-transport` | Private host-ABI adapter |
+| `blitz:fs` | Typed filesystem service and live Layer |
+| `blitz:http` | Scoped Effect HTTP service |
+| `blitz:websocket` | Scoped connections and message Streams |
+| `blitz:terminal` | Effect output and scoped line Stream |
+| `blitz:runtime` | Aggregate live Layer and supervised root runner |
+| `blitz:app` | Transitional application facade |
+| `blitz-internal:*` | Private host-ABI adapters |
 
 Public-root resolution is exact and case-sensitive. It does not normalize or
 fall back to arbitrary `effect/*` or `blitz:*` imports. Non-root modules remain
@@ -54,6 +59,20 @@ extraction, AST/ESTree linking, typechecks, and compilations. Runtime regression
 synchronous host boundaries through `Effect.runSync` / `Effect.runSyncExit`,
 including typed `Effect.try` recovery with `catchTag` and state transitions
 through `Ref`.
+
+The default runtime does not install the legacy `Blitz.*` compatibility
+namespace. Applications use the Effect-native `blitz:*` modules; compatibility
+tests may explicitly opt into the dormant adapter.
+
+`blitz:fs` currently provides lazy typed whole-file reads and writes for UTF-8
+text and `Uint8Array` data. The initial adapter is synchronous beneath the
+Effect boundary; cancellable Tokio-backed file operations and scoped open-file
+resources remain follow-up work. `blitz:http`, `blitz:websocket`, and `blitz:terminal` share
+runtime-owned resources, while `blitz:runtime` supplies their live Layers and
+starts one root Effect. HTTP request contexts supervise accepted WebSocket
+connection fibers in the listener Scope. HTTP handlers currently must settle
+without an asynchronous suspension; timer- or I/O-suspended request Effects
+remain a runtime-kernel follow-up.
 
 `blitz:app` serving is lazy and scoped: listener validation and binding occur
 only when the serve Effect runs, invalid options and bind failures use tagged

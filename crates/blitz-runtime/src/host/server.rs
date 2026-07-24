@@ -1,20 +1,21 @@
 //! `Blitz.serve` HTTP routing and VM callback bridge.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::rc::Rc;
 
-use blitz::Vm;
 use blitz::errors::RuntimeError;
 use blitz::gc;
 use blitz::value::{
   ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value,
 };
+use blitz::{HostRoot, Vm};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::watch;
 
+use crate::host::event_loop::{ResourceHandle, ResourceRegistry};
 use crate::net::http::{HttpRequestEvent, HttpResponse, HttpServer};
 use crate::net::websocket::{
   WebSocketCommand, WebSocketEvent, WebSocketServerOptions, connect_client,
@@ -105,13 +106,19 @@ struct WebSocketResource {
 struct ServerInner {
   listen_addr: SocketAddr,
   local_addr: Option<SocketAddr>,
-  handler: Option<Value>,
+  handler: Option<HostRoot>,
   requests: mpsc::Sender<HttpRequestEvent>,
   websocket_events: mpsc::Sender<WebSocketEvent>,
+  resources: ResourceRegistry,
   server: Option<HttpServer>,
+  server_resource: Option<ResourceHandle>,
+  finished: Option<HostRoot>,
+  generation: u64,
   current_websocket_id: Option<u64>,
+  pending_websocket_ids: BTreeSet<u64>,
   websockets: BTreeMap<u64, WebSocketResource>,
   next_client_id: u64,
+  websocket_prototype: Option<Value>,
 }
 
 /// VM-thread state for registered routes and the server resource.
@@ -125,7 +132,11 @@ impl ServerState {
 
   pub(super) fn has_resources(&self) -> bool {
     let inner = self.0.borrow();
-    inner.server.is_some() || !inner.websockets.is_empty()
+    inner
+      .server_resource
+      .as_ref()
+      .is_some_and(ResourceHandle::is_referenced)
+      || !inner.websockets.is_empty()
   }
 
   pub(super) fn shutdown_websockets(&self) {
@@ -141,10 +152,64 @@ impl ServerState {
     self.0.borrow().local_addr
   }
 
-  pub(super) fn take_server(&self) -> Option<HttpServer> {
-    let mut inner = self.0.borrow_mut();
-    inner.local_addr = None;
-    inner.server.take()
+  pub(super) fn websocket_prototype(&self) -> Option<Value> {
+    self.0.borrow().websocket_prototype.clone()
+  }
+
+  pub(super) fn close_current(
+    &self,
+    vm: &mut Vm,
+  ) -> Result<Value, RuntimeError> {
+    let generation = self.0.borrow().generation;
+    let finished = self.finished_value(vm);
+    self.close(vm, generation, &finished)?;
+    Ok(finished)
+  }
+
+  fn finished_value(
+    &self,
+    vm: &Vm,
+  ) -> Value {
+    self
+      .0
+      .borrow()
+      .finished
+      .and_then(|root| vm.host_root(root))
+      .unwrap_or_else(|| resolved_promise(Value::Undefined))
+  }
+
+  fn close(
+    &self,
+    vm: &mut Vm,
+    generation: u64,
+    finished: &Value,
+  ) -> Result<(), RuntimeError> {
+    let (server, resource, handler) = {
+      let mut inner = self.0.borrow_mut();
+      if inner.generation != generation {
+        return Ok(());
+      }
+      inner.local_addr = None;
+      (
+        inner.server.take(),
+        inner.server_resource.take(),
+        inner.handler.take(),
+      )
+    };
+    if let Some(handler) = handler {
+      vm.set_host_root(handler, Value::Undefined)?;
+    }
+    self.shutdown_websockets();
+    if let Some(server) = server {
+      vm.block_on(server.close())?;
+    }
+    if let Some(resource) = resource {
+      resource.close();
+    }
+    if matches!(finished, Value::Promise(_)) {
+      vm.resolve_host_promise(finished, Value::Undefined)?;
+    }
+    Ok(())
   }
 
   pub(super) fn dispatch(
@@ -152,39 +217,107 @@ impl ServerState {
     vm: &mut Vm,
     event: HttpRequestEvent,
   ) -> Result<(), RuntimeError> {
-    let callback = self.0.borrow().handler.clone();
+    let callback = self
+      .0
+      .borrow()
+      .handler
+      .and_then(|root| vm.host_root(root));
     let Some(callback) = callback else {
       event.respond(HttpResponse::text(404, "Not Found"));
       return Ok(());
     };
 
     let websocket_id = event.websocket_id();
-    self.0.borrow_mut().current_websocket_id = websocket_id;
+    {
+      let mut inner = self.0.borrow_mut();
+      inner.current_websocket_id = websocket_id;
+      if let Some(id) = websocket_id {
+        inner.pending_websocket_ids.insert(id);
+      }
+    }
     let request = request_object(vm, &event);
     let info = handler_info_object(vm, event.remote_addr);
     let result = match vm.call_value_with_this(&callback, &Value::Undefined, &[request, info]) {
       Ok(result) => result,
-      Err(_error) => {
-        self.0.borrow_mut().current_websocket_id = None;
+      Err(error) => {
+        eprintln!("HTTP handler error: {error}");
+        self.finish_request(websocket_id);
         event.respond(HttpResponse::text(500, "Internal Server Error"));
         return Ok(());
       }
     };
-    let result = match vm.await_value(result) {
-      Ok(result) => result,
-      Err(_error) => {
-        self.0.borrow_mut().current_websocket_id = None;
-        event.respond(HttpResponse::text(500, "Internal Server Error"));
-        return Ok(());
-      }
-    };
-    self.0.borrow_mut().current_websocket_id = None;
-    match response_from_value(vm, &result) {
+    if matches!(result, Value::Promise(_)) {
+      let promise_root = vm.create_host_root(result.clone());
+      let pending = Rc::new(RefCell::new(Some(event)));
+      let success_pending = Rc::clone(&pending);
+      let success_state = self.clone();
+      let on_success: BuiltinFn = Rc::new(move |vm, args| {
+        let value = args
+          .get(1)
+          .or_else(|| args.first())
+          .cloned()
+          .unwrap_or(Value::Undefined);
+        if let Some(event) = success_pending.borrow_mut().take() {
+          success_state.complete_request(vm, event, websocket_id, &value);
+        }
+        vm.set_host_root(promise_root, Value::Undefined)?;
+        Ok(Value::Undefined)
+      });
+      let failure_state = self.clone();
+      let failure_root = promise_root;
+      let on_failure: BuiltinFn = Rc::new(move |vm, args| {
+        let reason = args
+          .get(1)
+          .or_else(|| args.first())
+          .cloned()
+          .unwrap_or(Value::Undefined);
+        eprintln!("HTTP handler promise rejected: {reason}");
+        if let Some(event) = pending.borrow_mut().take() {
+          failure_state.finish_request(websocket_id);
+          event.respond(HttpResponse::text(500, "Internal Server Error"));
+        }
+        vm.set_host_root(failure_root, Value::Undefined)?;
+        Ok(Value::Undefined)
+      });
+      let then = vm.get_property_host(&result, &PropertyKey::String("then".to_string()))?;
+      vm.call_value_with_this(
+        &then,
+        &result,
+        &[Value::Builtin(on_success), Value::Builtin(on_failure)],
+      )?;
+      self.0.borrow_mut().current_websocket_id = None;
+      return Ok(());
+    }
+    self.complete_request(vm, event, websocket_id, &result);
+    Ok(())
+  }
+
+  fn finish_request(
+    &self,
+    websocket_id: Option<u64>,
+  ) {
+    let mut inner = self.0.borrow_mut();
+    if let Some(id) = websocket_id {
+      inner.pending_websocket_ids.remove(&id);
+    }
+    if inner.current_websocket_id == websocket_id {
+      inner.current_websocket_id = None;
+    }
+  }
+
+  fn complete_request(
+    &self,
+    vm: &mut Vm,
+    event: HttpRequestEvent,
+    websocket_id: Option<u64>,
+    result: &Value,
+  ) {
+    self.finish_request(websocket_id);
+    match response_from_value(vm, result) {
       Ok(HandlerResponse::Http(response)) => event.respond(response),
       Ok(HandlerResponse::WebSocket) => event.respond_websocket(),
       Err(_) => event.respond(HttpResponse::text(500, "handler must return a Response")),
     }
-    Ok(())
   }
 
   pub(super) fn dispatch_websocket(
@@ -315,6 +448,8 @@ pub(super) fn install(
   listen_addr: SocketAddr,
   requests: mpsc::Sender<HttpRequestEvent>,
   websocket_events: mpsc::Sender<WebSocketEvent>,
+  resources: ResourceRegistry,
+  install_compatibility_globals: bool,
 ) -> ServerState {
   let state = ServerState(Rc::new(RefCell::new(ServerInner {
     listen_addr,
@@ -322,30 +457,39 @@ pub(super) fn install(
     handler: None,
     requests,
     websocket_events,
+    resources,
     server: None,
+    server_resource: None,
+    finished: None,
+    generation: 0,
     current_websocket_id: None,
+    pending_websocket_ids: BTreeSet::new(),
     websockets: BTreeMap::new(),
     next_client_id: 1_u64 << 53,
+    websocket_prototype: None,
   })));
-  let blitz = object(vm.realm().object_prototype());
   let websocket_prototype = object(vm.realm().object_prototype());
-  set(&blitz, "serve", Value::Builtin(serve_method(state.clone())));
-  set(
-    &blitz,
-    "upgradeWebSocket",
-    Value::Builtin(upgrade_websocket_method(
-      state.clone(),
-      websocket_prototype.clone(),
-    )),
-  );
-  vm.realm().set_global("Blitz", blitz);
+  state.0.borrow_mut().websocket_prototype = Some(websocket_prototype.clone());
+  if install_compatibility_globals {
+    let blitz = object(vm.realm().object_prototype());
+    set(&blitz, "serve", Value::Builtin(serve_method(state.clone())));
+    set(
+      &blitz,
+      "upgradeWebSocket",
+      Value::Builtin(upgrade_websocket_method(
+        state.clone(),
+        websocket_prototype.clone(),
+      )),
+    );
+    vm.realm().set_global("Blitz", blitz);
+  }
   install_response_constructor(vm);
   install_headers_constructor(vm);
   install_websocket_constructor(vm, state.clone(), websocket_prototype);
   state
 }
 
-fn serve_method(state: ServerState) -> BuiltinFn {
+pub(super) fn serve_method(state: ServerState) -> BuiltinFn {
   Rc::new(move |vm, args| {
     let actual = args.get(1..).unwrap_or_default();
     let default_addr = state.0.borrow().listen_addr;
@@ -364,27 +508,96 @@ fn serve_method(state: ServerState) -> BuiltinFn {
         ))?
         .map_err(|error| RuntimeError::from(format!("failed to bind HTTP server: {error}")))?;
       let local_addr = server.local_addr();
+      let finished = vm.create_host_promise();
+      let finished_root = vm.create_host_root(finished);
       let mut inner = state.0.borrow_mut();
+      if let Some(previous) = inner.finished.replace(finished_root) {
+        vm.set_host_root(previous, Value::Undefined)?;
+      }
+      inner.generation = inner.generation.wrapping_add(1);
       inner.local_addr = Some(local_addr);
+      inner.server_resource = Some(inner.resources.register("http-server", true));
       inner.server = Some(server);
     }
-    state.0.borrow_mut().handler = Some(callback);
+    let callback = vm.create_host_root(callback);
+    if let Some(previous) = state.0.borrow_mut().handler.replace(callback) {
+      vm.set_host_root(previous, Value::Undefined)?;
+    }
 
-    let local_addr = state
-      .local_addr()
-      .ok_or_else(|| RuntimeError::from("HTTP server did not expose a bound address"))?;
-    let handle = object(vm.realm().object_prototype());
-    set(
-      &handle,
-      "hostname",
-      Value::String(local_addr.ip().to_string()),
-    );
-    set(&handle, "port", Value::Number(f64::from(local_addr.port())));
-    Ok(handle)
+    let (local_addr, generation, finished) = {
+      let inner = state.0.borrow();
+      let local_addr = inner
+        .local_addr
+        .ok_or_else(|| RuntimeError::from("HTTP server did not expose a bound address"))?;
+      let finished = inner
+        .finished
+        .and_then(|root| vm.host_root(root))
+        .ok_or_else(|| RuntimeError::from("HTTP server did not expose completion state"))?;
+      (local_addr, inner.generation, finished)
+    };
+    Ok(server_handle(
+      vm,
+      state.clone(),
+      local_addr,
+      generation,
+      finished,
+    ))
   })
 }
 
-fn upgrade_websocket_method(
+fn server_handle(
+  vm: &Vm,
+  state: ServerState,
+  local_addr: SocketAddr,
+  generation: u64,
+  finished: Value,
+) -> Value {
+  let handle = object(vm.realm().object_prototype());
+  let hostname = local_addr.ip().to_string();
+  let port = f64::from(local_addr.port());
+  let address = object(vm.realm().object_prototype());
+  set(&address, "transport", Value::String("tcp".to_string()));
+  set(&address, "hostname", Value::String(hostname.clone()));
+  set(&address, "port", Value::Number(port));
+  set(&handle, "addr", address);
+  set(&handle, "finished", finished.clone());
+  set(&handle, "hostname", Value::String(hostname));
+  set(&handle, "port", Value::Number(port));
+
+  let shutdown_state = state.clone();
+  let shutdown_finished = finished.clone();
+  let shutdown: BuiltinFn = Rc::new(move |vm, _args| {
+    shutdown_state.close(vm, generation, &shutdown_finished)?;
+    Ok(shutdown_finished.clone())
+  });
+  set(&handle, "shutdown", Value::Builtin(shutdown));
+
+  let reference_state = state.clone();
+  let reference: BuiltinFn = Rc::new(move |_vm, _args| {
+    let inner = reference_state.0.borrow();
+    if inner.generation == generation
+      && let Some(resource) = &inner.server_resource
+    {
+      resource.reference();
+    }
+    Ok(Value::Undefined)
+  });
+  set(&handle, "ref", Value::Builtin(reference));
+
+  let unreference: BuiltinFn = Rc::new(move |_vm, _args| {
+    let inner = state.0.borrow();
+    if inner.generation == generation
+      && let Some(resource) = &inner.server_resource
+    {
+      resource.unreference();
+    }
+    Ok(Value::Undefined)
+  });
+  set(&handle, "unref", Value::Builtin(unreference));
+  handle
+}
+
+pub(super) fn upgrade_websocket_method(
   state: ServerState,
   prototype: Value,
 ) -> BuiltinFn {
@@ -404,7 +617,9 @@ fn upgrade_websocket_method(
       .map_err(|_| RuntimeError::from("invalid WebSocket request"))?;
     {
       let inner = state.0.borrow();
-      if inner.current_websocket_id != Some(id) || inner.websockets.contains_key(&id) {
+      if (inner.current_websocket_id != Some(id) && !inner.pending_websocket_ids.contains(&id))
+        || inner.websockets.contains_key(&id)
+      {
         return Err(RuntimeError::from("request cannot be upgraded"));
       }
     }
@@ -931,7 +1146,9 @@ fn handler_info_object(
     Value::Number(f64::from(remote_addr.port())),
   );
   set(&address, "transport", Value::String("tcp".to_string()));
-  set(&info, "remoteAddr", address);
+  set(&info, "requestId", Value::String(String::new()));
+  set(&info, "remoteAddr", address.clone());
+  set(&info, "remoteAddress", address);
   info
 }
 

@@ -40,6 +40,8 @@ compatibility build on the same runtime event boundary.
 
 - bounded HTTP request handoff to the VM thread;
 - Deno-style `Blitz.serve(handler)` and `Blitz.serve(options, handler)` calls;
+- server handles with `addr`, `finished`, idempotent `shutdown()`, and runtime
+  liveness control through `ref()` and `unref()`;
 - handlers receiving `(request, info)` with remote TCP address metadata;
 - request objects with `url`, `method`, `path`, `query`, UTF-8 `body`, `text()`,
   `json()`, and mutable `Headers`;
@@ -125,7 +127,8 @@ can retain its focused harness loop until the runtime scheduler replaces it.
 - Dropping a connection command sender ends that connection.
 - Closing a server stops accepts, signals all upgraded connections, and waits
   for them to finish.
-- Later public handles need `ref()`/`unref()` and idempotent `close()` behavior.
+- HTTP server handles implement `ref()`/`unref()` and idempotent asynchronous
+  shutdown; later resource types must use the same lifecycle contract.
 
 ### Limits and backpressure
 

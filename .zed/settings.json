@@ -5,7 +5,10 @@
 {
   "languages": {
     "TypeScript": {
-      "enable_language_server": false
+      "language_servers": ["blitz-language-server"]
+    },
+    "JavaScript": {
+      "language_servers": ["blitz-language-server"]
     }
   },
   "lsp": {
@@ -20,5 +23,5 @@
   },
   "language_servers": [
     "!typescript-language-server", "!eslint", "..."
-  ]
+  ],
 }

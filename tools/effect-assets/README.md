@@ -15,8 +15,9 @@ only for the supported public specifiers; private internal modules do
 not carry duplicate upstream declaration graphs.
 
 The stdlib manifest is data-driven from `src/stdlib-manifest.ts`. It records
-the currently implemented `blitz:match`, `blitz:app`, and private application
-transport modules, including ordered dependencies, visibility, source and
+the implemented `blitz:match`, `blitz:fs`, `blitz:http`, `blitz:websocket`,
+`blitz:terminal`, `blitz:runtime`, transitional `blitz:app`, and private host
+adapter modules, including ordered dependencies, visibility, source and
 declaration hashes, pinned Effect/runtime/host ABIs, and host primitive
 requirements. It is input metadata for the committed prelinked runtime graph;
 the Rust `effect-bytecode` workspace tool owns that final binary.

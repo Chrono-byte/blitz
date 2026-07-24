@@ -839,6 +839,73 @@ mod tests {
   }
 
   #[test]
+  fn effect_file_system_reads_writes_and_reports_typed_failures() {
+    let path = std::env::temp_dir().join(format!(
+      "blitz-effect-fs-{}-{}.txt",
+      std::process::id(),
+      NEXT_EFFECT_COMPATIBILITY_TEST_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let missing = path.with_extension("missing");
+    let source = format!(
+      r#"
+        import * as Cause from 'effect/Cause';
+        import * as Effect from 'effect/Effect';
+        import * as Fs from 'blitz:fs';
+        import * as Runtime from 'blitz:runtime';
+
+        const path = {};
+        const missing = {};
+        const program = Fs.writeTextFile(path, 'hello filesystem').pipe(
+          Effect.zipRight(Fs.readTextFile(path))
+        );
+        globalThis.fs_text = Effect.runSync(Runtime.provideLive(program));
+        const missingExit = Effect.runSyncExit(
+          Runtime.provideLive(Fs.readTextFile(missing))
+        );
+        const failure = missingExit._tag === 'Failure'
+          ? Cause.failureOption(missingExit.cause)
+          : {{ _tag: 'None' }};
+        globalThis.fs_typed_error = failure._tag === 'Some' &&
+          failure.value._tag === 'FileSystemError' &&
+          failure.value.reason === 'NotFound';
+      "#,
+      serde_json::to_string(&path.to_string_lossy()).expect("serialize fs path"),
+      serde_json::to_string(&missing.to_string_lossy()).expect("serialize missing path")
+    );
+    run_effect_compatibility_entry(source, |vm| {
+      assert_eq!(
+        vm.get_global("fs_text"),
+        Some(Value::String("hello filesystem".to_string()))
+      );
+      assert_eq!(vm.get_global("fs_typed_error"), Some(Value::Bool(true)));
+    });
+    let _result = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn effect_terminal_operations_use_the_live_service() {
+    run_effect_compatibility_entry(
+      r#"
+        import * as Effect from 'effect/Effect';
+        import * as Terminal from 'blitz:terminal';
+        import * as Runtime from 'blitz:runtime';
+
+        const program = Terminal.setPrompt('[effect] > ').pipe(
+          Effect.zipRight(Terminal.close()),
+          Effect.as('closed')
+        );
+        globalThis.terminal_result = Effect.runSync(Runtime.provideLive(program));
+      "#,
+      |vm| {
+        assert_eq!(
+          vm.get_global("terminal_result"),
+          Some(Value::String("closed".to_string()))
+        );
+      },
+    );
+  }
+
+  #[test]
   fn app_transport_is_lazy_typed_and_scoped() {
     run_effect_compatibility_entry(
       r#"
