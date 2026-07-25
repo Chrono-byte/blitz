@@ -48,60 +48,29 @@ tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "
 url = "2"
 
 [workspace.lints.clippy]
-blocks_in_conditions = "warn"
-bool_comparison = "warn"
-box_collection = "warn"
-cast_possible_truncation = "warn"
-cast_precision_loss = "warn"
-cast_sign_loss = "warn"
-clone_on_ref_ptr = "warn"
-cognitive_complexity = "allow"
-default_numeric_fallback = "warn"
-explicit_iter_loop = "warn"
-excessive_nesting = "warn"
-filter_map_next = "warn"
-flat_map_identity = "warn"
-float_cmp = "warn"
-inefficient_to_string = "warn"
-into_iter_on_ref = "warn"
-iter_not_returning_iterator = "warn"
-large_enum_variant = "warn"
-large_stack_arrays = "warn"
-map_clone = "warn"
-map_unwrap_or = "warn"
-missing_docs_in_private_items = "allow"
-missing_errors_doc = "warn"
-missing_panics_doc = "warn"
-missing_safety_doc = "warn"
-multiple_crate_versions = "warn"
-needless_borrow = "warn"
-needless_collect = "warn"
-needless_for_each = "warn"
-option_option = "warn"
-or_fun_call = "warn"
-panic = "warn"
-range_plus_one = "warn"
+# Keep Clippy's maintained default set while leaving the noisier pedantic,
+# nursery, restriction, and cargo groups opt-in.
+all = { level = "warn", priority = -2 }
+
+# Semantic defects should never enter the workspace. Suspicious constructs and
+# avoidable runtime costs stay visible without blocking incremental cleanup.
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+
+# Small, actionable hygiene rules that are useful across every Blitz crate.
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
 redundant_clone = "deny"
-redundant_closure_for_method_calls = "deny"
-similar_names = "warn"
-single_char_pattern = "warn"
-todo = "warn"
-too_many_arguments = "warn"
-too_many_lines = "warn"
-unimplemented = "warn"
-unreachable = "warn"
+inefficient_to_string = "warn"
+large_futures = "warn"
+large_stack_arrays = "warn"
+needless_collect = "warn"
 unused_async = "warn"
-unwrap_used = "warn"
-vec_box = "warn"
-wrong_self_convention = "warn"
 
 [workspace.lints.rust]
-missing_docs = "allow"
-nonstandard-style = "warn"
-deprecated = "warn"
-trivial_casts = "warn"
-trivial_numeric_casts = "warn"
-unused_extern_crates = "warn"
-unused_import_braces = "warn"
-unused_qualifications = "warn"
-let_underscore = { level = "warn", priority = -1 }
+# These protect observable behavior and unsafe invariants rather than enforcing
+# subjective formatting or documentation policy.
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
