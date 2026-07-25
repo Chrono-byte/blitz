@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use crate::bytecode::Chunk;
 use crate::environment::EnvironmentRecord;
 use crate::value::Value;
@@ -11,8 +12,6 @@ pub(crate) struct HandlerRecord {
   pub(crate) chunk: Arc<Chunk>,
   /// The instruction pointer where the handler jumps to.
   pub(crate) handler_ip: usize,
-  /// The saved operand stack length for unwinding.
-  pub(crate) saved_stack_len: usize,
   /// The saved locals length for unwinding.
   pub(crate) saved_locals_len: usize,
   /// The saved frame count for unwinding.

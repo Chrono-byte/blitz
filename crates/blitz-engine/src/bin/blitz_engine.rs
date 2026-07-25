@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Host-neutral command-line harness for the Blitz ECMAScript engine.
 //!
 //! This binary intentionally does not install runtime APIs such as `console`,

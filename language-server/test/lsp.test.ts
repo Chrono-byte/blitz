@@ -29,7 +29,7 @@ const waitForOutput = (child: ChildProcessWithoutNullStreams, pattern: RegExp): 
   });
 
 await test("language server completes an LSP handshake", async () => {
-  const serverPath = fileURLToPath(new URL("../src/lsp.ts", import.meta.url));
+  const serverPath = fileURLToPath(new URL("../src/lsp.js", import.meta.url));
   const child = spawn(process.execPath, [serverPath]);
   let stderr = "";
   child.stderr.on("data", (chunk: Buffer) => {
@@ -43,6 +43,7 @@ await test("language server completes an LSP handshake", async () => {
   assert.match(output, /blitz-language-server/u);
   assert.match(output, /documentSymbolProvider/u);
   assert.match(output, /definitionProvider/u);
+  assert.match(output, /inlayHintProvider/u);
 
   child.stdin.write(frame({ jsonrpc: "2.0", id: 2, method: "shutdown", params: null }));
   await waitForOutput(child, /"id":2/u);

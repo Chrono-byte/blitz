@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Focused checker coverage for the corrected Effect type foundation.
 
 use std::path::Path;

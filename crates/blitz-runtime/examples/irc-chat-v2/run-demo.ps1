@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 $ErrorActionPreference = "Stop"
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
 $demo = Join-Path $repo "crates\blitz-runtime\examples\irc-chat-v2"

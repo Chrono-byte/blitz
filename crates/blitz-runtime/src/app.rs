@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Immutable application descriptions built around an RPC router.
 //!
 //! The JavaScript `blitz:app` facade is the Effect-facing API. This Rust module

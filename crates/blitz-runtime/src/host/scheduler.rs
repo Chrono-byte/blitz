@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Cancellation-safe host scheduling primitives for VM globals.
 //!
 //! The scheduler owns no JavaScript values. A host global stores a [`TimerId`]

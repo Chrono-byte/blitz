@@ -79,7 +79,9 @@ diagnostics, document symbols, completions, hover, and go-to-definition for
 JavaScript, TypeScript, and TSX documents. The local Zed extension lives in
 [`editors/zed/`](editors/zed/) and reuses Zed's built-in JS/TS grammars.
 
-License
---------------------
+Licensing
+---------
 
-- The `test262/` tree is governed by the Test262 license embedded inside that directory.
+Blitz code under `crates/` is licensed under the Mozilla Public License 2.0. The vendored `test262/` suite retains its upstream license, and other third-party material retains its applicable license and notices. Do not assume that every file in this repository is MPL-2.0.
+
+See [`LICENSE`](LICENSE) for the MPL-2.0 terms and [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) for third-party material.

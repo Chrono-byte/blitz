@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 export interface Tag<Id, Service> {
   readonly _Identifier: (_: never) => Id;
   readonly _Service: (_: never) => Service;

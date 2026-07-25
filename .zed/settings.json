@@ -5,10 +5,10 @@
 {
   "languages": {
     "TypeScript": {
-      "language_servers": ["blitz-language-server"]
+      "language_servers": ["blitz-language-server", "oxfmt"]
     },
     "JavaScript": {
-      "language_servers": ["blitz-language-server"]
+      "language_servers": ["blitz-language-server", "oxfmt"]
     }
   },
   "lsp": {

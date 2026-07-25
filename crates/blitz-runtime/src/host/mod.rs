@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Operating-system host APIs for the Blitz runtime.
 //!
 //! The ECMAScript engine is intentionally host-agnostic. This module is the

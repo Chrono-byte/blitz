@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Compile-time validation for JavaScript and TypeScript source embedded in Rust.
 
 use oxc_allocator::Allocator;

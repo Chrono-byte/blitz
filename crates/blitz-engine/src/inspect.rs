@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Side-effect-free formatting for host-facing runtime value inspection.
 //!
 //! This module is intentionally separate from ECMAScript `ToString`. Inspecting

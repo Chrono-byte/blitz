@@ -1,13 +1,13 @@
-//! RISC bytecode interpreter with stack-backed runtime helpers.
+// SPDX-License-Identifier: MPL-2.0
+//! RISC bytecode interpreter.
 //!
 //! This module implements the VM core: a fetch-decode-execute loop that
-//! evaluates compiled RISC bytecode using registers and spill storage, with an
-//! operand stack for call, exception, and host-helper state. It contains the
-//! Vm struct, frame/handler implementations, and tuning constants used by the
-//! runtime.
+//! evaluates compiled RISC bytecode using registers and spill storage. It
+//! contains the Vm struct, frame/handler implementations, and tuning constants
+//! used by the runtime.
 //!
 //! Key responsibilities:
-//! - Manage RISC registers, spill storage, the operand stack, and locals
+//! - Manage RISC registers, spill storage, and locals
 //! - Maintain call frames, exception handlers, and generator state
 //! - Provide property access support with generation-guarded inline
 //!   caching to accelerate repeated lookups
@@ -59,9 +59,6 @@ pub(crate) use yield_star::{YieldStarResume, YieldStarState};
 // Tuning constants
 // ---------------------------------------------------------------------------
 
-/// Initial operand stack capacity. Avoids reallocation for most programs.
-pub(super) const STACK_INITIAL_CAPACITY: usize = 512;
-
 /// Initial locals vector capacity per call frame.
 pub(super) const LOCALS_INITIAL_CAPACITY: usize = 64;
 
@@ -112,184 +109,6 @@ pub(super) struct PropertyGetIcEntry {
 type UnhandledRejectionHookInner = dyn FnMut(&mut Vm, Value, Value);
 type UnhandledRejectionHook = Rc<RefCell<UnhandledRejectionHookInner>>;
 
-#[derive(Default)]
-/// A stack of values used for operand storage in the VM.
-pub(crate) struct OperandStack {
-  /// The main stack of values.
-  inner: Vec<Value>,
-  /// A register holding the top-of-stack value for performance.
-  register: Option<Value>,
-}
-
-impl OperandStack {
-  /// Creates a new operand stack with the specified capacity.
-  pub(crate) fn with_capacity(cap: usize) -> Self {
-    Self {
-      inner: Vec::with_capacity(cap),
-      register: None,
-    }
-  }
-
-  /// Clears all values from the stack.
-  pub(crate) fn clear(&mut self) {
-    self.inner.clear();
-    self.register = None;
-  }
-
-  /// Returns the total number of values on the stack.
-  pub(crate) fn len(&self) -> usize {
-    self.inner.len() + self.register.is_some() as usize
-  }
-
-  /// Pushes a value onto the stack.
-  pub(crate) fn push(
-    &mut self,
-    value: Value,
-  ) {
-    if let Some(top) = self.register.replace(value) {
-      self.inner.push(top);
-    }
-  }
-
-  /// Pops and returns the top value from the stack.
-  pub(crate) fn pop(&mut self) -> Option<Value> {
-    if let Some(top) = self.register.take() {
-      Some(top)
-    } else {
-      self.inner.pop()
-    }
-  }
-
-  /// Returns a reference to the top value without removing it.
-  pub(crate) fn last(&self) -> Option<&Value> {
-    self
-      .register
-      .as_ref()
-      .or_else(|| self.inner.last())
-  }
-
-  /// Returns an iterator over all values in the stack.
-  pub(crate) fn iter(&self) -> OperandStackIter<'_> {
-    OperandStackIter {
-      inner: self.inner.iter(),
-      register: self.register.as_ref(),
-      register_emitted: false,
-    }
-  }
-
-  /// Returns a reverse iterator over all values in the stack.
-  pub(crate) fn iter_rev(&self) -> OperandStackRevIter<'_> {
-    OperandStackRevIter {
-      inner: self.inner.iter().rev(),
-      register: self.register.as_ref(),
-      register_emitted: false,
-    }
-  }
-
-  /// Returns a copy of all values currently on the stack.
-  pub(crate) fn snapshot(&self) -> Vec<Value> {
-    let mut values = self.inner.clone();
-    if let Some(top) = self.register.as_ref() {
-      values.push(top.clone());
-    }
-    values
-  }
-
-  /// Takes all values from the stack, leaving it empty.
-  pub(crate) fn take_all(&mut self) -> Vec<Value> {
-    let mut values = std::mem::take(&mut self.inner);
-    if let Some(top) = self.register.take() {
-      values.push(top);
-    }
-    values
-  }
-
-  /// Restores the stack to a previously saved state.
-  pub(crate) fn restore_from(
-    &mut self,
-    mut values: Vec<Value>,
-  ) {
-    if let Some(last) = values.pop() {
-      self.inner = values;
-      self.register = Some(last);
-    } else {
-      self.inner = Vec::new();
-      self.register = None;
-    }
-  }
-
-  /// Truncates the stack to the specified length.
-  pub(crate) fn truncate(
-    &mut self,
-    new_len: usize,
-  ) {
-    let total = self.len();
-    if new_len >= total {
-      return;
-    }
-    if new_len == 0 {
-      self.clear();
-      return;
-    }
-    if new_len <= self.inner.len() {
-      self.inner.truncate(new_len);
-      self.register = None;
-    } else if new_len == self.inner.len() {
-      self.register = None;
-    }
-  }
-}
-
-/// Forward iterator over operand stack values.
-pub(crate) struct OperandStackIter<'a> {
-  /// Inner iterator over the stack vector.
-  inner: std::slice::Iter<'a, Value>,
-  /// Reference to the register (top-of-stack).
-  register: Option<&'a Value>,
-  /// Whether the register has been emitted by the iterator.
-  register_emitted: bool,
-}
-
-impl<'a> Iterator for OperandStackIter<'a> {
-  type Item = &'a Value;
-
-  fn next(&mut self) -> Option<Self::Item> {
-    if let Some(value) = self.inner.next() {
-      Some(value)
-    } else if !self.register_emitted {
-      self.register_emitted = true;
-      self.register
-    } else {
-      None
-    }
-  }
-}
-
-/// Reverse iterator over operand stack values.
-pub(crate) struct OperandStackRevIter<'a> {
-  /// Inner reverse iterator over the stack vector.
-  inner: std::iter::Rev<std::slice::Iter<'a, Value>>,
-  /// Reference to the register (top-of-stack).
-  register: Option<&'a Value>,
-  /// Whether the register has been emitted by the iterator.
-  register_emitted: bool,
-}
-
-impl<'a> Iterator for OperandStackRevIter<'a> {
-  type Item = &'a Value;
-
-  fn next(&mut self) -> Option<Self::Item> {
-    if let Some(value) = self.inner.next() {
-      Some(value)
-    } else if !self.register_emitted {
-      self.register_emitted = true;
-      self.register
-    } else {
-      None
-    }
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Global background Tokio runtime (lazy, shared across all Vm instances)
 // ---------------------------------------------------------------------------
@@ -330,9 +149,6 @@ pub struct Vm {
   pub(super) chunk: Arc<Chunk>,
   /// Instruction pointer within the chunk.
   pub(super) ip: usize,
-  /// Operand stack for the currently executing frame. A suspended caller's
-  /// stack is saved in its `Frame` and restored when that frame resumes.
-  pub(super) stack: OperandStack,
   /// Local variables for the current frame.
   pub(super) locals: Vec<SharedValue>,
   /// Current `this` binding.
@@ -379,8 +195,8 @@ pub struct Vm {
   pub(super) bg_runtime: Arc<Runtime>,
   /// Exception-handler stack.
   pub(super) handlers: HandlerStack,
-  /// Flag set when a JS exception was unwound to a handler.
-  pub(super) pending_exception: bool,
+  /// Exception value unwound to the active handler but not yet loaded into r7.
+  pub(super) pending_exception: Option<Value>,
   /// Shared module loader for this realm, reused across VMs with the same globals.
   pub(super) module_loader: Rc<RefCell<ModuleLoader>>,
   /// Per-VM module table: vector indexed by module index, each mapping export name -> shared slot

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use std::borrow::Cow;
 
 use crate::value::{PropertyDescriptor, PropertyKey, Value};

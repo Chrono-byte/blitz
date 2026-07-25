@@ -1,6 +1,6 @@
 # Blitz
 
-This project is a combination Stack/Register based JavaScript VM. It is preferred to keep things operated upon. Always store state inside the VM, and operate upon it rather than mutating it directly.
+This project is a register based JavaScript VM. It is preferred to keep things operated upon. Always store state inside the VM, and operate upon it rather than mutating it directly.
 
 ## Engine, Runtime, and CLI Boundaries
 

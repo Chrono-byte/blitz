@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use std::cell::RefCell;
 use std::rc::Rc;
 

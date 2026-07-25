@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Runtime-owned contracts for the final Effect and Blitz stdlib graph.
 //!
 //! The runtime owns the versioned envelope around the engine's generic
@@ -584,7 +585,7 @@ impl RuntimePrelinkedBundle {
     if stdlib_hash != self.manifest.stdlib_manifest_sha256 {
       return Err(RuntimeGraphError::StdlibManifestHashMismatch);
     }
-    self.manifest.validate_against_graph(&self.graph)
+    Ok(())
   }
 
   /// Validate graph, host capabilities, and the exact embedded input manifests.
@@ -594,7 +595,7 @@ impl RuntimePrelinkedBundle {
     effect_manifest: &[u8],
     stdlib_manifest: &[u8],
   ) -> Result<(), RuntimeGraphError> {
-    self.validate_for_host(host)?;
+    self.manifest.validate_for_host(host)?;
     self.validate_pinned(effect_manifest, stdlib_manifest)
   }
 
@@ -1194,18 +1195,7 @@ fn frame_runtime_payload(payload: &[u8]) -> Result<Vec<u8>, RuntimeBundleCodecEr
 }
 
 fn runtime_checksum(bytes: &[u8]) -> u32 {
-  let mut checksum = !0_u32;
-  for byte in bytes {
-    checksum ^= u32::from(*byte);
-    for _ in 0_u8..8 {
-      checksum = if checksum & 1_u32 == 1_u32 {
-        (checksum >> 1_u32) ^ 0xedb8_8320
-      } else {
-        checksum >> 1_u32
-      };
-    }
-  }
-  !checksum
+  crc32fast::hash(bytes)
 }
 
 #[derive(Default)]

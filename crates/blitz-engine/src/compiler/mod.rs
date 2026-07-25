@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! AST-to-bytecode compiler.
 //!
 //! The compiler transforms parsed TypeScript/JavaScript AST into executable

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Deterministic wire encoding for host-neutral prelinked module graphs.
 //!
 //! This format is deliberately separate from [`crate::bytecode_bundle`]. It

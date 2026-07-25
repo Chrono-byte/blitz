@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Metadata for the pinned Effect and Blitz stdlib module graphs.
 //!
 //! Upstream Effect and Blitz stdlib files remain generated assets owned by the
@@ -69,7 +70,7 @@ pub fn declaration_source(specifier: &str) -> Option<&'static str> {
 /// The engine validates that each returned target belongs to the graph's
 /// public roots as part of the atomic registration call.
 #[must_use]
-pub(crate) fn public_declaration_sources() -> Vec<(String, String)> {
+pub fn public_declaration_sources() -> Vec<(String, String)> {
   EMBEDDED_EFFECT_MODULES
     .iter()
     .filter_map(|module| {

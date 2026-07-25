@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use crate::compiler;
 use crate::parser::Parser;
 use crate::runtime_utils;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! ECMAScript built-in implementations grouped by related functionality.
 
 pub(crate) mod array;

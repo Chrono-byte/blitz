@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Declaration phase compilation.
 //!
 //! This module handles the compilation of declarations including:

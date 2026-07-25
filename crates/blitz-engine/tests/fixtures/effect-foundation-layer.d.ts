@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 import type * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 export interface Layer<Out, Err = never, Req = never> {

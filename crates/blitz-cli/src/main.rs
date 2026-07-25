@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! CLI entry point for the full Blitz JavaScript runtime.
 //!
 //! This executable installs OS-facing host APIs such as `console` and
@@ -31,7 +32,7 @@
 use clap::{Args, Parser, Subcommand};
 use std::cell::RefCell;
 use std::env;
-use std::io::Read;
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::thread;
@@ -171,8 +172,12 @@ struct CheckArgs {
 /// Arguments for machine-readable editor analysis.
 struct AnalyzeArgs {
   /// Source file to analyze, or `-` to read source from standard input.
-  #[arg(value_name = "FILE")]
-  file: PathBuf,
+  #[arg(value_name = "FILE", required_unless_present = "server")]
+  file: Option<PathBuf>,
+
+  /// Serve newline-delimited analysis requests over stdin/stdout.
+  #[arg(long, action)]
+  server: bool,
 
   /// Filename used to select syntax and module semantics for standard input.
   #[arg(long, value_name = "PATH")]
@@ -324,6 +329,73 @@ fn run_typecheck(
   Ok(success)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
+enum AnalysisServerRequest {
+  Analyze {
+    id: u64,
+    path: PathBuf,
+    source: String,
+    #[serde(default)]
+    strict: bool,
+  },
+  Update {
+    path: PathBuf,
+    source: String,
+  },
+  Close {
+    path: PathBuf,
+  },
+}
+
+fn run_analysis_server(strict: bool) -> Result<(), blitz::errors::RuntimeError> {
+  let stdin = std::io::stdin();
+  let mut stdout = std::io::stdout().lock();
+  let mut project = blitz::analysis::AnalysisProject::with_module_declarations(
+    blitz_runtime::effect_assets::public_declaration_sources(),
+  );
+  for line in stdin.lock().lines() {
+    let line = line.map_err(|error| {
+      blitz::errors::RuntimeError::from(format!("Failed to read analysis request: {error}"))
+    })?;
+    if line.trim().is_empty() {
+      continue;
+    }
+    let response = match serde_json::from_str::<AnalysisServerRequest>(&line) {
+      Ok(AnalysisServerRequest::Analyze {
+        id,
+        path,
+        source,
+        strict: request_strict,
+      }) => {
+        let result = project.analyze_document(source, &path, strict || request_strict);
+        Some(serde_json::json!({ "id": id, "result": result }))
+      }
+      Ok(AnalysisServerRequest::Update { path, source }) => {
+        project.update_document(source, &path);
+        None
+      }
+      Ok(AnalysisServerRequest::Close { path }) => {
+        project.close_document(&path);
+        None
+      }
+      Err(error) => Some(serde_json::json!({ "id": null, "error": error.to_string() })),
+    };
+    if let Some(response) = response {
+      serde_json::to_writer(&mut stdout, &response).map_err(|error| {
+        blitz::errors::RuntimeError::from(format!("Failed to encode analysis response: {error}"))
+      })?;
+      stdout.write_all(b"\n").map_err(|error| {
+        blitz::errors::RuntimeError::from(format!("Failed to write analysis response: {error}"))
+      })?;
+      stdout.flush().map_err(|error| {
+        blitz::errors::RuntimeError::from(format!("Failed to flush analysis response: {error}"))
+      })?;
+    }
+  }
+  Ok(())
+}
+
 fn main() -> Result<(), blitz::errors::Error> {
   // Parse CLI early so clap can handle --help/--version before doing work.
   let cli = Cli::parse();
@@ -349,7 +421,14 @@ fn main() -> Result<(), blitz::errors::Error> {
       }
     }
     Some(CliCommand::Analyze(analyze)) => {
-      let source = if analyze.file == Path::new("-") {
+      if analyze.server {
+        run_analysis_server(analyze.strict)?;
+        return Ok(());
+      }
+      let file = analyze.file.as_deref().ok_or_else(|| {
+        blitz::errors::RuntimeError::from("Analyze requires a file unless --server is used")
+      })?;
+      let source = if file == Path::new("-") {
         let mut source = String::new();
         std::io::stdin()
           .read_to_string(&mut source)
@@ -358,14 +437,11 @@ fn main() -> Result<(), blitz::errors::Error> {
           })?;
         source
       } else {
-        std::fs::read_to_string(&analyze.file).map_err(|error| {
-          blitz::errors::RuntimeError::from(format!(
-            "Failed to read {}: {error}",
-            analyze.file.display()
-          ))
+        std::fs::read_to_string(file).map_err(|error| {
+          blitz::errors::RuntimeError::from(format!("Failed to read {}: {error}", file.display()))
         })?
       };
-      let path = analyze.path.as_deref().unwrap_or(&analyze.file);
+      let path = analyze.path.as_deref().unwrap_or(file);
       let result = blitz::analysis::analyze(&source, path, analyze.strict);
       println!(
         "{}",

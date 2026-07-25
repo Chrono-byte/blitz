@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Lexical analyzer for tokenizing TypeScript/JavaScript source.
 //!
 //! The lexer transforms raw source code into a stream of [`Token`] values for

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Deterministic binary serialization for committed bytecode bundles.
 //!
 //! The on-disk format is a small versioned envelope around a Postcard payload.

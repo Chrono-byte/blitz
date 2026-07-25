@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Errors that may cross the direct or JSON RPC boundary.
 
 use std::fmt;

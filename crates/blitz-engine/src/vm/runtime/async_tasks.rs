@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Async/microtask helpers and background runtime utilities.
 //!
 //! This module provides utilities the VM uses to schedule and run
@@ -260,7 +261,6 @@ impl Vm {
     let proto = Rc::clone(proto);
     let env = Rc::clone(env);
     let promise_for_job = Rc::clone(&promise);
-    let saved_stack = self.stack.snapshot();
     let caller_chunk = Arc::clone(&self.chunk);
     let caller_ip = self.ip;
     let caller_locals = self.locals.clone();
@@ -270,16 +270,13 @@ impl Vm {
     let caller_slot_types = self.current_slot_types.clone();
     let caller_frame_len = self.call_stack.len();
     let caller_handlers = std::mem::take(&mut self.handlers);
-    let thrown_value = self.stack.last().cloned();
 
     self.last_uncaught_exception = None;
     let exec_result = (|| {
       self.push_call_frame(&proto, &env, call_args, this_arg, callee.clone())?;
-      self.run_risc_loop(false).and_then(|value| {
-        self.stack.push(value);
-        self.execute_return()?;
-        self.pop()
-      })
+      self
+        .run_risc_loop(false)
+        .and_then(|value| self.execute_return(value))
     })();
     self.maybe_collect_garbage_prototype();
 
@@ -290,7 +287,6 @@ impl Vm {
     self.current_closure_env = caller_env;
     self.lexical_env = caller_lexical_env;
     self.current_slot_types = caller_slot_types;
-    self.stack.restore_from(saved_stack);
     self.call_stack.truncate(caller_frame_len);
     self.handlers = caller_handlers;
 
@@ -334,8 +330,9 @@ impl Vm {
             Rc::as_ptr(&promise_for_job)
           );
         }
-        let reason = thrown_value
-          .or_else(|| self.last_uncaught_exception.take())
+        let reason = self
+          .last_uncaught_exception
+          .take()
           .unwrap_or_else(|| Value::String(format!("{}", err)));
         let mut reason_cell = Some(reason);
         self.queue_microtask(move |vm| {

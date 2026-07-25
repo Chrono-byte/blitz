@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Compiler-only operations accepted by the AST emitter.
 //!
 //! Four operations model virtual-value lifetime/reordering and deliberately have

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Explicit virtual-value builder and RISC v2 encoder.
 
 use super::emit::FrontendOp as Op;
@@ -466,11 +467,14 @@ impl RiscBuilder {
         (instruction.op == Op::PushHandler)
           .then(|| instruction.branch_offset())
           .flatten()
-          .and_then(|offset| usize::try_from(ip as i64 + 1 + offset as i64).ok()).zip(builder
+          .and_then(|offset| usize::try_from(ip as i64 + 1 + offset as i64).ok())
+          .zip(
+            builder
               .branch_values
               .get(&ip)
               .and_then(|values| values.last())
-              .copied())
+              .copied(),
+          )
       })
       .collect();
 

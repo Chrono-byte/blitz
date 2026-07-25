@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Optional runtime tracing for debugging VM execution.
 //!
 //! Tracing provides diagnostic output to help debug parsing, compilation, and

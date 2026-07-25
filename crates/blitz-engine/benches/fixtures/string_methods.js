@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 var total = 0;
 var s = "héllo world";
 for (var i = 0; i < 30000; i = i + 1) {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Module loading and evaluation.
 //!
 //! Conformance notes and known deviations from ECMA-262

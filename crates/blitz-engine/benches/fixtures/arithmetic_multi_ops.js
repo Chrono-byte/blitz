@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 var sum = 0;
 var prod = 1;
 for (var i = 1; i < 1000; i = i + 1) {

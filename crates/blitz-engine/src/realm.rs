@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! ECMAScript Realm implementation.
 //!
 //! A Realm holds the set of intrinsic objects and the global object associated

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use super::*;
 use crate::ecmascript::semantics::atomics as semantics_atomics;
 

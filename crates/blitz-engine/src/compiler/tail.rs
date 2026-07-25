@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use super::emit::FrontendOp as Op;
 use crate::value::Value;
 use oxc_ast::ast as oast;

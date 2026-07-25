@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 const nickname = "Alice";
 const url = process.env.BLITZ_CHAT_URL || "ws://127.0.0.1:8000/chat";
 const socket = new WebSocket(url);

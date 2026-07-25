@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 function outerScope() {
   var x = 1;
   var y = 2;

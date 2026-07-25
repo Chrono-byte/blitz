@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";

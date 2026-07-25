@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Primitive wrapper builtins for Number and BigInt.
 
 use std::cell::RefCell;

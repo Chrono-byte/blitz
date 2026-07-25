@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 var arr2 = [];
 for (var i = 0; i < 100; i = i + 1) {
   arr2[i] = i;

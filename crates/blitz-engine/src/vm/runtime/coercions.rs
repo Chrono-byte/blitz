@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use crate::errors::RuntimeError;
 use crate::value::Value;
 use crate::vm::Vm;

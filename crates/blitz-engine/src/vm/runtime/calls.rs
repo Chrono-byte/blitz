@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use crate::bytecode::FunctionProto;
 use crate::ecmascript::semantics::properties::own_property_descriptor;
 use crate::environment::EnvironmentRecord;
@@ -369,9 +370,6 @@ impl Vm {
           callee.type_name()
         );
         crate::trace::value_string("[trace]   callee", callee);
-        for (i, v) in self.stack.iter_rev().take(6).enumerate() {
-          crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
-        }
         // Dump a small window of bytecode around the current ip to help
         // correlate the failing instruction with constants and nearby ops.
         let cur_ip = self.ip.saturating_sub(1);
@@ -915,16 +913,6 @@ impl Vm {
           } else if proto.is_async {
             self.invoke_async_closure(proto, &closure_env, call_args, this_arg, callee)
           } else {
-            let stack_base = self.stack.len();
-            let saved_stack = self.stack.snapshot();
-            if crate::trace::enabled() {
-              eprintln!(
-                "[trace] call_with_this closure stack_base={} stack_len={} proto='{}'",
-                stack_base,
-                self.stack.len(),
-                proto.name
-              );
-            }
             let caller_chunk = Arc::clone(&self.chunk);
             let caller_ip = self.ip;
             let caller_locals = self.locals.clone();
@@ -935,12 +923,10 @@ impl Vm {
             let caller_frame_len = self.call_stack.len();
             let caller_handler_len = self.handlers.len();
             self.push_call_frame(proto, &closure_env, call_args, this_arg, callee.clone())?;
-            let result = self.run_risc_loop(false).and_then(|value| {
-              self.stack.push(value);
-              self.execute_return()?;
-              self.pop()
-            });
-            if result.is_ok() || !self.pending_exception {
+            let result = self
+              .run_risc_loop(false)
+              .and_then(|value| self.execute_return(value));
+            if result.is_ok() || self.pending_exception.is_none() {
               // Restore the suspended caller state after the callee returns.
               self.chunk = caller_chunk;
               self.ip = caller_ip;
@@ -948,7 +934,6 @@ impl Vm {
               self.this_value = caller_this;
               self.current_closure_env = caller_env;
               self.current_slot_types = caller_slot_types;
-              self.stack.restore_from(saved_stack);
               self.call_stack.truncate(caller_frame_len);
               self.current_strict_mode = caller_strict_mode;
               self.handlers.truncate(caller_handler_len);
@@ -961,9 +946,6 @@ impl Vm {
             eprintln!("[trace] call_with_this: callee not callable (final fallback)");
             crate::trace::value_string("[trace]   callee", callee);
             crate::trace::value_string("[trace]   this_arg", this_arg);
-            for (i, v) in self.stack.iter_rev().take(8).enumerate() {
-              crate::trace::value_string(&format!("[trace]   stack[{}]", i), v);
-            }
           }
           self.dump_diag("CallWithThis failed: callee not callable", callee);
           Err(self.throw_type_error(&format!("{} is not a function", callee.type_name())))
@@ -1055,7 +1037,7 @@ impl Vm {
     Ok(fixed)
   }
 
-  /// Configures the call frame for a function call, setting up the stack and local variables.
+  /// Configures the call frame and local variables for a function call.
   #[allow(clippy::too_many_lines)]
   pub(super) fn configure_call_frame(
     &mut self,
@@ -1082,7 +1064,6 @@ impl Vm {
 
     self.chunk = Arc::clone(&proto.chunk);
     self.ip = 0;
-    self.stack.clear();
     self.current_closure_env = Some(Rc::clone(closure_env));
     self.current_slot_types = Some(proto.slot_types.clone());
     self.current_slot_names = Some(proto.slot_names.clone());
@@ -1243,24 +1224,11 @@ impl Vm {
     this_value: Value,
     callee: Value,
   ) -> Result<(), RuntimeError> {
-    let caller_stack = self.stack.take_all();
-    let stack_base = caller_stack.len();
     let caller_strict_mode = self.current_strict_mode;
-
-    if crate::trace::enabled() {
-      eprintln!(
-        "[trace] push_call_frame stack_base={} proto='{}' arity={} stack_len={}",
-        stack_base,
-        proto.name,
-        proto.arity,
-        self.stack.len()
-      );
-    }
 
     self.call_stack.push(Frame {
       chunk: Arc::clone(&self.chunk),
       ip: self.ip,
-      stack: caller_stack,
       locals: std::mem::replace(
         &mut self.locals,
         Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
@@ -1277,7 +1245,6 @@ impl Vm {
       slot_names: self.current_slot_names.take(),
       slot_immutable: self.current_slot_immutable.take(),
       slot_sloppy_immutable_silent: self.current_slot_sloppy_immutable_silent.take(),
-      stack_base,
       is_strict: caller_strict_mode,
       lexical_env: Rc::clone(&self.lexical_env),
       yield_star_state: self.yield_star_state.take(),

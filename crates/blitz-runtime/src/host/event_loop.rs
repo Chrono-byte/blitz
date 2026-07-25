@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! VM-thread event delivery and resource liveness primitives.
 //!
 //! Host tasks may produce owned events, but they must not retain or mutate VM

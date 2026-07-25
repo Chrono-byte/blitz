@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::runtime_utils::{array_length_descriptor, usize_to_f64};

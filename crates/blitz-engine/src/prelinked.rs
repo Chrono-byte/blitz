@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Host-neutral metadata for parser-free, prelinked ECMAScript module graphs.
 //!
 //! The types in this module contain only portable graph metadata and sendable

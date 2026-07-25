@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Host capabilities and application primitives for the Blitz runtime.
 
 pub mod app;

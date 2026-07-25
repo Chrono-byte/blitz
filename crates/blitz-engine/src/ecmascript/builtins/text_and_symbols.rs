@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Text and symbol builtin functions and prototype methods
 
 use std::borrow::Cow;

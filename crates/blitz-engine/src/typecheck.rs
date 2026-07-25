@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Static type checker for TypeScript/JavaScript programs.
 //!
 //! This module performs compile-time type checking before bytecode generation.
@@ -14,6 +15,7 @@
 
 use crate::errors::TypeCheckerError;
 use oxc_ast::ast as oast;
+use oxc_span::GetSpan;
 
 // Keep the engine's shared type metadata in this module so compiler and bundle
 // code can use the same conservative representation as the checker.
@@ -269,6 +271,26 @@ pub struct VirtualDeclaration {
   pub source: String,
 }
 
+/// The kind of annotation represented by a compiler inlay hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeInlayHintKind {
+  /// A type annotation inferred for a binding or callback parameter.
+  Type,
+  /// A parameter name inferred from the selected call signature.
+  Parameter,
+}
+
+/// A compiler-inferred annotation suitable for an editor inlay hint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeInlayHint {
+  /// UTF-8 byte position where the hint is inserted.
+  pub position: usize,
+  /// TypeScript annotation text, including the leading colon.
+  pub label: String,
+  /// Whether this is a type annotation or a parameter name.
+  pub kind: TypeInlayHintKind,
+}
+
 /// Check a program against declarations retained by public virtual modules.
 pub fn check_with_declarations(
   program: &oast::Program<'_>,
@@ -290,6 +312,16 @@ pub fn check_with_declarations_and_source_imports(
   declarations: &[VirtualDeclaration],
   source_imports: &[String],
 ) -> Result<(), TypeCheckerError> {
+  check_and_inlay_hints_with_declarations(program, declarations, source_imports).0
+}
+
+/// Check a program and retain contextual parameter types inferred by the compiler.
+#[must_use]
+pub fn check_and_inlay_hints_with_declarations(
+  program: &oast::Program<'_>,
+  declarations: &[VirtualDeclaration],
+  source_imports: &[String],
+) -> (Result<(), TypeCheckerError>, Vec<TypeInlayHint>) {
   let mut ctx = TypeContext {
     scopes: vec![Scope::new()],
     named_types: HashMap::new(),
@@ -298,12 +330,21 @@ pub fn check_with_declarations_and_source_imports(
     source_imports: source_imports.iter().cloned().collect(),
     check_imports: !declarations.is_empty() || !source_imports.is_empty(),
     expected_returns: Vec::new(),
+    return_types: Vec::new(),
+    inlay_hints: Vec::new(),
+    function_parameter_metadata: HashMap::new(),
   };
 
   // Runtime globals with stable, useful surface types.
   ctx
     .scope_mut()
     .insert("undefined".to_string(), Type::Undefined);
+  ctx
+    .scope_mut()
+    .insert("NaN".to_string(), Type::Number);
+  ctx
+    .scope_mut()
+    .insert("Infinity".to_string(), Type::Number);
   ctx.scope_mut().insert(
     "isNaN".to_string(),
     Type::Function(vec![Type::Number], Box::new(Type::Boolean)),
@@ -320,6 +361,17 @@ pub fn check_with_declarations_and_source_imports(
     "parseFloat".to_string(),
     Type::Function(vec![Type::String], Box::new(Type::Number)),
   );
+  for name in [
+    "decodeURI",
+    "decodeURIComponent",
+    "encodeURI",
+    "encodeURIComponent",
+    "eval",
+  ] {
+    ctx
+      .scope_mut()
+      .insert(name.to_string(), Type::Any);
+  }
   ctx.scope_mut().insert(
     "console".to_string(),
     Type::Object(HashMap::from([(
@@ -330,17 +382,61 @@ pub fn check_with_declarations_and_source_imports(
   ctx
     .scope_mut()
     .insert("process".to_string(), Type::Any);
-
-  ctx.register_declarations_sources(declarations)?;
-
-  for stmt in &program.body {
-    ctx.register_declarations(stmt)?;
+  for name in [
+    "Array",
+    "ArrayBuffer",
+    "Boolean",
+    "Date",
+    "Error",
+    "EvalError",
+    "Function",
+    "JSON",
+    "Map",
+    "Math",
+    "Number",
+    "Object",
+    "Promise",
+    "Proxy",
+    "RangeError",
+    "ReferenceError",
+    "Reflect",
+    "RegExp",
+    "Set",
+    "String",
+    "Symbol",
+    "SyntaxError",
+    "TypeError",
+    "URIError",
+    "WeakMap",
+    "WeakSet",
+  ] {
+    ctx
+      .scope_mut()
+      .insert(name.to_string(), Type::Any);
   }
 
-  for stmt in &program.body {
-    ctx.check_statement_oast(stmt)?;
-  }
-  Ok(())
+  let result = (|| {
+    ctx.register_declarations_sources(declarations)?;
+
+    for stmt in &program.body {
+      ctx.register_declarations(stmt)?;
+    }
+
+    for stmt in &program.body {
+      ctx.check_statement_oast(stmt)?;
+    }
+    Ok(())
+  })();
+  ctx.inlay_hints.sort_by(|left, right| {
+    left
+      .position
+      .cmp(&right.position)
+      .then_with(|| left.label.cmp(&right.label))
+  });
+  ctx
+    .inlay_hints
+    .dedup_by(|left, right| left.position == right.position && left.label == right.label);
+  (result, ctx.inlay_hints)
 }
 
 struct TypeContext {
@@ -351,6 +447,22 @@ struct TypeContext {
   source_imports: HashSet<String>,
   check_imports: bool,
   expected_returns: Vec<Type>,
+  return_types: Vec<Vec<Type>>,
+  inlay_hints: Vec<TypeInlayHint>,
+  /// Parameter names are kept beside `Type::Function` rather than inside it.
+  ///
+  /// `Type::Function` is also encoded by the bytecode bundle, so adding names
+  /// to that enum would require a format migration. This sidecar intentionally
+  /// has conservative limits: names survive ordinary declaration, method, and
+  /// function-type construction, but two overloads with identical type text
+  /// cannot be distinguished by metadata alone.
+  function_parameter_metadata: HashMap<String, FunctionParameterMetadata>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FunctionParameterMetadata {
+  names: Vec<Option<String>>,
+  rest_index: Option<usize>,
 }
 
 struct ParsedDeclaration {
@@ -638,15 +750,14 @@ impl TypeContext {
         .values
         .into_iter()
         .map(|(name, typ)| {
-          (
-            name,
-            qualify_type(
-              &declaration.specifier,
-              &local_type_names,
-              &HashSet::new(),
-              &typ,
-            ),
-          )
+          let qualified = qualify_type(
+            &declaration.specifier,
+            &local_type_names,
+            &HashSet::new(),
+            &typ,
+          );
+          self.copy_function_parameter_metadata(&typ, &qualified);
+          (name, qualified)
         })
         .collect::<HashMap<_, _>>();
       let mut public_values = qualified_values
@@ -897,12 +1008,7 @@ impl TypeContext {
               "unsupported declaration binding pattern",
             ));
           };
-          let typ = declarator
-            .type_annotation
-            .as_deref()
-            .map(convert_type_ann)
-            .transpose()?
-            .unwrap_or(Type::Unknown);
+          let typ = self.annotated_type(declarator.type_annotation.as_deref(), Type::Unknown)?;
           module
             .values
             .insert(identifier.name.to_string(), typ);
@@ -947,12 +1053,7 @@ impl TypeContext {
               "unsupported declaration binding pattern",
             ));
           };
-          let typ = declarator
-            .type_annotation
-            .as_deref()
-            .map(convert_type_ann)
-            .transpose()?
-            .unwrap_or(Type::Unknown);
+          let typ = self.annotated_type(declarator.type_annotation.as_deref(), Type::Unknown)?;
           module
             .values
             .insert(identifier.name.to_string(), typ);
@@ -1022,19 +1123,18 @@ impl TypeContext {
               "unsupported variable binding pattern",
             ));
           };
-          let typ = declarator
-            .type_annotation
-            .as_deref()
-            .map(convert_type_ann)
-            .transpose()?
-            .unwrap_or(Type::Unknown);
+          let typ = self.annotated_type(declarator.type_annotation.as_deref(), Type::Unknown)?;
           self
             .scope_mut()
             .insert(identifier.name.to_string(), typ);
         }
       }
-      oast::Statement::ImportDeclaration(import) if self.check_imports => {
-        self.register_import(import)?;
+      oast::Statement::ImportDeclaration(import) => {
+        if self.check_imports {
+          self.register_import(import)?;
+        } else {
+          self.register_source_import(import, Type::Any);
+        }
       }
       oast::Statement::ExportNamedDeclaration(export) => {
         if let Some(declaration) = &export.declaration {
@@ -1049,6 +1149,7 @@ impl TypeContext {
   fn register_source_import(
     &mut self,
     import: &oast::ImportDeclaration<'_>,
+    fallback: Type,
   ) {
     let Some(specifiers) = &import.specifiers else {
       return;
@@ -1058,22 +1159,22 @@ impl TypeContext {
         oast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
           self
             .scope_mut()
-            .insert(namespace.local.name.to_string(), Type::Unknown);
+            .insert(namespace.local.name.to_string(), fallback.clone());
         }
         oast::ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
           self
             .scope_mut()
-            .insert(default.local.name.to_string(), Type::Unknown);
+            .insert(default.local.name.to_string(), fallback.clone());
         }
         oast::ImportDeclarationSpecifier::ImportSpecifier(named) => {
           self
             .scope_mut()
-            .insert(named.local.name.to_string(), Type::Unknown);
+            .insert(named.local.name.to_string(), fallback.clone());
           self.named_types.insert(
             named.local.name.to_string(),
             TypeDefinition {
               parameters: Vec::new(),
-              body: Type::Unknown,
+              body: fallback.clone(),
             },
           );
         }
@@ -1088,7 +1189,7 @@ impl TypeContext {
     let source = import.source.value.as_str();
     let Some(module) = self.modules.get(source).cloned() else {
       if self.source_imports.contains(source) {
-        self.register_source_import(import);
+        self.register_source_import(import, Type::Unknown);
         return Ok(());
       }
       return Err(TypeCheckerError::from(format!(
@@ -1174,12 +1275,7 @@ impl TypeContext {
               "unsupported variable binding pattern",
             ));
           };
-          let typ = declarator
-            .type_annotation
-            .as_deref()
-            .map(convert_type_ann)
-            .transpose()?
-            .unwrap_or(Type::Unknown);
+          let typ = self.annotated_type(declarator.type_annotation.as_deref(), Type::Unknown)?;
           self
             .scope_mut()
             .insert(identifier.name.to_string(), typ);
@@ -1191,7 +1287,7 @@ impl TypeContext {
   }
 
   fn interface_type(
-    &self,
+    &mut self,
     interface: &oast::TSInterfaceDeclaration<'_>,
   ) -> Result<Type, TypeCheckerError> {
     let mut properties = HashMap::new();
@@ -1225,7 +1321,9 @@ impl TypeContext {
           }
         }
         oast::TSSignature::TSCallSignatureDeclaration(call) => {
-          call_signatures.push(function_type_from_call_signature(call)?);
+          let typ = function_type_from_call_signature(call)?;
+          self.record_function_parameter_metadata(&typ, &call.params);
+          call_signatures.push(typ);
         }
         _ => {}
       }
@@ -1240,7 +1338,7 @@ impl TypeContext {
   }
 
   fn function_type(
-    &self,
+    &mut self,
     params: &oast::FormalParameters<'_>,
     return_type: Option<&oast::TSTypeAnnotation<'_>>,
   ) -> Result<Type, TypeCheckerError> {
@@ -1269,7 +1367,124 @@ impl TypeContext {
       .map(convert_type_ann)
       .transpose()?
       .unwrap_or(Type::Any);
-    Ok(Type::Function(parameter_types, Box::new(return_type)))
+    let typ = Type::Function(parameter_types, Box::new(return_type));
+    self.record_function_parameter_metadata(&typ, params);
+    Ok(typ)
+  }
+
+  fn record_function_parameter_metadata(
+    &mut self,
+    typ: &Type,
+    params: &oast::FormalParameters<'_>,
+  ) {
+    let names = params
+      .items
+      .iter()
+      .map(|parameter| binding_parameter_name(&parameter.pattern))
+      .chain(
+        params
+          .rest
+          .as_ref()
+          .map(|rest| binding_parameter_name(&rest.rest.argument)),
+      )
+      .collect();
+    self.function_parameter_metadata.insert(
+      type_to_string(typ),
+      FunctionParameterMetadata {
+        names,
+        rest_index: params.rest.as_ref().map(|_| params.items.len()),
+      },
+    );
+  }
+
+  fn function_parameter_metadata(
+    &self,
+    typ: &Type,
+  ) -> Option<&FunctionParameterMetadata> {
+    self
+      .function_parameter_metadata
+      .get(&type_to_string(typ))
+  }
+
+  fn annotated_type(
+    &mut self,
+    annotation: Option<&oast::TSTypeAnnotation<'_>>,
+    fallback: Type,
+  ) -> Result<Type, TypeCheckerError> {
+    let Some(annotation) = annotation else {
+      return Ok(fallback);
+    };
+    let typ = convert_type_ann(annotation)?;
+    self.record_type_annotation_metadata(&annotation.type_annotation, &typ);
+    Ok(typ)
+  }
+
+  fn record_type_annotation_metadata(
+    &mut self,
+    annotation: &oast::TSType<'_>,
+    typ: &Type,
+  ) {
+    match (annotation, typ) {
+      (oast::TSType::TSFunctionType(function), Type::Function(..)) => {
+        self.record_function_parameter_metadata(typ, &function.params);
+      }
+      (oast::TSType::TSParenthesizedType(parenthesized), typ) => {
+        self.record_type_annotation_metadata(&parenthesized.type_annotation, typ);
+      }
+      (oast::TSType::TSUnionType(union), Type::Union(types)) => {
+        for (annotation, typ) in union.types.iter().zip(types) {
+          self.record_type_annotation_metadata(annotation, typ);
+        }
+      }
+      (oast::TSType::TSIntersectionType(intersection), Type::Intersection(types)) => {
+        for (annotation, typ) in intersection.types.iter().zip(types) {
+          self.record_type_annotation_metadata(annotation, typ);
+        }
+      }
+      _ => {}
+    }
+  }
+
+  fn copy_function_parameter_metadata(
+    &mut self,
+    source: &Type,
+    target: &Type,
+  ) {
+    if let Some(metadata) = self
+      .function_parameter_metadata
+      .get(&type_to_string(source))
+      .cloned()
+    {
+      self
+        .function_parameter_metadata
+        .insert(type_to_string(target), metadata);
+    }
+    match (source, target) {
+      (Type::Array(source), Type::Array(target)) | (Type::Rest(source), Type::Rest(target)) => {
+        self.copy_function_parameter_metadata(source, target);
+      }
+      (Type::Tuple(source), Type::Tuple(target))
+      | (Type::Union(source), Type::Union(target))
+      | (Type::Intersection(source), Type::Intersection(target)) => {
+        for (source, target) in source.iter().zip(target) {
+          self.copy_function_parameter_metadata(source, target);
+        }
+      }
+      (Type::Object(source), Type::Object(target)) => {
+        for (name, source) in source {
+          if let Some(target) = target.get(name) {
+            self.copy_function_parameter_metadata(source, target);
+          }
+        }
+      }
+      (Type::Function(source, source_return), Type::Function(target, target_return)) => {
+        for (source, target) in source.iter().zip(target) {
+          self.copy_function_parameter_metadata(source, target);
+        }
+        self.copy_function_parameter_metadata(source_return, target_return);
+      }
+      _ => {}
+    }
   }
 
   fn resolve_type(
@@ -1336,8 +1551,9 @@ impl TypeContext {
             .get(index)
             .cloned()
             .or_else(|| parameter.default.clone());
-          let argument = argument
-            .map_or(Type::Unknown, |typ| self.resolve_type_with_environment(&typ, environment, depth + 1));
+          let argument = argument.map_or(Type::Unknown, |typ| {
+            self.resolve_type_with_environment(&typ, environment, depth + 1)
+          });
           if let Some(constraint) = &parameter.constraint {
             let constraint =
               self.resolve_type_with_environment(constraint, &definition_environment, depth + 1);
@@ -1640,6 +1856,18 @@ impl TypeContext {
         .or_else(|| initializer_type.clone())
         .unwrap_or(Type::Any);
 
+      if declarator.type_annotation.is_none()
+        && declarator.init.is_some()
+        && let Some(initializer_type) = initializer_type.as_ref()
+        && let Some(initializer_type) = self.safe_inlay_type(initializer_type)
+      {
+        self.inlay_hints.push(TypeInlayHint {
+          position: identifier_span_end(&declarator.id),
+          label: format!(": {}", type_to_string(&initializer_type)),
+          kind: TypeInlayHintKind::Type,
+        });
+      }
+
       if let (Some(expected), Some(actual)) = (&declared_type, &initializer_type)
         && !self.is_assignable(expected, actual)
       {
@@ -1658,19 +1886,65 @@ impl TypeContext {
   fn check_function(
     &mut self,
     function: &oast::Function<'_>,
-  ) -> Result<(), TypeCheckerError> {
-    let return_type = function
-      .return_type
-      .as_deref()
-      .map(convert_type_ann)
-      .transpose()?
-      .unwrap_or(Type::Any);
+  ) -> Result<Type, TypeCheckerError> {
     let Some(body) = &function.body else {
-      return Ok(());
+      return self.function_type(&function.params, function.return_type.as_deref());
     };
 
+    self.check_function_body(
+      &function.params,
+      body,
+      function.return_type.as_deref(),
+      function.r#async || function.generator,
+      function.params.span.end as usize,
+      None,
+    )
+  }
+
+  fn check_arrow_function(
+    &mut self,
+    function: &oast::ArrowFunctionExpression<'_>,
+  ) -> Result<Type, TypeCheckerError> {
+    let hint_checkpoint = self.inlay_hints.len();
+    let implicit_return = if function.expression {
+      match function.body.statements.as_slice() {
+        [oast::Statement::ExpressionStatement(statement)] => Some(&statement.expression),
+        _ => None,
+      }
+    } else {
+      None
+    };
+    match self.check_function_body(
+      &function.params,
+      &function.body,
+      function.return_type.as_deref(),
+      function.r#async,
+      function.params.span.end as usize,
+      implicit_return,
+    ) {
+      Ok(typ) => Ok(typ),
+      Err(_) => {
+        self.inlay_hints.truncate(hint_checkpoint);
+        self.function_type(&function.params, function.return_type.as_deref())
+      }
+    }
+  }
+
+  fn check_function_body(
+    &mut self,
+    params: &oast::FormalParameters<'_>,
+    body: &oast::FunctionBody<'_>,
+    explicit_return_type: Option<&oast::TSTypeAnnotation<'_>>,
+    async_or_generator: bool,
+    return_hint_position: usize,
+    implicit_return: Option<&oast::Expression<'_>>,
+  ) -> Result<Type, TypeCheckerError> {
+    let explicit_return_type = explicit_return_type
+      .map(convert_type_ann)
+      .transpose()?;
+
     if strict_mode() {
-      for parameter in &function.params.items {
+      for parameter in &params.items {
         if parameter.type_annotation.is_none()
           && let oast::BindingPattern::BindingIdentifier(identifier) = &parameter.pattern
         {
@@ -1683,7 +1957,7 @@ impl TypeContext {
     }
 
     self.scopes.push(Scope::new());
-    for parameter in &function.params.items {
+    for parameter in &params.items {
       if let oast::BindingPattern::BindingIdentifier(identifier) = &parameter.pattern {
         let typ = parameter
           .type_annotation
@@ -1696,7 +1970,7 @@ impl TypeContext {
           .insert(identifier.name.to_string(), typ);
       }
     }
-    if let Some(rest) = &function.params.rest
+    if let Some(rest) = &params.rest
       && let oast::BindingPattern::BindingIdentifier(identifier) = &rest.rest.argument
     {
       let typ = rest
@@ -1709,14 +1983,118 @@ impl TypeContext {
         .scope_mut()
         .insert(identifier.name.to_string(), typ);
     }
-    self.expected_returns.push(return_type);
-    let result = body
-      .statements
-      .iter()
-      .try_for_each(|statement| self.check_statement_oast(statement));
+    self
+      .expected_returns
+      .push(explicit_return_type.clone().unwrap_or(Type::Any));
+    self.return_types.push(Vec::new());
+    let result = if let Some(expression) = implicit_return {
+      self.type_of_expr_oast(expression).map(|typ| {
+        self
+          .return_types
+          .last_mut()
+          .expect("return type stack is empty")
+          .push(typ);
+      })
+    } else {
+      body
+        .statements
+        .iter()
+        .try_for_each(|statement| self.check_statement_oast(statement))
+    };
+    let inferred_returns = self
+      .return_types
+      .pop()
+      .expect("return type stack is empty");
     self.expected_returns.pop();
     self.scopes.pop();
-    result
+
+    result?;
+    let inferred_return_type = if explicit_return_type.is_none() && !async_or_generator {
+      self.infer_simple_return_type(body, implicit_return, &inferred_returns)
+    } else {
+      None
+    };
+    if let Some(return_type) = inferred_return_type.as_ref() {
+      self.inlay_hints.push(TypeInlayHint {
+        position: return_hint_position,
+        label: format!(": {}", type_to_string(return_type)),
+        kind: TypeInlayHintKind::Type,
+      });
+    }
+    let typ = Type::Function(
+      self.parameter_types(params)?,
+      Box::new(
+        explicit_return_type
+          .or(inferred_return_type)
+          .unwrap_or(Type::Any),
+      ),
+    );
+    self.record_function_parameter_metadata(&typ, params);
+    Ok(typ)
+  }
+
+  fn parameter_types(
+    &self,
+    params: &oast::FormalParameters<'_>,
+  ) -> Result<Vec<Type>, TypeCheckerError> {
+    let mut parameter_types = Vec::new();
+    for parameter in &params.items {
+      parameter_types.push(
+        parameter
+          .type_annotation
+          .as_deref()
+          .map(convert_type_ann)
+          .transpose()?
+          .unwrap_or(Type::Any),
+      );
+    }
+    if let Some(rest) = &params.rest {
+      parameter_types.push(
+        rest
+          .type_annotation
+          .as_deref()
+          .map(convert_type_ann)
+          .transpose()?
+          .unwrap_or(Type::Any),
+      );
+    }
+    Ok(parameter_types)
+  }
+
+  fn infer_simple_return_type(
+    &self,
+    body: &oast::FunctionBody<'_>,
+    implicit_return: Option<&oast::Expression<'_>>,
+    returns: &[Type],
+  ) -> Option<Type> {
+    let simple_body = implicit_return.is_some()
+      || body.statements.is_empty()
+      || (body
+        .statements
+        .last()
+        .is_some_and(|statement| matches!(statement, oast::Statement::ReturnStatement(_)))
+        && body.statements[..body.statements.len().saturating_sub(1)]
+          .iter()
+          .all(|statement| matches!(statement, oast::Statement::VariableDeclaration(_))));
+    if !simple_body {
+      return None;
+    }
+    let inferred = returns.first().cloned().unwrap_or(Type::Void);
+    if returns.len() > 1 {
+      return None;
+    }
+    self.safe_inlay_type(&widen_literal(inferred))
+  }
+
+  fn safe_inlay_type(
+    &self,
+    typ: &Type,
+  ) -> Option<Type> {
+    let typ = self.resolve_type(typ);
+    if !is_supported_inlay_type(&typ) {
+      return None;
+    }
+    Some(typ)
   }
 
   fn check_exported_declaration(
@@ -1725,7 +2103,7 @@ impl TypeContext {
   ) -> Result<(), TypeCheckerError> {
     match declaration {
       oast::Declaration::VariableDeclaration(variable) => self.check_variable_declaration(variable),
-      oast::Declaration::FunctionDeclaration(function) => self.check_function(function),
+      oast::Declaration::FunctionDeclaration(function) => self.check_function(function).map(|_| ()),
       _ => Ok(()),
     }
   }
@@ -1743,7 +2121,9 @@ impl TypeContext {
     use oast::Statement as OStmt;
     match stmt {
       OStmt::VariableDeclaration(variable) => self.check_variable_declaration(variable)?,
-      OStmt::FunctionDeclaration(function) => self.check_function(function)?,
+      OStmt::FunctionDeclaration(function) => {
+        self.check_function(function)?;
+      }
       OStmt::ExportNamedDeclaration(export) => {
         if let Some(declaration) = &export.declaration {
           self.check_exported_declaration(declaration)?;
@@ -1788,10 +2168,166 @@ impl TypeContext {
             type_to_string(expected)
           )));
         }
+        if let Some(returns) = self.return_types.last_mut() {
+          returns.push(actual);
+        }
       }
       _ => {}
     }
     Ok(())
+  }
+
+  fn type_of_expr_with_context(
+    &mut self,
+    expression: &oast::Expression<'_>,
+    expected: &Type,
+  ) -> Result<Type, TypeCheckerError> {
+    let expected = self.resolve_type(expected);
+    match (expression, &expected) {
+      (
+        oast::Expression::ArrowFunctionExpression(function),
+        Type::Function(parameters, return_type),
+      ) => {
+        self.scopes.push(Scope::new());
+        for (index, parameter) in function.params.items.iter().enumerate() {
+          let typ = parameters
+            .get(index)
+            .cloned()
+            .unwrap_or(Type::Any);
+          if let oast::BindingPattern::BindingIdentifier(identifier) = &parameter.pattern {
+            if parameter.type_annotation.is_none()
+              && !matches!(typ, Type::Any | Type::Unknown | Type::Never)
+            {
+              self.inlay_hints.push(TypeInlayHint {
+                position: identifier.span.end as usize,
+                label: format!(": {}", type_to_string(&typ)),
+                kind: TypeInlayHintKind::Type,
+              });
+            }
+            self
+              .scope_mut()
+              .insert(identifier.name.to_string(), typ);
+          }
+        }
+        self.scopes.pop();
+        Ok(Type::Function(parameters.clone(), return_type.clone()))
+      }
+      (oast::Expression::ObjectExpression(object), Type::Object(expected_properties)) => {
+        let mut properties = HashMap::new();
+        for property in &object.properties {
+          let oast::ObjectPropertyKind::ObjectProperty(property) = property else {
+            continue;
+          };
+          let name = match &property.key {
+            oast::PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str()),
+            oast::PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
+            _ => None,
+          };
+          let typ =
+            if let Some(expected_property) = name.and_then(|name| expected_properties.get(name)) {
+              self.type_of_expr_with_context(&property.value, expected_property)?
+            } else {
+              self.type_of_expr_oast(&property.value)?
+            };
+          if let Some(name) = name {
+            properties.insert(name.to_string(), typ);
+          }
+        }
+        Ok(Type::Object(properties))
+      }
+      _ => self.type_of_expr_oast(expression),
+    }
+  }
+
+  fn generic_pattern(
+    &self,
+    typ: &Type,
+    environment: &TypeEnvironment,
+    depth: usize,
+  ) -> Type {
+    if depth >= TYPE_EVALUATION_LIMIT {
+      return typ.clone();
+    }
+    match typ {
+      Type::TypeReference { name, arguments } => {
+        if let Some(bound) = environment.get(name) {
+          return self.generic_pattern(bound, environment, depth + 1);
+        }
+        let definition = self
+          .namespace_types
+          .get(name)
+          .or_else(|| self.named_types.get(name));
+        if let Some(definition) = definition {
+          let mut definition_environment = environment.clone();
+          for (index, parameter) in definition.parameters.iter().enumerate() {
+            if let Some(argument) = arguments
+              .get(index)
+              .or_else(|| parameter.default.as_ref())
+            {
+              definition_environment.insert(
+                parameter.name.clone(),
+                self.generic_pattern(argument, environment, depth + 1),
+              );
+            }
+          }
+          return self.generic_pattern(&definition.body, &definition_environment, depth + 1);
+        }
+        Type::TypeReference {
+          name: name.clone(),
+          arguments: arguments
+            .iter()
+            .map(|argument| self.generic_pattern(argument, environment, depth + 1))
+            .collect(),
+        }
+      }
+      Type::Array(element) => Type::Array(Box::new(self.generic_pattern(
+        element,
+        environment,
+        depth + 1,
+      ))),
+      Type::Tuple(elements) => Type::Tuple(
+        elements
+          .iter()
+          .map(|element| self.generic_pattern(element, environment, depth + 1))
+          .collect(),
+      ),
+      Type::Rest(element) => Type::Rest(Box::new(self.generic_pattern(
+        element,
+        environment,
+        depth + 1,
+      ))),
+      Type::Function(parameters, return_type) => Type::Function(
+        parameters
+          .iter()
+          .map(|parameter| self.generic_pattern(parameter, environment, depth + 1))
+          .collect(),
+        Box::new(self.generic_pattern(return_type, environment, depth + 1)),
+      ),
+      Type::Object(properties) => Type::Object(
+        properties
+          .iter()
+          .map(|(name, property)| {
+            (
+              name.clone(),
+              self.generic_pattern(property, environment, depth + 1),
+            )
+          })
+          .collect(),
+      ),
+      Type::Union(types) => Type::Union(
+        types
+          .iter()
+          .map(|typ| self.generic_pattern(typ, environment, depth + 1))
+          .collect(),
+      ),
+      Type::Intersection(types) => Type::Intersection(
+        types
+          .iter()
+          .map(|typ| self.generic_pattern(typ, environment, depth + 1))
+          .collect(),
+      ),
+      _ => typ.clone(),
+    }
   }
 
   fn call_type(
@@ -1799,17 +2335,8 @@ impl TypeContext {
     callee: &Type,
     call: &oast::CallExpression<'_>,
   ) -> Result<Type, TypeCheckerError> {
-    let candidates = match callee {
-      Type::Union(types) => types.clone(),
-      other => vec![other.clone()],
-    };
-    let mut arguments = Vec::new();
-    for argument in &call.arguments {
-      let expression = argument
-        .as_expression()
-        .ok_or_else(|| TypeCheckerError::from("Unsupported call argument"))?;
-      arguments.push(self.type_of_expr_oast(expression)?);
-    }
+    let mut candidates = Vec::new();
+    flatten_union_types(callee, &mut candidates);
     let explicit_types = call
       .type_arguments
       .as_ref()
@@ -1821,43 +2348,154 @@ impl TypeContext {
           .collect::<Result<Vec<_>, _>>()
       })
       .transpose()?;
+    let mut best: Option<(usize, String, Type, Vec<TypeInlayHint>)> = None;
     for candidate in candidates {
+      let metadata = self
+        .function_parameter_metadata(&candidate)
+        .cloned();
       let Type::Function(parameters, return_type) = candidate else {
         continue;
       };
-      if !parameters.is_empty() && parameters.len() != arguments.len() {
+      let rest_index = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.rest_index);
+      if !parameters.is_empty()
+        && match rest_index {
+          Some(rest_index) => call.arguments.len() < rest_index,
+          None => parameters.len() != call.arguments.len(),
+        }
+      {
         continue;
       }
-      let mut environment = TypeEnvironment::new();
-      let mut generic_names = Vec::new();
-      for parameter in &parameters {
-        collect_generic_names(parameter, &self.named_types, &mut generic_names);
-      }
-      collect_generic_names(&return_type, &self.named_types, &mut generic_names);
-      if let Some(explicit_types) = &explicit_types {
-        for (name, typ) in generic_names.iter().zip(explicit_types) {
-          environment.insert(name.clone(), typ.clone());
+      let hint_checkpoint = self.inlay_hints.len();
+      let candidate_result: Result<_, TypeCheckerError> = (|| {
+        let mut environment = TypeEnvironment::new();
+        let mut generic_names = Vec::new();
+        for parameter in &parameters {
+          collect_generic_names(parameter, &self.named_types, &mut generic_names);
         }
-      }
-      for (parameter, argument) in parameters.iter().zip(&arguments) {
-        infer_type_parameter(parameter, argument, &mut environment);
-      }
-      for name in &generic_names {
-        environment
-          .entry(name.clone())
-          .or_insert(Type::Never);
-      }
-      let mut compatible = true;
-      for (parameter, argument) in parameters.iter().zip(&arguments) {
-        let parameter = self.resolve_type_with_environment(parameter, &environment, 0);
-        if !self.is_assignable(&parameter, &self.resolve_type(argument)) {
-          compatible = false;
-          break;
+        collect_generic_names(&return_type, &self.named_types, &mut generic_names);
+        if let Some(explicit_types) = &explicit_types {
+          for (name, typ) in generic_names.iter().zip(explicit_types) {
+            environment.insert(name.clone(), typ.clone());
+          }
         }
+
+        // Infer from the uncontextualized arguments first. This lets a sibling
+        // property such as `value: T` instantiate `T` before a callback is
+        // contextually typed as `(value: T) => ...`.
+        if !generic_names.is_empty() {
+          let mut raw_arguments = Vec::new();
+          for argument in &call.arguments {
+            let expression = argument
+              .as_expression()
+              .ok_or_else(|| TypeCheckerError::from("Unsupported call argument"))?;
+            raw_arguments.push(self.type_of_expr_oast(expression)?);
+          }
+          self.inlay_hints.truncate(hint_checkpoint);
+          for (index, argument) in raw_arguments.iter().enumerate() {
+            let Some(parameter) = call_parameter(&parameters, rest_index, index) else {
+              continue;
+            };
+            let pattern = self.generic_pattern(parameter, &environment, 0);
+            infer_type_parameter(&pattern, argument, &mut environment);
+          }
+        }
+        for name in &generic_names {
+          environment
+            .entry(name.clone())
+            .or_insert(Type::Never);
+        }
+
+        let mut arguments = Vec::new();
+        for (index, argument) in call.arguments.iter().enumerate() {
+          let expression = argument
+            .as_expression()
+            .ok_or_else(|| TypeCheckerError::from("Unsupported call argument"))?;
+          arguments.push(
+            if let Some(parameter) = call_parameter(&parameters, rest_index, index) {
+              let parameter = self.resolve_type_with_environment(parameter, &environment, 0);
+              self.type_of_expr_with_context(expression, &rest_argument_type(&parameter))?
+            } else {
+              self.type_of_expr_oast(expression)?
+            },
+          );
+        }
+        for (index, argument) in arguments.iter().enumerate() {
+          let Some(parameter) = call_parameter(&parameters, rest_index, index) else {
+            continue;
+          };
+          let pattern = self.generic_pattern(parameter, &environment, 0);
+          infer_type_parameter(&pattern, argument, &mut environment);
+        }
+        let compatible = arguments
+          .iter()
+          .enumerate()
+          .all(|(index, argument)| {
+            let Some(parameter) = call_parameter(&parameters, rest_index, index) else {
+              return false;
+            };
+            let parameter = self.resolve_type_with_environment(parameter, &environment, 0);
+            let actual = self.resolve_type(argument);
+            self.is_assignable(&rest_argument_type(&parameter), &actual)
+          });
+        if !compatible {
+          return Ok(None);
+        }
+        if let Some(metadata) = &metadata {
+          for (index, argument) in call.arguments.iter().enumerate() {
+            let Some(name) = metadata
+              .names
+              .get(index)
+              .and_then(Option::as_deref)
+            else {
+              continue;
+            };
+            if metadata
+              .rest_index
+              .is_some_and(|rest_index| index >= rest_index)
+              || suppress_parameter_hint(argument, name)
+            {
+              continue;
+            }
+            self.inlay_hints.push(TypeInlayHint {
+              position: argument.span().start as usize,
+              label: format!("{name}:"),
+              kind: TypeInlayHintKind::Parameter,
+            });
+          }
+        }
+        let return_type = self.resolve_type_with_environment(&return_type, &environment, 0);
+        let score = parameters.iter().map(type_specificity).sum();
+        let key = parameters
+          .iter()
+          .map(type_to_string)
+          .collect::<Vec<_>>()
+          .join(" | ");
+        Ok(Some((return_type, score, key)))
+      })();
+      let hints = if candidate_result.is_ok() {
+        self.inlay_hints[hint_checkpoint..].to_vec()
+      } else {
+        Vec::new()
+      };
+      self.inlay_hints.truncate(hint_checkpoint);
+      let Ok(Some((return_type, score, key))) = candidate_result else {
+        continue;
+      };
+      let replace = match best.as_ref() {
+        None => true,
+        Some((best_score, best_key, _, _)) => {
+          score > *best_score || (score == *best_score && key < *best_key)
+        }
+      };
+      if replace {
+        best = Some((score, key, return_type, hints));
       }
-      if compatible {
-        return Ok(self.resolve_type_with_environment(&return_type, &environment, 0));
-      }
+    }
+    if let Some((_, _, return_type, hints)) = best {
+      self.inlay_hints.extend(hints);
+      return Ok(return_type);
     }
     Err(TypeCheckerError::from(format!(
       "No overload matches call for {}",
@@ -1993,6 +2631,22 @@ impl TypeContext {
           Ok(Type::Union(vec![left, right]))
         }
       }
+      OExpr::NewExpression(expression) => {
+        let callee_type = self.type_of_expr_oast(&expression.callee)?;
+        for argument in &expression.arguments {
+          if let Some(argument) = argument.as_expression() {
+            drop(self.type_of_expr_oast(argument)?);
+          }
+        }
+        match callee_type {
+          Type::Function(..) | Type::Any => Ok(Type::Any),
+          Type::Unknown => Err(TypeCheckerError::from("Cannot construct unknown")),
+          other => Err(TypeCheckerError::from(format!(
+            "Cannot construct non-constructor type {}",
+            type_to_string(&other)
+          ))),
+        }
+      }
       OExpr::CallExpression(c) => {
         let callee_type = self.type_of_expr_oast(&c.callee)?;
         let is_console_log = if let OExpr::StaticMemberExpression(m) = &c.callee {
@@ -2116,14 +2770,8 @@ impl TypeContext {
       OExpr::TSAsExpression(expression) => convert_ts_type(&expression.type_annotation),
       OExpr::TSTypeAssertion(expression) => convert_ts_type(&expression.type_annotation),
       OExpr::TSNonNullExpression(expression) => self.type_of_expr_oast(&expression.expression),
-      OExpr::FunctionExpression(function) => {
-        let typ = self.function_type(&function.params, function.return_type.as_deref())?;
-        self.check_function(function)?;
-        Ok(typ)
-      }
-      OExpr::ArrowFunctionExpression(function) => {
-        self.function_type(&function.params, function.return_type.as_deref())
-      }
+      OExpr::FunctionExpression(function) => self.check_function(function),
+      OExpr::ArrowFunctionExpression(function) => self.check_arrow_function(function),
       _ => Err(TypeCheckerError::from(
         "Unsupported expression in type checker",
       )),
@@ -2361,7 +3009,8 @@ fn convert_tuple_element(element: &oast::TSTupleElement<'_>) -> Result<Type, Typ
       }
     }
     _ => element
-      .as_ts_type().map_or_else(|| Ok(Type::Unknown), convert_ts_type),
+      .as_ts_type()
+      .map_or_else(|| Ok(Type::Unknown), convert_ts_type),
   }
 }
 
@@ -2385,6 +3034,19 @@ fn normalize_union(types: Vec<Type>) -> Type {
     0 => Type::Never,
     1 => normalized.pop().unwrap_or(Type::Never),
     _ => Type::Union(normalized),
+  }
+}
+
+fn flatten_union_types(
+  typ: &Type,
+  flattened: &mut Vec<Type>,
+) {
+  if let Type::Union(types) = typ {
+    for typ in types {
+      flatten_union_types(typ, flattened);
+    }
+  } else {
+    flattened.push(typ.clone());
   }
 }
 
@@ -2463,6 +3125,83 @@ fn widen_literal(typ: Type) -> Type {
   }
 }
 
+fn identifier_span_end(pattern: &oast::BindingPattern<'_>) -> usize {
+  match pattern {
+    oast::BindingPattern::BindingIdentifier(identifier) => identifier.span.end as usize,
+    _ => 0,
+  }
+}
+
+fn is_supported_inlay_type(typ: &Type) -> bool {
+  match typ {
+    Type::Never | Type::Any | Type::Unknown | Type::TypeReference { .. } => false,
+    Type::Array(element) | Type::Rest(element) => is_supported_inlay_type(element),
+    Type::Tuple(elements) | Type::Union(elements) | Type::Intersection(elements) => {
+      !elements.is_empty() && elements.iter().all(is_supported_inlay_type)
+    }
+    Type::Function(parameters, return_type) => {
+      parameters.iter().all(is_supported_inlay_type) && is_supported_inlay_type(return_type)
+    }
+    Type::Object(properties) => properties.values().all(is_supported_inlay_type),
+    Type::Conditional { .. }
+    | Type::KeyOf(_)
+    | Type::IndexedAccess { .. }
+    | Type::Infer(_)
+    | Type::Mapped { .. }
+    | Type::TemplateLiteral { .. } => false,
+    Type::Number
+    | Type::String
+    | Type::Boolean
+    | Type::Null
+    | Type::Undefined
+    | Type::Void
+    | Type::Literal(_)
+    | Type::Builtin(_) => true,
+  }
+}
+
+fn type_specificity(typ: &Type) -> usize {
+  match typ {
+    Type::Any | Type::Unknown | Type::Never | Type::TypeReference { .. } => 0,
+    Type::Literal(_) => 6,
+    Type::Number | Type::String | Type::Boolean | Type::Null | Type::Undefined | Type::Void => 4,
+    Type::Array(element) | Type::Rest(element) => 1 + type_specificity(element),
+    Type::Tuple(elements) => {
+      1 + elements
+        .iter()
+        .map(type_specificity)
+        .sum::<usize>()
+    }
+    Type::Function(parameters, return_type) => {
+      1 + parameters
+        .iter()
+        .map(type_specificity)
+        .sum::<usize>()
+        + type_specificity(return_type)
+    }
+    Type::Object(properties) => {
+      1 + properties
+        .values()
+        .map(type_specificity)
+        .sum::<usize>()
+    }
+    Type::Union(types) => types
+      .iter()
+      .map(type_specificity)
+      .max()
+      .unwrap_or(0)
+      .saturating_sub(types.len().saturating_sub(1)),
+    Type::Intersection(types) => 1 + types.iter().map(type_specificity).sum::<usize>(),
+    Type::Builtin(_) => 2,
+    Type::Conditional { .. }
+    | Type::KeyOf(_)
+    | Type::IndexedAccess { .. }
+    | Type::Infer(_)
+    | Type::Mapped { .. }
+    | Type::TemplateLiteral { .. } => 0,
+  }
+}
+
 fn collect_generic_names(
   typ: &Type,
   named_types: &HashMap<String, TypeDefinition>,
@@ -2509,6 +3248,9 @@ fn infer_type_parameter(
   actual: &Type,
   environment: &mut TypeEnvironment,
 ) {
+  if matches!(actual, Type::Any) {
+    return;
+  }
   match parameter {
     Type::TypeReference { name, arguments } if arguments.is_empty() => {
       environment
@@ -2658,6 +3400,11 @@ fn assignable(
           .all(|(expected, actual)| assignable(expected, actual))
         && assignable(a_return, b_return)
     }
+    (Type::Union(expected), Type::Union(actual)) => actual.iter().all(|actual| {
+      expected
+        .iter()
+        .any(|expected| assignable(expected, actual))
+    }),
     (Type::Union(types), actual) => types
       .iter()
       .any(|expected| assignable(expected, actual)),
@@ -2694,6 +3441,52 @@ fn parameter_types(params: &oast::FormalParameters<'_>) -> Result<Vec<Type>, Typ
     );
   }
   Ok(types)
+}
+
+fn binding_parameter_name(pattern: &oast::BindingPattern<'_>) -> Option<String> {
+  match pattern {
+    oast::BindingPattern::BindingIdentifier(identifier) => Some(identifier.name.to_string()),
+    _ => None,
+  }
+}
+
+fn call_parameter<'a>(
+  parameters: &'a [Type],
+  rest_index: Option<usize>,
+  index: usize,
+) -> Option<&'a Type> {
+  match rest_index {
+    Some(rest_index) if index >= rest_index => parameters.get(rest_index),
+    _ => parameters.get(index),
+  }
+}
+
+fn rest_argument_type(typ: &Type) -> &Type {
+  match typ {
+    Type::Array(element) | Type::Rest(element) => element,
+    _ => typ,
+  }
+}
+
+fn suppress_parameter_hint(
+  argument: &oast::Argument<'_>,
+  parameter_name: &str,
+) -> bool {
+  let Some(expression) = argument.as_expression() else {
+    return true;
+  };
+  match expression {
+    oast::Expression::Identifier(identifier) => {
+      identifier.name == parameter_name || identifier.name == "undefined"
+    }
+    oast::Expression::BooleanLiteral(_)
+    | oast::Expression::BigIntLiteral(_)
+    | oast::Expression::NullLiteral(_)
+    | oast::Expression::NumericLiteral(_)
+    | oast::Expression::StringLiteral(_)
+    | oast::Expression::TemplateLiteral(_) => true,
+    _ => false,
+  }
 }
 
 fn qualified_type_name(
@@ -2854,12 +3647,24 @@ pub fn type_to_string(t: &Type) -> String {
         .join(", ")
     ),
     Type::Rest(element) => format!("...{}", type_to_string(element)),
-    Type::Object(_) => "object".to_string(),
+    Type::Object(properties) => {
+      let mut properties = properties.iter().collect::<Vec<_>>();
+      properties.sort_by_key(|(name, _)| name.as_str());
+      format!(
+        "{{ {} }}",
+        properties
+          .into_iter()
+          .map(|(name, typ)| format!("{name}: {}", type_to_string(typ)))
+          .collect::<Vec<_>>()
+          .join("; ")
+      )
+    }
     Type::Function(params, ret) => format!(
-      "fn({}) -> {}",
+      "({}) => {}",
       params
         .iter()
-        .map(type_to_string)
+        .enumerate()
+        .map(|(index, typ)| format!("arg{index}: {}", type_to_string(typ)))
         .collect::<Vec<_>>()
         .join(", "),
       type_to_string(ret)
@@ -3009,6 +3814,253 @@ mod tests {
     ));
 
     assert!(result.is_ok());
+  }
+
+  #[test]
+  fn contextually_types_callback_parameters_for_object_arguments() {
+    let source = crate::js!(
+      typescript,
+      r#"
+        declare function configure(options: {
+          handler: (context: { userId: string; active: boolean }) => void
+        }): void;
+        configure({ handler: (context) => context.userId });
+      "#
+    );
+    let source_type =
+      crate::parser::Parser::source_type_for_path(std::path::Path::new("test.ts"), false);
+    let session =
+      crate::parser::Parser::parse_source_with_type(source, source_type).expect("parse TypeScript");
+    let (result, hints) = check_and_inlay_hints_with_declarations(session.program(), &[], &[]);
+
+    assert!(result.is_ok(), "{result:?}");
+    let type_hints = hints
+      .iter()
+      .filter(|hint| hint.kind == TypeInlayHintKind::Type)
+      .collect::<Vec<_>>();
+    assert_eq!(type_hints.len(), 1);
+    assert_eq!(
+      type_hints[0].position,
+      source.rfind("(context)").unwrap() + "(context".len()
+    );
+    assert_eq!(type_hints[0].label, ": { active: boolean; userId: string }");
+  }
+
+  #[test]
+  fn instantiates_generic_object_context_from_a_sibling_property() {
+    let source = crate::js!(
+      typescript,
+      r#"
+        type Options<T> = {
+          value: T;
+          handler: (context: T) => void
+        };
+        declare function configure<T>(options: Options<T>): void;
+        configure({ value: "ready" as string, handler: (context) => context });
+      "#
+    );
+    let source_type =
+      crate::parser::Parser::source_type_for_path(std::path::Path::new("test.ts"), false);
+    let session =
+      crate::parser::Parser::parse_source_with_type(source, source_type).expect("parse TypeScript");
+    let (result, hints) = check_and_inlay_hints_with_declarations(session.program(), &[], &[]);
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+      hints
+        .iter()
+        .map(|hint| (&hint.kind, hint.label.as_str()))
+        .collect::<Vec<_>>(),
+      [
+        (&TypeInlayHintKind::Parameter, "options:"),
+        (&TypeInlayHintKind::Type, ": string"),
+      ]
+    );
+  }
+
+  #[test]
+  fn ranks_specific_overloads_and_discards_rejected_candidate_hints() {
+    let source = crate::js!(
+      typescript,
+      r#"
+        declare function choose(options: {
+          handler: (value: string | number) => void
+        }): void;
+        declare function choose(options: {
+          handler: (value: string) => void
+        }): void;
+        declare function choose(options: {
+          handler: (value: boolean) => void;
+          required: number
+        }): void;
+        choose({ handler: (value) => value });
+      "#
+    );
+    let source_type =
+      crate::parser::Parser::source_type_for_path(std::path::Path::new("test.ts"), false);
+    let session =
+      crate::parser::Parser::parse_source_with_type(source, source_type).expect("parse TypeScript");
+    let (result, hints) = check_and_inlay_hints_with_declarations(session.program(), &[], &[]);
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+      hints
+        .iter()
+        .map(|hint| (&hint.kind, hint.label.as_str()))
+        .collect::<Vec<_>>(),
+      [
+        (&TypeInlayHintKind::Parameter, "options:"),
+        (&TypeInlayHintKind::Type, ": string"),
+      ]
+    );
+  }
+
+  #[test]
+  fn emits_selected_parameter_name_hints_with_suppression_rules() {
+    let source = crate::js!(
+      typescript,
+      r#"
+        declare function choose(text: string): void;
+        declare function choose(count: number, radix: number): void;
+        declare function collect(first: string, ...rest: number[]): void;
+        declare const input: string;
+        declare const countValue: number;
+        choose(input);
+        choose(countValue, 10);
+        collect(input, countValue, 10);
+      "#
+    );
+    let source_type =
+      crate::parser::Parser::source_type_for_path(std::path::Path::new("test.ts"), false);
+    let session =
+      crate::parser::Parser::parse_source_with_type(source, source_type).expect("parse TypeScript");
+    let (result, hints) = check_and_inlay_hints_with_declarations(session.program(), &[], &[]);
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+      hints
+        .iter()
+        .map(|hint| (&hint.kind, hint.label.as_str()))
+        .collect::<Vec<_>>(),
+      [
+        (&TypeInlayHintKind::Parameter, "text:"),
+        (&TypeInlayHintKind::Parameter, "count:"),
+        (&TypeInlayHintKind::Parameter, "first:"),
+      ]
+    );
+    assert_eq!(
+      hints[0].position,
+      source.find("choose(input)").expect("first call") + "choose(".len()
+    );
+    assert_eq!(
+      hints[1].position,
+      source
+        .find("choose(countValue, 10)")
+        .expect("second call")
+        + "choose(".len()
+    );
+    assert_eq!(
+      hints[2].position,
+      source.find("collect(input").expect("rest call") + "collect(".len()
+    );
+  }
+
+  #[test]
+  fn emits_safe_local_and_simple_function_return_hints() {
+    let source = r#"
+      let count = 1;
+      const text = "ready";
+      const shape = { id: 1 };
+      const dynamic = eval("value");
+      const annotated: number = 1;
+
+      function identity(value: number) { return value; }
+      function empty() {}
+      async function asyncValue() { return 1; }
+      function recursive() { return recursive(); }
+      function conditional(flag: boolean) { if (flag) return 1; }
+    "#;
+    let source_type =
+      crate::parser::Parser::source_type_for_path(std::path::Path::new("test.ts"), false);
+    let session =
+      crate::parser::Parser::parse_source_with_type(source, source_type).expect("parse TypeScript");
+    let (result, hints) = check_and_inlay_hints_with_declarations(session.program(), &[], &[]);
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+      hints
+        .iter()
+        .map(|hint| hint.label.as_str())
+        .collect::<Vec<_>>(),
+      [
+        ": number",
+        ": \"ready\"",
+        ": { id: 1 }",
+        ": number",
+        ": void",
+      ]
+    );
+    assert!(
+      hints
+        .windows(2)
+        .all(|pair| pair[0].position <= pair[1].position)
+    );
+    assert_eq!(
+      hints
+        .iter()
+        .filter(|hint| hint.label == ": number")
+        .count(),
+      2
+    );
+    assert_eq!(
+      hints[0].position,
+      source.find("count").expect("count binding") + "count".len()
+    );
+    assert_eq!(
+      hints[3].position,
+      source
+        .find("(value: number)")
+        .expect("identity parameters")
+        + "(value: number)".len()
+    );
+    assert_eq!(
+      hints[4].position,
+      source.find("empty()").expect("empty parameters") + "empty()".len()
+    );
+    assert!(!hints.iter().any(|hint| hint.label == ": any"));
+  }
+
+  #[test]
+  fn emits_return_hint_for_expression_arrow_but_not_async_arrow() {
+    let source = r#"
+      const identity = (value: number) => value;
+      const asyncValue = async (value: number) => value;
+    "#;
+    let source_type =
+      crate::parser::Parser::source_type_for_path(std::path::Path::new("test.ts"), false);
+    let session =
+      crate::parser::Parser::parse_source_with_type(source, source_type).expect("parse TypeScript");
+    let (result, hints) = check_and_inlay_hints_with_declarations(session.program(), &[], &[]);
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+      hints
+        .iter()
+        .map(|hint| hint.label.as_str())
+        .collect::<Vec<_>>(),
+      [": (arg0: number) => number", ": number"]
+    );
+    assert_eq!(
+      hints[0].position,
+      source.find("identity").expect("identity binding") + "identity".len()
+    );
+    assert_eq!(
+      hints[1].position,
+      source
+        .find("(value: number)")
+        .expect("identity parameters")
+        + "(value: number)".len()
+    );
   }
 
   #[test]

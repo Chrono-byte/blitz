@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Blitz: **ECMAScript Engine in Rust**.
 //!
 //! # Architecture

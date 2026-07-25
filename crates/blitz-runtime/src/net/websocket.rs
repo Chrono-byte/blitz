@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Bounded, runtime-facing WebSocket server built on FastWebSockets.
 //!
 //! The server owns all socket tasks. It exchanges only owned byte buffers and

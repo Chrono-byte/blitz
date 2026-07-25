@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 console.log("ordinary output");
 console.info("informational output");
 console.warn("warning output");

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use super::frame::Frame;
 use super::handler::HandlerRecord;
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Parser adapter using OXC for TypeScript/JavaScript parsing.
 //!
 //! This module provides a thin wrapper around the OXC parser, delegating parsing

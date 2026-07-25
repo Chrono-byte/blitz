@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Scoped transport ownership for the JavaScript `blitz:app` facade.
 //!
 //! This module deliberately contains no VM or Effect implementation. An

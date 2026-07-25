@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Error types for the Blitz kernel.
 //!
 //! This module defines a structured error hierarchy using `thiserror` for

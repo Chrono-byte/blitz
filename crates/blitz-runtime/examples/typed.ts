@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 let x: number = 1 + 2;
 console.log(x);
 

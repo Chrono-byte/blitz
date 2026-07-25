@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 var deepObj = { a: 1 };
 var current = deepObj;
 for (var i = 0; i < 100; i = i + 1) {

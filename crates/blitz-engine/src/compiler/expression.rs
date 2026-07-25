@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Expression compilation
 //!
 //! Handles compilation of expressions from the AST into bytecode,

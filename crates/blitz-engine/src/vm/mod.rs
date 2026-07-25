@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! VM entry point and public surface for the virtual machine.
 //!
 //! This crate exposes the VM core (state::Vm) and a set of small runtime

@@ -129,6 +129,7 @@ dependencies = [
  "blitz-runtime",
  "clap",
  "rustyline",
+ "serde",
  "serde_json",
 ]
 
@@ -183,6 +184,7 @@ version = "0.1.2"
 dependencies = [
  "blitz-engine",
  "bytes",
+ "crc32fast",
  "fastwebsockets",
  "http-body-util",
  "hyper",

@@ -17,9 +17,8 @@ this file wins.
 
 Every active RISC execution state owns 16 value registers. Registers are not
 preserved across frames, so there is no caller-saved/callee-saved split. The
-interpreter also retains frame-local operand and lexical storage for legacy
-runtime paths; those storage fields are distinct from RISC registers and spill
-slots.
+interpreter has no runtime operand stack; lexical cells and frame metadata are
+distinct from RISC registers and spill slots.
 
 - `r0`: callee on call entry and result on return
 - `r1`: receiver (`this`)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Host-owned AbortController and AbortSignal compatibility.
 //!
 //! These objects are deliberately installed by the runtime host rather than
@@ -313,9 +314,10 @@ fn dispatch_abort_with_event(
     if get_property(&record, "once")
       .as_bool()
       .unwrap_or(false)
-      && let Some(slot) = listeners.borrow_mut().get_mut(index) {
-        *slot = None;
-      }
+      && let Some(slot) = listeners.borrow_mut().get_mut(index)
+    {
+      *slot = None;
+    }
   }
   Ok(())
 }

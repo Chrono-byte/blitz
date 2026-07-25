@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Runtime value types for the VM.
 //!
 //! This module defines the core value types that the VM operates on:

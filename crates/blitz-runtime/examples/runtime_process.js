@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 console.log("runtime:", process.versions.blitz);
 console.log("platform:", process.platform, process.arch);
 console.log("cwd:", process.cwd());

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Explicit runtime decoders for untrusted JSON input.
 
 use std::fmt;

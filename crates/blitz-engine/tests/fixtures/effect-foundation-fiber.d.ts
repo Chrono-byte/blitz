@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 import type * as Effect from "effect/Effect";
 export interface Fiber<A, E = never> {
   readonly await: Effect.Effect<Exit<A, E>>;

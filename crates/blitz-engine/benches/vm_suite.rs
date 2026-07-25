@@ -1,4 +1,5 @@
 #![allow(missing_docs)]
+// SPDX-License-Identifier: MPL-2.0
 //! Criterion benchmark suite for the Blitz VM pipeline.
 
 use std::cell::RefCell;

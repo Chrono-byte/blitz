@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Buffered terminal input and prompt-safe output for interactive applications.
 
 use std::cell::RefCell;

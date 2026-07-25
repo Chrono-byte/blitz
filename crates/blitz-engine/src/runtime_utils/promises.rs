@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use super::*;
 
 /// Checks if a promise's constructor matches the given constructor value.

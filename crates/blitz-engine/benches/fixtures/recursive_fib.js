@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 function fib(n) {
   if (n <= 1) {
     return n;

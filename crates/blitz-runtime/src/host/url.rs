@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Minimal WHATWG URL host object used by runtime HTTP APIs.
 
 use std::cell::RefCell;

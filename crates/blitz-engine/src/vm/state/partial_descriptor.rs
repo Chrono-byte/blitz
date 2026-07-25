@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use crate::value::Value;
 
 /// Represents a partially-specified property descriptor for Object.defineProperty.

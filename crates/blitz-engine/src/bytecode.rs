@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Bytecode representation and VM instruction set.
 //!
 //! This module defines the bytecode format used by the VM, including:

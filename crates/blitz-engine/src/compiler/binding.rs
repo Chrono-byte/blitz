@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Binding phase compilation
 //!
 //! Handles variable declaration compilation and binding pattern assignment,

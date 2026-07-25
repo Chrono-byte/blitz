@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use super::*;
 
 /// Installs hidden internal builtins required for ECMAScript semantics.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -5,11 +6,11 @@ import * as Http from "blitz:http";
 import * as Runtime from "blitz:runtime";
 import * as WebSocket from "blitz:websocket";
 
-const MAX_NICKNAME_LENGTH = 20;
-const MAX_MESSAGE_LENGTH = 400;
-const MAX_FRAME_LENGTH = 4_096;
-const RATE_LIMIT_WINDOW_MS = 2_000;
-const RATE_LIMIT_MESSAGES = 8;
+const MAX_NICKNAME_LENGTH: number = 20;
+const MAX_MESSAGE_LENGTH: number = 400;
+const MAX_FRAME_LENGTH: number = 4_096;
+const RATE_LIMIT_WINDOW_MS: number = 2_000;
+const RATE_LIMIT_MESSAGES: number = 8;
 
 type Client = {
   readonly nickname: string;

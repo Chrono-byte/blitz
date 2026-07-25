@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
@@ -6,8 +7,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 impl Vm {
-  /// Unwind the call stack and operand stack to the nearest exception
-  /// handler, or propagate the error if none exists.
+  /// Unwind call frames to the nearest exception handler, or propagate the
+  /// error if none exists.
   pub(super) fn unwind_to_handler(
     &mut self,
     thrown: Value,
@@ -16,7 +17,6 @@ impl Vm {
       Some(h) => h,
       None => {
         self.last_uncaught_exception = Some(thrown.clone());
-        self.stack.push(thrown.clone());
         return Err(match thrown {
           Value::String(s) => RuntimeError::from(format!("Uncaught: {}", s)),
           other => RuntimeError::from(format!(
@@ -32,7 +32,6 @@ impl Vm {
       if let Some(frame) = self.call_stack.pop() {
         self.chunk = frame.chunk;
         self.ip = frame.ip;
-        self.stack.restore_from(frame.stack);
         self.locals = frame.locals;
         self.this_value = frame.this_value;
         self.current_closure_env = frame.closure_env;
@@ -54,10 +53,8 @@ impl Vm {
     self.ip = handler.handler_ip;
     self.lexical_env = handler.saved_lexical_env;
 
-    self.stack.truncate(handler.saved_stack_len);
     self.locals.truncate(handler.saved_locals_len);
 
-    self.stack.push(thrown);
     Ok(())
   }
 
@@ -66,13 +63,13 @@ impl Vm {
     &mut self,
     thrown: Value,
   ) -> Result<(), RuntimeError> {
-    match self.unwind_to_handler(thrown) {
+    match self.unwind_to_handler(thrown.clone()) {
       Ok(()) => {
-        self.pending_exception = true;
+        self.pending_exception = Some(thrown);
         Ok(())
       }
       Err(err) => {
-        self.pending_exception = false;
+        self.pending_exception = None;
         Err(err)
       }
     }

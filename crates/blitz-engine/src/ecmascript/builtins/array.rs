@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Array builtin functions and prototype methods
 
 use std::cell::RefCell;

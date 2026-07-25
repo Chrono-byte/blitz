@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 async function observeServerLifecycle(runtime) {
   const server = runtime.serve(
     { hostname: "127.0.0.1", port: 0 },

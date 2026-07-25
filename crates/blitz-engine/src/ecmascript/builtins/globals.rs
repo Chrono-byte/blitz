@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Global builtin functions and prototype methods
 
 use std::rc::Rc;

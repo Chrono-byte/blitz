@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use crate::bytecode::{Chunk, UpvalueSpec};
 use crate::environment::EnvironmentRecord;
 use crate::typecheck::Type;
@@ -12,8 +13,6 @@ pub(crate) struct Frame {
   pub(crate) chunk: Arc<Chunk>,
   /// The current instruction pointer within the chunk.
   pub(crate) ip: usize,
-  /// The caller's operand stack, saved while this frame executes.
-  pub(crate) stack: Vec<Value>,
   /// The local variable slots for this frame.
   pub(crate) locals: Vec<SharedValue>,
   /// The `this` value for this frame.
@@ -34,8 +33,6 @@ pub(crate) struct Frame {
   pub(crate) slot_immutable: Option<Vec<bool>>,
   /// Per-slot sloppy-write-ignore flags for immutable bindings.
   pub(crate) slot_sloppy_immutable_silent: Option<Vec<bool>>,
-  /// Length of caller stack at call entry (diagnostic only).
-  pub(crate) stack_base: usize,
   /// Whether the suspended caller executes in strict mode.
   /// Restored when this frame is popped on return or exception unwind.
   pub(crate) is_strict: bool,

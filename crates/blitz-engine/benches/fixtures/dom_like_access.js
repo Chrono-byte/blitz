@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 var dom = {
   children: [
     { id: 1, className: "active", innerHTML: "test1" },

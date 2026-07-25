@@ -2,11 +2,13 @@
 name = "blitz-runtime"
 version.workspace = true
 edition.workspace = true
-description = "Application JavaScript runtime powered by the Blitz engine"
+license = "MPL-2.0"
+description = "Application JavaScript/TypeScript runtime powered by the Blitz engine"
 
 [dependencies]
 blitz.workspace = true
 bytes.workspace = true
+crc32fast = "1.5.0"
 fastwebsockets.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true

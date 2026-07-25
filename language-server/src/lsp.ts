@@ -7,6 +7,7 @@ import {
   type InitializeResult,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
+import { stopCompiler } from "./compiler-analysis.js";
 import {
   forgetDocument,
   getCompletions,
@@ -14,6 +15,7 @@ import {
   getDiagnostics,
   getDocumentSymbols,
   getHover,
+  getInlayHints,
 } from "./language-service.js";
 
 const connection = createConnection(process.stdin, process.stdout);
@@ -27,6 +29,7 @@ connection.onInitialize(
       definitionProvider: true,
       documentSymbolProvider: true,
       hoverProvider: true,
+      inlayHintProvider: true,
     },
     serverInfo: { name: "blitz-language-server", version: "0.1.0" },
   }),
@@ -43,6 +46,10 @@ documents.onDidChangeContent(({ document }) => {
 documents.onDidClose(({ document }) => {
   forgetDocument(document.uri);
   void connection.sendDiagnostics({ uri: document.uri, diagnostics: [] });
+});
+
+connection.onShutdown(() => {
+  stopCompiler();
 });
 
 connection.onCompletion(({ textDocument }) => {
@@ -63,6 +70,11 @@ connection.onHover(({ textDocument, position }) => {
 connection.onDefinition(({ textDocument, position }) => {
   const document = documents.get(textDocument.uri);
   return document === undefined ? null : getDefinition(document, position);
+});
+
+connection.languages.inlayHint.on(({ textDocument, range }) => {
+  const document = documents.get(textDocument.uri);
+  return document === undefined ? [] : getInlayHints(document, range);
 });
 
 documents.listen(connection);

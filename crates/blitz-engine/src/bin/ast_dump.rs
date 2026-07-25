@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Binary used to dump AST for debugging.
 #![allow(missing_docs)]
 

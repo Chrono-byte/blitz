@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 /** Public host globals installed by `blitz-runtime`. */
 
 interface BlitzNetAddr {

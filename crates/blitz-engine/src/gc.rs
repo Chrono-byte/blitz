@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Experimental garbage collection support.
 //!
 //! This module provides a prototype mark/sweep collector that can reclaim

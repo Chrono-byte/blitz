@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Execution-context lexical environment records.
 //!
 //! This module provides a lightweight runtime model of lexical and object

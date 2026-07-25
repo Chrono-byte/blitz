@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 function identity(value): number {
   return value;
 }

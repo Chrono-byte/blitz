@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Core Compiler struct and foundational implementation.
 //!
 //! This module contains the basic structure and initialization logic for the compiler,

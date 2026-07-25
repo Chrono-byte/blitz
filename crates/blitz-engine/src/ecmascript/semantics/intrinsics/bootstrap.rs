@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use super::*;
 
 /// Builds the ECMAScript intrinsics and installs the available global bindings.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 export interface Effect<A, E = never, R = never> {
   readonly _Success: (_: never) => A;
   readonly _Error: (_: never) => E;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 use crate::ecmascript::semantics::properties::{
   own_property_descriptor, own_property_keys, property_key_to_value,
 };
@@ -750,16 +751,13 @@ impl Vm {
     &mut self,
     receiver: &Value,
     key: &Value,
-  ) -> Result<(), RuntimeError> {
+  ) -> Result<Value, RuntimeError> {
     let super_obj = self.super_base_object()?;
     if matches!(super_obj, Value::Null) {
-      self.stack.push(Value::Undefined);
-      return Ok(());
+      return Ok(Value::Undefined);
     }
     let k = self.to_property_key(key)?;
-    let val = self.get_property_with_receiver(&super_obj, &k, receiver)?;
-    self.stack.push(val);
-    Ok(())
+    self.get_property_with_receiver(&super_obj, &k, receiver)
   }
 
   pub(super) fn set_super_property(
@@ -767,16 +765,14 @@ impl Vm {
     receiver: &Value,
     key: &Value,
     value: Value,
-  ) -> Result<(), RuntimeError> {
+  ) -> Result<Value, RuntimeError> {
     let super_obj = self.super_base_object()?;
     if matches!(super_obj, Value::Null) {
-      self.stack.push(Value::Undefined);
-      return Ok(());
+      return Ok(Value::Undefined);
     }
     let k = self.to_property_key(key)?;
     self.set_property_with_receiver(&super_obj, &k, value.clone(), receiver)?;
-    self.stack.push(value);
-    Ok(())
+    Ok(value)
   }
 
   /// Host hook: define an own property with a descriptor.

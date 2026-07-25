@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 function makeCounter(start) {
   var value = start;
   return function step() {

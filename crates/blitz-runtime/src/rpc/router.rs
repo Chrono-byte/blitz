@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Immutable nested routers and direct invocation.
 
 use std::collections::BTreeMap;

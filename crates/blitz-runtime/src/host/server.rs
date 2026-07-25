@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! `Blitz.serve` HTTP routing and VM callback bridge.
 
 use std::cell::RefCell;

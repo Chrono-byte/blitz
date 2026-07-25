@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Behavioral coverage for the public source macro.
 
 use blitz_macros::js;

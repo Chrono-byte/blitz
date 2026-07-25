@@ -1,4 +1,5 @@
 #![allow(trivial_numeric_casts)]
+// SPDX-License-Identifier: MPL-2.0
 
 use crate::bytecode::{
   Chunk, OP_COUNT, Op, decode_aux8, decode_compare_jump, decode_rd, decode_risc_aux16,
@@ -71,7 +72,6 @@ impl Vm {
       realm,
       chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
       ip: 0,
-      stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
       locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
       this_value: Value::Object(Rc::clone(&globals)),
       builtin_this_arg_prepended: false,
@@ -93,7 +93,7 @@ impl Vm {
       property_get_ic: HashMap::new(),
       bg_runtime: get_global_bg_runtime(),
       handlers: HandlerStack::with_capacity(32),
-      pending_exception: false,
+      pending_exception: None,
       module_loader,
       module_table: Vec::new(),
       current_module_specifier: None,
@@ -142,7 +142,6 @@ impl Vm {
       realm: self.realm.clone(),
       chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
       ip: 0,
-      stack: OperandStack::with_capacity(STACK_INITIAL_CAPACITY),
       locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
       this_value,
       builtin_this_arg_prepended: false,
@@ -164,7 +163,7 @@ impl Vm {
       property_get_ic: HashMap::new(),
       bg_runtime: Arc::clone(&self.bg_runtime),
       handlers: HandlerStack::with_capacity(32),
-      pending_exception: false,
+      pending_exception: None,
       module_loader: Rc::clone(&self.module_loader),
       module_table: Vec::new(),
       current_module_specifier: None,
@@ -284,7 +283,7 @@ impl Vm {
 
   /// Return whether a JavaScript exception is currently unwinding to a handler.
   pub(crate) fn has_pending_exception(&self) -> bool {
-    self.pending_exception
+    self.pending_exception.is_some()
   }
 
   /// Close an iterator from a host callback without disturbing its pending
@@ -494,7 +493,6 @@ impl Vm {
     let mut roots: Vec<Value> = Vec::new();
     let mut env_roots: Vec<Rc<RefCell<Vec<SharedValue>>>> = Vec::new();
     roots.push(Value::Object(Rc::clone(&self.globals)));
-    roots.extend(self.stack.iter().cloned());
     roots.extend(self.locals.iter().map(|c| c.borrow().clone()));
     roots.push(self.this_value.clone());
     if let Some(value) = &self.construct_new_target {
@@ -513,6 +511,9 @@ impl Vm {
         .filter_map(Clone::clone),
     );
     if let Some(value) = &self.last_uncaught_exception {
+      roots.push(value.clone());
+    }
+    if let Some(value) = &self.pending_exception {
       roots.push(value.clone());
     }
     if let Some(state) = &self.yield_star_state {
@@ -554,7 +555,6 @@ impl Vm {
       .borrow()
       .collect_binding_values(&mut roots);
     for frame in self.call_stack.iter() {
-      roots.extend(frame.stack.iter().cloned());
       roots.extend(frame.locals.iter().map(|c| c.borrow().clone()));
       roots.push(frame.this_value.clone());
       roots.push(frame.callee.clone());
@@ -1071,11 +1071,11 @@ impl Vm {
     &mut self,
     keep_globals: &HashSet<String>,
   ) {
-    self.stack.clear();
     self.locals.clear();
     self.call_stack.clear();
     self.current_strict_mode = self.chunk.root_strict;
     self.handlers.clear();
+    self.pending_exception = None;
     self.root_chunk = None;
     self.current_slot_types = None;
     self.current_slot_names = None;
@@ -1137,11 +1137,11 @@ impl Vm {
     self.root_chunk = Some(Arc::clone(&chunk_rc));
     self.chunk = chunk_rc;
     self.ip = 0;
-    self.stack.clear();
     self.locals.clear();
     self.call_stack.clear();
     self.current_strict_mode = self.chunk.root_strict;
     self.handlers.clear();
+    self.pending_exception = None;
     self.property_get_ic.clear();
     self.current_slot_types = None;
     self.current_slot_names = None;
@@ -1201,9 +1201,10 @@ impl Vm {
     let registers = &mut state.registers;
     let spills = &mut state.spills;
 
-    if self.pending_exception && Arc::ptr_eq(&self.chunk, &execution_chunk) {
-      self.pending_exception = false;
-      registers[7] = self.stack.pop().unwrap_or(Value::Undefined);
+    if Arc::ptr_eq(&self.chunk, &execution_chunk)
+      && let Some(exception) = self.pending_exception.take()
+    {
+      registers[7] = exception;
     }
 
     loop {
@@ -1665,20 +1666,16 @@ impl Vm {
             registers[rd] = Value::Bool(self.instance_of(&value, &constructor)?);
           }
           Op::GetSuperProperty => {
-            self.stack.push(registers[rd].clone());
-            self.stack.push(registers[rs].clone());
-            let key = self.pop()?;
-            let receiver = self.pop()?;
-            self.get_super_property(&receiver, &key)?;
-            registers[rd] = self.pop()?;
+            let receiver = registers[rd].clone();
+            let key = registers[rs].clone();
+            registers[rd] = self.get_super_property(&receiver, &key)?;
           }
           Op::SetSuperProperty => {
             let value_register = (decode_aux8(word) & 0xF) as usize;
             let receiver = registers[rd].clone();
             let key = registers[rs].clone();
             let value = registers[value_register].clone();
-            self.set_super_property(&receiver, &key, value)?;
-            registers[rd] = self.pop()?;
+            registers[rd] = self.set_super_property(&receiver, &key, value)?;
           }
           Op::BuildArray => {
             let count = decode_risc_aux16(word) as usize;
@@ -1777,7 +1774,6 @@ impl Vm {
             self.handlers.push(HandlerRecord {
               chunk: Arc::clone(&self.chunk),
               handler_ip,
-              saved_stack_len: self.stack.len(),
               saved_locals_len: self.locals.len(),
               frame_count: self.call_stack.len(),
               saved_lexical_env: Rc::clone(&self.lexical_env),
@@ -1792,19 +1788,13 @@ impl Vm {
             return Err(RuntimeError::from("JS exception"));
           }
           Op::DeleteIdentifier => {
-            self.stack.push(registers[rd].clone());
-            self.delete_identifier_op()?;
-            registers[rd] = self.pop()?;
+            registers[rd] = self.delete_identifier(registers[rd].clone())?;
           }
           Op::IteratorNext => {
-            self.stack.push(registers[rd].clone());
-            self.iterator_next_op()?;
-            registers[rd] = self.pop()?;
+            registers[rd] = self.iterator_next(registers[rd].clone())?;
           }
           Op::IteratorClose => {
-            self.stack.push(registers[rd].clone());
-            self.iterator_close_op()?;
-            registers[rd] = self.pop()?;
+            registers[rd] = self.iterator_close(registers[rd].clone())?;
           }
           Op::PushWithEnv => {
             let object = self.to_object_value(registers[rd].clone())?;
@@ -1899,9 +1889,13 @@ impl Vm {
       match step_result {
         Ok(Some(result)) => return Ok(result),
         Ok(None) => {}
-        Err(_error) if self.pending_exception && Arc::ptr_eq(&self.chunk, &execution_chunk) => {
-          self.pending_exception = false;
-          registers[7] = self.stack.pop().unwrap_or(Value::Undefined);
+        Err(_error)
+          if self.pending_exception.is_some() && Arc::ptr_eq(&self.chunk, &execution_chunk) =>
+        {
+          registers[7] = self
+            .pending_exception
+            .take()
+            .unwrap_or(Value::Undefined);
           continue;
         }
         Err(error) => return Err(error),
@@ -1933,7 +1927,6 @@ impl Vm {
       .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
     let saved_chunk = Arc::clone(&self.chunk);
     let saved_ip = self.ip;
-    let saved_stack = self.stack.snapshot();
     let saved_root_chunk = self.root_chunk.clone();
     let saved_current_strict_mode = self.current_strict_mode;
     let saved_current_closure_env = self.current_closure_env.clone();
@@ -1945,7 +1938,7 @@ impl Vm {
     let saved_current_arguments_mapped_count = self.current_arguments_mapped_count;
     let saved_recent_return_value = self.recent_return_value.clone();
     let saved_last_uncaught_exception = self.last_uncaught_exception.clone();
-    let saved_pending_exception = self.pending_exception;
+    let saved_pending_exception = self.pending_exception.clone();
     let saved_lexical_env = if direct_eval {
       Some(Rc::clone(&self.lexical_env))
     } else {
@@ -2005,7 +1998,6 @@ impl Vm {
     self.root_chunk = Some(Arc::clone(&chunk_rc));
     self.chunk = chunk_rc;
     self.ip = 0;
-    self.stack.clear();
     self.current_strict_mode = self.chunk.root_strict;
     self.gc_temp_roots.clear();
     self.yield_star_state = None;
@@ -2038,7 +2030,6 @@ impl Vm {
 
     self.chunk = saved_chunk;
     self.ip = saved_ip;
-    self.stack.restore_from(saved_stack);
     self.root_chunk = saved_root_chunk;
     self.current_strict_mode = saved_current_strict_mode;
     self.current_closure_env = saved_current_closure_env;
@@ -2742,37 +2733,25 @@ impl Vm {
     )
   }
 
-  /// Pop the return value, restore the caller's frame, and push the result.
-  pub(super) fn execute_return(&mut self) -> Result<(), RuntimeError> {
+  /// Restore the caller's frame and return the callee's result.
+  pub(super) fn execute_return(
+    &mut self,
+    result: Value,
+  ) -> Result<Value, RuntimeError> {
     let frame = self
       .call_stack
       .pop()
       .ok_or("Return without call frame")?;
-    let result = self.stack.pop().unwrap_or(Value::Undefined);
-
-    if crate::trace::enabled() {
-      eprintln!(
-        "[trace] execute_return stack_before_truncate={} frame.stack_base={} result={:?}",
-        self.stack.len(),
-        frame.stack_base,
-        result
-      );
-      for (i, v) in self.stack.iter_rev().take(6).enumerate() {
-        crate::trace::value_string(&format!("[trace]   ret_stack[{}]", i), v);
-      }
-    }
 
     // Runtime return-type check intentionally disabled in JS-first mode.
     // TypeScript return annotations are erased at runtime.
 
-    // Restore caller state.
     self.current_slot_types = frame.slot_types;
     self.current_slot_names = frame.slot_names;
     self.current_slot_immutable = frame.slot_immutable;
     self.current_slot_sloppy_immutable_silent = frame.slot_sloppy_immutable_silent;
     self.chunk = frame.chunk;
     self.ip = frame.ip;
-    self.stack.restore_from(frame.stack);
     self.locals = frame.locals;
     self.this_value = frame.this_value;
     self.current_closure_env = frame.closure_env;
@@ -2781,22 +2760,15 @@ impl Vm {
     self.current_arguments_object = frame.arguments_object;
     self.current_arguments_mapped_count = frame.arguments_mapped_count;
     self.current_strict_mode = frame.is_strict;
-    // Handlers registered in the returning frame are now invalid.
     self.prune_stale_handlers();
-    self.stack.push(result);
 
-    if crate::trace::enabled() {
-      eprintln!(
-        "[trace] execute_return stack_after_push={}",
-        self.stack.len()
-      );
-    }
-
-    Ok(())
+    Ok(result)
   }
 
-  fn delete_identifier_op(&mut self) -> Result<(), RuntimeError> {
-    let name_val = self.pop()?;
+  fn delete_identifier(
+    &mut self,
+    name_val: Value,
+  ) -> Result<Value, RuntimeError> {
     let name = if let Value::String(s) = name_val {
       s
     } else {
@@ -2814,8 +2786,7 @@ impl Vm {
         )
       };
       if has_binding {
-        self.stack.push(Value::Bool(false));
-        return Ok(());
+        return Ok(Value::Bool(false));
       }
       if let Some(binding_object) = binding_object {
         let key = PropertyKey::String(name.clone());
@@ -2823,8 +2794,7 @@ impl Vm {
         if found && (!with_environment || !self.is_unscopable_binding(&binding_object, &name)?) {
           let deleted = self.delete_property_host(&binding_object, &key)?;
           self.bump_object_generation(&binding_object);
-          self.stack.push(Value::Bool(deleted));
-          return Ok(());
+          return Ok(Value::Bool(deleted));
         }
       }
       env = outer;
@@ -2834,12 +2804,13 @@ impl Vm {
     let key = PropertyKey::String(name.clone());
     let deleted = self.delete_property_host(&global_obj, &key)?;
     self.bump_object_generation(&global_obj);
-    self.stack.push(Value::Bool(deleted));
-    Ok(())
+    Ok(Value::Bool(deleted))
   }
 
-  fn iterator_next_op(&mut self) -> Result<(), RuntimeError> {
-    let iterator = self.pop()?;
+  fn iterator_next(
+    &mut self,
+    iterator: Value,
+  ) -> Result<Value, RuntimeError> {
     let next_fn = self.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
     let result = self.call_value_with_this(&next_fn, &iterator, &[])?;
     let done = self.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
@@ -2861,8 +2832,7 @@ impl Vm {
         _ => {}
       }
     }
-    self.stack.push(result);
-    Ok(())
+    Ok(result)
   }
 
   fn create_yield_star_state(
@@ -2989,11 +2959,12 @@ impl Vm {
     }
   }
 
-  fn iterator_close_op(&mut self) -> Result<(), RuntimeError> {
-    let iterator = self.pop()?;
+  fn iterator_close(
+    &mut self,
+    iterator: Value,
+  ) -> Result<Value, RuntimeError> {
     if matches!(iterator, Value::Undefined | Value::Null) {
-      self.stack.push(iterator);
-      return Ok(());
+      return Ok(iterator);
     }
     let done_key = PropertyKey::String("__tsblitz_iter_done".to_string());
     let already_done = match &iterator {
@@ -3028,14 +2999,12 @@ impl Vm {
       _ => false,
     };
     if already_done {
-      self.stack.push(iterator);
-      return Ok(());
+      return Ok(iterator);
     }
     let return_fn =
       self.get_property_host(&iterator, &PropertyKey::String("return".to_string()))?;
     if matches!(return_fn, Value::Undefined | Value::Null) {
-      self.stack.push(iterator);
-      return Ok(());
+      return Ok(iterator);
     }
     if !Self::is_callable_value(&return_fn) {
       return Err(self.throw_type_error("Iterator return is not callable"));
@@ -3044,8 +3013,7 @@ impl Vm {
     if !ret.is_object() {
       return Err(self.throw_type_error("Iterator return result is not an object"));
     }
-    self.stack.push(iterator);
-    Ok(())
+    Ok(iterator)
   }
 
   pub(super) fn bump_object_generation(
@@ -3160,14 +3128,6 @@ impl Vm {
       .parse::<usize>()
       .map_err(|_| RuntimeError::from("Invalid module export index"))?;
     Ok((module, name.to_string()))
-  }
-
-  #[inline(always)]
-  pub(super) fn pop(&mut self) -> Result<Value, RuntimeError> {
-    self
-      .stack
-      .pop()
-      .ok_or_else(|| RuntimeError::from("Stack underflow"))
   }
 
   pub(super) fn dump_diag(

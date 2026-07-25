@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Language-semantic operations and intrinsic bootstrapping.
 use num_bigint::BigInt as BigIntValue;
 use num_traits::ToPrimitive;

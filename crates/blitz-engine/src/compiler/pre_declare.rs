@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 //! Pre-declaration phase for hoisting support.
 //!
 //! This module handles the pre-declaration phase of compilation, which:

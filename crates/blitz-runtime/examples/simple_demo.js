@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
 const people = [
   { name: "Ada", language: "JavaScript" },
   { name: "Grace", language: "COBOL" },
