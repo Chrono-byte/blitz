@@ -97,7 +97,7 @@ fn module_options() -> oxc_resolver::ResolveOptions {
       ".cts".into(),
       ".tsx".into(),
     ],
-    condition_names: vec!["import".into(), "default".into()],
+    condition_names: vec!["node".into(), "import".into(), "default".into()],
     tsconfig: Some(TsconfigDiscovery::Auto),
     // NODE_PATH is a deprecated CommonJS feature and is not part of the
     // TypeScript 6/7 or Node ESM project-resolution model.

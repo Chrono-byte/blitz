@@ -308,6 +308,20 @@
         "blitz-internal:websocket"
       ],
       "host_primitives": []
+    },
+    {
+      "specifier": "node:process",
+      "visibility": "public",
+      "source": {
+        "path": "modules/facades/node-process.js",
+        "sha256": "ac0ec67527834b3813ce728e27267567e82656ecc4378ea25144ea86d5b8bca4"
+      },
+      "declaration": {
+        "path": "declarations/node-process.d.ts",
+        "sha256": "2f5351322064b2fd9d6b813999be38a8a80f5e914aecf959dc67781144604132"
+      },
+      "dependencies": [],
+      "host_primitives": []
     }
   ],
   "files": [
@@ -340,8 +354,12 @@
       "sha256": "3af9dce8d0298bdcd80e5b55a136a2e9163764909207eb341bae7616c924916e"
     },
     {
+      "path": "declarations/node-process.d.ts",
+      "sha256": "2f5351322064b2fd9d6b813999be38a8a80f5e914aecf959dc67781144604132"
+    },
+    {
       "path": "embedded.rs",
-      "sha256": "bedd397f7516b332b7e34cbe034b722a9c7faed74d841174e134ddc4d9039528"
+      "sha256": "dbdc1b69208e30f9247f7fb0602323b9361f1b174b4280054866e7fc8381f975"
     },
     {
       "path": "modules/facades/blitz-app.js",
@@ -390,6 +408,10 @@
     {
       "path": "modules/facades/blitz-websocket.js",
       "sha256": "fb881a44fe2be9a00a8523977af5eebb9ca36f91fcac57b9e862a1598b025684"
+    },
+    {
+      "path": "modules/facades/node-process.js",
+      "sha256": "ac0ec67527834b3813ce728e27267567e82656ecc4378ea25144ea86d5b8bca4"
     }
   ]
 }

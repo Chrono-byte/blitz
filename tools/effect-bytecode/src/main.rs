@@ -755,7 +755,10 @@ fn verify_stdlib_manifest(
     if !specifiers.insert(entry.specifier.as_str()) {
       return Err(format!("duplicate stdlib specifier {}", entry.specifier));
     }
-    if entry.visibility == "public" && !entry.specifier.starts_with("blitz:") {
+    if entry.visibility == "public"
+      && !entry.specifier.starts_with("blitz:")
+      && !entry.specifier.starts_with("node:")
+    {
       return Err(format!(
         "public stdlib module has invalid prefix {}",
         entry.specifier

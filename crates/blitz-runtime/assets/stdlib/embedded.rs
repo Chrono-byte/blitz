@@ -142,4 +142,14 @@ pub const EMBEDDED_BLITZ_STDLIB_MODULES: &[EmbeddedBlitzStdlibModule] = &[
     dependencies: &["effect/Context", "effect/Effect", "effect/Layer", "effect/Stream", "blitz-internal:websocket"],
     host_primitives: &[],
   },
+  EmbeddedBlitzStdlibModule {
+    specifier: "node:process",
+    source: include_str!("modules/facades/node-process.js"),
+    declaration: Some(include_str!("declarations/node-process.d.ts")),
+    source_sha256: "ac0ec67527834b3813ce728e27267567e82656ecc4378ea25144ea86d5b8bca4",
+    declaration_sha256: Some("2f5351322064b2fd9d6b813999be38a8a80f5e914aecf959dc67781144604132"),
+    visibility: "public",
+    dependencies: &[],
+    host_primitives: &[],
+  },
 ];

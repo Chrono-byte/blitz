@@ -467,7 +467,8 @@ fn validate_specifier(specifier: &str) -> Result<(), RuntimeGraphError> {
 
 fn validate_visibility(module: &RuntimeModuleManifest) -> Result<(), RuntimeGraphError> {
   let is_effect_public = module.specifier == "effect" || module.specifier.starts_with("effect/");
-  let is_blitz_public = module.specifier.starts_with("blitz:");
+  let is_blitz_public =
+    module.specifier.starts_with("blitz:") || module.specifier.starts_with("node:");
   let is_private = module.specifier.starts_with("blitz-internal:");
 
   match (module.origin, module.visibility) {

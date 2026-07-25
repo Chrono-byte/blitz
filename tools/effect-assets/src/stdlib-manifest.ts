@@ -124,6 +124,13 @@ export const STDLIB_INPUTS = [
     visibility: "public",
     hostPrimitives: [],
   },
+  {
+    specifier: "node:process",
+    source: "facades/node-process.js",
+    declaration: "node-process.d.ts",
+    visibility: "public",
+    hostPrimitives: [],
+  },
 ] as const satisfies readonly StdlibInput[];
 
 export const STDLIB_FORMAT_VERSION = 1;

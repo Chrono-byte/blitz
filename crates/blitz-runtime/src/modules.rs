@@ -46,10 +46,23 @@ pub fn evaluate_entry(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use blitz::value::{ObjectData, Value};
+  use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
   use std::cell::RefCell;
   use std::path::PathBuf;
   use std::rc::Rc;
+
+  fn runtime_vm(profile: crate::host::NodeCompatProfile) -> (Vm, crate::host::RuntimeHandle) {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    globals.borrow_mut().properties.insert(
+      PropertyKey::String("globalThis".to_string()),
+      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+    );
+    let mut vm = Vm::new(globals);
+    let mut options = crate::host::RuntimeOptions::from_host(vec!["blitz-test".to_string()]);
+    options.node_compat = profile;
+    let runtime = crate::host::install_runtime(&mut vm, options);
+    (vm, runtime)
+  }
 
   fn temporary_directory(label: &str) -> PathBuf {
     let directory = std::env::temp_dir().join(format!(
@@ -62,6 +75,46 @@ mod tests {
     ));
     std::fs::create_dir_all(&directory).expect("create temporary module project");
     directory
+  }
+
+  #[test]
+  fn evaluates_the_core_node_process_module() {
+    let directory = temporary_directory("node-process");
+    let entry = directory.join("entry.ts");
+    std::fs::write(
+      &entry,
+      "import process, { argv, cwd, platform } from 'node:process'; if (argv !== process.argv || cwd() !== process.cwd() || platform !== process.platform) throw new Error('node:process exports do not share process state');",
+    )
+    .expect("write node:process entry");
+
+    let (mut vm, _runtime) = runtime_vm(crate::host::NodeCompatProfile::Core);
+    let loader = vm.module_loader_handle();
+    {
+      let mut loader = loader.borrow_mut();
+      loader
+        .construct(&directory, "./entry.ts")
+        .expect("construct node:process graph");
+      loader
+        .instantiate_all()
+        .expect("instantiate node:process graph");
+    }
+    blitz::module::evaluate_entry_shared(&loader, &entry, &mut vm, true)
+      .expect("typecheck and evaluate node:process entry");
+
+    std::fs::remove_dir_all(directory).expect("remove node:process project");
+  }
+
+  #[test]
+  fn rejects_node_modules_outside_the_selected_profile() {
+    let directory = temporary_directory("node-process-off");
+    let entry = directory.join("entry.ts");
+    std::fs::write(&entry, "import 'node:process';").expect("write disabled node entry");
+
+    let (mut vm, _runtime) = runtime_vm(crate::host::NodeCompatProfile::Off);
+    let error = evaluate_entry(&mut vm, &entry).expect_err("disabled node module must fail");
+
+    assert!(error.to_string().contains("node:process"), "{error}");
+    std::fs::remove_dir_all(directory).expect("remove disabled node project");
   }
 
   #[test]
@@ -101,6 +154,55 @@ mod tests {
 
     assert_eq!(vm.get_global("packageAnswer"), Some(Value::Number(42.0)));
     std::fs::remove_dir_all(directory).expect("remove temporary module project");
+  }
+
+  #[test]
+  fn resolves_scoped_packages_with_node_export_conditions() {
+    let directory = temporary_directory("scoped-node-condition");
+    let package = directory.join("node_modules/@fixture/condition");
+    std::fs::create_dir_all(&package).expect("create scoped package");
+    std::fs::write(
+      package.join("package.json"),
+      r#"{
+        "type": "module",
+        "exports": {
+          ".": {
+            "node": "./node.js",
+            "import": "./import.js",
+            "default": "./default.js"
+          }
+        }
+      }"#,
+    )
+    .expect("write scoped package manifest");
+    std::fs::write(package.join("node.js"), "export const selected = 'node';")
+      .expect("write node export");
+    std::fs::write(
+      package.join("import.js"),
+      "export const selected = 'import';",
+    )
+    .expect("write import export");
+    std::fs::write(
+      package.join("default.js"),
+      "export const selected = 'default';",
+    )
+    .expect("write default export");
+    let entry = directory.join("entry.ts");
+    std::fs::write(
+      &entry,
+      "import { selected } from '@fixture/condition'; globalThis.selectedCondition = selected;",
+    )
+    .expect("write scoped package entry");
+
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    evaluate_entry(&mut vm, &entry).expect("evaluate scoped package graph");
+
+    assert_eq!(
+      vm.get_global("selectedCondition"),
+      Some(Value::String("node".to_string()))
+    );
+    std::fs::remove_dir_all(directory).expect("remove scoped package project");
   }
 
   #[test]

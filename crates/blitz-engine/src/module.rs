@@ -732,7 +732,9 @@ impl ModuleLoader {
           .declarations
           .iter()
           .filter(|(specifier, _)| {
-            specifier.starts_with("effect/") || specifier.as_str() == "blitz:runtime"
+            specifier.starts_with("effect/")
+              || specifier.as_str() == "blitz:runtime"
+              || specifier.starts_with("node:")
           })
           .map(|(specifier, source)| (specifier.clone(), source.clone())),
       );

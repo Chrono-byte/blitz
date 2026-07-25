@@ -112,6 +112,7 @@ mod tests {
   use std::collections::BTreeMap;
 
   use super::*;
+  use crate::host::NodeCompatProfile;
   use blitz::compiler;
   use blitz::parser::Parser as JsParser;
 
@@ -137,6 +138,7 @@ mod tests {
           .parse()
           .expect("test listen address"),
         install_compatibility_globals: false,
+        node_compat: NodeCompatProfile::Core,
       },
     );
 

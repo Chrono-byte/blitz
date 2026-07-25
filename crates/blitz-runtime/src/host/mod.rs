@@ -45,6 +45,16 @@ use event_loop::{EventRegistry, EventSender, ResourceHandle, ResourceRegistry};
 use scheduler::{TimerId, TimerKind, TimerScheduler, WakeupEvent};
 use terminal::TerminalEvent;
 
+/// Node compatibility modules exposed to an application realm.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum NodeCompatProfile {
+  /// Do not expose any `node:*` modules.
+  Off,
+  /// Expose the tested process-local compatibility modules.
+  #[default]
+  Core,
+}
+
 /// Host configuration installed into a Blitz VM.
 #[derive(Clone, Debug)]
 pub struct RuntimeOptions {
@@ -61,6 +71,8 @@ pub struct RuntimeOptions {
   /// The default runtime leaves this disabled. Public runtime capabilities are
   /// exposed through Effect-native `blitz:*` modules instead.
   pub install_compatibility_globals: bool,
+  /// Select the allowlisted `node:*` compatibility surface.
+  pub node_compat: NodeCompatProfile,
 }
 
 impl RuntimeOptions {
@@ -93,6 +105,7 @@ impl RuntimeOptions {
       exec_path,
       listen_addr: SocketAddr::new(host, port),
       install_compatibility_globals: false,
+      node_compat: NodeCompatProfile::default(),
     }
   }
 }
@@ -392,10 +405,28 @@ pub fn try_install_runtime(
   }
   let policy_validation = policy_started.elapsed();
   let registration_started = Instant::now();
-  if let Err(error) = vm.register_prelinked_graph_with_declarations(
-    bundle.graph.clone(),
-    crate::effect_assets::public_declaration_sources(),
-  ) {
+  let mut graph = bundle.graph.clone();
+  let node_roots = graph
+    .public_roots
+    .iter()
+    .copied()
+    .filter(|module_index| {
+      graph
+        .module(*module_index)
+        .is_some_and(|module| module.specifier.starts_with("node:"))
+    })
+    .collect::<std::collections::HashSet<_>>();
+  if options.node_compat == NodeCompatProfile::Off {
+    graph
+      .public_roots
+      .retain(|module_index| !node_roots.contains(module_index));
+  }
+  let declarations = crate::effect_assets::public_declaration_sources()
+    .into_iter()
+    .filter(|(specifier, _)| {
+      options.node_compat != NodeCompatProfile::Off || !specifier.starts_with("node:")
+    });
+  if let Err(error) = vm.register_prelinked_graph_with_declarations(graph, declarations) {
     restore_host_bridge(vm, previous_bridge);
     return Err(RuntimeInstallError::Registration(error.to_string()));
   }
@@ -1554,6 +1585,7 @@ mod tests {
           .parse()
           .expect("test listen address"),
         install_compatibility_globals: false,
+        node_compat: NodeCompatProfile::Core,
       },
     );
     assert!(!runtime.is_live());
@@ -1578,6 +1610,7 @@ mod tests {
           .parse()
           .expect("test listen address"),
         install_compatibility_globals: false,
+        node_compat: NodeCompatProfile::Core,
       },
     );
     let source = blitz::js!(
@@ -1619,6 +1652,7 @@ mod tests {
           .parse()
           .expect("test listen address"),
         install_compatibility_globals: true,
+        node_compat: NodeCompatProfile::Core,
       },
     );
     let source = blitz::js!(
@@ -1696,6 +1730,7 @@ mod tests {
           .parse()
           .expect("test listen address"),
         install_compatibility_globals: true,
+        node_compat: NodeCompatProfile::Core,
       },
     );
     let source = format!(
@@ -1743,6 +1778,7 @@ mod tests {
               .parse()
               .expect("test listen address"),
             install_compatibility_globals: false,
+            node_compat: NodeCompatProfile::Core,
           },
         );
         let directory = env::temp_dir().join(format!("blitz-effect-http-{}", std::process::id()));
@@ -1824,6 +1860,7 @@ mod tests {
           .parse()
           .expect("test listen address"),
         install_compatibility_globals: true,
+        node_compat: NodeCompatProfile::Core,
       },
     );
     let source = blitz::js!(
@@ -1898,6 +1935,7 @@ mod tests {
           .parse()
           .expect("test listen address"),
         install_compatibility_globals: true,
+        node_compat: NodeCompatProfile::Core,
       },
     );
     let source = blitz::js!(
@@ -2033,6 +2071,7 @@ mod tests {
           .parse()
           .expect("test listen address"),
         install_compatibility_globals: true,
+        node_compat: NodeCompatProfile::Core,
       },
     );
     let source = blitz::js!(
@@ -2134,6 +2173,7 @@ mod tests {
               .parse()
               .expect("test listen address"),
             install_compatibility_globals: false,
+            node_compat: NodeCompatProfile::Core,
           },
         );
         let source =

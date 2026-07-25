@@ -1,5 +1,8 @@
 # Scoped Node compatibility plan
 
+The exhaustive Node 24 built-in inventory and per-module delivery order live in
+[`NODE_MODULE_IMPLEMENTATION_PLAN.md`](NODE_MODULE_IMPLEMENTATION_PLAN.md).
+
 ## Goal
 
 Allow ESM applications and selected npm packages to run under Blitz when they
@@ -14,6 +17,26 @@ A useful first target is an ESM-only package graph that depends on the core
 utility modules. Vite is a later integration target because starting its dev
 server also requires filesystem watching, streams, HTTP, sockets, crypto, and
 parts of the process and module APIs.
+
+## Implementation status
+
+The first vertical slice is implemented:
+
+- runtime resolution now selects the `node` package-export condition before
+  `import` and `default`;
+- `RuntimeOptions.node_compat` supports `Off` and `Core` profiles, with the CLI
+  selecting the tested `Core` surface by default;
+- profile filtering controls which `node:*` roots and declarations become
+  public in a realm;
+- the generated prelinked runtime graph contains the first curated module,
+  `node:process`;
+- `node:process` has matching runtime and declaration assets and shares the
+  process singleton's state through its default and named exports; and
+- runtime tests cover scoped package resolution, the `node` export condition,
+  strict typechecking/evaluation, and rejection under the `Off` profile.
+
+The next slice is `node:path` plus the dynamic-import registry propagation
+called out below. Vite is not yet supported.
 
 ## Current baseline
 
@@ -111,9 +134,9 @@ node-compat manifest
 
 `RuntimeOptions` receives `node_compat: NodeCompatConfig`. The CLI installs the
 selected graph before constructing the application entry. Other embedders can
-choose `off` or a narrower module set. The default should remain `off` until
-core behavior and declarations pass the compatibility suite; changing the CLI
-default is a separate release decision.
+choose `off` or a narrower module set. The CLI may default to `core` only for
+modules that meet the per-module definition of done; adding a module to that
+profile is therefore a compatibility release decision.
 
 The generated manifest and graph should have deterministic hashes and ABI
 validation equivalent to the existing stdlib assets. A Node facade must never

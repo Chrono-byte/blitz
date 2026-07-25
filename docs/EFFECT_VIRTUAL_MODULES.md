@@ -25,6 +25,7 @@ The manifest currently supports:
 | `blitz:terminal` | Effect output and scoped line Stream |
 | `blitz:runtime` | Aggregate live Layer and supervised root runner |
 | `blitz:app` | Transitional application facade |
+| `node:process` | Scoped Node-compatible view of the runtime process singleton |
 | `blitz-internal:*` | Private host-ABI adapters |
 
 Public-root resolution is exact and case-sensitive. It does not normalize or

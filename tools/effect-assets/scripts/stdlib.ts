@@ -135,7 +135,8 @@ export const verifyManifest = (root: string, manifest = readManifest(root), effe
   for (const entry of entries) {
     const isPublic = entry.visibility === "public";
     if (!isPublic && entry.visibility !== "private") fail(`invalid visibility: ${entry.specifier}`);
-    if (isPublic !== entry.specifier.startsWith("blitz:")) fail(`visibility does not match specifier: ${entry.specifier}`);
+    const hasPublicPrefix = entry.specifier.startsWith("blitz:") || entry.specifier.startsWith("node:");
+    if (isPublic !== hasPublicPrefix) fail(`visibility does not match specifier: ${entry.specifier}`);
     if (!isPublic && entry.declaration !== undefined) fail(`private entry has a declaration: ${entry.specifier}`);
     if (unique(entry.dependencies).length !== entry.dependencies.length) fail(`duplicate dependency: ${entry.specifier}`);
     const primitiveNames = entry.host_primitives.map(primitive => primitive.name);
