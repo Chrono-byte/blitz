@@ -466,15 +466,11 @@ impl RiscBuilder {
         (instruction.op == Op::PushHandler)
           .then(|| instruction.branch_offset())
           .flatten()
-          .and_then(|offset| usize::try_from(ip as i64 + 1 + offset as i64).ok())
-          .and_then(|target| {
-            builder
+          .and_then(|offset| usize::try_from(ip as i64 + 1 + offset as i64).ok()).zip(builder
               .branch_values
               .get(&ip)
               .and_then(|values| values.last())
-              .copied()
-              .map(|exception| (target, exception))
-          })
+              .copied())
       })
       .collect();
 

@@ -550,8 +550,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
           let value = next_characters
             .get(*index)
             .cloned()
-            .map(Value::String)
-            .unwrap_or(Value::Undefined);
+            .map_or(Value::Undefined, Value::String);
           let done = *index >= next_characters.len();
           if !done {
             *index += 1;

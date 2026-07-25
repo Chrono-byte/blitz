@@ -313,11 +313,9 @@ fn dispatch_abort_with_event(
     if get_property(&record, "once")
       .as_bool()
       .unwrap_or(false)
-    {
-      if let Some(slot) = listeners.borrow_mut().get_mut(index) {
+      && let Some(slot) = listeners.borrow_mut().get_mut(index) {
         *slot = None;
       }
-    }
   }
   Ok(())
 }

@@ -498,7 +498,7 @@ pub(crate) fn install_map_set_constructors(
   let map_get = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, &map_data, "get")?;
+      let entries = require_state(vm, &receiver, map_data, "get")?;
       let key = args.get(1).cloned().unwrap_or(Value::Undefined);
       if let Value::Array(entries, _) = entries {
         for entry in entries.borrow().iter().flatten() {
@@ -524,7 +524,7 @@ pub(crate) fn install_map_set_constructors(
   let map_has = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, &map_data, "has")?;
+      let entries = require_state(vm, &receiver, map_data, "has")?;
       let key = args.get(1).cloned().unwrap_or(Value::Undefined);
       if let Value::Array(entries, _) = entries {
         return Ok(Value::Bool(entries.borrow().iter().flatten().any(
@@ -548,7 +548,7 @@ pub(crate) fn install_map_set_constructors(
   let map_delete = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, &map_data, "delete")?;
+      let entries = require_state(vm, &receiver, map_data, "delete")?;
       let key = args.get(1).cloned().unwrap_or(Value::Undefined);
       let Value::Array(entries, _) = entries else {
         return Ok(Value::Bool(false));
@@ -578,7 +578,7 @@ pub(crate) fn install_map_set_constructors(
   let map_set = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, &map_data, "set")?;
+      let entries = require_state(vm, &receiver, map_data, "set")?;
       let key =
         canonicalize_keyed_collection_value(args.get(1).cloned().unwrap_or(Value::Undefined));
       let value = args.get(2).cloned().unwrap_or(Value::Undefined);
@@ -617,7 +617,7 @@ pub(crate) fn install_map_set_constructors(
   let map_clear = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, &map_data, "clear")?;
+      let entries = require_state(vm, &receiver, map_data, "clear")?;
       if let Value::Array(entries, _) = entries {
         for entry in entries.borrow_mut().iter_mut() {
           *entry = None;
@@ -638,7 +638,7 @@ pub(crate) fn install_map_set_constructors(
   let map_for_each = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, &map_data, "forEach")?;
+      let entries = require_state(vm, &receiver, map_data, "forEach")?;
       let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
       if !crate::vm::Vm::is_callable_value(&callback) {
         return Err(vm.throw_type_error("Map.prototype.forEach callback is not callable"));
@@ -677,7 +677,7 @@ pub(crate) fn install_map_set_constructors(
   let map_size = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let entries = require_state(vm, &receiver, &map_data, "size")?;
+      let entries = require_state(vm, &receiver, map_data, "size")?;
       let size = if let Value::Array(entries, _) = entries {
         entries.borrow().iter().flatten().count()
       } else {
@@ -712,14 +712,14 @@ pub(crate) fn install_map_set_constructors(
     let function = method(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-        let state = require_state(vm, &receiver, &data, name)?;
+        let state = require_state(vm, &receiver, data, name)?;
         Ok(iterator_object(
           &iterator_proto,
-          &iterator_brand,
-          &source_key,
-          &index_key,
-          &done_key,
-          Some(&kind_key),
+          iterator_brand,
+          source_key,
+          index_key,
+          done_key,
+          Some(kind_key),
           state,
           Some(kind),
         ))
@@ -744,14 +744,14 @@ pub(crate) fn install_map_set_constructors(
   let entries_function = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let state = require_state(vm, &receiver, &map_data, "entries")?;
+      let state = require_state(vm, &receiver, map_data, "entries")?;
       Ok(iterator_object(
         &map_iterator_proto_for_entries,
-        &map_iterator_brand_for_entries,
-        &iterator_source_key_for_map_entries,
-        &iterator_index_key_for_map_entries,
-        &iterator_done_key_for_map_entries,
-        Some(&iterator_kind_key_for_map_entries),
+        map_iterator_brand_for_entries,
+        iterator_source_key_for_map_entries,
+        iterator_index_key_for_map_entries,
+        iterator_done_key_for_map_entries,
+        Some(iterator_kind_key_for_map_entries),
         state,
         Some(2.0),
       ))
@@ -836,7 +836,7 @@ pub(crate) fn install_map_set_constructors(
   let set_add = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let values = require_state(vm, &receiver, &set_data, "add")?;
+      let values = require_state(vm, &receiver, set_data, "add")?;
       let value =
         canonicalize_keyed_collection_value(args.get(1).cloned().unwrap_or(Value::Undefined));
       let Value::Array(values, _) = values else {
@@ -865,7 +865,7 @@ pub(crate) fn install_map_set_constructors(
   let set_has = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let values = require_state(vm, &receiver, &set_data, "has")?;
+      let values = require_state(vm, &receiver, set_data, "has")?;
       let value = args.get(1).cloned().unwrap_or(Value::Undefined);
       if let Value::Array(values, _) = values {
         return Ok(Value::Bool(
@@ -891,7 +891,7 @@ pub(crate) fn install_map_set_constructors(
   let set_delete = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let values = require_state(vm, &receiver, &set_data, "delete")?;
+      let values = require_state(vm, &receiver, set_data, "delete")?;
       let value = args.get(1).cloned().unwrap_or(Value::Undefined);
       let Value::Array(values, _) = values else {
         return Ok(Value::Bool(false));
@@ -920,7 +920,7 @@ pub(crate) fn install_map_set_constructors(
   let set_clear = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let values = require_state(vm, &receiver, &set_data, "clear")?;
+      let values = require_state(vm, &receiver, set_data, "clear")?;
       if let Value::Array(values, _) = values {
         for value in values.borrow_mut().iter_mut() {
           *value = None;
@@ -941,7 +941,7 @@ pub(crate) fn install_map_set_constructors(
   let set_for_each = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let values = require_state(vm, &receiver, &set_data, "forEach")?;
+      let values = require_state(vm, &receiver, set_data, "forEach")?;
       let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
       if !crate::vm::Vm::is_callable_value(&callback) {
         return Err(vm.throw_type_error("Set.prototype.forEach callback is not callable"));
@@ -981,7 +981,7 @@ pub(crate) fn install_map_set_constructors(
   let set_size = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let values = require_state(vm, &receiver, &set_data, "size")?;
+      let values = require_state(vm, &receiver, set_data, "size")?;
       let size = if let Value::Array(values, _) = values {
         values.borrow().iter().flatten().count()
       } else {
@@ -1013,14 +1013,14 @@ pub(crate) fn install_map_set_constructors(
   let set_values = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let state = require_state(vm, &receiver, &set_data, "values")?;
+      let state = require_state(vm, &receiver, set_data, "values")?;
       Ok(iterator_object(
         &set_iterator_proto_for_values,
-        &set_iterator_brand_for_values,
-        &iterator_source_key_for_set_values,
-        &iterator_index_key_for_set_values,
-        &iterator_done_key_for_set_values,
-        Some(&iterator_kind_key_for_set_values),
+        set_iterator_brand_for_values,
+        iterator_source_key_for_set_values,
+        iterator_index_key_for_set_values,
+        iterator_done_key_for_set_values,
+        Some(iterator_kind_key_for_set_values),
         state,
         Some(0.0),
       ))
@@ -1052,14 +1052,14 @@ pub(crate) fn install_map_set_constructors(
   let set_entries = method(
     Rc::new(move |vm, args| {
       let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-      let state = require_state(vm, &receiver, &set_data, "entries")?;
+      let state = require_state(vm, &receiver, set_data, "entries")?;
       Ok(iterator_object(
         &set_iterator_proto_for_entries,
-        &set_iterator_brand_for_entries,
-        &iterator_source_key_for_set_entries,
-        &iterator_index_key_for_set_entries,
-        &iterator_done_key_for_set_entries,
-        Some(&iterator_kind_key_for_set_entries),
+        set_iterator_brand_for_entries,
+        iterator_source_key_for_set_entries,
+        iterator_index_key_for_set_entries,
+        iterator_done_key_for_set_entries,
+        Some(iterator_kind_key_for_set_entries),
         state,
         Some(1.0),
       ))

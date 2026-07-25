@@ -1337,8 +1337,7 @@ impl TypeContext {
             .cloned()
             .or_else(|| parameter.default.clone());
           let argument = argument
-            .map(|typ| self.resolve_type_with_environment(&typ, environment, depth + 1))
-            .unwrap_or(Type::Unknown);
+            .map_or(Type::Unknown, |typ| self.resolve_type_with_environment(&typ, environment, depth + 1));
           if let Some(constraint) = &parameter.constraint {
             let constraint =
               self.resolve_type_with_environment(constraint, &definition_environment, depth + 1);
@@ -2362,9 +2361,7 @@ fn convert_tuple_element(element: &oast::TSTupleElement<'_>) -> Result<Type, Typ
       }
     }
     _ => element
-      .as_ts_type()
-      .map(convert_ts_type)
-      .unwrap_or_else(|| Ok(Type::Unknown)),
+      .as_ts_type().map_or_else(|| Ok(Type::Unknown), convert_ts_type),
   }
 }
 

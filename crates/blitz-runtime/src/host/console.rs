@@ -223,9 +223,7 @@ fn label(
   vm: &mut Vm,
   value: Option<&Value>,
 ) -> String {
-  value
-    .map(|value| stringify(vm, value))
-    .unwrap_or_else(|| "default".to_string())
+  value.map_or_else(|| "default".to_string(), |value| stringify(vm, value))
 }
 
 fn format_arguments(
