@@ -66,19 +66,19 @@ impl Parser {
     path: &Path,
     module: bool,
   ) -> SourceType {
-    let is_typescript = path
+    let extension = path
       .extension()
       .and_then(|extension| extension.to_str())
-      .is_some_and(|extension| matches!(extension, "ts" | "tsx" | "mts" | "cts"));
+      .unwrap_or_default();
+    let inferred = SourceType::from_path(path).unwrap_or_else(|_| SourceType::script());
 
-    if is_typescript {
-      SourceType::from_path(path)
-        .unwrap_or_else(|_| SourceType::ts())
-        .with_module(module)
-    } else if module {
-      SourceType::mjs()
-    } else {
-      SourceType::script()
+    if module {
+      return inferred.with_module(true);
+    }
+
+    match extension {
+      "mjs" | "mts" | "cjs" | "cts" => inferred,
+      _ => inferred.with_module(false),
     }
   }
 

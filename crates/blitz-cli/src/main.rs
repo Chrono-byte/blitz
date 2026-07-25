@@ -195,6 +195,13 @@ struct ExecutionArgs {
   args: Vec<String>,
 }
 
+fn should_load_as_module(
+  path: &Path,
+  explicit_module: bool,
+) -> bool {
+  explicit_module || JsParser::source_type_for_path(path, false).is_module()
+}
+
 /// Returns whether a path has an executable TypeScript extension.
 fn is_typescript_path(path: &Path) -> bool {
   path
@@ -419,7 +426,7 @@ fn main() -> Result<(), blitz::errors::Error> {
 
   // If a file was provided, run it and exit. Otherwise start REPL.
   if let Some(path) = execution.file {
-    if execution.module {
+    if should_load_as_module(&path, execution.module) {
       let loader_handle = repl_vm.module_loader_handle();
       {
         let mut loader = loader_handle.borrow_mut();
@@ -628,6 +635,15 @@ mod tests {
       assert_eq!(run.file, PathBuf::from("program.ts"));
       assert_eq!(run.args, ["one"]);
     }
+  }
+
+  #[test]
+  fn explicit_module_extensions_use_the_module_loader() {
+    assert!(should_load_as_module(Path::new("entry.mjs"), false));
+    assert!(should_load_as_module(Path::new("entry.mts"), false));
+    assert!(!should_load_as_module(Path::new("entry.js"), false));
+    assert!(!should_load_as_module(Path::new("entry.cjs"), false));
+    assert!(should_load_as_module(Path::new("entry.js"), true));
   }
 
   #[test]
