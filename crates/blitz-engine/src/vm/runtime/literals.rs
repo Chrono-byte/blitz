@@ -1,6 +1,5 @@
 use crate::errors::RuntimeError;
 use crate::gc;
-use crate::mutex_compat::MutexBorrowExt;
 use crate::runtime_utils::{array_length_descriptor, usize_to_f64};
 use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
@@ -8,7 +7,6 @@ use crate::vm::runtime::execution::{ensure_slot, get_property};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 impl Vm {
   pub(super) fn build_array_value(
@@ -209,7 +207,7 @@ impl Vm {
 
     let closure = Value::Closure {
       proto: Rc::clone(&closure_proto),
-      env: gc::track_env(Rc::new(Mutex::new(env_cells))),
+      env: gc::track_env(Rc::new(RefCell::new(env_cells))),
       lexical_this: if closure_proto.captures_this {
         Some(Box::new(self.this_value.clone()))
       } else {

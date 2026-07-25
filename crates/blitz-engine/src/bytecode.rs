@@ -206,18 +206,25 @@ impl Constant {
   }
 }
 
-impl From<Value> for Constant {
-  fn from(value: Value) -> Self {
+/// Error returned when a runtime-owned value is passed to the bytecode
+/// constant pool.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConstantConversionError;
+
+impl TryFrom<Value> for Constant {
+  type Error = ConstantConversionError;
+
+  fn try_from(value: Value) -> Result<Self, Self::Error> {
     match value {
-      Value::Uninitialized => Self::Uninitialized,
-      Value::Number(value) => Self::Number(value),
-      Value::String(value) => Self::String(value),
-      Value::Bool(value) => Self::Bool(value),
-      Value::Undefined => Self::Undefined,
-      Value::BigInt(value) => Self::BigInt(value),
-      Value::Symbol(id, description) => Self::Symbol(id, description),
-      Value::Null => Self::Null,
-      _ => panic!("runtime-owned values cannot be stored in bytecode constants"),
+      Value::Uninitialized => Ok(Self::Uninitialized),
+      Value::Number(value) => Ok(Self::Number(value)),
+      Value::String(value) => Ok(Self::String(value)),
+      Value::Bool(value) => Ok(Self::Bool(value)),
+      Value::Undefined => Ok(Self::Undefined),
+      Value::BigInt(value) => Ok(Self::BigInt(value)),
+      Value::Symbol(id, description) => Ok(Self::Symbol(id, description)),
+      Value::Null => Ok(Self::Null),
+      _ => Err(ConstantConversionError),
     }
   }
 }
@@ -496,9 +503,9 @@ impl Chunk {
   /// Adds a constant to the constant pool and returns its index
   pub fn add_constant(
     &mut self,
-    value: Value,
+    value: Constant,
   ) -> usize {
-    self.constants.push(value.into());
+    self.constants.push(value);
     self.constants.len() - 1
   }
 
@@ -1306,11 +1313,20 @@ impl From<Op> for u8 {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::value::ObjectData;
+  use std::cell::RefCell;
+  use std::rc::Rc;
 
   #[test]
   fn compiled_chunks_are_sendable_between_threads() {
     fn assert_send<T: Send>() {}
     assert_send::<Chunk>();
+  }
+
+  #[test]
+  fn runtime_owned_values_are_rejected_as_constants() {
+    let object = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
+    assert_eq!(Constant::try_from(object), Err(ConstantConversionError));
   }
 
   #[test]

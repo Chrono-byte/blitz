@@ -64,7 +64,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 
 /// A point-in-time count of source-module work performed by a module loader.
 ///
@@ -1330,10 +1330,8 @@ impl ModuleLoader {
         let Some(namespace) = vm.module_namespace_value(*dependency_index) else {
           continue;
         };
-        if let Some(slot) = record.exports.get(exported)
-          && let Ok(mut value) = slot.lock()
-        {
-          *value = namespace;
+        if let Some(slot) = record.exports.get(exported) {
+          *slot.borrow_mut() = namespace;
         }
       }
     }
@@ -1370,7 +1368,7 @@ impl ModuleLoader {
           .map_err(|_| BundlerError::from("Prelinked binding count does not fit usize"))?;
         registration.binding_slots = Some(
           (0..binding_count)
-            .map(|_| Rc::new(Mutex::new(Value::Undefined)))
+            .map(|_| Rc::new(RefCell::new(Value::Undefined)))
             .collect(),
         );
       }
@@ -1587,9 +1585,10 @@ impl ModuleLoader {
                       .and_then(|e| e.get("name"))
                       .and_then(|n| n.as_str())
                     {
-                      rec
-                        .exports
-                        .insert(exported.to_string(), Rc::new(Mutex::new(Value::Undefined)));
+                      rec.exports.insert(
+                        exported.to_string(),
+                        Rc::new(RefCell::new(Value::Undefined)),
+                      );
                     }
                   }
                 }
@@ -1604,7 +1603,7 @@ impl ModuleLoader {
                   {
                     rec
                       .exports
-                      .insert(id.to_string(), Rc::new(Mutex::new(Value::Undefined)));
+                      .insert(id.to_string(), Rc::new(RefCell::new(Value::Undefined)));
                   } else if decl_type == "VariableDeclaration"
                     && let Some(decls) = decl
                       .get("declarations")
@@ -1618,16 +1617,17 @@ impl ModuleLoader {
                       {
                         rec
                           .exports
-                          .insert(name.to_string(), Rc::new(Mutex::new(Value::Undefined)));
+                          .insert(name.to_string(), Rc::new(RefCell::new(Value::Undefined)));
                       }
                     }
                   }
                 }
               }
               "ExportDefaultDeclaration" => {
-                rec
-                  .exports
-                  .insert("default".to_string(), Rc::new(Mutex::new(Value::Undefined)));
+                rec.exports.insert(
+                  "default".to_string(),
+                  Rc::new(RefCell::new(Value::Undefined)),
+                );
               }
               "ExportAllDeclaration" => {
                 if let Some(source) = item
@@ -1638,7 +1638,7 @@ impl ModuleLoader {
                   if let Some(exported) = estree_module_export_name(item.get("exported")) {
                     rec
                       .exports
-                      .insert(exported.clone(), Rc::new(Mutex::new(Value::Undefined)));
+                      .insert(exported.clone(), Rc::new(RefCell::new(Value::Undefined)));
                     rec
                       .namespace_export_sources
                       .push((exported, source.to_string()));
@@ -1849,7 +1849,7 @@ impl ModuleLoader {
                     .to_string();
                   let exports_snapshot = { dep_rec_rc.borrow().exports.clone() };
                   let dep_module_index = dep_rec_rc.borrow().module_index;
-                  let boxed = Rc::new(Mutex::new(
+                  let boxed = Rc::new(RefCell::new(
                     crate::vm::runtime::execution::build_module_namespace_object(&exports_snapshot),
                   ));
                   {
@@ -4211,8 +4211,7 @@ mod tests {
         .exports
         .get("value")
         .expect("value export")
-        .lock()
-        .expect("value export lock")
+        .borrow()
         .clone(),
       Value::Number(42.0),
     );

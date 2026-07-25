@@ -10,7 +10,6 @@ use std::rc::Rc;
 use std::rc::Weak;
 
 use crate::errors::RuntimeError;
-use crate::mutex_compat::MutexBorrowExt;
 use crate::value::{SharedValue, Value};
 
 #[derive(Clone, Debug)]
@@ -251,12 +250,11 @@ impl EnvironmentRecord {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::sync::Mutex;
 
   #[test]
   fn uninitialized_binding_read_throws() {
     let mut env = EnvironmentRecord::new(None);
-    let cell = Rc::new(Mutex::new(Value::Uninitialized));
+    let cell = Rc::new(RefCell::new(Value::Uninitialized));
     env.create_mutable_binding("x".to_string(), cell, false);
     let err = env
       .get_binding_value("x")
@@ -271,7 +269,7 @@ mod tests {
   #[test]
   fn immutable_binding_cannot_be_reassigned() {
     let mut env = EnvironmentRecord::new(None);
-    let cell = Rc::new(Mutex::new(Value::Number(1.0)));
+    let cell = Rc::new(RefCell::new(Value::Number(1.0)));
     env.create_immutable_binding("x".to_string(), cell, true);
     let err = env
       .set_mutable_binding("x", Value::Number(2.0))

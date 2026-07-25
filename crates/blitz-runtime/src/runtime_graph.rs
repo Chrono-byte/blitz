@@ -5,6 +5,7 @@
 //! and cross-validation at the runtime boundary while leaving graph execution
 //! and bytecode validation to the engine.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
@@ -69,6 +70,34 @@ const RUNTIME_GRAPH_ARTIFACT: &[u8] = include_bytes!(concat!(
   env!("CARGO_MANIFEST_DIR"),
   "/assets/runtime/v1/runtime-graph.blitzpg"
 ));
+
+/// Normalize text manifest line endings before content-addressing them.
+///
+/// Git may materialize text assets with CRLF on Windows. Runtime artifacts
+/// must remain byte-for-byte reproducible across checkout platforms.
+pub fn canonical_manifest_bytes(bytes: &[u8]) -> Cow<'_, [u8]> {
+  if !bytes.contains(&b'\r') {
+    return Cow::Borrowed(bytes);
+  }
+
+  let mut canonical = Vec::with_capacity(bytes.len());
+  let mut index = 0;
+  while index < bytes.len() {
+    if bytes[index] == b'\r' {
+      canonical.push(b'\n');
+      index += usize::from(bytes.get(index + 1) == Some(&b'\n')) + 1;
+    } else {
+      canonical.push(bytes[index]);
+      index += 1;
+    }
+  }
+  Cow::Owned(canonical)
+}
+
+/// Compute a platform-independent digest for a checked-in text manifest.
+pub fn manifest_sha256(bytes: &[u8]) -> [u8; 32] {
+  Sha256::digest(canonical_manifest_bytes(bytes).as_ref()).into()
+}
 
 /// Visibility of a module in the runtime graph.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -547,11 +576,11 @@ impl RuntimePrelinkedBundle {
     stdlib_manifest: &[u8],
   ) -> Result<(), RuntimeGraphError> {
     self.validate()?;
-    let effect_hash: [u8; 32] = Sha256::digest(effect_manifest).into();
+    let effect_hash = manifest_sha256(effect_manifest);
     if effect_hash != self.manifest.effect_manifest_sha256 {
       return Err(RuntimeGraphError::EffectManifestHashMismatch);
     }
-    let stdlib_hash: [u8; 32] = Sha256::digest(stdlib_manifest).into();
+    let stdlib_hash = manifest_sha256(stdlib_manifest);
     if stdlib_hash != self.manifest.stdlib_manifest_sha256 {
       return Err(RuntimeGraphError::StdlibManifestHashMismatch);
     }
@@ -1761,5 +1790,13 @@ mod tests {
       graph.validate(),
       Err(RuntimeGraphError::MissingDependency { .. })
     ));
+  }
+
+  #[test]
+  fn manifest_hashes_ignore_checkout_line_endings() {
+    let lf = b"{\n  \"format\": 1\n}\n";
+    let crlf = b"{\r\n  \"format\": 1\r\n}\r\n";
+    assert_eq!(canonical_manifest_bytes(crlf).as_ref(), lf);
+    assert_eq!(manifest_sha256(lf), manifest_sha256(crlf));
   }
 }

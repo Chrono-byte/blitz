@@ -99,7 +99,7 @@ fn percent_decode(
     }
     i += 3;
   }
-  Ok(unsafe { String::from_utf8_unchecked(bytes) })
+  String::from_utf8(bytes).map_err(|_| uri_error(vm))
 }
 
 fn hex_value(byte: u8) -> Option<u8> {

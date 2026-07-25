@@ -61,7 +61,6 @@ use std::sync::Arc;
 
 use crate::compiler;
 use crate::gc;
-use crate::mutex_compat::MutexBorrowExt;
 use crate::parser::Parser;
 use crate::realm::Intrinsics;
 use crate::value::SymbolId;
@@ -433,10 +432,16 @@ fn clone_value_across_realms(
           return Ok(existing.clone());
         }
 
+        let transferring = transfer_set.is_some_and(|set| set.contains(&addr));
+        let property_snapshot = props_rc.borrow().properties.clone();
+        let transferred_elements = transferring.then(|| arr_rc.borrow_mut().take_elements());
+
         // Reserve a placeholder array in visited to handle cycles.
-        let len = arr_rc.borrow().len();
-        let placeholder_vec: Vec<Option<Value>> = vec![None; len];
-        let new_arr = Rc::new(RefCell::new(ArrayData::from(placeholder_vec)));
+        let len = transferred_elements
+          .as_ref()
+          .map_or_else(|| arr_rc.borrow().len(), Vec::len);
+        let placeholder_vec = transferred_elements.unwrap_or_else(|| vec![None; len]);
+        let new_arr = gc::track_array(Rc::new(RefCell::new(ArrayData::from(placeholder_vec))));
         let new_props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         if let Some(proto) = vm.realm().intrinsics.array_prototype.clone() {
           new_props.borrow_mut().set_prototype_value(proto);
@@ -449,18 +454,23 @@ fn clone_value_across_realms(
         let new_val = Value::Array(Rc::clone(&new_arr), Rc::clone(&new_props));
         visited.insert(addr, new_val);
 
-        // Fill dense slots
-        for (i, slot) in arr_rc.borrow().iter().enumerate() {
-          if let Some(sv) = slot {
-            let cloned = helper(vm, sv, visited, transfer_set)?;
-            new_arr.borrow_mut()[i] = Some(cloned);
-          } else {
-            new_arr.borrow_mut()[i] = None;
+        if !transferring {
+          // Fill dense slots while preserving cycles and shared references.
+          for (i, slot) in arr_rc.borrow().iter().enumerate() {
+            if let Some(sv) = slot {
+              let cloned = helper(vm, sv, visited, transfer_set)?;
+              new_arr.borrow_mut()[i] = Some(cloned);
+            }
           }
+        } else {
+          props_rc.borrow_mut().properties.insert(
+            PropertyKey::String("length".to_string()),
+            array_length_descriptor(0),
+          );
         }
 
         // Clone property bag (data descriptors only)
-        for (k, desc) in &props_rc.borrow().properties {
+        for (k, desc) in &property_snapshot {
           match desc {
             PropertyDescriptor::Data { value, .. } => {
               let cloned = helper(vm, value, visited, transfer_set)?;
@@ -490,10 +500,28 @@ fn clone_value_across_realms(
         // (no-op) helper removed; build placeholders inline below
 
         // ArrayBuffer: identified by [[ArrayBufferData]] internal slot
-        if let Some(PropertyDescriptor::Data { value: ab_data, .. }) = borrow
+        let array_buffer_data = borrow
           .properties
           .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
-        {
+          .and_then(|descriptor| match descriptor {
+            PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+            PropertyDescriptor::Accessor { .. } => None,
+          });
+        let array_buffer_byte_length = borrow
+          .properties
+          .get(&PropertyKey::String("byteLength".to_string()))
+          .and_then(|descriptor| match descriptor {
+            PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+            PropertyDescriptor::Accessor { .. } => None,
+          });
+        if let Some(ab_data) = array_buffer_data {
+          let transferring = matches!(
+            &ab_data,
+            Value::Array(backing, _)
+              if transfer_set.is_some_and(|set| set.contains(&(Rc::as_ptr(backing) as usize)))
+          );
+          drop(borrow);
+
           // Create placeholder object with host ArrayBuffer prototype
           let mut out = ObjectData::new();
           if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
@@ -503,22 +531,25 @@ fn clone_value_across_realms(
           let target_val = Value::Object(Rc::clone(&target_obj));
           visited.insert(addr, target_val);
 
-          // Clone underlying data (expected to be Value::Array)
-          let cloned_data = helper(vm, ab_data, visited, transfer_set)?;
+          let cloned_data = helper(vm, &ab_data, visited, transfer_set)?;
           target_obj.borrow_mut().properties.insert(
             PropertyKey::String("[[ArrayBufferData]]".to_string()),
             PropertyDescriptor::data(cloned_data),
           );
-          // Copy byteLength if present
-          if let Some(PropertyDescriptor::Data { value, .. }) = borrow
-            .properties
-            .get(&PropertyKey::String("byteLength".to_string()))
-          {
-            let bl = helper(vm, value, visited, transfer_set)?;
+          if let Some(value) = array_buffer_byte_length {
+            let bl = helper(vm, &value, visited, transfer_set)?;
             target_obj.borrow_mut().properties.insert(
               PropertyKey::String("byteLength".to_string()),
               PropertyDescriptor::data(bl),
             );
+          }
+          if transferring
+            && let Some(PropertyDescriptor::Data { value, .. }) = obj_rc
+              .borrow_mut()
+              .properties
+              .get_mut(&PropertyKey::String("byteLength".to_string()))
+          {
+            *value = Value::Number(0.0);
           }
           return Ok(Value::Object(target_obj));
         }
@@ -728,3 +759,71 @@ fn clone_value_across_realms(
 //   internal brand checks and the Promise constructor's intrinsic behaviour.
 //   Consider replacing property-based checks with a stricter internal brand
 //   or explicit slot marking on promise state.
+
+#[cfg(test)]
+mod structured_clone_tests {
+  use super::*;
+
+  #[test]
+  fn transfer_moves_array_buffer_storage_and_detaches_source() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let backing = gc::track_array(Rc::new(RefCell::new(ArrayData::new(vec![
+      Some(Value::Number(1.0)),
+      Some(Value::Number(2.0)),
+    ]))));
+    let backing_props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+    backing_props.borrow_mut().properties.insert(
+      PropertyKey::String("length".to_string()),
+      array_length_descriptor(2),
+    );
+    let backing_value = Value::Array(Rc::clone(&backing), backing_props);
+
+    let source = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+    source.borrow_mut().properties.insert(
+      PropertyKey::String("[[ArrayBufferData]]".to_string()),
+      PropertyDescriptor::data(backing_value),
+    );
+    source.borrow_mut().properties.insert(
+      PropertyKey::String("byteLength".to_string()),
+      PropertyDescriptor::data(Value::Number(2.0)),
+    );
+
+    let transfer_set = HashSet::from([Rc::as_ptr(&backing) as usize]);
+    let cloned = clone_value_across_realms(
+      &mut vm,
+      &Value::Object(Rc::clone(&source)),
+      Some(&transfer_set),
+    )
+    .expect("transfer should succeed");
+
+    assert!(backing.borrow().is_empty());
+    assert!(matches!(
+      source
+        .borrow()
+        .properties
+        .get(&PropertyKey::String("byteLength".to_string())),
+      Some(PropertyDescriptor::Data {
+        value: Value::Number(0.0),
+        ..
+      })
+    ));
+
+    let Value::Object(cloned) = cloned else {
+      panic!("transferred ArrayBuffer should remain an object");
+    };
+    let cloned_backing = cloned
+      .borrow()
+      .properties
+      .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
+      .and_then(|descriptor| match descriptor {
+        PropertyDescriptor::Data {
+          value: Value::Array(backing, _),
+          ..
+        } => Some(Rc::clone(backing)),
+        _ => None,
+      })
+      .expect("transferred object should contain backing data");
+    assert_eq!(cloned_backing.borrow().len(), 2);
+  }
+}

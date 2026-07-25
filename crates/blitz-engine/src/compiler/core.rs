@@ -390,7 +390,8 @@ impl Compiler {
     value: Value,
     line: u32,
   ) {
-    let idx = self.chunk.add_constant(value);
+    let constant = Constant::try_from(value).expect("compiler emitted a runtime-owned constant");
+    let idx = self.chunk.add_constant(constant);
     // Emit the Const instruction with the constant index encoded into
     // the 24-bit payload in a single instruction word to avoid
     // multi-write emissions which break the fixed-width instruction model.
@@ -434,7 +435,7 @@ impl Compiler {
       .constants
       .iter()
       .position(|value| value == &descriptor)
-      .unwrap_or_else(|| self.chunk.add_constant(descriptor.to_value()));
+      .unwrap_or_else(|| self.chunk.add_constant(descriptor));
     u16::try_from(index)
       .map_err(|_| CompilerError::from(format!("Too many constants (max 65535, got {index})")))
   }
@@ -963,7 +964,7 @@ impl Compiler {
     // add a local constant instead of reusing the stale index.
     let idx = self
       .chunk
-      .add_constant(Value::String(name.to_string()));
+      .add_constant(Constant::String(name.to_string()));
     self.globals.insert(name.to_string(), idx);
     idx
   }

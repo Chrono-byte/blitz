@@ -876,7 +876,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
           &replacement,
           &Value::Undefined,
           &[
-            Value::String(search.clone()),
+            Value::String(search),
             Value::Number(usize_to_f64(subject[..position].chars().count())),
             Value::String(subject.clone()),
           ],

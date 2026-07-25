@@ -2,7 +2,6 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Mutex;
 
 use crate::runtime_utils::{
   builtin_object, collect_iterable_values, promise_constructor_matches, reject_pending_promise,
@@ -287,25 +286,20 @@ pub(crate) fn create_promise_intrinsics(
           return Ok(value.clone());
         }
 
-        let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
-        let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
+        let resolve_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let reject_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
         let resolve_slot_capture = Rc::clone(&resolve_slot);
         let reject_slot_capture = reject_slot;
         let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
           let off = if executor_args.len() > 2 { 1 } else { 0 };
-          *resolve_slot_capture
-            .lock()
-            .expect("Mutex poisoned") = executor_args.get(off).cloned();
-          *reject_slot_capture
-            .lock()
-            .expect("Mutex poisoned") = executor_args.get(off + 1).cloned();
+          *resolve_slot_capture.borrow_mut() = executor_args.get(off).cloned();
+          *reject_slot_capture.borrow_mut() = executor_args.get(off + 1).cloned();
           Ok(Value::Undefined)
         }));
 
         let promise = vm.construct_value(&this_val, &[executor])?;
         let resolve_fn = resolve_slot
-          .lock()
-          .expect("Mutex poisoned")
+          .borrow()
           .clone()
           .ok_or_else(|| vm.throw_type_error("Promise capability resolve missing"))?;
         if let Err(err) =
@@ -337,30 +331,24 @@ pub(crate) fn create_promise_intrinsics(
           return Err(vm.throw_type_error("Promise.all called on non-object"));
         }
 
-        let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
-        let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
+        let resolve_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let reject_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
         let resolve_slot_capture = Rc::clone(&resolve_slot);
         let reject_slot_capture = Rc::clone(&reject_slot);
         let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
           let off = if executor_args.len() > 2 { 1 } else { 0 };
-          *resolve_slot_capture
-            .lock()
-            .expect("Mutex poisoned") = executor_args.get(off).cloned();
-          *reject_slot_capture
-            .lock()
-            .expect("Mutex poisoned") = executor_args.get(off + 1).cloned();
+          *resolve_slot_capture.borrow_mut() = executor_args.get(off).cloned();
+          *reject_slot_capture.borrow_mut() = executor_args.get(off + 1).cloned();
           Ok(Value::Undefined)
         }));
 
         let promise = vm.construct_value(&this_val, &[executor])?;
         let resolve_fn = resolve_slot
-          .lock()
-          .expect("Mutex poisoned")
+          .borrow()
           .clone()
           .ok_or_else(|| vm.throw_type_error("Promise capability resolve missing"))?;
         let reject_fn = reject_slot
-          .lock()
-          .expect("Mutex poisoned")
+          .borrow()
           .clone()
           .ok_or_else(|| vm.throw_type_error("Promise capability reject missing"))?;
 
@@ -381,9 +369,10 @@ pub(crate) fn create_promise_intrinsics(
           return Ok(promise);
         }
 
-        let results: Rc<Mutex<Vec<Option<Value>>>> = Rc::new(Mutex::new(vec![None; items.len()]));
-        let remaining = Rc::new(Mutex::new(items.len()));
-        let settled = Rc::new(Mutex::new(false));
+        let results: Rc<RefCell<Vec<Option<Value>>>> =
+          Rc::new(RefCell::new(vec![None; items.len()]));
+        let remaining = Rc::new(RefCell::new(items.len()));
+        let settled = Rc::new(RefCell::new(false));
 
         for (idx, item) in items.into_iter().enumerate() {
           let then_val = vm.get_property_host(&item, &PropertyKey::String("then".to_string()))?;
@@ -393,31 +382,25 @@ pub(crate) fn create_promise_intrinsics(
             let settled_rc = Rc::clone(&settled);
             let resolve_fn_rc = resolve_fn.clone();
             let reject_fn_rc = reject_fn.clone();
-            let resolve_slot_resolved = Rc::new(Mutex::new(false));
-            let reject_slot_resolved = Rc::new(Mutex::new(false));
+            let resolve_slot_resolved = Rc::new(RefCell::new(false));
+            let reject_slot_resolved = Rc::new(RefCell::new(false));
 
             let resolve_slot_resolved_cb = Rc::clone(&resolve_slot_resolved);
             let resolve_cb = Value::Builtin(Rc::new(move |vm, args| {
-              if *settled_rc.lock().expect("Mutex poisoned")
-                || *resolve_slot_resolved_cb
-                  .lock()
-                  .expect("Mutex poisoned")
-              {
+              if *settled_rc.borrow() || *resolve_slot_resolved_cb.borrow() {
                 return Ok(Value::Undefined);
               }
-              *resolve_slot_resolved_cb
-                .lock()
-                .expect("Mutex poisoned") = true;
+              *resolve_slot_resolved_cb.borrow_mut() = true;
               let off = if args.len() > 1 { 1 } else { 0 };
               let value = args.get(off).cloned().unwrap_or(Value::Undefined);
-              results_rc.lock().expect("Mutex poisoned")[idx] = Some(value);
-              let mut remaining_ref = remaining_rc.lock().expect("Mutex poisoned");
+              results_rc.borrow_mut()[idx] = Some(value);
+              let mut remaining_ref = remaining_rc.borrow_mut();
               if *remaining_ref > 0 {
                 *remaining_ref -= 1;
               }
-              if *remaining_ref == 0 && !*settled_rc.lock().expect("Mutex poisoned") {
-                *settled_rc.lock().expect("Mutex poisoned") = true;
-                let array = vm.new_array(results_rc.lock().expect("Mutex poisoned").clone());
+              if *remaining_ref == 0 && !*settled_rc.borrow() {
+                *settled_rc.borrow_mut() = true;
+                let array = vm.new_array(results_rc.borrow().clone());
                 drop(vm.call_value_with_this(&resolve_fn_rc, &Value::Undefined, &[array]));
               }
               Ok(Value::Undefined)
@@ -426,17 +409,11 @@ pub(crate) fn create_promise_intrinsics(
             let reject_slot_resolved_cb = Rc::clone(&reject_slot_resolved);
             let settled_rc = Rc::clone(&settled);
             let reject_cb = Value::Builtin(Rc::new(move |vm, args| {
-              if *settled_rc.lock().expect("Mutex poisoned")
-                || *reject_slot_resolved_cb
-                  .lock()
-                  .expect("Mutex poisoned")
-              {
+              if *settled_rc.borrow() || *reject_slot_resolved_cb.borrow() {
                 return Ok(Value::Undefined);
               }
-              *reject_slot_resolved_cb
-                .lock()
-                .expect("Mutex poisoned") = true;
-              *settled_rc.lock().expect("Mutex poisoned") = true;
+              *reject_slot_resolved_cb.borrow_mut() = true;
+              *settled_rc.borrow_mut() = true;
               let off = if args.len() > 1 { 1 } else { 0 };
               let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
               drop(vm.call_value_with_this(&reject_fn_rc, &Value::Undefined, &[reason]));
@@ -444,7 +421,7 @@ pub(crate) fn create_promise_intrinsics(
             }));
 
             if let Err(err) = vm.call_value_with_this(&then_val, &item, &[resolve_cb, reject_cb]) {
-              *settled.lock().expect("Mutex poisoned") = true;
+              *settled.borrow_mut() = true;
               let reason = vm
                 .last_uncaught_exception
                 .take()
@@ -453,14 +430,14 @@ pub(crate) fn create_promise_intrinsics(
               return Ok(promise);
             }
           } else {
-            results.lock().expect("Mutex poisoned")[idx] = Some(item);
-            let mut remaining_ref = remaining.lock().expect("Mutex poisoned");
+            results.borrow_mut()[idx] = Some(item);
+            let mut remaining_ref = remaining.borrow_mut();
             if *remaining_ref > 0 {
               *remaining_ref -= 1;
             }
-            if *remaining_ref == 0 && !*settled.lock().expect("Mutex poisoned") {
-              *settled.lock().expect("Mutex poisoned") = true;
-              let array = vm.new_array(results.lock().expect("Mutex poisoned").clone());
+            if *remaining_ref == 0 && !*settled.borrow() {
+              *settled.borrow_mut() = true;
+              let array = vm.new_array(results.borrow().clone());
               drop(vm.call_value_with_this(&resolve_fn, &Value::Undefined, &[array]));
             }
           }
@@ -484,25 +461,20 @@ pub(crate) fn create_promise_intrinsics(
           return Err(vm.throw_type_error("Promise.reject called on non-object"));
         }
 
-        let resolve_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
-        let reject_slot: Rc<Mutex<Option<Value>>> = Rc::new(Mutex::new(None));
+        let resolve_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let reject_slot: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
         let resolve_slot_capture = resolve_slot;
         let reject_slot_capture = Rc::clone(&reject_slot);
         let executor = Value::Builtin(Rc::new(move |_vm, executor_args| {
           let off = if executor_args.len() > 2 { 1 } else { 0 };
-          *resolve_slot_capture
-            .lock()
-            .expect("Mutex poisoned") = executor_args.get(off).cloned();
-          *reject_slot_capture
-            .lock()
-            .expect("Mutex poisoned") = executor_args.get(off + 1).cloned();
+          *resolve_slot_capture.borrow_mut() = executor_args.get(off).cloned();
+          *reject_slot_capture.borrow_mut() = executor_args.get(off + 1).cloned();
           Ok(Value::Undefined)
         }));
 
         let promise = vm.construct_value(&this_val, &[executor])?;
         let reject_fn = reject_slot
-          .lock()
-          .expect("Mutex poisoned")
+          .borrow()
           .clone()
           .ok_or_else(|| vm.throw_type_error("Promise capability reject missing"))?;
         if let Err(err) =

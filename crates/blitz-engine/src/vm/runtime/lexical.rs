@@ -1,6 +1,5 @@
 use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
-use crate::mutex_compat::MutexBorrowExt;
 use crate::value::{PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
 use std::cell::RefCell;

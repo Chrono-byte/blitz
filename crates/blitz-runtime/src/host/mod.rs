@@ -1206,12 +1206,7 @@ fn effect_function(
     .get(name)
     .cloned()
     .ok_or_else(|| RuntimeError::from(format!("effect/Effect has no {name} export")))?;
-  Ok(
-    slot
-      .lock()
-      .map_err(|_| RuntimeError::from("effect/Effect export lock is poisoned"))?
-      .clone(),
-  )
+  Ok(slot.borrow().clone())
 }
 
 fn effect_sync(

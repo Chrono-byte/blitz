@@ -1069,6 +1069,7 @@ mod tests {
         r#"
         const controller = new AbortController();
         let calls = 0;
+        controller.signal.__blitz_abort_listeners = { length: Infinity };
         controller.signal.addEventListener('abort', () => calls++, { once: true });
         controller.abort('stop');
         controller.abort('ignored');

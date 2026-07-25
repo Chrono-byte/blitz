@@ -31,4 +31,12 @@ mod tests {
       .expect("decodeURI should accept raw utf8");
     assert_eq!(value, Value::String("héllo".to_string()));
   }
+
+  #[test]
+  fn decode_uri_rejects_invalid_utf8_escapes() {
+    let mut vm = test_vm();
+    let error = global_decode_uri_component(&mut vm, &[Value::String("%FF".to_string())])
+      .expect_err("decodeURIComponent must reject malformed UTF-8");
+    assert!(error.to_string().contains("URIError"));
+  }
 }

@@ -262,7 +262,7 @@ impl Vm {
   pub(super) fn invoke_async_closure(
     &mut self,
     proto: &Rc<FunctionProto>,
-    env: &Rc<std::sync::Mutex<Vec<SharedValue>>>,
+    env: &Rc<RefCell<Vec<SharedValue>>>,
     call_args: Vec<Value>,
     this_arg: Value,
     callee: &Value,

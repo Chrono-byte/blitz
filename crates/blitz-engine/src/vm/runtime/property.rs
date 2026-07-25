@@ -2,7 +2,6 @@ use crate::ecmascript::semantics::properties::{
   own_property_descriptor, own_property_keys, property_key_to_value,
 };
 use crate::errors::RuntimeError;
-use crate::mutex_compat::MutexBorrowExt;
 use crate::runtime_utils::{to_length, usize_to_f64};
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
