@@ -111,7 +111,7 @@ pub(crate) fn install_global_function_builtins(g: &mut ObjectData) {
                 }
             }
             let eval_src = if strict {
-                format!("'use strict';\n{src}")
+    crate::js!(format(script), "'use strict';\n{src}")
             } else {
                 src.to_string()
             };

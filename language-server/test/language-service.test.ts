@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import {
@@ -10,11 +11,10 @@ import {
 } from "../src/language-service.js";
 
 await test("provides Blitz diagnostics and navigation", async () => {
-  const source = [
-    "interface Answer { value: number }",
-    "const answer: Answer = { value: 42 };",
-    "function read(): Answer { return answer; }",
-  ].join("\n");
+  const source = await readFile(
+    new URL("../../test/fixtures/language-service-positive.txt", import.meta.url),
+    "utf8",
+  );
   const document = TextDocument.create("file:///editor.ts", "typescript", 1, source);
 
   assert.deepEqual(await getDiagnostics(document), []);
@@ -31,12 +31,11 @@ await test("provides Blitz diagnostics and navigation", async () => {
 });
 
 await test("reports type errors from the Blitz checker", async () => {
-  const document = TextDocument.create(
-    "file:///invalid.ts",
-    "typescript",
-    1,
-    "const answer: number = 'wrong';",
+  const source = await readFile(
+    new URL("../../test/fixtures/language-service-negative.txt", import.meta.url),
+    "utf8",
   );
+  const document = TextDocument.create("file:///invalid.ts", "typescript", 1, source);
 
   assert.match(JSON.stringify(await getDiagnostics(document)), /not assignable/u);
 });

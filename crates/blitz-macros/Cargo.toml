@@ -1,0 +1,22 @@
+[package]
+name = "blitz-macros"
+version.workspace = true
+edition.workspace = true
+description = "Compile-time source validation macros for Blitz"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+oxc_allocator.workspace = true
+oxc_parser.workspace = true
+oxc_span.workspace = true
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "parsing", "proc-macro", "visit"] }
+
+[dev-dependencies]
+walkdir = "2"
+
+[lints]
+workspace = true

@@ -369,7 +369,8 @@ mod tests {
     vm.realm().set_global("Blitz", blitz);
     let (events, _receiver) = mpsc::channel(1);
     let state = install(&mut vm, events);
-    let source = r#"
+    let source = blitz::js!(
+      r#"
       globalThis.sentLine = "";
       const prefix = "MSG ";
       const chatSocket = {
@@ -380,7 +381,8 @@ mod tests {
       globalThis.handleInput = (line) => {
         chatSocket.send(prefix + line.trim());
       };
-    "#;
+    "#
+    );
     let session = JsParser::parse_source(source).expect("parse terminal callback");
     let chunk =
       compiler::compile_oxc(session.program(), source).expect("compile terminal callback");
@@ -411,7 +413,8 @@ mod tests {
     vm.realm().set_global("Blitz", blitz);
     let (events, _receiver) = mpsc::channel(1);
     let state = install(&mut vm, events);
-    let source = r#"
+    let source = blitz::js!(
+      r#"
       globalThis.WebSocket = { OPEN: 1 };
       globalThis.sentLine = "";
       const socket = {
@@ -446,7 +449,8 @@ mod tests {
           socket.close(1000, "stdin closed");
         }
       };
-    "#;
+    "#
+    );
     let session = JsParser::parse_source(source).expect("parse IRC terminal callback");
     let chunk =
       compiler::compile_oxc(session.program(), source).expect("compile IRC terminal callback");

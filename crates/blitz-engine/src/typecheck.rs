@@ -2921,13 +2921,16 @@ mod tests {
 
   #[test]
   fn logical_ops_accept_non_boolean_operands() {
-    let src = r#"
+    let src = crate::js!(
+      typescript,
+      r#"
             var a = 1;
             var b = 'b';
             var x = a || b;
             var y = a && b;
             var z = 1 && 2;
-        "#;
+        "#
+    );
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     assert!(check(program).is_ok());
@@ -2935,42 +2938,51 @@ mod tests {
 
   #[test]
   fn rejects_annotated_variable_mismatch() {
-    let result = check_typescript("const count: number = 'wrong';");
+    let result = check_typescript(crate::js!(typescript, "const count: number = 'wrong';"));
 
     assert!(result.is_err());
   }
 
   #[test]
   fn rejects_assignment_mismatch() {
-    let result = check_typescript("let count: number = 1; count = 'wrong';");
+    let result = check_typescript(crate::js!(
+      typescript,
+      "let count: number = 1; count = 'wrong';"
+    ));
 
     assert!(result.is_err());
   }
 
   #[test]
   fn rejects_function_return_mismatch() {
-    let result = check_typescript("function answer(): number { return 'wrong'; }");
+    let result = check_typescript(crate::js!(
+      typescript,
+      "function answer(): number { return 'wrong'; }"
+    ));
 
     assert!(result.is_err());
   }
 
   #[test]
   fn rejects_call_argument_mismatch() {
-    let result = check_typescript(
-      "function square(value: number): number { return value * value; } square('wrong');",
-    );
+    let result = check_typescript(crate::js!(
+      typescript,
+      "function square(value: number): number { return value * value; } square('wrong');"
+    ));
 
     assert!(result.is_err());
   }
 
   #[test]
   fn resolves_interface_shapes() {
-    let valid = check_typescript(
-      "interface User { name: string; age: number } const user: User = { name: 'Ada', age: 36 };",
-    );
-    let invalid = check_typescript(
-      "interface User { name: string; age: number } const user: User = { name: 'Ada' };",
-    );
+    let valid = check_typescript(crate::js!(
+      typescript,
+      "interface User { name: string; age: number } const user: User = { name: 'Ada', age: 36 };"
+    ));
+    let invalid = check_typescript(crate::js!(
+      typescript,
+      "interface User { name: string; age: number } const user: User = { name: 'Ada' };"
+    ));
 
     assert!(valid.is_ok(), "{valid:?}");
     assert!(invalid.is_err());
@@ -2978,22 +2990,26 @@ mod tests {
 
   #[test]
   fn checks_exported_declarations() {
-    let result = check_typescript("export const count: number = 'wrong';");
+    let result = check_typescript(crate::js!(
+      typescript,
+      "export const count: number = 'wrong';"
+    ));
 
     assert!(result.is_err());
   }
 
   #[test]
   fn infers_common_expression_types() {
-    let result = check_typescript(
+    let result = check_typescript(crate::js!(
+      typescript,
       r#"
         const compared: boolean = 1 < 2;
         const equal: boolean = "a" === "b";
         const shifted: number = 2 << 1;
         const message: string = `answer: ${shifted}`;
         const missing: undefined = undefined;
-      "#,
-    );
+      "#
+    ));
 
     assert!(result.is_ok());
   }
@@ -3003,7 +3019,10 @@ mod tests {
     let source_type =
       crate::parser::Parser::source_type_for_path(std::path::Path::new("test.ts"), false);
     let session = crate::parser::Parser::parse_source_with_type(
-      "function identity(value): number { return value; }",
+      crate::js!(
+        typescript,
+        "function identity(value): number { return value; }"
+      ),
       source_type,
     )
     .expect("parse TypeScript");
@@ -3015,16 +3034,18 @@ mod tests {
 
   #[test]
   fn evaluates_generic_aliases_and_defaults() {
-    let valid = check_typescript(
+    let valid = check_typescript(crate::js!(
+      typescript,
       r#"
         type Box<T extends string = "default"> = { value: T };
         const explicit: Box<"value"> = { value: "value" };
         const fallback: Box = { value: "default" };
-      "#,
-    );
-    let invalid = check_typescript(
-      "type Box<T extends string> = { value: T }; const value: Box<number> = { value: 1 };",
-    );
+      "#
+    ));
+    let invalid = check_typescript(crate::js!(
+      typescript,
+      "type Box<T extends string> = { value: T }; const value: Box<number> = { value: 1 };"
+    ));
 
     assert!(valid.is_ok(), "{valid:?}");
     assert!(invalid.is_err());
@@ -3032,16 +3053,18 @@ mod tests {
 
   #[test]
   fn evaluates_conditional_types() {
-    let valid = check_typescript(
+    let valid = check_typescript(crate::js!(
+      typescript,
       r#"
         type IsString<T> = T extends string ? true : false;
         const yes: IsString<"value"> = true;
         const no: IsString<number> = false;
-      "#,
-    );
-    let invalid = check_typescript(
-      "type IsString<T> = T extends string ? true : false; const value: IsString<number> = true;",
-    );
+      "#
+    ));
+    let invalid = check_typescript(crate::js!(
+      typescript,
+      "type IsString<T> = T extends string ? true : false; const value: IsString<number> = true;"
+    ));
 
     assert!(valid.is_ok());
     assert!(invalid.is_err());
@@ -3049,12 +3072,14 @@ mod tests {
 
   #[test]
   fn distributes_conditional_types_over_unions() {
-    let valid = check_typescript(
-      "type Strings<T> = T extends string ? T : never; const value: Strings<\"a\" | 1> = \"a\";",
-    );
-    let invalid = check_typescript(
-      "type Strings<T> = T extends string ? T : never; const value: Strings<\"a\" | 1> = 1;",
-    );
+    let valid = check_typescript(crate::js!(
+      typescript,
+      "type Strings<T> = T extends string ? T : never; const value: Strings<\"a\" | 1> = \"a\";"
+    ));
+    let invalid = check_typescript(crate::js!(
+      typescript,
+      "type Strings<T> = T extends string ? T : never; const value: Strings<\"a\" | 1> = 1;"
+    ));
 
     assert!(valid.is_ok());
     assert!(invalid.is_err());
@@ -3062,21 +3087,24 @@ mod tests {
 
   #[test]
   fn evaluates_recursive_aliases_with_a_budget() {
-    let result = check_typescript(
-      "type EventuallyTrue<T> = T extends true ? true : EventuallyTrue<true>; const value: EventuallyTrue<false> = true;",
-    );
+    let result = check_typescript(crate::js!(
+      typescript,
+      "type EventuallyTrue<T> = T extends true ? true : EventuallyTrue<true>; const value: EventuallyTrue<false> = true;"
+    ));
 
     assert!(result.is_ok());
   }
 
   #[test]
   fn merges_object_intersections() {
-    let valid = check_typescript(
-      "type Both = { name: string } & { age: number }; const value: Both = { name: 'Ada', age: 36 };",
-    );
-    let invalid = check_typescript(
-      "type Both = { name: string } & { age: number }; const value: Both = { name: 'Ada' };",
-    );
+    let valid = check_typescript(crate::js!(
+      typescript,
+      "type Both = { name: string } & { age: number }; const value: Both = { name: 'Ada', age: 36 };"
+    ));
+    let invalid = check_typescript(crate::js!(
+      typescript,
+      "type Both = { name: string } & { age: number }; const value: Both = { name: 'Ada' };"
+    ));
 
     assert!(valid.is_ok());
     assert!(invalid.is_err());
@@ -3084,17 +3112,20 @@ mod tests {
 
   #[test]
   fn evaluates_keyof_and_indexed_access_types() {
-    let valid = check_typescript(
+    let valid = check_typescript(crate::js!(
+      typescript,
       r#"
         type Person = { name: string; age: number };
         type PersonKey = keyof Person;
         type Age = Person["age"];
         const key: PersonKey = "name";
         const age: Age = 36;
-      "#,
-    );
-    let invalid =
-      check_typescript("type Person = { name: string }; const key: keyof Person = 'missing';");
+      "#
+    ));
+    let invalid = check_typescript(crate::js!(
+      typescript,
+      "type Person = { name: string }; const key: keyof Person = 'missing';"
+    ));
 
     assert!(valid.is_ok(), "{valid:?}");
     assert!(invalid.is_err());
@@ -3102,12 +3133,14 @@ mod tests {
 
   #[test]
   fn evaluates_generic_tuple_indexing() {
-    let valid = check_typescript(
-      "type Head<T extends unknown[]> = T[0]; const value: Head<[string, number]> = 'first';",
-    );
-    let invalid = check_typescript(
-      "type Head<T extends unknown[]> = T[0]; const value: Head<[string, number]> = 1;",
-    );
+    let valid = check_typescript(crate::js!(
+      typescript,
+      "type Head<T extends unknown[]> = T[0]; const value: Head<[string, number]> = 'first';"
+    ));
+    let invalid = check_typescript(crate::js!(
+      typescript,
+      "type Head<T extends unknown[]> = T[0]; const value: Head<[string, number]> = 1;"
+    ));
 
     assert!(valid.is_ok(), "{valid:?}");
     assert!(invalid.is_err());
@@ -3115,12 +3148,14 @@ mod tests {
 
   #[test]
   fn infers_types_from_tuple_patterns() {
-    let valid = check_typescript(
-      "type Head<T> = T extends [infer H, ...unknown[]] ? H : never; const value: Head<[string, number]> = 'first';",
-    );
-    let invalid = check_typescript(
-      "type Head<T> = T extends [infer H, ...unknown[]] ? H : never; const value: Head<[string, number]> = 1;",
-    );
+    let valid = check_typescript(crate::js!(
+      typescript,
+      "type Head<T> = T extends [infer H, ...unknown[]] ? H : never; const value: Head<[string, number]> = 'first';"
+    ));
+    let invalid = check_typescript(crate::js!(
+      typescript,
+      "type Head<T> = T extends [infer H, ...unknown[]] ? H : never; const value: Head<[string, number]> = 1;"
+    ));
 
     assert!(valid.is_ok(), "{valid:?}");
     assert!(invalid.is_err());
@@ -3128,7 +3163,9 @@ mod tests {
 
   #[test]
   fn recursively_computes_over_inferred_tuple_tails() {
-    let source = r#"
+    let source = crate::js!(
+      typescript,
+      r#"
       type FirstString<T extends unknown[]> =
         T extends [infer Head, ...infer Tail]
           ? Head extends string
@@ -3138,7 +3175,8 @@ mod tests {
               : never
           : never;
       const value: FirstString<[number, boolean, "found"]> = "found";
-    "#;
+    "#
+    );
 
     let result = check_typescript(source);
 
@@ -3147,16 +3185,18 @@ mod tests {
 
   #[test]
   fn evaluates_mapped_object_types() {
-    let valid = check_typescript(
+    let valid = check_typescript(crate::js!(
+      typescript,
       r#"
         type Copy<T> = { [K in keyof T]: T[K] };
         type Source = { name: string; age: number };
         const value: Copy<Source> = { name: "Ada", age: 36 };
-      "#,
-    );
-    let invalid = check_typescript(
-      "type Flags<T> = { [K in keyof T]: boolean }; const value: Flags<{ ready: string }> = { ready: 'yes' };",
-    );
+      "#
+    ));
+    let invalid = check_typescript(crate::js!(
+      typescript,
+      "type Flags<T> = { [K in keyof T]: boolean }; const value: Flags<{ ready: string }> = { ready: 'yes' };"
+    ));
 
     assert!(valid.is_ok(), "{valid:?}");
     assert!(invalid.is_err());
@@ -3164,12 +3204,14 @@ mod tests {
 
   #[test]
   fn evaluates_template_literal_type_products() {
-    let valid = check_typescript(
-      "type Event = `on:${\"open\" | \"close\"}`; const value: Event = 'on:open';",
-    );
-    let invalid = check_typescript(
-      "type Event = `on:${\"open\" | \"close\"}`; const value: Event = 'on:missing';",
-    );
+    let valid = check_typescript(crate::js!(
+      typescript,
+      "type Event = `on:${\"open\" | \"close\"}`; const value: Event = 'on:open';"
+    ));
+    let invalid = check_typescript(crate::js!(
+      typescript,
+      "type Event = `on:${\"open\" | \"close\"}`; const value: Event = 'on:missing';"
+    ));
 
     assert!(valid.is_ok(), "{valid:?}");
     assert!(invalid.is_err());

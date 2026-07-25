@@ -1,0 +1,3 @@
+interface Answer { value: number }
+const answer: Answer = { value: 42 };
+function read(): Answer { return answer; }

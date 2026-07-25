@@ -1229,7 +1229,7 @@ mod tests {
 
   #[test]
   fn compiler_produces_only_verified_risc_chunks_recursively() {
-    let source = "function value(x) { try { return x + 1; } finally {} } value(2);";
+    let source = crate::js!("function value(x) { try { return x + 1; } finally {} } value(2);");
     let session = Parser::parse_source(source).expect("parse");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile");
     fn assert_risc(chunk: &Chunk) {

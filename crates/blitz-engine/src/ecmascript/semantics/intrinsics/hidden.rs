@@ -23,7 +23,7 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
         None => return Ok(Value::Undefined),
       };
       let eval_src = if vm.active_strict_mode() {
-        format!("'use strict';\n{src}")
+        crate::js!(format(script), "'use strict';\n{src}")
       } else {
         src.to_string()
       };

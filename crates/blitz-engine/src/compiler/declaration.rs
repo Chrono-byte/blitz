@@ -1669,7 +1669,7 @@ impl Compiler {
     &mut self,
     source: &str,
   ) -> Result<(), crate::errors::CompilerError> {
-    let wrapped = format!("({source})");
+    let wrapped = crate::js!(format(tsx), "({source})");
     let session = crate::parser::Parser::parse_source_with_type(&wrapped, SourceType::tsx())
       .map_err(|error| crate::errors::CompilerError::from(error.to_string()))?;
     let Some(oast::Statement::ExpressionStatement(statement)) = session.program().body.first()

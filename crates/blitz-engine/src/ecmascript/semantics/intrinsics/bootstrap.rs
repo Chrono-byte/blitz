@@ -1910,7 +1910,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     for idx in 0..param_count {
       params.push(vm.to_string(&user_args[idx])?);
     }
-    let source = format!(
+    let source = crate::js!(
+      format(script),
       "(function __tsblitz_dynamic({}) {{\n{}\n}})",
       params.join(","),
       body_src

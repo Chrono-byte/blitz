@@ -18,7 +18,7 @@
 //! ```
 //! use blitz::lexer::Lexer;
 //!
-//! let mut lexer = Lexer::new("let x = 42;");
+//! let mut lexer = Lexer::new(blitz::js!("let x = 42;"));
 //! let tokens = lexer.tokenize().unwrap();
 //! // tokens contains: Let, Ident("x"), Assign, Number(42.0), Semicolon, Eof
 //! ```

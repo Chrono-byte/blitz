@@ -1584,14 +1584,16 @@ mod tests {
         install_compatibility_globals: false,
       },
     );
-    let source = r#"
+    let source = blitz::js!(
+      r#"
       globalThis.timerResult = 0;
       globalThis.clockIsMonotonic = performance.now() >= 0;
       const cancelled = setInterval(() => { timerResult = -1; }, 1000);
       clearInterval(cancelled);
       clearInterval(cancelled);
       setTimeout((left, right) => { timerResult = left + right; }, 1, 2, 3);
-    "#;
+    "#
+    );
     let session = JsParser::parse_source(source).expect("parse timer script");
     let chunk = compiler::compile_oxc(session.program(), source).expect("compile timer script");
     vm.run(chunk).expect("evaluate timer script");
@@ -1623,7 +1625,8 @@ mod tests {
         install_compatibility_globals: true,
       },
     );
-    let source = r#"
+    let source = blitz::js!(
+      r#"
       globalThis.serverFinished = false;
       globalThis.server = Blitz.serve(
         { hostname: "127.0.0.1", port: 0 },
@@ -1637,7 +1640,8 @@ mod tests {
         typeof server.shutdown === "function" &&
         typeof server.ref === "function" &&
         typeof server.unref === "function";
-    "#;
+    "#
+    );
     let session = JsParser::parse_source(source).expect("parse server handle script");
     let chunk =
       compiler::compile_oxc(session.program(), source).expect("compile server handle script");
@@ -1649,21 +1653,25 @@ mod tests {
     assert_eq!(vm.get_global("serverShape"), Some(Value::Bool(true)));
     assert!(runtime.is_live());
 
-    let source = r#"
+    let source = blitz::js!(
+      r#"
       server.unref();
       globalThis.unrefCalled = true;
-    "#;
+    "#
+    );
     let session = JsParser::parse_source(source).expect("parse server unref script");
     let chunk = compiler::compile_oxc(session.program(), source).expect("compile unref script");
     vm.run(chunk).expect("unref server");
     assert_eq!(vm.get_global("unrefCalled"), Some(Value::Bool(true)));
     assert!(!runtime.is_live());
 
-    let source = r#"
+    let source = blitz::js!(
+      r#"
       server.ref();
       globalThis.shutdownIdentity = server.shutdown() === server.finished;
       server.shutdown();
-    "#;
+    "#
+    );
     let session = JsParser::parse_source(source).expect("parse server shutdown script");
     let chunk = compiler::compile_oxc(session.program(), source).expect("compile shutdown script");
     vm.run(chunk).expect("shut down server");
@@ -1746,7 +1754,8 @@ mod tests {
         let entry = directory.join("entry.mjs");
         std::fs::write(
           &entry,
-          r#"
+          blitz::js!(
+            r#"
         import * as Effect from "effect/Effect";
         import * as Http from "blitz:http";
         import * as Runtime from "blitz:runtime";
@@ -1756,7 +1765,8 @@ mod tests {
           port: 0,
           handler: () => Effect.succeed(new Response("effect-http"))
         }));
-      "#,
+      "#
+          ),
         )
         .expect("write Effect HTTP entry");
         let loader = vm.module_loader_handle();
@@ -1820,7 +1830,8 @@ mod tests {
         install_compatibility_globals: true,
       },
     );
-    let source = r#"
+    let source = blitz::js!(
+      r#"
       async function callbackFunc(request, info) {
         const body = await request.text();
         const parsed = await new Response('{"value":"json"}').json();
@@ -1834,7 +1845,8 @@ mod tests {
         );
       }
       Blitz.serve({ hostname: "127.0.0.1", port: 0 }, callbackFunc);
-    "#;
+    "#
+    );
     let session = JsParser::parse_source(source).expect("parse server script");
     let chunk = compiler::compile_oxc(session.program(), source).expect("compile server script");
     vm.run(chunk).expect("evaluate server script");
@@ -1892,7 +1904,8 @@ mod tests {
         install_compatibility_globals: true,
       },
     );
-    let source = r#"
+    let source = blitz::js!(
+      r#"
       function handler(request) {
         if (request.headers.get("upgrade") !== "websocket") {
           return new Response("upgrade required", { status: 426 });
@@ -1910,7 +1923,8 @@ mod tests {
         return upgraded.response;
       }
       Blitz.serve(handler);
-    "#;
+    "#
+    );
     let session = JsParser::parse_source(source).expect("parse WebSocket server script");
     let chunk =
       compiler::compile_oxc(session.program(), source).expect("compile WebSocket server script");
@@ -2025,7 +2039,8 @@ mod tests {
         install_compatibility_globals: true,
       },
     );
-    let source = r#"
+    let source = blitz::js!(
+      r#"
       const server = Blitz.serve((request) => {
         const upgraded = Blitz.upgradeWebSocket(request);
         upgraded.socket.onmessage = (event) => upgraded.socket.send("echo:" + event.data);
@@ -2040,7 +2055,8 @@ mod tests {
         globalThis.clientResult = event.data;
         client.close(1000, "done");
       };
-    "#;
+    "#
+    );
     let session = JsParser::parse_source(source).expect("parse WebSocket client script");
     let chunk =
       compiler::compile_oxc(session.program(), source).expect("compile WebSocket client script");

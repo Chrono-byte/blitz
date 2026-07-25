@@ -9,9 +9,9 @@
 //! # Example
 //!
 //! ```no_run
-//! use blitz::parser::Parser;
+//! use blitz::{js, parser::Parser};
 //!
-//! let source = "let x: number = 42;";
+//! let source = js!(typescript, "let x: number = 42;");
 //! let program = Parser::parse_source(source)?;
 //! // Use program AST for compilation or analysis
 //! # Ok::<(), Box<dyn std::error::Error>>(())

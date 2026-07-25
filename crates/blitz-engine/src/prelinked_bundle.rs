@@ -1457,7 +1457,7 @@ mod tests {
   use std::collections::HashMap;
 
   fn graph() -> PrelinkedModuleGraph {
-    let source = Arc::new("export const value = 1;".to_string());
+    let source = Arc::new(crate::js!(module, "export const value = 1;").to_string());
     let mut nested = Chunk::new(Arc::clone(&source));
     nested.write_instr(Op::Undefined as u32, 1);
     nested.write_instr(Op::Return as u32, 1);
@@ -1543,7 +1543,9 @@ mod tests {
             binding_id: 0,
           }],
           imports: vec![],
-          chunk: Chunk::new(Arc::new("export const value = 1;".into())),
+          chunk: Chunk::new(Arc::new(
+            crate::js!(module, "export const value = 1;").into(),
+          )),
         },
         PrelinkedModule {
           specifier: "synthetic:entry".into(),
