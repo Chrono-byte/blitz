@@ -139,12 +139,14 @@ mod tests {
       },
     );
 
-    let source = r#"
+    let source = blitz::js!(
+      r#"
       globalThis.hostResult = process.argv[2] + ":" + process.env.BLITZ_HOST_TEST;
       globalThis.hostCwdIsString = typeof process.cwd() === "string";
       globalThis.hostVersion = process.versions.blitz;
       globalThis.hostAlias = global === globalThis;
-    "#;
+    "#
+    );
     let session = JsParser::parse_source(source).expect("parse host API probe");
     let chunk = compiler::compile_oxc(session.program(), source).expect("compile host API probe");
     vm.run(chunk).expect("run host API probe");

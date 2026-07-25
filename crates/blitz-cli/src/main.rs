@@ -563,7 +563,7 @@ mod tests {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     let mut vm = Vm::new(globals);
 
-    run_source(&mut vm, "var answer = 1 + 2; answer;").expect("run");
+    run_source(&mut vm, blitz::js!("var answer = 1 + 2; answer;")).expect("run");
 
     assert!(
       matches!(vm.get_global("answer"), Some(Value::Number(n)) if (n - 3.0).abs() < f64::EPSILON)
@@ -585,11 +585,14 @@ mod tests {
 
   #[test]
   fn typescript_annotations_are_erased_for_execution() {
-    let source = r#"
+    let source = blitz::js!(
+      typescript,
+      r#"
       interface Answer { value: number }
       const answer: Answer = { value: 42 };
       var result: number = answer.value as number;
-    "#;
+    "#
+    );
     let session = JsParser::parse_source_with_type(
       source,
       JsParser::source_type_for_path(Path::new("answer.ts"), false),
@@ -651,10 +654,11 @@ mod tests {
     std::fs::create_dir_all(&source_directory).expect("create source directory");
     std::fs::create_dir_all(root.join("node_modules")).expect("create dependency directory");
     let source = source_directory.join("program.ts");
-    std::fs::write(&source, "let value: number = 1;").expect("write source");
+    std::fs::write(&source, blitz::js!(typescript, "let value: number = 1;"))
+      .expect("write source");
     std::fs::write(
       source_directory.join("types.d.ts"),
-      "declare const value: number;",
+      blitz::js!(typescript, "declare const value: number;"),
     )
     .expect("write declaration");
     std::fs::write(root.join("node_modules").join("ignored.ts"), "").expect("write ignored file");
@@ -670,8 +674,13 @@ mod tests {
     std::fs::create_dir_all(&root).expect("create test directory");
     let valid = root.join("valid.ts");
     let invalid = root.join("invalid.ts");
-    std::fs::write(&valid, "const answer: number = 42;").expect("write valid source");
-    std::fs::write(&invalid, "const answer: number = 'wrong';").expect("write invalid source");
+    std::fs::write(&valid, blitz::js!(typescript, "const answer: number = 42;"))
+      .expect("write valid source");
+    std::fs::write(
+      &invalid,
+      blitz::js!(typescript, "const answer: number = 'wrong';"),
+    )
+    .expect("write invalid source");
 
     assert!(run_typecheck(&[valid], false).expect("check valid source"));
     assert!(!run_typecheck(&[invalid], false).expect("check invalid source"));

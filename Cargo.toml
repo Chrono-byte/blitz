@@ -2,6 +2,7 @@
 members = [
   "crates/blitz-cli",
   "crates/blitz-engine",
+  "crates/blitz-macros",
   "crates/blitz-runtime",
   "tools/effect-bytecode",
 ]
@@ -13,6 +14,7 @@ edition = "2024"
 
 [workspace.dependencies]
 blitz = { package = "blitz-engine", path = "crates/blitz-engine" }
+blitz-macros = { path = "crates/blitz-macros" }
 blitz-runtime = { path = "crates/blitz-runtime" }
 bytes = "1"
 clap = { version = "4.5.57", features = ["derive"] }

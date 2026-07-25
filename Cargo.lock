@@ -136,6 +136,7 @@ dependencies = [
 name = "blitz-engine"
 version = "0.1.2"
 dependencies = [
+ "blitz-macros",
  "clap",
  "crc32fast",
  "criterion",
@@ -161,6 +162,19 @@ dependencies = [
  "serde_yaml",
  "thiserror 2.0.19",
  "tokio",
+]
+
+[[package]]
+name = "blitz-macros"
+version = "0.1.2"
+dependencies = [
+ "oxc_allocator",
+ "oxc_parser",
+ "oxc_span",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "walkdir",
 ]
 
 [[package]]

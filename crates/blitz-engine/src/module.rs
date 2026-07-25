@@ -2605,7 +2605,13 @@ mod tests {
         .expect("synthetic prelinked source compiles during test setup");
     replace_debug_source(
       &mut chunk,
-      &Arc::new("!!! invalid debug source; parser/compiler must not read this !!!".to_string()),
+      &Arc::new(
+        crate::js!(
+          parse_error(module),
+          "!!! invalid debug source; parser/compiler must not read this !!!"
+        )
+        .to_string(),
+      ),
     );
     chunk
   }
@@ -2629,7 +2635,13 @@ mod tests {
         .expect("synthetic namespace re-export source compiles during test setup");
     replace_debug_source(
       &mut chunk,
-      &Arc::new("!!! invalid debug source; parser/compiler must not read this !!!".to_string()),
+      &Arc::new(
+        crate::js!(
+          parse_error(module),
+          "!!! invalid debug source; parser/compiler must not read this !!!"
+        )
+        .to_string(),
+      ),
     );
     chunk
   }
@@ -2675,19 +2687,19 @@ mod tests {
   fn virtual_registry_keeps_stable_payload_hashes_and_declarations() {
     let first = VirtualModule::javascript(
       "test:module",
-      "export const value = 1;",
+      crate::js!(module, "export const value = 1;"),
       SourceType::mjs(),
-      Some("export declare const value: number;".to_string()),
+      Some(crate::js!(typescript, "export declare const value: number;").to_string()),
     );
     let second = VirtualModule::javascript(
       "test:module",
-      "export const value = 1;",
+      crate::js!(module, "export const value = 1;"),
       SourceType::mjs(),
-      Some("export declare const value: number;".to_string()),
+      Some(crate::js!(typescript, "export declare const value: number;").to_string()),
     );
     let changed = VirtualModule::javascript(
       "test:module",
-      "export const value = 2;",
+      crate::js!(module, "export const value = 2;"),
       SourceType::mjs(),
       None,
     );
@@ -2696,7 +2708,10 @@ mod tests {
     assert_ne!(first.content_hash, changed.content_hash);
     assert_eq!(
       first.declaration_source.as_deref(),
-      Some("export declare const value: number;")
+      Some(crate::js!(
+        typescript,
+        "export declare const value: number;"
+      ))
     );
 
     let mut registry = VirtualModuleRegistry::new();
@@ -2713,7 +2728,7 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "test:dependency",
-        "export const answer = 42;",
+        crate::js!(module, "export const answer = 42;"),
         SourceType::mjs(),
         None,
       ))
@@ -2721,7 +2736,10 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "test:entry",
-        "import { answer } from 'test:dependency'; globalThis.result = answer;",
+        crate::js!(
+          module,
+          "import { answer } from 'test:dependency'; globalThis.result = answer;"
+        ),
         SourceType::mjs(),
         None,
       ))
@@ -2750,21 +2768,24 @@ mod tests {
     let mut vm = Vm::new(globals);
     vm.register_virtual_module(VirtualModule::javascript(
       "app/value.js",
-      "export const value = 41;",
+      crate::js!(module, "export const value = 41;"),
       SourceType::mjs(),
       None,
     ))
     .expect("source dependency registers");
     vm.register_virtual_module(VirtualModule::javascript(
       "effect/api",
-      "export const answer = 42;",
+      crate::js!(module, "export const answer = 42;"),
       SourceType::mjs(),
-      Some("export declare const answer: number;".to_string()),
+      Some(crate::js!(typescript, "export declare const answer: number;").to_string()),
     ))
     .expect("declared virtual module registers");
     vm.register_virtual_module(VirtualModule::javascript(
       "app/entry.js",
-      "import './value.js'; import { answer } from 'effect/api'; globalThis.result = answer;",
+      crate::js!(
+        module,
+        "import './value.js'; import { answer } from 'effect/api'; globalThis.result = answer;"
+      ),
       SourceType::mjs(),
       None,
     ))
@@ -2793,7 +2814,7 @@ mod tests {
     let mut vm = Vm::new(globals);
     vm.register_virtual_module(VirtualModule::javascript(
       "test:counters",
-      "globalThis.result = 42;",
+      crate::js!(module, "globalThis.result = 42;"),
       SourceType::mjs(),
       None,
     ))
@@ -2831,14 +2852,17 @@ mod tests {
     let mut vm = Vm::new(globals);
     vm.register_virtual_module(VirtualModule::javascript(
       "test:parallel-dependency",
-      "globalThis.dependencyLoaded = true;",
+      crate::js!(module, "globalThis.dependencyLoaded = true;"),
       SourceType::mjs(),
       None,
     ))
     .expect("dependency module registers");
     vm.register_virtual_module(VirtualModule::javascript(
       "test:parallel-entry",
-      "import 'test:parallel-dependency'; globalThis.parallelResult = 42;",
+      crate::js!(
+        module,
+        "import 'test:parallel-dependency'; globalThis.parallelResult = 42;"
+      ),
       SourceType::mjs(),
       None,
     ))
@@ -2874,7 +2898,7 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "app/shared/value.js",
-        "export const value = 9;",
+        crate::js!(module, "export const value = 9;"),
         SourceType::mjs(),
         None,
       ))
@@ -2882,7 +2906,10 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "app/entry.js",
-        "import { value } from './shared/value.js'; globalThis.relativeResult = value;",
+        crate::js!(
+          module,
+          "import { value } from './shared/value.js'; globalThis.relativeResult = value;"
+        ),
         SourceType::mjs(),
         None,
       ))
@@ -2914,15 +2941,15 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "pkg/value.js",
-        "export const value = 11;",
+        crate::js!(module, "export const value = 11;"),
         SourceType::mjs(),
-        Some("export declare const value: number;".to_string()),
+        Some(crate::js!(typescript, "export declare const value: number;").to_string()),
       ))
       .expect("value registration succeeds");
     loader
       .register_virtual_module(VirtualModule::javascript(
         "pkg/reexport.js",
-        "export { value } from './value.js';",
+        crate::js!(module, "export { value } from './value.js';"),
         SourceType::mjs(),
         None,
       ))
@@ -2930,7 +2957,10 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "pkg/entry.js",
-        "import { value } from 'pkg/alias.js'; globalThis.aliasResult = value;",
+        crate::js!(
+          module,
+          "import { value } from 'pkg/alias.js'; globalThis.aliasResult = value;"
+        ),
         SourceType::mjs(),
         None,
       ))
@@ -2948,7 +2978,10 @@ mod tests {
     assert!(Rc::ptr_eq(&alias, &canonical));
     assert_eq!(
       loader.declaration_source("pkg/value.js"),
-      Some("export declare const value: number;")
+      Some(crate::js!(
+        typescript,
+        "export declare const value: number;"
+      ))
     );
     let entry = loader
       .construct(Path::new("."), "pkg/entry.js")
@@ -2971,7 +3004,7 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "namespace-source/base.js",
-        "export let value = 2;",
+        crate::js!(module, "export let value = 2;"),
         SourceType::mjs(),
         None,
       ))
@@ -2979,7 +3012,7 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "namespace-source/reexport.js",
-        "export * as ns from './base.js';",
+        crate::js!(module, "export * as ns from './base.js';"),
         SourceType::mjs(),
         None,
       ))
@@ -2987,7 +3020,7 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "namespace-source/entry.js",
-        "import { ns } from './reexport.js'; import * as direct from './base.js'; globalThis.namespaceSame = ns === direct; globalThis.namespaceValue = ns.value; globalThis.namespaceType = typeof direct;",
+        crate::js!(module, "import { ns } from './reexport.js'; import * as direct from './base.js'; globalThis.namespaceSame = ns === direct; globalThis.namespaceValue = ns.value; globalThis.namespaceType = typeof direct;"),
         SourceType::mjs(),
         None,
       ))
@@ -3019,7 +3052,7 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "broken/entry.js",
-        "import './missing.js'; export const value = 1;",
+        crate::js!(module, "import './missing.js'; export const value = 1;"),
         SourceType::mjs(),
         None,
       ))
@@ -3044,7 +3077,10 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "cycle/a.js",
-        "import { value as bValue } from './b.js'; export const value = bValue;",
+        crate::js!(
+          module,
+          "import { value as bValue } from './b.js'; export const value = bValue;"
+        ),
         SourceType::mjs(),
         None,
       ))
@@ -3052,7 +3088,10 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "cycle/b.js",
-        "import { value as aValue } from './a.js'; export const value = aValue;",
+        crate::js!(
+          module,
+          "import { value as aValue } from './a.js'; export const value = aValue;"
+        ),
         SourceType::mjs(),
         None,
       ))
@@ -3085,9 +3124,17 @@ mod tests {
 
   #[test]
   fn prelinked_direct_import_is_parser_free_and_uses_canonical_slots() {
-    let value_chunk = compile_prelinked_chunk("export const answer = 42;", 0, &[], &["answer"]);
+    let value_chunk = compile_prelinked_chunk(
+      crate::js!(module, "export const answer = 42;"),
+      0,
+      &[],
+      &["answer"],
+    );
     let entry_chunk = compile_prelinked_chunk(
-      "import { answer } from 'graph:value'; globalThis.prelinkedResult = answer;",
+      crate::js!(
+        module,
+        "import { answer } from 'graph:value'; globalThis.prelinkedResult = answer;"
+      ),
       1,
       &[("answer", 0, "answer")],
       &[],
@@ -3184,7 +3231,12 @@ mod tests {
         dependencies: vec![],
         exports: vec![export("answer", 0)],
         imports: vec![],
-        chunk: compile_prelinked_chunk("export const answer = 42;", 0, &[], &["answer"]),
+        chunk: compile_prelinked_chunk(
+          crate::js!(module, "export const answer = 42;"),
+          0,
+          &[],
+          &["answer"],
+        ),
       }],
       1,
       vec![0],
@@ -3196,7 +3248,10 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "visibility:source-entry",
-        "import { answer } from 'visibility:public'; globalThis.visibilityResult = answer;",
+        crate::js!(
+          module,
+          "import { answer } from 'visibility:public'; globalThis.visibilityResult = answer;"
+        ),
         SourceType::mjs(),
         None,
       ))
@@ -3238,7 +3293,7 @@ mod tests {
         graph,
         vec![(
           "declarations:public".to_string(),
-          "export declare const answer: number;".to_string(),
+          crate::js!(typescript, "export declare const answer: number;").to_string(),
         )],
       )
       .expect("graph and declaration register atomically");
@@ -3248,11 +3303,17 @@ mod tests {
       .expect("public root constructs");
     assert_eq!(
       record.borrow().declaration_source.as_deref(),
-      Some("export declare const answer: number;")
+      Some(crate::js!(
+        typescript,
+        "export declare const answer: number;"
+      ))
     );
     assert_eq!(
       loader.declaration_source("declarations:public"),
-      Some("export declare const answer: number;")
+      Some(crate::js!(
+        typescript,
+        "export declare const answer: number;"
+      ))
     );
   }
 
@@ -3290,7 +3351,7 @@ mod tests {
           graph.clone(),
           vec![(
             target.to_string(),
-            "declare const value: number;".to_string(),
+            crate::js!(typescript, "declare const value: number;").to_string(),
           )],
         )
         .expect_err("invalid declaration target is rejected");
@@ -3322,11 +3383,11 @@ mod tests {
         vec![
           (
             "declarations:public".to_string(),
-            "declare const a: 1;".to_string(),
+            crate::js!(typescript, "declare const a: 1;").to_string(),
           ),
           (
             "declarations:public".to_string(),
-            "declare const b: 2;".to_string(),
+            crate::js!(typescript, "declare const b: 2;").to_string(),
           ),
         ],
       )
@@ -3373,7 +3434,7 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "visibility:source-private-entry",
-        "import 'visibility:private';",
+        crate::js!(module, "import 'visibility:private';"),
         SourceType::mjs(),
         None,
       ))
@@ -3398,7 +3459,12 @@ mod tests {
           dependencies: vec![],
           exports: vec![export("answer", 0)],
           imports: vec![],
-          chunk: compile_prelinked_chunk("export const answer = 42;", 0, &[], &["answer"]),
+          chunk: compile_prelinked_chunk(
+            crate::js!(module, "export const answer = 42;"),
+            0,
+            &[],
+            &["answer"],
+          ),
         },
         PrelinkedModule {
           specifier: "visibility:entry".to_string(),
@@ -3408,7 +3474,10 @@ mod tests {
           exports: vec![],
           imports: vec![import("answer", 0)],
           chunk: compile_prelinked_chunk(
-            "import { answer } from 'visibility:private'; globalThis.visibilityResult = answer;",
+            crate::js!(
+              module,
+              "import { answer } from 'visibility:private'; globalThis.visibilityResult = answer;"
+            ),
             1,
             &[("answer", 0, "answer")],
             &[],
@@ -3516,19 +3585,28 @@ mod tests {
   #[test]
   fn prelinked_cycles_read_preallocated_live_bindings() {
     let a_chunk = compile_prelinked_chunk(
-      "import { getB } from 'cycle:b'; export const a = 1; export function readB() { return getB(); }",
+      crate::js!(
+        module,
+        "import { getB } from 'cycle:b'; export const a = 1; export function readB() { return getB(); }"
+      ),
       0,
       &[("getB", 1, "getB")],
       &["a", "readB"],
     );
     let b_chunk = compile_prelinked_chunk(
-      "import { a } from 'cycle:a'; export function getB() { return a + 1; }",
+      crate::js!(
+        module,
+        "import { a } from 'cycle:a'; export function getB() { return a + 1; }"
+      ),
       1,
       &[("a", 0, "a")],
       &["getB"],
     );
     let entry_chunk = compile_prelinked_chunk(
-      "import { readB } from 'cycle:a'; globalThis.cycleResult = readB();",
+      crate::js!(
+        module,
+        "import { readB } from 'cycle:a'; globalThis.cycleResult = readB();"
+      ),
       2,
       &[("readB", 0, "readB")],
       &[],
@@ -3610,17 +3688,29 @@ mod tests {
 
   #[test]
   fn prelinked_reexports_and_export_all_share_the_origin_slot() {
-    let base_chunk = compile_prelinked_chunk("export const value = 5;", 0, &[], &["value"]);
+    let base_chunk = compile_prelinked_chunk(
+      crate::js!(module, "export const value = 5;"),
+      0,
+      &[],
+      &["value"],
+    );
     let alias_chunk = compile_prelinked_chunk(
-      "export { value as renamed } from 'reexport:base';",
+      crate::js!(module, "export { value as renamed } from 'reexport:base';"),
       1,
       &[],
       &["renamed"],
     );
-    let star_chunk =
-      compile_prelinked_chunk("export * from 'reexport:alias';", 2, &[], &["renamed"]);
+    let star_chunk = compile_prelinked_chunk(
+      crate::js!(module, "export * from 'reexport:alias';"),
+      2,
+      &[],
+      &["renamed"],
+    );
     let entry_chunk = compile_prelinked_chunk(
-      "import { renamed } from 'reexport:star'; globalThis.reexportResult = renamed;",
+      crate::js!(
+        module,
+        "import { renamed } from 'reexport:star'; globalThis.reexportResult = renamed;"
+      ),
       3,
       &[("renamed", 2, "renamed")],
       &[],
@@ -3707,9 +3797,17 @@ mod tests {
 
   #[test]
   fn prelinked_namespace_imports_share_one_live_namespace() {
-    let base_chunk = compile_prelinked_chunk("export let value = 2;", 0, &[], &["value"]);
+    let base_chunk = compile_prelinked_chunk(
+      crate::js!(module, "export let value = 2;"),
+      0,
+      &[],
+      &["value"],
+    );
     let entry_chunk = compile_prelinked_chunk(
-      "import * as first from 'namespace:base'; import * as second from 'namespace:base'; globalThis.namespaceSame = first === second; globalThis.namespaceValue = second.value;",
+      crate::js!(
+        module,
+        "import * as first from 'namespace:base'; import * as second from 'namespace:base'; globalThis.namespaceSame = first === second; globalThis.namespaceValue = second.value;"
+      ),
       1,
       &[("first", 0, "*"), ("second", 0, "*")],
       &[],
@@ -3761,15 +3859,23 @@ mod tests {
 
   #[test]
   fn prelinked_namespace_reexports_use_the_target_namespace_without_parsing() {
-    let base_chunk = compile_prelinked_chunk("export let value = 2;", 0, &[], &["value"]);
+    let base_chunk = compile_prelinked_chunk(
+      crate::js!(module, "export let value = 2;"),
+      0,
+      &[],
+      &["value"],
+    );
     let reexport_chunk = compile_prelinked_namespace_reexport_chunk(
-      "export * as ns from 'namespace-prelinked:base';",
+      crate::js!(module, "export * as ns from 'namespace-prelinked:base';"),
       1,
       0,
       "ns",
     );
     let entry_chunk = compile_prelinked_chunk(
-      "import { ns } from 'namespace-prelinked:reexport'; import * as direct from 'namespace-prelinked:base'; globalThis.prelinkedNamespaceSame = ns === direct; globalThis.prelinkedNamespaceValue = ns.value;",
+      crate::js!(
+        module,
+        "import { ns } from 'namespace-prelinked:reexport'; import * as direct from 'namespace-prelinked:base'; globalThis.prelinkedNamespaceSame = ns === direct; globalThis.prelinkedNamespaceValue = ns.value;"
+      ),
       2,
       &[("ns", 1, "ns"), ("direct", 0, "*")],
       &[],
@@ -3859,7 +3965,7 @@ mod tests {
         exports: vec![],
         imports: vec![],
         chunk: compile_prelinked_chunk(
-          "globalThis.order = (globalThis.order || '') + 'A';",
+          crate::js!(module, "globalThis.order = (globalThis.order || '') + 'A';"),
           0,
           &[],
           &[],
@@ -3873,7 +3979,7 @@ mod tests {
         exports: vec![],
         imports: vec![],
         chunk: compile_prelinked_chunk(
-          "globalThis.order = (globalThis.order || '') + 'B';",
+          crate::js!(module, "globalThis.order = (globalThis.order || '') + 'B';"),
           1,
           &[],
           &[],
@@ -3887,7 +3993,7 @@ mod tests {
         exports: vec![],
         imports: vec![],
         chunk: compile_prelinked_chunk(
-          "globalThis.order = (globalThis.order || '') + 'E';",
+          crate::js!(module, "globalThis.order = (globalThis.order || '') + 'E';"),
           2,
           &[],
           &[],
@@ -3937,7 +4043,12 @@ mod tests {
         dependencies: vec![],
         exports: vec![export("answer", 0)],
         imports: vec![],
-        chunk: compile_prelinked_chunk("export const answer = 42;", 0, &[], &["answer"]),
+        chunk: compile_prelinked_chunk(
+          crate::js!(module, "export const answer = 42;"),
+          0,
+          &[],
+          &["answer"],
+        ),
       }],
       1,
       vec![0],
@@ -3946,7 +4057,7 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "mixed:early",
-        "export const early = 1;",
+        crate::js!(module, "export const early = 1;"),
         SourceType::mjs(),
         None,
       ))
@@ -3962,7 +4073,10 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "mixed:entry",
-        "import { answer } from 'mixed:value'; globalThis.mixedResult = answer;",
+        crate::js!(
+          module,
+          "import { answer } from 'mixed:value'; globalThis.mixedResult = answer;"
+        ),
         SourceType::mjs(),
         None,
       ))
@@ -3998,7 +4112,7 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "mixed:late",
-        "export const late = 2;",
+        crate::js!(module, "export const late = 2;"),
         SourceType::mjs(),
         None,
       ))
@@ -4021,7 +4135,7 @@ mod tests {
     collision_loader
       .register_virtual_module(VirtualModule::javascript(
         "mixed:indexed-first",
-        "export const value = 1;",
+        crate::js!(module, "export const value = 1;"),
         SourceType::mjs(),
         None,
       ))
@@ -4042,7 +4156,7 @@ mod tests {
 
   #[test]
   fn precompiled_virtual_modules_keep_source_metadata_and_stable_indices() {
-    let source = "export const value = 42;";
+    let source = crate::js!(module, "export const value = 42;");
     let session = crate::parser::Parser::parse_source_with_type(source, SourceType::mjs())
       .expect("precompiled source parses");
     let context = ModuleContext {
@@ -4068,7 +4182,7 @@ mod tests {
     loader
       .register_virtual_module(VirtualModule::javascript(
         "test:source",
-        "export const other = 1;",
+        crate::js!(module, "export const other = 1;"),
         SourceType::mjs(),
         None,
       ))
@@ -4106,8 +4220,9 @@ mod tests {
 
   #[test]
   fn generated_bytecode_virtual_modules_are_loaded_and_run() {
-    let session = crate::parser::Parser::parse_source("globalThis.bytecodeResult = 7;")
-      .expect("bytecode source parses");
+    let session =
+      crate::parser::Parser::parse_source(crate::js!("globalThis.bytecodeResult = 7;"))
+        .expect("bytecode source parses");
     let chunk = crate::compiler::compile(session.program(), session.source()).expect("compiles");
     let mut loader = ModuleLoader::new();
     loader

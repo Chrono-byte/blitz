@@ -359,7 +359,10 @@ mod tests {
   #[test]
   fn reports_declarations_and_runtime_globals() {
     let result = analyze(
-      "interface Answer { value: number }\nconst answer: Answer = { value: 42 };\nfunction read() { return answer; }",
+      crate::js!(
+        typescript,
+        "interface Answer { value: number }\nconst answer: Answer = { value: 42 };\nfunction read() { return answer; }"
+      ),
       Path::new("example.ts"),
       false,
     );
@@ -384,7 +387,7 @@ mod tests {
   #[test]
   fn reports_type_errors() {
     let result = analyze(
-      "const answer: number = 'wrong';",
+      crate::js!(typescript, "const answer: number = 'wrong';"),
       Path::new("example.ts"),
       false,
     );

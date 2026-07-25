@@ -78,7 +78,10 @@ fn corrected_effect_foundation_fixture_rejects_bad_members_and_identity() {
 
 #[test]
 fn run_main_rejects_open_requirements() {
-  let source = "import type * as Effect from \"effect/Effect\"; import type * as Runtime from \"blitz:runtime\"; const open = null as unknown as Effect.Effect<number, never, \"Clock\">; Runtime.runMain(open);";
+  let source = blitz::js!(
+    typescript,
+    "import type * as Effect from \"effect/Effect\"; import type * as Runtime from \"blitz:runtime\"; const open = null as unknown as Effect.Effect<number, never, \"Clock\">; Runtime.runMain(open);"
+  );
   let source_type = Parser::source_type_for_path(Path::new("run-main.ts"), false);
   let session = Parser::parse_source_with_type(source, source_type).expect("parse source");
   let declarations = [
@@ -96,10 +99,13 @@ fn run_main_rejects_open_requirements() {
 
 #[test]
 fn missing_virtual_module_is_not_implicit_any() {
-  let source = "import * as Missing from \"missing/module\"; const value = Missing.answer;";
+  let source = blitz::js!(
+    typescript,
+    "import * as Missing from \"missing/module\"; const value = Missing.answer;"
+  );
   let declarations = [VirtualDeclaration {
     specifier: "present/module".to_string(),
-    source: "export declare const answer: number;".to_string(),
+    source: blitz::js!(typescript, "export declare const answer: number;").to_string(),
   }];
   let result = check_source(source, "missing.ts", &declarations);
   assert!(result.is_err());
@@ -110,15 +116,18 @@ fn aggregate_declaration_can_precede_its_dependency() {
   let declarations = [
     VirtualDeclaration {
       specifier: "root".to_string(),
-      source: "export * as Dependency from \"dependency\";".to_string(),
+      source: blitz::js!(typescript, "export * as Dependency from \"dependency\";").to_string(),
     },
     VirtualDeclaration {
       specifier: "dependency".to_string(),
-      source: "export declare const answer: number;".to_string(),
+      source: blitz::js!(typescript, "export declare const answer: number;").to_string(),
     },
   ];
   let result = check_source(
-    "import * as Root from \"root\"; const answer: number = Root.Dependency.answer;",
+    blitz::js!(
+      typescript,
+      "import * as Root from \"root\"; const answer: number = Root.Dependency.answer;"
+    ),
     "aggregate.ts",
     &declarations,
   );
@@ -129,11 +138,17 @@ fn aggregate_declaration_can_precede_its_dependency() {
 fn namespace_imports_include_type_only_members() {
   let declarations = [VirtualDeclaration {
     specifier: "api".to_string(),
-    source: "export interface Service { value: number } export declare const make: () => Service;"
-      .to_string(),
+    source: blitz::js!(
+      typescript,
+      "export interface Service { value: number } export declare const make: () => Service;"
+    )
+    .to_string(),
   }];
   let result = check_source(
-    "import type * as Api from \"api\"; const service: Api.Service = Api.make();",
+    blitz::js!(
+      typescript,
+      "import type * as Api from \"api\"; const service: Api.Service = Api.make();"
+    ),
     "namespace.ts",
     &declarations,
   );
@@ -144,10 +159,13 @@ fn namespace_imports_include_type_only_members() {
 fn missing_virtual_members_are_rejected() {
   let declarations = [VirtualDeclaration {
     specifier: "api".to_string(),
-    source: "export declare const answer: number;".to_string(),
+    source: blitz::js!(typescript, "export declare const answer: number;").to_string(),
   }];
   let result = check_source(
-    "import * as Api from \"api\"; const value = Api.missing;",
+    blitz::js!(
+      typescript,
+      "import * as Api from \"api\"; const value = Api.missing;"
+    ),
     "missing-member.ts",
     &declarations,
   );
@@ -158,44 +176,53 @@ fn missing_virtual_members_are_rejected() {
 fn module_local_helpers_resolve_without_becoming_exports() {
   let declarations = [VirtualDeclaration {
     specifier: "effect/Effect".to_string(),
-    source: r#"
+    source: blitz::js!(typescript, r#"
       export interface Effect<A> {}
       interface Exit<A> { readonly value: A }
       interface RunCallbackOptions<A> { readonly onExit?: (exit: Exit<A>) => void }
       type Cancel<A> = (options?: RunCallbackOptions<A>) => void;
       export declare const runCallback: <A>(effect: Effect<A>, options?: RunCallbackOptions<A>) => Cancel<A>;
-    "#
+    "#)
     .to_string(),
   }, VirtualDeclaration {
     specifier: "effect/Scope".to_string(),
-    source: r#"
+    source: blitz::js!(typescript, r#"
       interface ExecutionStrategy { readonly _tag: "Sequential" }
       export interface Scope { readonly strategy: ExecutionStrategy }
       export declare const make: (executionStrategy?: ExecutionStrategy) => Scope;
-    "#
+    "#)
     .to_string(),
   }];
   let result = check_source(
-    r#"
+    blitz::js!(
+      typescript,
+      r#"
       import * as Effect from "effect/Effect";
       import * as Scope from "effect/Scope";
       const cancel = Effect.runCallback(null as unknown as Effect.Effect<number>, {});
       cancel({});
       const tag: "Sequential" = Scope.make({ _tag: "Sequential" }).strategy._tag;
-    "#,
+    "#
+    ),
     "module-local-helpers.ts",
     &declarations,
   );
   assert!(result.is_ok(), "{result:?}");
 
   let private_import = check_source(
-    "import type { RunCallbackOptions } from \"effect/Effect\";",
+    blitz::js!(
+      typescript,
+      "import type { RunCallbackOptions } from \"effect/Effect\";"
+    ),
     "private-helper-import.ts",
     &declarations,
   );
   assert!(private_import.is_err());
   let private_scope_import = check_source(
-    "import type { ExecutionStrategy } from \"effect/Scope\";",
+    blitz::js!(
+      typescript,
+      "import type { ExecutionStrategy } from \"effect/Scope\";"
+    ),
     "private-scope-helper-import.ts",
     &declarations,
   );
@@ -206,7 +233,7 @@ fn bundled_effect_declarations() -> Vec<VirtualDeclaration> {
   vec![
     VirtualDeclaration {
       specifier: "effect/Effect".to_string(),
-      source: r#"
+      source: blitz::js!(typescript, r#"
         interface FiberId {}
         interface Exit<A, E> { readonly value: A; readonly error: E }
         interface RunCallbackOptions<A, E = never> {
@@ -218,12 +245,12 @@ fn bundled_effect_declarations() -> Vec<VirtualDeclaration> {
         export interface Effect<A, E = never> {}
         export declare const succeed: <A>(value: A) => Effect<A>;
         export declare const runCallback: <A, E>(effect: Effect<A, E>, options?: RunCallbackOptions<A, E>) => Cancel<A, E>;
-      "#
+      "#)
       .to_string(),
     },
     VirtualDeclaration {
       specifier: "effect/Scope".to_string(),
-      source: r#"
+      source: blitz::js!(typescript, r#"
         interface Pipeable<Self> {
           readonly pipe: <A>(ab: (self: Self) => A) => A;
         }
@@ -234,7 +261,7 @@ fn bundled_effect_declarations() -> Vec<VirtualDeclaration> {
         export interface Scope extends Pipeable<Scope> { readonly strategy: ExecutionStrategy }
         export interface CloseableScope extends Scope {}
         export declare const make: (executionStrategy?: ExecutionStrategy) => CloseableScope;
-      "#
+      "#)
       .to_string(),
     },
   ]
@@ -244,13 +271,16 @@ fn bundled_effect_declarations() -> Vec<VirtualDeclaration> {
 fn bundled_effect_run_callback_and_scope_make_signatures_resolve() {
   let declarations = bundled_effect_declarations();
   let valid = check_source(
-    r#"
+    blitz::js!(
+      typescript,
+      r#"
       import * as Effect from "effect/Effect";
       import * as Scope from "effect/Scope";
       const cancel = Effect.runCallback(Effect.succeed(1), {});
       cancel({}, {});
       Scope.make({ _tag: "Sequential" });
-    "#,
+    "#
+    ),
     "bundled-effect-signatures.ts",
     &declarations,
   );
@@ -261,7 +291,9 @@ fn bundled_effect_run_callback_and_scope_make_signatures_resolve() {
 fn declaration_overloads_and_requirements_are_checked() {
   let declarations = [VirtualDeclaration {
     specifier: "api".to_string(),
-    source: r#"
+    source: blitz::js!(
+      typescript,
+      r#"
       export declare const overloaded: {
         (value: string): number;
         (value: number): string;
@@ -269,20 +301,30 @@ fn declaration_overloads_and_requirements_are_checked() {
       export interface Effect<A, R = never> { readonly _Requirements: (_: R) => void }
       export declare const run: <A>(effect: Effect<A, never>) => void;
     "#
+    )
     .to_string(),
   }];
   let valid = check_source(
-    "import type * as Api from \"api\"; const numberResult: number = Api.overloaded(\"ok\"); const stringResult: string = Api.overloaded(1); const effect = null as unknown as Api.Effect<number>; Api.run(effect);",
+    blitz::js!(
+      typescript,
+      "import type * as Api from \"api\"; const numberResult: number = Api.overloaded(\"ok\"); const stringResult: string = Api.overloaded(1); const effect = null as unknown as Api.Effect<number>; Api.run(effect);"
+    ),
     "overloads.ts",
     &declarations,
   );
   let invalid = check_source(
-    "import type * as Api from \"api\"; const result: boolean = Api.overloaded(true);",
+    blitz::js!(
+      typescript,
+      "import type * as Api from \"api\"; const result: boolean = Api.overloaded(true);"
+    ),
     "bad-overload.ts",
     &declarations,
   );
   let open_requirement = check_source(
-    "import type * as Api from \"api\"; const effect = null as unknown as Api.Effect<number, \"Clock\">; Api.run(effect);",
+    blitz::js!(
+      typescript,
+      "import type * as Api from \"api\"; const effect = null as unknown as Api.Effect<number, \"Clock\">; Api.run(effect);"
+    ),
     "bad-requirement.ts",
     &declarations,
   );

@@ -73,7 +73,8 @@ fn benchmark_globals() -> Rc<RefCell<ObjectData>> {
 
 /// Returns a source string for the unicode comment hotpath benchmark.
 fn unicode_comment_hotpath_source() -> String {
-  r#"
+  blitz::js!(
+    r#"
         var hex = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F"];
         for (var i = 0; i < 4096; i++) {
             var uu = hex[(i >> 12) & 15] + hex[(i >> 8) & 15] + hex[(i >> 4) & 15] + hex[i & 15];
@@ -83,16 +84,19 @@ fn unicode_comment_hotpath_source() -> String {
             }
         }
     "#
+  )
   .to_string()
 }
 
 /// Returns a source string for the comment-only eval benchmark.
 fn comment_only_eval_source() -> String {
-  r#"
+  blitz::js!(
+    r#"
         for (var i = 0; i < 4096; i++) {
             eval("/* comment */");
         }
     "#
+  )
   .to_string()
 }
 

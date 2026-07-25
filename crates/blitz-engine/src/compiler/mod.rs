@@ -555,7 +555,7 @@ mod test {
 
   #[test]
   fn compile_simple_for_loop() {
-    let src = "for (var i = 0; i < 3; i = i + 1) { console.log(i); }";
+    let src = crate::js!("for (var i = 0; i < 3; i = i + 1) { console.log(i); }");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -581,7 +581,8 @@ mod test {
 
   #[test]
   fn compile_for_with_continue() {
-    let src = "for (var i = 0; i < 3; i = i + 1) { if (i == 1) { continue; } console.log(i); }";
+    let src =
+      crate::js!("for (var i = 0; i < 3; i = i + 1) { if (i == 1) { continue; } console.log(i); }");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -617,7 +618,7 @@ mod test {
 
   #[test]
   fn static_member_cache_sites_have_distinct_risc_instructions() {
-    let src = "a.x; a.y; a.x;";
+    let src = crate::js!("a.x; a.y; a.x;");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -664,7 +665,7 @@ mod test {
 
   #[test]
   fn compile_for_loop_back_jump_targets_loop_start() {
-    let src = "for (var i = 0; i < 3; i = i + 1) {}";
+    let src = crate::js!("for (var i = 0; i < 3; i = i + 1) {}");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -693,7 +694,7 @@ mod test {
 
   #[test]
   fn compile_new_expression_lowers_to_construct() {
-    let src = "new Array(1, 2, 3);";
+    let src = crate::js!("new Array(1, 2, 3);");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -712,7 +713,7 @@ mod test {
 
   #[test]
   fn compile_update_expression_emits_store() {
-    let src = "for (var i = 0; i < 3; i++) {}";
+    let src = crate::js!("for (var i = 0; i < 3; i++) {}");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -734,7 +735,7 @@ mod test {
 
   #[test]
   fn compile_member_call_uses_call_method() {
-    let src = "obj.method(1);";
+    let src = crate::js!("obj.method(1);");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -750,7 +751,7 @@ mod test {
 
   #[test]
   fn compile_for_in_uses_get_builtin() {
-    let src = "for (var k in obj) {}";
+    let src = crate::js!("for (var k in obj) {}");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -773,7 +774,7 @@ mod test {
       .map(|i| i.to_string())
       .collect::<Vec<_>>()
       .join(", ");
-    let src = format!("f({args});");
+    let src = crate::js!(format(script), "f({args});");
     let session = crate::parser::Parser::parse_source(&src).expect("parse ok");
     let program = session.program();
     let err = compile(program, session.source()).expect_err("compile should fail");
@@ -788,7 +789,7 @@ mod test {
 
   #[test]
   fn compile_generator_non_simple_params_keep_later_params_tdz() {
-    let src = "function* f(x = y, y) {}";
+    let src = crate::js!("function* f(x = y, y) {}");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -838,7 +839,7 @@ mod test {
 
   #[test]
   fn compile_object_generator_method_emits_body() {
-    let src = "var o = { *m() { let x; eval(\"var x;\"); } };";
+    let src = crate::js!("var o = { *m() { let x; eval(\"var x;\"); } };");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -882,7 +883,7 @@ mod test {
 
   #[test]
   fn compile_dynamic_import_uses_get_builtin() {
-    let src = "import('./dep.js');";
+    let src = crate::js!("import('./dep.js');");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -901,7 +902,7 @@ mod test {
 
   #[test]
   fn compile_sequence_expression_keeps_last_value() {
-    let src = "var x = (a = 1, 2);";
+    let src = crate::js!("var x = (a = 1, 2);");
     let session = crate::parser::Parser::parse_source(src).expect("parse_source failed");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -913,7 +914,7 @@ mod test {
 
   #[test]
   fn imported_binding_assignment_is_rejected() {
-    let src = "a = 1;";
+    let src = crate::js!("a = 1;");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let ctx = ModuleContext {
@@ -933,12 +934,14 @@ mod test {
 
   #[test]
   fn strict_assignment_to_arguments_is_rejected() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
         function testcase() {
             'use strict';
             arguments = 7;
         }
-    "#;
+    "#
+    );
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
 
@@ -953,7 +956,7 @@ mod test {
 
   #[test]
   fn nullish_coalescing_is_supported() {
-    let src = "1 ?? 2;";
+    let src = crate::js!("1 ?? 2;");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
 
@@ -971,7 +974,7 @@ mod test {
 
   #[test]
   fn comparison_branches_use_compare_jump() {
-    let src = "if (a === b) { 1; } else { 2; } a === b ? 1 : 2;";
+    let src = crate::js!("if (a === b) { 1; } else { 2; } a === b ? 1 : 2;");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
 
@@ -989,7 +992,7 @@ mod test {
 
   #[test]
   fn while_compare_jump_preserves_compare_opcode_payload() {
-    let src = "var s = \"\"; while (s.length < 4) { s = \"0\" + s; }";
+    let src = crate::js!("var s = \"\"; while (s.length < 4) { s = \"0\" + s; }");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
 
@@ -1012,7 +1015,7 @@ mod test {
 
   #[test]
   fn compile_for_of_emits_iterator_ops() {
-    let src = "for (var x of [1, 2, 3]) {}";
+    let src = crate::js!("for (var x of [1, 2, 3]) {}");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -1032,7 +1035,7 @@ mod test {
 
   #[test]
   fn for_of_over_array_executes() {
-    let src = "var sum = 0; for (var x of [1, 2, 3]) { sum = sum + x; } sum;";
+    let src = crate::js!("var sum = 0; for (var x of [1, 2, 3]) { sum = sum + x; } sum;");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -1052,12 +1055,14 @@ mod test {
 
   #[test]
   fn computed_member_compound_assignment_evaluates_reference_once() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
         globalThis.hits = 0;
         var obj = { value: 1 };
         function key() { globalThis.hits = globalThis.hits + 1; return "value"; }
         obj[key()] += 2;
-    "#;
+    "#
+    );
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -1079,10 +1084,12 @@ mod test {
 
   #[test]
   fn member_postfix_update_returns_old_value_and_stores_new_value() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
         var obj = { value: 1 };
         var old = obj.value++;
-    "#;
+    "#
+    );
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");
@@ -1102,7 +1109,7 @@ mod test {
 
   #[test]
   fn block_scoped_let_does_not_escape_block() {
-    let src = "{ let x = 1; } x = 2;";
+    let src = crate::js!("{ let x = 1; } x = 2;");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compile(program, session.source()).expect("compile ok");

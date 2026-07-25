@@ -387,14 +387,17 @@ mod tests {
         let entry = directory.join("entry.mjs");
         std::fs::write(
           &entry,
-          r#"
+          blitz::js!(
+            module,
+            r#"
         import * as Effect from 'effect/Effect';
         const fiber = Effect.runFork(
           Effect.map(Effect.succeed(41), value => value + 1)
         );
         const exit = fiber.unsafePoll();
         globalThis.effect_result = exit === null ? undefined : exit.value;
-      "#,
+      "#
+          ),
         )
         .expect("write Effect smoke entry");
 
@@ -451,7 +454,9 @@ mod tests {
     let entry_path = directory.join("entry.mjs");
     std::fs::write(
       &entry_path,
-      r#"
+      blitz::js!(
+        module,
+        r#"
         import * as Effect from 'effect/Effect';
         import * as Ref from 'effect/Ref';
         globalThis.effect_typecheck =
@@ -459,7 +464,8 @@ mod tests {
           typeof Effect.catchTag === 'function' &&
           typeof Effect.runSync === 'function' &&
           typeof Ref.make === 'function';
-      "#,
+      "#
+      ),
     )
     .expect("write declaration test entry");
 
@@ -515,7 +521,10 @@ mod tests {
     let entry = directory.join("entry.mjs");
     std::fs::write(
       &entry,
-      "import * as Facade from 'blitz:app'; globalThis.facade_type = typeof Facade;",
+      blitz::js!(
+        module,
+        "import * as Facade from 'blitz:app'; globalThis.facade_type = typeof Facade;"
+      ),
     )
     .expect("write facade entry");
     let loader_handle = vm.module_loader_handle();
@@ -590,12 +599,16 @@ mod tests {
       .iter()
       .enumerate()
       .map(|(index, (specifier, _))| {
-        format!(
+        blitz::js!(
+          format(module),
           "import * as root{index} from '{specifier}';\nglobalThis.effect_public_root_count += typeof root{index} === 'object' ? 1 : 0;\n"
         )
       })
       .collect::<String>();
-    let source = format!("globalThis.effect_public_root_count = 0;\n{imports}");
+    let source = blitz::js!(
+      format(module),
+      "globalThis.effect_public_root_count = 0;\n{imports}"
+    );
     let expected_count = roots.len();
     run_effect_compatibility_entry(source, move |vm| {
       assert_eq!(
@@ -608,7 +621,9 @@ mod tests {
   #[test]
   fn effect_root_and_fiber_await_preserve_identity() {
     run_effect_compatibility_entry(
-      r#"
+      blitz::js!(
+        module,
+        r#"
         import * as Root from 'effect';
         import * as Effect from 'effect/Effect';
         import * as Fiber from 'effect/Fiber';
@@ -624,7 +639,8 @@ mod tests {
           Exit.isSuccess(awaited) &&
           Exit.isSuccess(awaited.value) &&
           awaited.value.value === 41;
-      "#,
+      "#
+      ),
       |vm| {
         assert_eq!(
           vm.get_global("effect_root_identity"),
@@ -646,7 +662,9 @@ mod tests {
   #[test]
   fn ref_and_synchronous_error_boundaries_are_usable() {
     run_effect_compatibility_entry(
-      r#"
+      blitz::js!(
+        module,
+        r#"
         import * as Root from 'effect';
         import * as Effect from 'effect/Effect';
         import * as Exit from 'effect/Exit';
@@ -681,7 +699,8 @@ mod tests {
         globalThis.effect_boundary_recovered = recovered;
         globalThis.effect_boundary_failed = Exit.isFailure(failed);
         globalThis.effect_boundary_sequenced = sequenced;
-      "#,
+      "#
+      ),
       |vm| {
         assert_eq!(
           vm.get_global("effect_ref_root_identity"),
@@ -711,7 +730,9 @@ mod tests {
   #[test]
   fn exit_and_cause_observation_preserve_failure_shape() {
     run_effect_compatibility_entry(
-      r#"
+      blitz::js!(
+        module,
+        r#"
         import * as Effect from 'effect/Effect';
         import * as Exit from 'effect/Exit';
         import * as Cause from 'effect/Cause';
@@ -726,7 +747,8 @@ mod tests {
           failure._tag === 'Some' && failure.value === 'boom';
         globalThis.exit_cause_observed =
           Exit.causeOption(observed)._tag === 'Some';
-      "#,
+      "#
+      ),
       |vm| {
         for name in [
           "exit_is_exit",
@@ -745,7 +767,9 @@ mod tests {
   #[test]
   fn context_tags_keep_key_identity_and_service_identity() {
     run_effect_compatibility_entry(
-      r#"
+      blitz::js!(
+        module,
+        r#"
         import * as Effect from 'effect/Effect';
         import * as Context from 'effect/Context';
         const firstTag = Context.GenericTag('blitz/effect-compatibility/service');
@@ -762,7 +786,8 @@ mod tests {
         globalThis.context_tag_shape = Context.isTag(firstTag);
         globalThis.context_service_identity =
           observed !== null && observed.value === service;
-      "#,
+      "#
+      ),
       |vm| {
         assert_eq!(
           vm.get_global("context_tag_key_identity"),
@@ -780,7 +805,9 @@ mod tests {
   #[test]
   fn layers_build_and_provide_context() {
     run_effect_compatibility_entry(
-      r#"
+      blitz::js!(
+        module,
+        r#"
         import * as Effect from 'effect/Effect';
         import * as Context from 'effect/Context';
         import * as Exit from 'effect/Exit';
@@ -789,7 +816,8 @@ mod tests {
         const layer = Layer.succeed(tag, { answer: 13 });
         const built = Effect.runFork(Effect.scoped(Layer.build(layer))).unsafePoll();
         globalThis.layer_built = built !== null && Exit.isSuccess(built);
-      "#,
+      "#
+      ),
       |vm| {
         assert_eq!(vm.get_global("layer_built"), Some(Value::Bool(true)));
       },
@@ -799,7 +827,9 @@ mod tests {
   #[test]
   fn scoped_acquire_release_receives_success_exit() {
     run_effect_compatibility_entry(
-      r#"
+      blitz::js!(
+        module,
+        r#"
         import * as Effect from 'effect/Effect';
         import * as Exit from 'effect/Exit';
         let acquired = 0;
@@ -825,7 +855,8 @@ mod tests {
         globalThis.scoped_acquired = acquired === 1;
         globalThis.scoped_released = released === 1;
         globalThis.scoped_finalizer_exit = releaseSawExit && releaseSawSuccess;
-      "#,
+      "#
+      ),
       |vm| {
         assert_eq!(vm.get_global("scoped_result"), Some(Value::Bool(true)));
         assert_eq!(vm.get_global("scoped_acquired"), Some(Value::Bool(true)));
@@ -846,7 +877,8 @@ mod tests {
       NEXT_EFFECT_COMPATIBILITY_TEST_ID.fetch_add(1, Ordering::Relaxed)
     ));
     let missing = path.with_extension("missing");
-    let source = format!(
+    let source = blitz::js!(
+      format(module),
       r#"
         import * as Cause from 'effect/Cause';
         import * as Effect from 'effect/Effect';
@@ -885,7 +917,9 @@ mod tests {
   #[test]
   fn effect_terminal_operations_use_the_live_service() {
     run_effect_compatibility_entry(
-      r#"
+      blitz::js!(
+        module,
+        r#"
         import * as Effect from 'effect/Effect';
         import * as Terminal from 'blitz:terminal';
         import * as Runtime from 'blitz:runtime';
@@ -895,7 +929,8 @@ mod tests {
           Effect.as('closed')
         );
         globalThis.terminal_result = Effect.runSync(Runtime.provideLive(program));
-      "#,
+      "#
+      ),
       |vm| {
         assert_eq!(
           vm.get_global("terminal_result"),
@@ -908,7 +943,9 @@ mod tests {
   #[test]
   fn app_transport_is_lazy_typed_and_scoped() {
     run_effect_compatibility_entry(
-      r#"
+      blitz::js!(
+        module,
+        r#"
         import * as Cause from 'effect/Cause';
         import * as Effect from 'effect/Effect';
         import * as Exit from 'effect/Exit';
@@ -989,7 +1026,8 @@ mod tests {
           bindFailureOption.value.reason === 'Bind';
         globalThis.app_transport_interrupt_released =
           Exit.isInterrupted(interruptedApp) && rebound.localAddr === server.localAddr;
-      "#,
+      "#
+      ),
       |vm| {
         assert_eq!(
           vm.get_global("app_serve_is_lazy_effect"),
@@ -1026,7 +1064,9 @@ mod tests {
   #[test]
   fn abort_controller_signal_is_single_shot_and_observable() {
     run_effect_compatibility_entry(
-      r#"
+      blitz::js!(
+        module,
+        r#"
         const controller = new AbortController();
         let calls = 0;
         controller.signal.addEventListener('abort', () => calls++, { once: true });
@@ -1038,7 +1078,8 @@ mod tests {
         globalThis.abort_signal_aborted = controller.signal.aborted;
         globalThis.abort_signal_reason = controller.signal.reason;
         globalThis.abort_listener_calls = calls;
-      "#,
+      "#
+      ),
       |vm| {
         assert_eq!(
           vm.get_global("abort_signal_detached_reason"),
@@ -1063,7 +1104,9 @@ mod tests {
   #[test]
   fn synchronous_effect_async_resumes_without_host_timer() {
     run_effect_compatibility_entry(
-      r#"
+      blitz::js!(
+        module,
+        r#"
         import * as Effect from 'effect/Effect';
         import * as Exit from 'effect/Exit';
         let callbackCalls = 0;
@@ -1076,7 +1119,8 @@ mod tests {
         globalThis.effect_async_result =
           result !== null && Exit.isSuccess(result) && result.value.value === 73;
         globalThis.effect_async_callback_once = callbackCalls === 1;
-      "#,
+      "#
+      ),
       |vm| {
         assert_eq!(
           vm.get_global("effect_async_result"),
@@ -1093,7 +1137,9 @@ mod tests {
   #[test]
   fn fiber_interrupt_cancellation_uses_supported_scheduler_path() {
     run_effect_compatibility_entry(
-      r#"
+      blitz::js!(
+        module,
+        r#"
         import * as Effect from 'effect/Effect';
         import * as Exit from 'effect/Exit';
         import * as Fiber from 'effect/Fiber';
@@ -1106,7 +1152,8 @@ mod tests {
           Exit.isSuccess(interrupted) &&
           Exit.isInterrupted(exit) &&
           Cause.isInterrupted(exit.cause);
-      "#,
+      "#
+      ),
       |vm| {
         assert_eq!(vm.get_global("fiber_cancelled"), Some(Value::Bool(true)));
       },

@@ -45,7 +45,7 @@ mod test {
 
   #[test]
   fn risc_registers_keep_new_closure_environments_alive_during_gc() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         const closures = [];
         for (let index = 0; index < 500; index += 1) {
@@ -57,8 +57,8 @@ mod test {
           total += closures[index]();
         }
         globalThis.closure_total = total;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("closure_total"),
@@ -68,7 +68,7 @@ mod test {
 
   #[test]
   fn optional_member_access_short_circuits_to_undefined() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         let missing;
         let computed = false;
@@ -76,8 +76,8 @@ mod test {
         globalThis.computed_result = missing?.[computed = true];
         globalThis.present_result = ({ value: 42 })?.value;
         globalThis.computed_ran = computed;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("static_result"), Some(Value::Undefined));
     assert_eq!(vm.get_global("computed_result"), Some(Value::Undefined));
@@ -87,7 +87,7 @@ mod test {
 
   #[test]
   fn arrays_retain_all_pushed_objects_across_function_calls() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         const clients = [];
         function addClient(name) {
@@ -105,8 +105,8 @@ mod test {
         globalThis.client_count = clients.length;
         globalThis.second_client = clients[1].name;
         globalThis.client_names = listClients();
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("client_count"), Some(Value::Number(2.0)));
     assert_eq!(
@@ -121,7 +121,7 @@ mod test {
 
   #[test]
   fn loop_body_lexical_bindings_are_recreated_each_iteration() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         const clients = [{ name: "Alice" }, { name: "Bob" }];
         const readers = [];
@@ -133,8 +133,8 @@ mod test {
         }
         globalThis.loop_body_names = names;
         globalThis.loop_body_captures = readers[0]() + "," + readers[1]();
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("loop_body_names"),
@@ -148,13 +148,13 @@ mod test {
 
   #[test]
   fn host_can_invoke_a_long_lived_closure_with_captured_bindings() {
-    let (mut vm, _) = run_script(
+    let (mut vm, _) = run_script(crate::js!(
       r#"
         const prefix = "message:";
         const suffix = "!";
         globalThis.inputHandler = (line) => prefix + line + suffix;
-      "#,
-    );
+      "#
+    ));
     let handler = vm
       .get_global("inputHandler")
       .expect("input handler");
@@ -172,7 +172,7 @@ mod test {
 
   #[test]
   fn nested_event_handlers_created_by_host_calls_keep_their_environments() {
-    let (mut vm, _) = run_script(
+    let (mut vm, _) = run_script(crate::js!(
       r#"
         const clients = [];
         function clientNames() {
@@ -194,8 +194,8 @@ mod test {
           };
         }
         globalThis.handler = handler;
-      "#,
-    );
+      "#
+    ));
     let handler = vm.get_global("handler").expect("host handler");
     let first_socket = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
     let second_socket = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
@@ -240,13 +240,13 @@ mod test {
 
   #[test]
   fn string_trim_removes_ecmascript_whitespace() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         globalThis.trimmed = "\uFEFF \t\nhello\r\n \u00A0".trim();
         globalThis.trimmed_start = "  hello  ".trimStart();
         globalThis.trimmed_end = "  hello  ".trimEnd();
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("trimmed"),
@@ -264,7 +264,7 @@ mod test {
 
   #[test]
   fn string_methods_support_chat_server_operations() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         globalThis.lowercase = "WebSocket İ".toLowerCase();
         globalThis.uppercase = "straße".toUpperCase();
@@ -272,8 +272,8 @@ mod test {
         globalThis.starts_with = "JOIN Alice".startsWith("JOIN ");
         globalThis.replaced = "a\nb\tc".replace(/[\u0000-\u001f]/g, "");
         globalThis.replacement_patterns = "abc".replace("b", "[$&][$`][$']");
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("lowercase"),
@@ -300,7 +300,7 @@ mod test {
 
   #[test]
   fn const_bindings_initialize_once_and_reject_reassignment() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         const root = 1;
         let root_threw = false;
@@ -321,8 +321,8 @@ mod test {
         globalThis.const_result =
           root === 1 && root_threw && localConst() &&
           destructured === 5 && destructured_threw;
-      "#,
-    );
+      "#
+    ));
 
     assert!(matches!(
       vm.get_global("const_result"),
@@ -332,7 +332,7 @@ mod test {
 
   #[test]
   fn for_const_uses_a_fresh_immutable_cell_per_iteration() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         let closures = [];
         for (const value of [1, 2, 3]) closures.push(() => value);
@@ -345,8 +345,8 @@ mod test {
         globalThis.for_const_result =
           closures[0]() === 1 && closures[1]() === 2 &&
           closures[2]() === 3 && reassignment_threw;
-      "#,
-    );
+      "#
+    ));
 
     assert!(matches!(
       vm.get_global("for_const_result"),
@@ -356,7 +356,7 @@ mod test {
 
   #[test]
   fn for_of_closes_iterators_for_abrupt_completions() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         function iterableWithReturn(returnValue) {
           var iterable = {};
@@ -426,8 +426,8 @@ mod test {
           && returnClosed
           && finallyRanBeforeClose === true
           && continueClosed;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("for_of_close_ok"), Some(Value::Bool(true)));
   }
@@ -435,20 +435,24 @@ mod test {
   #[test]
   fn labeled_loop_breaks_complete_through_risc_cleanup() {
     for source in [
-      r#"
+      crate::js!(
+        r#"
         var labeled_loop_result = 0;
         outer: while (true) {
           try {} finally { break outer; }
         }
         labeled_loop_result = 1;
-      "#,
-      r#"
+      "#
+      ),
+      crate::js!(
+        r#"
         var labeled_loop_result = 0;
         outer: do {
           try {} finally { break outer; }
         } while (true);
         labeled_loop_result = 1;
-      "#,
+      "#
+      ),
     ] {
       let (vm, _) = run_script(source);
       assert_eq!(
@@ -461,15 +465,19 @@ mod test {
   #[test]
   fn array_destructuring_in_for_of_preserves_the_bound_value() {
     for source in [
-      r#"
+      crate::js!(
+        r#"
         var x;
         for ([x] of [[1]]) { break; }
         var array_destructuring_result = x;
-      "#,
-      r#"
+      "#
+      ),
+      crate::js!(
+        r#"
         for (var [x] of [[1]]) { break; }
         var array_destructuring_result = x;
-      "#,
+      "#
+      ),
     ] {
       let (vm, _) = run_script(source);
       assert_eq!(
@@ -481,11 +489,13 @@ mod test {
 
   #[test]
   fn risc_core_execution_handles_control_flow() {
-    let source = r#"
+    let source = crate::js!(
+      r#"
       var x = 1;
       while (x < 5) x = x + 1;
       var result = x * 2;
-    "#;
+    "#
+    );
     let session = Parser::parse_source(source).expect("parse");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile");
 
@@ -501,15 +511,15 @@ mod test {
 
   #[test]
   fn exponentiation_and_unary_operators_match_ecmascript() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         globalThis.exp_positive_infinity = 1 ** Infinity;
         globalThis.exp_negative_infinity = (-1) ** -Infinity;
         globalThis.exp_negative = 2 ** -2;
         globalThis.bitwise_not = ~(3 ** 2);
         globalThis.unary_plus = +("2");
-      "#,
-    );
+      "#
+    ));
 
     assert!(matches!(
       vm.get_global("exp_positive_infinity"),
@@ -526,14 +536,16 @@ mod test {
 
   #[test]
   fn risc_functions_literals_and_overflow_arguments_are_stable() {
-    let source = r#"
+    let source = crate::js!(
+      r#"
       function sum(a, b, c, d, e, f, g, h) {
         return a + b + c + d + e + f + g + h;
       }
       var array = [1, 2, 3];
       var object = { value: 4, other: 5 };
       var result = sum(array[0], array[1], array[2], object.value, object.other, 6, 7, 8);
-    "#;
+    "#
+    );
     let session = Parser::parse_source(source).expect("parse");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile");
 
@@ -549,7 +561,7 @@ mod test {
 
   #[test]
   fn returning_to_strict_root_preserves_strict_mode() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         "use strict";
         function helper() {}
@@ -557,8 +569,8 @@ mod test {
         let threw = false;
         try { leaked_after_call = 1; } catch (error) { threw = error instanceof ReferenceError; }
         globalThis.strict_after_call = threw;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("strict_after_call"), Some(Value::Bool(true)));
     assert_eq!(vm.get_global("leaked_after_call"), None);
@@ -566,15 +578,15 @@ mod test {
 
   #[test]
   fn ordinary_nested_call_does_not_inherit_new_target() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         let nested_target;
         function helper() { nested_target = new.target; }
         function Constructor() { helper(); }
         new Constructor();
         globalThis.nested_new_target_is_undefined = nested_target === undefined;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("nested_new_target_is_undefined"),
@@ -584,14 +596,14 @@ mod test {
 
   #[test]
   fn throwing_an_object_does_not_add_own_properties() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         let thrown = {};
         try { throw thrown; } catch (error) {}
         globalThis.throw_preserved_object =
           Object.getOwnPropertyDescriptor(thrown, "constructor") === undefined;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("throw_preserved_object"),
@@ -601,10 +613,12 @@ mod test {
 
   #[test]
   fn relational_comparison_applies_to_primitive() {
-    let source = r#"
+    let source = crate::js!(
+      r#"
       var left = { valueOf: function () { return 1; } };
       var relational_result = left < 2;
-    "#;
+    "#
+    );
     let session = Parser::parse_source(source).expect("parse");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile");
     let globals = test_globals();
@@ -615,7 +629,7 @@ mod test {
 
   #[test]
   fn risc_ordinary_builtin_call_does_not_prepend_receiver() {
-    let source = "var builtin_argument = capture(\"expected\");";
+    let source = crate::js!("var builtin_argument = capture(\"expected\");");
     let session = Parser::parse_source(source).expect("parse");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile");
     let globals = test_globals();
@@ -636,14 +650,14 @@ mod test {
 
   #[test]
   fn property_get_ic_invalidates_after_tracked_write() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         var cached_object = { value: 1 };
         var before_write = cached_object.value;
         cached_object.value = 2;
         globalThis.after_write = cached_object.value;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("before_write"), Some(Value::Number(1.0)));
     assert_eq!(vm.get_global("after_write"), Some(Value::Number(2.0)));
@@ -652,7 +666,7 @@ mod test {
 
   #[test]
   fn object_get_own_property_descriptor_reports_data_flags() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var obj = {};
         Object.defineProperty(obj, "prop", {
@@ -666,8 +680,8 @@ mod test {
         globalThis.desc_enumerable = desc.enumerable;
         globalThis.desc_writable = desc.writable;
         globalThis.desc_configurable = desc.configurable;
-        "#,
-    );
+        "#
+    ));
 
     assert_eq!(
       vm.get_global("desc_value"),
@@ -680,15 +694,15 @@ mod test {
 
   #[test]
   fn object_get_own_property_descriptor_works_when_extracted() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var obj = { a: 1, b: true };
         var getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
         var desc = getOwnPropertyDescriptor(obj, "a");
         globalThis.desc_value = desc && desc.value;
         globalThis.desc_enumerable = desc && desc.enumerable;
-        "#,
-    );
+        "#
+    ));
 
     assert_eq!(vm.get_global("desc_value"), Some(Value::Number(1.0)));
     assert_eq!(vm.get_global("desc_enumerable"), Some(Value::Bool(true)));
@@ -696,13 +710,13 @@ mod test {
 
   #[test]
   fn array_copy_within_handles_negative_target() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var arr = [0, 1, 2, 3];
         arr.copyWithin(-1, 0);
         globalThis.result = arr;
-        "#,
-    );
+        "#
+    ));
 
     match vm.get_global("result") {
       Some(Value::Array(arr, _)) => {
@@ -719,15 +733,15 @@ mod test {
 
   #[test]
   fn constructor_species_property_round_trips() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var array = [];
         array.constructor = function() {};
         var Ctor = function() {};
         array.constructor[Symbol.species] = Ctor;
         globalThis.species_value = array.constructor[Symbol.species];
-        "#,
-    );
+        "#
+    ));
 
     assert!(matches!(
       vm.get_global("species_value"),
@@ -737,19 +751,19 @@ mod test {
 
   #[test]
   fn proxy_wrapping_array_is_array() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var proxy = new Proxy([], {});
         globalThis.is_array = Array.isArray(proxy);
-        "#,
-    );
+        "#
+    ));
 
     assert_eq!(vm.get_global("is_array"), Some(Value::Bool(true)));
   }
 
   #[test]
   fn reflect_own_keys_matches_get_own_property_descriptor() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var obj = { a: 1, b: true };
         var keys = Reflect.ownKeys(obj);
@@ -757,8 +771,8 @@ mod test {
         globalThis.k1 = keys[1];
         globalThis.d0 = Object.getOwnPropertyDescriptor(obj, keys[0]) !== undefined;
         globalThis.d1 = Object.getOwnPropertyDescriptor(obj, keys[1]) !== undefined;
-        "#,
-    );
+        "#
+    ));
 
     assert_eq!(vm.get_global("k0"), Some(Value::String("a".to_string())));
     assert_eq!(vm.get_global("k1"), Some(Value::String("b".to_string())));
@@ -768,7 +782,7 @@ mod test {
 
   #[test]
   fn reflect_own_keys_uses_ecmascript_key_order() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var first = Symbol("first");
         var second = Symbol("second");
@@ -784,8 +798,8 @@ mod test {
         var keys = Reflect.ownKeys(obj);
         globalThis.key_order = keys.slice(0, 6).join(",");
         globalThis.symbol_order = keys[6] === first && keys[7] === second;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("key_order"),
@@ -796,15 +810,15 @@ mod test {
 
   #[test]
   fn reflect_own_keys_excludes_array_holes() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var array = [];
         array.length = 4;
         array[2] = "present";
         array.extra = true;
         globalThis.keys = Reflect.ownKeys(array).join(",");
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("keys"),
@@ -814,7 +828,7 @@ mod test {
 
   #[test]
   fn proxy_own_keys_trap_controls_order_and_preserves_symbols() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var symbol = Symbol("key");
         var target = { a: 1, b: 2 };
@@ -827,15 +841,15 @@ mod test {
           && keys[1] === "b"
           && keys[2] === "a"
           && keys[3] === "extra";
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("order_ok"), Some(Value::Bool(true)));
   }
 
   #[test]
   fn proxy_own_keys_rejects_invalid_trap_results() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var duplicate_rejected = false;
         try {
@@ -880,8 +894,8 @@ mod test {
           && fixed_rejected
           && sealed_rejected
           && valid_result_accepted;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("invalid_results_rejected"),
@@ -891,7 +905,7 @@ mod test {
 
   #[test]
   fn proxy_get_own_property_descriptor_drives_enumeration() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var target = {};
         var proxy = new Proxy(target, {
@@ -909,8 +923,8 @@ mod test {
         globalThis.proxy_descriptor_ok = desc.value === 42
           && desc.enumerable === true
           && Object.keys(proxy).join(",") === "virtual";
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("proxy_descriptor_ok"),
@@ -920,7 +934,7 @@ mod test {
 
   #[test]
   fn proxy_get_own_property_descriptor_enforces_invariants() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var fixed = {};
         Object.defineProperty(fixed, "value", { configurable: false });
@@ -958,8 +972,8 @@ mod test {
         globalThis.proxy_descriptor_invariants = hidden_fixed_rejected
           && hidden_sealed_rejected
           && new_fixed_rejected;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("proxy_descriptor_invariants"),
@@ -969,7 +983,7 @@ mod test {
 
   #[test]
   fn proxy_get_and_set_traps_receive_the_original_receiver() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var get_receiver;
         var set_receiver;
@@ -997,8 +1011,8 @@ mod test {
           && set_value === 9
           && reflected
           && target.value === undefined;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("proxy_get_set_receiver_ok"),
@@ -1008,7 +1022,7 @@ mod test {
 
   #[test]
   fn proxy_get_and_set_traps_enforce_target_invariants() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var fixed = {};
         Object.defineProperty(fixed, "value", {
@@ -1061,8 +1075,8 @@ mod test {
           && missing_setter_rejected
           && allowed_get
           && allowed_set;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("proxy_get_set_invariants"),
@@ -1072,7 +1086,7 @@ mod test {
 
   #[test]
   fn proxy_set_false_distinguishes_reflect_and_strict_assignment() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var proxy = new Proxy({}, { set: function() { return false; } });
         var reflected = Reflect.set(proxy, "value", 1);
@@ -1083,15 +1097,15 @@ mod test {
           strict_rejected = error instanceof TypeError;
         }
         globalThis.proxy_set_false_ok = reflected === false && strict_rejected;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("proxy_set_false_ok"), Some(Value::Bool(true)));
   }
 
   #[test]
   fn proxy_get_and_set_fallbacks_preserve_receiver_semantics() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var accessor_receiver;
         var target = {};
@@ -1125,8 +1139,8 @@ mod test {
           && getter_receiver_ok
           && accessor_receiver === proxy
           && empty_accessor_ok;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("proxy_get_set_fallback_ok"),
@@ -1136,7 +1150,7 @@ mod test {
 
   #[test]
   fn proxy_apply_trap_and_fallback_preserve_call_semantics() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         function target(a, b) { return this.base + a + b; }
         var receiver = { base: 10 };
@@ -1184,15 +1198,15 @@ mod test {
           && non_callable_trap_rejected
           && non_callable_target_rejected
           && revoked_rejected;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("proxy_apply_ok"), Some(Value::Bool(true)));
   }
 
   #[test]
   fn proxy_construct_trap_and_fallback_preserve_new_target() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         function Target(value) { this.value = value; }
         function Alternate() {}
@@ -1262,15 +1276,15 @@ mod test {
           && non_callable_trap_rejected
           && non_constructor_target_rejected
           && revoked_rejected;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("proxy_construct_ok"), Some(Value::Bool(true)));
   }
 
   #[test]
   fn proxy_define_property_trap_and_invariants() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var observed = false;
         var target = {};
@@ -1316,15 +1330,15 @@ mod test {
           && target.virtual === undefined
           && sealed_rejected
           && fixed_rejected;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("proxy_define_ok"), Some(Value::Bool(true)));
   }
 
   #[test]
   fn proxy_has_and_delete_traps_enforce_invariants() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var target = { value: 1 };
         var proxy = new Proxy(target, {
@@ -1375,8 +1389,8 @@ mod test {
           && fixed_delete_rejected
           && sealed_has_rejected
           && sealed_delete_rejected;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("proxy_has_delete_ok"),
@@ -1386,7 +1400,7 @@ mod test {
 
   #[test]
   fn proxy_extensibility_traps_enforce_target_state() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var target = {};
         var proxy = new Proxy(target, {
@@ -1424,8 +1438,8 @@ mod test {
           && !finally_extensible
           && bad_is_extensible
           && bad_prevent_extensions;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("proxy_extensibility_ok"),
@@ -1435,7 +1449,7 @@ mod test {
 
   #[test]
   fn proxy_prototype_traps_and_reflect_methods_enforce_invariants() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var target = {};
         var reported = {};
@@ -1476,15 +1490,15 @@ mod test {
           && invalid_set
           && matching_get
           && matching_set;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("proxy_prototype_ok"), Some(Value::Bool(true)));
   }
 
   #[test]
   fn object_integrity_operations_use_proxy_internal_methods() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var target = { value: 1 };
         var prevented = false;
@@ -1528,8 +1542,8 @@ mod test {
           && descriptor.writable === false
           && descriptor.configurable === false
           && primitive_behavior;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("proxy_integrity_ok"), Some(Value::Bool(true)));
   }
@@ -1608,12 +1622,12 @@ mod test {
 
   #[test]
   fn object_assign_copies_properties_and_returns_target() {
-    let (mut vm, _) = run_script(
+    let (mut vm, _) = run_script(crate::js!(
       r#"
             var target = { a: 1 };
             var result = Object.assign(target, { b: 2 }, null, { c: 3 });
-        "#,
-    );
+        "#
+    ));
 
     let target = vm.get_global("target").expect("target");
     let result = vm.get_global("result").expect("result");
@@ -1634,7 +1648,7 @@ mod test {
 
   #[test]
   fn object_from_entries_set_prototype_of_and_to_locale_string_work() {
-    let (mut vm, _) = run_script(
+    let (mut vm, _) = run_script(crate::js!(
       r#"
             var entries = [['a', 1], ['b', 2]];
             var created = Object.fromEntries(entries);
@@ -1642,8 +1656,8 @@ mod test {
             var target = {};
             var proto_result = Object.setPrototypeOf(target, proto);
             var locale = ({}).toLocaleString();
-        "#,
-    );
+        "#
+    ));
 
     match vm.get_global("created") {
       Some(Value::Object(obj)) => {
@@ -1677,7 +1691,7 @@ mod test {
 
   #[test]
   fn object_freeze_and_seal_report_state() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
             var frozen_obj = { a: 1 };
             var sealed_obj = { b: 2 };
@@ -1686,8 +1700,8 @@ mod test {
             var frozen = Object.isFrozen(frozen_obj);
             var sealed = Object.isSealed(sealed_obj);
             var not_frozen = Object.isFrozen(sealed_obj);
-        "#,
-    );
+        "#
+    ));
 
     assert!(matches!(vm.get_global("frozen"), Some(Value::Bool(true))));
     assert!(matches!(vm.get_global("sealed"), Some(Value::Bool(true))));
@@ -1699,7 +1713,7 @@ mod test {
 
   #[test]
   fn array_includes_uses_same_value_zero_and_index_of_uses_strict_equality() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
             var arr = [NaN, 1];
             var includes_nan = arr.includes(NaN);
@@ -1707,8 +1721,8 @@ mod test {
             globalThis.arr_len = arr.length;
             globalThis.arr_0 = arr[0];
             globalThis.arr_1 = arr[1];
-        "#,
-    );
+        "#
+    ));
 
     assert!(matches!(
       vm.get_global("includes_nan"),
@@ -1752,11 +1766,11 @@ mod test {
 
   #[test]
   fn array_of_builds_array_from_arguments() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
             var created = Array.of(4, 5, 6);
-        "#,
-    );
+        "#
+    ));
 
     match vm.get_global("created") {
       Some(Value::Array(arr, props)) => {
@@ -1784,7 +1798,7 @@ mod test {
 
   #[test]
   fn array_from_follows_iterator_mapping_and_constructor_semantics() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         var array = [1, 2];
         array[Symbol.iterator] = function() {
@@ -1813,8 +1827,8 @@ mod test {
           iterable_result[0] === 3 && iterable_result[1] === 4 &&
           array_like_result[0] === 5 && array_like_result.length === 1 &&
           Array.from.name === "from" && Array.from.length === 1;
-      "#,
-    );
+      "#
+    ));
 
     assert!(matches!(
       vm.get_global("array_from_focused"),
@@ -1824,7 +1838,7 @@ mod test {
 
   #[test]
   fn array_from_closes_iterators_and_validates_results() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         var closed = 0;
         var source = {};
@@ -1844,8 +1858,8 @@ mod test {
         try { Array.from(invalid); } catch (error) { invalid_threw = true; }
 
         globalThis.array_from_iterator_checks = closed === 1 && invalid_threw;
-      "#,
-    );
+      "#
+    ));
 
     assert!(matches!(
       vm.get_global("array_from_iterator_checks"),
@@ -2041,7 +2055,7 @@ mod test {
 
   #[test]
   fn map_and_set_iterator_and_brand_conformance() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         var map = new Map([["a", 1], ["b", 2]]);
         var fake = Object.create(Map.prototype);
@@ -2093,15 +2107,15 @@ mod test {
           iterator.next.name === "next" && iterator.next.length === 0 &&
           Object.getOwnPropertyDescriptor(iterator.next, "length").enumerable === false &&
           iterator.next.hasOwnProperty("length");
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("collection_focused"), Some(Value::Bool(true)));
   }
 
   #[test]
   fn map_and_set_clear_and_for_each_follow_live_iteration() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         const map = new Map([["a", 1], ["b", 2]]);
         const mapSeen = [];
@@ -2132,8 +2146,8 @@ mod test {
           setSeen.length === 2 && setSeen[0][0] === 1 && setSeen[0][1] === 1 &&
           setSeen[1][0] === 3 && setSeen[1][1] === 3 && setSeen[1][2] &&
           setReturn === undefined && set.size === 0;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("collection_for_each_result"),
@@ -2143,7 +2157,7 @@ mod test {
 
   #[test]
   fn map_values_is_a_live_self_iterating_iterator() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         var map = new Map([["first", 1], ["second", 2]]);
         var iterator = map.values();
@@ -2169,15 +2183,15 @@ mod test {
           keys[0] === "a" && keys[1] === "b" &&
           entries[0][0] === "a" && entries[0][1] === 1 && entriesAlias &&
           chained[0] === 4;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("map_values_result"), Some(Value::Bool(true)));
   }
 
   #[test]
   fn map_and_set_constructors_consume_iterables_with_spec_validation() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         const source = new Map([['first', 1], ['second', 2]]);
         const copied = new Map(source);
@@ -2256,8 +2270,8 @@ mod test {
           customSet.size === 2 && nanMap.size === 1 && nanMap.get(NaN) === 2 &&
           nanSet.size === 1 && liveSetFirst.value === 1 && liveSetSecond.value === 2 &&
           malformed && accessorThrew && closed === 1;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("collection_constructor_result"),
@@ -2267,7 +2281,7 @@ mod test {
 
   #[test]
   fn reverse_is_generic_and_preserves_sparse_properties() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         var array = [];
         array[1] = "one";
@@ -2283,8 +2297,8 @@ mod test {
           !array.hasOwnProperty("0") && !array.hasOwnProperty("2") &&
           object[1] === "two" && object[3] === "zero" &&
           !object.hasOwnProperty("0") && !object.hasOwnProperty("2");
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(
       vm.get_global("reverse_sparse_result"),
@@ -2294,7 +2308,7 @@ mod test {
 
   #[test]
   fn reverse_with_length_shrink_clears_lower_index() {
-    let (mut vm, _) = run_script(
+    let (mut vm, _) = run_script(crate::js!(
       r#"
             var array = ["first", "second"];
             Object.defineProperty(array, 0, {
@@ -2304,8 +2318,8 @@ mod test {
                 }
             });
             array.reverse();
-        "#,
-    );
+        "#
+    ));
 
     match vm.get_global("array") {
       Some(Value::Array(arr, props)) => {
@@ -2335,7 +2349,7 @@ mod test {
 
   #[test]
   fn top_level_assignment_updates_global_binding() {
-    let session = Parser::parse_source("var x; x = 5;").expect("parse ok");
+    let session = Parser::parse_source(crate::js!("var x; x = 5;")).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
@@ -2349,11 +2363,13 @@ mod test {
 
   #[test]
   fn eval_for_loop_completion_is_undefined() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
             var supreme, count;
             supreme = 5;
             var evaluated = eval("for(count=0;;) {if (count===supreme)break;else count++; }");
-        "#;
+        "#
+    );
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -2374,7 +2390,7 @@ mod test {
 
   #[test]
   fn eval_array_spread_literal_expands_values() {
-    let src = r#"var evaluated = eval('[...[1, 2, 3], 4, 5]');"#;
+    let src = crate::js!(r#"var evaluated = eval('[...[1, 2, 3], 4, 5]');"#);
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -2404,7 +2420,8 @@ mod test {
 
   #[test]
   fn with_statement_coerces_operand_to_object() {
-    let session = Parser::parse_source("with (undefined) { x = 1; }").expect("parse ok");
+    let session =
+      Parser::parse_source(crate::js!("with (undefined) { x = 1; }")).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
@@ -2424,7 +2441,7 @@ mod test {
 
   #[test]
   fn with_statement_reads_bindings_from_object_environment() {
-    let session = Parser::parse_source(
+    let session = Parser::parse_source(crate::js!(
       r#"
             var result;
             var obj = { value: "from-with", NaN: "shadowed" };
@@ -2432,8 +2449,8 @@ mod test {
                 result = value;
                 result = result + ":" + NaN;
             }
-        "#,
-    )
+        "#
+    ))
     .expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -2450,7 +2467,7 @@ mod test {
 
   #[test]
   fn with_statement_inside_constructor_reads_and_writes_object_bindings() {
-    let session = Parser::parse_source(
+    let session = Parser::parse_source(crate::js!(
       r#"
             var result = "result";
             var myObj = { value: "myObj_value", NaN: "obj_NaN" };
@@ -2463,8 +2480,8 @@ mod test {
               }
             };
             var obj = new f();
-        "#,
-    )
+        "#
+    ))
     .expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -2481,7 +2498,7 @@ mod test {
 
   #[test]
   fn with_statement_handles_common_identifier_shadowing_cases() {
-    let session = Parser::parse_source(
+    let session = Parser::parse_source(crate::js!(
       r#"
             this.p1 = 1;
             this.p2 = 2;
@@ -2522,8 +2539,8 @@ mod test {
               }
             };
             var obj = new f();
-        "#,
-    )
+        "#
+    ))
     .expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -2552,7 +2569,7 @@ mod test {
 
   #[test]
   fn with_statement_prefers_object_bindings_over_global_nans() {
-    let session = Parser::parse_source(
+    let session = Parser::parse_source(crate::js!(
       r#"
             this.p1 = 1;
             this.p2 = 2;
@@ -2592,8 +2609,8 @@ mod test {
             var st_isNaN = "isNaN";
             var st_isFinite = "isFinite";
             f();
-        "#,
-    )
+        "#
+    ))
     .expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -2630,7 +2647,7 @@ mod test {
 
   #[test]
   fn with_statement_prefers_object_bindings_over_global_nans_in_plain_call() {
-    let session = Parser::parse_source(
+    let session = Parser::parse_source(crate::js!(
       r#"
             this.p1 = 1;
             this.p2 = 2;
@@ -2682,8 +2699,8 @@ mod test {
               }
             };
             f();
-        "#,
-    )
+        "#
+    ))
     .expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -2729,7 +2746,7 @@ mod test {
       vm.run(chunk).expect("run harness");
     }
 
-    let session = Parser::parse_source(
+    let session = Parser::parse_source(crate::js!(
       r#"
             this.p1 = 1;
             this.p2 = 2;
@@ -2781,8 +2798,8 @@ mod test {
               }
             };
             f();
-        "#,
-    )
+        "#
+    ))
     .expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -2797,7 +2814,7 @@ mod test {
 
   #[test]
   fn with_statement_var_initializer_writes_through_object_binding() {
-    let session = Parser::parse_source(
+    let session = Parser::parse_source(crate::js!(
       r#"
             var result;
             var myObj = { value: "myObj_value" };
@@ -2805,8 +2822,8 @@ mod test {
               var value = "value";
             }
             result = value;
-        "#,
-    )
+        "#
+    ))
     .expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -2833,7 +2850,8 @@ mod test {
 
   #[test]
   fn strict_assignment_to_non_extensible_object_throws() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
             function f() {
                 'use strict';
                 var _8_7_2_5 = {};
@@ -2841,7 +2859,8 @@ mod test {
                 _8_7_2_5.b = 11;
             }
             f();
-        "#;
+        "#
+    );
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -2862,7 +2881,7 @@ mod test {
 
   #[test]
   fn mapped_arguments_object_exposes_callee() {
-    let session = Parser::parse_source(
+    let session = Parser::parse_source(crate::js!(
       r#"
             function testcase() {
                 var desc = Object.getOwnPropertyDescriptor(arguments, "callee");
@@ -2872,8 +2891,8 @@ mod test {
                     && desc.writable === true;
             }
             var result = testcase();
-        "#,
-    )
+        "#
+    ))
     .expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
 
@@ -2885,7 +2904,7 @@ mod test {
 
   #[test]
   fn function_apply_uses_create_list_from_array_like() {
-    let (vm, _) = run_script(
+    let (vm, _) = run_script(crate::js!(
       r#"
         function capture() {
           return {
@@ -2961,23 +2980,23 @@ mod test {
           && !lengthTouched
           && capture.apply(receiver, null).count === 0
           && capture.apply(receiver, undefined).count === 0;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("apply_result"), Some(Value::Bool(true)));
   }
 
   #[test]
   fn strict_arguments_object_poison_pill_throws_on_callee() {
-    let session = Parser::parse_source(
+    let session = Parser::parse_source(crate::js!(
       r#"
             function testcase() {
                 'use strict';
                 return arguments.callee;
             }
             testcase();
-        "#,
-    )
+        "#
+    ))
     .expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
 
@@ -2995,7 +3014,7 @@ mod test {
 
   #[test]
   fn mapped_arguments_object_prototype_and_aliasing() {
-    let session = Parser::parse_source(
+    let session = Parser::parse_source(crate::js!(
       r#"
             function testcase(a) {
                 arguments[0] = 2;
@@ -3006,8 +3025,8 @@ mod test {
                     && Object.getOwnPropertyDescriptor(arguments, "length").enumerable === false;
             }
             var result = testcase(1);
-        "#,
-    )
+        "#
+    ))
     .expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
 
@@ -3019,7 +3038,7 @@ mod test {
 
   #[test]
   fn arguments_object_is_iterable_with_array_iterator() {
-    let session = Parser::parse_source(
+    let session = Parser::parse_source(crate::js!(
       r#"
             function mapped(a, b, c) {
                 return arguments[Symbol.iterator].name
@@ -3031,8 +3050,8 @@ mod test {
             }
             var mapped_result = mapped(1, 2, 3);
             var unmapped_result = unmapped([1], 2, 3);
-        "#,
-    )
+        "#
+    ))
     .expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
 
@@ -3052,7 +3071,7 @@ mod test {
 
   #[test]
   fn void_operator_evaluates_to_undefined() {
-    let session = Parser::parse_source("var x = void 0;").expect("parse ok");
+    let session = Parser::parse_source(crate::js!("var x = void 0;")).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
@@ -3066,7 +3085,7 @@ mod test {
 
   #[test]
   fn logical_and_short_circuits_and_preserves_left_operand() {
-    let session = Parser::parse_source("var x = 0 && bump();").expect("parse ok");
+    let session = Parser::parse_source(crate::js!("var x = 0 && bump();")).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
@@ -3093,7 +3112,7 @@ mod test {
 
   #[test]
   fn logical_or_short_circuits_and_preserves_left_operand() {
-    let session = Parser::parse_source("var x = 1 || bump();").expect("parse ok");
+    let session = Parser::parse_source(crate::js!("var x = 1 || bump();")).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
 
@@ -3120,14 +3139,14 @@ mod test {
 
   #[test]
   fn conditional_expression_merges_both_arms_and_nested_results() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var truthy = true ? 11 : 12;
         var falsy = false ? 21 : 22;
         var nested_left = true ? (false ? 31 : 32) : 33;
         var nested_right = false ? 41 : (true ? 42 : 43);
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("truthy"), Some(Value::Number(11.0)));
     assert_eq!(vm.get_global("falsy"), Some(Value::Number(22.0)));
@@ -3137,15 +3156,17 @@ mod test {
 
   #[test]
   fn catch_handler_receives_thrown_value_at_cfg_entry() {
-    let (vm, _globals) =
-      run_script("var caught; try { throw 42; } catch (error) { caught = error; }");
+    let (vm, _globals) = run_script(crate::js!(
+      "var caught; try { throw 42; } catch (error) { caught = error; }"
+    ));
 
     assert_eq!(vm.get_global("caught"), Some(Value::Number(42.0)));
   }
 
   #[test]
   fn lexical_binding_reads_before_init_throw_reference_error() {
-    let session = Parser::parse_source("function f(){ x; let x = 1; } f();").expect("parse ok");
+    let session =
+      Parser::parse_source(crate::js!("function f(){ x; let x = 1; } f();")).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
@@ -3162,9 +3183,9 @@ mod test {
 
   #[test]
   fn captured_lexical_binding_reads_before_init_throw_reference_error() {
-    let session = Parser::parse_source(
-      "function g(){ function f(){ return x + 1; } return f(); let x = 1; } g();",
-    )
+    let session = Parser::parse_source(crate::js!(
+      "function g(){ function f(){ return x + 1; } return f(); let x = 1; } g();"
+    ))
     .expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -3183,7 +3204,7 @@ mod test {
   #[test]
   fn try_block_lexical_shadow_does_not_escape_to_catch() {
     let session = Parser::parse_source(
-            "var out = (function(x){ try { let x = 'inner'; throw 0; } catch(e) { return x; } })('outer');",
+      crate::js!("var out = (function(x){ try { let x = 'inner'; throw 0; } catch(e) { return x; } })('outer');"),
         )
         .expect("parse ok");
     let program = session.program();
@@ -3196,8 +3217,8 @@ mod test {
 
   #[test]
   fn for_in_lexical_declaration_with_initializer_is_syntax_error() {
-    let session =
-      Parser::parse_source("for (let x = 3 in {}) {}").expect("parser currently accepts syntax");
+    let session = Parser::parse_source(crate::js!("for (let x = 3 in {}) {}"))
+      .expect("parser currently accepts syntax");
     let program = session.program();
     let err = compiler::compile(program, session.source())
       .expect_err("compile should reject lexical initializer in for-in");
@@ -3206,8 +3227,10 @@ mod test {
 
   #[test]
   fn var_binding_reads_before_init_return_undefined() {
-    let session = Parser::parse_source("function f(){ return x; var x = 1; } var out = f();")
-      .expect("parse ok");
+    let session = Parser::parse_source(crate::js!(
+      "function f(){ return x; var x = 1; } var out = f();"
+    ))
+    .expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
     let globals = test_globals();
@@ -3218,7 +3241,8 @@ mod test {
 
   #[test]
   fn generator_next_yields_values_and_done() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
             function* g() { yield 1; yield 2; return 3; }
             var it = g();
             var a = it.next();
@@ -3230,7 +3254,8 @@ mod test {
             var e = nested.next();
             var f = nested.next();
             var g_result = nested.next(9);
-        "#;
+        "#
+    );
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -3289,7 +3314,8 @@ mod test {
 
   #[test]
   fn yield_star_delegates_through_the_iterator_protocol() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
             var nextCount = 0;
             var initialArgumentCount = -1;
             var initialArgument = 1;
@@ -3331,7 +3357,8 @@ mod test {
             var holeResult = arrayIterator.next();
             sparse[1] = 3;
             var liveArrayValue = arrayIterator.next().value;
-        "#;
+        "#
+    );
     let session = Parser::parse_source(src).expect("parse ok");
     let program = session.program();
     let chunk = compiler::compile(program, session.source()).expect("compile ok");
@@ -3378,7 +3405,7 @@ mod test {
 
   #[test]
   fn generator_abrupt_completions_run_catch_and_finally() {
-    let (vm, _globals) = run_script(
+    let (vm, _globals) = run_script(crate::js!(
       r#"
         var thrown = {};
         var caught;
@@ -3461,8 +3488,8 @@ mod test {
           && overrideOuterFinalized
           && overrideReturnResult.done === true
           && overrideReturnResult.value === 9;
-      "#,
-    );
+      "#
+    ));
 
     assert_eq!(vm.get_global("innerFinalized"), Some(Value::Bool(true)));
     assert_eq!(vm.get_global("outerFinalized"), Some(Value::Bool(true)));
@@ -3500,7 +3527,8 @@ mod test {
     }
 
     typecheck::set_strict_override(Some(true));
-    let src = r#"
+    let src = crate::js!(
+      r#"
             var obj;
             var prop = 'prop';
 
@@ -3515,7 +3543,8 @@ mod test {
             }
 
             checkDesc({ enumerable: false, writable: false, configurable: false });
-        "#;
+        "#
+    );
     let session = Parser::parse_source(src).expect("parse test");
     let program = session.program();
     let chunk = compiler::compile_oxc(program, session.source()).expect("compile test");
@@ -3525,9 +3554,11 @@ mod test {
 
   #[test]
   fn class_declaration_binds_constructor_function() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
             class A {}
-        "#;
+        "#
+    );
     let session = Parser::parse_source(src).expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
@@ -3538,7 +3569,8 @@ mod test {
 
   #[test]
   fn class_fields_initialize_instances_and_static_properties_in_source_order() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
       let keyCalls = 0;
       const key = () => { keyCalls += 1; return "computed"; };
       let setterCalls = 0;
@@ -3576,7 +3608,8 @@ mod test {
         && two.computed === 3
         && Fields.answer === 42
         && keyCalls === 1;
-    "#;
+    "#
+    );
     let session = Parser::parse_source(src).expect("parse class fields");
     let chunk =
       compiler::compile(session.program(), session.source()).expect("compile class fields");
@@ -3588,7 +3621,8 @@ mod test {
 
   #[test]
   fn object_spread_and_set_delete_support_effect_runtime_patterns() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
       const marker = Symbol.for("spread-marker");
       const methods = {
         get: () => 1,
@@ -3608,7 +3642,8 @@ mod test {
         && deleted
         && roots.size === 0
         && !roots.has(hook);
-    "#;
+    "#
+    );
     let session = Parser::parse_source(src).expect("parse runtime patterns");
     let chunk =
       compiler::compile(session.program(), session.source()).expect("compile runtime patterns");
@@ -3620,7 +3655,8 @@ mod test {
 
   #[test]
   fn derived_constructor_this_survives_nested_calls_after_super() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
       const helper = () => 1;
       class Base {}
       class Middle extends Base {}
@@ -3632,7 +3668,8 @@ mod test {
         }
       }
       globalThis.derivedThisOk = new Derived().field === 1;
-    "#;
+    "#
+    );
     let session = Parser::parse_source(src).expect("parse derived constructor");
     let chunk =
       compiler::compile(session.program(), session.source()).expect("compile derived constructor");
@@ -3644,7 +3681,8 @@ mod test {
 
   #[test]
   fn super_property_access_uses_home_object_and_lexical_this() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
             class C {
                 methodThis() { return this; }
                 method() { return super.toString(); }
@@ -3658,7 +3696,8 @@ mod test {
             var arrow_result = c.arrow();
             var arrow_this_matches = c.arrowThis();
             var assign_result = c.assign(9);
-        "#;
+        "#
+    );
     let session = Parser::parse_source(src).expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
@@ -3699,11 +3738,13 @@ mod test {
 
   #[test]
   fn risc_super_construct_initializes_derived_this() {
-    let source = r#"
+    let source = crate::js!(
+      r#"
       class Base { constructor(value) { this.value = value; } }
       class Derived extends Base { constructor(value) { super(value + 1); } }
       var derived_value = new Derived(4).value;
-    "#;
+    "#
+    );
     let session = Parser::parse_source(source).expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
@@ -3742,7 +3783,7 @@ mod test {
 
   #[test]
   fn array_reduce_without_initial_value_throws_on_empty_array() {
-    let src = r#"[].reduce(function(acc, value) { return acc + value; });"#;
+    let src = crate::js!(r#"[].reduce(function(acc, value) { return acc + value; });"#);
     let session = Parser::parse_source(src).expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
@@ -3757,14 +3798,16 @@ mod test {
 
   #[test]
   fn object_keys_orders_indices_before_strings() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
             var o = {};
             o.b = 1;
             o[2] = 2;
             o.a = 3;
             o[1] = 4;
             var keys = Object.keys(o);
-        "#;
+        "#
+    );
     let session = Parser::parse_source(src).expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();
@@ -3898,7 +3941,8 @@ mod test {
 
   #[test]
   fn json_stringify_preserves_descriptor_fields() {
-    let src = r#"
+    let src = crate::js!(
+      r#"
             var desc = Object.getOwnPropertyDescriptor(globalThis, "globalThis");
             Object.defineProperty(globalThis, "keys", {
                 value: Object.keys(desc).join(","),
@@ -3923,7 +3967,8 @@ mod test {
                 enumerable: false,
                 configurable: true,
             });
-        "#;
+        "#
+    );
     let session = Parser::parse_source(src).expect("parse ok");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile ok");
     let globals = test_globals();

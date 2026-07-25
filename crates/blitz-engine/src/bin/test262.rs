@@ -2433,12 +2433,14 @@ fn run_test_file(
         }
       }
       if vm.get_global("Test262Error").is_none() {
-        const FIX_SCRIPT: &str = r#"
+        const FIX_SCRIPT: &str = blitz::js!(
+          r#"
                     if (typeof Test262Error !== "undefined"
                         && typeof globalThis.Test262Error === "undefined") {
                         globalThis.Test262Error = Test262Error;
                     }
-                "#;
+                "#
+        );
         let fix_path = test262_root.join("test262Error-fix.js");
         let session = parse_source_for_path(FIX_SCRIPT, &fix_path)
           .map_err(|e| format!("Failed to parse Test262Error fixer: {}", e))?;
@@ -2584,7 +2586,7 @@ fn run_test_file(
       let mut run_src = String::new();
       if *mode_name == "strict" && !raw_flag {
         // Per INTERPRETING.md: strict-mode run prefixes the entire source with "use strict".
-        run_src.push_str("\"use strict\";\n");
+        run_src.push_str(blitz::js!("\"use strict\";\n"));
       }
       for inc_src in &include_sources {
         run_src.push_str(inc_src);
@@ -2991,12 +2993,14 @@ fn run_scope_dump_test(
     }
 
     if vm.get_global("Test262Error").is_none() {
-      const FIX_SCRIPT: &str = r#"
+      const FIX_SCRIPT: &str = blitz::js!(
+        r#"
                 if (typeof Test262Error !== "undefined"
                     && typeof globalThis.Test262Error === "undefined") {
                     globalThis.Test262Error = Test262Error;
                 }
-            "#;
+            "#
+      );
       let fix_path = test262_root.join("test262Error-fix.js");
       let session = parse_source_for_path(FIX_SCRIPT, &fix_path)
         .map_err(|e| format!("Failed to parse Test262Error fixer: {}", e))?;
@@ -3557,11 +3561,13 @@ mod tests {
 
     write_file(
       &file,
-      r#"/*---
+      blitz::js!(
+        r#"/*---
 features: [array-grouping]
 ---*/
 const ok = 1;
-"#,
+"#
+      ),
     );
 
     let (top, subsection) = bucket_keys(&root, &file);
@@ -3578,11 +3584,13 @@ const ok = 1;
 
     write_file(
       &file,
-      r#"/*---
+      blitz::js!(
+        r#"/*---
 es5id: 7.4_A6
 ---*/
 var ok = 1;
-"#,
+"#
+      ),
     );
 
     let (top, subsection) = bucket_keys(&root, &file);
@@ -3616,21 +3624,25 @@ var ok = 1;
 
     write_file(
       &es5_file,
-      r#"/*---
+      blitz::js!(
+        r#"/*---
 es5id: 7.4_A6
 ---*/
 var ok = 1;
-"#,
+"#
+      ),
     );
     write_file(
       &es2024_file,
-      r#"/*---
+      blitz::js!(
+        r#"/*---
 features: [array-grouping]
 ---*/
 const ok = 1;
-"#,
+"#
+      ),
     );
-    write_file(&builtin_file, "const ok = 1;\n");
+    write_file(&builtin_file, blitz::js!("const ok = 1;\n"));
 
     let selected = select_files_to_run(
       vec![builtin_file, es2024_file, es5_file.clone()],
@@ -3840,7 +3852,8 @@ const ok = 1;
 
   #[test]
   fn extract_front_matter_and_parse_meta_read_test262_metadata() {
-    let src = r#"/*---
+    let src = blitz::js!(
+      r#"/*---
 flags: [module, async]
 includes:
   - harness/assert.js
@@ -3849,7 +3862,8 @@ negative:
   phase: runtime
 ---*/
 const x = 1;
-"#;
+"#
+    );
 
     let fm = extract_front_matter(src).expect("front matter");
     assert!(fm.contains("flags: [module, async]"));
@@ -3867,7 +3881,7 @@ const x = 1;
   #[test]
   fn unsupported_reason_checks_module_flag_toggle() {
     let _guard = env_lock().lock().expect("env lock");
-    let src = "/*---\nflags: [module]\n---*/\n";
+    let src = blitz::js!(module, "/*---\nflags: [module]\n---*/\n");
     let meta = parse_meta(src);
     let path = Path::new("/tmp/test.js");
 
@@ -3896,9 +3910,15 @@ const x = 1;
     let include_dir = root.join("language");
     let excluded_dir = root.join("built-ins");
 
-    write_file(&include_dir.join("good.js"), "const ok = 1;\n");
-    write_file(&include_dir.join("skip_FIXTURE.js"), "const skip = 1;\n");
-    write_file(&excluded_dir.join("ignored.js"), "const nope = 1;\n");
+    write_file(&include_dir.join("good.js"), blitz::js!("const ok = 1;\n"));
+    write_file(
+      &include_dir.join("skip_FIXTURE.js"),
+      blitz::js!("const skip = 1;\n"),
+    );
+    write_file(
+      &excluded_dir.join("ignored.js"),
+      blitz::js!("const nope = 1;\n"),
+    );
 
     let mut out = Vec::new();
     collect_tests(&root, &mut out, &[excluded_dir]);

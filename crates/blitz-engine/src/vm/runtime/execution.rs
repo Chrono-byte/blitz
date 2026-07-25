@@ -2264,9 +2264,13 @@ impl Vm {
   ) -> Result<Value, RuntimeError> {
     let strict = self.active_strict_mode();
     let wrapped = if strict {
-      format!("'use strict'; (function() {{ return ({}); }})()", source)
+      crate::js!(
+        format(script),
+        "'use strict'; (function() {{ return ({}); }})()",
+        source
+      )
     } else {
-      format!("(function() {{ return ({}); }})()", source)
+      crate::js!(format(script), "(function() {{ return ({}); }})()", source)
     };
     let session = crate::parser::Parser::parse_source(&wrapped)
       .map_err(|e| RuntimeError::from(format!("parse: {}", e)))?;
@@ -2299,9 +2303,13 @@ impl Vm {
   ) -> Result<Value, RuntimeError> {
     let strict = self.active_strict_mode();
     let wrapped = if strict {
-      format!("'use strict'; (function() {{ return ({}); }})()", source)
+      crate::js!(
+        format(script),
+        "'use strict'; (function() {{ return ({}); }})()",
+        source
+      )
     } else {
-      format!("(function() {{ return ({}); }})()", source)
+      crate::js!(format(script), "(function() {{ return ({}); }})()", source)
     };
     let session = crate::parser::Parser::parse_source(&wrapped)
       .map_err(|e| RuntimeError::from(format!("parse: {}", e)))?;

@@ -1057,7 +1057,7 @@ mod tests {
   use crate::bytecode::Op;
 
   fn populated_bundle() -> Vec<NamedChunk> {
-    let source = Arc::new("function nested() { return undefined; }".to_string());
+    let source = Arc::new(crate::js!("function nested() { return undefined; }").to_string());
     let mut nested = Chunk::new(Arc::clone(&source));
     nested.write_instr(Op::Undefined as u32, 7);
     nested.write_instr(Op::Return as u32, 7);
