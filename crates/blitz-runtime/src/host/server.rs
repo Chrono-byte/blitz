@@ -565,7 +565,7 @@ fn server_handle(
   set(&handle, "port", Value::Number(port));
 
   let shutdown_state = state.clone();
-  let shutdown_finished = finished.clone();
+  let shutdown_finished = finished;
   let shutdown: BuiltinFn = Rc::new(move |vm, _args| {
     shutdown_state.close(vm, generation, &shutdown_finished)?;
     Ok(shutdown_finished.clone())

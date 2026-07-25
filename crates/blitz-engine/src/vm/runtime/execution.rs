@@ -8,7 +8,6 @@ use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::module::ModuleLoader;
-use crate::mutex_compat::MutexBorrowExt;
 use crate::realm::{Intrinsics, Realm};
 use crate::runtime_utils::{
   array_from_values, array_length_descriptor, js_number_to_string, number_exponentiate,
@@ -25,7 +24,7 @@ use num_traits::{FromPrimitive, ToPrimitive, Zero};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 enum YieldStarStep {
   Yield(Value),
@@ -493,7 +492,7 @@ impl Vm {
     };
 
     let mut roots: Vec<Value> = Vec::new();
-    let mut env_roots: Vec<Rc<Mutex<Vec<SharedValue>>>> = Vec::new();
+    let mut env_roots: Vec<Rc<RefCell<Vec<SharedValue>>>> = Vec::new();
     roots.push(Value::Object(Rc::clone(&self.globals)));
     roots.extend(self.stack.iter().cloned());
     roots.extend(self.locals.iter().map(|c| c.borrow().clone()));
@@ -915,7 +914,7 @@ impl Vm {
     mut exports: HashMap<String, SharedValue>,
   ) {
     let namespace = build_module_namespace_object(&exports);
-    exports.insert("*".to_string(), Rc::new(Mutex::new(namespace)));
+    exports.insert("*".to_string(), Rc::new(RefCell::new(namespace)));
     // Ensure table is large enough
     while self.module_table.len() <= module_index {
       self.module_table.push(HashMap::new());
@@ -1355,12 +1354,12 @@ impl Vm {
             let slot = decode_risc_aux16(word) as usize;
             ensure_slot(&mut self.locals, slot);
             let value = self.locals[slot].borrow().clone();
-            self.locals[slot] = Rc::new(Mutex::new(value));
+            self.locals[slot] = Rc::new(RefCell::new(value));
           }
           Op::ResetLocalCell => {
             let slot = decode_risc_aux16(word) as usize;
             ensure_slot(&mut self.locals, slot);
-            self.locals[slot] = Rc::new(Mutex::new(Value::Uninitialized));
+            self.locals[slot] = Rc::new(RefCell::new(Value::Uninitialized));
           }
           Op::GetUpvalue => {
             let index = decode_risc_aux16(word) as usize;
@@ -1475,7 +1474,7 @@ impl Vm {
               *slot.borrow_mut() = registers[rd].clone();
             } else {
               self.module_table[module_index]
-                .insert(name, Rc::new(Mutex::new(registers[rd].clone())));
+                .insert(name, Rc::new(RefCell::new(registers[rd].clone())));
             }
           }
           Op::GetThis => registers[rd] = self.get_this(),
@@ -2095,7 +2094,7 @@ impl Vm {
       return;
     }
 
-    self.locals = std::iter::repeat_with(|| Rc::new(Mutex::new(Value::Undefined)))
+    self.locals = std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
       .take(slot_count)
       .collect();
     for (idx, is_tdz) in slot_tdz.iter().copied().enumerate() {
@@ -3412,7 +3411,7 @@ pub(super) fn ensure_slot(
   slot: usize,
 ) {
   if slot >= locals.len() {
-    locals.resize_with(slot + 1, || Rc::new(Mutex::new(Value::Undefined)));
+    locals.resize_with(slot + 1, || Rc::new(RefCell::new(Value::Undefined)));
   }
 }
 

@@ -4,7 +4,7 @@ use crate::typecheck::Type;
 use crate::value::{SharedValue, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Call frame.
 pub(crate) struct Frame {
@@ -23,7 +23,7 @@ pub(crate) struct Frame {
   /// The `[[NewTarget]]` value in effect for this frame, if any.
   pub(crate) new_target: Option<Value>,
   /// The closure environment for this frame.
-  pub(crate) closure_env: Option<Rc<Mutex<Vec<SharedValue>>>>,
+  pub(crate) closure_env: Option<Rc<RefCell<Vec<SharedValue>>>>,
   /// Upvalue metadata for the current function.
   pub(crate) upvalues: Vec<UpvalueSpec>,
   /// The types of local variables for this frame.

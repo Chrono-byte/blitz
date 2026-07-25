@@ -10,13 +10,13 @@ use std::rc::Rc;
 use blitz::Vm;
 use blitz::errors::RuntimeError;
 use blitz::gc;
-use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use blitz::value::{ArrayData, BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 const ABORTED: &str = "aborted";
 const REASON: &str = "reason";
 const SIGNAL: &str = "signal";
 const ON_ABORT: &str = "onabort";
-const LISTENERS: &str = "__blitz_abort_listeners";
+const LISTENERS_SLOT: &str = "[[AbortListeners]]";
 
 /// Install the host's AbortController and AbortSignal constructors.
 pub fn install(vm: &mut Vm) {
@@ -171,7 +171,9 @@ fn make_signal(
   put(&signal, ABORTED, Value::Bool(aborted));
   put(&signal, REASON, reason);
   put(&signal, ON_ABORT, Value::Undefined);
-  put(&signal, LISTENERS, object(Value::Null));
+  object_data(&signal)
+    .borrow_mut()
+    .set_internal_slot(LISTENERS_SLOT, listener_list());
   signal
 }
 
@@ -223,22 +225,10 @@ fn add_event_listener(
     .get(3)
     .and_then(|options| get_property(options, "once").as_bool())
     .unwrap_or(false);
-  let listeners = get_property(&signal, LISTENERS);
-  if let Value::Object(listeners) = listeners {
-    let index = match get_property(&Value::Object(Rc::clone(&listeners)), "length") {
-      Value::Number(length) => length as usize,
-      _ => 0,
-    };
-    put(
-      &Value::Object(Rc::clone(&listeners)),
-      &index.to_string(),
-      listener_record(listener, once),
-    );
-    put(
-      &Value::Object(listeners),
-      "length",
-      Value::Number((index + 1) as f64),
-    );
+  if let Some(listeners) = signal_listeners(&signal) {
+    listeners
+      .borrow_mut()
+      .push(Some(listener_record(listener, once)));
   }
   Ok(Value::Undefined)
 }
@@ -255,22 +245,15 @@ fn remove_event_listener(
   let Some(listener) = args.get(2) else {
     return Ok(Value::Undefined);
   };
-  let listeners = get_property(&signal, LISTENERS);
-  let Value::Object(listeners) = listeners else {
+  let Some(listeners) = signal_listeners(&signal) else {
     return Ok(Value::Undefined);
   };
-  let length = match get_property(&Value::Object(Rc::clone(&listeners)), "length") {
-    Value::Number(length) => length as usize,
-    _ => 0,
-  };
-  for index in 0..length {
-    let record = get_property(&Value::Object(Rc::clone(&listeners)), &index.to_string());
-    if same_value(&get_property(&record, "listener"), listener) {
-      put(
-        &Value::Object(Rc::clone(&listeners)),
-        &index.to_string(),
-        Value::Undefined,
-      );
+  for record in listeners.borrow_mut().iter_mut() {
+    if record
+      .as_ref()
+      .is_some_and(|record| same_value(&get_property(record, "listener"), listener))
+    {
+      *record = None;
     }
   }
   Ok(Value::Undefined)
@@ -315,16 +298,14 @@ fn dispatch_abort_with_event(
   if onabort.is_callable() {
     drop(vm.call_value_with_this(&onabort, signal, std::slice::from_ref(&event)));
   }
-  let listeners = get_property(signal, LISTENERS);
-  let Value::Object(listeners) = listeners else {
+  let Some(listeners) = signal_listeners(signal) else {
     return Ok(());
   };
-  let length = match get_property(&Value::Object(Rc::clone(&listeners)), "length") {
-    Value::Number(length) => length as usize,
-    _ => 0,
-  };
-  for index in 0..length {
-    let record = get_property(&Value::Object(Rc::clone(&listeners)), &index.to_string());
+  let records = listeners.borrow().clone_elements();
+  for (index, record) in records.into_iter().enumerate() {
+    let Some(record) = record else {
+      continue;
+    };
     let callback = get_property(&record, "listener");
     if callback.is_callable() {
       drop(vm.call_value_with_this(&callback, signal, std::slice::from_ref(&event)));
@@ -333,14 +314,33 @@ fn dispatch_abort_with_event(
       .as_bool()
       .unwrap_or(false)
     {
-      put(
-        &Value::Object(Rc::clone(&listeners)),
-        &index.to_string(),
-        Value::Undefined,
-      );
+      if let Some(slot) = listeners.borrow_mut().get_mut(index) {
+        *slot = None;
+      }
     }
   }
   Ok(())
+}
+
+fn listener_list() -> Value {
+  Value::Array(
+    gc::track_array(Rc::new(RefCell::new(ArrayData::new(Vec::new())))),
+    gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
+  )
+}
+
+fn signal_listeners(signal: &Value) -> Option<Rc<RefCell<ArrayData>>> {
+  let Value::Object(signal) = signal else {
+    return None;
+  };
+  let listeners = signal
+    .borrow()
+    .internal_slot(LISTENERS_SLOT)?
+    .clone();
+  match listeners {
+    Value::Array(listeners, _) => Some(listeners),
+    _ => None,
+  }
 }
 
 fn listener_record(

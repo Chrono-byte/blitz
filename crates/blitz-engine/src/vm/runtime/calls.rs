@@ -3,7 +3,6 @@ use crate::ecmascript::semantics::properties::own_property_descriptor;
 use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
 use crate::gc;
-use crate::mutex_compat::MutexBorrowExt;
 use crate::runtime_utils::{to_length, usize_to_decimal_string, usize_to_f64};
 use crate::value::{
   ArrayData, ObjectData, PropertyDescriptor, PropertyKey, SharedValue, SymbolId, Value,
@@ -15,7 +14,7 @@ use crate::vm::state::{
 };
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 impl Vm {
   fn propagate_generator_error(
@@ -102,7 +101,7 @@ impl Vm {
   pub(super) fn create_generator_object(
     &mut self,
     proto: &Rc<FunctionProto>,
-    closure_env: &Rc<Mutex<Vec<SharedValue>>>,
+    closure_env: &Rc<RefCell<Vec<SharedValue>>>,
     call_args: Vec<Value>,
     this_value: Value,
     callee: &Value,
@@ -1061,7 +1060,7 @@ impl Vm {
   pub(super) fn configure_call_frame(
     &mut self,
     proto: &Rc<FunctionProto>,
-    closure_env: &Rc<Mutex<Vec<SharedValue>>>,
+    closure_env: &Rc<RefCell<Vec<SharedValue>>>,
     call_args: Vec<Value>,
     mut this_value: Value,
     callee: Value,
@@ -1096,7 +1095,7 @@ impl Vm {
       this_value
     };
 
-    self.locals = std::iter::repeat_with(|| Rc::new(Mutex::new(Value::Undefined)))
+    self.locals = std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
       .take(proto.slot_types.len().max(proto.arity))
       .collect();
     for (idx, is_tdz) in proto.lexical_tdz.iter().copied().enumerate() {
@@ -1171,7 +1170,7 @@ impl Vm {
         let args_obj = self.build_mapped_arguments_object(proto, callee, &args_for_arguments);
         self.current_arguments_object = Some(args_obj.clone());
         self.current_arguments_mapped_count = mapped_count;
-        self.locals[slot] = Rc::new(Mutex::new(args_obj));
+        self.locals[slot] = Rc::new(RefCell::new(args_obj));
       } else {
         let props: Rc<RefCell<ObjectData>> =
           gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
@@ -1227,7 +1226,7 @@ impl Vm {
         self.install_arguments_iterator_property(&props);
         self.current_arguments_object = None;
         self.current_arguments_mapped_count = 0;
-        self.locals[slot] = Rc::new(Mutex::new(Value::Object(props)));
+        self.locals[slot] = Rc::new(RefCell::new(Value::Object(props)));
       }
     }
     self.pending_closure_env = None;
@@ -1239,7 +1238,7 @@ impl Vm {
   pub(super) fn push_call_frame(
     &mut self,
     proto: &Rc<FunctionProto>,
-    closure_env: &Rc<Mutex<Vec<SharedValue>>>,
+    closure_env: &Rc<RefCell<Vec<SharedValue>>>,
     call_args: Vec<Value>,
     this_value: Value,
     callee: Value,

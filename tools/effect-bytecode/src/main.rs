@@ -15,7 +15,7 @@ use blitz::{Chunk, compile_oxc_with_ctx};
 use blitz_runtime::runtime_graph::{
   EFFECT_VERSION, HOST_BRIDGE_ABI_VERSION, HostPrimitiveRequirement, ModuleOrigin,
   ModuleVisibility, RUNTIME_ABI_VERSION, RUNTIME_GRAPH_FORMAT_VERSION, RuntimeGraphManifest,
-  RuntimeModuleManifest, RuntimePrelinkedBundle,
+  RuntimeModuleManifest, RuntimePrelinkedBundle, canonical_manifest_bytes, manifest_sha256,
 };
 use clap::{Args, Parser, Subcommand};
 use oxc_span::SourceType;
@@ -27,9 +27,9 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Mutex;
 
 const ARTIFACT_RELATIVE_PATH: &str = "crates/blitz-runtime/assets/runtime/v1/runtime-graph.blitzpg";
+const GENERATOR_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 #[derive(Parser)]
 #[command(
@@ -133,7 +133,7 @@ struct InputModule {
 }
 
 #[derive(Clone, Copy)]
-struct BindingKey(*const Mutex<blitz::Value>);
+struct BindingKey(*const RefCell<blitz::Value>);
 
 impl std::hash::Hash for BindingKey {
   fn hash<H: std::hash::Hasher>(
@@ -156,7 +156,18 @@ impl PartialEq for BindingKey {
 impl Eq for BindingKey {}
 
 fn main() {
-  if let Err(error) = run() {
+  let worker = std::thread::Builder::new()
+    .name("effect-bytecode-generator".to_string())
+    .stack_size(GENERATOR_STACK_SIZE)
+    .spawn(run);
+  let result = match worker {
+    Ok(worker) => match worker.join() {
+      Ok(result) => result,
+      Err(_) => Err("generator thread panicked".to_string()),
+    },
+    Err(error) => Err(format!("could not start generator thread: {error}")),
+  };
+  if let Err(error) = result {
     eprintln!("effect-bytecode: {error}");
     std::process::exit(1);
   }
@@ -206,8 +217,8 @@ fn build_artifact(root: &Path) -> Result<Vec<u8>, String> {
   verify_effect_manifest(&effect_root, &effect_manifest)?;
   verify_stdlib_manifest(&stdlib_root, &stdlib_manifest, &effect_manifest)?;
 
-  let effect_manifest_hash = sha256(&effect_manifest_bytes);
-  let stdlib_manifest_hash = sha256(&stdlib_manifest_bytes);
+  let effect_manifest_hash = manifest_sha256(&effect_manifest_bytes);
+  let stdlib_manifest_hash = manifest_sha256(&stdlib_manifest_bytes);
   let inputs = collect_inputs(
     &effect_root,
     &stdlib_root,
@@ -427,10 +438,12 @@ fn build_artifact(root: &Path) -> Result<Vec<u8>, String> {
     .map_err(|error| format!("runtime envelope metadata is invalid: {error}"))?;
 
   let mut source_manifest_hasher = Sha256::new();
-  source_manifest_hasher.update((effect_manifest_bytes.len() as u64).to_le_bytes());
-  source_manifest_hasher.update(effect_manifest_bytes);
-  source_manifest_hasher.update((stdlib_manifest_bytes.len() as u64).to_le_bytes());
-  source_manifest_hasher.update(stdlib_manifest_bytes);
+  let canonical_effect_manifest = canonical_manifest_bytes(&effect_manifest_bytes);
+  let canonical_stdlib_manifest = canonical_manifest_bytes(&stdlib_manifest_bytes);
+  source_manifest_hasher.update((canonical_effect_manifest.len() as u64).to_le_bytes());
+  source_manifest_hasher.update(canonical_effect_manifest.as_ref());
+  source_manifest_hasher.update((canonical_stdlib_manifest.len() as u64).to_le_bytes());
+  source_manifest_hasher.update(canonical_stdlib_manifest.as_ref());
   let graph = PrelinkedModuleGraph {
     format_version: blitz::prelinked::PRELINKED_MODULE_GRAPH_VERSION,
     engine_bytecode_version: BytecodeVersion::RiscV2,
@@ -887,7 +900,8 @@ fn read_file(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 fn read_file_string(path: &Path) -> Result<String, String> {
-  String::from_utf8(read_file(path)?)
+  let bytes = read_file(path)?;
+  String::from_utf8(canonical_manifest_bytes(&bytes).into_owned())
     .map_err(|error| format!("{} is not UTF-8: {error}", path.display()))
 }
 
@@ -899,7 +913,7 @@ fn parse_json<T: for<'de> Deserialize<'de>>(
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
-  Sha256::digest(bytes).into()
+  Sha256::digest(canonical_manifest_bytes(bytes).as_ref()).into()
 }
 
 fn decode_hash(value: &str) -> Result<[u8; 32], String> {

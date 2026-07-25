@@ -41,7 +41,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::rc::{Rc, Weak};
-use std::sync::Mutex;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::runtime::Runtime;
@@ -345,10 +344,10 @@ pub struct Vm {
   /// Whether the current builtin call received an explicit receiver in args[0].
   pub(super) builtin_this_arg_prepended: bool,
   /// Upvalue environment for the currently executing closure, if any.
-  pub(super) current_closure_env: Option<Rc<Mutex<Vec<SharedValue>>>>,
+  pub(super) current_closure_env: Option<Rc<RefCell<Vec<SharedValue>>>>,
   /// Temporary root for a callee closure environment while a call frame is
   /// being prepared.
-  pub(super) pending_closure_env: Option<Rc<Mutex<Vec<SharedValue>>>>,
+  pub(super) pending_closure_env: Option<Rc<RefCell<Vec<SharedValue>>>>,
   /// Temporary roots for values that are in flight through host helpers or
   /// call setup and are not yet anchored in the VM state.
   pub(super) gc_temp_roots: Vec<Value>,

@@ -423,7 +423,9 @@ pub(crate) fn shadowrealm_evaluate(
             .cloned()
             && let Value::Array(backing_rc, _) = ab_data
           {
-            set.insert(Rc::as_ptr(&backing_rc) as usize);
+            if !set.insert(Rc::as_ptr(&backing_rc) as usize) {
+              return Err(vm.throw_type_error("Transfer list contains a duplicate ArrayBuffer"));
+            }
             continue;
           }
           return Err(vm.throw_type_error("Transfer list entries must be ArrayBuffer objects"));
@@ -532,7 +534,18 @@ pub(crate) fn shadowrealm_import_value(
                   .cloned()
                   && let Value::Array(backing_rc, _) = ab_data
                 {
-                  set.insert(Rc::as_ptr(&backing_rc) as usize);
+                  if !set.insert(Rc::as_ptr(&backing_rc) as usize) {
+                    let err_val = vm
+                      .create_intrinsic_error(
+                        "TypeError",
+                        "Transfer list contains a duplicate ArrayBuffer",
+                      )
+                      .unwrap_or(Value::String(
+                        "Transfer list contains a duplicate ArrayBuffer".to_string(),
+                      ));
+                    reject_pending_promise(vm, &promise, err_val);
+                    return Ok(());
+                  }
                   continue;
                 }
                 let err_val = vm

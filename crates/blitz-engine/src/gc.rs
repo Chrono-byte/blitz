@@ -9,9 +9,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
-use std::sync::Mutex;
 
-use crate::mutex_compat::MutexBorrowExt;
 use crate::value::{
   ArrayData, ObjectData, PromiseState, PropertyDescriptor, ProxyData, SharedValue, Value,
 };
@@ -65,7 +63,7 @@ struct HeapRegistry {
   objects: Vec<Weak<RefCell<ObjectData>>>,
   arrays: Vec<Weak<RefCell<ArrayData>>>,
   proxies: Vec<Weak<RefCell<ProxyData>>>,
-  envs: Vec<Weak<Mutex<Vec<SharedValue>>>>,
+  envs: Vec<Weak<RefCell<Vec<SharedValue>>>>,
   promises: Vec<Weak<RefCell<PromiseState>>>,
 }
 
@@ -125,7 +123,7 @@ pub fn track_proxy(proxy: Rc<RefCell<ProxyData>>) -> Rc<RefCell<ProxyData>> {
 }
 
 /// Register a closure environment vector with the collector.
-pub fn track_env(env: Rc<Mutex<Vec<SharedValue>>>) -> Rc<Mutex<Vec<SharedValue>>> {
+pub fn track_env(env: Rc<RefCell<Vec<SharedValue>>>) -> Rc<RefCell<Vec<SharedValue>>> {
   {
     HEAP.with(|heap| push_weak(&mut heap.borrow_mut().envs, &env));
     bump_allocation_pressure();
@@ -184,14 +182,14 @@ pub fn heap_snapshot() -> GcHeapSnapshot {
 
 /// Prototype collector entry point.
 pub fn collect(roots: &[Value]) -> GcStats {
-  let env_roots: &[Rc<Mutex<Vec<SharedValue>>>] = &[];
+  let env_roots: &[Rc<RefCell<Vec<SharedValue>>>] = &[];
   collect_with_env_roots(roots, env_roots)
 }
 
 /// Prototype collector entry point with explicit closure-environment roots.
 pub fn collect_with_env_roots(
   roots: &[Value],
-  env_roots: &[Rc<Mutex<Vec<SharedValue>>>],
+  env_roots: &[Rc<RefCell<Vec<SharedValue>>>],
 ) -> GcStats {
   {
     {
@@ -589,7 +587,7 @@ fn mark_object(
 }
 
 fn mark_env(
-  env: &Rc<Mutex<Vec<SharedValue>>>,
+  env: &Rc<RefCell<Vec<SharedValue>>>,
   marked_objects: &mut HashSet<usize>,
   marked_arrays: &mut HashSet<usize>,
   marked_proxies: &mut HashSet<usize>,
@@ -663,13 +661,13 @@ fn clear_array(arr: &Rc<RefCell<ArrayData>>) {
   arr.borrow_mut().clear();
 }
 
-fn clear_env(env: &Rc<Mutex<Vec<SharedValue>>>) {
+fn clear_env(env: &Rc<RefCell<Vec<SharedValue>>>) {
   // Break closure cycles by dropping the captured values once the
   // environment is determined to be unreachable.
   env.borrow_mut().clear();
 }
 
-fn clear_env_aggressively(env: &Rc<Mutex<Vec<SharedValue>>>) {
+fn clear_env_aggressively(env: &Rc<RefCell<Vec<SharedValue>>>) {
   clear_env(env);
 }
 
@@ -688,9 +686,9 @@ mod tests {
 
   use oxc_span::Span;
 
-  use std::sync::{Arc, Mutex};
+  use std::sync::Arc;
 
-  fn make_dummy_closure(env: Rc<Mutex<Vec<SharedValue>>>) -> Value {
+  fn make_dummy_closure(env: Rc<RefCell<Vec<SharedValue>>>) -> Value {
     let proto = Rc::new(FunctionProto {
       name: "gc_test".to_string(),
       span: Span::new(0, 0),
@@ -754,7 +752,7 @@ mod tests {
 
   #[test]
   fn regular_collect_breaks_closure_env_cycles() {
-    let env = track_env(Rc::new(Mutex::new(Vec::new())));
+    let env = track_env(Rc::new(RefCell::new(Vec::new())));
     let closure = make_dummy_closure(Rc::clone(&env));
     let weak_props = match &closure {
       Value::Closure { props, .. } => Rc::downgrade(props),
@@ -762,8 +760,8 @@ mod tests {
     };
 
     env
-      .borrow()
-      .push(Rc::new(Mutex::new(closure.clone())));
+      .borrow_mut()
+      .push(Rc::new(RefCell::new(closure.clone())));
 
     let weak_env = Rc::downgrade(&env);
 
@@ -779,7 +777,7 @@ mod tests {
 
   #[test]
   fn aggressive_collect_breaks_closure_env_cycles() {
-    let env = track_env(Rc::new(Mutex::new(Vec::new())));
+    let env = track_env(Rc::new(RefCell::new(Vec::new())));
     let closure = make_dummy_closure(Rc::clone(&env));
     let weak_props = match &closure {
       Value::Closure { props, .. } => Rc::downgrade(props),
@@ -787,8 +785,8 @@ mod tests {
     };
 
     env
-      .borrow()
-      .push(Rc::new(Mutex::new(closure.clone())));
+      .borrow_mut()
+      .push(Rc::new(RefCell::new(closure.clone())));
 
     let weak_env = Rc::downgrade(&env);
 
@@ -803,7 +801,7 @@ mod tests {
 
   #[test]
   fn aggressive_collect_respects_roots() {
-    let env = track_env(Rc::new(Mutex::new(Vec::new())));
+    let env = track_env(Rc::new(RefCell::new(Vec::new())));
     let closure = make_dummy_closure(Rc::clone(&env));
     let weak_props = match &closure {
       Value::Closure { props, .. } => Rc::downgrade(props),
@@ -811,8 +809,8 @@ mod tests {
     };
 
     env
-      .borrow()
-      .push(Rc::new(Mutex::new(closure.clone())));
+      .borrow_mut()
+      .push(Rc::new(RefCell::new(closure.clone())));
 
     let weak_env = Rc::downgrade(&env);
 
@@ -833,7 +831,7 @@ mod tests {
     let _arr = track_array(Rc::new(RefCell::new(ArrayData::from(
       Vec::<Option<Value>>::new(),
     ))));
-    let _env = track_env(Rc::new(Mutex::new(Vec::new())));
+    let _env = track_env(Rc::new(RefCell::new(Vec::new())));
     let _promise = track_promise(Rc::new(RefCell::new(PromiseState::Pending {
       on_fulfilled: Vec::new(),
       on_rejected: Vec::new(),

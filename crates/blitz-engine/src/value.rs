@@ -55,15 +55,16 @@ use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::rc::Weak;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use num_bigint::BigInt as BigIntValue;
 use num_traits::Zero;
 
 /// Shared, reference-counted, mutable handle to a `Value`.
-/// Note: `Rc<Mutex<_>>` is for single-threaded shared mutation and is not `Send`/`Sync`.
-pub type SharedValue = Rc<Mutex<Value>>;
+///
+/// The VM is single-threaded, so binding cells use `RefCell` rather than a
+/// synchronization primitive that implies cross-thread access.
+pub type SharedValue = Rc<RefCell<Value>>;
 
 /// A weak reference to an ObjectData that can be upgraded when needed.
 /// This helps prevent reference cycles in prototype chains.
@@ -253,6 +254,11 @@ impl ArrayData {
   /// Return a cloned copy of the dense elements.
   pub fn clone_elements(&self) -> Vec<Option<Value>> {
     self.elements.clone()
+  }
+
+  /// Remove and return every dense element, leaving an empty backing store.
+  pub fn take_elements(&mut self) -> Vec<Option<Value>> {
+    std::mem::take(&mut self.elements)
   }
 
   /// Return the array contents as packed numbers if every element is a
@@ -482,6 +488,25 @@ impl ObjectData {
     }
   }
 
+  /// Read a host or engine internal slot without exposing it to ECMAScript
+  /// property operations.
+  pub fn internal_slot(
+    &self,
+    name: &'static str,
+  ) -> Option<&Value> {
+    self.internal_slots.get(name)
+  }
+
+  /// Store a host or engine internal slot without creating a JavaScript-visible
+  /// property.
+  pub fn set_internal_slot(
+    &mut self,
+    name: &'static str,
+    value: Value,
+  ) {
+    self.internal_slots.insert(name, value);
+  }
+
   /// Get the prototype, preferring weak reference if available.
   /// Returns Value::Null if the weak reference has expired.
   pub fn get_prototype(&self) -> Value {
@@ -587,7 +612,7 @@ pub enum Value {
     /// Function prototype
     proto: Rc<FunctionProto>,
     /// Captured / closed-over binding cells
-    env: Rc<Mutex<Vec<SharedValue>>>,
+    env: Rc<RefCell<Vec<SharedValue>>>,
     /// Lexically captured `this` value for arrow functions.
     lexical_this: Option<Box<Value>>,
     /// Mutable property bag for function object properties (e.g., `prototype`).
