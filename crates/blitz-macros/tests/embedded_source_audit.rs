@@ -61,7 +61,7 @@ fn rust_sources(root: &Path) -> impl Iterator<Item = PathBuf> + '_ {
     .into_iter()
     .filter_map(Result::ok)
     .filter(|entry| entry.file_type().is_file())
-    .map(|entry| entry.into_path())
+    .map(walkdir::DirEntry::into_path)
     .filter(|path| {
       path
         .extension()

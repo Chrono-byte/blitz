@@ -1,0 +1,41 @@
+name: Security audit
+
+on:
+  push:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**/Cargo.toml"
+      - "tools/**/Cargo.toml"
+      - ".forgejo/workflows/security.yml"
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**/Cargo.toml"
+      - "tools/**/Cargo.toml"
+      - ".forgejo/workflows/security.yml"
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+env:
+  CI: "true"
+
+jobs:
+  rustsec:
+    name: RustSec advisories
+    runs-on: ci
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: https://data.forgejo.org/actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Install Rust toolchain
+        uses: https://github.com/dtolnay/rust-toolchain@1.97.0
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Audit Cargo.lock
+        run: cargo audit

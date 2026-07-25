@@ -1,0 +1,39 @@
+name: Test262
+
+on:
+  schedule:
+    - cron: "0 5 * * 0"
+  workflow_dispatch:
+
+env:
+  CI: "true"
+
+jobs:
+  es6:
+    name: ES6 conformance baseline
+    runs-on: ci
+    timeout-minutes: 180
+    steps:
+      - name: Check out repository and Test262
+        uses: https://data.forgejo.org/actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          submodules: true
+
+      - name: Install Rust toolchain
+        uses: https://github.com/dtolnay/rust-toolchain@1.97.0
+
+      - name: Run ES6 conformance baseline
+        continue-on-error: true
+        run: cargo run --locked -p blitz-engine --bin test262 -- --manifest docs/test262/es6-manifest.txt --summary-json target/test262/es6-summary.json --workers 4 --batch-size 20 --subprocess-timeout 35 --quiet
+
+      - name: Verify conformance report
+        run: test -s target/test262/es6-summary.json
+
+      - name: Upload conformance report
+        if: always()
+        uses: https://data.forgejo.org/actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5
+        with:
+          name: test262-es6-summary
+          path: target/test262/es6-summary.json
+          if-no-files-found: error
+          retention-days: 30
