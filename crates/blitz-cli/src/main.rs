@@ -198,9 +198,19 @@ struct ExecutionArgs {
 
 fn should_load_as_module(
   path: &Path,
+  source: &str,
   explicit_module: bool,
 ) -> bool {
-  explicit_module || JsParser::source_type_for_path(path, false).is_module()
+  if explicit_module || JsParser::source_type_for_path(path, false).is_module() {
+    return true;
+  }
+
+  is_typescript_path(path)
+    && JsParser::extract_imports_from_source_with_type(
+      source,
+      JsParser::source_type_for_path(path, true),
+    )
+    .is_ok_and(|imports| !imports.is_empty())
 }
 
 /// Returns whether a path has an executable TypeScript extension.
@@ -427,7 +437,10 @@ fn main() -> Result<(), blitz::errors::Error> {
 
   // If a file was provided, run it and exit. Otherwise start REPL.
   if let Some(path) = execution.file {
-    if should_load_as_module(&path, execution.module) {
+    let source = std::fs::read_to_string(&path).map_err(|e| {
+      blitz::errors::RuntimeError::from(format!("Failed to read {}: {}", path.display(), e))
+    })?;
+    if should_load_as_module(&path, &source, execution.module) {
       let loader_handle = repl_vm.module_loader_handle();
       {
         let mut loader = loader_handle.borrow_mut();
@@ -448,9 +461,6 @@ fn main() -> Result<(), blitz::errors::Error> {
       blitz::module::evaluate_entry_shared(&loader_handle, &path, &mut repl_vm, false)
         .map_err(blitz::errors::Error::from)?;
     } else {
-      let source = std::fs::read_to_string(&path).map_err(|e| {
-        blitz::errors::RuntimeError::from(format!("Failed to read {}: {}", path.display(), e))
-      })?;
       let source_type = JsParser::source_type_for_path(&path, false);
       let session = JsParser::parse_source_with_type(&source, source_type)?;
       let program = session.program();
@@ -640,11 +650,25 @@ mod tests {
 
   #[test]
   fn explicit_module_extensions_use_the_module_loader() {
-    assert!(should_load_as_module(Path::new("entry.mjs"), false));
-    assert!(should_load_as_module(Path::new("entry.mts"), false));
-    assert!(!should_load_as_module(Path::new("entry.js"), false));
-    assert!(!should_load_as_module(Path::new("entry.cjs"), false));
-    assert!(should_load_as_module(Path::new("entry.js"), true));
+    assert!(should_load_as_module(Path::new("entry.mjs"), "", false));
+    assert!(should_load_as_module(Path::new("entry.mts"), "", false));
+    assert!(!should_load_as_module(Path::new("entry.js"), "", false));
+    assert!(!should_load_as_module(Path::new("entry.cjs"), "", false));
+    assert!(should_load_as_module(Path::new("entry.js"), "", true));
+  }
+
+  #[test]
+  fn typescript_imports_use_the_module_loader() {
+    assert!(should_load_as_module(
+      Path::new("entry.ts"),
+      "import * as Ref from \"effect/Ref\"; Ref.make(0);",
+      false,
+    ));
+    assert!(!should_load_as_module(
+      Path::new("entry.ts"),
+      "const answer: number = 42;",
+      false,
+    ));
   }
 
   #[test]

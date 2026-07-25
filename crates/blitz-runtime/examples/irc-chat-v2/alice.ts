@@ -12,17 +12,17 @@ const closeTerminal = Terminal.close().pipe(
   Effect.catchAll(() => Effect.succeed(undefined)),
 );
 
-const closeSocket = (connection) =>
+const closeSocket = (connection: WebSocket.Connection) =>
   connection.close({ code: 1000, reason: "terminal closed" }).pipe(
     Effect.catchAll(() => Effect.succeed(undefined)),
   );
 
-const reportSocketError = (error) =>
+const reportSocketError = (error: WebSocket.WebSocketError) =>
   Terminal.writeLine(`Connection error: ${error.message}`).pipe(
     Effect.catchAll(() => Effect.succeed(undefined)),
   );
 
-const sendLine = (connection, line) => {
+const sendLine = (connection: WebSocket.Connection, line: string) => {
   const message = line.trim();
   if (message.length === 0) {
     return Effect.succeed(undefined);
@@ -38,14 +38,14 @@ const sendLine = (connection, line) => {
   );
 };
 
-const receiveMessages = (connection) =>
+const receiveMessages = (connection: WebSocket.Connection) =>
   Stream.runForEach(connection.messages, (message) =>
     message._tag === "Text"
       ? Terminal.writeLine(message.data)
       : Terminal.writeLine("* Received an unsupported binary frame."),
   ).pipe(Effect.ensuring(closeTerminal));
 
-const runClient = (connection) =>
+const runClient = (connection: WebSocket.Connection) =>
   Effect.fork(receiveMessages(connection)).pipe(
     Effect.flatMap((receiver) =>
       Stream.runForEach(Terminal.lines, (line) => sendLine(connection, line)).pipe(

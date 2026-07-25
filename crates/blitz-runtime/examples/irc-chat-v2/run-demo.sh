@@ -24,7 +24,7 @@ fi
 
 cp -- "$built_blitz" "$blitz"
 
-osascript - "$repo" "$blitz" "$demo/server.mjs" "$demo/alice.mjs" "$demo/bob.mjs" <<'APPLESCRIPT'
+osascript - "$repo" "$blitz" "$demo/server.ts" "$demo/alice.ts" "$demo/bob.ts" <<'APPLESCRIPT'
 on run argv
   set repoPath to item 1 of argv
   set blitzPath to item 2 of argv
@@ -41,11 +41,11 @@ on run argv
 
     set aliceConfig to new surface configuration
     set initial working directory of aliceConfig to repoPath
-    set command of aliceConfig to quoted form of blitzPath & " " & quoted form of alicePath
+    set command of aliceConfig to quoted form of blitzPath & " run --module " & quoted form of alicePath
 
     set bobConfig to new surface configuration
     set initial working directory of bobConfig to repoPath
-    set command of bobConfig to quoted form of blitzPath & " " & quoted form of bobPath
+    set command of bobConfig to quoted form of blitzPath & " run --module " & quoted form of bobPath
 
     set chatWindow to new window with configuration serverConfig
     set serverPane to terminal 1 of selected tab of chatWindow

@@ -2,7 +2,7 @@
 
 Version two keeps the original terminal clients and WebSocket protocol while
 adding nickname validation, message limits, basic rate limiting, and robust
-connection cleanup.
+connection cleanup. The server and both clients are written in TypeScript.
 
 The server exposes:
 
@@ -25,9 +25,9 @@ On Windows:
 Or run each process in a separate terminal:
 
 ```sh
-cargo run -p blitz-cli -- run --module crates/blitz-runtime/examples/irc-chat-v2/server.mjs
-cargo run -p blitz-cli -- crates/blitz-runtime/examples/irc-chat-v2/alice.mjs
-cargo run -p blitz-cli -- crates/blitz-runtime/examples/irc-chat-v2/bob.mjs
+cargo run -p blitz-cli -- run crates/blitz-runtime/examples/irc-chat-v2/server.ts
+cargo run -p blitz-cli -- run crates/blitz-runtime/examples/irc-chat-v2/alice.ts
+cargo run -p blitz-cli -- run crates/blitz-runtime/examples/irc-chat-v2/bob.ts
 ```
 
 Type a message and press Enter to broadcast it. Type `/quit`, press Ctrl-D, or

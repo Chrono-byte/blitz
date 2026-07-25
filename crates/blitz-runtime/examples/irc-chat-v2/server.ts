@@ -11,13 +11,27 @@ const MAX_FRAME_LENGTH = 4_096;
 const RATE_LIMIT_WINDOW_MS = 2_000;
 const RATE_LIMIT_MESSAGES = 8;
 
-const mapSet = (map, key, value) =>
+type Client = {
+  readonly nickname: string;
+  readonly windowStartedAt: number;
+  readonly messageCount: number;
+};
+
+type Clients = Map<WebSocket.Connection, Client>;
+type ClientsRef = Ref.Ref<Clients>;
+
+type JoinResult =
+  | { readonly _tag: "AlreadyJoined" }
+  | { readonly _tag: "Taken" }
+  | { readonly _tag: "Joined"; readonly client: Client };
+
+const mapSet = <Key, Value>(map: Map<Key, Value>, key: Key, value: Value) =>
   new Map([...map, [key, value]]);
 
-const mapDelete = (map, key) =>
+const mapDelete = <Key, Value>(map: Map<Key, Value>, key: Key) =>
   new Map([...map].filter(([entry]) => entry !== key));
 
-const normalizeNickname = (input) => {
+const normalizeNickname = (input: string) => {
   const nickname = input.trim();
   if (
     nickname.length === 0 ||
@@ -29,13 +43,13 @@ const normalizeNickname = (input) => {
   return nickname;
 };
 
-const sanitizeMessage = (input) =>
+const sanitizeMessage = (input: string) =>
   input
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
     .trim()
     .slice(0, MAX_MESSAGE_LENGTH);
 
-const nicknameIsTaken = (clients, nickname) => {
+const nicknameIsTaken = (clients: Clients, nickname: string) => {
   const key = nickname.toLowerCase();
   for (const client of clients.values()) {
     if (client.nickname.toLowerCase() === key) {
@@ -45,24 +59,31 @@ const nicknameIsTaken = (clients, nickname) => {
   return false;
 };
 
-const detach = (clientsRef, connection) =>
+const detach = (clientsRef: ClientsRef, connection: WebSocket.Connection) =>
   Ref.modify(clientsRef, (clients) => [
     clients.get(connection),
     mapDelete(clients, connection),
   ]);
 
-const closeQuietly = (connection, options) =>
+const closeQuietly = (
+  connection: WebSocket.Connection,
+  options: WebSocket.CloseOptions,
+) =>
   connection.close(options).pipe(
     Effect.catchAll(() => Effect.succeed(undefined)),
   );
 
-const send = (clientsRef, connection, message) =>
+const send = (
+  clientsRef: ClientsRef,
+  connection: WebSocket.Connection,
+  message: string,
+) =>
   connection.send(message).pipe(
     Effect.map(() => true),
     Effect.catchAll(() => detach(clientsRef, connection).pipe(Effect.as(false))),
   );
 
-const broadcast = (clientsRef, message) =>
+const broadcast = (clientsRef: ClientsRef, message: string) =>
   Ref.get(clientsRef).pipe(
     Effect.flatMap((clients) =>
       Effect.all(
@@ -74,7 +95,10 @@ const broadcast = (clientsRef, message) =>
     Effect.tap(() => Effect.sync(() => console.log(message))),
   );
 
-const removeClient = (clientsRef, connection) =>
+const removeClient = (
+  clientsRef: ClientsRef,
+  connection: WebSocket.Connection,
+) =>
   detach(clientsRef, connection).pipe(
     Effect.flatMap((client) =>
       client === undefined
@@ -83,8 +107,12 @@ const removeClient = (clientsRef, connection) =>
     ),
   );
 
-const joinClient = (clientsRef, connection, nickname) =>
-  Ref.modify(clientsRef, (clients) => {
+const joinClient = (
+  clientsRef: ClientsRef,
+  connection: WebSocket.Connection,
+  nickname: string,
+) =>
+  Ref.modify<Clients, JoinResult>(clientsRef, (clients) => {
     if (clients.has(connection)) {
       return [{ _tag: "AlreadyJoined" }, clients];
     }
@@ -103,7 +131,10 @@ const joinClient = (clientsRef, connection, nickname) =>
     ];
   });
 
-const registerMessage = (clientsRef, connection) =>
+const registerMessage = (
+  clientsRef: ClientsRef,
+  connection: WebSocket.Connection,
+) =>
   Ref.modify(clientsRef, (clients) => {
     const client = clients.get(connection);
     if (client === undefined) {
@@ -126,7 +157,11 @@ const registerMessage = (clientsRef, connection) =>
     ];
   });
 
-const handleMessage = (clientsRef, connection, message) => {
+const handleMessage = (
+  clientsRef: ClientsRef,
+  connection: WebSocket.Connection,
+  message: WebSocket.Message,
+) => {
   if (message._tag === "Binary") {
     return closeQuietly(connection, { code: 1003, reason: "text frames only" });
   }
@@ -210,7 +245,10 @@ const handleMessage = (clientsRef, connection, message) => {
   ).pipe(Effect.asVoid);
 };
 
-const processConnection = (clientsRef, connection) =>
+const processConnection = (
+  clientsRef: ClientsRef,
+  connection: WebSocket.Connection,
+) =>
   Stream.runForEach(
     connection.messages,
     (message) => handleMessage(clientsRef, connection, message),
@@ -221,7 +259,11 @@ const processConnection = (clientsRef, connection) =>
     Effect.ensuring(removeClient(clientsRef, connection)),
   );
 
-const handleChat = (clientsRef, request, context) => {
+const handleChat = (
+  clientsRef: ClientsRef,
+  request: Request,
+  context: Http.RequestContext,
+) => {
   const upgradeHeader = request.headers.get("upgrade");
   if (upgradeHeader === null || upgradeHeader.toLowerCase() !== "websocket") {
     return Effect.succeed(
@@ -248,7 +290,11 @@ const handleChat = (clientsRef, request, context) => {
   );
 };
 
-const handler = (clientsRef, request, context) => {
+const handler = (
+  clientsRef: ClientsRef,
+  request: Request,
+  context: Http.RequestContext,
+) => {
   const path = new URL(request.url).pathname;
   if (path === "/") {
     return Effect.succeed(
@@ -275,7 +321,7 @@ const handler = (clientsRef, request, context) => {
   );
 };
 
-const serverProgram = Ref.make(new Map()).pipe(
+const serverProgram = Ref.make(new Map<WebSocket.Connection, Client>()).pipe(
   Effect.flatMap((clientsRef) => {
     const announce = Effect.sync(() => {
       console.log("Blitz IRC chat listening on http://127.0.0.1:8000");

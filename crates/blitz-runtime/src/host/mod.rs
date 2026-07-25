@@ -2097,20 +2097,19 @@ mod tests {
 
   #[test]
   fn effect_irc_chat_v2_scripts_parse_and_compile() {
-    let server = include_str!("../../examples/irc-chat-v2/server.mjs");
-    let session = JsParser::parse_source_with_type(server, oxc_span::SourceType::mjs())
-      .expect("parse Effect IRC server module");
+    let server = include_str!("../../examples/irc-chat-v2/server.ts");
+    let session =
+      JsParser::parse_source_with_type(server, oxc_span::SourceType::ts().with_module(true))
+        .expect("parse Effect IRC server module");
     compiler::compile_oxc(session.program(), server).expect("compile Effect IRC server module");
 
     for (name, source) in [
-      (
-        "alice",
-        include_str!("../../examples/irc-chat-v2/alice.mjs"),
-      ),
-      ("bob", include_str!("../../examples/irc-chat-v2/bob.mjs")),
+      ("alice", include_str!("../../examples/irc-chat-v2/alice.ts")),
+      ("bob", include_str!("../../examples/irc-chat-v2/bob.ts")),
     ] {
-      let session = JsParser::parse_source_with_type(source, oxc_span::SourceType::mjs())
-        .unwrap_or_else(|error| panic!("parse Effect IRC {name} client: {error}"));
+      let session =
+        JsParser::parse_source_with_type(source, oxc_span::SourceType::ts().with_module(true))
+          .unwrap_or_else(|error| panic!("parse Effect IRC {name} client: {error}"));
       compiler::compile_oxc(session.program(), source)
         .unwrap_or_else(|error| panic!("compile Effect IRC {name} client: {error}"));
     }
@@ -2137,16 +2136,16 @@ mod tests {
           },
         );
         let source =
-          include_str!("../../examples/irc-chat-v2/server.mjs").replace("port: 8000", "port: 0");
+          include_str!("../../examples/irc-chat-v2/server.ts").replace("port: 8000", "port: 0");
         let directory = env::temp_dir().join(format!("blitz-effect-irc-v2-{}", std::process::id()));
         std::fs::create_dir_all(&directory).expect("create Effect IRC directory");
-        let entry = directory.join("server.mjs");
+        let entry = directory.join("server.ts");
         std::fs::write(&entry, source).expect("write Effect IRC server");
         let loader = vm.module_loader_handle();
         {
           let mut loader = loader.borrow_mut();
           loader
-            .construct(&directory, "./server.mjs")
+            .construct(&directory, "./server.ts")
             .expect("construct Effect IRC graph");
           loader
             .instantiate_all()

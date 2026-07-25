@@ -32,7 +32,7 @@ function Start-BlitzProcess($script, $module = $false) {
     -WorkingDirectory $repo
 }
 
-Start-BlitzProcess (Join-Path $demo "server.mjs") $true
+Start-BlitzProcess (Join-Path $demo "server.ts") $true
 $serverReady = $false
 for ($attempt = 0; $attempt -lt 60; $attempt++) {
   try {
@@ -48,5 +48,5 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
 if (-not $serverReady) {
   throw "IRC chat v2 server did not become ready within 60 seconds"
 }
-Start-BlitzProcess (Join-Path $demo "alice.mjs")
-Start-BlitzProcess (Join-Path $demo "bob.mjs")
+Start-BlitzProcess (Join-Path $demo "alice.ts") $true
+Start-BlitzProcess (Join-Path $demo "bob.ts") $true
