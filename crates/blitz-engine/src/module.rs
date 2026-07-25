@@ -1252,23 +1252,9 @@ impl ModuleLoader {
       .parent()
       .unwrap_or_else(|| Path::new("."));
     for dependency in imports {
-      // Preserve the filesystem loader's handling of optional/bare host
-      // dependencies, while making relative and registered virtual imports
-      // strict. Virtual-module construction above is strict for every edge.
-      if dependency.starts_with('.')
-        || dependency.starts_with('/')
-        || self
-          .virtual_modules
-          .resolve(&dependency)
-          .is_some()
-        || self
-          .prelinked_by_specifier
-          .contains_key(&dependency)
-      {
-        self.construct(base_dir, &dependency)?;
-      } else {
-        drop(self.construct(base_dir, &dependency));
-      }
+      // Every static import is a required graph edge. This includes bare
+      // package specifiers resolved through the nearest node_modules tree.
+      self.construct(base_dir, &dependency)?;
     }
 
     Ok(record)

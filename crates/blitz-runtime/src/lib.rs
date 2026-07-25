@@ -7,6 +7,7 @@ pub mod app;
 pub(crate) mod app_transport;
 pub mod effect_assets;
 pub mod host;
+pub mod modules;
 pub mod net;
 pub mod rpc;
 pub mod runtime_graph;

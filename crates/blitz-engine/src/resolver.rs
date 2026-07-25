@@ -3,7 +3,7 @@
 //! used by the ModuleLoader. Exposes a minimal API for resolving module
 //! specifiers relative to a base directory.
 
-use oxc_resolver::Resolver;
+use oxc_resolver::{Resolver, TsconfigDiscovery, TsconfigOptions, TsconfigReferences};
 use std::path::{Path, PathBuf};
 
 /// Resolve a module specifier relative to `base` using `oxc_resolver` and
@@ -30,30 +30,29 @@ pub fn resolve_specifier(
 ///
 /// Returns a `BundlerError` if no declaration file can be resolved.
 pub fn resolve_declaration_specifier(
-  base: &Path,
+  containing_file: &Path,
   specifier: &str,
 ) -> Result<PathBuf, crate::errors::BundlerError> {
-  let resolved = resolve_with_options(base, specifier, declaration_options())
-    .or_else(|_| resolve_with_options(base, specifier, declaration_fallback_options()))?;
-  if is_declaration_path(&resolved) {
-    return Ok(resolved);
-  }
-
-  declaration_siblings(&resolved)
-    .find(|path| path.is_file())
-    .ok_or_else(|| {
-      crate::errors::BundlerError::from(format!(
-        "No declaration file found near {}",
-        resolved.display()
-      ))
-    })
+  let resolver = Resolver::new(declaration_options());
+  resolver
+    .resolve_dts(containing_file, specifier)
+    .map(|resolution| resolution.full_path())
+    .map_err(|error| crate::errors::BundlerError::from(error.to_string()))
 }
 
 fn resolve_with_options(
   base: &Path,
   specifier: &str,
-  options: oxc_resolver::ResolveOptions,
+  mut options: oxc_resolver::ResolveOptions,
 ) -> Result<PathBuf, crate::errors::BundlerError> {
+  if matches!(options.tsconfig, Some(TsconfigDiscovery::Auto))
+    && let Some(config_file) = nearest_tsconfig(base)
+  {
+    options.tsconfig = Some(TsconfigDiscovery::Manual(TsconfigOptions {
+      config_file,
+      references: TsconfigReferences::Auto,
+    }));
+  }
   let resolver = Resolver::new(options);
 
   // Resolve expects an absolute base directory; prefer to canonicalize, but
@@ -65,6 +64,25 @@ fn resolve_with_options(
     .resolve(&base_dir, specifier)
     .map(|resolution| resolution.full_path())
     .map_err(|e| crate::errors::BundlerError::from(e.to_string()))
+}
+
+fn nearest_tsconfig(base: &Path) -> Option<PathBuf> {
+  let mut directory = base;
+  loop {
+    let candidate = directory.join("tsconfig.json");
+    if candidate.is_file() {
+      return Some(candidate);
+    }
+    // A dependency is its own project. Do not leak the consumer's config into
+    // package-internal imports when searching upward from node_modules.
+    if directory
+      .file_name()
+      .is_some_and(|name| name == "node_modules")
+    {
+      return None;
+    }
+    directory = directory.parent()?;
+  }
 }
 
 fn module_options() -> oxc_resolver::ResolveOptions {
@@ -79,49 +97,20 @@ fn module_options() -> oxc_resolver::ResolveOptions {
       ".cts".into(),
       ".tsx".into(),
     ],
-    condition_names: vec!["import".into()],
+    condition_names: vec!["import".into(), "default".into()],
+    tsconfig: Some(TsconfigDiscovery::Auto),
+    // NODE_PATH is a deprecated CommonJS feature and is not part of the
+    // TypeScript 6/7 or Node ESM project-resolution model.
+    node_path: false,
     ..Default::default()
   }
 }
 
 fn declaration_options() -> oxc_resolver::ResolveOptions {
   oxc_resolver::ResolveOptions {
-    extensions: vec![
-      ".d.ts".into(),
-      ".d.mts".into(),
-      ".d.cts".into(),
-      ".ts".into(),
-      ".mts".into(),
-      ".cts".into(),
-      ".tsx".into(),
-      ".js".into(),
-      ".mjs".into(),
-      ".cjs".into(),
-    ],
     condition_names: vec!["types".into()],
-    main_fields: vec!["types".into(), "typings".into(), "main".into()],
+    tsconfig: Some(TsconfigDiscovery::Auto),
+    node_path: false,
     ..Default::default()
   }
-}
-
-fn declaration_fallback_options() -> oxc_resolver::ResolveOptions {
-  oxc_resolver::ResolveOptions {
-    condition_names: vec!["types".into(), "import".into()],
-    ..declaration_options()
-  }
-}
-
-fn is_declaration_path(path: &Path) -> bool {
-  let path = path.to_string_lossy();
-  path.ends_with(".d.ts") || path.ends_with(".d.mts") || path.ends_with(".d.cts")
-}
-
-fn declaration_siblings(path: &Path) -> impl Iterator<Item = PathBuf> + '_ {
-  ["d.ts", "d.mts", "d.cts"]
-    .into_iter()
-    .map(move |extension| {
-      let mut sibling = path.to_path_buf();
-      sibling.set_extension(extension);
-      sibling
-    })
 }

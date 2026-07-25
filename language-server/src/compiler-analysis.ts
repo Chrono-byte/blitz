@@ -27,6 +27,7 @@ export interface CompilerDeclaration {
   readonly name: string;
   readonly kind: CompilerDeclarationKind;
   readonly detail: string;
+  readonly documentation?: string;
   readonly start: number;
   readonly end: number;
   readonly selection_start: number;
@@ -40,6 +41,7 @@ export interface CompilerDefinition {
   readonly target_path?: string;
   readonly target_virtual?: string;
   readonly detail?: string;
+  readonly documentation?: string;
   readonly target_start: number;
   readonly target_end: number;
   readonly target_selection_start: number;
@@ -249,7 +251,7 @@ class CompilerProcess {
 function compilerCommand(): CompilerCommand {
   const configured = process.env.BLITZ_COMPILER;
   if (configured !== undefined) return { command: configured, arguments: [] };
-  for (const root of [process.cwd(), resolve(process.cwd(), "..")]) {
+  for (const root of ancestorDirectories(process.cwd())) {
     const local = resolve(
       root,
       "target",
@@ -266,6 +268,17 @@ function compilerCommand(): CompilerCommand {
     }
   }
   return { command: "blitz", arguments: [] };
+}
+
+function ancestorDirectories(path: string) {
+  const directories = [];
+  let current = resolve(path);
+  for (;;) {
+    directories.push(current);
+    const parent = resolve(current, "..");
+    if (parent === current) return directories;
+    current = parent;
+  }
 }
 
 function failedAnalysis(message: string): CompilerAnalysis {
@@ -336,6 +349,7 @@ function isDeclaration(value: unknown): value is CompilerDeclaration {
       "namespace",
     ].includes(String(value.kind)) &&
     typeof value.detail === "string" &&
+    (value.documentation === undefined || typeof value.documentation === "string") &&
     typeof value.start === "number" &&
     typeof value.end === "number" &&
     typeof value.selection_start === "number" &&
@@ -353,6 +367,7 @@ function isDefinition(value: unknown): value is CompilerDefinition {
     (value.target_path === undefined || typeof value.target_path === "string") &&
     (value.target_virtual === undefined || typeof value.target_virtual === "string") &&
     (value.detail === undefined || typeof value.detail === "string") &&
+    (value.documentation === undefined || typeof value.documentation === "string") &&
     typeof value.target_start === "number" &&
     typeof value.target_end === "number" &&
     typeof value.target_selection_start === "number" &&

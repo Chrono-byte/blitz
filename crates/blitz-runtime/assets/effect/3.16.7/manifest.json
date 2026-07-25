@@ -3137,8 +3137,13 @@
       "sourceType": "declaration"
     },
     {
+      "path": "documentation.json",
+      "sha256": "452e05c7a268ac47997f3ee3f4f2dd8dfc28aa779e41dfb77b6cf32d410145fc",
+      "sourceType": "metadata"
+    },
+    {
       "path": "embedded.rs",
-      "sha256": "f6bdafa5479d758cb0ef84b98da5bdc575b3188e395250fab9d3fd1cf93eb7ea",
+      "sha256": "c87ca80d05610c6e1efb31dd7b57dd5c9cbb4e21f8c07e6d9ec5622722dbcffc",
       "sourceType": "rust"
     },
     {

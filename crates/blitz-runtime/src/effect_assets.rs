@@ -45,6 +45,8 @@ mod generated_stdlib {
 }
 
 use generated_stdlib::EMBEDDED_BLITZ_STDLIB_MODULES;
+use serde::Deserialize;
+use std::collections::HashMap;
 
 /// The declarations intentionally supported by the first facade milestone.
 pub const BLITZ_MATCH_SUPPORTED_EXPORTS: &[&str] =
@@ -88,6 +90,29 @@ pub fn public_declaration_sources() -> Vec<(String, String)> {
             .map(|source| (module.specifier.to_string(), source.to_string()))
         }),
     )
+    .collect()
+}
+
+/// Return upstream documentation for every curated public Effect symbol.
+#[must_use]
+pub fn public_documentation() -> Vec<(String, String, String)> {
+  #[derive(Deserialize)]
+  struct Documentation {
+    format: u8,
+    modules: HashMap<String, HashMap<String, String>>,
+  }
+
+  let documentation: Documentation =
+    serde_json::from_str(EFFECT_DOCUMENTATION_JSON).expect("generated Effect documentation");
+  assert_eq!(documentation.format, 1, "Effect documentation format");
+  documentation
+    .modules
+    .into_iter()
+    .flat_map(|(specifier, symbols)| {
+      symbols
+        .into_iter()
+        .map(move |(symbol, documentation)| (specifier.clone(), symbol, documentation))
+    })
     .collect()
 }
 
@@ -222,6 +247,29 @@ mod tests {
         module.declaration_sha256
       );
     }
+  }
+
+  #[test]
+  fn generated_effect_documentation_covers_curated_functions() {
+    let documentation = public_documentation();
+    assert!(
+      documentation
+        .iter()
+        .any(|(specifier, symbol, text)| {
+          specifier == "effect/Effect"
+            && symbol == "succeed"
+            && text.contains("always succeeds with a given value")
+        })
+    );
+    assert!(
+      documentation
+        .iter()
+        .any(|(specifier, symbol, text)| {
+          specifier == "effect/Layer"
+            && symbol == "effect"
+            && text.contains("Constructs a layer from the specified effect")
+        })
+    );
   }
 
   #[test]

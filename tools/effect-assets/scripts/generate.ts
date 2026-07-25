@@ -84,6 +84,90 @@ const packageRootFromResolution = (file: string) => {
   throw new Error(`Cannot find package root for ${file}`);
 };
 
+const declarationNames = (statement: ts.Statement) => {
+  if (ts.isVariableStatement(statement)) {
+    return statement.declarationList.declarations.flatMap(declaration =>
+      ts.isIdentifier(declaration.name) ? [declaration.name.text] : []
+    );
+  }
+  if (
+    ts.isFunctionDeclaration(statement) ||
+    ts.isClassDeclaration(statement) ||
+    ts.isInterfaceDeclaration(statement) ||
+    ts.isTypeAliasDeclaration(statement) ||
+    ts.isEnumDeclaration(statement)
+  ) {
+    return statement.name ? [statement.name.text] : [];
+  }
+  return [];
+};
+
+const leadingJsDoc = (source: string, node: ts.Node) => {
+  const start = node.getStart();
+  const ranges = ts.getLeadingCommentRanges(source, node.getFullStart()) ?? [];
+  for (let index = ranges.length - 1; index >= 0; index -= 1) {
+    const range = ranges[index];
+    if (
+      range &&
+      range.kind === ts.SyntaxKind.MultiLineCommentTrivia &&
+      source.startsWith("/**", range.pos) &&
+      source.slice(range.end, start).trim() === ""
+    ) {
+      return source.slice(range.pos, range.end);
+    }
+  }
+  return undefined;
+};
+
+const jsDocMarkdown = (comment: string) =>
+  comment
+    .slice(3, -2)
+    .split("\n")
+    .map(line => line.trimStart().replace(/^\* ?/u, ""))
+    .join("\n")
+    .trim();
+
+const documentationForCurated = (curated: string, upstream: string, file: string) => {
+  const upstreamFile = ts.createSourceFile(file, upstream, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const upstreamDocumentation = new Map<string, string>();
+  for (const statement of upstreamFile.statements) {
+    const comment = leadingJsDoc(upstream, statement);
+    if (comment) {
+      for (const name of declarationNames(statement)) {
+        upstreamDocumentation.set(name, jsDocMarkdown(comment));
+      }
+    }
+    if (ts.isExportDeclaration(statement) && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+      for (const element of statement.exportClause.elements) {
+        const elementComment = leadingJsDoc(upstream, element);
+        if (elementComment) {
+          upstreamDocumentation.set(
+            element.propertyName?.text ?? element.name.text,
+            jsDocMarkdown(elementComment),
+          );
+        }
+      }
+    }
+  }
+
+  const curatedFile = ts.createSourceFile(file, curated, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const documentation: Record<string, string> = {};
+  for (const statement of curatedFile.statements) {
+    for (const name of declarationNames(statement)) {
+      const value = upstreamDocumentation.get(name);
+      if (value) documentation[name] = value;
+    }
+    if (ts.isExportDeclaration(statement) && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+      for (const element of statement.exportClause.elements) {
+        const localName = element.propertyName?.text ?? element.name.text;
+        const value = upstreamDocumentation.get(localName);
+        if (value) documentation[element.name.text] = value;
+      }
+    }
+  }
+  return documentation;
+};
+
 const exportedRuntimeNames = (file: string) => {
   const source = readFileSync(file, "utf8");
   const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -257,10 +341,19 @@ const main = async () => {
   rmSync(join(temp, "entries"), { recursive: true, force: true });
 
   const publicEntries: OutputEntry[] = [];
+  const documentationModules: Record<string, Record<string, string>> = {};
   const addPublic = (specifier: string, source: string, declarationName: string) => {
     const sourcePath = `modules/public/${specifier === PACKAGE_NAME ? "index" : declarationName}.js`;
     const declarationPath = `declarations/effect/${declarationName}.d.ts`;
     const declaration = normalize(readFileSync(join(ROOT, declarationPath), "utf8"));
+    const upstreamDeclarationPath = join(effectRoot, "dist/dts", `${declarationName}.d.ts`);
+    if (existsSync(upstreamDeclarationPath)) {
+      documentationModules[specifier] = documentationForCurated(
+        declaration,
+        normalize(readFileSync(upstreamDeclarationPath, "utf8")),
+        upstreamDeclarationPath,
+      );
+    }
     writeText(temp, sourcePath, source);
     writeText(temp, declarationPath, declaration);
     const sourceHash = sha256(source);
@@ -283,6 +376,10 @@ const main = async () => {
     addPublic(specifier, source, moduleName);
   }
 
+  const documentation = normalize(JSON.stringify({ format: 1, modules: documentationModules }, null, 2) + "\n");
+  writeText(temp, "documentation.json", documentation);
+  files.push({ path: "documentation.json", sha256: sha256(documentation), sourceType: "metadata" });
+
   const metadata = normalize(JSON.stringify(JSON.parse(readFileSync(join(effectRoot, "package.json"), "utf8")), null, 2) + "\n");
   const license = normalize(readFileSync(join(effectRoot, "LICENSE"), "utf8"));
   writeText(temp, "package.json", metadata);
@@ -295,8 +392,8 @@ const main = async () => {
   const embedded = [
     "// @generated by tools/effect-assets/scripts/generate.ts; do not edit.",
     "/// Curated, split Effect runtime modules embedded by blitz-runtime.",
-    "pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[",
-    ...entries.map(entry => [
+    "pub const EFFECT_DOCUMENTATION_JSON: &str = include_str!(\"documentation.json\");",
+    "pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[",    ...entries.map(entry => [
       "  EmbeddedEffectModule {",
       `    specifier: ${JSON.stringify(entry.specifier)},`,
       `    source: include_str!(${JSON.stringify(entry.source.path)}),`,

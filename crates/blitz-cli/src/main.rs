@@ -353,7 +353,8 @@ fn run_analysis_server(strict: bool) -> Result<(), blitz::errors::RuntimeError> 
   let mut stdout = std::io::stdout().lock();
   let mut project = blitz::analysis::AnalysisProject::with_module_declarations(
     blitz_runtime::effect_assets::public_declaration_sources(),
-  );
+  )
+  .with_module_documentation(blitz_runtime::effect_assets::public_documentation());
   for line in stdin.lock().lines() {
     let line = line.map_err(|error| {
       blitz::errors::RuntimeError::from(format!("Failed to read analysis request: {error}"))
@@ -517,25 +518,7 @@ fn main() -> Result<(), blitz::errors::Error> {
       blitz::errors::RuntimeError::from(format!("Failed to read {}: {}", path.display(), e))
     })?;
     if should_load_as_module(&path, &source, execution.module) {
-      let loader_handle = repl_vm.module_loader_handle();
-      {
-        let mut loader = loader_handle.borrow_mut();
-        loader.construct(
-          path.parent().unwrap_or_else(|| Path::new(".")),
-          &format!(
-            "./{}",
-            path
-              .file_name()
-              .expect("path must have a file name")
-              .to_string_lossy()
-          ),
-        )?;
-        loader
-          .instantiate_all()
-          .map_err(blitz::errors::Error::from)?;
-      }
-      blitz::module::evaluate_entry_shared(&loader_handle, &path, &mut repl_vm, false)
-        .map_err(blitz::errors::Error::from)?;
+      blitz_runtime::modules::evaluate_entry(&mut repl_vm, &path)?;
     } else {
       let source_type = JsParser::source_type_for_path(&path, false);
       let session = JsParser::parse_source_with_type(&source, source_type)?;

@@ -50,6 +50,9 @@ pub struct AnalysisDeclaration {
   pub kind: &'static str,
   /// Human-readable declaration summary.
   pub detail: String,
+  /// Markdown documentation attached to the declaration.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub documentation: Option<String>,
   /// Inclusive declaration start byte offset.
   pub start: usize,
   /// Exclusive declaration end byte offset.
@@ -78,6 +81,9 @@ pub struct AnalysisDefinition {
   /// Hover text supplied by an external or built-in declaration.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub detail: Option<String>,
+  /// Markdown documentation supplied by the target declaration.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub documentation: Option<String>,
   /// Inclusive target declaration start byte offset.
   pub target_start: usize,
   /// Exclusive target declaration end byte offset.
@@ -205,6 +211,14 @@ const RUNTIME_GLOBALS: &[AnalysisRuntimeGlobal] = &[
   },
 ];
 
+#[derive(Clone, Copy)]
+struct AnalysisSources<'a> {
+  overlays: &'a HashMap<PathBuf, String>,
+  module_declarations: &'a HashMap<String, String>,
+  module_documentation: &'a HashMap<(String, String), String>,
+  declaration_paths: &'a HashMap<String, PathBuf>,
+}
+
 #[derive(Clone)]
 struct CachedProjectAnalysis {
   source: String,
@@ -217,6 +231,7 @@ struct CachedProjectAnalysis {
 pub struct AnalysisProject {
   overlays: HashMap<PathBuf, String>,
   module_declarations: HashMap<String, String>,
+  module_documentation: HashMap<(String, String), String>,
   declaration_cache: HashMap<PathBuf, String>,
   declaration_paths: HashMap<String, PathBuf>,
   analyses: HashMap<PathBuf, CachedProjectAnalysis>,
@@ -234,6 +249,19 @@ impl AnalysisProject {
       module_declarations: declarations.into_iter().collect(),
       ..Self::default()
     }
+  }
+
+  /// Add documentation for declarations supplied by virtual modules.
+  #[must_use]
+  pub fn with_module_documentation(
+    mut self,
+    documentation: impl IntoIterator<Item = (String, String, String)>,
+  ) -> Self {
+    self.module_documentation = documentation
+      .into_iter()
+      .map(|(specifier, symbol, documentation)| ((specifier, symbol), documentation))
+      .collect();
+    self
   }
 
   /// Add or update an open document overlay.
@@ -279,8 +307,12 @@ impl AnalysisProject {
       &source,
       &path,
       strict,
-      &self.overlays,
-      &self.module_declarations,
+      AnalysisSources {
+        overlays: &self.overlays,
+        module_declarations: &self.module_declarations,
+        module_documentation: &self.module_documentation,
+        declaration_paths: &self.declaration_paths,
+      },
       &mut dependencies,
     );
     self.record_dependencies(&path, dependencies);
@@ -458,8 +490,12 @@ pub fn analyze(
     source,
     path,
     strict,
-    &HashMap::new(),
-    &HashMap::new(),
+    AnalysisSources {
+      overlays: &HashMap::new(),
+      module_declarations: &HashMap::new(),
+      module_documentation: &HashMap::new(),
+      declaration_paths: &HashMap::new(),
+    },
     &mut HashSet::new(),
   )
 }
@@ -468,10 +504,10 @@ fn analyze_with_sources(
   source: &str,
   path: &Path,
   strict: bool,
-  overlays: &HashMap<PathBuf, String>,
-  module_declarations: &HashMap<String, String>,
+  sources: AnalysisSources<'_>,
   dependencies: &mut HashSet<PathBuf>,
 ) -> Analysis {
+  let module_declarations = sources.module_declarations;
   let mut virtual_documents = vec![AnalysisVirtualDocument {
     id: BUILTIN_LIB_ID.to_string(),
     text: BUILTIN_LIB_SOURCE.to_string(),
@@ -486,8 +522,7 @@ fn analyze_with_sources(
       resolve_external_definitions(
         session.program(),
         path,
-        overlays,
-        module_declarations,
+        sources,
         dependencies,
         &mut definitions,
         &mut virtual_documents,
@@ -511,14 +546,17 @@ fn analyze_with_sources(
             && (specifier.starts_with('.') || specifier.starts_with('/'))
         })
         .collect::<Vec<_>>();
-      let (check_result, type_hints) =
+      let (check_result, type_hints) = if declaration_dependencies_available(&declaration_sources) {
         crate::typecheck::with_strict_override(strict.then_some(true), || {
           crate::typecheck::check_and_inlay_hints_with_declarations(
             session.program(),
             &declaration_sources,
             &source_imports,
           )
-        });
+        })
+      } else {
+        (Ok(()), Vec::new())
+      };
       let diagnostics = check_result
         .err()
         .map(|error| diagnostic(error.message, error.source_location, source))
@@ -577,6 +615,20 @@ fn analysis_imports(program: &oxc_ast::ast::Program<'_>) -> Vec<String> {
         .flatten()
     })
     .collect()
+}
+
+fn declaration_dependencies_available(
+  declarations: &[crate::typecheck::VirtualDeclaration]
+) -> bool {
+  let available = declarations
+    .iter()
+    .map(|declaration| declaration.specifier.as_str())
+    .collect::<HashSet<_>>();
+  declarations.iter().all(|declaration| {
+    source_imports(&declaration.source, Path::new("virtual.d.ts"))
+      .iter()
+      .all(|specifier| available.contains(specifier.as_str()))
+  })
 }
 
 fn source_imports(
@@ -720,12 +772,49 @@ fn declaration_from_object(
     name,
     kind,
     detail,
+    documentation: preceding_jsdoc(source, start),
     start,
     end,
     selection_start,
     selection_end,
     children: std::mem::take(children),
   })
+}
+
+fn preceding_jsdoc(
+  source: &str,
+  declaration_start: usize,
+) -> Option<String> {
+  let before = source.get(..declaration_start)?;
+  let comment_start = before.rfind("/**")?;
+  let comment = before.get(comment_start..)?;
+  let comment_end = comment.find("*/")? + 2;
+  let prefix = comment[comment_end..].trim();
+  if !prefix.is_empty()
+    && !prefix.split_whitespace().all(|token| {
+      matches!(
+        token,
+        "export" | "default" | "declare" | "const" | "let" | "var"
+      )
+    })
+  {
+    return None;
+  }
+  let body = comment.get(3..comment_end.saturating_sub(2))?;
+  let documentation = body
+    .lines()
+    .map(|line| {
+      let line = line.trim_start();
+      line
+        .strip_prefix('*')
+        .and_then(|line| line.strip_prefix(' ').or(Some(line)))
+        .unwrap_or(line)
+    })
+    .collect::<Vec<_>>()
+    .join("\n")
+    .trim()
+    .to_string();
+  (!documentation.is_empty()).then_some(documentation)
 }
 
 fn node_name(value: &Value) -> Option<String> {
@@ -762,6 +851,7 @@ fn add_declaration_definitions(
         target_path: None,
         target_virtual: None,
         detail: None,
+        documentation: declaration.documentation.clone(),
         target_start: declaration.start,
         target_end: declaration.end,
         target_selection_start: declaration.selection_start,
@@ -793,6 +883,7 @@ fn definition_map(
       target_path: None,
       target_virtual: None,
       detail: None,
+      documentation: None,
       target_start,
       target_end,
       target_selection_start: target.start as usize,
@@ -809,6 +900,7 @@ fn definition_map(
             target_path: None,
             target_virtual: None,
             detail: None,
+            documentation: None,
             target_start,
             target_end,
             target_selection_start: target.start as usize,
@@ -841,6 +933,7 @@ fn definition_map(
           } else {
             target.detail.clone()
           }),
+          documentation: target.documentation.clone(),
           target_start: target.start,
           target_end: target.end,
           target_selection_start: target.selection_start,
@@ -888,6 +981,7 @@ struct DefinitionTarget {
   path: Option<PathBuf>,
   virtual_id: Option<String>,
   detail: Option<String>,
+  documentation: Option<String>,
   start: usize,
   end: usize,
   selection_start: usize,
@@ -899,12 +993,17 @@ type ExportMap = HashMap<String, Vec<DefinitionTarget>>;
 fn resolve_external_definitions(
   program: &oxc_ast::ast::Program<'_>,
   path: &Path,
-  overlays: &HashMap<PathBuf, String>,
-  module_declarations: &HashMap<String, String>,
+  sources: AnalysisSources<'_>,
   dependencies: &mut HashSet<PathBuf>,
   definitions: &mut Vec<AnalysisDefinition>,
   virtual_documents: &mut Vec<AnalysisVirtualDocument>,
 ) {
+  let AnalysisSources {
+    overlays,
+    module_declarations,
+    module_documentation,
+    declaration_paths,
+  } = sources;
   let Ok(root) = serde_json::from_str::<Value>(&program.to_pretty_estree_json(true, false)) else {
     return;
   };
@@ -1059,7 +1158,14 @@ fn resolve_external_definitions(
   }
   collect_namespace_member_links(&root, &namespaces, &mut direct_links);
   definitions.extend(direct_links);
-  resolve_declaration_module_members(&root, module_declarations, definitions, virtual_documents);
+  resolve_declaration_module_members(
+    &root,
+    module_declarations,
+    module_documentation,
+    declaration_paths,
+    definitions,
+    virtual_documents,
+  );
 }
 
 #[derive(Clone, Debug)]
@@ -1073,6 +1179,8 @@ type DeclarationTypes = HashMap<String, DeclarationType>;
 fn resolve_declaration_module_members(
   root: &Value,
   module_declarations: &HashMap<String, String>,
+  module_documentation: &HashMap<(String, String), String>,
+  declaration_paths: &HashMap<String, PathBuf>,
   definitions: &mut Vec<AnalysisDefinition>,
   virtual_documents: &mut Vec<AnalysisVirtualDocument>,
 ) {
@@ -1103,9 +1211,11 @@ fn resolve_declaration_module_members(
     };
     used_declaration_sources.push(declaration_source.as_str());
     let virtual_id = declaration_virtual_id(specifier);
-    let Some(types) = declaration_types(declaration_source, &virtual_id) else {
+    let Some(mut types) = declaration_types(declaration_source, &virtual_id) else {
       continue;
     };
+    apply_module_path(specifier, &mut types, declaration_paths);
+    apply_module_documentation(specifier, &mut types, module_documentation);
     if !virtual_documents
       .iter()
       .any(|document| document.id == virtual_id)
@@ -1310,6 +1420,33 @@ fn declaration_types(
   )
 }
 
+fn apply_module_path(
+  specifier: &str,
+  declarations: &mut DeclarationTypes,
+  paths: &HashMap<String, PathBuf>,
+) {
+  let Some(path) = paths.get(specifier) else {
+    return;
+  };
+  for declaration in declarations.values_mut() {
+    declaration.target.path = Some(path.clone());
+    declaration.target.virtual_id = None;
+  }
+}
+
+fn apply_module_documentation(
+  specifier: &str,
+  declarations: &mut DeclarationTypes,
+  documentation: &HashMap<(String, String), String>,
+) {
+  for (name, declaration) in declarations {
+    declaration.target.documentation = documentation
+      .get(&(specifier.to_string(), name.clone()))
+      .cloned()
+      .or_else(|| declaration.target.documentation.clone());
+  }
+}
+
 fn virtual_definition_target(
   virtual_id: &str,
   source: &str,
@@ -1327,6 +1464,7 @@ fn virtual_definition_target(
     path: None,
     virtual_id: Some(virtual_id.to_string()),
     detail: Some(detail),
+    documentation: declaration.documentation.clone(),
     start: declaration.start,
     end: declaration.end,
     selection_start: declaration.selection_start,
@@ -1562,6 +1700,7 @@ fn definition_link(
       .map(|path| path.to_string_lossy().into_owned()),
     target_virtual: target.virtual_id.clone(),
     detail: target.detail.clone(),
+    documentation: target.documentation.clone(),
     target_start: target.start,
     target_end: target.end,
     target_selection_start: target.selection_start,
@@ -1636,13 +1775,13 @@ fn resolve_declaration_path(
   specifier: &str,
   overlays: &HashMap<PathBuf, String>,
 ) -> Option<PathBuf> {
-  let base = importer
-    .parent()
-    .unwrap_or_else(|| Path::new("."));
-  if let Ok(path) = crate::resolver::resolve_declaration_specifier(base, specifier) {
+  if let Ok(path) = crate::resolver::resolve_declaration_specifier(importer, specifier) {
     return Some(normalize_path(&path));
   }
 
+  let base = importer
+    .parent()
+    .unwrap_or_else(|| Path::new("."));
   let candidate = normalize_path(&base.join(specifier));
   let mut candidates = vec![candidate.clone()];
   if candidate.extension().is_none() {
@@ -1793,6 +1932,7 @@ fn top_level_declarations(
           path: Some(path.to_path_buf()),
           virtual_id: None,
           detail: Some(declaration.detail.clone()),
+          documentation: declaration.documentation.clone(),
           start: declaration.start,
           end: declaration.end,
           selection_start: declaration.selection_start,
@@ -1864,6 +2004,7 @@ fn direct_exports(
               path: Some(path.to_path_buf()),
               virtual_id: None,
               detail: Some(item.detail.clone()),
+              documentation: item.documentation.clone(),
               start: item.start,
               end: item.end,
               selection_start: item.selection_start,
@@ -2056,6 +2197,38 @@ mod tests {
   }
 
   #[test]
+  fn carries_module_documentation_to_imported_definition_hovers() {
+    let declaration = r#"
+      export declare const succeed: <Value>(value: Value) => Value;
+    "#;
+    let source = r#"
+      import * as Effect from "effect/Effect";
+      Effect.succeed(42);
+    "#;
+    let mut project = AnalysisProject::with_module_declarations([(
+      "effect/Effect".to_string(),
+      declaration.to_string(),
+    )])
+    .with_module_documentation([(
+      "effect/Effect".to_string(),
+      "succeed".to_string(),
+      "Creates an Effect that always succeeds.\n@category Creating Effects".to_string(),
+    )]);
+    let result = project.analyze_document(source.to_string(), Path::new("editor.ts"), false);
+    let start = source.find("succeed").expect("succeed reference");
+    let definition = result
+      .definitions
+      .iter()
+      .find(|definition| definition.start == start)
+      .expect("succeed definition");
+
+    assert_eq!(
+      definition.documentation.as_deref(),
+      Some("Creates an Effect that always succeeds.\n@category Creating Effects")
+    );
+  }
+
+  #[test]
   fn resolves_members_from_imported_module_declarations() {
     let declaration = r#"
       import type * as Effect from "effect/Effect";
@@ -2130,9 +2303,13 @@ mod tests {
     let legacy_directory = directory
       .join("node_modules")
       .join("fixture-typings");
+    let source_package_directory = directory
+      .join("node_modules")
+      .join("fixture-source");
     std::fs::create_dir_all(&source_directory).expect("create source directory");
     std::fs::create_dir_all(types_directory.join("types")).expect("create types directory");
     std::fs::create_dir_all(&legacy_directory).expect("create legacy package directory");
+    std::fs::create_dir_all(&source_package_directory).expect("create source package directory");
     std::fs::write(
       types_directory.join("package.json"),
       r#"{
@@ -2154,7 +2331,7 @@ mod tests {
     .expect("write runtime entry");
     std::fs::write(
       types_directory.join("types/index.d.ts"),
-      "export declare const configure: (options: { handler: (context: { userId: string }) => void }) => void;",
+      "/** Configures the fixture handler. */\nexport declare const configure: (options: { handler: (context: { userId: string }) => void }) => void;",
     )
     .expect("write package declaration");
     std::fs::write(
@@ -2167,13 +2344,25 @@ mod tests {
       "export declare const create: (options: { handler: (context: { name: string }) => void }) => void;",
     )
     .expect("write legacy declaration");
+    std::fs::write(
+      source_package_directory.join("package.json"),
+      r#"{ "type": "module", "exports": "./index.ts" }"#,
+    )
+    .expect("write source package manifest");
+    std::fs::write(
+      source_package_directory.join("index.ts"),
+      "/** Returns the installed source answer. */\nexport function sourceAnswer(): number { return 42; }",
+    )
+    .expect("write source package body");
 
     let path = source_directory.join("editor.ts");
     let source = r#"
       import { configure } from "fixture-types";
       import { create } from "fixture-typings";
+      import { sourceAnswer } from "fixture-source";
       configure({ handler: (context) => context.userId });
       create({ handler: (context) => context.name });
+      sourceAnswer();
     "#;
     let mut project = AnalysisProject::default();
     let result = project.analyze_document(source.to_string(), &path, false);
@@ -2201,17 +2390,41 @@ mod tests {
     let configure_start = source
       .find("configure")
       .expect("configure import");
+    assert!(
+      result.definitions.iter().any(|definition| {
+        definition.start == configure_start
+          && definition.target_path.as_deref()
+            == Some(
+              normalize_path(&types_directory.join("types/index.d.ts"))
+                .to_string_lossy()
+                .as_ref(),
+            )
+          && definition.documentation.as_deref() == Some("Configures the fixture handler.")
+      }),
+      "{:?}",
+      result.definitions
+    );
+    let source_answer_start = source
+      .find("sourceAnswer")
+      .expect("source import");
     assert!(result.definitions.iter().any(|definition| {
-      definition.start == configure_start
-        && definition.target_virtual.as_deref() == Some("fixture-types.d.ts")
+      definition.start == source_answer_start
+        && definition.target_path.as_deref()
+          == Some(
+            normalize_path(&source_package_directory.join("index.ts"))
+              .to_string_lossy()
+              .as_ref(),
+          )
+        && definition.documentation.as_deref() == Some("Returns the installed source answer.")
+        && definition.target_end > definition.target_start
     }));
-    assert_eq!(project.declaration_cache.len(), 2);
+    assert_eq!(project.declaration_cache.len(), 3);
 
     std::fs::remove_dir_all(directory).expect("remove analysis fixture");
   }
 
   #[test]
-  fn discovers_relative_dts_entries_and_keeps_them_virtual() {
+  fn discovers_relative_dts_entries_and_targets_the_source_file() {
     let directory = temporary_directory("relative-dts");
     let source_directory = directory.join("src");
     std::fs::create_dir_all(&source_directory).expect("create source directory");
@@ -2240,10 +2453,19 @@ mod tests {
     let configure_start = source
       .find("configure")
       .expect("configure import");
-    assert!(result.definitions.iter().any(|definition| {
-      definition.start == configure_start
-        && definition.target_virtual.as_deref() == Some("__nearby.d.ts")
-    }));
+    assert!(
+      result.definitions.iter().any(|definition| {
+        definition.start == configure_start
+          && definition.target_path.as_deref()
+            == Some(
+              normalize_path(&declaration)
+                .to_string_lossy()
+                .as_ref(),
+            )
+      }),
+      "{:?}",
+      result.definitions
+    );
     assert!(
       result
         .virtual_documents

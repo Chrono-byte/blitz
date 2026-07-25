@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import { stopCompiler } from "../src/compiler-analysis.js";
 import {
@@ -159,6 +162,86 @@ await test("hovers and navigates to typed members from runtime declarations", as
   assert.match(sendDefinition?.targetUri ?? "", /blitz_websocket\.d\.ts$/u);
   assert.match(JSON.stringify(sendPipeHover), /readonly pipe/u);
   assert.match(connectPipeDefinition?.targetUri ?? "", /effect_Effect\.d\.ts$/u);
+});
+
+await test("includes bundled Effect documentation in function hovers", async () => {
+  const source = [
+    'import * as Effect from "effect/Effect";',
+    "const program = Effect.succeed(42);",
+  ].join("\n");
+  const document = TextDocument.create("file:///effect-docs.ts", "typescript", 1, source);
+  const hover = await getHover(document, { line: 1, character: 25 });
+  const value = JSON.stringify(hover);
+
+  assert.deepEqual(await getDiagnostics(document), []);
+  assert.match(value, /succeed.*Effect<Success>/u);
+  assert.match(value, /always succeeds with a given value/u);
+  assert.match(value, /Creating Effects/u);
+});
+
+await test("loads JSDoc and TypeScript bodies from installed dependencies", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blitz-lsp-node-modules-"));
+  const packageDirectory = join(directory, "node_modules", "fixture-source");
+  await Promise.all([
+    mkdir(packageDirectory, { recursive: true }),
+    mkdir(join(directory, "src"), { recursive: true }),
+  ]);
+  await writeFile(
+    join(packageDirectory, "package.json"),
+    JSON.stringify({ type: "module", exports: "./index.ts" }),
+  );
+  await writeFile(
+    join(packageDirectory, "index.ts"),
+    "/** Returns an answer from installed TypeScript source. */\nexport function installedAnswer(): number { return 42; }\n",
+  );
+  const source =
+    'import { installedAnswer } from "fixture-source";\nconst answer = installedAnswer();';
+  const uri = pathToFileURL(join(directory, "src", "editor.ts")).href;
+  const document = TextDocument.create(uri, "typescript", 1, source);
+  const position = { line: 1, character: 20 };
+
+  const hover = await getHover(document, position);
+  const definition = (await getDefinition(document, position))?.[0];
+
+  assert.deepEqual(await getDiagnostics(document), []);
+  assert.match(JSON.stringify(hover), /installedAnswer.*number/u);
+  assert.match(JSON.stringify(hover), /Returns an answer from installed TypeScript source/u);
+  assert.match(definition?.targetUri ?? "", /node_modules\/fixture-source\/index\.ts$/u);
+  assert.equal(definition?.targetSelectionRange.start.line, 1);
+
+  forgetDocument(uri);
+  await rm(directory, { recursive: true, force: true });
+});
+
+await test("uses TypeScript 7-style config-relative paths without baseUrl", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "blitz-lsp-tsconfig-"));
+  await mkdir(join(directory, "src", "lib"), { recursive: true });
+  await writeFile(
+    join(directory, "tsconfig.base.json"),
+    JSON.stringify({ compilerOptions: { paths: { "@lib/*": ["./src/lib/*"] } } }),
+  );
+  await writeFile(
+    join(directory, "tsconfig.json"),
+    JSON.stringify({ extends: "./tsconfig.base.json" }),
+  );
+  await writeFile(
+    join(directory, "src", "lib", "answer.ts"),
+    "/** The mapped project answer. */\nexport const mappedAnswer: number = 42;\n",
+  );
+  const source = 'import { mappedAnswer } from "@lib/answer";\nmappedAnswer;';
+  const uri = pathToFileURL(join(directory, "src", "editor.ts")).href;
+  const document = TextDocument.create(uri, "typescript", 1, source);
+  const position = { line: 1, character: 5 };
+
+  const hover = await getHover(document, position);
+  const definition = (await getDefinition(document, position))?.[0];
+
+  assert.deepEqual(await getDiagnostics(document), []);
+  assert.match(JSON.stringify(hover), /The mapped project answer/u);
+  assert.match(definition?.targetUri ?? "", /src\/lib\/answer\.ts$/u);
+
+  forgetDocument(uri);
+  await rm(directory, { recursive: true, force: true });
 });
 
 await test("uses unsaved dependency overlays and invalidates importer analysis", async () => {

@@ -8,10 +8,18 @@ overlays and dependency/reverse-dependency edges, invalidating affected
 analyses when an imported document changes or closes. Runtime and Effect
 declaration modules are loaded into the project so explicitly typed interface
 members, such as `WebSocket.Connection.send`, support hover and definition
-navigation. Effect-returning calls also retain enough declaration provenance
+navigation. A generated documentation index ships upstream Effect JSDoc—including
+examples, usage guidance, categories, and version metadata—separately from the
+typechecker declarations and renders it with the inferred signature on hover.
+Effect-returning calls also retain enough declaration provenance
 for `connect(...).pipe` and `send(...).pipe` navigation. The project discovers
-filesystem package declarations through package `types`, `typings`, and
-`exports` metadata as well as relative declaration files.
+filesystem package declarations through package `types`, `typings`,
+`typesVersions`, and `exports` metadata as well as relative declaration files.
+Installed TypeScript entry points retain their real `node_modules` source path
+and body for navigation, and their JSDoc is included in hover output. Resolution
+discovers the nearest `tsconfig.json`, follows inherited `paths` mappings, and
+treats path targets as config-relative without requiring the TypeScript 6
+`baseUrl` compatibility option.
 
 Contextual object-literal typing instantiates generics, ranks compatible
 overloads, and flows selected handler signatures into unannotated callback

@@ -99,12 +99,16 @@ export async function getHover(document: TextDocument, position: Position): Prom
         );
   const runtimeGlobal = analysis.runtime_globals.find((candidate) => candidate.name === word.text);
   const detail = definition?.detail ?? declaration?.detail ?? runtimeGlobal?.detail;
-  return detail === undefined
-    ? null
-    : {
-        contents: { kind: MarkupKind.Markdown, value: `\`\`\`typescript\n${detail}\n\`\`\`` },
-        range: word.range,
-      };
+  const documentation = definition?.documentation ?? declaration?.documentation;
+  if (detail === undefined && documentation === undefined) return null;
+  const sections = [
+    detail === undefined ? undefined : `\`\`\`typescript\n${detail}\n\`\`\``,
+    documentation,
+  ].filter((section): section is string => section !== undefined);
+  return {
+    contents: { kind: MarkupKind.Markdown, value: sections.join("\n\n---\n\n") },
+    range: word.range,
+  };
 }
 
 export async function getDefinition(

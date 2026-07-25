@@ -678,17 +678,26 @@ impl TypeContext {
     &mut self,
     declarations: &[VirtualDeclaration],
   ) -> Result<(), TypeCheckerError> {
-    let source_type =
+    let declaration_type =
       crate::parser::Parser::source_type_for_path(std::path::Path::new("virtual.d.ts"), false);
+    let source_type =
+      crate::parser::Parser::source_type_for_path(std::path::Path::new("virtual.ts"), true);
     let mut parsed = Vec::with_capacity(declarations.len());
     for declaration in declarations {
-      let session = crate::parser::Parser::parse_source_with_type(&declaration.source, source_type)
-        .map_err(|error| {
-          TypeCheckerError::from(format!(
-            "Failed to parse declaration for '{}': {}",
-            declaration.specifier, error
-          ))
-        })?;
+      // Preserve ambient declaration semantics first. Installed packages may
+      // expose TypeScript implementation source directly, so retry as an
+      // ordinary TS module only when ambient parsing rejects a body.
+      let session =
+        crate::parser::Parser::parse_source_with_type(&declaration.source, declaration_type)
+          .or_else(|_| {
+            crate::parser::Parser::parse_source_with_type(&declaration.source, source_type)
+          })
+          .map_err(|error| {
+            TypeCheckerError::from(format!(
+              "Failed to parse declaration for '{}': {}",
+              declaration.specifier, error
+            ))
+          })?;
       parsed.push(ParsedDeclaration {
         specifier: declaration.specifier.clone(),
         session,
@@ -1537,6 +1546,10 @@ impl TypeContext {
               .collect(),
           );
         }
+        let resolving_marker = format!("\0resolving:{name}");
+        if environment.contains_key(&resolving_marker) {
+          return Type::Unknown;
+        }
         let definition = self
           .namespace_types
           .get(name)
@@ -1546,6 +1559,7 @@ impl TypeContext {
           return Type::Unknown;
         };
         let mut definition_environment = environment.clone();
+        definition_environment.insert(resolving_marker, Type::Unknown);
         for (index, parameter) in definition.parameters.iter().enumerate() {
           let argument = arguments
             .get(index)
