@@ -104,4 +104,4 @@ trivial_numeric_casts = "warn"
 unused_extern_crates = "warn"
 unused_import_braces = "warn"
 unused_qualifications = "warn"
-let_underscore = "warn"
+let_underscore = { level = "warn", priority = -1 }
