@@ -4219,9 +4219,8 @@ mod tests {
 
   #[test]
   fn generated_bytecode_virtual_modules_are_loaded_and_run() {
-    let session =
-      crate::parser::Parser::parse_source(crate::js!("globalThis.bytecodeResult = 7;"))
-        .expect("bytecode source parses");
+    let session = crate::parser::Parser::parse_source(crate::js!("globalThis.bytecodeResult = 7;"))
+      .expect("bytecode source parses");
     let chunk = crate::compiler::compile(session.program(), session.source()).expect("compiles");
     let mut loader = ModuleLoader::new();
     loader

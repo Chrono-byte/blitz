@@ -1,0 +1,24 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CI: "true"
+
+jobs:
+  workspace:
+    name: Rust workspace
+    runs-on: ci
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: https://data.forgejo.org/actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Install Rust toolchain
+        uses: https://github.com/dtolnay/rust-toolchain@1.97.0
+
+      - name: Build Rust workspace
+        run: cargo build --workspace --locked
