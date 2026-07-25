@@ -2,52 +2,57 @@
 //!
 //! Conformance notes and known deviations from ECMA-262
 //!
-//! This ModuleLoader implements a practical subset of ECMAScript module
-//! semantics suitable for running test harnesses and small module graphs, but
-//! it intentionally simplifies or omits some of the spec's details. The most
-//! important divergences are documented here so callers and reviewers can make
-//! informed decisions about correctness and prioritise future work.
+//! `ModuleLoader` supports source, virtual, and prelinked module graphs. It
+//! preserves live bindings across direct imports, indirect exports, star
+//! exports, namespace exports, and cycles, including ambiguous-star detection.
+//! The remaining differences from ECMA-262 are primarily in the representation
+//! of namespace objects, host scheduling for dynamic import, and the algorithms
+//! used to link and evaluate source graphs.
 //!
 //! 1) Module namespace objects
 //! - Current behaviour: namespace imports (`import * as ns from 'mod'`) share
 //!   one non-extensible object whose sorted accessor properties read live
-//!   export slots and expose the `Module` toString tag.
+//!   export slots. Export properties are enumerable and non-configurable, and
+//!   the object exposes the `Module` toString tag.
 //! - Spec behaviour: module namespace objects are exotic objects with
-//!   specialized internal methods in addition to their live, non-configurable
-//!   exports.
-//! - Impact: live values and namespace identity are preserved, but edge cases
-//!   involving exotic internal methods may still differ from ECMA-262.
+//!   specialized `[[GetOwnProperty]]`, `[[DefineOwnProperty]]`, `[[Set]]`,
+//!   `[[Delete]]`, and `[[OwnPropertyKeys]]` behavior.
+//! - Impact: live values, sorted keys, descriptors, and namespace identity are
+//!   preserved, but operations that depend on those exotic internal methods
+//!   can still differ from ECMA-262.
 //!
 //! 2) Dynamic import timing and async behaviour
-//! - Current behaviour: dynamic import resolution/evaluation is performed
-//!   synchronously in some paths and the returned `Promise` may be resolved
-//!   immediately rather than being resolved via a host job/microtask.
-//! - Spec behaviour: `import()` returns a Promise that is resolved/rejected
-//!   asynchronously via the host job queue; module linking/evaluation must be
-//!   performed according to the module linking steps and errors surface as
-//!   rejected promises.
-//! - Impact: timing differences are observable in Promise ordering and
-//!   microtask sequencing tests.
+//! - Current behaviour: `import()` synchronously constructs, instantiates, and
+//!   evaluates the requested graph in a child VM, then queues fulfillment or
+//!   rejection on the VM's dynamic-import job queue. Import options are
+//!   evaluated but otherwise ignored.
+//! - Spec behaviour: the host performs loading, linking, and evaluation through
+//!   the dynamic-import host hooks and resolves or rejects the returned Promise
+//!   through the prescribed job sequencing.
+//! - Impact: the Promise settles asynchronously, but module work and its side
+//!   effects happen before the queued settlement job. Host-hook timing, import
+//!   attributes, and some Promise ordering remain observably different.
 //!
 //! 3) Linking/instantiation simplifications
-//! - Current behaviour: instantiate_all uses a simplified ESTree-based scan
-//!   to allocate export slots and wire imports. Re-exports (export *),
-//!   indirect exports, and some symbol/export resolution edge cases are not
-//!   fully implemented.
-//! - Spec behaviour: module linking includes a precise export resolution
-//!   algorithm that handles indirect exports, re-exports, and cycles.
-//! - Impact: complex module graphs and advanced re-export patterns may not
-//!   behave as the spec describes.
+//! - Current behaviour: source records are linked by scanning serialized ESTree
+//!   to allocate slots and collect import/export metadata. `resolve_export`
+//!   handles direct, indirect, and star exports, cycles, shared origin slots,
+//!   and ambiguous star exports. Evaluation uses a synchronous DFS post-order
+//!   with basic cycle tolerance.
+//! - Spec behaviour: cyclic module records use the specification's linking and
+//!   evaluation state machines, including their precise status and error
+//!   propagation rules.
+//! - Impact: the common static-module cases above are supported, but the
+//!   implementation is not yet a complete Cyclic Module Record algorithm and
+//!   source linking still depends on an ESTree serialization pass.
 //!
 //! Recommendations:
-//! - Implement module namespace objects backed by Rc slots and mark
-//!   properties non-configurable/non-writable; ensure the object is
-//!   non-extensible.
-//! - Update dynamic import to schedule resolution via microtasks/jobs and
-//!   follow the module linking steps exactly (Construct, Instantiate,
-//!   Evaluate) with proper error propagation.
-//! - Replace ESTree-copy wiring with a full export resolution pass that
-//!   handles indirect and export-all semantics.
+//! - Represent module namespaces as a dedicated exotic object kind while
+//!   retaining the existing live export slots and shared identity.
+//! - Move dynamic-import loading and evaluation behind the host job boundary
+//!   and implement import attributes and host-hook error propagation.
+//! - Replace serialized-ESTree linking and DFS evaluation with spec-oriented
+//!   module-record linking and evaluation state machines.
 use crate::bytecode::Chunk;
 use crate::compiler::ModuleContext;
 use crate::errors::BundlerError;

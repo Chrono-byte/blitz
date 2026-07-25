@@ -10,12 +10,12 @@
 //! adjusted to follow the spec precisely.
 //!
 //! Known divergences (summary):
-//! - Module namespace objects are created as plain objects with copied values
-//!   rather than the spec-defined exotic namespace objects backed by live
-//!   export slots. See `ModuleLoader` in `crate::module` for details.
-//! - Dynamic `import()` is implemented synchronously in places and does not
-//!   always follow Promise job/microtask timing; import `options` are
-//!   currently ignored in some paths.
+//! - Module namespace objects are ordinary non-extensible objects with sorted
+//!   accessors backed by live export slots, rather than the spec-defined exotic
+//!   namespace object kind. See `ModuleLoader` in `crate::module` for details.
+//! - Dynamic `import()` performs graph loading and evaluation synchronously,
+//!   then queues Promise settlement on the dynamic-import job queue. Import
+//!   options are evaluated but otherwise ignored.
 //! - Promise/thenable resolution is implemented with direct calls to `then`
 //!   helpers which can resolve synchronously; the spec requires careful job
 //!   scheduling (PromiseResolveThenableJob) to match observed ordering. Concretely
