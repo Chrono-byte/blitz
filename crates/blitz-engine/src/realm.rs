@@ -14,16 +14,6 @@
 //!   [[TemplateMap]]       - (not yet implemented)
 //!   [[HostDefined]]       - (not yet implemented)
 //! ```
-//!
-//! # Why this matters
-//!
-//! Without a Realm, all built-in constructors live in a flat globals map.
-//! That means `instanceof`, cross-realm object identity, and per-realm
-//! constructor semantics are subtly wrong. The Realm provides:
-//!
-//! - Per-realm constructor identity (`Array !== otherRealm.Array`)
-//! - Canonical prototype objects for `instanceof`
-//! - Object -> realm association (future)
 
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 use std::cell::RefCell;
