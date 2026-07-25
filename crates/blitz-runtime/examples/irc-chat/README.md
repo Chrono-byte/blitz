@@ -1,4 +1,8 @@
-# Blitz IRC chat demo
+# Legacy Blitz IRC chat demo
+
+This example uses the legacy `Blitz.*` compatibility globals. The default CLI
+does not install them; use the current Effect-native `irc-chat-v2` example for
+the supported runtime path, or provide explicit compatibility host options.
 
 This demo runs one Blitz WebSocket server and two terminal clients. Incoming
 messages are printed through Rustyline's external-printer path, so they appear

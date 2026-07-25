@@ -15,8 +15,11 @@ this file wins.
 
 ## Register machine
 
-Every VM call frame owns 16 value registers. Registers are not preserved
-across frames, so there is no caller-saved/callee-saved split.
+Every active RISC execution state owns 16 value registers. Registers are not
+preserved across frames, so there is no caller-saved/callee-saved split. The
+interpreter also retains frame-local operand and lexical storage for legacy
+runtime paths; those storage fields are distinct from RISC registers and spill
+slots.
 
 - `r0`: callee on call entry and result on return
 - `r1`: receiver (`this`)
@@ -44,10 +47,11 @@ must not depend on whether a value resides in a register or slot.
 ## Compiler pipeline
 
 The frontend builds explicit RISC values, labels, branches, and operand
-windows for the root and every nested function. Finalization allocates
-temporary values to `r8..r15` or spill slots, patches control-flow and side
-metadata, and emits verified RISC v2 words. No stack-shaped compiler IR or
-lowering pass exists. Generators preserve an explicit register/spill
+windows for the root and every nested function. The compiler still uses a
+compiler-only virtual value stack for a small set of lowering operations; it is
+eliminated before serialization. Finalization allocates temporary values to
+`r8..r15` or spill slots, patches control-flow and side metadata, and emits
+verified RISC v2 words. Generators preserve an explicit register/spill
 continuation across `yield`; exceptions, async functions, direct eval, and
 ordinary calls all use the same RISC executor.
 

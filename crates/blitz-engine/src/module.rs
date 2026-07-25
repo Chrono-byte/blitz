@@ -17,9 +17,9 @@
 //! - Spec behaviour: module namespace objects are exotic objects with
 //!   specialized `[[GetOwnProperty]]`, `[[DefineOwnProperty]]`, `[[Set]]`,
 //!   `[[Delete]]`, and `[[OwnPropertyKeys]]` behavior.
-//! - Impact: live values, sorted keys, descriptors, and namespace identity are
-//!   preserved, but operations that depend on those exotic internal methods
-//!   can still differ from ECMA-262.
+//! - Impact: live values, sorted keys, and namespace identity are preserved,
+//!   while descriptor representation and operations that depend on the exotic
+//!   internal methods can still differ from ECMA-262.
 //!
 //! 2) Dynamic import timing and async behaviour
 //! - Current behaviour: `import()` synchronously constructs, instantiates, and

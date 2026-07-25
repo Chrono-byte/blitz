@@ -9,11 +9,11 @@ tooling, and compatibility APIs.
 
 ```text
 `blitz` CLI (`crates/blitz-cli`)
-  -> toolchain and package management
+  -> command routing, execution, checking, and editor analysis
   -> host capability layer (`crates/blitz-runtime/src/host`)
     -> builtin modules and Web APIs
     -> async event loop and I/O drivers
-    -> package and module resolution
+    -> runtime module installation and host policy
   -> ECMAScript engine (`crates/blitz-engine`)
     -> parser and compiler
     -> VM, values, realms, and garbage collector

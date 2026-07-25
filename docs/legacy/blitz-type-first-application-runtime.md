@@ -11,7 +11,9 @@ Build a Blitz-native application framework that combines:
 
 The first deliverable is an executable vertical slice: bundled Effect, strict typechecking, `App`, unary and subscription RPC, browser and Blitz clients, exhaustive matching, and a unified runtime event loop.
 
-The concrete download, virtual-module installation, scheduler prerequisite, and scoped `App.serve` execution plan is tracked in [`docs/EFFECT_APP_SERVE_IMPLEMENTATION_PLAN.md`](docs/EFFECT_APP_SERVE_IMPLEMENTATION_PLAN.md).
+The historical download, virtual-module installation, scheduler prerequisite,
+and scoped `App.serve` execution plan is retained in
+[`EFFECT_APP_SERVE_IMPLEMENTATION_PLAN.md`](EFFECT_APP_SERVE_IMPLEMENTATION_PLAN.md).
 
 ## Public API
 

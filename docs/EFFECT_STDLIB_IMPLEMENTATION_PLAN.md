@@ -33,9 +33,10 @@ Already present:
 - The engine now supports validated, parser-free prelinked module records,
   canonical live-binding IDs, reserved module indices, and mixed
   source/prelinked imports.
-- `effect`, selected `effect/*` modules, `blitz:match`, `blitz:app`, and the
-  private app adapter are installed from one committed parser-free runtime
-  graph by `blitz-runtime`.
+- `effect`, selected `effect/*` modules, `blitz:match`, `blitz:app`,
+  `blitz:fs`, `blitz:http`, `blitz:runtime`, `blitz:terminal`,
+  `blitz:websocket`, and private adapters are installed from one committed
+  parser-free runtime graph by `blitz-runtime`.
 - Effect and stdlib inputs plus the final runtime graph have deterministic
   generation and verification tools.
 - Curated declarations exist for Effect, Context, Layer, Stream, Scope,
@@ -47,30 +48,24 @@ Already present:
 
 Important gaps:
 
-- Full graph prebundling is complete: the versioned wrapper, graph codec,
-  generator, committed artifact, pinned manifest/ABI validation, public/private
-  resolution, atomic runtime cutover, and explicit source-pipeline counters are
-  implemented.
 - The curated Effect API is too small for service access, asynchronous
   registration, robust interruption, full scoped composition, and Stream
   adapters.
-- `TimerScheduler` and Effect scheduler wakeups are not yet integrated into the
-  main `RuntimeHandle` event loop.
 - There is no generic host-operation registry that can settle an Effect on the
   VM thread and discard cancellation races safely.
 - Existing public host APIs are globals and callback/Promise oriented.
 - `blitz:app` uses the versioned `__blitz_host_v1` bridge, but its host thunks
   still block through `Vm::block_on` inside `Effect.sync`; it is not a model for
   the cancellable asynchronous stdlib bridge.
-- No `blitz:runtime`, `blitz:path`, or `blitz:fs` virtual modules exist.
+- `blitz:path` is not yet part of the committed public runtime graph; the other
+  runtime modules listed above are installed and remain under API expansion.
 - The TypeScript checker still supports only part of upstream Effect's type
   language, so every declaration expansion needs focused checker fixtures.
 
-The older
-[`EFFECT_APP_SERVE_IMPLEMENTATION_PLAN.md`](EFFECT_APP_SERVE_IMPLEMENTATION_PLAN.md)
-records the application-serving vertical slice. Where its starting-state notes
-conflict with the repository, this plan and the current code take precedence.
-Its single-graph and scoped-resource decisions remain valid.
+The historical application-serving vertical slice is retained in
+[`legacy/EFFECT_APP_SERVE_IMPLEMENTATION_PLAN.md`](legacy/EFFECT_APP_SERVE_IMPLEMENTATION_PLAN.md).
+Its single-graph and scoped-resource decisions remain useful, but its starting
+state is not current.
 
 ## Non-negotiable architecture
 

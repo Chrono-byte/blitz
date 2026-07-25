@@ -10,16 +10,15 @@ Key layers
   builtins, raw engine executable, Test262 runner, and benchmarks.
 - `crates/blitz-runtime/` — reusable host capabilities, application primitives,
   RPC routing, and application examples.
-- `crates/blitz-cli/` — the `blitz` executable and home for the toolchain,
-  project commands, and package management.
+- `crates/blitz-cli/` — the `blitz` executable and its current `run`, `check`,
+  and `analyze` commands.
 - `docs/` and `test262/` — design material and the vendored conformance suite.
 
 Executables
 -----------
 
-- `blitz` is the application runtime. It installs host APIs such as `console`,
-  `process`, and `Blitz.serve` and is the executable intended for JavaScript
-  and TypeScript
+- `blitz` is the application runtime. It installs host APIs such as `console`
+  and `process` and is the executable intended for JavaScript and TypeScript
   applications.
 - `blitz-engine` is a host-neutral engine harness. It exposes ECMAScript
   intrinsics and `globalThis`, but deliberately omits OS and runtime APIs.
@@ -37,61 +36,30 @@ cargo run -p blitz-cli -- check --strict
 cargo run -p blitz-cli -- run --check path/to/application.ts
 
 # Emit compiler-owned JSON for editor tooling (source is read from stdin).
-printf "const answer: number = 42;" | cargo run -p blitz-cli -- analyze --path editor.ts -
+Write-Output "const answer: number = 42;" | cargo run -p blitz-cli -- analyze --path editor.ts -
 
 # Exercise the raw engine without host capabilities.
 cargo run -p blitz-engine --bin blitz-engine -- path/to/engine-test.js
 ```
 
-The Deno-style HTTP server listens on `127.0.0.1:8000` by default. Pass an
-options object or set `BLITZ_HOST`/`BLITZ_PORT` to override it. The new
-immutable Rust application/RPC model is documented in
+The default runtime exposes the Effect-native `blitz:*` modules described in
+[`EFFECT_STDLIB_DESIGN.md`](docs/EFFECT_STDLIB_DESIGN.md). The immutable Rust
+application/RPC model is documented in
 [`BLITZ_RUNTIME_RPC_SLICE.md`](docs/BLITZ_RUNTIME_RPC_SLICE.md); it preserves
-`Blitz.serve` as the low-level compatibility API. The target Effect-native
-host standard library and its migration rules are specified in
+the low-level compatibility API as an explicit legacy option. The target
+Effect-native host standard library and its migration rules are specified in
 [`EFFECT_STDLIB_DESIGN.md`](docs/EFFECT_STDLIB_DESIGN.md), with phased work
 tracked in
 [`EFFECT_STDLIB_IMPLEMENTATION_PLAN.md`](docs/EFFECT_STDLIB_IMPLEMENTATION_PLAN.md).
 The corrected contracts and complete plans for the remaining runtime APIs are
 in [`EFFECT_RUNTIME_API_EXPANSION_PLAN.md`](docs/EFFECT_RUNTIME_API_EXPANSION_PLAN.md).
-The runnable examples below use the current legacy `Blitz.*` compatibility API;
-the expanded Effect-native `blitz:*` modules are staged work and are not yet
-available as the complete surface described by those plans.
+The old `Blitz.*` HTTP/WebSocket example remains available in the
+[legacy IRC example](crates/blitz-runtime/examples/irc-chat/README.md) and is
+not installed by the default CLI runtime.
 
-```js
-function callbackFunc(request, info) {
-  return new Response(
-    `Hello from ${request.url} via ${info.remoteAddr.transport}`,
-  );
-}
-
-Blitz.serve({ hostname: "127.0.0.1", port: 8000 }, callbackFunc);
-```
-
-Upgrade a request on the same listener with the Deno-style WebSocket flow:
-
-```js
-Blitz.serve((request) => {
-  if (request.headers.get("upgrade") !== "websocket") {
-    return new Response("WebSocket upgrade required", { status: 426 });
-  }
-
-  const { socket, response } = Blitz.upgradeWebSocket(request);
-  socket.addEventListener("open", () => socket.send("connected"));
-  socket.onmessage = (event) => socket.send(`echo:${event.data}`);
-  return response;
-});
-```
-
-Server requests expose `text()` and `json()`. `Headers` supports `get`, `has`,
-`set`, `append`, `delete`, and `forEach`; `Response` accepts status, status text,
-and headers and exposes `ok`, `text()`, and `json()`.
-
-The [IRC chat example](crates/blitz-runtime/examples/irc-chat/README.md) runs a
-server and two Blitz terminal clients. Interactive applications can use
-`Blitz.stdin.onLine`, `setPrompt`, and `onClose` with
-`Blitz.stdout.writeLine`; incoming output is rendered above the active
-Rustyline prompt without discarding buffered input.
+The [Effect-native IRC chat example](crates/blitz-runtime/examples/irc-chat-v2/README.md)
+runs a server and two Blitz terminal clients. The legacy compatibility example
+documents the older `Blitz.stdin`/`Blitz.stdout` terminal APIs.
 
 `blitz check` accepts explicit source files or recursively checks TypeScript
 files in the current directory. Dependency, build, and declaration trees are
