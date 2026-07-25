@@ -28,17 +28,12 @@ use oxc_span::SourceType;
 use serde_json::Value;
 use std::path::Path;
 
-/// Parser facade. Historically this crate had a token-based parser that took
-/// tokens produced by `Lexer`. We now prefer parsing source text directly
-/// with Oxc. To ease migration, we keep a `new_from_source` constructor and a
-/// `parse` method that operates on source text.
+/// Parser facade around Oxc's source-text parser.
 ///
-/// NOTE: Calling `Parser::new(tokens)` (the legacy token-based constructor)
-/// then `parse()` is no longer supported. Use `Parser::new_from_source(...)`
-/// or the convenience `parse_source(...)` function instead.
+/// Use `new_from_source` with `parse`, or use the convenience `parse_source`
+/// and `parse_source_with_type` functions.
 pub struct Parser {
-  /// If present, source text to parse. (We do not currently support the old
-  /// token-based entry path.)
+  /// Source text retained until `parse` consumes it.
   source: Option<String>,
 }
 
@@ -113,10 +108,7 @@ impl Parser {
     source_type: SourceType,
   ) -> Result<ParserSession, ParserError> {
     let _p = Parser::new_from_source(source);
-    // Use a small wrapper around `parse()` that selects the oxc SourceType
-    // based on the caller's guidance. This keeps the public `parse()` logic
-    // centralized while allowing callers who know the file extension to
-    // request JS parsing.
+    // Build a ParserSession with the source type requested by the caller.
     ParserSession::try_new(Allocator::default(), source.to_string(), |alloc, source| {
       let ret = OxcParser::new(alloc, source, source_type)
         .with_options(ParseOptions {
@@ -141,8 +133,7 @@ impl Parser {
   /// Parse and return a `ParserSession` owning allocator+source and
   /// exposing an `oxc_ast::ast::Program` that borrows them.
   ///
-  /// If `self.source` is None, returns an error explaining that the token
-  /// based constructor is no longer supported.
+  /// The source is consumed, so a parser instance can be parsed only once.
   ///
   /// # Errors
   /// Returns an error if the parse fails.

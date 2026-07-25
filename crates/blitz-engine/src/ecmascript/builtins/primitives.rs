@@ -1,8 +1,4 @@
-//! Primitive wrapper builtins currently migrated from runtime_utils.
-//!
-//! Number
-//! BigInt
-//! Boolean
+//! Primitive wrapper builtins for Number and BigInt.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -12,7 +8,7 @@ use num_bigint::BigInt as BigIntValue;
 use crate::runtime_utils::{builtin_object, js_number_to_string, non_enum_data, strict_equal};
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
-/// Fundamental primitive wrapper builtins currently migrated from runtime_utils.
+/// Installs the Number and BigInt constructors and their prototype methods.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn install_bigint_and_number_builtins(
   globals: &mut ObjectData,

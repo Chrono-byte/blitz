@@ -76,8 +76,8 @@ pub struct Compiler {
   /// Current nested `with` depth.
   pub with_depth: usize,
   /// Stack of continue patch sites for nested loops. Each entry holds a list
-  /// of code offsets (index of the first placeholder byte) that must be
-  /// patched to jump to the loop's continue target when the loop is closed.
+  /// of instruction positions whose branch payloads must be patched to jump
+  /// to the loop's continue target when the loop is closed.
   pub continue_patches: Vec<Vec<usize>>,
   /// Stack of break patch sites for nested loops. Each entry holds a list of
   /// jump operands that must be patched to the loop exit target.
@@ -95,7 +95,7 @@ pub struct Compiler {
   /// Monotonic inline-cache slot allocator for the current chunk.
   pub next_ic_slot: u16,
   /// Number of operand bytes already emitted into the last instruction's payload.
-  /// This lets the old emit()/emit_byte() caller pattern pack subsequent operand
+  /// This lets the emit()/emit_byte() caller pattern pack subsequent operand
   /// bytes into the single 24-bit payload of the instruction word.
   pub pending_operand_bytes: usize,
   /// Whether `new.target` is valid in the current compilation context.
@@ -246,9 +246,9 @@ impl Compiler {
     let is_patchable_jump_at =
       |idx: usize| op_at(idx).is_some_and(|op| op.is_jump() || matches!(op, Op::PushHandler));
 
-    // Legacy call-sites capture `code.len()` immediately after emitting the
-    // jump opcode, which points one instruction past the jump in fixed-width
-    // mode. Prefer that interpretation first.
+    // Some call sites capture the instruction position immediately after
+    // emitting the jump opcode, which points one instruction past the jump
+    // while its fixed-width word is still pending. Prefer that interpretation.
     if offset > 0 && is_patchable_jump_at(offset - 1) {
       offset - 1
     } else {
@@ -330,25 +330,23 @@ impl Compiler {
     self.pending_operand_bytes = 0;
   }
 
-  /// Emit a single operand byte packed into the previous instruction's 24-bit payload.
+  /// Emit a single operand byte packed into the pending instruction's 24-bit payload.
   ///
-  /// This is the preferred path for variable-width instructions where the opcode
-  /// is a fixed value and operands are packed into the remaining 24 bits of the
-  /// previous instruction word.
+  /// This appends an operand to a fixed-width instruction's pending 24-bit
+  /// payload. The opcode is emitted first and subsequent operands occupy the
+  /// payload bytes of that same instruction word.
   pub(crate) fn emit_byte(
     &mut self,
     byte: u8,
     line: u32,
   ) {
-    // Pack a single operand byte into the previous instruction's 24-bit payload
+    // Pack a single operand byte into the pending instruction's 24-bit payload
     // using little-endian order: first emitted byte occupies bits 8..15, next 16..23, etc.
     if self.risc.is_empty() {
       return;
     }
     if self.pending_operand_bytes >= 3 {
-      // Defensive: avoid corrupting the instruction payload. In debug
-      // builds we assert so developers notice the incorrect emission pattern;
-      // in release builds we silently return to avoid panicking in production.
+      // Avoid writing beyond the instruction payload.
       debug_assert!(
         self.pending_operand_bytes < 3,
         "too many operand bytes for instruction payload"
@@ -372,12 +370,8 @@ impl Compiler {
     // as a single instruction word. This avoids emitting multiple operand
     // bytes separately which can desynchronize instruction indices.
     let payload = value as u32 & 0xFFFF;
-    // The caller must have emitted the opcode previously; to preserve
-    // existing call-sites that expect emit_u16 to follow an emit(Op),
-    // we'll patch the previously emitted zero-payload instruction word
-    // rather than calling write_instr again. If there is no previous
-    // instruction, fall back to writing a full instruction with a
-    // zero opcode (shouldn't happen in normal compilation).
+    // The caller must have emitted the opcode previously. Update that
+    // pending instruction rather than emitting another instruction word.
     self.risc.set_last_payload(payload, line);
     self.pending_operand_bytes = 0;
   }
@@ -1030,9 +1024,10 @@ impl Compiler {
     f()
   }
 
-  /// Attach a home object to the method closure currently on top of the stack.
+  /// Attach a home object to the method closure currently on top of the
+  /// compiler's virtual value stack.
   ///
-  /// The stack shape must be `[... home_object, key, closure]` when this is
+  /// The virtual value stack shape must be `[... home_object, key, closure]` when this is
   /// called. The helper preserves that shape so the caller can immediately
   /// emit the property installation that follows.
   pub(crate) fn emit_set_method_home_object(

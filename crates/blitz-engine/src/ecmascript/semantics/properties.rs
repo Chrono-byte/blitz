@@ -132,7 +132,7 @@ pub(crate) fn require_object_coercible(
   }
 }
 
-/// Extracts the value field from a property descriptor.
+/// Converts an internal property descriptor into an ordinary object descriptor.
 pub(crate) fn descriptor_value_from_descriptor(
   object_proto: &Rc<RefCell<ObjectData>>,
   desc: &PropertyDescriptor,

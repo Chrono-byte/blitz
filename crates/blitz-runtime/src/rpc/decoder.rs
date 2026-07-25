@@ -13,8 +13,8 @@ use super::json::JsonValue;
 /// A runtime validator for an RPC input.
 ///
 /// Decoders deliberately receive JSON values rather than engine values. This
-/// keeps validation deterministic and makes the boundary usable before the
-/// engine-side Effect integration is wired in.
+/// keeps validation deterministic and lets the Rust boundary remain usable
+/// independently of the JavaScript Effect integration.
 pub trait Decoder: Send + Sync {
   /// Validate and, optionally, normalize an input value.
   fn decode(

@@ -1,8 +1,8 @@
 //! ECMAScript Realm implementation.
 //!
-//! A Realm holds the set of intrinsic objects and the global environment for
-//! a distinct ECMAScript execution context. Every VM operates within exactly
-//! one Realm.
+//! A Realm holds the set of intrinsic objects and the global object associated
+//! with a distinct ECMAScript execution context. Every VM operates within
+//! exactly one Realm; the VM owns the active environment records.
 //!
 //! # Spec reference
 //!
@@ -10,7 +10,7 @@
 //! Realm Record:
 //!   [[Intrinsics]]        - canonical built-in objects
 //!   [[GlobalObject]]      - the global object
-//!   [[GlobalEnv]]         - the global environment record
+//!   [[GlobalEnv]]         - owned by the VM's environment state
 //!   [[TemplateMap]]       - (not yet implemented)
 //!   [[HostDefined]]       - (not yet implemented)
 //! ```
@@ -22,9 +22,10 @@ use std::rc::Rc;
 
 /// Table of well-known intrinsic objects for a Realm.
 ///
-/// Each field holds the *canonical* instance of a built-in constructor or
-/// prototype within this realm. These are used for instanceof checks,
-/// prototype chain validation, and per-realm identity.
+/// When populated, the constructor and prototype fields hold the *canonical*
+/// instance for this realm. These are used for `instanceof` checks, prototype
+/// chain validation, and per-realm identity; helper fields store VM-internal
+/// builtins and typed-array constructor variants.
 #[derive(Clone, Debug, Default)]
 pub struct Intrinsics {
   // --- Constructors (callable objects) ---
@@ -239,7 +240,7 @@ impl Realm {
       .unwrap_or(Value::Null)
   }
 
-  /// Borrow the canonical `GeneratorFunction.prototype` for this realm.
+  /// Borrow `GeneratorFunction.prototype`, falling back to `Function.prototype`.
   pub fn generator_function_prototype_ref(&self) -> Option<&Value> {
     self
       .intrinsics
@@ -248,7 +249,7 @@ impl Realm {
       .or_else(|| self.function_prototype_ref())
   }
 
-  /// Get the canonical `GeneratorFunction.prototype` for this realm.
+  /// Get `GeneratorFunction.prototype`, falling back to `Function.prototype`.
   pub fn generator_function_prototype(&self) -> Value {
     self
       .generator_function_prototype_ref()
@@ -256,7 +257,7 @@ impl Realm {
       .unwrap_or(Value::Null)
   }
 
-  /// Borrow the canonical `Generator.prototype` for this realm.
+  /// Borrow `Generator.prototype`, falling back to `Object.prototype`.
   pub fn generator_prototype_ref(&self) -> Option<&Value> {
     self
       .intrinsics
@@ -265,7 +266,7 @@ impl Realm {
       .or_else(|| self.object_prototype_ref())
   }
 
-  /// Get the canonical `Generator.prototype` for this realm.
+  /// Get `Generator.prototype`, falling back to `Object.prototype`.
   pub fn generator_prototype(&self) -> Value {
     self
       .generator_prototype_ref()

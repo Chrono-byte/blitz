@@ -23,7 +23,7 @@
 //!
 //! - [`enabled`] - Check if tracing is active
 //! - [`string`] - Log a string value with detailed info (length, bytes, repr)
-//! - [`value_string`] - Log a runtime Value when it's a string
+//! - [`value_string`] - Log a runtime Value
 
 use std::env;
 
@@ -55,7 +55,7 @@ pub fn string(
   }
 }
 
-/// Log a runtime Value when it's a string.
+/// Log a runtime Value when tracing is enabled.
 pub fn value_string(
   label: &str,
   v: &crate::value::Value,

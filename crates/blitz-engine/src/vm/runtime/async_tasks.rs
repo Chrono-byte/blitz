@@ -6,23 +6,11 @@
 //! async functions, etc.).
 //!
 //! Microtask / job queue semantics
-//! - The current microtask queue implementation stores closures and runs
-//!   them in FIFO order. If a microtask throws an error while being drained,
-//!   the draining routine returns early and remaining microtasks are not
-//!   executed. This is a host-specific choice and differs from the behaviour
-//!   of mainstream engines which typically process microtasks to completion
-//!   and surface exceptions to the host's unhandled rejection/exception
-//!   mechanism.
-//! - Promises and thenable resolution in this runtime may synchronously
-//!   invoke reactions depending on call sites; the spec requires careful
-//!   job scheduling for promise resolution (PromiseJobs) to guarantee
-//!   observable ordering.
-//!
-//! Recommendations:
-//! - When targeting ECMA-262 conformance, schedule promise reactions and
-//!   thenable resolution work via microtasks/jobs and adjust `drain_*
-//!   ` helpers to run jobs to completion while exposing unhandled
-//!   exceptions through a host hook.
+//! - Microtasks are stored as closures and drained in FIFO order. Job errors
+//!   are recorded on the VM, reported through the unhandled-rejection hook when
+//!   installed, and do not stop the remaining queue from being drained.
+//! - Promise reactions and thenable-resolution work are queued as microtasks,
+//!   preserving their observable job ordering.
 use crate::bytecode::FunctionProto;
 use crate::runtime_utils::{reject_pending_promise, resolve_promise_with_value};
 use crate::value::{PromiseState, SharedValue, Value};
@@ -116,15 +104,10 @@ impl Vm {
     }
   }
 
-  /// Drain all pending microtasks, executing them in FIFO order.
+  /// Drain all pending dynamic import jobs in FIFO order.
   ///
-  /// # Errors
-  ///
-  /// Microtask callbacks are executed to completion. If a microtask returns
-  /// an error the VM records it on `last_uncaught_exception` and continues
-  /// draining the remaining microtasks. This mirrors the common host policy
-  /// of running microtasks to completion while surfaceing exceptions via a
-  /// host hook instead of aborting the queue on first error.
+  /// Job failures are recorded on the VM and reported through the host hook;
+  /// they do not stop the remaining jobs from being drained.
   pub(crate) fn drain_dynamic_import_jobs(&mut self) -> Result<(), crate::errors::RuntimeError> {
     while let Some(mut job) = self.dynamic_import_jobs.pop_front() {
       let caller_handlers = std::mem::take(&mut self.handlers);
@@ -149,8 +132,6 @@ impl Vm {
   }
 
   /// Drain all pending microtasks, executing them in FIFO order and continuing on errors.
-  ///
-  /// # Errors
   ///
   /// Microtask callbacks are executed to completion. If a microtask returns
   /// an error, the VM records it on `last_uncaught_exception` and continues
@@ -190,9 +171,8 @@ impl Vm {
   ///
   /// Prioritizes microtasks over dynamic import jobs, processing them in rounds.
   ///
-  /// # Errors
-  ///
-  /// Returns a [`crate::errors::RuntimeError`] if any microtask or job fails.
+  /// Job failures are recorded on the VM and reported through the host hook;
+  /// they do not stop the remaining jobs from being drained.
   pub(crate) fn run_microtasks_if_needed(&mut self) -> Result<(), crate::errors::RuntimeError> {
     while !self.microtasks.is_empty() || !self.dynamic_import_jobs.is_empty() {
       if !self.microtasks.is_empty() {
@@ -247,18 +227,16 @@ impl Vm {
 
   /// Drain any pending microtasks, ensuring async bootstrap work completes.
   ///
-  /// # Errors
-  ///
-  /// If a microtask throws an error, it is propagated and the remaining microtasks are not executed.
+  /// Microtask failures are recorded on the VM and reported through the host
+  /// hook while the remaining microtasks continue to execute.
   pub fn flush_microtasks(&mut self) -> Result<(), crate::errors::RuntimeError> {
     self.run_microtasks_if_needed()
   }
 
   /// Invoke an async closure, queuing its microtasks for execution after the current call stack completes.
   ///
-  /// # Errors
-  ///
-  /// If a microtask throws an error, it is propagated and the remaining microtasks are not executed.
+  /// Execution failures reject the returned promise. Failures from queued
+  /// microtasks are recorded on the VM and reported through the host hook.
   pub(super) fn invoke_async_closure(
     &mut self,
     proto: &Rc<FunctionProto>,
@@ -400,9 +378,7 @@ impl Vm {
 
   /// Synchronously execute an async future on the background runtime.
   ///
-  /// # Errors
-  ///
-  /// Returns a [`crate::errors::RuntimeError`] if the background task fails.
+  /// Returns the future's output after running it on the background runtime.
   pub fn block_on<Fut>(
     &self,
     fut: Fut,

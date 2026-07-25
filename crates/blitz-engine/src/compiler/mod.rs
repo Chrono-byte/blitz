@@ -3,7 +3,7 @@
 //! The compiler transforms parsed TypeScript/JavaScript AST into executable
 //! bytecode for the VM. It performs:
 //! - Variable resolution (locals vs globals)
-//! - Type annotation tracking for runtime checks
+//! - Type annotation tracking for metadata and tooling
 //! - Control flow compilation (if/else, while, try/catch, etc.)
 //! - Function compilation with closure support
 //!
@@ -12,8 +12,9 @@
 //! Compilation is single-pass over the AST:
 //! 1. Pre-declare function names for hoisting support
 //! 2. Compile statements sequentially
-//! 3. Emit bytecode directly into a [`Chunk`]
-//! 4. Track local variables and their types for runtime enforcement
+//! 3. Emit compiler-owned virtual instructions
+//! 4. Finalize the virtual instructions into RISC v2 words in a [`Chunk`]
+//! 5. Track local variables and their types for metadata and tooling
 //!
 //! # Future Work
 //!

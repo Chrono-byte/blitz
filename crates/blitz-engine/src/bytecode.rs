@@ -63,24 +63,16 @@ pub struct UpvalueSpec {
   pub sloppy_immutable_silent: bool,
 }
 
-/// Unified inline cache entry used for property access, global access, and calls.
-/// All IC lookups in RISC bytecode share this format.
+/// Serialized inline-cache metadata associated with a bytecode chunk.
 #[derive(Clone, Debug)]
 pub struct ICEntry {
-  /// Cache validity key: generation ID + shape hash
-  /// For properties: receiver.generation << 32 | shape_hash
-  /// For globals: binding.generation
-  /// For calls: receiver.generation << 32 | function_identity
+  /// Cache validity key; its interpretation is selected by `ic_type`.
   pub key: u64,
 
-  /// Cached result (interpretation depends on IC type in metadata):
-  /// - Property get: property offset (u32) in upper bits
-  /// - Property set: descriptor flags (u32) in upper bits
-  /// - Global: slot offset (u32) in upper bits
-  /// - Call: cached function ptr or type info (u64)
+  /// Cached result metadata; its interpretation is selected by `ic_type`.
   pub value: u64,
 
-  /// Generation stamp for this IC entry (used for invalidation)
+  /// Generation stamp for this IC entry, used for invalidation bookkeeping.
   pub generation: u32,
 
   /// IC type: 0=Property, 1=Global, 2=Call
@@ -291,8 +283,8 @@ pub struct FunctionProto {
   pub arity: usize,
   /// Compiled bytecode for this function
   pub chunk: Arc<Chunk>,
-  /// NOTE: slot type annotations have been removed in JS-first mode; the
-  /// runtime no longer enforces TypeScript annotations.
+  /// Optional static slot types retained for tooling and serialization; the
+  /// runtime does not enforce TypeScript annotations.
   pub slot_types: Vec<Option<Type>>,
   /// Per-slot binding names when available.
   pub slot_names: Vec<Option<String>>,
@@ -338,8 +330,7 @@ pub struct FunctionProto {
   pub is_async: bool,
   /// Whether this function was declared as a generator (`function*`).
   pub is_generator: bool,
-  /// Unified inline cache table for this function. Sites use side metadata so
-  /// the register operand fields do not cap the site count.
+  /// Optional serialized inline-cache metadata associated with this function.
   pub ic_table: Vec<ICEntry>,
 }
 
@@ -488,9 +479,7 @@ impl Chunk {
     self.lines.push(line);
   }
 
-  /// Compatibility helper: write a single opcode byte as an instruction word
-  /// with empty payload. This mirrors the old `write(opcode, line)` helper
-  /// used during the migration and keeps callsites simple.
+  /// Write a single opcode as an instruction word with an empty payload.
   pub fn write(
     &mut self,
     opcode: u8,
@@ -560,11 +549,8 @@ impl Chunk {
     true
   }
 
-  /// Compatibility helper: write a signed 16-bit payload into the
-  /// instruction at `idx`. During the fixed-width migration most callers
-  /// now expect to patch a 24-bit payload; however some remaining code still
-  /// emits 16-bit patches. Implement this by sign-extending the i16 into
-  /// the 24-bit payload field.
+  /// Write a signed 16-bit payload into the instruction at `idx` by
+  /// sign-extending it into the instruction's 24-bit payload field.
   pub fn write_i16_at(
     &mut self,
     idx: usize,
@@ -889,7 +875,7 @@ impl Default for Chunk {
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-/// Bytecode operation codes for RISC-inspired format
+/// Bytecode operation codes for the RISC v2 format.
 ///
 /// All opcodes fit in a single 32-bit word with this layout:
 /// - Bits 0-7:    Opcode
@@ -899,14 +885,14 @@ impl Default for Chunk {
 ///
 /// Special cases:
 /// - Jump: aux field contains i24 signed offset (bits 8-31)
-/// - CompareJump: cond(3) | rs1(4) | rs2(4) | offset_i13(15)
+/// - CompareJump: cond(3) | rs1(4) | rs2(4) | signed offset(13)
 ///
 /// NOTE: The numeric discriminant of each `Op` variant is part of the runtime
 /// bytecode format. Do not reorder or insert variants in the middle without
-/// updating the bytecode version and migration logic.
+/// defining a new bytecode version and corresponding compatibility handling.
 pub enum Op {
   // === Constants & Immediate Values (5) ===
-  /// Load constant from pool → rd. Aux: constant_index (u8)
+  /// Load constant from pool → rd. Aux: constant index (u16)
   Const = 0,
   /// Load null → rd
   Null,
@@ -918,9 +904,9 @@ pub enum Op {
   Undefined,
 
   // === Register/Local Operations (3) ===
-  /// Load local slot → rd. Aux: slot_index (u8)
+  /// Load local slot → rd. Aux: slot index (u16)
   LoadLocal,
-  /// Store rd → local slot. Aux: slot_index (u8)
+  /// Store rd → local slot. Aux: slot index (u16)
   StoreLocal,
   /// Move rs → rd (copy register)
   Move,
@@ -956,78 +942,78 @@ pub enum Op {
   Ushr,
 
   // === Comparison & Conditional Jumps (5) ===
-  /// CompareJump: cond_type(3bits) | rs1(4) | rs2(4) | offset_i13(15)
+  /// CompareJump: cond_type(3) | rs1(4) | rs2(4) | signed offset(13)
   /// Compares rs1 and rs2 according to cond_type, jumps if true.
   /// cond_type: 0=Eq, 1=Neq, 2=Lt, 3=Lte, 4=Gt, 5=Gte, 6=StrictEq, 7=StrictNeq
   CompareJump,
   /// Jump offset_i24 (unconditional)
   Jump,
-  /// Jump offset_i24 if last comparison was true
+  /// Jump offset_i20 if rd is truthy
   JumpIfTrue,
-  /// Jump offset_i24 if last comparison was false
+  /// Jump offset_i20 if rd is falsy
   JumpIfFalse,
-  /// Jump offset_i24 if rs is null or undefined
+  /// Jump offset_i20 if rd is null or undefined
   JumpIfNullish,
 
   // === Logical (4) ===
-  /// rd = rd && rs (logical AND, short-circuits)
+  /// Combine operand truthiness: rd = truthy(rd) && truthy(rs).
   And,
-  /// rd = rd || rs (logical OR, short-circuits)
+  /// Combine operand truthiness: rd = truthy(rd) || truthy(rs).
   Or,
   /// rd = !rs (logical NOT)
   Not,
   /// rd = typeof rs
   Typeof,
 
-  // === Property Access with unified IC (4) ===
-  /// rd = obj[key]. Aux: ic_slot (4 bits), unused (4 bits)
+  // === Property Access (4) ===
+  /// rd = rd[rs]. The property-get cache is keyed by instruction position.
   GetProperty,
-  /// obj[key] = value. Aux: ic_slot (4 bits), unused (4 bits)
+  /// rd[rs] = aux register. The value register is stored in the first aux byte.
   SetProperty,
   /// rd = delete obj[key]
   DeleteProperty,
   /// rd = (key in obj)
   HasProperty,
 
-  // === Global Variable Access with unified IC (2) ===
-  /// rd = GetGlobal(name_const_idx). Aux: name_idx (u8), ic_slot (4 bits)
+  // === Global Variable Access (3) ===
+  /// rd = GetGlobal(name_const_idx). Aux: name constant index (u16)
   GetGlobal,
-  /// rd = typeof name_const_idx. Aux: name_idx (u8), ic_slot (4 bits)
+  /// rd = typeof name_const_idx. Aux: name constant index (u16)
   TypeofGlobal,
-  /// SetGlobal(name_const_idx, rd). Aux: name_idx (u8), ic_slot (4 bits)
+  /// SetGlobal(name_const_idx, rd). Aux: name constant index (u16)
   SetGlobal,
 
   // === Upvalue Access (2) ===
-  /// rd = GetUpvalue(upval_idx). Aux: upval_idx (u8)
+  /// rd = GetUpvalue(upval_idx). Aux: upvalue index (u16)
   GetUpvalue,
-  /// SetUpvalue(upval_idx, rd). Aux: upval_idx (u8)
+  /// SetUpvalue(upval_idx, rd). Aux: upvalue index (u16)
   SetUpvalue,
 
-  // === Function Calls with unified IC (4) ===
-  /// Call r0 with nargs in r1-r4 (+ stack if nargs > 3)
-  /// Return value in r0. Aux: nargs (4 bits), ic_slot (4 bits)
+  // === Function Calls (4) ===
+  /// Call the callee in r0 with arguments in r2-r7 and then the spill window.
+  /// The result is written to r0. Aux: argument count (u16).
   Call,
-  /// TailCall: like Call but reuses current frame
+  /// Tail-call form using the same operand convention as `Call`.
   TailCall,
-  /// Construct: new r0(...). Aux: nargs (4 bits)
+  /// Construct: new r0(...). Aux: argument count (u16)
   Construct,
-  /// CallBuiltin: call built-in function. Aux: builtin_idx (u8)
+  /// CallBuiltin: call the builtin in r0 with receiver r1 and Call's arguments.
   CallBuiltin,
 
   // === Closures & this/target (4) ===
-  /// rd = MakeClosure(proto_idx). Aux: proto_idx (u8)
+  /// rd = MakeClosure(proto_idx). Aux: prototype index (u16)
   MakeClosure,
   /// rd = GetThis
   GetThis,
   /// rd = GetNewTarget
   GetNewTarget,
-  /// rd = GetSuperProperty(obj, prop_const_idx). Aux: prop_idx (u8)
+  /// rd = super[rs], using the receiver/base value in rd.
   GetSuperProperty,
 
   // === Array & Object Construction (3) ===
-  /// BuildArray: collect nelem values into array → r0. Aux: nelem (u8)
+  /// BuildArray: collect values from the spill window into rd. Aux: element count (u16)
   BuildArray,
-  /// BuildObject: collect npairs {k,v} into object → r0. Aux: npairs (u8)
+  /// BuildObject: collect key/value pairs from the spill window into rd. Aux: pair count (u16)
   BuildObject,
   /// ArrayFromSpread: build array with spread
   ArrayFromSpread,
@@ -1041,9 +1027,9 @@ pub enum Op {
   PopHandler,
 
   // === Iteration (4) ===
-  /// IteratorNext: rd = iterator.next(). Aux: iterator_reg (4 bits)
+  /// IteratorNext: rd holds the iterator and receives the iterator result.
   IteratorNext,
-  /// IteratorClose: close iterator rs. Aux: iterator_reg (4 bits)
+  /// IteratorClose: close the iterator held in rd.
   IteratorClose,
   /// Yield: yield rd from generator
   Yield,
@@ -1057,35 +1043,37 @@ pub enum Op {
   PushWithEnv,
   /// PopEnv: pop lexical environment
   PopEnv,
-  /// AwaitPromise: await rs
+  /// AwaitPromise: await the promise/value held in rd and write the result to rd.
   AwaitPromise,
-  /// SuperConstruct: super(...) in derived constructor
+  /// SuperConstruct: super(...) in a derived constructor. Aux: argument count (u16).
   SuperConstruct,
   /// GeneratorInitDone: marker for end of generator prologue
   GeneratorInitDone,
 
   // === Module System (2) ===
-  /// GetModuleExport: rd = modules[descriptor.module].exports[descriptor.name]
+  /// GetModuleExport: rd = modules[descriptor.module].exports[descriptor.name].
+  /// Aux: descriptor constant index (u16).
   GetModuleExport,
-  /// SetModuleExport: modules[descriptor.module].exports[descriptor.name] = rd
+  /// SetModuleExport: modules[descriptor.module].exports[descriptor.name] = rd.
+  /// Aux: descriptor constant index (u16).
   SetModuleExport,
 
   // === Semantic Operations (4) ===
-  /// CloneLocalCell: clone a local cell for closure capture. Aux: slot_idx (u8)
+  /// CloneLocalCell: clone a local cell for closure capture. Aux: slot index (u16)
   CloneLocalCell,
-  /// SetSuperProperty: super.property = value
+  /// SetSuperProperty: super[rs] = aux register, using the receiver/base in rd.
   SetSuperProperty,
-  /// DeleteIdentifier: delete identifier reference. Aux: name_idx (u8)
+  /// DeleteIdentifier: delete the identifier name held in rd.
   DeleteIdentifier,
-  /// GetBuiltin: rd = builtin[name_idx]. Aux: name_idx (u8)
+  /// GetBuiltin: rd = builtin[name]. Aux: name constant index (u16)
   GetBuiltin,
 
   // === Miscellaneous (2) ===
   /// InstanceOf: rd = rs1 instanceof rs2
   InstanceOf,
-  /// Spread: spread array into arguments
+  /// Spread: call the callee in rd with values in rs expanded by the aux mask register.
   Spread,
-  /// ResetLocalCell: create a fresh uninitialized lexical cell. Aux: slot_idx (u8)
+  /// ResetLocalCell: create a fresh uninitialized lexical cell. Aux: slot index (u16)
   ResetLocalCell,
   /// Load a RISC spill slot into `rd`. Aux: spill index (u16).
   LoadSpill,

@@ -225,7 +225,7 @@ impl super::Compiler {
   /// - Object patterns (object destructuring)
   ///
   /// For destructuring patterns, this emits code to extract values from the
-  /// stack and assign them to their respective bindings.
+  /// compiler's virtual value stack and assign them to their respective bindings.
   pub(super) fn store_assignment_identifier(
     &mut self,
     name: &str,

@@ -400,9 +400,9 @@ pub(crate) fn shadowrealm_evaluate(
 
   // Run the code inside the ShadowRealm VM and clone the resulting value
   // into the current (host) VM using a pragmatic structured-clone that
-  // supports primitives, plain objects, and arrays. Non-cloneable values
-  // (functions, promises, symbols, accessors, cyclic structures) will
-  // result in a TypeError to avoid leaking object identity across realms.
+  // supports primitives, plain objects, arrays, and cycles. Non-cloneable
+  // values (functions, promises, symbols, and accessors) result in a TypeError
+  // to avoid leaking object identity across realms.
   // Parse optional transfer list argument (third argument) as an Array of
   // ArrayBuffer objects. We collect backing-store addresses (Rc pointer
   // addresses of the [[ArrayBufferData]] Array) into a HashSet and pass it
@@ -474,11 +474,8 @@ pub(crate) fn shadowrealm_import_value(
   })));
   let promise_value = Value::Promise(Rc::clone(&promise));
 
-  // Parse transfer list argument (third argument) if present. For importValue
-  // the signature is (shadowRealm, specifier, exportName, [transferList]) so
-  // the transfer list will be at index 2 or 3 depending on calling conv. The
-  // existing code places export name at args.get(1), so treat args.get(2) as
-  // the optional transfer list.
+  // The optional transfer list follows the export name in this builtin's
+  // normalized argument array.
   let mut transfer_set_arg: Option<Value> = None;
   if args.len() > 2 {
     transfer_set_arg = args.get(2).cloned();
@@ -671,9 +668,9 @@ pub(crate) fn dynamic_import_value(
       })?;
 
     if !matches!(options, Value::Undefined) {
-      // The `options` argument is currently parsed for side effects only.
-      // Test262 dynamic-import coverage in this tree only exercises the
-      // source-only form, so we intentionally ignore it here.
+      // Import options are evaluated by the compiler before this builtin is
+      // called. The runtime currently ignores their contents after those
+      // side effects; import attributes are not implemented yet.
     }
 
     let module_index = entry

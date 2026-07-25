@@ -135,7 +135,6 @@ pub(crate) fn global_decode_uri(
   Ok(Value::String(percent_decode(vm, s, false)?))
 }
 
-/// Implements the global decodeURI function.
 /// Implements the global decodeURIComponent function.
 pub(crate) fn global_decode_uri_component(
   vm: &mut Vm,
@@ -170,7 +169,6 @@ pub(crate) fn global_encode_uri(
   Ok(Value::String(percent_encode(s, false)))
 }
 
-/// Implements the global encodeURI function.
 /// Implements the global encodeURIComponent function.
 pub(crate) fn global_encode_uri_component(
   vm: &mut Vm,

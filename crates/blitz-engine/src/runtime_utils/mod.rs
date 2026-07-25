@@ -16,28 +16,16 @@
 //! - Dynamic `import()` performs graph loading and evaluation synchronously,
 //!   then queues Promise settlement on the dynamic-import job queue. Import
 //!   options are evaluated but otherwise ignored.
-//! - Promise/thenable resolution is implemented with direct calls to `then`
-//!   helpers which can resolve synchronously; the spec requires careful job
-//!   scheduling (PromiseResolveThenableJob) to match observed ordering. Concretely
-//!   this runtime calls a detected `then` property synchronously and invokes
-//!   the resolve/reject callbacks immediately which can produce different
-//!   microtask ordering compared to a spec-conformant engine.
-//! - Microtask/job queue draining is host-specific: thrown errors will abort
-//!   remaining microtasks in the current implementation. Hosts usually run
-//!   microtasks to completion and handle exceptions via host-defined hooks.
-//! - Some Array prototype methods are simplified and differ from spec (for
-//!   example `reduce` and `sort` edge cases and iterator behaviour). Concrete
-//!   deviations include:
-//!   * `Array.prototype.reduce`: when no initial value is provided and the
-//!     array has no defined elements the spec requires a TypeError; current
-//!     implementation returns `undefined` or behaves differently.
-//!   * `Array.prototype.sort`: comparator semantics are simplified; compare
-//!     results were interpreted via `is_sign_positive` rather than the proper
-//!     ToNumber negative/zero/positive semantics and NaN handling.
-//!   * Array iterators: the iterator factory is implemented as a stub that
-//!     does not produce a proper iterator over elements (iterator `next`
-//!     semantics are simplified). Implementing a proper iterator object is
-//!     required for conformance.
+//! - Promise/thenable resolution reads a thenable's `then` property
+//!   synchronously, then queues the `then` call and settled reactions on the
+//!   VM's microtask queue. This preserves more observable job ordering than
+//!   direct invocation, but remains engine-specific.
+//! - Microtask/job queue draining is host-specific: thrown errors are recorded
+//!   and reported through the host hook while the current implementation
+//!   continues draining the remaining jobs.
+//! - Some Array prototype methods are simplified and differ from spec. For
+//!   example, `Array.prototype.flat` flattens nested arrays by one level even
+//!   when a greater depth is requested.
 //! - Ordinary objects and arrays use ECMAScript own-key ordering, but several
 //!   exotic object kinds still share ordinary storage instead of defining
 //!   their own complete internal-method behavior.
@@ -393,11 +381,11 @@ pub(crate) fn char_index_to_byte_index(
 
 /// Structured-clone helper for cross-realm value transfers used by ShadowRealm
 /// operations. Implements copying semantics for primitives, Array, Object,
-/// Date, RegExp, Map, Set, ArrayBuffer, and TypedArray shaped objects used by
+/// Date, RegExp, Map, Set, ArrayBuffer, and TypedArray-shaped objects used by
 /// this runtime. Preserves cycles/shared references by using a visited map and
-/// creates host-realm objects with the appropriate host intrinsics as
-/// prototypes. Returns Err(String) for uncloneable values (functions,
-/// promises, symbols, accessors, etc.).
+/// uses runtime prototypes where the clone path provides them. Returns
+/// `Err(String)` for uncloneable values (functions, promises, symbols,
+/// accessors, etc.).
 fn clone_value_across_realms(
   vm: &mut Vm,
   value: &Value,
@@ -497,8 +485,6 @@ fn clone_value_across_realms(
         // TypedArray, Map, Set, Date, RegExp by inspecting internal slots
         let borrow = obj_rc.borrow();
 
-        // (no-op) helper removed; build placeholders inline below
-
         // ArrayBuffer: identified by [[ArrayBufferData]] internal slot
         let array_buffer_data = borrow
           .properties
@@ -522,7 +508,7 @@ fn clone_value_across_realms(
           );
           drop(borrow);
 
-          // Create placeholder object with host ArrayBuffer prototype
+          // Create a placeholder object with the runtime's Array prototype.
           let mut out = ObjectData::new();
           if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
             out.set_prototype_value(proto);
@@ -561,8 +547,8 @@ fn clone_value_across_realms(
         {
           let mut out = ObjectData::new();
           if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
-            // TypedArray prototype not separately tracked in Intrinsics here,
-            // fall back to Array prototype for shape safety.
+            // This clone path uses Array.prototype rather than restoring the
+            // typed-array-specific prototype.
             out.set_prototype_value(proto);
           }
           let target_obj = gc::track_object(Rc::new(RefCell::new(out)));

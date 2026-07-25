@@ -15,9 +15,8 @@
 use crate::errors::TypeCheckerError;
 use oxc_ast::ast as oast;
 
-// Reintroduce a compact Type enum here (previously in oxc_typecheck) so other
-// modules can reference `crate::typecheck::Type` after removing the duplicate
-// module. Keep it conservative and compatible with existing usage.
+// Keep the engine's shared type metadata in this module so compiler and bundle
+// code can use the same conservative representation as the checker.
 use std::collections::{HashMap, HashSet};
 
 /// Lightweight, conservative representation of types used by the checker.
@@ -206,7 +205,8 @@ thread_local! {
 /// should produce implicit-`any` diagnostics. The effective strictness is
 /// determined by, in order:
 /// 1. The test-only override set via `set_strict_override(Some(bool))`.
-/// 2. The environment variable `TSBLITZ_STRICT` (non-zero means enabled).
+/// 2. The environment variable `TSBLITZ_STRICT` (any value other than `0`
+///    enables strict mode).
 /// 3. Defaults to disabled when the environment variable is not set.
 fn strict_mode() -> bool {
   if let Some(v) = STRICT_OVERRIDE.with(|m| *m.borrow()) {
@@ -221,7 +221,7 @@ fn strict_mode() -> bool {
 /// Passing `None` clears the override and restores environment-driven behavior.
 ///
 /// # Panics
-/// Panics if the override mutex is poisoned.
+/// Panics if the thread-local override is already borrowed.
 pub fn set_strict_override(v: Option<bool>) {
   STRICT_OVERRIDE.with(|m| {
     *m.borrow_mut() = v;

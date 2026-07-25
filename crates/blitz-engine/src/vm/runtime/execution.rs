@@ -763,20 +763,12 @@ impl Vm {
     let _ = self.collect_garbage_prototype();
   }
 
-  /// Install the minimal kernel helpers and populate intrinsics before use.
-  ///
-  /// This ensures every VM starts with a fully populated global object and
-  /// intrinsic constructors before any bytecode executes.
+  /// Retain the compatibility builder; `Vm::new` performs initialization.
   pub fn with_runtime(self) -> Self {
     self
   }
 
-  /// Populate the Realm's intrinsics table from the globals.
-  ///
-  /// This extracts canonical constructor/prototype references from the
-  /// Populate the Realm's intrinsics table.
-  ///
-  /// This records the kernel-provided intrinsics on the realm record.
+  /// Store the kernel-provided intrinsic table on the Realm record.
   fn populate_realm_intrinsics(
     &mut self,
     intrinsics: Intrinsics,
@@ -2160,20 +2152,8 @@ impl Vm {
     Value::Object(obj)
   }
 
-  // -----------------------------------------------------------------------
-  // Iterator / iterator protocol notes
-  // -----------------------------------------------------------------------
-  //
-  // The VM exposes `make_iterator_result` as a helper to build objects of
-  // the form { value, done }. However, several iterator factories in the
-  // runtime are lightweight and currently produce simplified iterator
-  // objects. A full ECMAScript-compliant iterator should be an object that
-  // implements the `next` method and preserves iteration state across
-  // successive calls. Where the runtime uses simplified iterators (for
-  // example, array iterator factories), those implementations should be
-  // replaced with proper iterator objects that maintain internal iteration
-  // state and follow the spec's IteratorClose semantics for proper
-  // conformance.
+  // Iterator factories own their state in iterator objects; this helper only
+  // creates the `{ value, done }` result returned by generator operations.
 
   /// Apply ECMAScript `ToObject` coercion.
   ///
@@ -2243,16 +2223,16 @@ impl Vm {
       }
       Value::Uninitialized => Err(self.throw_type_error("Uninitialized value")),
       Value::Builtin(_) => {
-        // Builtins are callable but might not be full objects.
-        // However, in this VM they are often treated as such or wrapped.
+        // Builtins are callable values and are returned unchanged here.
         Ok(v)
       }
     }
   }
 
-  /// Parse and evaluate a single expression source string in an isolated VM.
+  /// Parse and evaluate a single expression source string in a forked VM
+  /// execution context.
   ///
-  /// The expression result is written to `__tsblitz_eval_result` and returned.
+  /// The expression result is returned directly.
   ///
   /// # Errors
   ///
@@ -2620,9 +2600,7 @@ impl Vm {
     v.is_truthy()
   }
 
-  /// Kernel helper: abstract equality comparison (==). Exposed so the
-  /// soft layer can delegate equality semantics to the kernel during
-  /// migration.
+  /// ECMAScript abstract equality comparison (`==`).
   ///
   /// # Errors
   ///
@@ -2764,11 +2742,6 @@ impl Vm {
     )
   }
 
-  /// Read a property descriptor from a value, following the prototype chain.
-  ///
-  /// # Errors
-  ///
-  /// Returns a [`crate::errors::RuntimeError`] if the operation fails.
   /// Pop the return value, restore the caller's frame, and push the result.
   pub(super) fn execute_return(&mut self) -> Result<(), RuntimeError> {
     let frame = self

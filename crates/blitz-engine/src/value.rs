@@ -9,14 +9,21 @@
 //!
 //! | Variant | Description |
 //! |---------|-------------|
+//! | `Uninitialized` | Internal temporal-dead-zone sentinel |
 //! | `Number` | IEEE 754 double-precision float |
 //! | `String` | UTF-8 string |
 //! | `Bool` | Boolean value |
+//! | `Undefined` | Undefined value |
+//! | `BigInt` | Arbitrary-precision integer |
+//! | `Symbol` | Symbol identity and optional description |
 //! | `Null` | Null value |
 //! | `Object` | Property map with prototype chain |
 //! | `Array` | Dense array with property bag |
+//! | `Proxy` | Proxy target and handler state |
 //! | `Closure` | Function with captured environment |
 //! | `Builtin` | Native Rust function |
+//! | `BuiltinObject` | Native function with object properties |
+//! | `Promise` | Promise state and reactions |
 //!
 //! # Memory Management
 //!
@@ -25,19 +32,18 @@
 //!
 //! Conformance and implementation notes
 //!
-//! - Prototype representation: ObjectData stores its prototype as a weak
-//!   reference to avoid keeping prototype chains alive through ownership
-//!   alone. Callers should use `get_prototype` / `set_prototype_value` rather
-//!   than storing a strong `Value` reference.
+//! - Prototype representation: ObjectData stores the current prototype as a
+//!   strong `Value` and keeps a weak mirror for object prototypes. Callers
+//!   should use `get_prototype` / `set_prototype_value` rather than modifying
+//!   the storage fields directly.
 //!
 //! - SameValue vs Strict Equality: the runtime contains several equality
 //!   helpers. The semantics of `SameValue`, `SameValueZero`, and strict equality
 //!   (===) differ in edge cases (for example, NaN should be SameValue-equal to
-//!   itself while strict equality is false for NaN). The codebase currently
-//!   mixes different equality checks; if strict ECMA-262 conformance is
-//!   required, add explicit helpers named `same_value`, `same_value_zero`, and
-//!   `strict_equal` and make sure the correct variant is used at each spec
-//!   algorithm site (e.g., Map/Set keying, Object.is, SameValue operations).
+//!   itself while strict equality is false for NaN). The runtime provides
+//!   explicit `same_value`, `same_value_zero`, and `strict_equal` helpers;
+//!   callers must use the variant required by each spec algorithm (for
+//!   example, Map/Set keying, `Object.is`, or strict equality).
 //!
 //! # Example
 //!
@@ -431,9 +437,9 @@ pub struct ObjectData {
   pub identity: u64,
   /// Property table
   pub properties: IndexMap<PropertyKey, PropertyDescriptor>,
-  /// Strongly stored prototype for non-object prototype values.
+  /// Strong reference to the current prototype value.
   pub strong_prototype: Option<Value>,
-  /// Prototype pointer (weak to prevent reference cycles)
+  /// Weak mirror of an object prototype, used when a weak reference is useful.
   pub weak_prototype: Option<WeakObject>,
   /// VM-internal slots that are never exposed through ECMAScript property operations.
   pub(crate) internal_slots: IndexMap<&'static str, Value>,
@@ -644,7 +650,7 @@ pub type NativeFn =
 pub type BuiltinFn =
   Rc<dyn Fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, crate::errors::RuntimeError>>;
 
-/// Full runtime type descriptor structure so the VM can perform stricter checks.
+/// Runtime type descriptor structure retained with compiled type metadata.
 #[derive(Clone, Debug)]
 pub enum RuntimeType {
   /// Number type

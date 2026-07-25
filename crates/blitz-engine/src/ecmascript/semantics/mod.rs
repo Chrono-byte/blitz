@@ -1,4 +1,4 @@
-//! Language-semantic bootstrapping routines extracted from `runtime_utils`.
+//! Language-semantic operations and intrinsic bootstrapping.
 use num_bigint::BigInt as BigIntValue;
 use num_traits::ToPrimitive;
 use regex::RegexBuilder;

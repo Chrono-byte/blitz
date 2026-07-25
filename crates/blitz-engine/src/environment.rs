@@ -1,8 +1,8 @@
 //! Execution-context lexical environment records.
 //!
-//! This module provides a lightweight runtime model of declarative environment
-//! records with parent links. It is intentionally minimal and is used as a
-//! stepping stone toward full ECMAScript execution context semantics.
+//! This module provides a lightweight runtime model of lexical and object
+//! environment records with parent links. The VM uses these records for
+//! lexical bindings, direct `eval`, and `with`-environment lookup.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -201,7 +201,8 @@ impl EnvironmentRecord {
   ///
   /// # Errors
   ///
-  /// Returns a [`crate::errors::RuntimeError`] if the binding is not initialized.
+  /// Returns a [`crate::errors::RuntimeError`] if an initialized immutable
+  /// binding is assigned.
   pub fn set_mutable_binding(
     &mut self,
     name: &str,

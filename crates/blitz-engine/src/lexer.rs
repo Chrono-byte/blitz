@@ -1,7 +1,7 @@
 //! Lexical analyzer for tokenizing TypeScript/JavaScript source.
 //!
-//! The lexer transforms raw source code into a stream of [`Token`] values that
-//! are consumed by the parser. It handles:
+//! The lexer transforms raw source code into a stream of [`Token`] values for
+//! callers that need standalone tokenization. It handles:
 //! - Keywords (let, const, function, if, etc.)
 //! - Operators (+, -, *, /, ===, etc.)
 //! - Literals (numbers, strings, booleans, null)

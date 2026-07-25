@@ -1532,7 +1532,8 @@ impl ModuleLoader {
   /// Returns a [`crate::errors::BundlerError`] if a module fails to instantiate.
   #[allow(clippy::too_many_lines)]
   pub fn instantiate_all(&mut self) -> Result<(), BundlerError> {
-    // For each module, examine its AST for exported names and allocate slots.
+    // For each parsed source module, examine its AST for exported names and
+    // allocate slots. Prelinked records already carry their export metadata.
     for rec_rc in self.map.values() {
       let mut rec = rec_rc.borrow_mut();
       if matches!(rec.state, ModuleState::Parsed) {
@@ -1861,8 +1862,8 @@ impl ModuleLoader {
                     let mut rec = rec_rc.borrow_mut();
                     rec.imports.insert(local.clone(), boxed);
                   }
-                  // Namespace imports are represented as plain objects for now.
-                  // Record a synthetic import source with module index and special "*" name
+                  // Record a synthetic import source with the module index and
+                  // special "*" name; namespace object wiring happens later.
                   if let Some(src_idx) = dep_module_index {
                     rec_rc
                       .borrow_mut()
@@ -2236,7 +2237,10 @@ impl ModuleLoader {
     Ok(())
   }
 
-  /// Evaluate module graph in depth-first, post-order. For now synchronous.
+  /// Evaluate all instantiated modules in loader insertion order.
+  ///
+  /// This bulk path is synchronous; entry-point evaluation uses the
+  /// dependency-derived order in [`Self::evaluate_entry`].
   ///
   /// # Errors
   ///

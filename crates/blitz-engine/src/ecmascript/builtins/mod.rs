@@ -1,6 +1,4 @@
-//! Module for built-ins.
-//!
-//! Each built-in object is separated by their ECMAScript specification.
+//! ECMAScript built-in implementations grouped by related functionality.
 
 pub(crate) mod array;
 pub(crate) mod collections;

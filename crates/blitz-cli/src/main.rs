@@ -4,15 +4,16 @@
 //! `process` before evaluating user code. Use `blitz-engine` when testing the
 //! host-neutral ECMAScript engine directly.
 //!
-//! The runtime CLI provides three main interfaces:
+//! The runtime CLI provides four main interfaces:
 //! - **File execution**: Run a JavaScript or TypeScript file directly
 //! - **Type checking**: Check TypeScript in-process from the OXC syntax tree
+//! - **Editor analysis**: Emit compiler-owned analysis as JSON
 //! - **REPL**: Interactive read-eval-print loop with history
 //!
 //! # Bootstrapping
 //!
-//! On startup, the CLI creates a VM and executes user code within the
-//! initialized execution environment.
+//! For execution and REPL startup, the CLI creates a VM and runs user code
+//! within the initialized execution environment.
 //!
 //! # Usage
 //!
@@ -40,12 +41,12 @@ use blitz::compiler;
 use blitz::test262_support;
 use blitz::{parser::Parser as JsParser, value::Value, vm::Vm};
 
-/// Runs source code in REPL mode (preserves expression results)
+/// Runs source code for a test while preserving the expression result.
 /// Set as `#[cfg(test)]` to avoid the warning for it being unused.
 ///
 /// # Errors
 ///
-/// Returns an error string if any stage of compilation fails
+/// Returns an error if parsing, compilation, or execution fails.
 #[cfg(test)]
 fn run_source(
   vm: &mut Vm,
@@ -58,11 +59,11 @@ fn run_source(
   vm.run(chunk).map_err(blitz::errors::Error::from)
 }
 
-/// Runs source code in REPL mode (preserves expression results)
+/// Runs one source line in REPL mode while preserving the expression result.
 ///
 /// # Errors
 ///
-/// Returns an error string if any stage of compilation fails
+/// Returns an error if parsing, compilation, or execution fails.
 fn run_source_repl(
   vm: &mut Vm,
   source: &str,
@@ -407,8 +408,8 @@ fn main() -> Result<(), blitz::errors::Error> {
     globals
   };
 
-  // Create a persistent VM for the REPL and reuse it for every input so
-  // we don't recompile and recreate the VM on each line.
+  // Create one VM for the selected execution mode. The REPL reuses it for
+  // every input so it does not recreate the VM on each line.
   // Create VM and run prelude. blitzlib can call `__host_get(name)` during
   // bootstrap to capture host-provided values; raw host entries are never
   // placed into the globals table.

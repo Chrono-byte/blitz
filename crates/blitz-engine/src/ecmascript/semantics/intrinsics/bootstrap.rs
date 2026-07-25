@@ -1,6 +1,6 @@
 use super::*;
 
-/// Installs the Builtins into the given globals object.
+/// Builds the ECMAScript intrinsics and installs the available global bindings.
 pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) -> Intrinsics {
   use PropertyKey as PKey;
 
@@ -91,7 +91,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         let mut out: Vec<Option<Value>> = Vec::with_capacity(len);
         for i in 0..len {
           let key = PKey::String(i.to_string());
-          // Check if property exists (hasOwnProperty check)
+          // Check whether the property exists, including inherited properties.
           let has_prop = vm.has_property_host(&receiver, &key)?;
           if has_prop {
             let item = vm.get_property_host(&receiver, &key)?;
@@ -2090,7 +2090,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let (_promise_proto_map, _promise_ctor_map, promise_ctor_val) =
     builtins::promise::create_promise_intrinsics(&object_proto_map, &function_proto_map);
 
-  // Reflect.construct
+  // Reflect object and methods
   let reflect_obj = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
     Rc::clone(&object_proto_map),
   ))));
@@ -2549,7 +2549,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           }
         }
         2 => {
-          // Receiver + single argument: timestamp or date string
+          // Receiver + single argument: numeric timestamp or numeric string
           if let Some(arg) = args.get(1) {
             to_num(arg)
           } else {
@@ -2719,7 +2719,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let arraybuffer_ctor_fn: BuiltinFn = {
     let proto_map_rc = Rc::clone(&arraybuffer_proto_map);
     Rc::new(move |_vm, args| {
-      // Get length argument with ToLength semantics (RangeError on Infinity).
+      // Read the requested buffer length; the length helper rejects non-finite
+      // and oversized values.
       let instance_proto = _vm
         .current_new_target()
         .and_then(|new_target| {

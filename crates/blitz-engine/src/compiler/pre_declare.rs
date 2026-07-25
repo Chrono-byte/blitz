@@ -3,7 +3,8 @@
 //! This module handles the pre-declaration phase of compilation, which:
 //! - Reserves local slots for function declarations (function hoisting)
 //! - Pre-declares variable bindings with proper temporal dead zone (TDZ) tracking
-//! - Emits the actual hoisted function closures into bytecode
+//! - Emits the actual hoisted function closures into the compiler's virtual
+//!   instruction stream
 //! - Detects "use strict" directives for strict mode context
 //!
 //! The pre-declaration phase runs before the main statement compilation to ensure
@@ -18,7 +19,7 @@ const LINE: u32 = 1;
 
 impl Compiler {
   /// Scan an oxc Program and reserve local slots for top-level function
-  /// declarations to preserve hoisting semantics during the migration.
+  /// declarations to preserve hoisting semantics.
   pub(crate) fn pre_declare_functions_oast(
     &mut self,
     program: &oast::Program<'_>,

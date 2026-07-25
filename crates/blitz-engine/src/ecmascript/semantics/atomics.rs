@@ -11,9 +11,9 @@ use crate::runtime_utils::{
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use num_traits::ToPrimitive;
 
-// Pure algorithmic helpers for Atomics. These were previously defined in
-// runtime_utils/atomics.rs but are language semantics and belong with the
-// other ECMAScript algorithms. Keep them minimal and host-independent.
+// Atomics algorithms and builtin wiring live with the other ECMAScript
+// semantics. The implementation delegates storage and waiter bookkeeping to
+// the runtime's shared helpers.
 
 /// Returns the `AtomicsValueKind` for a typed array kind name, or `None` if not supported.
 pub(crate) fn atomics_value_kind(

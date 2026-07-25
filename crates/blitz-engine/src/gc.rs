@@ -1,9 +1,7 @@
 //! Experimental garbage collection support.
 //!
-//! The default build enables a prototype mark/sweep collector that can
-//! reclaim cyclic garbage by tracking heap allocations in weak registries.
-//! When the feature is disabled, the tracking hooks become no-ops and the
-//! collector reports zero work.
+//! This module provides a prototype mark/sweep collector that can reclaim
+//! cyclic garbage by tracking heap allocations in weak registries.
 
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -17,7 +15,7 @@ use crate::value::{
 /// Result of a prototype GC collection cycle.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GcStats {
-  /// Number of unique object-like nodes marked reachable.
+  /// Number of tracked heap nodes marked reachable.
   pub marked_nodes: usize,
   /// Number of object property bags reclaimed.
   pub swept_objects: usize,

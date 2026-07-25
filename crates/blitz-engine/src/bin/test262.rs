@@ -368,7 +368,8 @@ fn run_test_in_thread(
         let result = catch_unwind(AssertUnwindSafe(|| {
           let globals = make_test_globals();
 
-          // Snapshot for test isolation (though we won't use restore since each test is fresh)
+          // Retain the baseline for auxiliary runner paths; normal test modes
+          // create fresh globals below.
           let baseline_snapshot = snapshot_globals(&globals);
 
           // Run the test
@@ -903,7 +904,7 @@ fn run_selected_tests_via_subprocess_batches(
     let shared_errors = Arc::clone(&worker_errors);
     handles.push(thread::spawn(move || {
       loop {
-        let Some((chunk_start, chunk_files)) = ({
+        let Some((chunk_start, chunk_files)): Option<(usize, Vec<PathBuf>)> = ({
           let mut guard = queue
             .lock()
             .expect("subprocess chunk queue poisoned");
@@ -2188,9 +2189,8 @@ fn snapshot_globals(globals: &Rc<RefCell<ObjectData>>) -> HashMap<PropertyKey, P
 /// - Ok(())        -> test ran and passed
 /// - Err(String)   -> test failed or is unsupported
 ///
-/// Uses snapshot/restore for test isolation instead of deep heap cloning.
-/// The `globals` Rc is shared across tests; we restore from `baseline_snapshot`
-/// before each test mode to undo mutations from the previous test.
+/// Each test mode runs in a fresh realm. The shared globals and baseline
+/// parameters remain for the runner's auxiliary modes but are not used here.
 #[allow(clippy::too_many_lines)]
 fn run_test_file(
   path: &Path,
@@ -2313,7 +2313,7 @@ fn run_test_file(
       continue;
     }
 
-    // Configure strictness for the engine (runtime-configured via TSBLITZ_STRICT).
+    // Configure strictness through the test-only type-checker override.
     let is_strict = *mode_name == "strict";
     let is_async = has_async_flag;
     // Use the test-friendly override rather than setting process env vars.
@@ -2659,7 +2659,7 @@ fn run_test_file(
         }
       };
 
-      // Execute using the provided persistent VM
+      // Execute in the fresh VM created for this test mode.
       vm.run(chunk).map_err(|e| e.to_string())
     };
 
@@ -3083,7 +3083,8 @@ fn main() {
   let mut top_level: HashMap<String, BucketStats> = HashMap::new();
   let mut subsections: HashMap<String, BucketStats> = HashMap::new();
 
-  // Create a persistent VM and globals, install host builtins and the soft-prelude
+  // Bootstrap shared globals for the harness-only and scope-dump modes.
+  // Normal tests create fresh globals per mode in `run_test_file`.
   let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
 
   // Provide globalThis reference
@@ -3106,8 +3107,7 @@ fn main() {
 
   let _vm = Vm::new(Clone::clone(&globals));
 
-  // Snapshot the bootstrapped globals for test isolation.
-  // Each test restores from this snapshot instead of deep-cloning.
+  // Auxiliary modes restore these shared globals between their runs.
   let baseline_snapshot = snapshot_globals(&globals);
 
   if opts.dump_scopes {

@@ -1,21 +1,17 @@
-//! Stack-based bytecode interpreter with runtime safety helpers.
+//! RISC bytecode interpreter with stack-backed runtime helpers.
 //!
 //! This module implements the VM core: a fetch-decode-execute loop that
-//! evaluates compiled bytecode in a stack-based environment. It contains
-//! the Vm struct, frame/handler implementations, and tuning constants used
-//! by the runtime.
+//! evaluates compiled RISC bytecode using registers and spill storage, with an
+//! operand stack for call, exception, and host-helper state. It contains the
+//! Vm struct, frame/handler implementations, and tuning constants used by the
+//! runtime.
 //!
 //! Key responsibilities:
-//! - Manage the operand stack and locals
+//! - Manage RISC registers, spill storage, the operand stack, and locals
 //! - Maintain call frames, exception handlers, and generator state
 //! - Provide property access support with generation-guarded inline
 //!   caching to accelerate repeated lookups
 //! - Integrate with a background runtime for blocking/async work
-//!
-//! Runtime safety:
-//! When type annotations are available the VM performs runtime checks on
-//! local and global assignments as well as function arguments. These checks
-//! are defensive and intended to surface type errors during development.
 //!
 //! Example
 //!
@@ -334,8 +330,8 @@ pub struct Vm {
   pub(super) chunk: Arc<Chunk>,
   /// Instruction pointer within the chunk.
   pub(super) ip: usize,
-  /// Operand stack. Shared across all frames; each frame records its base
-  /// offset so the stack is truncated correctly on return.
+  /// Operand stack for the currently executing frame. A suspended caller's
+  /// stack is saved in its `Frame` and restored when that frame resumes.
   pub(super) stack: OperandStack,
   /// Local variables for the current frame.
   pub(super) locals: Vec<SharedValue>,
@@ -357,9 +353,9 @@ pub struct Vm {
   pub(super) globals: Rc<RefCell<ObjectData>>,
   /// Call-frame stack component.
   pub(super) call_stack: CallStack,
-  /// Root chunk (kept alive for global type metadata).
+  /// Root chunk retained for the duration of root or nested execution.
   pub(super) root_chunk: Option<Arc<Chunk>>,
-  /// Slot-type annotations for the current function (formerly used by TS checks).
+  /// Slot-type metadata for the current function, carried across frame changes.
   pub(super) current_slot_types: Option<Vec<Option<Type>>>,
   /// Slot names for the current function.
   pub(super) current_slot_names: Option<Vec<Option<String>>>,

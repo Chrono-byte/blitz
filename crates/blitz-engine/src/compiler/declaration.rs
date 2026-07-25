@@ -105,7 +105,8 @@ impl Compiler {
   /// Compile an oxc AST statement into bytecode.
   ///
   /// Wrapper that delegates to `compile_statement_oast_with_mode` with `skip_pop` = false,
-  /// meaning expressions will have their values popped from the stack.
+  /// meaning expression values will be discarded from the compiler's virtual
+  /// value stack.
   fn compile_statement_oast(
     &mut self,
     stmt: &oast::Statement,
@@ -118,7 +119,8 @@ impl Compiler {
   /// # Arguments
   ///
   /// * `stmt` - The statement to compile
-  /// * `skip_pop` - If true, the result of expression statements is preserved on the stack
+  /// * `skip_pop` - If true, the result of expression statements is preserved
+  ///   on the compiler's virtual value stack
   ///
   /// This handles all statement types including:
   /// - Import/export declarations
@@ -865,7 +867,8 @@ impl Compiler {
 
         self.patch_jump(exit_jump);
         // Normal iterator exhaustion should not perform IteratorClose.
-        // Also discard the final iterator result object left on stack.
+        // Also discard the final iterator result object left on the virtual
+        // value stack.
         self.emit(Op::Discard, LINE);
         self.emit(Op::PopHandler, LINE);
         self.emit(Op::Jump, LINE);

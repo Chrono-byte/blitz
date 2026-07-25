@@ -14,7 +14,8 @@
 //! - Logical operators (&&, ||, ??)
 //!
 //! This module is part of the compiler's multi-phase compilation process.
-//! Expression compilation is recursive and produces stack-based bytecode.
+//! Expression compilation is recursive and produces compiler-owned virtual
+//! instructions that are finalized as RISC v2 bytecode.
 
 use super::emit::FrontendOp as Op;
 use crate::value::Value;
@@ -273,11 +274,11 @@ impl super::Compiler {
     self.compile_expr_oast(&binary.right)?;
     // Payload layout for CompareJump:
     // - payload byte 0: cond_type (3 bits, rest unused)
-    // - payload bytes 1..2: signed i16 relative jump offset (patched later)
+    // - payload bytes 1..2: relative jump offset placeholder (patched later)
     self.emit_with_payload(Op::CompareJump, cond_type as u32, LINE);
 
     // Return the instruction index containing the compare+jump payload so
-    // callers can patch the i16 jump offset while preserving cond_type.
+    // callers can patch the branch offset while preserving cond_type.
     let patch_addr = self.current_ip().saturating_sub(1);
 
     Ok(Some(patch_addr))
@@ -366,7 +367,8 @@ impl super::Compiler {
             oast::BigintBase::Decimal => num_bigint::BigInt::parse_bytes(digits_str.as_bytes(), 10),
           }
         } else {
-          // Fallback to source text - span gives us byte offsets
+          // Recover the digits from the original source when Oxc did not
+          // retain a normalized bigint spelling; the span uses byte offsets.
           let source = self.source_text.as_ref();
           let start = n.span.start as usize;
           let end = n.span.end as usize;

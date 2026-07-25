@@ -12,7 +12,7 @@ pub(crate) struct Frame {
   pub(crate) chunk: Arc<Chunk>,
   /// The current instruction pointer within the chunk.
   pub(crate) ip: usize,
-  /// The stack of values for this frame.
+  /// The caller's operand stack, saved while this frame executes.
   pub(crate) stack: Vec<Value>,
   /// The local variable slots for this frame.
   pub(crate) locals: Vec<SharedValue>,
@@ -26,7 +26,7 @@ pub(crate) struct Frame {
   pub(crate) closure_env: Option<Rc<RefCell<Vec<SharedValue>>>>,
   /// Upvalue metadata for the current function.
   pub(crate) upvalues: Vec<UpvalueSpec>,
-  /// The types of local variables for this frame.
+  /// Slot-type metadata carried by this frame.
   pub(crate) slot_types: Option<Vec<Option<Type>>>,
   /// The names of local variables for this frame.
   pub(crate) slot_names: Option<Vec<Option<String>>>,
