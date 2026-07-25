@@ -68,6 +68,108 @@ mod test {
   }
 
   #[test]
+  fn strict_tail_recursion_reuses_the_active_vm_frame() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        "use strict";
+        function countDown(remaining, total) {
+          if (remaining === 0) return total;
+          return countDown(remaining - 1, total + 1);
+        }
+        globalThis.tail_count = countDown(50_000, 0);
+      "#
+    ));
+
+    assert_eq!(vm.get_global("tail_count"), Some(Value::Number(50_000.0)));
+  }
+
+  #[test]
+  fn ordinary_recursion_uses_vm_managed_register_frames() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        function depth(remaining) {
+          if (remaining === 0) return 0;
+          return 1 + depth(remaining - 1);
+        }
+        globalThis.recursion_depth = depth(10_000);
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("recursion_depth"),
+      Some(Value::Number(10_000.0))
+    );
+  }
+
+  #[test]
+  fn recursive_method_calls_use_vm_managed_register_frames() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const counter = {
+          depth(remaining) {
+            if (remaining === 0) return 0;
+            return 1 + this.depth(remaining - 1);
+          }
+        };
+        globalThis.method_recursion_depth = counter.depth(10_000);
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("method_recursion_depth"),
+      Some(Value::Number(10_000.0))
+    );
+  }
+
+  #[test]
+  fn recursive_exception_unwinding_restores_the_handler_registers() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        function descend(remaining) {
+          if (remaining === 0) throw 42;
+          return 1 + descend(remaining - 1);
+        }
+        try {
+          descend(2_000);
+        } catch (error) {
+          globalThis.recursive_error = error;
+        }
+      "#
+    ));
+
+    assert_eq!(vm.get_global("recursive_error"), Some(Value::Number(42.0)));
+  }
+
+  #[test]
+  fn return_cleanup_prevents_unsafe_tail_frame_replacement() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        "use strict";
+        let finalized = false;
+        function value() { return 42; }
+        function wrapped() {
+          try {
+            return value();
+          } finally {
+            finalized = true;
+          }
+        }
+        globalThis.cleaned_tail_result = wrapped();
+        globalThis.cleaned_tail_finalized = finalized;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("cleaned_tail_result"),
+      Some(Value::Number(42.0))
+    );
+    assert_eq!(
+      vm.get_global("cleaned_tail_finalized"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
   fn optional_member_access_short_circuits_to_undefined() {
     let (vm, _) = run_script(crate::js!(
       r#"

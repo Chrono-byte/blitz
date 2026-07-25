@@ -884,6 +884,26 @@ mod test {
   }
 
   #[test]
+  fn strict_direct_return_calls_emit_tail_call() {
+    let src = crate::js!(r#""use strict"; function recurse(value) { return recurse(value - 1); }"#);
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let chunk = compile(session.program(), session.source()).expect("compile ok");
+    let proto = chunk
+      .functions
+      .iter()
+      .find(|proto| proto.name == "recurse")
+      .expect("function proto");
+
+    assert!(
+      proto
+        .chunk
+        .code
+        .iter()
+        .any(|word| { Op::from_byte((word & 0xFF) as u8) == Some(Op::TailCall) })
+    );
+  }
+
+  #[test]
   fn compile_dynamic_import_uses_get_builtin() {
     let src = crate::js!("import('./dep.js');");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");

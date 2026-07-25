@@ -44,6 +44,11 @@ impl CallStack {
     self.frames.last()
   }
 
+  /// Returns a mutable reference to the active frame.
+  pub(crate) fn last_mut(&mut self) -> Option<&mut Frame> {
+    self.frames.last_mut()
+  }
+
   /// Truncates the stack to the specified length.
   pub(crate) fn truncate(
     &mut self,

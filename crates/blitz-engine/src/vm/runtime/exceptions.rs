@@ -16,6 +16,7 @@ impl Vm {
     let handler = match self.handlers.pop() {
       Some(h) => h,
       None => {
+        self.pending_exception_frame_count = None;
         self.last_uncaught_exception = Some(thrown.clone());
         return Err(match thrown {
           Value::String(s) => RuntimeError::from(format!("Uncaught: {}", s)),
@@ -32,6 +33,7 @@ impl Vm {
       if let Some(frame) = self.call_stack.pop() {
         self.chunk = frame.chunk;
         self.ip = frame.ip;
+        self.unwound_risc_state = frame.risc_state;
         self.locals = frame.locals;
         self.this_value = frame.this_value;
         self.current_closure_env = frame.closure_env;
@@ -49,6 +51,7 @@ impl Vm {
     }
     self.prune_stale_handlers();
 
+    self.pending_exception_frame_count = Some(handler.frame_count);
     self.chunk = handler.chunk;
     self.ip = handler.handler_ip;
     self.lexical_env = handler.saved_lexical_env;
@@ -70,6 +73,7 @@ impl Vm {
       }
       Err(err) => {
         self.pending_exception = None;
+        self.pending_exception_frame_count = None;
         Err(err)
       }
     }

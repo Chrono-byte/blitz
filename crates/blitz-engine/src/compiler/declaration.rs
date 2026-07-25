@@ -1133,7 +1133,7 @@ impl Compiler {
         });
         if let Some((return_slot, did_return_slot)) = return_target {
           if let Some(arg) = &r.argument {
-            self.compile_expr_oast_tail(arg)?;
+            self.compile_expr_oast(arg)?;
           } else {
             self.emit(Op::Undefined, LINE);
           }
@@ -1153,7 +1153,12 @@ impl Compiler {
           return Ok(());
         }
         if let Some(arg) = &r.argument {
-          self.compile_expr_oast_tail(arg)?;
+          if self.handler_depth == 0 && self.iterator_close_stack.is_empty() && self.with_depth == 0
+          {
+            self.compile_expr_oast_tail(arg)?;
+          } else {
+            self.compile_expr_oast(arg)?;
+          }
         } else {
           self.emit(Op::Undefined, LINE);
         }
@@ -1304,11 +1309,13 @@ impl Compiler {
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
 
+        self.handler_depth += 1;
         self.enter_block_scope_with_vars(&t.block.body);
         for stmt in &t.block.body {
           self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
         }
         self.exit_scope();
+        self.handler_depth = self.handler_depth.saturating_sub(1);
 
         self.emit(Op::PopHandler, LINE);
 
@@ -1976,6 +1983,7 @@ impl Compiler {
           strict_context: true,
           loop_depth: 0,
           with_depth: 0,
+          handler_depth: 0,
           continue_patches: Vec::new(),
           break_patches: Vec::new(),
           finally_patches: Vec::new(),
@@ -2292,6 +2300,7 @@ impl Compiler {
       strict_context: self.strict_context,
       loop_depth: 0,
       with_depth: 0,
+      handler_depth: 0,
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
       finally_patches: Vec::new(),
@@ -2560,6 +2569,7 @@ impl Compiler {
       strict_context: self.strict_context,
       loop_depth: 0,
       with_depth: 0,
+      handler_depth: 0,
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
       finally_patches: Vec::new(),
@@ -2636,8 +2646,8 @@ impl Compiler {
       // In that case, the body contains a single ExpressionStatement that should be returned.
       if func.expression && func.body.statements.len() == 1 {
         if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
-          // Compile the expression and return its value
-          inner.compile_expr_oast(&expr_stmt.expression)?;
+          // Compile the expression in return position.
+          inner.compile_expr_oast_tail(&expr_stmt.expression)?;
           inner.emit(Op::Return, LINE);
         } else {
           // Shouldn't happen for expression: true, but handle it safely
@@ -2664,7 +2674,7 @@ impl Compiler {
       inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
       if func.expression && func.body.statements.len() == 1 {
         if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
-          inner.compile_expr_oast(&expr_stmt.expression)?;
+          inner.compile_expr_oast_tail(&expr_stmt.expression)?;
           inner.emit(Op::Return, LINE);
         } else {
           for stmt in &func.body.statements {

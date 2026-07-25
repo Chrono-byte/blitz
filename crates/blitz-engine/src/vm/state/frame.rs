@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
+use super::handler::RiscExecutionState;
 use crate::bytecode::{Chunk, UpvalueSpec};
 use crate::environment::EnvironmentRecord;
 use crate::typecheck::Type;
@@ -13,6 +14,8 @@ pub(crate) struct Frame {
   pub(crate) chunk: Arc<Chunk>,
   /// The current instruction pointer within the chunk.
   pub(crate) ip: usize,
+  /// Suspended caller registers and spills for an interpreter-managed call.
+  pub(crate) risc_state: Option<RiscExecutionState>,
   /// The local variable slots for this frame.
   pub(crate) locals: Vec<SharedValue>,
   /// The `this` value for this frame.

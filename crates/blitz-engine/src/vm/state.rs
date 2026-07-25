@@ -197,6 +197,10 @@ pub struct Vm {
   pub(super) handlers: HandlerStack,
   /// Exception value unwound to the active handler but not yet loaded into r7.
   pub(super) pending_exception: Option<Value>,
+  /// Frame depth of the handler selected for the pending exception.
+  pub(super) pending_exception_frame_count: Option<usize>,
+  /// Caller register state restored while unwinding interpreter-managed frames.
+  pub(super) unwound_risc_state: Option<RiscExecutionState>,
   /// Shared module loader for this realm, reused across VMs with the same globals.
   pub(super) module_loader: Rc<RefCell<ModuleLoader>>,
   /// Per-VM module table: vector indexed by module index, each mapping export name -> shared slot

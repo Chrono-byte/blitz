@@ -32,7 +32,7 @@ impl Vm {
       .unwrap_or_else(|| RuntimeError::from("JS exception"))
   }
 
-  fn throw_class_constructor_call_error(
+  pub(super) fn throw_class_constructor_call_error(
     &mut self,
     proto: &FunctionProto,
   ) -> RuntimeError {
@@ -1229,6 +1229,7 @@ impl Vm {
     self.call_stack.push(Frame {
       chunk: Arc::clone(&self.chunk),
       ip: self.ip,
+      risc_state: None,
       locals: std::mem::replace(
         &mut self.locals,
         Vec::with_capacity(LOCALS_INITIAL_CAPACITY),

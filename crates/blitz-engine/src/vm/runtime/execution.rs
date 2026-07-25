@@ -94,6 +94,8 @@ impl Vm {
       bg_runtime: get_global_bg_runtime(),
       handlers: HandlerStack::with_capacity(32),
       pending_exception: None,
+      pending_exception_frame_count: None,
+      unwound_risc_state: None,
       module_loader,
       module_table: Vec::new(),
       current_module_specifier: None,
@@ -164,6 +166,8 @@ impl Vm {
       bg_runtime: Arc::clone(&self.bg_runtime),
       handlers: HandlerStack::with_capacity(32),
       pending_exception: None,
+      pending_exception_frame_count: None,
+      unwound_risc_state: None,
       module_loader: Rc::clone(&self.module_loader),
       module_table: Vec::new(),
       current_module_specifier: None,
@@ -516,6 +520,10 @@ impl Vm {
     if let Some(value) = &self.pending_exception {
       roots.push(value.clone());
     }
+    if let Some(state) = &self.unwound_risc_state {
+      roots.extend(state.registers.iter().cloned());
+      roots.extend(state.spills.iter().cloned());
+    }
     if let Some(state) = &self.yield_star_state {
       roots.push(state.iterator.clone());
       roots.push(state.next_method.clone());
@@ -558,6 +566,10 @@ impl Vm {
       roots.extend(frame.locals.iter().map(|c| c.borrow().clone()));
       roots.push(frame.this_value.clone());
       roots.push(frame.callee.clone());
+      if let Some(state) = &frame.risc_state {
+        roots.extend(state.registers.iter().cloned());
+        roots.extend(state.spills.iter().cloned());
+      }
       if let Some(value) = &frame.new_target {
         roots.push(value.clone());
       }
@@ -1076,6 +1088,8 @@ impl Vm {
     self.current_strict_mode = self.chunk.root_strict;
     self.handlers.clear();
     self.pending_exception = None;
+    self.pending_exception_frame_count = None;
+    self.unwound_risc_state = None;
     self.root_chunk = None;
     self.current_slot_types = None;
     self.current_slot_names = None;
@@ -1142,6 +1156,8 @@ impl Vm {
     self.current_strict_mode = self.chunk.root_strict;
     self.handlers.clear();
     self.pending_exception = None;
+    self.pending_exception_frame_count = None;
+    self.unwound_risc_state = None;
     self.property_get_ic.clear();
     self.current_slot_types = None;
     self.current_slot_names = None;
@@ -1197,13 +1213,16 @@ impl Vm {
     state: &mut RiscExecutionState,
     stop_at_generator_init: bool,
   ) -> Result<RiscRunOutcome, RuntimeError> {
-    let execution_chunk = Arc::clone(&self.chunk);
+    let boundary_frame_count = self.call_stack.len();
     let registers = &mut state.registers;
     let spills = &mut state.spills;
 
-    if Arc::ptr_eq(&self.chunk, &execution_chunk)
+    if self
+      .pending_exception_frame_count
+      .is_some_and(|target| target >= boundary_frame_count)
       && let Some(exception) = self.pending_exception.take()
     {
+      self.pending_exception_frame_count = None;
       registers[7] = exception;
     }
 
@@ -1232,6 +1251,7 @@ impl Vm {
         );
       }
 
+      let mut switched_risc_context = false;
       let step_result = (|| -> Result<Option<RiscRunOutcome>, RuntimeError> {
         match op {
           Op::Const => {
@@ -1721,12 +1741,88 @@ impl Vm {
                 .ok_or_else(|| RuntimeError::from("RISC call operand window out of bounds"))?,
             );
             let callee = registers[0].clone();
-            registers[0] = if matches!(op, Op::CallBuiltin) {
-              let receiver = registers[1].clone();
-              self.call_value_with_this(&callee, &receiver, &args)?
+            if op != Op::TailCall
+              && let Value::Closure { proto, env, .. } = &callee
+              && !proto.is_generator
+              && !proto.is_async
+            {
+              if proto.is_class_constructor && self.construct_new_target.is_none() {
+                return Err(self.throw_class_constructor_call_error(proto));
+              }
+              let call_args = self.prepare_call_args(&args, proto)?;
+              let receiver = if op == Op::CallBuiltin {
+                registers[1].clone()
+              } else {
+                Value::Undefined
+              };
+              let this_arg = Self::closure_lexical_this(&callee).unwrap_or(receiver);
+              let this_arg = if proto.is_derived_constructor {
+                Value::Uninitialized
+              } else {
+                this_arg
+              };
+              let caller_state = RiscExecutionState {
+                registers: registers.clone(),
+                spills: spills.clone(),
+                resume_register: state.resume_register,
+              };
+              self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
+              self
+                .call_stack
+                .last_mut()
+                .expect("call frame was just pushed")
+                .risc_state = Some(caller_state);
+              registers.fill(Value::Undefined);
+              registers[1] = self.this_value.clone();
+              spills.clear();
+              spills.resize(self.chunk.risc_spill_count as usize, Value::Undefined);
+              state.resume_register = None;
+              switched_risc_context = true;
+            } else if op != Op::TailCall {
+              registers[0] = if matches!(op, Op::CallBuiltin) {
+                let receiver = registers[1].clone();
+                self.call_value_with_this(&callee, &receiver, &args)?
+              } else {
+                self.call_value(&callee, &args)?
+              };
+            } else if let Value::Closure { proto, env, .. } = &callee
+              && !proto.is_generator
+              && !proto.is_async
+            {
+              if proto.is_class_constructor && self.construct_new_target.is_none() {
+                return Err(self.throw_class_constructor_call_error(proto));
+              }
+              let call_args = self.prepare_call_args(&args, proto)?;
+              let this_arg = Self::closure_lexical_this(&callee).unwrap_or(Value::Undefined);
+              let this_arg = if proto.is_derived_constructor {
+                Value::Uninitialized
+              } else {
+                this_arg
+              };
+              let active_depth = self.call_stack.len();
+              while self
+                .handlers
+                .last()
+                .is_some_and(|handler| handler.frame_count >= active_depth)
+              {
+                self.handlers.pop();
+              }
+              if let Some(frame) = self.call_stack.last_mut() {
+                frame.callee = callee.clone();
+                frame.new_target = None;
+                frame.upvalues = proto.upvalues.clone();
+              }
+              self.configure_call_frame(proto, env, call_args, this_arg, callee.clone())?;
+              registers.fill(Value::Undefined);
+              registers[1] = self.this_value.clone();
+              spills.clear();
+              spills.resize(self.chunk.risc_spill_count as usize, Value::Undefined);
+              state.resume_register = None;
+              switched_risc_context = true;
             } else {
-              self.call_value(&callee, &args)?
-            };
+              let result = self.call_value(&callee, &args)?;
+              return Ok(Some(RiscRunOutcome::Return(result)));
+            }
           }
           Op::Construct => {
             let count = decode_risc_aux16(word) as usize;
@@ -1873,6 +1969,19 @@ impl Vm {
               }
               self.generator_return_frame_count = None;
             }
+            if let Some(caller_state) = self
+              .call_stack
+              .last_mut()
+              .and_then(|frame| frame.risc_state.take())
+            {
+              self.execute_return(result.clone())?;
+              registers.clone_from(&caller_state.registers);
+              registers[0] = result;
+              spills.clone_from(&caller_state.spills);
+              state.resume_register = caller_state.resume_register;
+              switched_risc_context = true;
+              return Ok(None);
+            }
             if self.call_stack.is_empty() {
               let temp_root_base = self.gc_temp_roots.len();
               self.gc_temp_roots.push(result.clone());
@@ -1888,10 +1997,20 @@ impl Vm {
       })();
       match step_result {
         Ok(Some(result)) => return Ok(result),
+        Ok(None) if switched_risc_context => continue,
         Ok(None) => {}
         Err(_error)
-          if self.pending_exception.is_some() && Arc::ptr_eq(&self.chunk, &execution_chunk) =>
+          if self.pending_exception.is_some()
+            && self
+              .pending_exception_frame_count
+              .is_some_and(|target| target >= boundary_frame_count) =>
         {
+          if let Some(caller_state) = self.unwound_risc_state.take() {
+            registers.clone_from(&caller_state.registers);
+            spills.clone_from(&caller_state.spills);
+            state.resume_register = caller_state.resume_register;
+          }
+          self.pending_exception_frame_count = None;
           registers[7] = self
             .pending_exception
             .take()
@@ -1939,6 +2058,7 @@ impl Vm {
     let saved_recent_return_value = self.recent_return_value.clone();
     let saved_last_uncaught_exception = self.last_uncaught_exception.clone();
     let saved_pending_exception = self.pending_exception.clone();
+    let saved_pending_exception_frame_count = self.pending_exception_frame_count;
     let saved_lexical_env = if direct_eval {
       Some(Rc::clone(&self.lexical_env))
     } else {
@@ -2042,6 +2162,7 @@ impl Vm {
     self.recent_return_value = saved_recent_return_value;
     self.last_uncaught_exception = saved_last_uncaught_exception;
     self.pending_exception = saved_pending_exception;
+    self.pending_exception_frame_count = saved_pending_exception_frame_count;
     if direct_eval {
       if let Some(lexical_env) = saved_lexical_env {
         self.lexical_env = lexical_env;

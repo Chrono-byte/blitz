@@ -281,7 +281,12 @@ impl super::Compiler {
 
     self.compile_expr_oast(&c.callee)?;
     let arg_count = self.compile_call_arguments(&c.arguments)?;
-    self.emit_call_with_arg_count(Op::Call, arg_count)
+    let op = if self.strict_context {
+      Op::TailCall
+    } else {
+      Op::Call
+    };
+    self.emit_call_with_arg_count(op, arg_count)
   }
 
   fn compile_tagged_template_tail(

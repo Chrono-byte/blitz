@@ -15,10 +15,13 @@ this file wins.
 
 ## Register machine
 
-Every active RISC execution state owns 16 value registers. Registers are not
-preserved across frames, so there is no caller-saved/callee-saved split. The
-interpreter has no runtime operand stack; lexical cells and frame metadata are
-distinct from RISC registers and spill slots.
+Every active RISC execution state owns 16 value registers. A bytecode call
+suspends the caller's register and spill state in its VM frame, so nested
+ordinary closure calls remain inside one iterative interpreter loop. There is
+no caller-saved/callee-saved split and no runtime operand stack; lexical cells
+and frame metadata are distinct from RISC registers and spill slots. Strict
+proper tail calls replace the active execution context without growing the VM
+frame stack when no language-mandated cleanup remains.
 
 - `r0`: callee on call entry and result on return
 - `r1`: receiver (`this`)

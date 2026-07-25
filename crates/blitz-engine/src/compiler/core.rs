@@ -76,6 +76,8 @@ pub struct Compiler {
   pub loop_depth: usize,
   /// Current nested `with` depth.
   pub with_depth: usize,
+  /// Active bytecode exception handlers that must survive a call.
+  pub handler_depth: usize,
   /// Stack of continue patch sites for nested loops. Each entry holds a list
   /// of instruction positions whose branch payloads must be patched to jump
   /// to the loop's continue target when the loop is closed.
@@ -286,6 +288,7 @@ impl Compiler {
       strict_context: false,
       loop_depth: 0,
       with_depth: 0,
+      handler_depth: 0,
       continue_patches: Vec::new(),
       break_patches: Vec::new(),
       finally_patches: Vec::new(),
