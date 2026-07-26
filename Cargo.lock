@@ -142,7 +142,6 @@ dependencies = [
  "crc32fast",
  "criterion",
  "fastrand",
- "futures",
  "indexmap",
  "js-string",
  "num-bigint 0.4.8",
@@ -161,7 +160,6 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
- "serde_yaml",
  "thiserror 2.0.19",
  "tokio",
 ]

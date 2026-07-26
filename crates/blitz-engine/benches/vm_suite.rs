@@ -65,7 +65,7 @@ const EXTRA_FIXTURES: [&str; 3] = ["dom_like_access", "array_iteration", "config
 fn benchmark_globals() -> Rc<RefCell<ObjectData>> {
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
-    PropertyKey::String("globalThis".to_string()),
+    PropertyKey::String("globalThis".to_string().into()),
     PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
   );
   runtime_utils::install_minimal_kernel_constructors(&globals);
@@ -103,7 +103,7 @@ fn comment_only_eval_source() -> String {
 
 /// Returns a `Value` for the hotpath number value.
 fn hotpath_number_value() -> Value {
-  Value::String("0x1234".to_string())
+  Value::String("0x1234".to_string().into())
 }
 
 /// Compiles a benchmark fixture from the given path.
@@ -133,7 +133,7 @@ fn baseline_global_names(globals: &Rc<RefCell<ObjectData>>) -> HashSet<String> {
     .properties
     .keys()
     .filter_map(|key| match key {
-      PropertyKey::String(name) => Some(name.clone()),
+      PropertyKey::String(name) => Some(name.to_string_lossy()),
       _ => None,
     })
     .collect()
@@ -332,7 +332,7 @@ fn bench_micro_hotpaths(c: &mut Criterion) {
   let from_char_code = vm
     .get_property_host(
       &string_ctor,
-      &PropertyKey::String("fromCharCode".to_string()),
+      &PropertyKey::String("fromCharCode".to_string().into()),
     )
     .expect("String.fromCharCode available");
 
@@ -352,7 +352,7 @@ fn bench_micro_hotpaths(c: &mut Criterion) {
         vm.call_value_with_this(
           &from_char_code,
           &string_ctor,
-          &[value, Value::String("1".to_string())],
+          &[value, Value::String("1".to_string().into())],
         )
         .expect("builtin dispatch"),
       );

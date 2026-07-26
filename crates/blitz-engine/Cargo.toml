@@ -17,10 +17,6 @@ path = "src/bin/blitz_engine.rs"
 name = "ast_dump"
 path = "src/bin/ast_dump.rs"
 
-[[bin]]
-name = "test262"
-path = "src/bin/test262.rs"
-
 [[bench]]
 name = "vm_suite"
 harness = false
@@ -30,7 +26,6 @@ blitz-macros.workspace = true
 clap.workspace = true
 crc32fast = "1.5.0"
 fastrand.workspace = true
-futures.workspace = true
 indexmap.workspace = true
 js-string.workspace = true
 num-bigint.workspace = true
@@ -49,7 +44,6 @@ regex-js.workspace = true
 rustyline.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
