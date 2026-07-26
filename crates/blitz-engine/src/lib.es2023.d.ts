@@ -49,15 +49,17 @@ interface SetConstructor {
 }
 declare var Set: SetConstructor;
 
-interface WeakMap<K extends object, V> {
+interface WeakMap<K extends object | symbol, V> {
   delete(key: K): boolean;
   get(key: K): V | undefined;
+  getOrInsert(key: K, value: V): V;
+  getOrInsertComputed(key: K, callback: (key: K) => V): V;
   has(key: K): boolean;
   set(key: K, value: V): this;
 }
 interface WeakMapConstructor {
-  new <K extends object = object, V = any>(entries?: readonly (readonly [K, V])[] | null): WeakMap<K, V>;
-  readonly prototype: WeakMap<object, any>;
+  new <K extends object | symbol = object, V = any>(entries?: readonly (readonly [K, V])[] | null): WeakMap<K, V>;
+  readonly prototype: WeakMap<object | symbol, any>;
 }
 declare var WeakMap: WeakMapConstructor;
 

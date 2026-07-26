@@ -854,6 +854,15 @@ impl Vm {
       .realm_state
       .realm
       .intrinsics
+      .weak_map_constructor
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
       .number_constructor
       .clone()
     {
@@ -936,6 +945,15 @@ impl Vm {
       .realm
       .intrinsics
       .map_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .weak_map_prototype
       .clone()
     {
       roots.push(value);

@@ -30,6 +30,8 @@ pub(crate) struct GlobalIntrinsicValues<'a> {
   pub aggregate_error_ctor_val: &'a Value,
   /// The Map constructor value.
   pub map_ctor_val: &'a Value,
+  /// The WeakMap constructor value.
+  pub weak_map_ctor_val: &'a Value,
   /// The Set constructor value.
   pub set_ctor_val: &'a Value,
   /// The ArrayBuffer constructor value.
@@ -174,6 +176,7 @@ pub(crate) fn install_global_bindings(
     ("Atomics", values.atomics_obj),
     ("ShadowRealm", values.shadowrealm_ctor_val),
     ("Map", values.map_ctor_val),
+    ("WeakMap", values.weak_map_ctor_val),
     ("Set", values.set_ctor_val),
   ] {
     g.properties.insert(
@@ -191,6 +194,7 @@ pub(crate) fn install_global_bindings(
   set_builtin_name(values.error_ctor_val, "Error");
   set_builtin_name(values.aggregate_error_ctor_val, "AggregateError");
   set_builtin_name(values.map_ctor_val, "Map");
+  set_builtin_name(values.weak_map_ctor_val, "WeakMap");
   set_builtin_name(values.set_ctor_val, "Set");
 
   g.properties.insert(
@@ -261,7 +265,6 @@ pub(crate) fn install_global_bindings(
     PropertyDescriptor::builtin_data(temporal_namespace),
   );
 
-  let weakmap_ctor_val = make_placeholder_ctor("WeakMap", false);
   let weakset_ctor_val = make_placeholder_ctor("WeakSet", false);
   let proxy_object_proto = Rc::clone(object_proto_map);
   let proxy_function_proto = Rc::clone(function_proto_map);
@@ -344,10 +347,6 @@ pub(crate) fn install_global_bindings(
       set_builtin_length(&builtin, 2.0);
       builtin
     }),
-  );
-  g.properties.insert(
-    PKey::String("WeakMap".to_string().into()),
-    PropertyDescriptor::builtin_data(weakmap_ctor_val),
   );
   g.properties.insert(
     PKey::String("WeakSet".to_string().into()),

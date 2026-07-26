@@ -384,7 +384,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/Hash.js",
     source: include_str!("modules/dist/esm/Hash.js"),
     declaration: None,
-    source_sha256: "dddf008a04d4825f55aff1fa8dff59d1c2139665d0dbcac315eadacd33e8deea",
+    source_sha256: "84659ae9af6d50d16deaa6f8bd85811b4b0a79da63873d7cce671ee7a45b35d9",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -426,7 +426,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/internal/cause.js",
     source: include_str!("modules/dist/esm/internal/cause.js"),
     declaration: None,
-    source_sha256: "2ed8d9e951c7491aa289b47ef3b202e90d20555331082fc42b7c6f81ad2bf48c",
+    source_sha256: "c83bcabfdb0aa83106064caab90dcb37df445c6ea6422253214e4412edc04bad",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {
@@ -832,7 +832,7 @@ pub const EMBEDDED_EFFECT_MODULES: &[EmbeddedEffectModule] = &[
     specifier: "blitz-internal:effect/dist/esm/internal/metric.js",
     source: include_str!("modules/dist/esm/internal/metric.js"),
     declaration: None,
-    source_sha256: "183665c0e2f0700e52f918ae8afab757dcd4ca3622033fd1a57604d278685409",
+    source_sha256: "20ce94a0c85100b287739fec9e3eae6cf0acf20567a1aab1361284e3a59922c4",
     declaration_sha256: None,
   },
   EmbeddedEffectModule {

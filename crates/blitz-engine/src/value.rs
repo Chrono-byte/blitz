@@ -52,7 +52,7 @@
 //! use blitz::value::Value;
 //!
 //! let num = Value::Number(42.0);
-//! let s = Value::String("hello".to_string());
+//! let s = Value::String("hello".to_string().into());
 //! assert!(num.is_truthy());
 //! assert_eq!(num.type_name(), "number");
 //! ```
@@ -63,6 +63,7 @@ use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::rc::Weak;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use num_bigint::BigInt as BigIntValue;
@@ -129,22 +130,22 @@ impl std::fmt::Debug for WeakObject {
 
 /// Symbol primitive identity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SymbolId(u64);
+pub struct SymbolId(Arc<u64>);
 
 impl SymbolId {
   /// Generate a new unique symbol id.
   pub fn new() -> Self {
-    Self(fastrand::u64(..))
+    Self(Arc::new(fastrand::u64(..)))
   }
 
   /// Create a well-known symbol id.
   pub fn well_known(id: u64) -> Self {
-    Self(id)
+    Self(Arc::new(id))
   }
 
   /// Return the raw id.
   pub fn as_u64(&self) -> u64 {
-    self.0
+    *self.0
   }
 
   /// Well-known symbol for @@toPrimitive
@@ -637,6 +638,8 @@ pub struct ObjectData {
   pub weak_prototype: Option<WeakObject>,
   /// VM-internal slots that are never exposed through ECMAScript property operations.
   pub(crate) internal_slots: IndexMap<&'static str, Value>,
+  /// Ephemeron entries for objects with a `[[WeakMapData]]` internal slot.
+  pub(crate) weak_map_entries: Option<Vec<WeakMapEntry>>,
   /// Compiled matcher for objects with a `[[RegExpMatcher]]` internal slot.
   pub(crate) regexp_matcher: Option<regex_js::Regex>,
   /// Lexical environment captured by function objects, if any.
@@ -665,6 +668,7 @@ impl ObjectData {
       strong_prototype: None,
       weak_prototype: None,
       internal_slots: IndexMap::new(),
+      weak_map_entries: None,
       regexp_matcher: None,
       captured_lexical_env: None,
       extensible: true,
@@ -686,6 +690,7 @@ impl ObjectData {
       strong_prototype: None,
       weak_prototype: Some(WeakObject::new(prototype)),
       internal_slots: IndexMap::new(),
+      weak_map_entries: None,
       regexp_matcher: None,
       captured_lexical_env: None,
       extensible: true,
@@ -847,6 +852,93 @@ pub type NativeFn =
 /// receiver (`this`) as the first element when invoked via `Vm::call_with_this`.
 pub type BuiltinFn =
   Rc<dyn Fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, crate::errors::RuntimeError>>;
+
+type WeakBuiltinFn =
+  Weak<dyn Fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, crate::errors::RuntimeError>>;
+
+/// A garbage-collector-aware weak reference to any ECMAScript object identity.
+#[derive(Clone)]
+pub(crate) enum WeakKey {
+  Object(Weak<RefCell<ObjectData>>),
+  Array(Weak<RefCell<ArrayData>>),
+  Proxy(Weak<RefCell<ProxyData>>),
+  Closure(Weak<RefCell<ObjectData>>),
+  Builtin(WeakBuiltinFn),
+  BuiltinObject(Weak<RefCell<ObjectData>>),
+  Promise(Weak<RefCell<PromiseState>>),
+  Symbol(std::sync::Weak<u64>),
+}
+
+impl WeakKey {
+  /// Create a weak key for an ECMAScript object value.
+  pub(crate) fn new(value: &Value) -> Option<Self> {
+    match value {
+      Value::Object(value) => Some(Self::Object(Rc::downgrade(value))),
+      Value::Array(value, _) => Some(Self::Array(Rc::downgrade(value))),
+      Value::Proxy(value) => Some(Self::Proxy(Rc::downgrade(value))),
+      Value::Closure { props, .. } => Some(Self::Closure(Rc::downgrade(props))),
+      Value::Builtin(value) => Some(Self::Builtin(Rc::downgrade(value))),
+      Value::BuiltinObject(_, props) => Some(Self::BuiltinObject(Rc::downgrade(props))),
+      Value::Promise(value) => Some(Self::Promise(Rc::downgrade(value))),
+      Value::Symbol(id, _) => Some(Self::Symbol(Arc::downgrade(&id.0))),
+      _ => None,
+    }
+  }
+
+  /// Return whether this weak key has the same identity as `value`.
+  pub(crate) fn matches(
+    &self,
+    value: &Value,
+  ) -> bool {
+    match (self, value) {
+      (Self::Object(key), Value::Object(value)) => key.ptr_eq(&Rc::downgrade(value)),
+      (Self::Array(key), Value::Array(value, _)) => key.ptr_eq(&Rc::downgrade(value)),
+      (Self::Proxy(key), Value::Proxy(value)) => key.ptr_eq(&Rc::downgrade(value)),
+      (Self::Closure(key), Value::Closure { props, .. }) => key.ptr_eq(&Rc::downgrade(props)),
+      (Self::Builtin(key), Value::Builtin(value)) => key.ptr_eq(&Rc::downgrade(value)),
+      (Self::BuiltinObject(key), Value::BuiltinObject(_, props)) => {
+        key.ptr_eq(&Rc::downgrade(props))
+      }
+      (Self::Promise(key), Value::Promise(value)) => key.ptr_eq(&Rc::downgrade(value)),
+      (Self::Symbol(key), Value::Symbol(value, _)) => key
+        .upgrade()
+        .is_some_and(|key| *key == value.as_u64()),
+      _ => false,
+    }
+  }
+
+  /// Return whether the allocation still has at least one strong owner.
+  pub(crate) fn is_live(&self) -> bool {
+    match self {
+      Self::Object(value) | Self::Closure(value) | Self::BuiltinObject(value) => {
+        value.strong_count() > 0
+      }
+      Self::Array(value) => value.strong_count() > 0,
+      Self::Proxy(value) => value.strong_count() > 0,
+      Self::Builtin(value) => value.strong_count() > 0,
+      Self::Promise(value) => value.strong_count() > 0,
+      Self::Symbol(value) => value.strong_count() > 0,
+    }
+  }
+}
+
+impl std::fmt::Debug for WeakKey {
+  fn fmt(
+    &self,
+    f: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
+    f.debug_struct("WeakKey")
+      .field("live", &self.is_live())
+      .finish()
+  }
+}
+
+/// One `WeakMap` ephemeron: a weak key and its conditionally strong value.
+#[derive(Clone, Debug)]
+pub(crate) struct WeakMapEntry {
+  pub(crate) key: WeakKey,
+  pub(crate) value: Value,
+}
 
 /// Runtime type descriptor structure retained with compiled type metadata.
 #[derive(Clone, Debug)]

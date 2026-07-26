@@ -310,9 +310,6 @@ const main = async () => {
       "self instanceof URL",
       'typeof URL !== "undefined" && self instanceof URL',
     );
-    // Blitz does not yet implement WeakMap methods. Effect uses these caches
-    // only as identity maps, so retain behavior at the cost of weak retention.
-    rollupSource = rollupSource.replaceAll("new WeakMap()", "new Map()");
     const minified = await transform(rollupSource, {
       format: "esm",
       target: "es2022",

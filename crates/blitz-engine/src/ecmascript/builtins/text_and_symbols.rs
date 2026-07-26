@@ -21,6 +21,16 @@ thread_local! {
   static SYMBOL_REGISTRY: RefCell<HashMap<JsString, SymbolId>> = RefCell::new(HashMap::new());
 }
 
+/// Return whether `id` belongs to the agent-wide `Symbol.for` registry.
+pub(crate) fn is_registered_symbol(id: &SymbolId) -> bool {
+  SYMBOL_REGISTRY.with(|registry| {
+    registry
+      .borrow()
+      .values()
+      .any(|registered| registered == id)
+  })
+}
+
 pub(crate) struct TextAndSymbolIntrinsics {
   pub(crate) string_constructor: Value,
   pub(crate) string_prototype: Value,

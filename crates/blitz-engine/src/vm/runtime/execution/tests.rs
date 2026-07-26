@@ -3051,6 +3051,171 @@ mod test {
   }
 
   #[test]
+  fn weak_map_supports_object_identity_and_standard_methods() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        globalThis.first = {};
+        globalThis.second = {};
+        const callable = function() {};
+        var wm = new WeakMap([[first, 1], [callable, 2]]);
+        const chained = wm.set(second, 3);
+        wm.set(first, 4);
+        const hasSecond = wm.has(second);
+        const gotFirst = wm.get(first);
+        const gotCallable = wm.get(callable);
+        const hasFreshObject = wm.has({});
+        const hasPrimitive = wm.has(1);
+        const gotPrimitive = wm.get(1);
+        const deletedPrimitive = wm.delete(1);
+        const deletedSecond = wm.delete(second);
+        const hasDeletedSecond = wm.has(second);
+
+        let invalidKeyRejected = false;
+        let callRejected = false;
+        let brandRejected = false;
+        try { wm.set(1, "invalid"); } catch (error) {
+          invalidKeyRejected = error instanceof TypeError;
+        }
+        try { WeakMap(); } catch (error) {
+          callRejected = error instanceof TypeError;
+        }
+        try { WeakMap.prototype.get.call(new Map(), first); } catch (error) {
+          brandRejected = error instanceof TypeError;
+        }
+
+        globalThis.weak_map_result = [
+          hasSecond,
+          gotFirst,
+          gotCallable,
+          chained === wm,
+          hasFreshObject,
+          hasPrimitive,
+          gotPrimitive === undefined,
+          deletedPrimitive,
+          deletedSecond,
+          !hasDeletedSecond,
+          invalidKeyRejected,
+          callRejected,
+          brandRejected,
+          new WeakMap(null) instanceof WeakMap,
+          Object.prototype.toString.call(wm)
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("weak_map_result"),
+      Some(Value::String(
+        "true,4,2,true,false,false,true,false,true,true,true,true,true,true,[object WeakMap]"
+          .to_string()
+          .into()
+      ))
+    );
+  }
+
+  #[test]
+  fn weak_map_entries_follow_ephemeron_reachability() {
+    let (mut vm, _) = run_script(crate::js!(
+      r#"
+        globalThis.weak_map_for_gc = new WeakMap();
+        globalThis.weak_map_key_for_gc = {};
+        weak_map_for_gc.set(weak_map_key_for_gc, {
+          key: weak_map_key_for_gc
+        });
+      "#
+    ));
+    let weak_map = vm
+      .get_global("weak_map_for_gc")
+      .expect("WeakMap global");
+    let Value::Object(data) = weak_map else {
+      panic!("WeakMap must be an ordinary object");
+    };
+    assert_eq!(
+      data
+        .borrow()
+        .weak_map_entries
+        .as_ref()
+        .expect("WeakMap data")
+        .len(),
+      1
+    );
+
+    assert!(
+      vm.get_global("weak_map_key_for_gc").is_some(),
+      "key is rooted before collection"
+    );
+
+    vm.collect_garbage_prototype();
+    assert_eq!(
+      data
+        .borrow()
+        .weak_map_entries
+        .as_ref()
+        .expect("reachable WeakMap data")
+        .len(),
+      1
+    );
+
+    let source = crate::js!("globalThis.weak_map_key_for_gc = null;");
+    let session = Parser::parse_source(source).expect("parse WeakMap key release");
+    let chunk =
+      compiler::compile_oxc(session.program(), session.source()).expect("compile WeakMap release");
+    vm.run(chunk).expect("release WeakMap key");
+    vm.collect_garbage_prototype();
+
+    assert!(
+      data
+        .borrow()
+        .weak_map_entries
+        .as_ref()
+        .expect("reachable WeakMap data")
+        .is_empty()
+    );
+  }
+
+  #[test]
+  fn weak_map_supports_symbol_keys_and_upsert_methods() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const symbol = Symbol("key");
+        const key = {};
+        const map = new WeakMap();
+        map.set(symbol, 1);
+        map.set(Symbol.hasInstance, 2);
+        const inserted = map.getOrInsert(key, 3);
+        const retained = map.getOrInsert(key, 4);
+        const computedKey = {};
+        const computed = map.getOrInsertComputed(computedKey, current => {
+          map.set(current, 5);
+          return 6;
+        });
+        let registeredRejected = false;
+        try {
+          map.set(Symbol.for("registered"), 7);
+        } catch (error) {
+          registeredRejected = error instanceof TypeError;
+        }
+        globalThis.weak_map_upsert_result = [
+          map.get(symbol),
+          map.get(Symbol.hasInstance),
+          inserted,
+          retained,
+          computed,
+          map.get(computedKey),
+          registeredRejected,
+          WeakMap.prototype.getOrInsert.length,
+          WeakMap.prototype.getOrInsertComputed.length
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("weak_map_upsert_result"),
+      Some(Value::String("1,2,3,3,6,6,true,2,2".to_string().into()))
+    );
+  }
+
+  #[test]
   fn reverse_is_generic_and_preserves_sparse_properties() {
     let (vm, _) = run_script(crate::js!(
       r#"

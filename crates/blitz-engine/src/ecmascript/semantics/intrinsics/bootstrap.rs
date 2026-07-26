@@ -72,6 +72,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let collection_intrinsics =
     builtins::collections::install_map_set_constructors(&object_proto_map, &function_proto_map);
   let map_ctor_val = collection_intrinsics.map_constructor.clone();
+  let weak_map_ctor_val = collection_intrinsics.weak_map_constructor.clone();
   let set_ctor_val = collection_intrinsics.set_constructor.clone();
   let iterator_proto = collection_intrinsics.iterator_prototype.clone();
   let map_iterator_proto = collection_intrinsics
@@ -128,6 +129,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       error_ctor_val: &error_ctor_val,
       aggregate_error_ctor_val: &aggregate_error_ctor_val,
       map_ctor_val: &map_ctor_val,
+      weak_map_ctor_val: &weak_map_ctor_val,
       set_ctor_val: &set_ctor_val,
       arraybuffer_ctor_val: &arraybuffer_ctor_val,
       sharedarraybuffer_ctor_val: &sharedarraybuffer_ctor_val,
@@ -193,6 +195,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     date_constructor: Some(date_ctor_val),
     regexp_constructor: Some(regexp_ctor_val),
     map_constructor: Some(map_ctor_val),
+    weak_map_constructor: Some(weak_map_ctor_val),
     set_constructor: Some(set_ctor_val),
     arraybuffer_constructor: Some(arraybuffer_ctor_val),
     shared_array_buffer_constructor: Some(sharedarraybuffer_ctor_val),
@@ -211,6 +214,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     date_prototype: Some(date_proto_val),
     regexp_prototype: Some(regexp_proto_val),
     map_prototype: Some(collection_intrinsics.map_prototype),
+    weak_map_prototype: Some(collection_intrinsics.weak_map_prototype),
     set_prototype: Some(collection_intrinsics.set_prototype),
     typed_array_prototype: Some(Value::Object(typedarray_proto_map)),
     arraybuffer_prototype: Some(Value::Object(arraybuffer_proto_map)),
@@ -279,6 +283,7 @@ mod tests {
       ("Promise", intrinsics.promise_constructor.as_ref()),
       ("RegExp", intrinsics.regexp_constructor.as_ref()),
       ("Map", intrinsics.map_constructor.as_ref()),
+      ("WeakMap", intrinsics.weak_map_constructor.as_ref()),
       ("Set", intrinsics.set_constructor.as_ref()),
       ("ArrayBuffer", intrinsics.arraybuffer_constructor.as_ref()),
       ("DataView", intrinsics.data_view_constructor.as_ref()),
@@ -321,6 +326,11 @@ mod tests {
         "Error",
         intrinsics.error_constructor.as_ref(),
         intrinsics.error_prototype.as_ref(),
+      ),
+      (
+        "WeakMap",
+        intrinsics.weak_map_constructor.as_ref(),
+        intrinsics.weak_map_prototype.as_ref(),
       ),
     ] {
       let constructor = constructor.unwrap_or_else(|| panic!("missing {name} constructor"));

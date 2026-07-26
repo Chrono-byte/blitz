@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 
 use crate::value::{
-  ArrayData, ObjectData, PromiseState, PropertyDescriptor, ProxyData, SharedValue, Value,
+  ArrayData, ObjectData, PromiseState, PropertyDescriptor, ProxyData, SharedValue, Value, WeakKey,
 };
 
 /// Result of a prototype GC collection cycle.
@@ -254,6 +254,19 @@ pub fn collect_with_env_roots(
             &mut marked_promises,
           );
         }
+        mark_ephemeron_values(
+          &mut marked_objects,
+          &mut marked_arrays,
+          &mut marked_proxies,
+          &mut marked_envs,
+          &mut marked_promises,
+        );
+        prune_dead_ephemerons(
+          &marked_objects,
+          &marked_arrays,
+          &marked_proxies,
+          &marked_promises,
+        );
 
         let mut stats = GcStats {
           marked_nodes: marked_objects.len()
@@ -412,7 +425,7 @@ fn mark_value(
     }
     Value::Proxy(proxy) => {
       let ptr = Rc::as_ptr(proxy) as usize;
-      if marked_objects.insert(ptr) {
+      if marked_proxies.insert(ptr) {
         let proxy = proxy.borrow();
         mark_value(
           &proxy.target,
@@ -618,6 +631,122 @@ fn mark_object(
   }
 }
 
+fn weak_key_is_marked(
+  key: &WeakKey,
+  marked_objects: &HashSet<usize>,
+  marked_arrays: &HashSet<usize>,
+  marked_proxies: &HashSet<usize>,
+  marked_promises: &HashSet<usize>,
+) -> bool {
+  match key {
+    WeakKey::Object(value) | WeakKey::Closure(value) | WeakKey::BuiltinObject(value) => value
+      .upgrade()
+      .is_some_and(|value| marked_objects.contains(&(Rc::as_ptr(&value) as usize))),
+    WeakKey::Array(value) => value
+      .upgrade()
+      .is_some_and(|value| marked_arrays.contains(&(Rc::as_ptr(&value) as usize))),
+    WeakKey::Proxy(value) => value
+      .upgrade()
+      .is_some_and(|value| marked_proxies.contains(&(Rc::as_ptr(&value) as usize))),
+    WeakKey::Promise(value) => value
+      .upgrade()
+      .is_some_and(|value| marked_promises.contains(&(Rc::as_ptr(&value) as usize))),
+    // Bare native functions are not allocations managed by this collector.
+    WeakKey::Builtin(value) => value.strong_count() > 0,
+    WeakKey::Symbol(value) => value.strong_count() > 0,
+  }
+}
+
+fn mark_ephemeron_values(
+  marked_objects: &mut HashSet<usize>,
+  marked_arrays: &mut HashSet<usize>,
+  marked_proxies: &mut HashSet<usize>,
+  marked_envs: &mut HashSet<usize>,
+  marked_promises: &mut HashSet<usize>,
+) {
+  loop {
+    let marked_before = marked_objects.len()
+      + marked_arrays.len()
+      + marked_proxies.len()
+      + marked_envs.len()
+      + marked_promises.len();
+    let ephemerons = HEAP.with(|heap| {
+      heap
+        .borrow()
+        .objects
+        .iter()
+        .filter_map(Weak::upgrade)
+        .filter(|object| marked_objects.contains(&(Rc::as_ptr(object) as usize)))
+        .flat_map(|object| {
+          object
+            .borrow()
+            .weak_map_entries
+            .clone()
+            .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+    });
+    for entry in ephemerons {
+      if weak_key_is_marked(
+        &entry.key,
+        marked_objects,
+        marked_arrays,
+        marked_proxies,
+        marked_promises,
+      ) {
+        mark_value(
+          &entry.value,
+          marked_objects,
+          marked_arrays,
+          marked_proxies,
+          marked_envs,
+          marked_promises,
+        );
+      }
+    }
+    let marked_after = marked_objects.len()
+      + marked_arrays.len()
+      + marked_proxies.len()
+      + marked_envs.len()
+      + marked_promises.len();
+    if marked_after == marked_before {
+      break;
+    }
+  }
+}
+
+fn prune_dead_ephemerons(
+  marked_objects: &HashSet<usize>,
+  marked_arrays: &HashSet<usize>,
+  marked_proxies: &HashSet<usize>,
+  marked_promises: &HashSet<usize>,
+) {
+  HEAP.with(|heap| {
+    for object in heap
+      .borrow()
+      .objects
+      .iter()
+      .filter_map(Weak::upgrade)
+    {
+      if !marked_objects.contains(&(Rc::as_ptr(&object) as usize)) {
+        continue;
+      }
+      let mut object = object.borrow_mut();
+      if let Some(entries) = object.weak_map_entries.as_mut() {
+        entries.retain(|entry| {
+          weak_key_is_marked(
+            &entry.key,
+            marked_objects,
+            marked_arrays,
+            marked_proxies,
+            marked_promises,
+          )
+        });
+      }
+    }
+  });
+}
+
 fn mark_env(
   env: &Rc<RefCell<Vec<SharedValue>>>,
   marked_objects: &mut HashSet<usize>,
@@ -677,6 +806,7 @@ fn clear_object(obj: &Rc<RefCell<ObjectData>>) {
   let mut obj = obj.borrow_mut();
   obj.properties.clear();
   obj.internal_slots.clear();
+  obj.weak_map_entries = None;
   obj.strong_prototype = None;
   obj.weak_prototype = None;
   obj.captured_lexical_env = None;

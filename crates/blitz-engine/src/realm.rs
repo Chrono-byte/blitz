@@ -70,6 +70,8 @@ pub struct Intrinsics {
   pub regexp_constructor: Option<Value>,
   /// Map constructor for this realm.
   pub map_constructor: Option<Value>,
+  /// WeakMap constructor for this realm.
+  pub weak_map_constructor: Option<Value>,
   /// Set constructor for this realm.
   pub set_constructor: Option<Value>,
   /// ArrayBuffer constructor for this realm.
@@ -108,6 +110,8 @@ pub struct Intrinsics {
   pub regexp_prototype: Option<Value>,
   /// Map prototype for this realm.
   pub map_prototype: Option<Value>,
+  /// WeakMap prototype for this realm.
+  pub weak_map_prototype: Option<Value>,
   /// Set prototype for this realm.
   pub set_prototype: Option<Value>,
   /// TypedArray prototype for this realm.
@@ -333,6 +337,7 @@ impl Realm {
       "Date" => self.intrinsics.date_constructor.as_ref(),
       "RegExp" => self.intrinsics.regexp_constructor.as_ref(),
       "Map" => self.intrinsics.map_constructor.as_ref(),
+      "WeakMap" => self.intrinsics.weak_map_constructor.as_ref(),
       "Set" => self.intrinsics.set_constructor.as_ref(),
       "ArrayBuffer" => self.intrinsics.arraybuffer_constructor.as_ref(),
       "SharedArrayBuffer" => self
@@ -373,6 +378,7 @@ impl Realm {
       "Promise" => self.intrinsics.promise_prototype.as_ref(),
       "Date" => self.intrinsics.date_prototype.as_ref(),
       "Map" => self.intrinsics.map_prototype.as_ref(),
+      "WeakMap" => self.intrinsics.weak_map_prototype.as_ref(),
       "Set" => self.intrinsics.set_prototype.as_ref(),
       "TypedArray" => self.intrinsics.typed_array_prototype.as_ref(),
       "Boolean" => self.intrinsics.boolean_prototype.as_ref(),
