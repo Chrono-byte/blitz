@@ -2411,7 +2411,8 @@ impl TypeContext {
               continue;
             };
             let pattern = self.generic_pattern(parameter, &environment, 0);
-            infer_type_parameter(&pattern, argument, &mut environment);
+            let actual = self.generic_pattern(argument, &TypeEnvironment::new(), 0);
+            infer_type_parameter(&pattern, &actual, &mut environment);
           }
         }
         for name in &generic_names {
@@ -2439,7 +2440,8 @@ impl TypeContext {
             continue;
           };
           let pattern = self.generic_pattern(parameter, &environment, 0);
-          infer_type_parameter(&pattern, argument, &mut environment);
+          let actual = self.generic_pattern(argument, &TypeEnvironment::new(), 0);
+          infer_type_parameter(&pattern, &actual, &mut environment);
         }
         let compatible = arguments
           .iter()
