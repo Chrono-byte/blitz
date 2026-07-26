@@ -4,6 +4,7 @@ members = [
   "crates/blitz-engine",
   "crates/blitz-macros",
   "crates/blitz-runtime",
+  "crates/blitz-test262",
   "crates/js-string",
   "crates/regex-js",
   "tools/effect-bytecode",
