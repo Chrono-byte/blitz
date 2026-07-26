@@ -316,7 +316,6 @@ pub fn check_with_declarations_and_source_imports(
 }
 
 /// Check a program and retain contextual parameter types inferred by the compiler.
-#[must_use]
 pub fn check_and_inlay_hints_with_declarations(
   program: &oast::Program<'_>,
   declarations: &[VirtualDeclaration],

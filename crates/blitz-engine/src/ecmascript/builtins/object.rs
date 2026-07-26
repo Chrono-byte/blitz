@@ -964,6 +964,10 @@ pub(crate) fn install_object_intrinsics(
               return Err(vm.throw_type_error("Object.groupBy callback is not callable"));
             }
             let items = collect_iterable_values(vm, &iterable)?;
+            #[expect(
+              clippy::mutable_key_type,
+              reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
+            )]
             let mut groups: HashMap<PropertyKey, Vec<Value>> = HashMap::new();
             for (index, item) in items.into_iter().enumerate() {
               let key = vm.call_value_with_this(

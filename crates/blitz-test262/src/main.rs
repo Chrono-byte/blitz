@@ -371,6 +371,10 @@ fn run_test_in_thread(
 
           // Retain the baseline for auxiliary runner paths; normal test modes
           // create fresh globals below.
+          #[expect(
+            clippy::mutable_key_type,
+            reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
+          )]
           let baseline_snapshot = snapshot_globals(&globals);
 
           // Run the test
@@ -782,11 +786,14 @@ fn should_use_subprocess_batches(
     && selected_count > 0
 }
 
+type IndexedTestBatch = (usize, Vec<PathBuf>);
+type TestBatchQueue = Arc<Mutex<VecDeque<IndexedTestBatch>>>;
+
 /// Splits a crashed subprocess batch while preserving each test's original index.
 fn bisect_subprocess_batch(
   chunk_start: usize,
   mut chunk_files: Vec<PathBuf>,
-) -> Option<((usize, Vec<PathBuf>), (usize, Vec<PathBuf>))> {
+) -> Option<(IndexedTestBatch, IndexedTestBatch)> {
   if chunk_files.len() < 2 {
     return None;
   }
@@ -886,7 +893,7 @@ fn run_selected_tests_via_subprocess_batches(
   let exe = env::current_exe().map_err(|e| format!("Failed to resolve current exe: {e}"))?;
   let effective_batch_size = batch_size.max(1);
 
-  let chunk_queue: Arc<Mutex<VecDeque<(usize, Vec<PathBuf>)>>> = Arc::new(Mutex::new(
+  let chunk_queue: TestBatchQueue = Arc::new(Mutex::new(
     files_to_run
       .chunks(effective_batch_size)
       .enumerate()
@@ -904,16 +911,12 @@ fn run_selected_tests_via_subprocess_batches(
     let shared_results = Arc::clone(&results);
     let shared_errors = Arc::clone(&worker_errors);
     handles.push(thread::spawn(move || {
-      loop {
-        let Some((chunk_start, chunk_files)): Option<(usize, Vec<PathBuf>)> = ({
-          let mut guard = queue
-            .lock()
-            .expect("subprocess chunk queue poisoned");
-          guard.pop_front()
-        }) else {
-          break;
-        };
-
+      while let Some((chunk_start, chunk_files)) = {
+        let mut guard = queue
+          .lock()
+          .expect("subprocess chunk queue poisoned");
+        guard.pop_front()
+      } {
         let file_list_path = unique_temp_path("files", "txt");
         let report_path = unique_temp_path("report", "json");
         let file_list_contents = chunk_files
@@ -2159,6 +2162,10 @@ fn unsupported_reason(
 /// properties that were MODIFIED. This is lighter than a full deep clone:
 /// we only track keys, and we rely on the fact that builtins/closures share
 /// state via `Rc`.
+#[expect(
+  clippy::mutable_key_type,
+  reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
+)]
 fn restore_globals(
   globals: &Rc<RefCell<ObjectData>>,
   baseline: &HashMap<PropertyKey, PropertyDescriptor>,
@@ -2175,6 +2182,10 @@ fn restore_globals(
 }
 
 /// Snapshot global property descriptors (deeper than just keys).
+#[expect(
+  clippy::mutable_key_type,
+  reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
+)]
 fn snapshot_globals(globals: &Rc<RefCell<ObjectData>>) -> HashMap<PropertyKey, PropertyDescriptor> {
   globals
     .borrow()
@@ -2191,6 +2202,10 @@ fn snapshot_globals(globals: &Rc<RefCell<ObjectData>>) -> HashMap<PropertyKey, P
 /// Each test mode runs in a fresh realm. The shared globals and baseline
 /// parameters remain for the runner's auxiliary modes but are not used here.
 #[allow(clippy::too_many_lines)]
+#[expect(
+  clippy::mutable_key_type,
+  reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
+)]
 fn run_test_file(
   path: &Path,
   test262_root: &Path,
@@ -2837,6 +2852,10 @@ fn print_vm_diag(
 /// Runs the test262 harness-only tests.
 ///
 /// Used to verify that the harness itself is able to be parsed correctly.
+#[expect(
+  clippy::mutable_key_type,
+  reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
+)]
 fn run_harness_only(
   test262_root: &Path,
   globals: &Rc<RefCell<ObjectData>>,
@@ -2956,6 +2975,10 @@ fn run_harness_only(
 const SCOPE_DUMP_TEST: &str = "language/expressions/object/11.1.5-0-1.js";
 
 /// Runs a test to verify that all proper test harness tools are being put into scope correctly.
+#[expect(
+  clippy::mutable_key_type,
+  reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
+)]
 fn run_scope_dump_test(
   test262_root: &Path,
   globals: &Rc<RefCell<ObjectData>>,
@@ -3107,6 +3130,10 @@ fn main() {
   let _vm = Vm::new(Clone::clone(&globals));
 
   // Auxiliary modes restore these shared globals between their runs.
+  #[expect(
+    clippy::mutable_key_type,
+    reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
+  )]
   let baseline_snapshot = snapshot_globals(&globals);
 
   if opts.dump_scopes {

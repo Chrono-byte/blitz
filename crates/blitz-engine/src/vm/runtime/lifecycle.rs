@@ -353,7 +353,7 @@ impl Vm {
         }
       })
       .collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     for (op, count) in ranked.into_iter().take(16) {
       // Precision loss acceptable for percentage display calculation

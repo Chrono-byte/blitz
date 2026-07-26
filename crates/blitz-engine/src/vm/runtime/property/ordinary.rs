@@ -171,14 +171,8 @@ pub(in crate::vm::runtime) fn get_property(
       if let Some(desc) = d.properties.get(key) {
         return match desc {
           PropertyDescriptor::Data { value, .. } => Ok(value.clone()),
-          PropertyDescriptor::Accessor { get, .. } => {
-            if get.is_some() {
-              // Accessor invocation is handled in Vm::get_property_value.
-              Ok(Value::Undefined)
-            } else {
-              Ok(Value::Undefined)
-            }
-          }
+          // Accessor invocation is handled in Vm::get_property_value.
+          PropertyDescriptor::Accessor { .. } => Ok(Value::Undefined),
         };
       }
       let proto = d.get_prototype();
@@ -192,13 +186,7 @@ pub(in crate::vm::runtime) fn get_property(
       if let Some(desc) = props_ref.properties.get(key) {
         return match desc {
           PropertyDescriptor::Data { value, .. } => Ok(value.clone()),
-          PropertyDescriptor::Accessor { get, .. } => {
-            if get.is_some() {
-              Ok(Value::Undefined)
-            } else {
-              Ok(Value::Undefined)
-            }
-          }
+          PropertyDescriptor::Accessor { .. } => Ok(Value::Undefined),
         };
       }
       if let Some(i) = array_index_from_key(key)

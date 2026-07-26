@@ -478,9 +478,13 @@ impl RiscBuilder {
       })
       .collect();
 
-    for old_ip in 0..builder.instructions.len() {
+    for (old_ip, new_ip) in old_to_new
+      .iter_mut()
+      .enumerate()
+      .take(builder.instructions.len())
+    {
       let instruction = pending_instruction(&builder, old_ip)?;
-      old_to_new[old_ip] = Some(lowered.code.len());
+      *new_ip = Some(lowered.code.len());
       if let Some(exception) = handler_values.get(&old_ip).copied() {
         let exception_location = plan.get(exception)?;
         store_location(&mut lowered, exception_location, 7, builder.lines[old_ip]);

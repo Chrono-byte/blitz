@@ -154,7 +154,6 @@ impl Vm {
   }
 
   /// Builds an arguments object for a function call, mapping arguments to local slots.
-
   pub(in crate::vm::runtime) fn build_mapped_arguments_object(
     &mut self,
     proto: &FunctionProto,

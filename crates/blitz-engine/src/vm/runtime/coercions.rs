@@ -284,7 +284,7 @@ impl Vm {
         if let Some(d) = &desc {
           data.properties.insert(
             PropertyKey::String("description".to_string().into()),
-            PropertyDescriptor::ordinary_data(Value::String(d.clone().into())),
+            PropertyDescriptor::ordinary_data(Value::String(d.clone())),
           );
         }
         // Try to find Symbol.prototype
@@ -577,14 +577,14 @@ impl Vm {
         let prim = self.to_primitive(v, Some("string"))?;
         match prim {
           Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym)),
-          _ => Ok(PropertyKey::String(self.to_string(&prim)?.into())),
+          _ => Ok(PropertyKey::String(self.to_string(&prim)?)),
         }
       }
       _ => {
         let prim = self.to_primitive(v, Some("string"))?;
         match prim {
           Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym)),
-          _ => Ok(PropertyKey::String(self.to_string(&prim)?.into())),
+          _ => Ok(PropertyKey::String(self.to_string(&prim)?)),
         }
       }
     }

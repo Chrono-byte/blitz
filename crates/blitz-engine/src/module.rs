@@ -251,7 +251,7 @@ fn stable_hash_bytes(bytes: impl IntoIterator<Item = u8>) -> u64 {
   // hasher: generated assets must have the same hash across hosts and runs.
   bytes
     .into_iter()
-    .fold(0xcbf2_9ce4_8422_325u64, |hash, byte| {
+    .fold(0x0cbf_29ce_4842_2325_u64, |hash, byte| {
       (hash ^ u64::from(byte)).wrapping_mul(0x1000_0000_01b3)
     })
 }

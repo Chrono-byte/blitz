@@ -627,11 +627,10 @@ mod test {
 
     let sites = walk_chunk_ops(&chunk)
       .into_iter()
-      .filter_map(|(ip, op)| {
-        (op == Op::GetProperty).then(|| {
-          let word = chunk.code[ip];
-          (ip, decode_rd(word), decode_rs(word))
-        })
+      .filter(|(_, op)| *op == Op::GetProperty)
+      .map(|(ip, _)| {
+        let word = chunk.code[ip];
+        (ip, decode_rd(word), decode_rs(word))
       })
       .collect::<Vec<_>>();
 

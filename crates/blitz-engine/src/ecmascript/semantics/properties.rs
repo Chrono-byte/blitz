@@ -230,6 +230,10 @@ fn order_property_keys(keys: Vec<PropertyKey>) -> Vec<PropertyKey> {
   let mut indices = Vec::new();
   let mut strings = Vec::new();
   let mut symbols = Vec::new();
+  #[expect(
+    clippy::mutable_key_type,
+    reason = "PropertyKey's interior mutability is limited to JsString's derived UTF-8 cache"
+  )]
   let mut seen = HashSet::new();
 
   for key in keys {

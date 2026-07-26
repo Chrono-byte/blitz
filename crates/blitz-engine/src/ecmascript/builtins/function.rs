@@ -88,8 +88,8 @@ pub(crate) fn create_function_intrinsics(
     };
     let param_count = user_args.len().saturating_sub(1);
     let mut params = Vec::with_capacity(param_count);
-    for idx in 0..param_count {
-      params.push(vm.to_string(&user_args[idx])?);
+    for argument in user_args.iter().take(param_count) {
+      params.push(vm.to_string(argument)?);
     }
     let source = crate::js!(
       format(script),

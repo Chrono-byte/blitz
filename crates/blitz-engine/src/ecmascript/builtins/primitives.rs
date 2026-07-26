@@ -325,7 +325,8 @@ pub(crate) fn install_bigint_and_number_builtins(
       },
     );
   }
-  let number_predicates: [(&str, fn(f64) -> bool); 4] = [
+  type NumberPredicate = fn(f64) -> bool;
+  let number_predicates: [(&str, NumberPredicate); 4] = [
     ("isNaN", f64::is_nan),
     ("isFinite", f64::is_finite),
     ("isInteger", |value: f64| {

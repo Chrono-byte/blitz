@@ -116,7 +116,7 @@ fn collection_entry_array(
 
 fn canonicalize_keyed_collection_value(value: Value) -> Value {
   match value {
-    Value::Number(number) if number == 0.0 => Value::Number(0.0),
+    Value::Number(number) => Value::Number(if number == 0.0 { 0.0 } else { number }),
     value => value,
   }
 }
@@ -140,28 +140,35 @@ fn pair_values(entry: &Value) -> Option<(Value, Value)> {
   ))
 }
 
-fn iterator_object(
-  prototype: &Rc<RefCell<ObjectData>>,
+#[derive(Clone, Copy)]
+struct IteratorSlots {
   brand_key: &'static str,
   source_key: &'static str,
   index_key: &'static str,
   done_key: &'static str,
   kind_key: Option<&'static str>,
+}
+
+fn iterator_object(
+  prototype: &Rc<RefCell<ObjectData>>,
+  slots: IteratorSlots,
   source: Value,
   kind: Option<f64>,
 ) -> Value {
   let mut iterator = ObjectData::with_prototype(Value::Object(Rc::clone(prototype)));
   iterator
     .internal_slots
-    .insert(brand_key, Value::Bool(true));
-  iterator.internal_slots.insert(source_key, source);
+    .insert(slots.brand_key, Value::Bool(true));
   iterator
     .internal_slots
-    .insert(index_key, Value::Number(0.0));
+    .insert(slots.source_key, source);
   iterator
     .internal_slots
-    .insert(done_key, Value::Bool(false));
-  if let (Some(key), Some(kind)) = (kind_key, kind) {
+    .insert(slots.index_key, Value::Number(0.0));
+  iterator
+    .internal_slots
+    .insert(slots.done_key, Value::Bool(false));
+  if let (Some(key), Some(kind)) = (slots.kind_key, kind) {
     iterator
       .internal_slots
       .insert(key, Value::Number(kind));
@@ -734,11 +741,13 @@ pub(crate) fn install_map_set_constructors(
         let state = require_state(vm, &receiver, data, name)?;
         Ok(iterator_object(
           &iterator_proto,
-          iterator_brand,
-          source_key,
-          index_key,
-          done_key,
-          Some(kind_key),
+          IteratorSlots {
+            brand_key: iterator_brand,
+            source_key,
+            index_key,
+            done_key,
+            kind_key: Some(kind_key),
+          },
           state,
           Some(kind),
         ))
@@ -766,11 +775,13 @@ pub(crate) fn install_map_set_constructors(
       let state = require_state(vm, &receiver, map_data, "entries")?;
       Ok(iterator_object(
         &map_iterator_proto_for_entries,
-        map_iterator_brand_for_entries,
-        iterator_source_key_for_map_entries,
-        iterator_index_key_for_map_entries,
-        iterator_done_key_for_map_entries,
-        Some(iterator_kind_key_for_map_entries),
+        IteratorSlots {
+          brand_key: map_iterator_brand_for_entries,
+          source_key: iterator_source_key_for_map_entries,
+          index_key: iterator_index_key_for_map_entries,
+          done_key: iterator_done_key_for_map_entries,
+          kind_key: Some(iterator_kind_key_for_map_entries),
+        },
         state,
         Some(2.0),
       ))
@@ -1035,11 +1046,13 @@ pub(crate) fn install_map_set_constructors(
       let state = require_state(vm, &receiver, set_data, "values")?;
       Ok(iterator_object(
         &set_iterator_proto_for_values,
-        set_iterator_brand_for_values,
-        iterator_source_key_for_set_values,
-        iterator_index_key_for_set_values,
-        iterator_done_key_for_set_values,
-        Some(iterator_kind_key_for_set_values),
+        IteratorSlots {
+          brand_key: set_iterator_brand_for_values,
+          source_key: iterator_source_key_for_set_values,
+          index_key: iterator_index_key_for_set_values,
+          done_key: iterator_done_key_for_set_values,
+          kind_key: Some(iterator_kind_key_for_set_values),
+        },
         state,
         Some(0.0),
       ))
@@ -1074,11 +1087,13 @@ pub(crate) fn install_map_set_constructors(
       let state = require_state(vm, &receiver, set_data, "entries")?;
       Ok(iterator_object(
         &set_iterator_proto_for_entries,
-        set_iterator_brand_for_entries,
-        iterator_source_key_for_set_entries,
-        iterator_index_key_for_set_entries,
-        iterator_done_key_for_set_entries,
-        Some(iterator_kind_key_for_set_entries),
+        IteratorSlots {
+          brand_key: set_iterator_brand_for_entries,
+          source_key: iterator_source_key_for_set_entries,
+          index_key: iterator_index_key_for_set_entries,
+          done_key: iterator_done_key_for_set_entries,
+          kind_key: Some(iterator_kind_key_for_set_entries),
+        },
         state,
         Some(1.0),
       ))

@@ -136,7 +136,11 @@ impl Vm {
     v: &Value,
   ) -> Result<Vec<JsString>, RuntimeError> {
     let mut keys = Vec::new();
-    let mut seen = HashSet::new();
+    #[expect(
+      clippy::mutable_key_type,
+      reason = "JsString's interior mutability is limited to a derived UTF-8 cache"
+    )]
+    let mut seen: HashSet<JsString> = Default::default();
     let mut current = v.clone();
     let mut depth = 0usize;
 

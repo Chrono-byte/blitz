@@ -748,6 +748,10 @@ struct CaptureScan {
 fn scan_capturing_groups(units: &[u16]) -> Result<CaptureScan, Error> {
   let mut count = 0;
   let mut names = vec![None];
+  #[expect(
+    clippy::mutable_key_type,
+    reason = "JsString's interior mutability is limited to a derived UTF-8 cache"
+  )]
   let mut named_indices = HashMap::new();
   let mut index = 0;
   let mut in_class = false;

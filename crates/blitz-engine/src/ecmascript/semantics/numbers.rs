@@ -230,24 +230,6 @@ fn parse_float_string(text: &str) -> f64 {
   }
 }
 
-#[cfg(test)]
-mod tests {
-  use super::number_exponentiate;
-
-  #[test]
-  fn exponentiation_of_unit_base_by_infinity_is_nan() {
-    for base in [-1.0_f64, 1.0_f64] {
-      assert!(number_exponentiate(base, f64::INFINITY).is_nan());
-      assert!(number_exponentiate(base, f64::NEG_INFINITY).is_nan());
-    }
-  }
-
-  #[test]
-  fn exponentiation_uses_regular_power_for_finite_values() {
-    assert_eq!(number_exponentiate(2.0_f64, -2.0_f64), 0.25_f64);
-  }
-}
-
 /// Implements the global parseInt function.
 pub(crate) fn global_parse_int(
   vm: &mut Vm,
@@ -289,4 +271,22 @@ pub(crate) fn global_parse_float(
   };
   let parsed = parse_float_string(s);
   Ok(Value::Number(parsed))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::number_exponentiate;
+
+  #[test]
+  fn exponentiation_of_unit_base_by_infinity_is_nan() {
+    for base in [-1.0_f64, 1.0_f64] {
+      assert!(number_exponentiate(base, f64::INFINITY).is_nan());
+      assert!(number_exponentiate(base, f64::NEG_INFINITY).is_nan());
+    }
+  }
+
+  #[test]
+  fn exponentiation_uses_regular_power_for_finite_values() {
+    assert_eq!(number_exponentiate(2.0_f64, -2.0_f64), 0.25_f64);
+  }
 }

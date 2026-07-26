@@ -581,6 +581,10 @@ mod tests {
     };
     let owned = JsString::new("abc");
     assert_eq!(slice, owned);
+    #[expect(
+      clippy::mutable_key_type,
+      reason = "JsString's interior mutability is limited to a derived UTF-8 cache"
+    )]
     let mut values = HashSet::new();
     values.insert(slice);
     assert!(values.contains(&owned));

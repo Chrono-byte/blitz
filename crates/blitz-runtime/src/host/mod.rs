@@ -521,22 +521,26 @@ pub fn try_install_runtime(
   let events = EventRegistry::new(64).expect("runtime event capacity is non-zero");
   let server_slot = Rc::new(RefCell::new(None));
   let terminal_slot = Rc::new(RefCell::new(None));
+  let node_file_system_allowed = options
+    .node_compat
+    .allowed_modules()
+    .iter()
+    .any(|module| matches!(*module, "node:fs" | "node:fs/promises"));
+  let crypto_random_allowed = options
+    .node_compat
+    .allowed_modules()
+    .contains(&"node:crypto");
   let (host_bridge, capabilities) = create_host_bridge(
     vm,
-    requests_tx.clone(),
-    websocket_events_tx.clone(),
-    events.resources(),
-    Rc::clone(&server_slot),
-    Rc::clone(&terminal_slot),
-    options
-      .node_compat
-      .allowed_modules()
-      .iter()
-      .any(|module| matches!(*module, "node:fs" | "node:fs/promises")),
-    options
-      .node_compat
-      .allowed_modules()
-      .contains(&"node:crypto"),
+    HostBridgeInputs {
+      requests: requests_tx.clone(),
+      websocket_events: websocket_events_tx.clone(),
+      resources: events.resources(),
+      server: Rc::clone(&server_slot),
+      terminal: Rc::clone(&terminal_slot),
+      node_file_system_allowed,
+      crypto_random_allowed,
+    },
   );
   let policy_started = Instant::now();
   if let Err(error) = bundle.validate_pinned_for_host(
@@ -1287,8 +1291,7 @@ fn terminal_primitive(
 /// connections idempotently. The transitional limitation remains that requests
 /// are forwarded to the ordinary runtime event channel rather than invoking
 /// the `blitz:app` router/layers; host capability validation does not hide it.
-fn create_host_bridge(
-  vm: &mut Vm,
+struct HostBridgeInputs {
   requests: mpsc::Sender<HttpRequestEvent>,
   websocket_events: mpsc::Sender<WebSocketEvent>,
   resources: ResourceRegistry,
@@ -1296,7 +1299,21 @@ fn create_host_bridge(
   terminal: Rc<RefCell<Option<terminal::TerminalState>>>,
   node_file_system_allowed: bool,
   crypto_random_allowed: bool,
+}
+
+fn create_host_bridge(
+  vm: &mut Vm,
+  inputs: HostBridgeInputs,
 ) -> (Value, HostBridgeCapabilities) {
+  let HostBridgeInputs {
+    requests,
+    websocket_events,
+    resources,
+    server,
+    terminal,
+    node_file_system_allowed,
+    crypto_random_allowed,
+  } = inputs;
   let app_transport = object(vm.realm().object_prototype());
   set(
     &app_transport,

@@ -173,9 +173,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
             registry
               .borrow()
               .iter()
-              .find_map(|(key, registered)| {
-                (registered == id).then(|| Value::String(key.clone()))
-              })
+              .find_map(|(key, registered)| (registered == id).then(|| Value::String(key.clone())))
               .unwrap_or(Value::Undefined)
           }))
         }),
