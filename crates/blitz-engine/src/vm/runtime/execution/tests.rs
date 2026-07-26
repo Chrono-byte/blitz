@@ -6,7 +6,9 @@ use crate::runtime_utils;
 use crate::runtime_utils::strict_equal;
 use crate::typecheck;
 use crate::value::ArrayData;
+use crate::vm::runtime::property::{get_property, same_value};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 fn test262_harness_source(name: &str) -> &'static str {

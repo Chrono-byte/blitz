@@ -69,7 +69,6 @@ use num_traits::{FromPrimitive, ToPrimitive};
 mod atomics;
 mod numbers; // kept as a thin compatibility re-export; moved implementation into ecmascript::semantics
 mod promises;
-mod properties; // kept as a thin compatibility re-export; implementation moved
 mod shadowrealm;
 mod uri; // kept as thin compatibility re-export; implementation moved
 
