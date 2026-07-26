@@ -29,7 +29,7 @@
 //! TSBLITZ_TRACE=1 cargo run -p blitz-cli -- file.js
 //! ```
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::cell::RefCell;
 use std::env;
 use std::io::{BufRead, Read, Write};
@@ -76,6 +76,31 @@ fn run_source_repl(
   vm.run(chunk).map_err(blitz::errors::Error::from)
 }
 
+/// Node.js compatibility profiles exposed by the hosted runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "lower")]
+enum NodeCompatArg {
+  /// Disable all `node:*` compatibility modules.
+  Off,
+  /// Enable the core process-local compatibility modules.
+  Core,
+  /// Enable compatibility modules used by development tooling.
+  Tooling,
+  /// Enable all completed Node compatibility modules.
+  Full,
+}
+
+impl From<NodeCompatArg> for blitz_runtime::host::NodeCompatProfile {
+  fn from(profile: NodeCompatArg) -> Self {
+    match profile {
+      NodeCompatArg::Off => Self::Off,
+      NodeCompatArg::Core => Self::Core,
+      NodeCompatArg::Tooling => Self::Tooling,
+      NodeCompatArg::Full => Self::Full,
+    }
+  }
+}
+
 /// Command line arguments for the Blitz executable.
 #[derive(Parser, Debug)]
 #[command(name = "blitz", about = "Blitz", subcommand_precedence_over_arg = true)]
@@ -87,6 +112,10 @@ struct Cli {
   /// JavaScript file to execute. If omitted the REPL will be started.
   #[arg(value_name = "FILE")]
   file: Option<PathBuf>,
+
+  /// Select the Node.js compatibility profile: off, core, tooling, or full.
+  #[arg(long, value_enum, default_value_t = NodeCompatArg::Core, global = true)]
+  node_compat: NodeCompatArg,
 
   /// Start the REPL even when a file is not provided.
   #[arg(short, long, action)]
@@ -400,6 +429,7 @@ fn run_analysis_server(strict: bool) -> Result<(), blitz::errors::RuntimeError> 
 fn main() -> Result<(), blitz::errors::Error> {
   // Parse CLI early so clap can handle --help/--version before doing work.
   let cli = Cli::parse();
+  let node_compat = cli.node_compat.into();
 
   let execution = match cli.command {
     Some(CliCommand::Check(check)) => {
@@ -507,10 +537,9 @@ fn main() -> Result<(), blitz::errors::Error> {
     runtime_argv.push(path.to_string_lossy().into_owned());
   }
   runtime_argv.extend(execution.args.iter().cloned());
-  let mut runtime = blitz_runtime::host::install_runtime(
-    &mut repl_vm,
-    blitz_runtime::host::RuntimeOptions::from_host(runtime_argv),
-  );
+  let mut runtime_options = blitz_runtime::host::RuntimeOptions::from_host(runtime_argv);
+  runtime_options.node_compat = node_compat;
+  let mut runtime = blitz_runtime::host::install_runtime(&mut repl_vm, runtime_options);
 
   // If a file was provided, run it and exit. Otherwise start REPL.
   if let Some(path) = execution.file {
@@ -692,6 +721,24 @@ mod tests {
     assert!(cli.command.is_none());
     assert_eq!(cli.file, Some(PathBuf::from("program.js")));
     assert_eq!(cli.args, ["one"]);
+    assert_eq!(cli.node_compat, NodeCompatArg::Core);
+  }
+
+  #[test]
+  fn parses_node_compatibility_profile() {
+    for (value, expected) in [
+      ("off", NodeCompatArg::Off),
+      ("core", NodeCompatArg::Core),
+      ("tooling", NodeCompatArg::Tooling),
+      ("full", NodeCompatArg::Full),
+    ] {
+      let cli = Cli::try_parse_from(["blitz", "--node-compat", value]).expect("parse");
+      assert_eq!(cli.node_compat, expected);
+    }
+
+    let cli = Cli::try_parse_from(["blitz", "run", "--node-compat", "tooling", "program.js"])
+      .expect("parse explicit run");
+    assert_eq!(cli.node_compat, NodeCompatArg::Tooling);
   }
 
   #[test]

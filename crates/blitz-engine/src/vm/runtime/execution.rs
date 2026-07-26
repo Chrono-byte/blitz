@@ -64,10 +64,22 @@ impl Vm {
 
   /// Create a new virtual machine.
   pub fn new(globals: Rc<RefCell<ObjectData>>) -> Self {
+    let module_loader = shared_module_loader_for(&globals);
+    Self::new_with_module_loader(globals, module_loader)
+  }
+
+  /// Create a VM in an existing module registry.
+  ///
+  /// A nested module evaluation must retain the parent realm's registry and
+  /// its selected public/private graph. Keeping this handle explicit avoids
+  /// making dynamic import depend on reconstructing host policy from globals.
+  pub(crate) fn new_with_module_loader(
+    globals: Rc<RefCell<ObjectData>>,
+    module_loader: Rc<RefCell<ModuleLoader>>,
+  ) -> Self {
     let intrinsics = crate::runtime_utils::install_minimal_kernel_constructors(&globals);
     let realm = Realm::with_globals(Rc::clone(&globals));
     let global_env = Rc::new(RefCell::new(EnvironmentRecord::new(None)));
-    let module_loader = shared_module_loader_for(&globals);
     let mut vm = Self {
       realm,
       chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
@@ -844,6 +856,39 @@ impl Vm {
       .register_prelinked_graph_with_declarations(graph, declarations)
   }
 
+  /// Register a parser-free graph, declarations, and private host modules atomically.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if graph, declaration, host-module, or collision
+  /// validation fails.
+  pub fn register_prelinked_graph_with_declarations_and_host_modules<I, S, T>(
+    &mut self,
+    graph: crate::prelinked::PrelinkedModuleGraph,
+    declarations: I,
+    host_modules: Vec<crate::module::PrelinkedHostModule>,
+  ) -> Result<(), crate::errors::BundlerError>
+  where
+    I: IntoIterator<Item = (S, T)>,
+    S: Into<String>,
+    T: Into<String>,
+  {
+    let host_roots = host_modules
+      .iter()
+      .flat_map(|module| module.exports.values().cloned())
+      .collect::<Vec<_>>();
+    self
+      .module_loader
+      .borrow_mut()
+      .register_prelinked_graph_with_declarations_and_host_modules(
+        graph,
+        declarations,
+        host_modules,
+      )?;
+    self.host_roots.extend(host_roots);
+    Ok(())
+  }
+
   /// Register one host-provided virtual module in this VM's realm loader.
   ///
   /// # Errors
@@ -924,6 +969,26 @@ impl Vm {
       self.module_table.push(HashMap::new());
     }
     self.module_table[module_index] = exports;
+  }
+
+  /// Install exports only when this VM has not seen the module yet.
+  ///
+  /// Dynamic imports evaluate in a child execution context, but the namespace
+  /// returned to source code belongs to the caller's realm. Preserving an
+  /// existing table entry keeps static and dynamic access paths on one
+  /// namespace object.
+  pub(crate) fn ensure_module_exports(
+    &mut self,
+    module_index: usize,
+    exports: HashMap<String, SharedValue>,
+  ) {
+    let installed = self
+      .module_table
+      .get(module_index)
+      .is_some_and(|module| module.contains_key("*"));
+    if !installed {
+      self.install_module_exports(module_index, exports);
+    }
   }
 
   /// Return the current namespace object for a module, if available.

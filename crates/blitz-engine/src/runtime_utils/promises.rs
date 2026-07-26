@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 use super::*;
+use crate::ecmascript::semantics::byte_views::array_buffer_backing;
 
 /// Checks if a promise's constructor matches the given constructor value.
 pub(crate) fn promise_constructor_matches(
@@ -417,13 +418,7 @@ pub(crate) fn shadowrealm_evaluate(
         Value::Object(obj_rc) => {
           // Look up [[ArrayBufferData]] slot and grab underlying
           // array backing Rc pointer address.
-          if let Some(PropertyDescriptor::Data { value: ab_data, .. }) = obj_rc
-            .borrow()
-            .properties
-            .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
-            .cloned()
-            && let Value::Array(backing_rc, _) = ab_data
-          {
+          if let Some(backing_rc) = array_buffer_backing(&Value::Object(Rc::clone(&obj_rc))) {
             if !set.insert(Rc::as_ptr(&backing_rc) as usize) {
               return Err(vm.throw_type_error("Transfer list contains a duplicate ArrayBuffer"));
             }
@@ -525,13 +520,7 @@ pub(crate) fn shadowrealm_import_value(
           for v in arr_rc.borrow().iter().flatten().cloned() {
             match v {
               Value::Object(obj_rc) => {
-                if let Some(PropertyDescriptor::Data { value: ab_data, .. }) = obj_rc
-                  .borrow()
-                  .properties
-                  .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
-                  .cloned()
-                  && let Value::Array(backing_rc, _) = ab_data
-                {
+                if let Some(backing_rc) = array_buffer_backing(&Value::Object(Rc::clone(&obj_rc))) {
                   if !set.insert(Rc::as_ptr(&backing_rc) as usize) {
                     let err_val = vm
                       .create_intrinsic_error(
@@ -626,8 +615,11 @@ pub(crate) fn dynamic_import_value(
 
   let base_dir = resolve_shadowrealm_base_dir(vm);
   let importer_specifier = vm.current_module_specifier().map(str::to_owned);
-  let mut import_vm = Vm::new(vm.globals_rc());
-  let loader_handle = import_vm.module_loader_handle();
+  // Keep the parent realm's loader explicit. Its prelinked public roots are
+  // the selected compatibility profile, while its private records remain
+  // inaccessible to source resolution in the child VM.
+  let loader_handle = vm.module_loader_handle();
+  let mut import_vm = Vm::new_with_module_loader(vm.globals_rc(), loader_handle.clone());
   let result = (|| -> Result<Value, Value> {
     let entry = {
       let mut loader = loader_handle.borrow_mut();
@@ -678,12 +670,24 @@ pub(crate) fn dynamic_import_value(
       .borrow()
       .module_index
       .ok_or_else(|| Value::String("dynamic import failed: module missing index".to_string()))?;
-    let ns = import_vm
-      .module_namespace_value(module_index)
-      .ok_or_else(|| {
-        Value::String("dynamic import failed: module namespace missing".to_string())
-      })?;
-    Ok(ns)
+    let exports = {
+      let loader = loader_handle.borrow();
+      loader
+        .map
+        .values()
+        .filter_map(|record| {
+          let record = record.borrow();
+          record
+            .module_index
+            .map(|index| (index, record.exports.clone()))
+        })
+        .collect::<Vec<_>>()
+    };
+    for (index, exports) in exports {
+      vm.ensure_module_exports(index, exports);
+    }
+    vm.module_namespace_value(module_index)
+      .ok_or_else(|| Value::String("dynamic import failed: module namespace missing".to_string()))
   })();
 
   match result {

@@ -54,9 +54,10 @@ Important gaps:
 - There is no generic host-operation registry that can settle an Effect on the
   VM thread and discard cancellation races safely.
 - Existing public host APIs are globals and callback/Promise oriented.
-- `blitz:app` uses the versioned `__blitz_host_v1` bridge, but its host thunks
-  still block through `Vm::block_on` inside `Effect.sync`; it is not a model for
-  the cancellable asynchronous stdlib bridge.
+- `blitz:app` receives its versioned host bridge through the private,
+  host-initialized `blitz-internal:host` module, but its host thunks still block
+  through `Vm::block_on` inside `Effect.sync`; it is not a model for the
+  cancellable asynchronous stdlib bridge.
 - `blitz:path` is not yet part of the committed public runtime graph; the other
   runtime modules listed above are installed and remain under API expansion.
 - The TypeScript checker still supports only part of upstream Effect's type

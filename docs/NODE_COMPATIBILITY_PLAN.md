@@ -20,23 +20,30 @@ parts of the process and module APIs.
 
 ## Implementation status
 
-The first vertical slice is implemented:
+The compatibility graph now registers 36 of Node 24.18.0's 58 public built-in
+roots (62.07% root coverage) with explicit declarations and tested initial
+slices. This is root-level coverage, not a claim of complete export-level API
+parity. The machine-readable inventory is
+[`node-compat-support.json`](node-compat-support.json).
 
-- runtime resolution now selects the `node` package-export condition before
+- runtime resolution selects the `node` package-export condition before
   `import` and `default`;
-- `RuntimeOptions.node_compat` supports `Off` and `Core` profiles, with the CLI
-  selecting the tested `Core` surface by default;
-- profile filtering controls which `node:*` roots and declarations become
-  public in a realm;
-- the generated prelinked runtime graph contains the first curated module,
-  `node:process`;
-- `node:process` has matching runtime and declaration assets and shares the
-  process singleton's state through its default and named exports; and
-- runtime tests cover scoped package resolution, the `node` export condition,
-  strict typechecking/evaluation, and rejection under the `Off` profile.
+- `RuntimeOptions.node_compat` and `--node-compat` support `off`, `core`,
+  `tooling`, and `full` profiles with explicit allowlists;
+- dynamic imports of registered roots preserve the selected registry/profile;
+  filesystem-relative dynamic-import resolution and same-realm evaluation remain
+  open engine work;
+- canonical module records provide top-level `import.meta.url`; preserving the
+  owning module context inside later callbacks remains open;
+- pure/process-local modules, an initial byte-backed `Buffer` slice, streams,
+  readline, direct-host filesystem, and a secure crypto-random slice are
+  prelinked and declaration-backed; and
+- runtime tests cover profile rejection, package conditions, strict
+  typechecking, identity, filesystem operations, event/stream/readline
+  lifecycle, and permission-gated secure randomness.
 
-The next slice is `node:path` plus the dynamic-import registry propagation
-called out below. Vite is not yet supported.
+Vite is not yet supported: HTTP, sockets, watchers, compression, and remaining
+module-loader behavior still block that milestone.
 
 ## Current baseline
 
@@ -74,14 +81,10 @@ wrapping, `module.exports`, and ESM/CJS interop are a separate project and are
 not hidden inside this plan. Likewise, `.cjs` being a resolver candidate does
 not make it execute with CommonJS semantics.
 
-Two existing module gaps must be addressed at the registry boundary:
-
-- dynamic import currently evaluates in a fresh VM/loader, so the selected
-  runtime module registry and compatibility profile must be propagated rather
-  than silently disappearing; and
-- `import.meta` currently evaluates as `undefined`, so `import.meta.url` needs
-  a generic host/module-record implementation before tooling can depend on
-  file-relative URL behavior.
+The registry boundary now propagates the selected loader/profile through
+dynamic import and implements generic module-record-backed `import.meta.url`.
+Remaining metadata work includes callback/frame ownership, the selected
+symlink policy, and the optional Node `import.meta.dirname`/`filename` fields.
 
 ## Architectural decisions
 
@@ -120,7 +123,7 @@ Add a runtime-owned registry, separate from the Effect graph:
 
 ```text
 NodeCompatConfig
-  profile: off | core | tooling
+  profile: off | core | tooling | full
   enabled_modules: explicit overrides
   permissions: filesystem / environment / network / subprocess
 
@@ -162,9 +165,13 @@ whole table.
 | `node:querystring` | parse/stringify/escape/unescape compatibility |
 | `node:timers` and `node:timers/promises` | facades over the runtime scheduler, including cancellation where `AbortSignal` exists |
 
-`node:buffer` is intentionally gated on faithful `ArrayBuffer`, typed arrays,
-encoding/decoding, slice/view aliasing, and byte-copy behavior. A nominal
-`Buffer` backed by ordinary arrays is not sufficient.
+`node:buffer` begins with an eight-bit `ArrayBuffer`/`Uint8Array`-backed slice
+whose hidden engine slots preserve byte aliasing and authoritative transfer
+state. A host byte-view API now lets secure crypto operate on Buffer and
+nonzero-offset Uint8Array views without inspecting JavaScript properties.
+Broader Buffer parity remains gated on wider typed arrays, `DataView`, complete
+detached-view metadata, and multi-byte numeric access; ordinary-array emulation
+is not accepted.
 
 ### Slice B: filesystem and diagnostics
 

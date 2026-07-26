@@ -22,19 +22,19 @@ export type RequirementReduction<Provided, Required> = Exclude<Required, Provide
 export interface AppDescription<Services = unknown> {
   readonly rpc: Router;
   readonly layers: ReadonlyArray<Layer.Layer<Services, unknown, unknown>>;
-  readonly provide<Provided>(
+  provide<Provided>(
     layer: Layer.Layer<Services & Provided, unknown, Provided>
   ): AppDescription<Services & Provided>;
-  readonly serve(
+  serve(
     options?: ServeOptions
   ): Effect.Effect<never, ServeError, Services>;
 }
 
 export declare const App: {
-  readonly make<Services = unknown>(input: {
+  make<Services = unknown>(input: {
     readonly rpc: Router;
   }): AppDescription<Services>;
-  readonly provide<Provided, Services>(
+  provide<Provided, Services>(
     layer: Layer.Layer<Services & Provided, unknown, Provided>
   ): (app: AppDescription<Services>) => AppDescription<Services & Provided>;
 };

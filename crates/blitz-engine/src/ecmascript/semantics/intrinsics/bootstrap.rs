@@ -1,6 +1,69 @@
 // SPDX-License-Identifier: MPL-2.0
 use super::*;
 
+#[allow(clippy::type_complexity)]
+fn typed_view_details(
+  value: &Value
+) -> Option<(
+  Rc<RefCell<ObjectData>>,
+  Value,
+  Rc<RefCell<ArrayData>>,
+  String,
+  usize,
+  usize,
+  Value,
+)> {
+  let details = byte_view_details(value)?;
+  Some((
+    details.object,
+    details.buffer,
+    details.data,
+    details.kind,
+    details.length,
+    details.byte_offset,
+    details.prototype,
+  ))
+}
+
+fn new_typed_array_view(
+  prototype: Value,
+  buffer: Value,
+  data: Rc<RefCell<ArrayData>>,
+  kind: &str,
+  length: usize,
+  byte_offset: usize,
+) -> Value {
+  new_byte_view(prototype, buffer, data, kind, length, byte_offset)
+}
+
+fn new_byte_buffer(
+  prototype: &Rc<RefCell<ObjectData>>,
+  length: usize,
+) -> (Value, Rc<RefCell<ArrayData>>) {
+  new_array_buffer(Value::Object(Rc::clone(prototype)), length, false)
+}
+
+fn typed_array_relative_index(
+  vm: &mut Vm,
+  value: &Value,
+  length: usize,
+) -> Result<usize, RuntimeError> {
+  let number = vm.to_number_value(value)?;
+  if number.is_nan() {
+    return Ok(0);
+  }
+  if number == f64::NEG_INFINITY {
+    return Ok(0);
+  }
+  if number == f64::INFINITY {
+    return Ok(length);
+  }
+  if number < 0.0 {
+    return Ok(length.saturating_sub((-number).trunc() as usize));
+  }
+  Ok(number.trunc().min(length as f64) as usize)
+}
+
 /// Builds the ECMAScript intrinsics and installs the available global bindings.
 pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectData>>) -> Intrinsics {
   use PropertyKey as PKey;
@@ -2740,27 +2803,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       let length_value = args.get(1).cloned().unwrap_or(Value::Undefined);
       let length = to_length(_vm, &length_value)?;
 
-      let mut arraybuffer_obj_data = ObjectData::with_prototype(instance_proto);
-      arraybuffer_obj_data.properties.insert(
-        PropertyKey::String("[[ArrayBufferData]]".to_string()),
-        PropertyDescriptor::data(Value::Array(
-          Rc::new(RefCell::new(ArrayData::from(vec![
-            Some(Value::Number(0.0));
-            length
-          ]))),
-          Rc::new(RefCell::new(ObjectData::new())),
-        )),
-      );
-      arraybuffer_obj_data.properties.insert(
-        PropertyKey::String("[[IsSharedArrayBuffer]]".to_string()),
-        PropertyDescriptor::data(Value::Bool(false)),
-      );
-      arraybuffer_obj_data.properties.insert(
-        PropertyKey::String("byteLength".to_string()),
-        PropertyDescriptor::data(Value::Number(usize_to_f64(length))),
-      );
-      let arraybuffer_obj = Rc::new(RefCell::new(arraybuffer_obj_data));
-      Ok(Value::Object(arraybuffer_obj))
+      let (buffer, _) = new_array_buffer(instance_proto, length, false);
+      Ok(buffer)
     })
   };
   let arraybuffer_ctor_val = Value::BuiltinObject(
@@ -2809,27 +2853,8 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       let length_value = args.get(1).cloned().unwrap_or(Value::Undefined);
       let length = to_length(vm, &length_value)?;
 
-      let mut arraybuffer_obj_data = ObjectData::with_prototype(instance_proto);
-      arraybuffer_obj_data.properties.insert(
-        PropertyKey::String("[[ArrayBufferData]]".to_string()),
-        PropertyDescriptor::data(Value::Array(
-          Rc::new(RefCell::new(ArrayData::from(vec![
-            Some(Value::Number(0.0));
-            length
-          ]))),
-          Rc::new(RefCell::new(ObjectData::new())),
-        )),
-      );
-      arraybuffer_obj_data.properties.insert(
-        PropertyKey::String("[[IsSharedArrayBuffer]]".to_string()),
-        PropertyDescriptor::data(Value::Bool(true)),
-      );
-      arraybuffer_obj_data.properties.insert(
-        PropertyKey::String("byteLength".to_string()),
-        PropertyDescriptor::data(Value::Number(usize_to_f64(length))),
-      );
-      let arraybuffer_obj = Rc::new(RefCell::new(arraybuffer_obj_data));
-      Ok(Value::Object(arraybuffer_obj))
+      let (buffer, _) = new_array_buffer(instance_proto, length, true);
+      Ok(buffer)
     })
   };
   let sharedarraybuffer_ctor_val = Value::BuiltinObject(
@@ -2936,14 +2961,155 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       )),
     );
 
+  let subarray_builtin = {
+    builtin_object(
+      Rc::new(move |vm, args| {
+        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let (_, buffer, data, kind, length, byte_offset, prototype) = typed_view_details(&receiver)
+          .filter(|(_, _, _, kind, _, _, _)| {
+            matches!(
+              kind.as_str(),
+              "Uint8Array" | "Int8Array" | "Uint8ClampedArray"
+            )
+          })
+          .ok_or_else(|| {
+            vm.throw_type_error("TypedArray.prototype.subarray called on incompatible receiver")
+          })?;
+        let begin_value = args.get(1).cloned().unwrap_or(Value::Number(0.0));
+        let begin = typed_array_relative_index(vm, &begin_value, length)?;
+        let end_value = args
+          .get(2)
+          .cloned()
+          .unwrap_or(Value::Number(usize_to_f64(length)));
+        let end = typed_array_relative_index(vm, &end_value, length)?;
+        let final_end = end.max(begin);
+        let view = new_typed_array_view(
+          prototype,
+          buffer,
+          data,
+          &kind,
+          final_end.saturating_sub(begin),
+          byte_offset + begin,
+        );
+        Ok(view)
+      }),
+      &function_proto_map,
+    )
+  };
+  typedarray_proto_map
+    .borrow_mut()
+    .properties
+    .insert(
+      PKey::String("subarray".to_string()),
+      PropertyDescriptor::data(subarray_builtin),
+    );
+
+  let slice_builtin = {
+    let arraybuffer_proto_map = Rc::clone(&arraybuffer_proto_map);
+    builtin_object(
+      Rc::new(move |vm, args| {
+        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let (_, _, data, kind, length, byte_offset, prototype) = typed_view_details(&receiver)
+          .filter(|(_, _, _, kind, _, _, _)| {
+            matches!(
+              kind.as_str(),
+              "Uint8Array" | "Int8Array" | "Uint8ClampedArray"
+            )
+          })
+          .ok_or_else(|| {
+            vm.throw_type_error("TypedArray.prototype.slice called on incompatible receiver")
+          })?;
+        let begin_value = args.get(1).cloned().unwrap_or(Value::Number(0.0));
+        let begin = typed_array_relative_index(vm, &begin_value, length)?;
+        let end_value = args
+          .get(2)
+          .cloned()
+          .unwrap_or(Value::Number(usize_to_f64(length)));
+        let end = typed_array_relative_index(vm, &end_value, length)?;
+        let copy_length = end.max(begin).saturating_sub(begin);
+        let (buffer, new_data) = new_byte_buffer(&arraybuffer_proto_map, copy_length);
+        for index in 0..copy_length {
+          let value = data
+            .borrow()
+            .get(byte_offset + begin + index)
+            .and_then(|slot| slot.clone())
+            .unwrap_or(Value::Number(0.0));
+          let byte = encode_byte(vm, &kind, &value)?;
+          new_data.borrow_mut()[index] = Some(Value::Number(f64::from(byte)));
+        }
+        Ok(new_typed_array_view(
+          prototype,
+          buffer,
+          new_data,
+          &kind,
+          copy_length,
+          0,
+        ))
+      }),
+      &function_proto_map,
+    )
+  };
+  typedarray_proto_map
+    .borrow_mut()
+    .properties
+    .insert(
+      PKey::String("slice".to_string()),
+      PropertyDescriptor::data(slice_builtin),
+    );
+
+  let set_builtin = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      let (_, _, _, _kind, target_length, _, _) = typed_view_details(&receiver)
+        .filter(|(_, _, _, kind, _, _, _)| {
+          matches!(
+            kind.as_str(),
+            "Uint8Array" | "Int8Array" | "Uint8ClampedArray"
+          )
+        })
+        .ok_or_else(|| {
+          vm.throw_type_error("TypedArray.prototype.set called on incompatible receiver")
+        })?;
+      let source = args.get(1).cloned().unwrap_or(Value::Undefined);
+      let offset_value = args.get(2).cloned().unwrap_or(Value::Number(0.0));
+      let offset = to_index(vm, &offset_value)?;
+      let source_length = vm.get_property_host(&source, &PKey::String("length".to_string()))?;
+      let source_length = to_length(vm, &source_length)?;
+      if offset.saturating_add(source_length) > target_length {
+        return Err(vm.throw_range_error("Source is too large"));
+      }
+      let mut values = Vec::with_capacity(source_length);
+      for index in 0..source_length {
+        values.push(vm.get_property_host(&source, &PKey::String(usize_to_decimal_string(index)))?);
+      }
+      for (index, value) in values.into_iter().enumerate() {
+        vm.set_property_host(
+          &receiver,
+          &Value::String(usize_to_decimal_string(offset + index)),
+          value,
+        )?;
+      }
+      Ok(Value::Undefined)
+    }),
+    &function_proto_map,
+  );
+  typedarray_proto_map
+    .borrow_mut()
+    .properties
+    .insert(
+      PKey::String("set".to_string()),
+      PropertyDescriptor::data(set_builtin),
+    );
+
   macro_rules! create_typed_array_ctor {
-    ($name:expr, $element_count:expr, $zero_value:expr) => {{
+    ($name:expr, $element_count:expr, $zero_value:expr, $shared:expr) => {{
       let proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::with_prototype(
         Value::Object(typedarray_proto_map.clone()),
       )));
       let ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::with_prototype(
         typedarray_ctor_val.clone(),
       )));
+      let arraybuffer_proto_rc = Rc::clone(&arraybuffer_proto_map);
       let ctor_fn: BuiltinFn = {
         let proto_map_rc = proto_map.clone();
         let ctor_name = $name.to_string();
@@ -2972,7 +3138,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
               _ => None,
             })
             .unwrap_or_else(|| Value::Object(proto_map_rc.clone()));
-          let (length, initial_values, byte_offset, view_byte_length, buffer_slot): (
+          let (length, initial_values, byte_offset, view_byte_length, mut buffer_slot): (
             usize,
             Vec<Value>,
             usize,
@@ -3019,20 +3185,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             }
             Value::Object(_) => {
               let buffer_value = init.clone();
-              let has_arraybuffer_data = vm.has_property_host(
-                &buffer_value,
-                &PropertyKey::String("[[ArrayBufferData]]".to_string()),
-              )?;
-              if has_arraybuffer_data {
-                let byte_length_value = vm.get_property_host(
-                  &buffer_value,
-                  &PropertyKey::String("byteLength".to_string()),
-                )?;
-                let buffer_byte_length = vm.to_number_value(&byte_length_value)?;
-                if !buffer_byte_length.is_finite() || buffer_byte_length < 0.0 {
-                  return Err(vm.throw_range_error("Invalid typed array length"));
-                }
-                let buffer_byte_length = buffer_byte_length.trunc().to_usize().unwrap_or(0);
+              if is_array_buffer(&buffer_value) {
+                let backing = array_buffer_backing(&buffer_value)
+                  .ok_or_else(|| vm.throw_range_error("Invalid typed array length"))?;
+                let buffer_byte_length = backing.borrow().len();
                 let byte_offset = if matches!(byte_offset_arg, Value::Undefined) {
                   0
                 } else {
@@ -3083,16 +3239,48 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             _ => (0, Vec::<Value>::new(), 0usize, 0usize, Value::Undefined),
           };
 
+          if $shared {
+            let backing_data = if is_array_buffer(&buffer_slot) {
+              array_buffer_backing(&buffer_slot)
+                .ok_or_else(|| vm.throw_type_error("Invalid ArrayBuffer backing store"))?
+            } else {
+              let (buffer, data) = new_array_buffer(
+                Value::Object(Rc::clone(&arraybuffer_proto_rc)),
+                view_byte_length,
+                false,
+              );
+              buffer_slot = buffer;
+              data
+            };
+            for (idx, value) in initial_values.into_iter().enumerate() {
+              let byte = encode_byte(vm, &ctor_name, &value)?;
+              if let Some(slot) = backing_data
+                .borrow_mut()
+                .get_mut(byte_offset + idx)
+              {
+                *slot = Some(Value::Number(f64::from(byte)));
+              }
+            }
+            return Ok(new_byte_view(
+              instance_proto,
+              buffer_slot,
+              backing_data,
+              &ctor_name,
+              length,
+              byte_offset,
+            ));
+          }
+          let typed_data_value = Value::Array(
+            Rc::new(RefCell::new(ArrayData::from(vec![
+              Some($zero_value.clone());
+              length
+            ]))),
+            Rc::new(RefCell::new(ObjectData::new())),
+          );
           let mut typed_array_data = ObjectData::with_prototype(instance_proto);
           typed_array_data.properties.insert(
             PropertyKey::String("[[TypedArrayData]]".to_string()),
-            PropertyDescriptor::data(Value::Array(
-              Rc::new(RefCell::new(ArrayData::from(vec![
-                Some($zero_value.clone());
-                length
-              ]))),
-              Rc::new(RefCell::new(ObjectData::new())),
-            )),
+            PropertyDescriptor::data(typed_data_value),
           );
           typed_array_data.properties.insert(
             PropertyKey::String("[[TypedArrayKind]]".to_string()),
@@ -3116,7 +3304,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           );
           typed_array_data.properties.insert(
             PropertyKey::String("[[TypedArrayBuffer]]".to_string()),
-            PropertyDescriptor::data(buffer_slot),
+            PropertyDescriptor::data(buffer_slot.clone()),
           );
           typed_array_data.properties.insert(
             PropertyKey::String("length".to_string()),
@@ -3158,27 +3346,35 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   }
 
   let (uint8array_ctor_val, _uint8array_ctor_map) =
-    create_typed_array_ctor!("Uint8Array", 1, Value::Number(0.0));
+    create_typed_array_ctor!("Uint8Array", 1, Value::Number(0.0), true);
   let (int8array_ctor_val, _int8array_ctor_map) =
-    create_typed_array_ctor!("Int8Array", 1, Value::Number(0.0));
+    create_typed_array_ctor!("Int8Array", 1, Value::Number(0.0), true);
   let (uint16array_ctor_val, _uint16array_ctor_map) =
-    create_typed_array_ctor!("Uint16Array", 2, Value::Number(0.0));
+    create_typed_array_ctor!("Uint16Array", 2, Value::Number(0.0), false);
   let (int16array_ctor_val, _int16array_ctor_map) =
-    create_typed_array_ctor!("Int16Array", 2, Value::Number(0.0));
+    create_typed_array_ctor!("Int16Array", 2, Value::Number(0.0), false);
   let (uint32array_ctor_val, _uint32array_ctor_map) =
-    create_typed_array_ctor!("Uint32Array", 4, Value::Number(0.0));
+    create_typed_array_ctor!("Uint32Array", 4, Value::Number(0.0), false);
   let (int32array_ctor_val, _int32array_ctor_map) =
-    create_typed_array_ctor!("Int32Array", 4, Value::Number(0.0));
+    create_typed_array_ctor!("Int32Array", 4, Value::Number(0.0), false);
   let (float32array_ctor_val, _float32array_ctor_map) =
-    create_typed_array_ctor!("Float32Array", 4, Value::Number(0.0));
+    create_typed_array_ctor!("Float32Array", 4, Value::Number(0.0), false);
   let (float64array_ctor_val, _float64array_ctor_map) =
-    create_typed_array_ctor!("Float64Array", 8, Value::Number(0.0));
-  let (bigint64array_ctor_val, _bigint64array_ctor_map) =
-    create_typed_array_ctor!("BigInt64Array", 8, Value::BigInt(BigIntValue::from(0u8)));
-  let (biguint64array_ctor_val, _biguint64array_ctor_map) =
-    create_typed_array_ctor!("BigUint64Array", 8, Value::BigInt(BigIntValue::from(0u8)));
+    create_typed_array_ctor!("Float64Array", 8, Value::Number(0.0), false);
+  let (bigint64array_ctor_val, _bigint64array_ctor_map) = create_typed_array_ctor!(
+    "BigInt64Array",
+    8,
+    Value::BigInt(BigIntValue::from(0u8)),
+    false
+  );
+  let (biguint64array_ctor_val, _biguint64array_ctor_map) = create_typed_array_ctor!(
+    "BigUint64Array",
+    8,
+    Value::BigInt(BigIntValue::from(0u8)),
+    false
+  );
   let (uint8clampedarray_ctor_val, _uint8clampedarray_ctor_map) =
-    create_typed_array_ctor!("Uint8ClampedArray", 1, Value::Number(0.0));
+    create_typed_array_ctor!("Uint8ClampedArray", 1, Value::Number(0.0), true);
 
   let dataview_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
     ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
@@ -3194,22 +3390,15 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         .get(off + 1)
         .cloned()
         .unwrap_or(Value::Undefined);
-      if !matches!(buffer, Value::Object(_)) {
+      if !is_array_buffer(&buffer) {
         return Err(
           vm.throw_type_error("DataView constructor requires ArrayBuffer or SharedArrayBuffer"),
         );
       }
-      vm.get_property_host(
-        &buffer,
-        &PropertyKey::String("[[ArrayBufferData]]".to_string()),
-      )?;
-      let byte_length_value =
-        vm.get_property_host(&buffer, &PropertyKey::String("byteLength".to_string()))?;
-      let buffer_byte_length = vm.to_number_value(&byte_length_value)?;
-      if !buffer_byte_length.is_finite() || buffer_byte_length < 0.0 {
-        return Err(vm.throw_range_error("Invalid DataView length"));
-      }
-      let buffer_byte_length = buffer_byte_length.trunc().to_usize().unwrap_or(0);
+      let buffer_byte_length = array_buffer_backing(&buffer)
+        .ok_or_else(|| vm.throw_range_error("Invalid DataView length"))?
+        .borrow()
+        .len();
       let byte_offset_arg = args
         .get(off + 2)
         .cloned()
@@ -3248,7 +3437,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       );
       dataview_data.properties.insert(
         PropertyKey::String("buffer".to_string()),
-        PropertyDescriptor::data(buffer.clone()),
+        PropertyDescriptor::data(buffer),
       );
       dataview_data.properties.insert(
         PropertyKey::String("byteLength".to_string()),

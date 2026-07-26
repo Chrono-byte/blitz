@@ -1,0 +1,153 @@
+// A process-local Node 24 os slice. Blitz does not expose a general OS
+// inspection bridge, so this module only derives values from process metadata
+// and environment variables. It deliberately does not invent host metrics.
+const processValue = globalThis.process;
+const processObject = processValue !== null && typeof processValue === "object"
+  ? processValue
+  : Object.create(null);
+
+const environment = () => {
+  const value = processObject.env;
+  return value !== null && typeof value === "object" ? value : Object.create(null);
+};
+
+const fromEnvironment = (...names) => {
+  const env = environment();
+  for (const name of names) {
+    const value = env[name];
+    if (typeof value === "string" && value.length !== 0) return value;
+  }
+  return undefined;
+};
+
+const metadata = (name, fallback) => {
+  const value = processObject[name];
+  return typeof value === "string" && value.length !== 0 ? value : fallback;
+};
+
+const unsupported = operation => {
+  const error = new Error(`node:os.${operation} is not implemented by Blitz`);
+  error.code = "ERR_NOT_IMPLEMENTED";
+  throw error;
+};
+
+const platformName = () => metadata("platform", "unknown");
+const architecture = () => metadata("arch", "unknown");
+
+const osType = Object.freeze({
+  aix: "AIX",
+  android: "Android",
+  darwin: "Darwin",
+  freebsd: "FreeBSD",
+  linux: "Linux",
+  openbsd: "OpenBSD",
+  sunos: "SunOS",
+  win32: "Windows_NT",
+});
+
+const priority = Object.freeze({
+  PRIORITY_LOW: 19,
+  PRIORITY_BELOW_NORMAL: 10,
+  PRIORITY_NORMAL: 0,
+  PRIORITY_ABOVE_NORMAL: -7,
+  PRIORITY_HIGH: -14,
+  PRIORITY_HIGHEST: -20,
+});
+
+// These are the platform-independent constants that can be stated without a
+// native constants table. errno, signals, and dlopen are intentionally absent:
+// their values vary by host and Blitz does not expose them.
+export const constants = Object.freeze({
+  UV_UDP_REUSEADDR: 4,
+  priority,
+});
+
+export const arch = architecture;
+export const platform = platformName;
+export const type = () => {
+  const value = osType[platformName()];
+  return typeof value === "string" ? value : "Unknown";
+};
+
+// process.version is Blitz's runtime version, not the kernel release. An
+// explicit value may be supplied by a host through the process environment;
+// otherwise the sentinel makes the absence of a kernel query visible.
+export const release = () => fromEnvironment("BLITZ_OS_RELEASE") ?? "unknown";
+
+// HOSTNAME and COMPUTERNAME are process-provided host metadata, not a network
+// lookup. "unknown" is an honest fallback rather than a fabricated machine
+// name.
+export const hostname = () => fromEnvironment("BLITZ_HOSTNAME", "HOSTNAME", "COMPUTERNAME") ?? "unknown";
+
+export const homedir = () => {
+  const value = fromEnvironment("BLITZ_HOME", "HOME", "USERPROFILE");
+  return value === undefined ? unsupported("homedir") : value;
+};
+
+export const tmpdir = () => {
+  const value = platformName() === "win32"
+    ? fromEnvironment("BLITZ_TMPDIR", "TEMP", "TMP")
+    : fromEnvironment("BLITZ_TMPDIR", "TMPDIR", "TMP", "TEMP");
+  if (value !== undefined) return value;
+
+  // These are conventional defaults, not claims about an existing directory.
+  return platformName() === "win32" ? "C:\\Windows\\Temp" : "/tmp";
+};
+
+export const userInfo = () => {
+  const username = fromEnvironment("USERNAME", "USER", "LOGNAME");
+  const home = fromEnvironment("BLITZ_HOME", "HOME", "USERPROFILE");
+  if (username === undefined || home === undefined) return unsupported("userInfo");
+
+  return {
+    username,
+    // UID/GID and the POSIX shell require a host user database. -1 is Node's
+    // Windows sentinel and is also an explicit unknown value for Blitz.
+    uid: -1,
+    gid: -1,
+    shell: platformName() === "win32" ? null : fromEnvironment("SHELL") ?? null,
+    homedir: home,
+  };
+};
+
+export const EOL = platformName() === "win32" ? "\r\n" : "\n";
+export const devNull = platformName() === "win32" ? "NUL" : "/dev/null";
+
+export const endianness = () => {
+  const configured = fromEnvironment("BLITZ_ENDIANNESS");
+  if (configured === "LE" || configured === "BE") return configured;
+
+  // These are the architectures exposed by the current Blitz hosts and are
+  // little-endian in the supported runtime targets. Unknown architectures are
+  // not guessed.
+  switch (architecture()) {
+    case "arm":
+    case "arm64":
+    case "ia32":
+    case "riscv64":
+    case "x64":
+      return "LE";
+    default:
+      return unsupported("endianness");
+  }
+};
+
+// Memory, CPU timing, load, uptime, and network-interface snapshots are not
+// process metadata. They remain absent until Blitz grows a corresponding host
+// capability; returning zeroes or empty interfaces would fabricate observations.
+const os = Object.freeze({
+  arch,
+  platform,
+  type,
+  release,
+  hostname,
+  homedir,
+  tmpdir,
+  userInfo,
+  EOL,
+  devNull,
+  endianness,
+  constants,
+});
+
+export default os;

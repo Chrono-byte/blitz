@@ -44,6 +44,23 @@ over same-named npm packages.
 A phase indicates dependency order, not one large pull request. Every row is a
 separately reviewable vertical slice.
 
+## Current implementation snapshot
+
+The generated graph currently exposes tested initial slices for 36 of the 58
+public Node 24.18.0 built-in roots (62.07% root coverage) across explicit
+`core`, `tooling`, and `full` allowlists. Root coverage means the declared
+slice resolves, runs, typechecks, and has compatibility tests; it does not mean
+every Node export is implemented. See the authoritative machine-readable
+[`node-compat-support.json`](node-compat-support.json) for profile membership,
+declarations, host primitives, and tests.
+
+Notable remaining blockers include broader typed-array/DataView and Buffer
+numeric parity, Web Streams, networking/HTTP, filesystem watchers, moving bounded `fs/promises` host calls
+off the VM thread, compression, CommonJS, workers, and VM contexts. The Vite milestone therefore remains open. Status labels in the
+inventory tables below describe the route to complete module parity; a root
+with a landed partial slice is tracked precisely in the machine-readable
+matrix rather than relabeling the whole module as complete.
+
 ## Shared prerequisites
 
 ### N0.1 Module registry
@@ -134,7 +151,7 @@ Deprecated modules never enter `core` or `tooling` merely for completeness.
 
 | Module | Status / phase | Initial contract | Prerequisites and notes |
 | --- | --- | --- | --- |
-| `node:buffer` | Planned / N2 | Buffer constructor/factories, encodings, views, search/compare, integer/float/bigint access, transcode constants | Blocked on faithful byte primitives; global `Buffer` and module export identity must match |
+| `node:buffer` | Landed, partial / N2 | Byte-backed constructor/factories, core encodings, aliased views, copy/compare, and 8-bit integer access; expand to search and multi-byte integer/float/bigint access | Hidden engine branding/backing, transfer-aware host views, `Uint8Array` aliasing, and global/module identity are landed; wider typed-array, complete detached metadata, and `DataView` parity remain required |
 | `node:string_decoder` | Planned / N2 | incremental decoder across split multibyte sequences | Depends on Buffer and encoding tables |
 | `node:events` | Planned / N2 | EventEmitter, EventEmitterAsyncResource, once/on, abort integration, listener limits and error events | Foundational for streams, networking, process and tooling |
 | `node:stream` | Planned / N2 | Readable, Writable, Duplex, Transform, PassThrough, pipeline, finished, compose and adapters | Implement state machines and backpressure, not superficial wrappers |
@@ -180,7 +197,7 @@ Deprecated modules never enter `core` or `tooling` merely for completeness.
 
 | Module | Status / phase | Initial contract | Prerequisites and notes |
 | --- | --- | --- | --- |
-| `node:crypto` | Planned / N2-N4 | secure random and UUID first, then hashes/HMAC, key APIs, ciphers, signatures, X.509 and WebCrypto identity | Never use insecure fallbacks; algorithms follow reference Node/OpenSSL policy |
+| `node:crypto` | Landed, partial / N2-N4 | secure random, UUID, random fill/int, and timing-safe comparison are landed; add hashes/HMAC, key APIs, ciphers, signatures, X.509 and WebCrypto identity | Buffer and nonzero-offset Uint8Array views use the engine's opaque host byte-view API; never use insecure fallbacks |
 | `node:zlib` | Planned / N4 | sync/callback/stream compression and Brotli where backend supports parity | Buffer and streams; output limits protect against decompression bombs |
 | `node:sqlite` | Deferred / N6 | DatabaseSync and Node 24 SQLite surface, sessions/backups only with backend parity | Database/file permissions, deterministic bundled SQLite version, extension loading off by default |
 

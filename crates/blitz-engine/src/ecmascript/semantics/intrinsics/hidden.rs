@@ -4,6 +4,18 @@ use super::*;
 /// Installs hidden internal builtins required for ECMAScript semantics.
 pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
   intrinsics.hidden_builtins.insert(
+    "importMeta".to_string(),
+    Value::Builtin(Rc::new(|vm, _args| {
+      let Some(specifier) = vm.current_module_specifier().map(str::to_owned) else {
+        return Err(vm.throw_type_error("import.meta is only available in a module"));
+      };
+      vm.module_loader_handle()
+        .borrow_mut()
+        .import_meta_for(&specifier)
+        .ok_or_else(|| vm.throw_type_error("module record is unavailable for import.meta"))
+    })),
+  );
+  intrinsics.hidden_builtins.insert(
     "dynamicImport".to_string(),
     Value::Builtin(Rc::new(|vm, args| {
       crate::runtime_utils::dynamic_import_value(vm, args)

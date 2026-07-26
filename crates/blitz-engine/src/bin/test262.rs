@@ -1992,10 +1992,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
       if let Some(Value::Object(obj)) = args.first() {
         let mut obj_data = obj.borrow_mut();
         // Per spec: [[ArrayBufferData]] = null
-        obj_data.properties.insert(
-          PropertyKey::String("[[ArrayBufferData]]".to_string()),
-          PropertyDescriptor::data(Value::Null),
-        );
+        obj_data.set_internal_slot("[[ArrayBufferData]]", Value::Null);
         obj_data.properties.insert(
           PropertyKey::String("byteLength".to_string()),
           PropertyDescriptor::data(Value::Number(0.0)),

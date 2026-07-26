@@ -11,6 +11,8 @@ mod abort;
 mod console;
 pub mod event_loop;
 mod fs;
+mod node_crypto;
+mod node_fs;
 mod process;
 pub mod scheduler;
 mod server;
@@ -27,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use blitz::errors::RuntimeError;
 use blitz::gc;
+use blitz::module::PrelinkedHostModule;
 use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use blitz::{HostRoot, Vm};
 use tokio::sync::mpsc;
@@ -38,8 +41,10 @@ use crate::net::http::HttpRequestEvent;
 use crate::net::websocket::WebSocketEvent;
 use crate::runtime_graph::{
   APP_TRANSPORT_METHODS, APP_TRANSPORT_PRIMITIVE, FILE_SYSTEM_METHODS, FILE_SYSTEM_PRIMITIVE,
-  HOST_BRIDGE_ABI_VERSION, HTTP_METHODS, HTTP_PRIMITIVE, HostBridgeCapabilities, RuntimeGraphError,
-  TERMINAL_METHODS, TERMINAL_PRIMITIVE, WEB_SOCKET_METHODS, WEB_SOCKET_PRIMITIVE,
+  HOST_BRIDGE_ABI_VERSION, HTTP_METHODS, HTTP_PRIMITIVE, HostBridgeCapabilities,
+  NODE_CRYPTO_RANDOM_ABI_VERSION, NODE_CRYPTO_RANDOM_METHODS, NODE_CRYPTO_RANDOM_PRIMITIVE,
+  NODE_FILE_SYSTEM_METHODS, NODE_FILE_SYSTEM_PRIMITIVE, RuntimeGraphError, TERMINAL_METHODS,
+  TERMINAL_PRIMITIVE, WEB_SOCKET_METHODS, WEB_SOCKET_PRIMITIVE,
 };
 use event_loop::{EventRegistry, EventSender, ResourceHandle, ResourceRegistry};
 use scheduler::{TimerId, TimerKind, TimerScheduler, WakeupEvent};
@@ -50,9 +55,140 @@ use terminal::TerminalEvent;
 pub enum NodeCompatProfile {
   /// Do not expose any `node:*` modules.
   Off,
-  /// Expose the tested process-local compatibility modules.
+  /// Expose the completed process-local compatibility modules.
   #[default]
   Core,
+  /// Expose completed modules needed by development tooling.
+  Tooling,
+  /// Expose every completed Node compatibility module.
+  Full,
+}
+
+impl NodeCompatProfile {
+  // Keep these lists explicit. A new generated `node:*` root must not become
+  // available merely by being added to the runtime graph; it needs a reviewed
+  // compatibility entry in each profile that should expose it.
+  const CORE_MODULES: &'static [&'static str] = &[
+    "node:assert",
+    "node:assert/strict",
+    "node:async_hooks",
+    "node:buffer",
+    "node:console",
+    "node:constants",
+    "node:diagnostics_channel",
+    "node:events",
+    "node:module",
+    "node:os",
+    "node:path",
+    "node:path/posix",
+    "node:path/win32",
+    "node:perf_hooks",
+    "node:process",
+    "node:querystring",
+    "node:stream",
+    "node:stream/consumers",
+    "node:stream/promises",
+    "node:string_decoder",
+    "node:timers",
+    "node:timers/promises",
+    "node:tty",
+    "node:url",
+    "node:util",
+    "node:util/types",
+  ];
+  const TOOLING_MODULES: &'static [&'static str] = &[
+    "node:assert",
+    "node:assert/strict",
+    "node:async_hooks",
+    "node:buffer",
+    "node:console",
+    "node:constants",
+    "node:crypto",
+    "node:diagnostics_channel",
+    "node:events",
+    "node:fs",
+    "node:fs/promises",
+    "node:module",
+    "node:os",
+    "node:path",
+    "node:path/posix",
+    "node:path/win32",
+    "node:perf_hooks",
+    "node:process",
+    "node:querystring",
+    "node:readline",
+    "node:readline/promises",
+    "node:stream",
+    "node:stream/consumers",
+    "node:stream/promises",
+    "node:string_decoder",
+    "node:timers",
+    "node:timers/promises",
+    "node:tty",
+    "node:url",
+    "node:util",
+    "node:util/types",
+  ];
+  const FULL_MODULES: &'static [&'static str] = &[
+    "node:assert",
+    "node:assert/strict",
+    "node:async_hooks",
+    "node:buffer",
+    "node:console",
+    "node:constants",
+    "node:crypto",
+    "node:diagnostics_channel",
+    "node:domain",
+    "node:events",
+    "node:fs",
+    "node:fs/promises",
+    "node:module",
+    "node:os",
+    "node:path",
+    "node:path/posix",
+    "node:path/win32",
+    "node:perf_hooks",
+    "node:process",
+    "node:punycode",
+    "node:querystring",
+    "node:readline",
+    "node:readline/promises",
+    "node:sea",
+    "node:stream",
+    "node:stream/consumers",
+    "node:stream/promises",
+    "node:string_decoder",
+    "node:sys",
+    "node:timers",
+    "node:timers/promises",
+    "node:trace_events",
+    "node:tty",
+    "node:url",
+    "node:util",
+    "node:util/types",
+  ];
+
+  /// Return the canonical `node:*` roots enabled by this profile.
+  #[must_use]
+  pub const fn allowed_modules(self) -> &'static [&'static str] {
+    match self {
+      Self::Off => &[],
+      Self::Core => Self::CORE_MODULES,
+      Self::Tooling => Self::TOOLING_MODULES,
+      Self::Full => Self::FULL_MODULES,
+    }
+  }
+
+  /// Return the stable name used by host-facing diagnostics.
+  #[must_use]
+  pub const fn name(self) -> &'static str {
+    match self {
+      Self::Off => "off",
+      Self::Core => "core",
+      Self::Tooling => "tooling",
+      Self::Full => "full",
+    }
+  }
 }
 
 /// Host configuration installed into a Blitz VM.
@@ -385,14 +521,22 @@ pub fn try_install_runtime(
   let events = EventRegistry::new(64).expect("runtime event capacity is non-zero");
   let server_slot = Rc::new(RefCell::new(None));
   let terminal_slot = Rc::new(RefCell::new(None));
-  let previous_bridge = vm.get_global("__blitz_host_v1");
-  let capabilities = install_host_bridge(
+  let (host_bridge, capabilities) = create_host_bridge(
     vm,
     requests_tx.clone(),
     websocket_events_tx.clone(),
     events.resources(),
     Rc::clone(&server_slot),
     Rc::clone(&terminal_slot),
+    options
+      .node_compat
+      .allowed_modules()
+      .iter()
+      .any(|module| matches!(*module, "node:fs" | "node:fs/promises")),
+    options
+      .node_compat
+      .allowed_modules()
+      .contains(&"node:crypto"),
   );
   let policy_started = Instant::now();
   if let Err(error) = bundle.validate_pinned_for_host(
@@ -400,34 +544,40 @@ pub fn try_install_runtime(
     crate::effect_assets::EFFECT_MANIFEST_BYTES,
     crate::effect_assets::STDLIB_MANIFEST_BYTES,
   ) {
-    restore_host_bridge(vm, previous_bridge);
     return Err(RuntimeInstallError::Policy(error));
   }
   let policy_validation = policy_started.elapsed();
   let registration_started = Instant::now();
   let mut graph = bundle.graph.clone();
-  let node_roots = graph
+  let allowed_node_modules = options.node_compat.allowed_modules();
+  let disabled_node_roots = graph
     .public_roots
     .iter()
     .copied()
     .filter(|module_index| {
-      graph
-        .module(*module_index)
-        .is_some_and(|module| module.specifier.starts_with("node:"))
+      graph.module(*module_index).is_some_and(|module| {
+        module.specifier.starts_with("node:")
+          && !allowed_node_modules.contains(&module.specifier.as_str())
+      })
     })
-    .collect::<std::collections::HashSet<_>>();
-  if options.node_compat == NodeCompatProfile::Off {
-    graph
-      .public_roots
-      .retain(|module_index| !node_roots.contains(module_index));
-  }
+    .collect::<Vec<_>>();
+  graph
+    .public_roots
+    .retain(|module_index| !disabled_node_roots.contains(module_index));
   let declarations = crate::effect_assets::public_declaration_sources()
     .into_iter()
     .filter(|(specifier, _)| {
-      options.node_compat != NodeCompatProfile::Off || !specifier.starts_with("node:")
+      !specifier.starts_with("node:") || allowed_node_modules.contains(&specifier.as_str())
     });
-  if let Err(error) = vm.register_prelinked_graph_with_declarations(graph, declarations) {
-    restore_host_bridge(vm, previous_bridge);
+  let host_module = PrelinkedHostModule {
+    specifier: "blitz-internal:host".to_string(),
+    exports: HashMap::from([("host".to_string(), host_bridge)]),
+  };
+  if let Err(error) = vm.register_prelinked_graph_with_declarations_and_host_modules(
+    graph,
+    declarations,
+    vec![host_module],
+  ) {
     return Err(RuntimeInstallError::Registration(error.to_string()));
   }
   let graph_registration = registration_started.elapsed();
@@ -1093,14 +1243,16 @@ fn terminal_primitive(
 /// connections idempotently. The transitional limitation remains that requests
 /// are forwarded to the ordinary runtime event channel rather than invoking
 /// the `blitz:app` router/layers; host capability validation does not hide it.
-fn install_host_bridge(
+fn create_host_bridge(
   vm: &mut Vm,
   requests: mpsc::Sender<HttpRequestEvent>,
   websocket_events: mpsc::Sender<WebSocketEvent>,
   resources: ResourceRegistry,
   server: Rc<RefCell<Option<server::ServerState>>>,
   terminal: Rc<RefCell<Option<terminal::TerminalState>>>,
-) -> HostBridgeCapabilities {
+  node_file_system_allowed: bool,
+  crypto_random_allowed: bool,
+) -> (Value, HostBridgeCapabilities) {
   let app_transport = object(vm.realm().object_prototype());
   set(
     &app_transport,
@@ -1132,26 +1284,23 @@ fn install_host_bridge(
   );
   set(&bridge, "appTransport", app_transport);
   set(&bridge, "fileSystem", fs::install(vm));
+  set(
+    &bridge,
+    "nodeFileSystem",
+    node_fs::install(vm, node_file_system_allowed),
+  );
+  set(
+    &bridge,
+    "nodeCryptoRandom",
+    node_crypto::install(vm, crypto_random_allowed),
+  );
   set(&bridge, "http", http_primitive(vm, Rc::clone(&server)));
   set(&bridge, "webSocket", websocket_primitive(vm, server));
   set(&bridge, "terminal", terminal_primitive(vm, terminal));
   if let Value::Object(object) = &bridge {
     object.borrow_mut().extensible = false;
   }
-  vm.realm()
-    .global()
-    .borrow_mut()
-    .properties
-    .insert(
-      PropertyKey::String("__blitz_host_v1".to_string()),
-      PropertyDescriptor::Data {
-        value: bridge,
-        writable: false,
-        enumerable: false,
-        configurable: false,
-      },
-    );
-  HostBridgeCapabilities::new(HOST_BRIDGE_ABI_VERSION)
+  let capabilities = HostBridgeCapabilities::new(HOST_BRIDGE_ABI_VERSION)
     .with_primitive(
       APP_TRANSPORT_PRIMITIVE,
       HOST_BRIDGE_ABI_VERSION,
@@ -1161,6 +1310,16 @@ fn install_host_bridge(
       FILE_SYSTEM_PRIMITIVE,
       HOST_BRIDGE_ABI_VERSION,
       FILE_SYSTEM_METHODS.iter().copied(),
+    )
+    .with_primitive(
+      NODE_FILE_SYSTEM_PRIMITIVE,
+      HOST_BRIDGE_ABI_VERSION,
+      NODE_FILE_SYSTEM_METHODS.iter().copied(),
+    )
+    .with_primitive(
+      NODE_CRYPTO_RANDOM_PRIMITIVE,
+      NODE_CRYPTO_RANDOM_ABI_VERSION,
+      NODE_CRYPTO_RANDOM_METHODS.iter().copied(),
     )
     .with_primitive(
       HTTP_PRIMITIVE,
@@ -1176,22 +1335,8 @@ fn install_host_bridge(
       WEB_SOCKET_PRIMITIVE,
       HOST_BRIDGE_ABI_VERSION,
       WEB_SOCKET_METHODS.iter().copied(),
-    )
-}
-
-fn restore_host_bridge(
-  vm: &mut Vm,
-  previous: Option<Value>,
-) {
-  if let Some(previous) = previous {
-    vm.realm().set_global("__blitz_host_v1", previous);
-  } else {
-    vm.realm()
-      .global()
-      .borrow_mut()
-      .properties
-      .shift_remove(&PropertyKey::String("__blitz_host_v1".to_string()));
-  }
+    );
+  (bridge, capabilities)
 }
 
 fn object(prototype: Value) -> Value {
@@ -1533,42 +1678,20 @@ mod tests {
   }
 
   #[test]
-  fn private_host_bridge_is_immutable_and_non_enumerable() {
+  fn private_host_bridge_is_not_exposed_on_the_global_object() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     let mut vm = Vm::new(Rc::clone(&globals));
     let _runtime = install_runtime(
       &mut vm,
       RuntimeOptions::from_host(vec!["blitz-test".to_string()]),
     );
-    let descriptor = globals
-      .borrow()
-      .properties
-      .get(&PropertyKey::String("__blitz_host_v1".to_string()))
-      .cloned()
-      .expect("host bridge descriptor");
-    let PropertyDescriptor::Data {
-      value: Value::Object(bridge),
-      writable,
-      enumerable,
-      configurable,
-    } = descriptor
-    else {
-      panic!("host bridge is an object data property");
-    };
-    assert!(!writable);
-    assert!(!enumerable);
-    assert!(!configurable);
-    assert!(!bridge.borrow().extensible);
-    let app_transport = bridge
-      .borrow()
-      .properties
-      .get(&PropertyKey::String("appTransport".to_string()))
-      .and_then(|descriptor| match descriptor {
-        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-        PropertyDescriptor::Accessor { .. } => None,
-      })
-      .expect("app transport primitive");
-    assert!(matches!(app_transport, Value::Object(object) if !object.borrow().extensible));
+    assert_eq!(vm.get_global("__blitz_host_v1"), None);
+    assert!(
+      !globals
+        .borrow()
+        .properties
+        .contains_key(&PropertyKey::String("__blitz_host_v1".to_string()))
+    );
   }
 
   #[test]
@@ -2122,30 +2245,22 @@ mod tests {
   }
 
   #[test]
-  fn irc_chat_demo_scripts_parse_and_compile() {
-    for (name, source) in [
-      ("server", include_str!("../../examples/irc-chat/server.js")),
-      ("alice", include_str!("../../examples/irc-chat/alice.js")),
-      ("bob", include_str!("../../examples/irc-chat/bob.js")),
-    ] {
-      let session =
-        JsParser::parse_source(source).unwrap_or_else(|error| panic!("parse {name} demo: {error}"));
-      compiler::compile_oxc(session.program(), source)
-        .unwrap_or_else(|error| panic!("compile {name} demo: {error}"));
-    }
-  }
-
-  #[test]
   fn effect_irc_chat_v2_scripts_parse_and_compile() {
-    let server = include_str!("../../examples/irc-chat-v2/server.ts");
+    let server = include_str!("../../../../examples/irc-chat-v2/server.ts");
     let session =
       JsParser::parse_source_with_type(server, oxc_span::SourceType::ts().with_module(true))
         .expect("parse Effect IRC server module");
     compiler::compile_oxc(session.program(), server).expect("compile Effect IRC server module");
 
     for (name, source) in [
-      ("alice", include_str!("../../examples/irc-chat-v2/alice.ts")),
-      ("bob", include_str!("../../examples/irc-chat-v2/bob.ts")),
+      (
+        "alice",
+        include_str!("../../../../examples/irc-chat-v2/alice.ts"),
+      ),
+      (
+        "bob",
+        include_str!("../../../../examples/irc-chat-v2/bob.ts"),
+      ),
     ] {
       let session =
         JsParser::parse_source_with_type(source, oxc_span::SourceType::ts().with_module(true))
@@ -2176,8 +2291,8 @@ mod tests {
             node_compat: NodeCompatProfile::Core,
           },
         );
-        let source =
-          include_str!("../../examples/irc-chat-v2/server.ts").replace("port: 8000", "port: 0");
+        let source = include_str!("../../../../examples/irc-chat-v2/server.ts")
+          .replace("port: 8000", "port: 0");
         let directory = env::temp_dir().join(format!("blitz-effect-irc-v2-{}", std::process::id()));
         std::fs::create_dir_all(&directory).expect("create Effect IRC directory");
         let entry = directory.join("server.ts");

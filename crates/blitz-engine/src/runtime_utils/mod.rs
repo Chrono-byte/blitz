@@ -49,6 +49,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::compiler;
+use crate::ecmascript::semantics::byte_views::{
+  ARRAY_BUFFER_DATA_SLOT, ARRAY_BUFFER_SHARED_SLOT, TYPED_ARRAY_BUFFER_SLOT,
+  TYPED_ARRAY_BYTE_LENGTH_SLOT, TYPED_ARRAY_BYTE_OFFSET_SLOT, TYPED_ARRAY_DATA_SLOT,
+  TYPED_ARRAY_KIND_SLOT, TYPED_ARRAY_LENGTH_SLOT, array_buffer_backing, array_buffer_is_shared,
+  byte_view_details, is_array_buffer,
+};
 use crate::gc;
 use crate::parser::Parser;
 use crate::realm::Intrinsics;
@@ -486,14 +492,16 @@ fn clone_value_across_realms(
         // TypedArray, Map, Set, Date, RegExp by inspecting internal slots
         let borrow = obj_rc.borrow();
 
-        // ArrayBuffer: identified by [[ArrayBufferData]] internal slot
-        let array_buffer_data = borrow
-          .properties
-          .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
-          .and_then(|descriptor| match descriptor {
-            PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-            PropertyDescriptor::Accessor { .. } => None,
-          });
+        // ArrayBuffer: identified by its VM-only internal slots.
+        let array_buffer_data = if is_array_buffer(&Value::Object(Rc::clone(obj_rc))) {
+          Some(
+            array_buffer_backing(&Value::Object(Rc::clone(obj_rc)))
+              .map(|data| Value::Array(data, Rc::new(RefCell::new(ObjectData::new()))))
+              .unwrap_or(Value::Null),
+          )
+        } else {
+          None
+        };
         let array_buffer_byte_length = borrow
           .properties
           .get(&PropertyKey::String("byteLength".to_string()))
@@ -519,9 +527,12 @@ fn clone_value_across_realms(
           visited.insert(addr, target_val);
 
           let cloned_data = helper(vm, &ab_data, visited, transfer_set)?;
-          target_obj.borrow_mut().properties.insert(
-            PropertyKey::String("[[ArrayBufferData]]".to_string()),
-            PropertyDescriptor::data(cloned_data),
+          target_obj
+            .borrow_mut()
+            .set_internal_slot(ARRAY_BUFFER_DATA_SLOT, cloned_data);
+          target_obj.borrow_mut().set_internal_slot(
+            ARRAY_BUFFER_SHARED_SLOT,
+            Value::Bool(array_buffer_is_shared(&Value::Object(Rc::clone(obj_rc))).unwrap_or(false)),
           );
           if let Some(value) = array_buffer_byte_length {
             let bl = helper(vm, &value, visited, transfer_set)?;
@@ -530,21 +541,94 @@ fn clone_value_across_realms(
               PropertyDescriptor::data(bl),
             );
           }
-          if transferring
-            && let Some(PropertyDescriptor::Data { value, .. }) = obj_rc
+          if transferring {
+            obj_rc
+              .borrow_mut()
+              .set_internal_slot(ARRAY_BUFFER_DATA_SLOT, Value::Null);
+            if let Some(PropertyDescriptor::Data { value, .. }) = obj_rc
               .borrow_mut()
               .properties
               .get_mut(&PropertyKey::String("byteLength".to_string()))
-          {
-            *value = Value::Number(0.0);
+            {
+              *value = Value::Number(0.0);
+            }
           }
           return Ok(Value::Object(target_obj));
         }
 
-        // TypedArray: identified by [[TypedArrayData]]
+        // Byte TypedArray: use the VM-only slots so a spoofed property bag is
+        // never treated as a view during cloning.
+        if let Some(details) = byte_view_details(&Value::Object(Rc::clone(obj_rc))) {
+          let mut out = ObjectData::new();
+          if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
+            out.set_prototype_value(proto);
+          }
+          let target_obj = gc::track_object(Rc::new(RefCell::new(out)));
+          let target_val = Value::Object(Rc::clone(&target_obj));
+          visited.insert(addr, target_val);
+
+          let cloned_data = helper(
+            vm,
+            &Value::Array(
+              Rc::clone(&details.data),
+              Rc::new(RefCell::new(ObjectData::new())),
+            ),
+            visited,
+            transfer_set,
+          )?;
+          let cloned_buffer = helper(vm, &details.buffer, visited, transfer_set)?;
+          let mut target = target_obj.borrow_mut();
+          target.set_internal_slot(TYPED_ARRAY_DATA_SLOT, cloned_data);
+          target.set_internal_slot(TYPED_ARRAY_KIND_SLOT, Value::String(details.kind.clone()));
+          target.set_internal_slot(
+            TYPED_ARRAY_LENGTH_SLOT,
+            Value::Number(details.length as f64),
+          );
+          target.set_internal_slot(
+            TYPED_ARRAY_BYTE_LENGTH_SLOT,
+            Value::Number(details.length as f64),
+          );
+          target.set_internal_slot(
+            TYPED_ARRAY_BYTE_OFFSET_SLOT,
+            Value::Number(details.byte_offset as f64),
+          );
+          target.set_internal_slot(TYPED_ARRAY_BUFFER_SLOT, cloned_buffer.clone());
+          target.properties.insert(
+            PropertyKey::String("length".to_string()),
+            PropertyDescriptor::data(Value::Number(details.length as f64)),
+          );
+          target.properties.insert(
+            PropertyKey::String("byteLength".to_string()),
+            PropertyDescriptor::data(Value::Number(details.length as f64)),
+          );
+          target.properties.insert(
+            PropertyKey::String("byteOffset".to_string()),
+            PropertyDescriptor::data(Value::Number(details.byte_offset as f64)),
+          );
+          target.properties.insert(
+            PropertyKey::String("buffer".to_string()),
+            PropertyDescriptor::data(cloned_buffer),
+          );
+          drop(target);
+          return Ok(Value::Object(target_obj));
+        }
+
+        // Wider TypedArrays retain their existing representation for now.
         if let Some(PropertyDescriptor::Data { value: ta_data, .. }) = borrow
           .properties
           .get(&PropertyKey::String("[[TypedArrayData]]".to_string()))
+          && !matches!(
+            borrow
+              .properties
+              .get(&PropertyKey::String("[[TypedArrayKind]]".to_string())),
+            Some(PropertyDescriptor::Data {
+              value: Value::String(kind),
+              ..
+            }) if matches!(
+              kind.as_str(),
+              "Uint8Array" | "Int8Array" | "Uint8ClampedArray"
+            )
+          )
         {
           let mut out = ObjectData::new();
           if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
@@ -767,10 +851,12 @@ mod structured_clone_tests {
     let backing_value = Value::Array(Rc::clone(&backing), backing_props);
 
     let source = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
-    source.borrow_mut().properties.insert(
-      PropertyKey::String("[[ArrayBufferData]]".to_string()),
-      PropertyDescriptor::data(backing_value),
-    );
+    source
+      .borrow_mut()
+      .set_internal_slot(ARRAY_BUFFER_DATA_SLOT, backing_value);
+    source
+      .borrow_mut()
+      .set_internal_slot(ARRAY_BUFFER_SHARED_SLOT, Value::Bool(false));
     source.borrow_mut().properties.insert(
       PropertyKey::String("byteLength".to_string()),
       PropertyDescriptor::data(Value::Number(2.0)),
@@ -801,13 +887,9 @@ mod structured_clone_tests {
     };
     let cloned_backing = cloned
       .borrow()
-      .properties
-      .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
-      .and_then(|descriptor| match descriptor {
-        PropertyDescriptor::Data {
-          value: Value::Array(backing, _),
-          ..
-        } => Some(Rc::clone(backing)),
+      .internal_slot(ARRAY_BUFFER_DATA_SLOT)
+      .and_then(|value| match value {
+        Value::Array(backing, _) => Some(Rc::clone(backing)),
         _ => None,
       })
       .expect("transferred object should contain backing data");
