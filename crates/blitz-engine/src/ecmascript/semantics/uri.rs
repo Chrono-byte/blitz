@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
-use std::borrow::Cow;
-
-use crate::value::{PropertyDescriptor, PropertyKey, Value};
+use crate::value::Value;
 use crate::{RuntimeError, Vm};
+use js_string::{JsString, JsStringBuilder};
 
 fn is_uri_component_safe(
   ch: char,
@@ -22,17 +21,6 @@ fn is_uri_component_safe(
           | '\''
           | '('
           | ')'
-          | ';'
-          | ','
-          | '/'
-          | '?'
-          | ':'
-          | '@'
-          | '&'
-          | '='
-          | '+'
-          | '$'
-          | '#'
   ) || (!component
     && matches!(
       ch,
@@ -41,12 +29,17 @@ fn is_uri_component_safe(
 }
 
 fn percent_encode(
-  text: &str,
+  vm: &mut Vm,
+  text: &JsString,
   component: bool,
-) -> String {
+) -> Result<String, RuntimeError> {
   let mut out = String::with_capacity(text.len() * 3);
   const HEX: &[u8; 16] = b"0123456789ABCDEF";
-  for ch in text.chars() {
+  let mut index = 0;
+  while let Some(point) = text.code_point_at(index, true) {
+    let Some(ch) = char::from_u32(point.value()) else {
+      return Err(uri_error(vm));
+    };
     if is_uri_component_safe(ch, component) {
       out.push(ch);
     } else {
@@ -57,57 +50,97 @@ fn percent_encode(
         out.push(HEX[(b & 0x0F) as usize] as char);
       }
     }
+    index += point.width();
   }
-  out
+  Ok(out)
 }
 
 fn uri_error(vm: &mut Vm) -> RuntimeError {
   let err = vm
     .create_intrinsic_error("URIError", "malformed URI sequence")
-    .unwrap_or(Value::String("URIError".to_string()));
+    .unwrap_or(Value::String("URIError".to_string().into()));
   vm.throw_exception(err)
 }
 
 fn percent_decode(
   vm: &mut Vm,
-  text: &str,
+  text: &JsString,
   component: bool,
-) -> Result<String, RuntimeError> {
-  let input = text.as_bytes();
-  let mut bytes = Vec::with_capacity(input.len());
+) -> Result<JsString, RuntimeError> {
+  let input = text.as_slice();
+  let mut output = JsStringBuilder::with_capacity(input.len());
   let mut i = 0usize;
   while i < input.len() {
-    let byte = input[i];
-    if byte != b'%' {
-      bytes.push(byte);
+    let unit = input[i];
+    if unit != u16::from(b'%') {
+      output.push_code_unit(unit);
       i += 1;
       continue;
     }
-    if i + 2 >= input.len() {
+    let first = decode_escape_byte(input, i).ok_or_else(|| uri_error(vm))?;
+    if first < 0x80 {
+      if !component && is_decode_uri_reserved_byte(first) {
+        output.push_code_unit(u16::from(b'%'));
+        output.push_code_unit(input[i + 1]);
+        output.push_code_unit(input[i + 2]);
+      } else {
+        output.push_code_unit(u16::from(first));
+      }
+      i += 3;
+      continue;
+    }
+
+    let byte_count = match first {
+      0xC2..=0xDF => 2,
+      0xE0..=0xEF => 3,
+      0xF0..=0xF4 => 4,
+      _ => return Err(uri_error(vm)),
+    };
+    let mut bytes = Vec::with_capacity(byte_count);
+    bytes.push(first);
+    for offset in 1..byte_count {
+      let escape_index = i + offset * 3;
+      let byte = decode_escape_byte(input, escape_index).ok_or_else(|| uri_error(vm))?;
+      bytes.push(byte);
+    }
+    let decoded = std::str::from_utf8(&bytes).map_err(|_| uri_error(vm))?;
+    let mut characters = decoded.chars();
+    let character = characters.next().ok_or_else(|| uri_error(vm))?;
+    if characters.next().is_some() {
       return Err(uri_error(vm));
     }
-    let Some(hi) = hex_value(input[i + 1]) else {
+    if !output.push_code_point(character.into()) {
       return Err(uri_error(vm));
-    };
-    let Some(lo) = hex_value(input[i + 2]) else {
-      return Err(uri_error(vm));
-    };
-    let decoded = (hi << 4) | lo;
-    if !component && is_decode_uri_reserved_byte(decoded) {
-      bytes.extend_from_slice(&input[i..i + 3]);
-    } else {
-      bytes.push(decoded);
     }
-    i += 3;
+    i += byte_count * 3;
   }
-  String::from_utf8(bytes).map_err(|_| uri_error(vm))
+  Ok(output.finish())
 }
 
-fn hex_value(byte: u8) -> Option<u8> {
-  match byte {
-    b'0'..=b'9' => Some(byte - b'0'),
-    b'a'..=b'f' => Some(byte - b'a' + 10),
-    b'A'..=b'F' => Some(byte - b'A' + 10),
+fn decode_escape_byte(
+  input: &[u16],
+  index: usize,
+) -> Option<u8> {
+  if input.get(index) != Some(&u16::from(b'%')) {
+    return None;
+  }
+  let hi = hex_value(*input.get(index + 1)?)?;
+  let lo = hex_value(*input.get(index + 2)?)?;
+  Some((hi << 4) | lo)
+}
+
+fn hex_value(unit: u16) -> Option<u8> {
+  match unit {
+    value if value == u16::from(b'0') => Some(0),
+    value if (u16::from(b'1')..=u16::from(b'9')).contains(&value) => {
+      Some((value - u16::from(b'0')) as u8)
+    }
+    value if (u16::from(b'a')..=u16::from(b'f')).contains(&value) => {
+      Some((value - u16::from(b'a') + 10) as u8)
+    }
+    value if (u16::from(b'A')..=u16::from(b'F')).contains(&value) => {
+      Some((value - u16::from(b'A') + 10) as u8)
+    }
     _ => None,
   }
 }
@@ -126,14 +159,8 @@ pub(crate) fn global_decode_uri(
 ) -> Result<Value, RuntimeError> {
   let undefined = Value::Undefined;
   let value = args.first().unwrap_or(&undefined);
-  let s = match value {
-    Value::String(s) => s.as_str(),
-    _ => {
-      let s = vm.to_string(value)?;
-      return Ok(Value::String(percent_decode(vm, &s, false)?));
-    }
-  };
-  Ok(Value::String(percent_decode(vm, s, false)?))
+  let s = vm.to_string(value)?;
+  Ok(Value::String(percent_decode(vm, &s, false)?))
 }
 
 /// Implements the global decodeURIComponent function.
@@ -143,14 +170,8 @@ pub(crate) fn global_decode_uri_component(
 ) -> Result<Value, RuntimeError> {
   let undefined = Value::Undefined;
   let value = args.first().unwrap_or(&undefined);
-  let s = match value {
-    Value::String(s) => s.as_str(),
-    _ => {
-      let s = vm.to_string(value)?;
-      return Ok(Value::String(percent_decode(vm, &s, true)?));
-    }
-  };
-  Ok(Value::String(percent_decode(vm, s, true)?))
+  let s = vm.to_string(value)?;
+  Ok(Value::String(percent_decode(vm, &s, true)?))
 }
 
 /// Implements the global encodeURI function.
@@ -160,14 +181,8 @@ pub(crate) fn global_encode_uri(
 ) -> Result<Value, RuntimeError> {
   let undefined = Value::Undefined;
   let value = args.first().unwrap_or(&undefined);
-  let s = match value {
-    Value::String(s) => s.as_str(),
-    _ => {
-      let s = vm.to_string(value)?;
-      return Ok(Value::String(percent_encode(&s, false)));
-    }
-  };
-  Ok(Value::String(percent_encode(s, false)))
+  let s = vm.to_string(value)?;
+  Ok(Value::String(percent_encode(vm, &s, false)?.into()))
 }
 
 /// Implements the global encodeURIComponent function.
@@ -177,34 +192,6 @@ pub(crate) fn global_encode_uri_component(
 ) -> Result<Value, RuntimeError> {
   let undefined = Value::Undefined;
   let value = args.first().unwrap_or(&undefined);
-  let s = match value {
-    Value::String(s) => s.as_str(),
-    _ => {
-      let s = vm.to_string(value)?;
-      return Ok(Value::String(percent_encode(&s, true)));
-    }
-  };
-  Ok(Value::String(percent_encode(s, true)))
-}
-
-/// Gets a string value reference from the String prototype methods.
-pub(crate) fn this_string_value_ref<'a>(
-  vm: &mut Vm,
-  value: &'a Value,
-) -> Result<Cow<'a, str>, RuntimeError> {
-  match value {
-    Value::String(s) => Ok(Cow::Borrowed(s)),
-    Value::Object(obj) => {
-      if let Some(PropertyDescriptor::Data { value, .. }) = obj
-        .borrow()
-        .properties
-        .get(&PropertyKey::String("[[PrimitiveValue]]".to_string()))
-        && let Value::String(s) = value
-      {
-        return Ok(Cow::Owned(s.clone()));
-      }
-      Err(vm.throw_type_error("String method called on incompatible receiver"))
-    }
-    _ => Err(vm.throw_type_error("String method called on incompatible receiver")),
-  }
+  let s = vm.to_string(value)?;
+  Ok(Value::String(percent_encode(vm, &s, true)?.into()))
 }

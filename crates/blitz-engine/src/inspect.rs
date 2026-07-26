@@ -141,7 +141,7 @@ impl Inspector {
         let name = properties
           .borrow()
           .properties
-          .get(&PropertyKey::String("name".to_string()))
+          .get(&PropertyKey::String("name".to_string().into()))
           .and_then(|descriptor| match descriptor {
             PropertyDescriptor::Data {
               value: Value::String(name),
@@ -315,7 +315,7 @@ fn format_number(number: f64) -> String {
 
 fn format_property_key(key: &PropertyKey) -> String {
   match key {
-    PropertyKey::String(key) if is_identifier(key) => key.clone(),
+    PropertyKey::String(key) if is_identifier(key.as_str_lossy()) => key.to_string_lossy(),
     PropertyKey::String(key) => format!("{key:?}"),
     PropertyKey::Symbol(symbol) => format!("[{symbol:?}]"),
   }
@@ -356,7 +356,7 @@ mod tests {
     let mut data = ObjectData::new();
     for (key, value) in properties {
       data.properties.insert(
-        PropertyKey::String(key.to_string()),
+        PropertyKey::String(key.to_string().into()),
         PropertyDescriptor::ordinary_data(value),
       );
     }
@@ -374,7 +374,7 @@ mod tests {
   fn inspects_nested_objects_and_arrays() {
     let array = Value::Array(
       Rc::new(RefCell::new(ArrayData::new(vec![
-        Some(Value::String("one".to_string())),
+        Some(Value::String("one".to_string().into())),
         None,
       ]))),
       Rc::new(RefCell::new(ObjectData::new())),
@@ -391,7 +391,7 @@ mod tests {
   fn detects_circular_objects() {
     let data = Rc::new(RefCell::new(ObjectData::new()));
     data.borrow_mut().properties.insert(
-      PropertyKey::String("self".to_string()),
+      PropertyKey::String("self".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&data))),
     );
 
@@ -405,7 +405,7 @@ mod tests {
   fn does_not_invoke_accessors_and_omits_non_enumerable_properties() {
     let mut data = ObjectData::new();
     data.properties.insert(
-      PropertyKey::String("value".to_string()),
+      PropertyKey::String("value".to_string().into()),
       PropertyDescriptor::Accessor {
         get: Some(Value::Builtin(Rc::new(|_, _| Ok(Value::Number(1.0))))),
         set: None,
@@ -414,7 +414,7 @@ mod tests {
       },
     );
     data.properties.insert(
-      PropertyKey::String("hidden".to_string()),
+      PropertyKey::String("hidden".to_string().into()),
       PropertyDescriptor::Data {
         value: Value::Bool(true),
         writable: true,

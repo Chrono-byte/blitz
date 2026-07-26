@@ -108,7 +108,7 @@ pub(crate) fn build_atomics_object(
     set_builtin_name(&func_val, name);
     set_builtin_length(&func_val, length);
     atomics_props.borrow_mut().properties.insert(
-      PropertyKey::String(name.to_string()),
+      PropertyKey::String(name.to_string().into()),
       PropertyDescriptor::builtin_data(func_val),
     );
   };
@@ -245,13 +245,13 @@ pub(crate) fn build_atomics_object(
       let current = atomics_normalized_current(vm, &info, index)?;
       let expected = atomics_coerce_view_value(vm, &info, &expected)?;
       if current != expected {
-        return Ok(Value::String("not-equal".to_string()));
+        return Ok(Value::String("not-equal".to_string().into()));
       }
       if timeout == 0.0 {
-        return Ok(Value::String("timed-out".to_string()));
+        return Ok(Value::String("timed-out".to_string().into()));
       }
       atomics_register_waiter(vm, &info, index, None)?;
-      Ok(Value::String("ok".to_string()))
+      Ok(Value::String("ok".to_string().into()))
     }),
   );
   insert_atomics_method(
@@ -284,13 +284,13 @@ pub(crate) fn build_atomics_object(
       if current != expected {
         return Ok(atomics_make_wait_result(
           false,
-          Value::String("not-equal".to_string()),
+          Value::String("not-equal".to_string().into()),
         ));
       }
       if timeout == 0.0 {
         return Ok(atomics_make_wait_result(
           false,
-          Value::String("timed-out".to_string()),
+          Value::String("timed-out".to_string().into()),
         ));
       }
 

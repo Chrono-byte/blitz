@@ -727,8 +727,8 @@ impl ModuleRecord {
     let meta = Value::Object(gc::track_object(Rc::new(RefCell::new({
       let mut object = ObjectData::new();
       object.properties.insert(
-        PropertyKey::String("url".to_string()),
-        PropertyDescriptor::ordinary_data(Value::String(self.url.clone())),
+        PropertyKey::String("url".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::String(self.url.clone().into())),
       );
       object
     }))));
@@ -3260,7 +3260,7 @@ mod tests {
     assert_eq!(vm.get_global("namespaceValue"), Some(Value::Number(2.0)));
     assert_eq!(
       vm.get_global("namespaceType"),
-      Some(Value::String("object".to_string()))
+      Some(Value::String("object".to_string().into()))
     );
   }
 
@@ -4317,7 +4317,7 @@ mod tests {
       .expect("ordered graph evaluates");
     assert_eq!(
       vm.get_global("order"),
-      Some(Value::String("BAE".to_string()))
+      Some(Value::String("BAE".to_string().into()))
     );
   }
 
@@ -4536,7 +4536,7 @@ mod tests {
 
     assert_eq!(
       vm.get_global("metaUrl"),
-      Some(Value::String("test:meta-entry".to_string()))
+      Some(Value::String("test:meta-entry".to_string().into()))
     );
     assert_eq!(vm.get_global("metaSame"), Some(Value::Bool(true)));
   }

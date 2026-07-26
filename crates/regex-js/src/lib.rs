@@ -244,6 +244,7 @@ mod tests {
     assert!(Regex::new("", "d").is_ok());
     assert!(Regex::new("", "v").is_err());
     assert!(Regex::new("", "uv").is_err());
+    assert_eq!(regex("", "ymigd").flags().to_string(), "dgimy");
   }
 
   #[test]

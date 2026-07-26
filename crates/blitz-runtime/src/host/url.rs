@@ -19,11 +19,12 @@ pub(super) fn install(vm: &mut Vm) {
       .ok_or_else(|| RuntimeError::from("URL requires an input"))?;
     let input = vm.to_string(input)?;
     let parsed = match args.get(2) {
-      None | Some(Value::Undefined) => Url::parse(&input),
+      None | Some(Value::Undefined) => Url::parse(input.as_str_lossy()),
       Some(base) => {
-        let base = Url::parse(&vm.to_string(base)?)
+        let base_string = vm.to_string(base)?;
+        let base = Url::parse(base_string.as_str_lossy())
           .map_err(|error| RuntimeError::from(format!("invalid base URL: {error}")))?;
-        base.join(&input)
+        base.join(input.as_str_lossy())
       }
     }
     .map_err(|error| RuntimeError::from(format!("invalid URL: {error}")))?;
@@ -37,7 +38,7 @@ pub(super) fn install(vm: &mut Vm) {
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("prototype".to_string()),
+      PropertyKey::String("prototype".to_string().into()),
       PropertyDescriptor::ordinary_data(prototype),
     );
   vm.realm().set_global(
@@ -85,7 +86,7 @@ fn url_object(
     ("search", search),
     ("hash", hash),
   ] {
-    set(&value, name, Value::String(property));
+    set(&value, name, Value::String(property.into()));
   }
   value
 }
@@ -103,7 +104,7 @@ fn set(
 ) {
   if let Value::Object(object) = target {
     object.borrow_mut().properties.insert(
-      PropertyKey::String(name.to_string()),
+      PropertyKey::String(name.to_string().into()),
       PropertyDescriptor::ordinary_data(value),
     );
   }
@@ -128,7 +129,7 @@ mod tests {
         ..
       }) = properties
         .properties
-        .get(&PropertyKey::String(name.to_string()))
+        .get(&PropertyKey::String(name.to_string().into()))
       else {
         panic!("{name} should be a string data property");
       };

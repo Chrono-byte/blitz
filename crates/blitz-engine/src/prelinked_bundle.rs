@@ -21,7 +21,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Current version of the prelinked graph wire envelope.
-pub const PRELINKED_GRAPH_WIRE_VERSION: u16 = 1;
+pub const PRELINKED_GRAPH_WIRE_VERSION: u16 = 2;
 
 const MAGIC: &[u8; 8] = b"BLITZPG\0";
 const HEADER_LEN: usize = MAGIC.len() + 2 + 8 + 4;
@@ -553,7 +553,7 @@ fn encode_constant(
     }
     Constant::String(value) => {
       writer.u8(2);
-      writer.string(value, StringKind::Name)?;
+      writer.js_string(value)?;
     }
     Constant::Bool(value) => {
       writer.u8(3);
@@ -569,7 +569,7 @@ fn encode_constant(
     Constant::Symbol(id, description) => {
       writer.u8(6);
       writer.u64(id.as_u64());
-      writer.option_string(description.as_deref(), StringKind::Name)?;
+      writer.option_js_string(description.as_ref())?;
     }
     Constant::Null => writer.u8(7),
   }
@@ -580,7 +580,7 @@ fn decode_constant(reader: &mut Reader<'_>) -> Result<Constant, PrelinkedGraphCo
   Ok(match reader.u8()? {
     0 => Constant::Uninitialized,
     1 => Constant::Number(f64::from_bits(reader.u64()?)),
-    2 => Constant::String(reader.string(StringKind::Name)?),
+    2 => Constant::String(reader.js_string()?),
     3 => Constant::Bool(reader.bool()?),
     4 => Constant::Undefined,
     5 => {
@@ -595,10 +595,7 @@ fn decode_constant(reader: &mut Reader<'_>) -> Result<Constant, PrelinkedGraphCo
     }
     6 => {
       let id = reader.u64()?;
-      Constant::Symbol(
-        SymbolId::well_known(id),
-        reader.option_string(StringKind::Name)?,
-      )
+      Constant::Symbol(SymbolId::well_known(id), reader.option_js_string()?)
     }
     7 => Constant::Null,
     tag => return Err(invalid(format!("unknown constant tag {tag}"))),
@@ -1170,6 +1167,31 @@ impl Writer {
     Ok(())
   }
 
+  fn js_string(
+    &mut self,
+    value: &js_string::JsString,
+  ) -> Result<(), PrelinkedGraphCodecError> {
+    self.vector_len(value.len(), MAX_NAME_BYTES / 2, "UTF-16 code unit count")?;
+    for unit in value.code_units() {
+      self.u16(unit);
+    }
+    Ok(())
+  }
+
+  fn option_js_string(
+    &mut self,
+    value: Option<&js_string::JsString>,
+  ) -> Result<(), PrelinkedGraphCodecError> {
+    match value {
+      None => self.u8(0),
+      Some(value) => {
+        self.u8(1);
+        self.js_string(value)?;
+      }
+    }
+    Ok(())
+  }
+
   fn bytes_vec(
     &mut self,
     value: &[u8],
@@ -1356,6 +1378,23 @@ impl<'a> Reader<'a> {
     match self.u8()? {
       0 => Ok(None),
       1 => Ok(Some(self.string(kind)?)),
+      tag => Err(invalid(format!("invalid optional string tag {tag}"))),
+    }
+  }
+
+  fn js_string(&mut self) -> Result<js_string::JsString, PrelinkedGraphCodecError> {
+    let length = self.vector_len(MAX_NAME_BYTES / 2, "UTF-16 code unit count")?;
+    let mut units = Vec::with_capacity(length);
+    for _ in 0..length {
+      units.push(self.u16()?);
+    }
+    Ok(units.into())
+  }
+
+  fn option_js_string(&mut self) -> Result<Option<js_string::JsString>, PrelinkedGraphCodecError> {
+    match self.u8()? {
+      0 => Ok(None),
+      1 => Ok(Some(self.js_string()?)),
       tag => Err(invalid(format!("invalid optional string tag {tag}"))),
     }
   }

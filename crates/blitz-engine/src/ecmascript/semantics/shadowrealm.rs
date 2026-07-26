@@ -39,14 +39,14 @@ pub(crate) fn build_shadowrealm_constructor(
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("prototype".to_string()),
+      PropertyKey::String("prototype".to_string().into()),
       PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&shadowrealm_proto_map))),
     );
   shadowrealm_proto_map
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("constructor".to_string()),
+      PropertyKey::String("constructor".to_string().into()),
       PropertyDescriptor::builtin_data(shadowrealm_ctor_val.clone()),
     );
   set_builtin_length(&shadowrealm_ctor_val, 0.0);
@@ -54,8 +54,8 @@ pub(crate) fn build_shadowrealm_constructor(
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("name".to_string()),
-      PropertyDescriptor::builtin_metadata(Value::String("ShadowRealm".to_string())),
+      PropertyKey::String("name".to_string().into()),
+      PropertyDescriptor::builtin_metadata(Value::String("ShadowRealm".to_string().into())),
     );
 
   let shadowrealm_evaluate_val = builtin_object(Rc::new(shadowrealm_evaluate), function_proto_map);
@@ -63,8 +63,8 @@ pub(crate) fn build_shadowrealm_constructor(
     set_builtin_length(&shadowrealm_evaluate_val, 1.0);
     if let Value::BuiltinObject(_, props) = &shadowrealm_evaluate_val {
       props.borrow_mut().properties.insert(
-        PropertyKey::String("name".to_string()),
-        PropertyDescriptor::builtin_metadata(Value::String("evaluate".to_string())),
+        PropertyKey::String("name".to_string().into()),
+        PropertyDescriptor::builtin_metadata(Value::String("evaluate".to_string().into())),
       );
     }
   }
@@ -72,7 +72,7 @@ pub(crate) fn build_shadowrealm_constructor(
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("evaluate".to_string()),
+      PropertyKey::String("evaluate".to_string().into()),
       PropertyDescriptor::builtin_data(shadowrealm_evaluate_val),
     );
 
@@ -82,8 +82,8 @@ pub(crate) fn build_shadowrealm_constructor(
     set_builtin_length(&shadowrealm_import_val, 2.0);
     if let Value::BuiltinObject(_, props) = &shadowrealm_import_val {
       props.borrow_mut().properties.insert(
-        PropertyKey::String("name".to_string()),
-        PropertyDescriptor::builtin_metadata(Value::String("importValue".to_string())),
+        PropertyKey::String("name".to_string().into()),
+        PropertyDescriptor::builtin_metadata(Value::String("importValue".to_string().into())),
       );
     }
   }
@@ -91,7 +91,7 @@ pub(crate) fn build_shadowrealm_constructor(
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("importValue".to_string()),
+      PropertyKey::String("importValue".to_string().into()),
       PropertyDescriptor::builtin_data(shadowrealm_import_val),
     );
   shadowrealm_proto_map
@@ -100,7 +100,7 @@ pub(crate) fn build_shadowrealm_constructor(
     .insert(
       PropertyKey::Symbol(SymbolId::well_known_to_string_tag()),
       PropertyDescriptor::Data {
-        value: Value::String("ShadowRealm".to_string()),
+        value: Value::String("ShadowRealm".to_string().into()),
         writable: false,
         enumerable: false,
         configurable: true,

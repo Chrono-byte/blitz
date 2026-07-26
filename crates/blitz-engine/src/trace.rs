@@ -67,7 +67,7 @@ pub fn value_string(
   use crate::value::Value;
   match v {
     Value::Uninitialized => eprintln!("[trace] {} Uninitialized", label),
-    Value::String(s) => string_inner(label, s),
+    Value::String(s) => string_inner(label, s.as_str_lossy()),
     Value::Number(n) => eprintln!("[trace] {} Number({})", label, n),
     Value::Bool(b) => eprintln!("[trace] {} Bool({})", label, b),
     Value::Null => eprintln!("[trace] {} Null", label),

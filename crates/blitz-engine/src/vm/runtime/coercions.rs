@@ -46,8 +46,8 @@ pub(super) fn to_uint32_with_vm(
 }
 
 /// Parse a JavaScript number string into a `f64`.
-pub(super) fn parse_js_number_string(s: &str) -> f64 {
-  let s = s.trim();
+pub(super) fn parse_js_number_string(s: &js_string::JsString) -> f64 {
+  let s = s.as_str_lossy().trim();
   if s.is_empty() {
     return 0.0;
   }
@@ -114,8 +114,8 @@ fn parse_radix_number_string(
   Some(value)
 }
 
-pub(super) fn parse_js_bigint_string(s: &str) -> Option<BigIntValue> {
-  let s = s.trim();
+pub(super) fn parse_js_bigint_string(s: &js_string::JsString) -> Option<BigIntValue> {
+  let s = s.as_str_lossy().trim();
   if s.is_empty() {
     return None;
   }

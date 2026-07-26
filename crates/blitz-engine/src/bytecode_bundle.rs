@@ -19,7 +19,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Current version of the bytecode bundle container format.
-pub const BYTECODE_BUNDLE_VERSION: u16 = 1;
+pub const BYTECODE_BUNDLE_VERSION: u16 = 2;
 
 const MAGIC: &[u8; 8] = b"BLITZBC\0";
 const HEADER_LEN: usize = MAGIC.len() + 2 + 8 + 4;
@@ -320,11 +320,11 @@ struct WireICEntry {
 enum WireConstant {
   Uninitialized,
   Number(f64),
-  String(String),
+  String(Vec<u16>),
   Bool(bool),
   Undefined,
   BigInt(WireSign, Vec<u8>),
-  Symbol(u64, Option<String>),
+  Symbol(u64, Option<Vec<u16>>),
   Null,
 }
 
@@ -746,14 +746,19 @@ impl From<&Constant> for WireConstant {
     match value {
       Constant::Uninitialized => Self::Uninitialized,
       Constant::Number(value) => Self::Number(*value),
-      Constant::String(value) => Self::String(value.clone()),
+      Constant::String(value) => Self::String(value.as_slice().to_vec()),
       Constant::Bool(value) => Self::Bool(*value),
       Constant::Undefined => Self::Undefined,
       Constant::BigInt(value) => {
         let (sign, bytes) = value.to_bytes_le();
         Self::BigInt(WireSign::from(sign), bytes)
       }
-      Constant::Symbol(id, description) => Self::Symbol(id.as_u64(), description.clone()),
+      Constant::Symbol(id, description) => Self::Symbol(
+        id.as_u64(),
+        description
+          .as_ref()
+          .map(|value| value.as_slice().to_vec()),
+      ),
       Constant::Null => Self::Null,
     }
   }
@@ -764,11 +769,13 @@ impl From<WireConstant> for Constant {
     match value {
       WireConstant::Uninitialized => Self::Uninitialized,
       WireConstant::Number(value) => Self::Number(value),
-      WireConstant::String(value) => Self::String(value),
+      WireConstant::String(value) => Self::String(value.into()),
       WireConstant::Bool(value) => Self::Bool(value),
       WireConstant::Undefined => Self::Undefined,
       WireConstant::BigInt(sign, bytes) => Self::BigInt(BigInt::from_bytes_le(sign.into(), &bytes)),
-      WireConstant::Symbol(id, description) => Self::Symbol(SymbolId::well_known(id), description),
+      WireConstant::Symbol(id, description) => {
+        Self::Symbol(SymbolId::well_known(id), description.map(Into::into))
+      }
       WireConstant::Null => Self::Null,
     }
   }

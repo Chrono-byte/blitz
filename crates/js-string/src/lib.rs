@@ -9,7 +9,9 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
+use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// A code point read from a JavaScript string.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,6 +40,7 @@ pub struct JsString {
   storage: Arc<[u16]>,
   start: usize,
   len: usize,
+  utf8_lossy: Arc<OnceLock<String>>,
 }
 
 impl JsString {
@@ -62,6 +65,7 @@ impl JsString {
       storage,
       start: 0,
       len,
+      utf8_lossy: Arc::new(OnceLock::new()),
     }
   }
 
@@ -146,6 +150,7 @@ impl JsString {
       storage: Arc::clone(&self.storage),
       start: self.start + range.start,
       len: range.end - range.start,
+      utf8_lossy: Arc::new(OnceLock::new()),
     })
   }
 
@@ -200,10 +205,57 @@ impl JsString {
       .map(|relative| from + relative)
   }
 
+  /// Apply Unicode default uppercase mappings while preserving isolated
+  /// surrogate code units.
+  #[must_use]
+  pub fn to_uppercase(&self) -> Self {
+    self.map_case(char::to_uppercase)
+  }
+
+  /// Apply Unicode default lowercase mappings while preserving isolated
+  /// surrogate code units.
+  #[must_use]
+  pub fn to_lowercase(&self) -> Self {
+    self.map_case(char::to_lowercase)
+  }
+
+  fn map_case<I, F>(
+    &self,
+    map: F,
+  ) -> Self
+  where
+    I: Iterator<Item = char>,
+    F: Fn(char) -> I,
+  {
+    let mut output = JsStringBuilder::with_capacity(self.len);
+    let mut index = 0;
+    while let Some(point) = self.code_point_at(index, true) {
+      if let Some(character) = char::from_u32(point.value()) {
+        for mapped in map(character) {
+          let _ = output.push_code_point(mapped.into());
+        }
+      } else {
+        output.push_code_unit(point.value() as u16);
+      }
+      index += point.width();
+    }
+    output.finish()
+  }
+
   /// Decode this string, replacing isolated surrogates with U+FFFD.
   #[must_use]
   pub fn to_string_lossy(&self) -> String {
-    String::from_utf16_lossy(self.as_slice())
+    self.as_str_lossy().to_owned()
+  }
+
+  /// Borrow a UTF-8 view, replacing isolated surrogates with U+FFFD.
+  ///
+  /// Engine code should use this only at APIs that cannot accept UTF-16.
+  #[must_use]
+  pub fn as_str_lossy(&self) -> &str {
+    self
+      .utf8_lossy
+      .get_or_init(|| String::from_utf16_lossy(self.as_slice()))
   }
 
   /// Return whether the string contains no isolated surrogate code units.
@@ -263,6 +315,14 @@ impl JsString {
   pub fn code_units(&self) -> impl DoubleEndedIterator<Item = u16> + ExactSizeIterator + '_ {
     self.as_slice().iter().copied()
   }
+
+  /// Parse a well-formed textual representation using a Rust parser.
+  ///
+  /// Isolated surrogates are converted to U+FFFD, which makes ASCII-oriented
+  /// parsers reject the input rather than accepting a different value.
+  pub fn parse<T: FromStr>(&self) -> Result<T, T::Err> {
+    self.as_str_lossy().parse()
+  }
 }
 
 impl Default for JsString {
@@ -289,6 +349,13 @@ impl From<Vec<u16>> for JsString {
   }
 }
 
+impl FromIterator<char> for JsString {
+  fn from_iter<T: IntoIterator<Item = char>>(iter: T) -> Self {
+    let value: String = iter.into_iter().collect();
+    Self::new(&value)
+  }
+}
+
 impl PartialEq for JsString {
   fn eq(
     &self,
@@ -299,6 +366,24 @@ impl PartialEq for JsString {
 }
 
 impl Eq for JsString {}
+
+impl PartialEq<str> for JsString {
+  fn eq(
+    &self,
+    other: &str,
+  ) -> bool {
+    self.code_units().eq(other.encode_utf16())
+  }
+}
+
+impl PartialEq<&str> for JsString {
+  fn eq(
+    &self,
+    other: &&str,
+  ) -> bool {
+    self == *other
+  }
+}
 
 impl PartialOrd for JsString {
   fn partial_cmp(

@@ -22,7 +22,7 @@ fn test262_harness_path(name: &str) -> PathBuf {
 fn test_globals() -> Rc<RefCell<ObjectData>> {
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
-    PropertyKey::String("globalThis".to_string()),
+    PropertyKey::String("globalThis".to_string().into()),
     PropertyDescriptor::ordinary_data(Value::Object(Clone::clone(&globals))),
   );
   runtime_utils::install_minimal_kernel_constructors(&globals);
@@ -72,7 +72,9 @@ mod test {
     assert_eq!(
       vm.get_global("result"),
       Some(Value::String(
-        "255,255,99,254,99,255,127,true,2,3,3,true,42".to_string()
+        "255,255,99,254,99,255,127,true,2,3,3,true,42"
+          .to_string()
+          .into()
       ))
     );
   }
@@ -103,7 +105,7 @@ mod test {
 
     assert_eq!(
       vm.get_global("result"),
-      Some(Value::String("true,7,0,Uint8Array".to_string()))
+      Some(Value::String("true,7,0,Uint8Array".to_string().into()))
     );
   }
 
@@ -157,7 +159,9 @@ mod test {
 
     assert_eq!(
       vm.get_global("result"),
-      Some(Value::String("1,255,0,-1,-128,127,2,2,0,255".to_string()))
+      Some(Value::String(
+        "1,255,0,-1,-128,127,2,2,0,255".to_string().into()
+      ))
     );
   }
 
@@ -331,11 +335,11 @@ mod test {
     assert_eq!(vm.get_global("client_count"), Some(Value::Number(2.0)));
     assert_eq!(
       vm.get_global("second_client"),
-      Some(Value::String("Bob".to_string()))
+      Some(Value::String("Bob".to_string().into()))
     );
     assert_eq!(
       vm.get_global("client_names"),
-      Some(Value::String("Alice,Bob,".to_string()))
+      Some(Value::String("Alice,Bob,".to_string().into()))
     );
   }
 
@@ -358,11 +362,11 @@ mod test {
 
     assert_eq!(
       vm.get_global("loop_body_names"),
-      Some(Value::String("Alice,Bob,".to_string()))
+      Some(Value::String("Alice,Bob,".to_string().into()))
     );
     assert_eq!(
       vm.get_global("loop_body_captures"),
-      Some(Value::String("Alice,Bob".to_string()))
+      Some(Value::String("Alice,Bob".to_string().into()))
     );
   }
 
@@ -383,11 +387,11 @@ mod test {
       .call_value_with_this(
         &handler,
         &Value::Undefined,
-        &[Value::String("hello".to_string())],
+        &[Value::String("hello".to_string().into())],
       )
       .expect("invoke retained closure");
 
-    assert_eq!(result, Value::String("message:hello!".to_string()));
+    assert_eq!(result, Value::String("message:hello!".to_string().into()));
   }
 
   #[test]
@@ -423,7 +427,7 @@ mod test {
       vm.call_value_with_this(&handler, &Value::Undefined, std::slice::from_ref(socket))
         .expect("create event handler");
     }
-    let onmessage_key = PropertyKey::String("onmessage".to_string());
+    let onmessage_key = PropertyKey::String("onmessage".to_string().into());
     let first_callback = vm
       .get_property_host(&first_socket, &onmessage_key)
       .expect("first event handler");
@@ -435,27 +439,33 @@ mod test {
       .call_value_with_this(
         &first_callback,
         &first_socket,
-        &[Value::String("Alice".to_string())],
+        &[Value::String("Alice".to_string().into())],
       )
       .expect("invoke first event handler");
     let second_result = vm
       .call_value_with_this(
         &second_callback,
         &second_socket,
-        &[Value::String("Bob".to_string())],
+        &[Value::String("Bob".to_string().into())],
       )
       .expect("invoke second event handler");
 
-    assert_eq!(first_result, Value::String("Alice,".to_string()));
-    assert_eq!(second_result, Value::String("Alice,Bob,".to_string()));
+    assert_eq!(first_result, Value::String("Alice,".to_string().into()));
+    assert_eq!(
+      second_result,
+      Value::String("Alice,Bob,".to_string().into())
+    );
     let repeat_result = vm
       .call_value_with_this(
         &first_callback,
         &first_socket,
-        &[Value::String("hello".to_string())],
+        &[Value::String("hello".to_string().into())],
       )
       .expect("invoke first event handler again");
-    assert_eq!(repeat_result, Value::String("Alice:hello".to_string()));
+    assert_eq!(
+      repeat_result,
+      Value::String("Alice:hello".to_string().into())
+    );
   }
 
   #[test]
@@ -470,15 +480,252 @@ mod test {
 
     assert_eq!(
       vm.get_global("trimmed"),
-      Some(Value::String("hello".to_string()))
+      Some(Value::String("hello".to_string().into()))
     );
     assert_eq!(
       vm.get_global("trimmed_start"),
-      Some(Value::String("hello  ".to_string()))
+      Some(Value::String("hello  ".to_string().into()))
     );
     assert_eq!(
       vm.get_global("trimmed_end"),
-      Some(Value::String("  hello".to_string()))
+      Some(Value::String("  hello".to_string().into()))
+    );
+  }
+
+  #[test]
+  fn strings_preserve_exact_utf16_code_units() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const high = String.fromCharCode(0xD800);
+        const highFromCodePoint = String.fromCodePoint(0xD800);
+        const pair = String.fromCharCode(0xD83D, 0xDE00);
+        const sliced = high.slice(0, 1);
+        const keyed = {};
+        keyed[high] = 7;
+        const split = pair.split("");
+        const expression = new RegExp(high);
+        const matched = expression.exec(high);
+        let enumeratedCodeUnit = 0;
+        for (const key in keyed) enumeratedCodeUnit = key.charCodeAt(0);
+        let uriRejected = false;
+        try {
+          encodeURIComponent(high);
+        } catch (error) {
+          uriRejected = true;
+        }
+
+        globalThis.result = [
+          high.length,
+          high.charCodeAt(0),
+          highFromCodePoint === high,
+          high[0] === high,
+          sliced === high,
+          sliced.length,
+          sliced.charCodeAt(0),
+          high.toUpperCase() === high,
+          (high + "x").charCodeAt(0),
+          ("x" + high).charCodeAt(1),
+          pair.length,
+          split.length,
+          split[0].charCodeAt(0),
+          split[1].charCodeAt(0),
+          Object.keys(keyed)[0].charCodeAt(0),
+          enumeratedCodeUnit,
+          keyed[high],
+          matched[0].charCodeAt(0),
+          uriRejected,
+          encodeURIComponent(";") === "%3B",
+          decodeURIComponent(high) === high,
+          decodeURIComponent("%F0%9F%98%80").length,
+          JSON.stringify(high)
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "1,55296,true,true,true,1,55296,true,55296,55296,2,2,55357,56832,55296,55296,7,55296,true,true,true,2,\"\\ud800\""
+          .to_string()
+          .into()
+      ))
+    );
+  }
+
+  #[test]
+  fn regexp_uses_utf16_indices_captures_and_last_index() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const captured = /(a)(b+)/.exec("😀abbb");
+        const unicode = /./gu;
+        const first = unicode.exec("😀x");
+        const firstLastIndex = unicode.lastIndex;
+        const second = unicode.exec("😀x");
+        const secondLastIndex = unicode.lastIndex;
+        const legacy = /./g;
+        legacy.exec("😀");
+
+        globalThis.result = [
+          captured.index, captured[0], captured[1], captured[2],
+          first[0], firstLastIndex, second[0], secondLastIndex,
+          legacy.lastIndex
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String("2,abbb,a,bbb,😀,2,x,3,1".to_string().into()))
+    );
+  }
+
+  #[test]
+  fn regexp_supports_ecmascript_backreferences_case_folding_and_replacement_offsets() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const backreference = /(a|b)\1/.test("zaa");
+        const folded = /[a-z]/iu.test("\u212A");
+        const sticky = /a/y;
+        sticky.lastIndex = 2;
+        const stickyMatch = sticky.exec("😀a");
+        const replaced = "😀a".replace(/a/, (_, offset) => offset);
+        const emptyGlobal = "ab".replace(/(?:)/g, "-");
+        const namedReplacement =
+          "ab".replace(/(?<first>a)(?<missing>z)?/, "$<missing>-$<first>-$<unknown>");
+        const namedCallback =
+          "ab".replace(/(?<letter>a)/, (...args) => args[args.length - 1].letter);
+        const literalNamedReplacement = "a".replace(/a/, "$<missing>");
+        const overridden = /a/g;
+        let overriddenCalls = 0;
+        overridden.exec = function() {
+          overriddenCalls++;
+          return overriddenCalls === 1
+            ? { 0: "b", index: 1, length: 1, groups: undefined }
+            : null;
+        };
+        const overriddenReplacement = "aaa".replace(overridden, "x");
+
+        globalThis.result = [
+          backreference, folded, stickyMatch.index, sticky.lastIndex,
+          replaced, emptyGlobal, namedReplacement, namedCallback,
+          literalNamedReplacement, overriddenReplacement, overriddenCalls
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "true,true,2,3,😀2,-a-b-,-a-b,ab,$<missing>,axa,2"
+          .to_string()
+          .into()
+      ))
+    );
+  }
+
+  #[test]
+  fn regexp_match_search_and_constructor_dispatch_follow_es6_protocols() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const globalMatches = "aba".match(/a/g);
+        const captured = "😀ab".match(/(a)/);
+        const searchExpression = /a/g;
+        searchExpression.lastIndex = 2;
+        const searchIndex = "ba".search(searchExpression);
+        const original = /x/gi;
+        const copied = new RegExp(original);
+        const same = RegExp(original) === original;
+        const custom = {
+          [Symbol.match](value) { return "matched:" + value; },
+          [Symbol.search](value) { return value.length; }
+        };
+        let startsWithRejected = false;
+        try { "x".startsWith(original); } catch (error) {
+          startsWithRejected = error instanceof TypeError;
+        }
+        original[Symbol.match] = false;
+
+        globalThis.result = [
+          globalMatches.join(":"),
+          captured.index,
+          captured[1],
+          searchIndex,
+          searchExpression.lastIndex,
+          same,
+          copied !== original,
+          copied.source,
+          copied.flags,
+          "abc".match(custom),
+          "abc".search(custom),
+          startsWithRejected,
+          "x".startsWith(original) === false
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "a:a,2,a,1,2,true,true,x,gi,matched:abc,3,true,true"
+          .to_string()
+          .into()
+      ))
+    );
+  }
+
+  #[test]
+  fn regexp_constructor_rejects_invalid_ecmascript_patterns() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let rejected = false;
+        try {
+          new RegExp("[", "u");
+        } catch (error) {
+          rejected = true;
+        }
+        globalThis.result = rejected;
+      "#
+    ));
+
+    assert_eq!(vm.get_global("result"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn regexp_exposes_named_groups_indices_and_canonical_flags() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const expression = new RegExp("(?<letter>a)(b)?", "ymigd");
+        const sourceDescriptor =
+          Object.getOwnPropertyDescriptor(RegExp.prototype, "source");
+        expression.lastIndex = 2;
+        const match = expression.exec("😀a");
+        globalThis.result = [
+          expression.flags,
+          expression.global,
+          expression.ignoreCase,
+          expression.multiline,
+          expression.sticky,
+          expression.unicode,
+          expression.hasIndices,
+          Object.hasOwn(expression, "source"),
+          typeof sourceDescriptor.get === "function" &&
+            sourceDescriptor.enumerable === false &&
+            sourceDescriptor.configurable === true,
+          match.groups.letter,
+          match[2] === undefined,
+          match.indices[0][0], match.indices[0][1],
+          match.indices.groups.letter[0], match.indices.groups.letter[1]
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "dgimy,true,true,true,true,false,true,false,true,a,true,2,3,2,3"
+          .to_string()
+          .into()
+      ))
     );
   }
 
@@ -492,29 +739,60 @@ mod test {
         globalThis.starts_with = "JOIN Alice".startsWith("JOIN ");
         globalThis.replaced = "a\nb\tc".replace(/[\u0000-\u001f]/g, "");
         globalThis.replacement_patterns = "abc".replace("b", "[$&][$`][$']");
+        const customSplitter = {
+          [Symbol.split](value, limit) { return [value, limit]; }
+        };
+        const customSplit = "abc".split(customSplitter, -1);
+        const regexSplit = "😀a,b".split(/(,)/);
+        const unicodeEmptySplit = "😀x".split(/(?:)/u);
+        const undefinedLimitSplit = "a,b".split(",", undefined);
+        const negativeLimitSplit = "a,b".split(",", -1);
+        globalThis.string_boundaries = [
+          "abc".slice(-Infinity) === "abc",
+          "abc".slice(Infinity) === "",
+          Number.isNaN("abc".charCodeAt(-1)),
+          Number.isNaN("abc".charCodeAt(Infinity)),
+          "abc".startsWith("a", -Infinity),
+          undefinedLimitSplit.length === 2,
+          negativeLimitSplit.length === 2,
+          customSplit[0] === "abc",
+          customSplit[1] === -1,
+          regexSplit.length === 3 && regexSplit[0] === "😀a" &&
+            regexSplit[1] === "," && regexSplit[2] === "b",
+          unicodeEmptySplit.length === 2 &&
+            unicodeEmptySplit[0] === "😀" && unicodeEmptySplit[1] === "x"
+        ].join(",");
       "#
     ));
 
     assert_eq!(
       vm.get_global("lowercase"),
-      Some(Value::String("websocket i\u{307}".to_string()))
+      Some(Value::String("websocket i\u{307}".to_string().into()))
     );
     assert_eq!(
       vm.get_global("uppercase"),
-      Some(Value::String("STRASSE".to_string()))
+      Some(Value::String("STRASSE".to_string().into()))
     );
     assert_eq!(
       vm.get_global("generic"),
-      Some(Value::String("123".to_string()))
+      Some(Value::String("123".to_string().into()))
     );
     assert_eq!(vm.get_global("starts_with"), Some(Value::Bool(true)));
     assert_eq!(
       vm.get_global("replaced"),
-      Some(Value::String("abc".to_string()))
+      Some(Value::String("abc".to_string().into()))
     );
     assert_eq!(
       vm.get_global("replacement_patterns"),
-      Some(Value::String("a[b][a][c]c".to_string()))
+      Some(Value::String("a[b][a][c]c".to_string().into()))
+    );
+    assert_eq!(
+      vm.get_global("string_boundaries"),
+      Some(Value::String(
+        "true,true,true,true,true,true,true,true,true,true,true"
+          .to_string()
+          .into()
+      ))
     );
   }
 
@@ -854,7 +1132,7 @@ mod test {
     let chunk = compiler::compile(session.program(), session.source()).expect("compile");
     let globals = test_globals();
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("capture".to_string()),
+      PropertyKey::String("capture".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(|_vm, args| {
         Ok(args.first().cloned().unwrap_or(Value::Undefined))
       }))),
@@ -864,7 +1142,7 @@ mod test {
 
     assert_eq!(
       vm.get_global("builtin_argument"),
-      Some(Value::String("expected".to_string()))
+      Some(Value::String("expected".to_string().into()))
     );
   }
 
@@ -905,7 +1183,7 @@ mod test {
 
     assert_eq!(
       vm.get_global("desc_value"),
-      Some(Value::String("prop".to_string()))
+      Some(Value::String("prop".to_string().into()))
     );
     assert_eq!(vm.get_global("desc_enumerable"), Some(Value::Bool(false)));
     assert_eq!(vm.get_global("desc_writable"), Some(Value::Bool(false)));
@@ -959,7 +1237,9 @@ mod test {
     assert_eq!(
       vm.get_global("result"),
       Some(Value::String(
-        "true,false,true,true,false,true,true,true,true,false,false,true,true,true".to_string()
+        "true,false,true,true,false,true,true,true,true,false,false,true,true,true"
+          .to_string()
+          .into()
       ))
     );
   }
@@ -989,6 +1269,7 @@ mod test {
       Some(Value::String(
         "false,false,false,false,false,true,false,false,true,false,false,false,false,false,false"
           .to_string()
+          .into()
       ))
     );
   }
@@ -1075,8 +1356,14 @@ mod test {
         "#
     ));
 
-    assert_eq!(vm.get_global("k0"), Some(Value::String("a".to_string())));
-    assert_eq!(vm.get_global("k1"), Some(Value::String("b".to_string())));
+    assert_eq!(
+      vm.get_global("k0"),
+      Some(Value::String("a".to_string().into()))
+    );
+    assert_eq!(
+      vm.get_global("k1"),
+      Some(Value::String("b".to_string().into()))
+    );
     assert_eq!(vm.get_global("d0"), Some(Value::Bool(true)));
     assert_eq!(vm.get_global("d1"), Some(Value::Bool(true)));
   }
@@ -1104,7 +1391,7 @@ mod test {
 
     assert_eq!(
       vm.get_global("key_order"),
-      Some(Value::String("1,2,b,4294967295,a,c".to_string()))
+      Some(Value::String("1,2,b,4294967295,a,c".to_string().into()))
     );
     assert_eq!(vm.get_global("symbol_order"), Some(Value::Bool(true)));
   }
@@ -1123,7 +1410,7 @@ mod test {
 
     assert_eq!(
       vm.get_global("keys"),
-      Some(Value::String("2,length,extra".to_string()))
+      Some(Value::String("2,length,extra".to_string().into()))
     );
   }
 
@@ -1853,7 +2140,7 @@ mod test {
   fn builtin_object_property_lookup_uses_props_and_prototype() {
     let proto = Rc::new(RefCell::new(ObjectData::new()));
     proto.borrow_mut().properties.insert(
-      PropertyKey::String("inherited".to_string()),
+      PropertyKey::String("inherited".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(7.0)),
     );
 
@@ -1861,20 +2148,24 @@ mod test {
       proto,
     ))));
     props.borrow_mut().properties.insert(
-      PropertyKey::String("own".to_string()),
+      PropertyKey::String("own".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(3.0)),
     );
 
     let builtin = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), props);
 
     assert!(matches!(
-      get_property(&builtin, &PropertyKey::String("own".to_string()), 0)
+      get_property(&builtin, &PropertyKey::String("own".to_string().into()), 0)
         .expect("test should not fail"),
       Value::Number(3.0_f64)
     ));
     assert!(matches!(
-      get_property(&builtin, &PropertyKey::String("inherited".to_string()), 0)
-        .expect("test should not fail"),
+      get_property(
+        &builtin,
+        &PropertyKey::String("inherited".to_string().into()),
+        0
+      )
+      .expect("test should not fail"),
       Value::Number(7.0_f64)
     ));
   }
@@ -1888,7 +2179,7 @@ mod test {
 
     vm.set_property_tracked(
       &builtin,
-      &PropertyKey::String("prototype".to_string()),
+      &PropertyKey::String("prototype".to_string().into()),
       Value::Number(11.0),
     )
     .unwrap_or_default();
@@ -1896,7 +2187,7 @@ mod test {
     let stored = props
       .borrow()
       .properties
-      .get(&PropertyKey::String("prototype".to_string()))
+      .get(&PropertyKey::String("prototype".to_string().into()))
       .cloned();
     assert!(matches!(
       stored,
@@ -1934,13 +2225,13 @@ mod test {
     let result = vm.get_global("result").expect("result");
     assert!(strict_equal(&target, &result));
     let a = vm
-      .get_property_host(&target, &PropertyKey::String("a".to_string()))
+      .get_property_host(&target, &PropertyKey::String("a".to_string().into()))
       .expect("test should not fail");
     let b = vm
-      .get_property_host(&target, &PropertyKey::String("b".to_string()))
+      .get_property_host(&target, &PropertyKey::String("b".to_string().into()))
       .expect("test should not fail");
     let c = vm
-      .get_property_host(&target, &PropertyKey::String("c".to_string()))
+      .get_property_host(&target, &PropertyKey::String("c".to_string().into()))
       .expect("test should not fail");
     assert!(matches!(a, Value::Number(n) if (n - 1.0).abs() < f64::EPSILON));
     assert!(matches!(b, Value::Number(n) if (n - 2.0).abs() < f64::EPSILON));
@@ -1963,11 +2254,11 @@ mod test {
     match vm.get_global("created") {
       Some(Value::Object(obj)) => {
         assert!(matches!(
-            vm.get_property_host(&Value::Object(Clone::clone(&obj)), &PropertyKey::String("a".to_string())).ok(),
+            vm.get_property_host(&Value::Object(Clone::clone(&obj)), &PropertyKey::String("a".to_string().into())).ok(),
             Some(Value::Number(n)) if (n - 1.0).abs() < f64::EPSILON
         ));
         assert!(matches!(
-            vm.get_property_host(&Value::Object(Clone::clone(&obj)), &PropertyKey::String("b".to_string())).ok(),
+            vm.get_property_host(&Value::Object(Clone::clone(&obj)), &PropertyKey::String("b".to_string().into())).ok(),
             Some(Value::Number(n)) if (n - 2.0).abs() < f64::EPSILON
         ));
       }
@@ -1986,7 +2277,7 @@ mod test {
     ));
     assert_eq!(
       vm.get_global("locale"),
-      Some(Value::String("[object Object]".to_string()))
+      Some(Value::String("[object Object]".to_string().into()))
     );
   }
 
@@ -2045,21 +2336,21 @@ mod test {
     ])));
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
-      PropertyKey::String("length".to_string()),
+      PropertyKey::String("length".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(2.0)),
     );
     let arr = Value::Array(arr_data, props);
 
     assert!(
-      vm.has_property_host(&arr, &PropertyKey::String("length".to_string()))
+      vm.has_property_host(&arr, &PropertyKey::String("length".to_string().into()))
         .expect("test should not fail")
     );
     assert!(
-      vm.has_property_host(&arr, &PropertyKey::String("0".to_string()))
+      vm.has_property_host(&arr, &PropertyKey::String("0".to_string().into()))
         .expect("test should not fail")
     );
     assert!(matches!(
-        vm.get_property_host(&arr, &PropertyKey::String("0".to_string()))
+        vm.get_property_host(&arr, &PropertyKey::String("0".to_string().into()))
             .expect("test should not fail"),
         Value::Number(n) if n.is_nan()
     ));
@@ -2086,7 +2377,7 @@ mod test {
           matches!(arr.borrow().get(2).cloned().flatten(), Some(Value::Number(n)) if (n - 6.0).abs() < f64::EPSILON)
         );
         assert!(matches!(
-            props.borrow().properties.get(&PropertyKey::String("length".to_string())),
+            props.borrow().properties.get(&PropertyKey::String("length".to_string().into())),
             Some(PropertyDescriptor::Data {
                 value: Value::Number(n),
                 ..
@@ -2223,15 +2514,15 @@ mod test {
     let mut vm = Vm::new(globals);
 
     let n = vm
-      .to_number_value(&Value::String("0x10".to_string()))
+      .to_number_value(&Value::String("0x10".to_string().into()))
       .expect("test should not fail");
     assert!((n - 16.0).abs() < f64::EPSILON);
     let n = vm
-      .to_number_value(&Value::String("0b101".to_string()))
+      .to_number_value(&Value::String("0b101".to_string().into()))
       .expect("test should not fail");
     assert!((n - 5.0).abs() < f64::EPSILON);
     let n = vm
-      .to_number_value(&Value::String("0o10".to_string()))
+      .to_number_value(&Value::String("0o10".to_string().into()))
       .expect("test should not fail");
     assert!((n - 8.0).abs() < f64::EPSILON);
   }
@@ -2242,12 +2533,12 @@ mod test {
     let mut vm = Vm::new(globals);
 
     assert!(
-      vm.to_number_value(&Value::String("-0x10".to_string()))
+      vm.to_number_value(&Value::String("-0x10".to_string().into()))
         .expect("test should not fail")
         .is_nan()
     );
     assert!(
-      vm.to_number_value(&Value::String("+0b101".to_string()))
+      vm.to_number_value(&Value::String("+0b101".to_string().into()))
         .expect("test should not fail")
         .is_nan()
     );
@@ -2260,13 +2551,13 @@ mod test {
     ))])));
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
-      PropertyKey::String("length".to_string()),
+      PropertyKey::String("length".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(1.0)),
     );
     let arr = Value::Array(Clone::clone(&arr_data), props);
-    let key = PropertyKey::String("4294967295".to_string());
+    let key = PropertyKey::String("4294967295".to_string().into());
 
-    set_property(&arr, &key, Value::String("x".to_string())).expect("test should not fail");
+    set_property(&arr, &key, Value::String("x".to_string().into())).expect("test should not fail");
 
     assert_eq!(arr_data.borrow().len(), 1);
     assert!(matches!(
@@ -2274,7 +2565,7 @@ mod test {
         Value::String(ref s) if s == "x"
     ));
     assert!(matches!(
-        get_property(&arr, &PropertyKey::String("length".to_string()), 0).expect("test should not fail"),
+        get_property(&arr, &PropertyKey::String("length".to_string().into()), 0).expect("test should not fail"),
         Value::Number(n) if (n - 1.0).abs() < f64::EPSILON
     ));
   }
@@ -2286,11 +2577,11 @@ mod test {
     ))])));
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
-      PropertyKey::String("length".to_string()),
+      PropertyKey::String("length".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(1.0)),
     );
     let arr = Value::Array(Clone::clone(&arr_data), props);
-    let key = PropertyKey::String("4294967294".to_string());
+    let key = PropertyKey::String("4294967294".to_string().into());
 
     set_property(&arr, &key, Value::Number(1.0)).expect("test should not fail");
 
@@ -2300,7 +2591,7 @@ mod test {
         Value::Number(n) if (n - 1.0).abs() < f64::EPSILON
     ));
     assert!(matches!(
-        get_property(&arr, &PropertyKey::String("length".to_string()), 0).expect("test should not fail"),
+        get_property(&arr, &PropertyKey::String("length".to_string().into()), 0).expect("test should not fail"),
         Value::Number(n) if (n - 4294967295.0).abs() < f64::EPSILON
     ));
   }
@@ -2315,7 +2606,7 @@ mod test {
     ])));
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
-      PropertyKey::String("length".to_string()),
+      PropertyKey::String("length".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(2.0)),
     );
     let arr = Value::Array(arr_data, Clone::clone(&props));
@@ -2330,26 +2621,26 @@ mod test {
     desc.has_get = true;
 
     assert!(
-      vm.define_own_property(&arr, PropertyKey::String("0".to_string()), desc)
+      vm.define_own_property(&arr, PropertyKey::String("0".to_string().into()), desc)
         .expect("test should not fail")
     );
     assert!(matches!(
       props
         .borrow()
         .properties
-        .get(&PropertyKey::String("0".to_string())),
+        .get(&PropertyKey::String("0".to_string().into())),
       Some(PropertyDescriptor::Accessor {
         configurable: true,
         ..
       })
     ));
     assert!(
-      vm.delete_property_host(&arr, &PropertyKey::String("0".to_string()))
+      vm.delete_property_host(&arr, &PropertyKey::String("0".to_string().into()))
         .expect("test should not fail")
     );
     assert!(
       !vm
-        .has_property_host(&arr, &PropertyKey::String("0".to_string()))
+        .has_property_host(&arr, &PropertyKey::String("0".to_string().into()))
         .expect("test should not fail")
     );
   }
@@ -2628,17 +2919,17 @@ mod test {
 
         assert!(
           !vm
-            .has_property_host(&array_val, &PropertyKey::String("0".to_string()))
+            .has_property_host(&array_val, &PropertyKey::String("0".to_string().into()))
             .expect("expected false, got true")
         );
         assert!(
-          vm.has_property_host(&array_val, &PropertyKey::String("1".to_string()))
+          vm.has_property_host(&array_val, &PropertyKey::String("1".to_string().into()))
             .expect("expected true, got false")
         );
         assert!(matches!(
             vm.get_property_host(
                 &array_val,
-                &PropertyKey::String("1".to_string())
+                &PropertyKey::String("1".to_string().into())
             )
             .expect("expected 'first', got something else"),
             Value::String(ref s) if s == "first"
@@ -3029,11 +3320,11 @@ mod test {
 
     let globals = test_globals();
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("NaN".to_string()),
+      PropertyKey::String("NaN".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(f64::NAN)),
     );
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("Infinity".to_string()),
+      PropertyKey::String("Infinity".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(f64::INFINITY)),
     );
     let mut vm = Vm::new(globals);
@@ -3136,7 +3427,7 @@ mod test {
     assert_eq!(vm.get_global("result"), Some(Value::Undefined));
     match vm.get_global("myObj") {
       Some(Value::Object(obj)) => {
-        let value_key = PropertyKey::String("value".to_string());
+        let value_key = PropertyKey::String("value".to_string().into());
         let obj_borrow = obj.borrow();
         match obj_borrow.properties.get(&value_key) {
           Some(PropertyDescriptor::Data { value, .. }) => {
@@ -3393,7 +3684,7 @@ mod test {
     let calls = Rc::new(RefCell::new(0usize));
     let globals = test_globals();
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("bump".to_string()),
+      PropertyKey::String("bump".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new({
         let calls = Clone::clone(&calls);
         move |_vm, _args| {
@@ -3420,7 +3711,7 @@ mod test {
     let calls = Rc::new(RefCell::new(0usize));
     let globals = test_globals();
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("bump".to_string()),
+      PropertyKey::String("bump".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new({
         let calls = Clone::clone(&calls);
         move |_vm, _args| {
@@ -3575,40 +3866,48 @@ mod test {
       .expect("g_result exists");
 
     assert!(matches!(
-        get_property(&a, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
+        get_property(&a, &PropertyKey::String("value".to_string().into()), 0).expect("test should not fail"),
         Value::Number(n) if (n - 1.0).abs() < f64::EPSILON
     ));
     assert!(matches!(
-      get_property(&a, &PropertyKey::String("done".to_string()), 0).expect("test should not fail"),
+      get_property(&a, &PropertyKey::String("done".to_string().into()), 0)
+        .expect("test should not fail"),
       Value::Bool(false)
     ));
     assert!(matches!(
-        get_property(&b, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
+        get_property(&b, &PropertyKey::String("value".to_string().into()), 0).expect("test should not fail"),
         Value::Number(n) if (n - 2.0).abs() < f64::EPSILON
     ));
     assert!(matches!(
-        get_property(&c, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
+        get_property(&c, &PropertyKey::String("value".to_string().into()), 0).expect("test should not fail"),
         Value::Number(n) if (n - 3.0).abs() < f64::EPSILON
     ));
     assert!(matches!(
-      get_property(&c, &PropertyKey::String("done".to_string()), 0).expect("test should not fail"),
+      get_property(&c, &PropertyKey::String("done".to_string().into()), 0)
+        .expect("test should not fail"),
       Value::Bool(true)
     ));
     assert!(matches!(
-      get_property(&d, &PropertyKey::String("done".to_string()), 0).expect("test should not fail"),
+      get_property(&d, &PropertyKey::String("done".to_string().into()), 0)
+        .expect("test should not fail"),
       Value::Bool(true)
     ));
     assert!(matches!(
-      get_property(&e, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
+      get_property(&e, &PropertyKey::String("value".to_string().into()), 0).expect("test should not fail"),
       Value::Number(n) if (n - 4.0).abs() < f64::EPSILON
     ));
     assert!(matches!(
-      get_property(&f, &PropertyKey::String("value".to_string()), 0).expect("test should not fail"),
+      get_property(&f, &PropertyKey::String("value".to_string().into()), 0)
+        .expect("test should not fail"),
       Value::Undefined
     ));
     assert!(matches!(
-      get_property(&g_result, &PropertyKey::String("done".to_string()), 0)
-        .expect("test should not fail"),
+      get_property(
+        &g_result,
+        &PropertyKey::String("done".to_string().into()),
+        0
+      )
+      .expect("test should not fail"),
       Value::Bool(true)
     ));
   }
@@ -3694,7 +3993,7 @@ mod test {
       vm.get_global("holeResult"),
       Some(result)
         if matches!(
-          get_property(&result, &PropertyKey::String("value".to_string()), 0),
+          get_property(&result, &PropertyKey::String("value".to_string().into()), 0),
           Ok(Value::Undefined)
         )
     ));
@@ -3808,11 +4107,11 @@ mod test {
   fn harness_property_helper_works_across_multiple_runs() {
     let globals = test_globals();
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("NaN".to_string()),
+      PropertyKey::String("NaN".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(f64::NAN)),
     );
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("Infinity".to_string()),
+      PropertyKey::String("Infinity".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(f64::INFINITY)),
     );
     runtime_utils::install_minimal_kernel_constructors(&globals);
@@ -4120,7 +4419,7 @@ mod test {
           .borrow()
           .iter()
           .filter_map(|v| match v {
-            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::String(s)) => Some(s.to_string_lossy()),
             _ => None,
           })
           .collect();
@@ -4137,22 +4436,22 @@ mod test {
 
     let mut proto = ObjectData::new();
     proto.properties.insert(
-      PropertyKey::String("b".to_string()),
+      PropertyKey::String("b".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(2.0)),
     );
     proto.properties.insert(
-      PropertyKey::String("1".to_string()),
+      PropertyKey::String("1".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(1.0)),
     );
     let proto = Rc::new(RefCell::new(proto));
 
     let mut obj = ObjectData::with_prototype(Value::Object(proto));
     obj.properties.insert(
-      PropertyKey::String("a".to_string()),
+      PropertyKey::String("a".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(3.0)),
     );
     obj.properties.insert(
-      PropertyKey::String("1".to_string()),
+      PropertyKey::String("1".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(4.0)),
     );
     let obj = Value::Object(Rc::new(RefCell::new(obj)));

@@ -280,7 +280,7 @@ impl ServerState {
         vm.set_host_root(failure_root, Value::Undefined)?;
         Ok(Value::Undefined)
       });
-      let then = vm.get_property_host(&result, &PropertyKey::String("then".to_string()))?;
+      let then = vm.get_property_host(&result, &PropertyKey::String("then".to_string().into()))?;
       vm.call_value_with_this(
         &then,
         &result,
@@ -358,7 +358,7 @@ impl ServerState {
           return Ok(());
         };
         let message = event_object(vm, "message");
-        set(&message, "data", Value::String(text));
+        set(&message, "data", Value::String(text.into()));
         dispatch_socket_event(vm, &self.0, connection_id, &socket, "message", message)?;
       }
       WebSocketEvent::Binary {
@@ -407,7 +407,7 @@ impl ServerState {
           "code",
           Value::Number(f64::from(code.unwrap_or(1005))),
         );
-        set(&close, "reason", Value::String(reason));
+        set(&close, "reason", Value::String(reason.into()));
         set(&close, "wasClean", Value::Bool(code.is_some()));
         dispatch_socket_event(vm, &self.0, connection_id, &socket, "close", close)?;
         self
@@ -424,7 +424,7 @@ impl ServerState {
           return Ok(());
         };
         let error = event_object(vm, "error");
-        set(&error, "message", Value::String(message));
+        set(&error, "message", Value::String(message.into()));
         dispatch_socket_event(vm, &self.0, connection_id, &socket, "error", error)?;
       }
     }
@@ -557,12 +557,16 @@ fn server_handle(
   let hostname = local_addr.ip().to_string();
   let port = f64::from(local_addr.port());
   let address = object(vm.realm().object_prototype());
-  set(&address, "transport", Value::String("tcp".to_string()));
-  set(&address, "hostname", Value::String(hostname.clone()));
+  set(
+    &address,
+    "transport",
+    Value::String("tcp".to_string().into()),
+  );
+  set(&address, "hostname", Value::String(hostname.clone().into()));
   set(&address, "port", Value::Number(port));
   set(&handle, "addr", address);
   set(&handle, "finished", finished.clone());
-  set(&handle, "hostname", Value::String(hostname));
+  set(&handle, "hostname", Value::String(hostname.into()));
   set(&handle, "port", Value::Number(port));
 
   let shutdown_state = state.clone();
@@ -608,7 +612,7 @@ pub(super) fn upgrade_websocket_method(
       .ok_or_else(|| RuntimeError::from("Blitz.upgradeWebSocket requires a Request"))?;
     let id = vm.get_property_host(
       request,
-      &PropertyKey::String("__blitz_websocket_id".to_string()),
+      &PropertyKey::String("__blitz_websocket_id".to_string().into()),
     )?;
     let Value::String(id) = id else {
       return Err(RuntimeError::from("request cannot be upgraded"));
@@ -625,9 +629,10 @@ pub(super) fn upgrade_websocket_method(
       }
     }
 
-    let url = vm.get_property_host(request, &PropertyKey::String("url".to_string()))?;
+    let url = vm.get_property_host(request, &PropertyKey::String("url".to_string().into()))?;
     let url = vm
       .to_string(&url)?
+      .to_string_lossy()
       .replacen("http://", "ws://", 1);
     let socket = websocket_object(state.clone(), id, &url, prototype.clone());
     state.0.borrow_mut().websockets.insert(
@@ -644,7 +649,7 @@ pub(super) fn upgrade_websocket_method(
     set(&response, "__blitz_response", Value::Bool(true));
     set(&response, "__blitz_upgrade_response", Value::Bool(true));
     set(&response, "status", Value::Number(101.0));
-    set(&response, "body", Value::String(String::new()));
+    set(&response, "body", Value::String(String::new().into()));
     let result = object(vm.realm().object_prototype());
     set(&result, "socket", socket);
     set(&result, "response", response);
@@ -676,12 +681,13 @@ fn serve_arguments(
       "Blitz.serve expects a handler or an options object and handler",
     ));
   };
-  let hostname = vm.get_property_host(first, &PropertyKey::String("hostname".to_string()))?;
+  let hostname =
+    vm.get_property_host(first, &PropertyKey::String("hostname".to_string().into()))?;
   let hostname = match hostname {
     Value::Undefined => default_addr.ip().to_string(),
-    value => vm.to_string(&value)?,
+    value => vm.to_string(&value)?.to_string_lossy(),
   };
-  let port = vm.get_property_host(first, &PropertyKey::String("port".to_string()))?;
+  let port = vm.get_property_host(first, &PropertyKey::String("port".to_string().into()))?;
   let port = match port {
     Value::Undefined => default_addr.port(),
     Value::Number(port) if port.is_finite() && port.fract() == 0.0 => port
@@ -701,14 +707,18 @@ fn request_object(
   event: &HttpRequestEvent,
 ) -> Value {
   let request = object(vm.realm().object_prototype());
-  set(&request, "method", Value::String(event.method.clone()));
-  set(&request, "path", Value::String(event.path.clone()));
-  set(&request, "url", Value::String(event.url.clone()));
+  set(
+    &request,
+    "method",
+    Value::String(event.method.clone().into()),
+  );
+  set(&request, "path", Value::String(event.path.clone().into()));
+  set(&request, "url", Value::String(event.url.clone().into()));
   if let Some(id) = event.websocket_id() {
     set(
       &request,
       "__blitz_websocket_id",
-      Value::String(id.to_string()),
+      Value::String(id.to_string().into()),
     );
   }
   set(&request, "headers", headers_object(vm, &event.headers));
@@ -718,16 +728,20 @@ fn request_object(
     event
       .query
       .as_ref()
-      .map_or(Value::Null, |query| Value::String(query.clone())),
+      .map_or(Value::Null, |query| Value::String(query.clone().into())),
   );
   set(
     &request,
     "body",
-    Value::String(String::from_utf8_lossy(&event.body).into_owned()),
+    Value::String(
+      String::from_utf8_lossy(&event.body)
+        .into_owned()
+        .into(),
+    ),
   );
   let body = String::from_utf8_lossy(&event.body).into_owned();
   let text: BuiltinFn =
-    Rc::new(move |_vm, _args| Ok(resolved_promise(Value::String(body.clone()))));
+    Rc::new(move |_vm, _args| Ok(resolved_promise(Value::String(body.clone().into()))));
   set(&request, "text", Value::Builtin(text));
   let body = String::from_utf8_lossy(&event.body).into_owned();
   let json: BuiltinFn = Rc::new(move |vm, _args| Ok(json_promise(vm, &body)));
@@ -747,11 +761,11 @@ fn websocket_object(
   set(
     &socket,
     "binaryType",
-    Value::String("arraybuffer".to_string()),
+    Value::String("arraybuffer".to_string().into()),
   );
-  set(&socket, "protocol", Value::String(String::new()));
-  set(&socket, "extensions", Value::String(String::new()));
-  set(&socket, "url", Value::String(url.to_string()));
+  set(&socket, "protocol", Value::String(String::new().into()));
+  set(&socket, "extensions", Value::String(String::new().into()));
+  set(&socket, "url", Value::String(url.to_string().into()));
   set(&socket, "CONNECTING", Value::Number(0.0));
   set(&socket, "OPEN", Value::Number(1.0));
   set(&socket, "CLOSING", Value::Number(2.0));
@@ -779,7 +793,7 @@ fn websocket_object(
         }
         WebSocketCommand::Binary(bytes)
       }
-      value => WebSocketCommand::Text(vm.to_string(value)?),
+      value => WebSocketCommand::Text(vm.to_string(value)?.to_string_lossy()),
     };
     send_websocket_command(&send_state, connection_id, command)?;
     Ok(Value::Undefined)
@@ -799,9 +813,13 @@ fn websocket_object(
     if !is_valid_websocket_close_code(code) {
       return Err(RuntimeError::from("invalid WebSocket close code"));
     }
-    let reason = args
-      .get(2)
-      .map_or_else(|| Ok(String::new()), |value| vm.to_string(value))?;
+    let reason = args.get(2).map_or_else(
+      || Ok(String::new()),
+      |value| {
+        vm.to_string(value)
+          .map(|value| value.to_string_lossy())
+      },
+    )?;
     if reason.len() > 123 {
       return Err(RuntimeError::from(
         "WebSocket close reason exceeds 123 bytes",
@@ -837,7 +855,7 @@ fn websocket_object(
     if !callback.is_callable() {
       return Ok(Value::Undefined);
     }
-    let event_type = vm.to_string(event_type)?;
+    let event_type = vm.to_string(event_type)?.to_string_lossy();
     if let Some(resource) = listener_state
       .0
       .borrow_mut()
@@ -862,7 +880,7 @@ fn websocket_object(
     let Some(callback) = args.get(2) else {
       return Ok(Value::Undefined);
     };
-    let event_type = vm.to_string(event_type)?;
+    let event_type = vm.to_string(event_type)?.to_string_lossy();
     if let Some(listeners) = listener_state
       .0
       .borrow_mut()
@@ -960,7 +978,7 @@ fn dispatch_socket_event(
   event: Value,
 ) -> Result<(), RuntimeError> {
   let property = format!("on{event_type}");
-  if let Ok(callback) = vm.get_property_host(socket, &PropertyKey::String(property))
+  if let Ok(callback) = vm.get_property_host(socket, &PropertyKey::String(property.into()))
     && callback.is_callable()
   {
     vm.call_value_with_this(&callback, socket, std::slice::from_ref(&event))?;
@@ -983,7 +1001,7 @@ fn event_object(
   event_type: &str,
 ) -> Value {
   let event = object(vm.realm().object_prototype());
-  set(&event, "type", Value::String(event_type.to_string()));
+  set(&event, "type", Value::String(event_type.to_string().into()));
   event
 }
 
@@ -1015,7 +1033,7 @@ fn headers_object(
   ));
   let headers = object(vm.realm().object_prototype());
   for (name, value) in entries {
-    set(&headers, name, Value::String(value.clone()));
+    set(&headers, name, Value::String(value.clone().into()));
   }
 
   let get_values = Rc::clone(&values);
@@ -1023,12 +1041,15 @@ fn headers_object(
     let Some(name) = args.get(1) else {
       return Ok(Value::Null);
     };
-    let name = vm.to_string(name)?.to_ascii_lowercase();
+    let name = vm
+      .to_string(name)?
+      .as_str_lossy()
+      .to_ascii_lowercase();
     Ok(
       get_values
         .borrow()
         .get(&name)
-        .map_or(Value::Null, |value| Value::String(value.clone())),
+        .map_or(Value::Null, |value| Value::String(value.clone().into())),
     )
   });
   set(&headers, "get", Value::Builtin(get));
@@ -1038,7 +1059,10 @@ fn headers_object(
     let Some(name) = args.get(1) else {
       return Ok(Value::Bool(false));
     };
-    let name = vm.to_string(name)?.to_ascii_lowercase();
+    let name = vm
+      .to_string(name)?
+      .as_str_lossy()
+      .to_ascii_lowercase();
     Ok(Value::Bool(has_values.borrow().contains_key(&name)))
   });
   set(&headers, "has", Value::Builtin(has));
@@ -1051,13 +1075,16 @@ fn headers_object(
     let value = args
       .get(2)
       .ok_or_else(|| RuntimeError::from("Headers.set requires a value"))?;
-    let name = vm.to_string(name)?.to_ascii_lowercase();
-    let value = vm.to_string(value)?;
+    let name = vm
+      .to_string(name)?
+      .as_str_lossy()
+      .to_ascii_lowercase();
+    let value = vm.to_string(value)?.to_string_lossy();
     set_values
       .borrow_mut()
       .insert(name.clone(), value.clone());
     if let Some(receiver) = args.first() {
-      set(receiver, &name, Value::String(value));
+      set(receiver, &name, Value::String(value.into()));
     }
     Ok(Value::Undefined)
   });
@@ -1071,8 +1098,11 @@ fn headers_object(
     let value = args
       .get(2)
       .ok_or_else(|| RuntimeError::from("Headers.append requires a value"))?;
-    let name = vm.to_string(name)?.to_ascii_lowercase();
-    let value = vm.to_string(value)?;
+    let name = vm
+      .to_string(name)?
+      .as_str_lossy()
+      .to_ascii_lowercase();
+    let value = vm.to_string(value)?.to_string_lossy();
     let combined = {
       let mut values = append_values.borrow_mut();
       let entry = values.entry(name.clone()).or_default();
@@ -1083,7 +1113,7 @@ fn headers_object(
       entry.clone()
     };
     if let Some(receiver) = args.first() {
-      set(receiver, &name, Value::String(combined));
+      set(receiver, &name, Value::String(combined.into()));
     }
     Ok(Value::Undefined)
   });
@@ -1094,13 +1124,16 @@ fn headers_object(
     let Some(name) = args.get(1) else {
       return Ok(Value::Undefined);
     };
-    let name = vm.to_string(name)?.to_ascii_lowercase();
+    let name = vm
+      .to_string(name)?
+      .as_str_lossy()
+      .to_ascii_lowercase();
     delete_values.borrow_mut().remove(&name);
     if let Some(Value::Object(receiver)) = args.first() {
       receiver
         .borrow_mut()
         .properties
-        .shift_remove(&PropertyKey::String(name));
+        .shift_remove(&PropertyKey::String(name.into()));
     }
     Ok(Value::Undefined)
   });
@@ -1121,7 +1154,11 @@ fn headers_object(
       vm.call_value_with_this(
         callback,
         &Value::Undefined,
-        &[Value::String(value), Value::String(name), receiver.clone()],
+        &[
+          Value::String(value.into()),
+          Value::String(name.into()),
+          receiver.clone(),
+        ],
       )?;
     }
     Ok(Value::Undefined)
@@ -1139,15 +1176,19 @@ fn handler_info_object(
   set(
     &address,
     "hostname",
-    Value::String(remote_addr.ip().to_string()),
+    Value::String(remote_addr.ip().to_string().into()),
   );
   set(
     &address,
     "port",
     Value::Number(f64::from(remote_addr.port())),
   );
-  set(&address, "transport", Value::String("tcp".to_string()));
-  set(&info, "requestId", Value::String(String::new()));
+  set(
+    &address,
+    "transport",
+    Value::String("tcp".to_string().into()),
+  );
+  set(&info, "requestId", Value::String(String::new().into()));
   set(&info, "remoteAddr", address.clone());
   set(&info, "remoteAddress", address);
   info
@@ -1164,19 +1205,22 @@ fn response_from_value(
 ) -> Result<HandlerResponse, RuntimeError> {
   match value {
     Value::Object(_) => {
-      let marker =
-        vm.get_property_host(value, &PropertyKey::String("__blitz_response".to_string()))?;
+      let marker = vm.get_property_host(
+        value,
+        &PropertyKey::String("__blitz_response".to_string().into()),
+      )?;
       if !matches!(marker, Value::Bool(true)) {
         return Err(RuntimeError::from("handler must return a Response"));
       }
       let upgrade = vm.get_property_host(
         value,
-        &PropertyKey::String("__blitz_upgrade_response".to_string()),
+        &PropertyKey::String("__blitz_upgrade_response".to_string().into()),
       )?;
       if matches!(upgrade, Value::Bool(true)) {
         return Ok(HandlerResponse::WebSocket);
       }
-      let status = vm.get_property_host(value, &PropertyKey::String("status".to_string()))?;
+      let status =
+        vm.get_property_host(value, &PropertyKey::String("status".to_string().into()))?;
       let status = match status {
         Value::Number(status)
           if status.is_finite() && status.fract() == 0.0 && (100.0..=599.0).contains(&status) =>
@@ -1185,13 +1229,14 @@ fn response_from_value(
         }
         _ => 200,
       };
-      let body = vm.get_property_host(value, &PropertyKey::String("body".to_string()))?;
+      let body = vm.get_property_host(value, &PropertyKey::String("body".to_string().into()))?;
       let body = if matches!(body, Value::Undefined) {
         String::new()
       } else {
-        vm.to_string(&body)?
+        vm.to_string(&body)?.to_string_lossy()
       };
-      let headers = vm.get_property_host(value, &PropertyKey::String("headers".to_string()))?;
+      let headers =
+        vm.get_property_host(value, &PropertyKey::String("headers".to_string().into()))?;
       let mut response = HttpResponse::text(status, body);
       let supplied_headers = extract_header_entries(vm, &headers)?;
       if !supplied_headers.is_empty() {
@@ -1214,7 +1259,7 @@ fn install_websocket_constructor(
     let url = args
       .get(1)
       .ok_or_else(|| RuntimeError::from("WebSocket requires a URL"))?;
-    let url = vm.to_string(url)?;
+    let url = vm.to_string(url)?.to_string_lossy();
     if !url.starts_with("ws://") {
       return Err(RuntimeError::from(
         "WebSocket currently supports ws:// URLs only",
@@ -1269,12 +1314,12 @@ fn install_websocket_constructor(
     ("CLOSED", 3.0),
   ] {
     props.borrow_mut().properties.insert(
-      PropertyKey::String(name.to_string()),
+      PropertyKey::String(name.to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Number(value)),
     );
   }
   props.borrow_mut().properties.insert(
-    PropertyKey::String("prototype".to_string()),
+    PropertyKey::String("prototype".to_string().into()),
     PropertyDescriptor::ordinary_data(prototype),
   );
   vm.realm()
@@ -1290,10 +1335,10 @@ fn install_response_constructor(vm: &mut Vm) {
     let response = object(instance_prototype.clone());
     let body = match actual.first() {
       None | Some(Value::Null | Value::Undefined) => String::new(),
-      Some(value) => vm.to_string(value)?,
+      Some(value) => vm.to_string(value)?.to_string_lossy(),
     };
     let status = if let Some(init @ Value::Object(_)) = actual.get(1) {
-      match vm.get_property_host(init, &PropertyKey::String("status".to_string()))? {
+      match vm.get_property_host(init, &PropertyKey::String("status".to_string().into()))? {
         Value::Number(status) => status,
         _ => 200.0,
       }
@@ -1307,22 +1352,23 @@ fn install_response_constructor(vm: &mut Vm) {
     }
     let (status_text, header_entries) = if let Some(init @ Value::Object(_)) = actual.get(1) {
       let status_text =
-        vm.get_property_host(init, &PropertyKey::String("statusText".to_string()))?;
+        vm.get_property_host(init, &PropertyKey::String("statusText".to_string().into()))?;
       let status_text = if matches!(status_text, Value::Undefined) {
         String::new()
       } else {
-        vm.to_string(&status_text)?
+        vm.to_string(&status_text)?.to_string_lossy()
       };
-      let headers = vm.get_property_host(init, &PropertyKey::String("headers".to_string()))?;
+      let headers =
+        vm.get_property_host(init, &PropertyKey::String("headers".to_string().into()))?;
       (status_text, extract_header_entries(vm, &headers)?)
     } else {
       (String::new(), Vec::new())
     };
     let headers = headers_object(vm, &header_entries);
     set(&response, "__blitz_response", Value::Bool(true));
-    set(&response, "body", Value::String(body.clone()));
+    set(&response, "body", Value::String(body.clone().into()));
     set(&response, "status", Value::Number(status));
-    set(&response, "statusText", Value::String(status_text));
+    set(&response, "statusText", Value::String(status_text.into()));
     set(&response, "headers", headers);
     set(
       &response,
@@ -1330,18 +1376,22 @@ fn install_response_constructor(vm: &mut Vm) {
       Value::Bool((200.0..=299.0).contains(&status)),
     );
     set(&response, "redirected", Value::Bool(false));
-    set(&response, "type", Value::String("default".to_string()));
-    set(&response, "url", Value::String(String::new()));
+    set(
+      &response,
+      "type",
+      Value::String("default".to_string().into()),
+    );
+    set(&response, "url", Value::String(String::new().into()));
     set(&response, "bodyUsed", Value::Bool(false));
     let text: BuiltinFn =
-      Rc::new(move |_vm, _args| Ok(resolved_promise(Value::String(body.clone()))));
+      Rc::new(move |_vm, _args| Ok(resolved_promise(Value::String(body.clone().into()))));
     set(&response, "text", Value::Builtin(text));
     let json_body =
-      match vm.get_property_host(&response, &PropertyKey::String("body".to_string()))? {
+      match vm.get_property_host(&response, &PropertyKey::String("body".to_string().into()))? {
         Value::String(body) => body,
-        _ => String::new(),
+        _ => String::new().into(),
       };
-    let json: BuiltinFn = Rc::new(move |vm, _args| Ok(json_promise(vm, &json_body)));
+    let json: BuiltinFn = Rc::new(move |vm, _args| Ok(json_promise(vm, json_body.as_str_lossy())));
     set(&response, "json", Value::Builtin(json));
     Ok(response)
   });
@@ -1349,7 +1399,7 @@ fn install_response_constructor(vm: &mut Vm) {
     vm.realm().function_prototype(),
   ))));
   props.borrow_mut().properties.insert(
-    PropertyKey::String("prototype".to_string()),
+    PropertyKey::String("prototype".to_string().into()),
     PropertyDescriptor::ordinary_data(prototype),
   );
   vm.realm()
@@ -1369,7 +1419,7 @@ fn install_headers_constructor(vm: &mut Vm) {
     vm.realm().function_prototype(),
   ))));
   props.borrow_mut().properties.insert(
-    PropertyKey::String("prototype".to_string()),
+    PropertyKey::String("prototype".to_string().into()),
     PropertyDescriptor::ordinary_data(prototype),
   );
   vm.realm()
@@ -1399,15 +1449,18 @@ fn extract_header_entries(
       let PropertyDescriptor::Data { value, .. } = descriptor else {
         return None;
       };
-      if value.is_callable() || name.starts_with("__blitz_") {
+      if value.is_callable() || name.as_str_lossy().starts_with("__blitz_") {
         return None;
       }
-      Some((name.to_ascii_lowercase(), value.clone()))
+      Some((name.as_str_lossy().to_ascii_lowercase(), value.clone()))
     })
     .collect::<Vec<_>>();
   entries
     .into_iter()
-    .map(|(name, value)| vm.to_string(&value).map(|value| (name, value)))
+    .map(|(name, value)| {
+      vm.to_string(&value)
+        .map(|value| (name, value.to_string_lossy()))
+    })
     .collect()
 }
 
@@ -1424,7 +1477,7 @@ fn json_promise(
   match serde_json::from_str::<serde_json::Value>(body) {
     Ok(value) => resolved_promise(json_to_value(vm, value)),
     Err(error) => {
-      let reason = Value::String(error.to_string());
+      let reason = Value::String(error.to_string().into());
       Value::Promise(gc::track_promise(Rc::new(RefCell::new(
         PromiseState::Rejected {
           reason,
@@ -1443,7 +1496,7 @@ fn json_to_value(
     serde_json::Value::Null => Value::Null,
     serde_json::Value::Bool(value) => Value::Bool(value),
     serde_json::Value::Number(value) => Value::Number(value.as_f64().unwrap_or(f64::NAN)),
-    serde_json::Value::String(value) => Value::String(value),
+    serde_json::Value::String(value) => Value::String(value.into()),
     serde_json::Value::Array(values) => {
       let elements = values
         .into_iter()
@@ -1481,7 +1534,7 @@ fn set(
     return;
   };
   properties.borrow_mut().properties.insert(
-    PropertyKey::String(name.to_string()),
+    PropertyKey::String(name.to_string().into()),
     PropertyDescriptor::ordinary_data(value),
   );
 }

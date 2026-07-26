@@ -20,6 +20,7 @@ use crate::value::{
 };
 use crate::vm::runtime::coercions::{parse_js_bigint_string, parse_js_number_string};
 use crate::vm::state::*;
+use js_string::{JsString, JsStringBuilder};
 use num_bigint::BigInt as BigIntValue;
 use num_traits::{FromPrimitive, ToPrimitive, Zero};
 use std::cell::RefCell;
@@ -146,7 +147,7 @@ impl Vm {
       .globals
       .borrow()
       .properties
-      .get(&PropertyKey::String("globalThis".to_string()))
+      .get(&PropertyKey::String("globalThis".to_string().into()))
       .and_then(|d| match d {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         _ => None,
@@ -310,7 +311,7 @@ impl Vm {
   ) -> Result<(), RuntimeError> {
     let mut child = self.fork_execution();
     let return_method =
-      child.get_property_host(iterator, &PropertyKey::String("return".to_string()))?;
+      child.get_property_host(iterator, &PropertyKey::String("return".to_string().into()))?;
     if matches!(return_method, Value::Undefined | Value::Null) {
       return Ok(());
     }
@@ -373,7 +374,7 @@ impl Vm {
         let props = props.borrow();
         props
           .properties
-          .get(&PropertyKey::String("[[HomeObject]]".to_string()))
+          .get(&PropertyKey::String("[[HomeObject]]".to_string().into()))
           .and_then(|desc| match desc {
             PropertyDescriptor::Data { value, .. } => Some(value.clone()),
             PropertyDescriptor::Accessor { .. } => None,
@@ -454,7 +455,11 @@ impl Vm {
     }
 
     if let Some(ctor) = self.realm.get_global("Promise")
-      && let Ok(proto) = get_property(&ctor, &PropertyKey::String("prototype".to_string()), 0)
+      && let Ok(proto) = get_property(
+        &ctor,
+        &PropertyKey::String("prototype".to_string().into()),
+        0,
+      )
       && !matches!(proto, Value::Null | Value::Undefined)
     {
       return proto;
@@ -472,7 +477,7 @@ impl Vm {
     let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     let len = arr_rc.borrow().len();
     props.borrow_mut().properties.insert(
-      PropertyKey::String("length".to_string()),
+      PropertyKey::String("length".to_string().into()),
       array_length_descriptor(len),
     );
 
@@ -1012,7 +1017,7 @@ impl Vm {
       .globals
       .borrow()
       .properties
-      .get(&PropertyKey::String(name.to_string()))
+      .get(&PropertyKey::String(name.to_string().into()))
       .and_then(|d| match d {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         _ => None,
@@ -1061,12 +1066,17 @@ impl Vm {
     let g = self.globals.borrow();
     let v = g
       .properties
-      .get(&PropertyKey::String(name.to_string()))
+      .get(&PropertyKey::String(name.to_string().into()))
       .and_then(|d| match d {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         _ => None,
       })?;
-    list_own_keys_of_value(&v)
+    list_own_keys_of_value(&v).map(|keys| {
+      keys
+        .into_iter()
+        .map(|key| key.to_string_lossy())
+        .collect()
+    })
   }
 
   /// Return prototype keys for a global's prototype property.
@@ -1077,13 +1087,18 @@ impl Vm {
     let g = self.globals.borrow();
     let v = g
       .properties
-      .get(&PropertyKey::String(name.to_string()))
+      .get(&PropertyKey::String(name.to_string().into()))
       .and_then(|d| match d {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         _ => None,
       })?;
-    match get_property(&v, &PropertyKey::String("prototype".to_string()), 0) {
-      Ok(pv) => list_own_keys_of_value(&pv),
+    match get_property(&v, &PropertyKey::String("prototype".to_string().into()), 0) {
+      Ok(pv) => list_own_keys_of_value(&pv).map(|keys| {
+        keys
+          .into_iter()
+          .map(|key| key.to_string_lossy())
+          .collect()
+      }),
       Err(_) => None,
     }
   }
@@ -1093,7 +1108,12 @@ impl Vm {
     &self,
     v: &Value,
   ) -> Option<Vec<String>> {
-    list_own_keys_of_value(v)
+    list_own_keys_of_value(v).map(|keys| {
+      keys
+        .into_iter()
+        .map(|key| key.to_string_lossy())
+        .collect()
+    })
   }
 
   /// Return enumerable string keys for `for-in`, walking the prototype
@@ -1101,7 +1121,7 @@ impl Vm {
   pub fn for_in_keys_of_value(
     &mut self,
     v: &Value,
-  ) -> Result<Vec<String>, RuntimeError> {
+  ) -> Result<Vec<JsString>, RuntimeError> {
     let mut keys = Vec::new();
     let mut seen = HashSet::new();
     let mut current = v.clone();
@@ -1167,7 +1187,7 @@ impl Vm {
       .globals
       .borrow()
       .properties
-      .get(&PropertyKey::String("globalThis".to_string()))
+      .get(&PropertyKey::String("globalThis".to_string().into()))
       .and_then(|d| match d {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         _ => None,
@@ -1185,8 +1205,9 @@ impl Vm {
     self.property_get_ic.clear();
     gc::reset_allocation_pressure();
     let mut g = self.globals.borrow_mut();
-    g.properties
-      .retain(|k, _| matches!(k, PropertyKey::String(s) if keep_globals.contains(s)));
+    g.properties.retain(
+      |k, _| matches!(k, PropertyKey::String(s) if keep_globals.contains(s.as_str_lossy())),
+    );
   }
 
   // -----------------------------------------------------------------------
@@ -1241,7 +1262,7 @@ impl Vm {
       .globals
       .borrow()
       .properties
-      .get(&PropertyKey::String("globalThis".to_string()))
+      .get(&PropertyKey::String("globalThis".to_string().into()))
       .and_then(|descriptor| match descriptor {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         _ => None,
@@ -1417,7 +1438,7 @@ impl Vm {
                 if let Some(arguments_object) = self.current_arguments_object.clone()
                   && slot < self.current_arguments_mapped_count
                 {
-                  let key = PropertyKey::String(slot.to_string());
+                  let key = PropertyKey::String(slot.to_string().into());
                   if let Some((PropertyDescriptor::Data { writable: true, .. }, _)) =
                     self.lookup_property_descriptor(&arguments_object, &key, 0)?
                   {
@@ -1509,7 +1530,8 @@ impl Vm {
               Value::String(
                 value
                   .as_ref()
-                  .map_or_else(|| "undefined".to_string(), |value| self.typeof_value(value)),
+                  .map_or_else(|| "undefined".to_string(), |value| self.typeof_value(value))
+                  .into(),
               )
             } else {
               value.ok_or_else(|| self.throw_reference_error(&format!("{name} is not defined")))?
@@ -1567,17 +1589,18 @@ impl Vm {
               value => Value::Number((!self.to_int32_value(&value)?) as f64),
             };
           }
-          Op::Typeof => registers[rd] = Value::String(registers[rs].type_name().to_string()),
+          Op::Typeof => registers[rd] = Value::String(registers[rs].type_name().to_string().into()),
           Op::Add => {
             let left = self.to_primitive(&registers[rd], None)?;
             let right = self.to_primitive(&registers[rs], None)?;
             registers[rd] = if matches!(left, Value::String(_)) || matches!(right, Value::String(_))
             {
-              Value::String(format!(
-                "{}{}",
-                self.to_string(&left)?,
-                self.to_string(&right)?
-              ))
+              let left = self.to_string(&left)?;
+              let right = self.to_string(&right)?;
+              let mut result = JsStringBuilder::with_capacity(left.len() + right.len());
+              result.push_string(&left);
+              result.push_string(&right);
+              Value::String(result.finish())
             } else {
               match (&left, &right) {
                 (Value::BigInt(left), Value::BigInt(right)) => {
@@ -2202,7 +2225,7 @@ impl Vm {
         .globals
         .borrow()
         .properties
-        .get(&PropertyKey::String("globalThis".to_string()))
+        .get(&PropertyKey::String("globalThis".to_string().into()))
         .and_then(|d| match d {
           PropertyDescriptor::Data { value, .. } => Some(value.clone()),
           _ => None,
@@ -2296,7 +2319,7 @@ impl Vm {
         if initialized {
           let value = self.locals[idx].borrow().clone();
           self.globals.borrow_mut().properties.insert(
-            PropertyKey::String(name.clone()),
+            PropertyKey::String(name.clone().into()),
             PropertyDescriptor::ordinary_data(value),
           );
         }
@@ -2319,11 +2342,11 @@ impl Vm {
   ) -> Value {
     let obj = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     obj.borrow_mut().properties.insert(
-      PropertyKey::String("value".to_string()),
+      PropertyKey::String("value".to_string().into()),
       PropertyDescriptor::ordinary_data(value),
     );
     obj.borrow_mut().properties.insert(
-      PropertyKey::String("done".to_string()),
+      PropertyKey::String("done".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Bool(done)),
     );
     Value::Object(obj)
@@ -2379,17 +2402,17 @@ impl Vm {
         // Wrap Symbol in an object.
         let mut data = ObjectData::new();
         data.properties.insert(
-          PropertyKey::String("[[PrimitiveValue]]".to_string()),
+          PropertyKey::String("[[PrimitiveValue]]".to_string().into()),
           PropertyDescriptor::ordinary_data(Value::Symbol(id, desc.clone())),
         );
         data.properties.insert(
-          PropertyKey::String("__isSymbol".to_string()),
+          PropertyKey::String("__isSymbol".to_string().into()),
           PropertyDescriptor::ordinary_data(Value::Bool(true)),
         );
         if let Some(d) = &desc {
           data.properties.insert(
-            PropertyKey::String("description".to_string()),
-            PropertyDescriptor::ordinary_data(Value::String(d.clone())),
+            PropertyKey::String("description".to_string().into()),
+            PropertyDescriptor::ordinary_data(Value::String(d.clone().into())),
           );
         }
         // Try to find Symbol.prototype
@@ -2533,7 +2556,7 @@ impl Vm {
           let rv = self.call_with_this(
             &method,
             v,
-            &[Value::String(hint.unwrap_or("default").to_string())],
+            &[Value::String(hint.unwrap_or("default").to_string().into())],
           )?;
           if crate::trace::enabled() {
             crate::trace::value_string("[trace] @@toPrimitive returned", &rv);
@@ -2565,7 +2588,7 @@ impl Vm {
           _ => ["valueOf", "toString"],
         };
         for name in order {
-          let key = PropertyKey::String(name.to_string());
+          let key = PropertyKey::String(name.to_string().into());
           if let Some((desc, _holder)) = self.lookup_property_descriptor(v, &key, 0)?
             && let PropertyDescriptor::Data { value: method, .. } = desc
             && matches!(
@@ -2615,22 +2638,18 @@ impl Vm {
   pub fn to_string(
     &mut self,
     v: &Value,
-  ) -> Result<String, RuntimeError> {
+  ) -> Result<js_string::JsString, RuntimeError> {
     match v {
       Value::String(s) => Ok(s.clone()),
-      Value::Number(n) => Ok(js_number_to_string(*n)),
-      Value::Bool(b) => Ok(if *b {
-        "true".to_string()
-      } else {
-        "false".to_string()
-      }),
-      Value::Undefined => Ok("undefined".to_string()),
-      Value::Null => Ok("null".to_string()),
-      Value::BigInt(n) => Ok(n.to_string()),
+      Value::Number(n) => Ok(js_number_to_string(*n).into()),
+      Value::Bool(b) => Ok(if *b { "true".into() } else { "false".into() }),
+      Value::Undefined => Ok("undefined".into()),
+      Value::Null => Ok("null".into()),
+      Value::BigInt(n) => Ok(n.to_string().into()),
       Value::Symbol(_, _) => {
         Err(self.throw_type_error("Cannot convert a Symbol value to a string"))
       }
-      Value::Promise(_) => Ok("[object Promise]".to_string()),
+      Value::Promise(_) => Ok("[object Promise]".into()),
       _ => {
         let prim = self.to_primitive(v, Some("string"))?;
         self.to_string(&prim)
@@ -2642,7 +2661,7 @@ impl Vm {
   pub fn to_string_ref<'a>(
     &mut self,
     v: &'a Value,
-  ) -> Result<&'a str, RuntimeError> {
+  ) -> Result<&'a js_string::JsString, RuntimeError> {
     match v {
       Value::String(s) => Ok(s),
       _ => Err(self.throw_type_error("Cannot convert to string reference")),
@@ -2672,8 +2691,8 @@ impl Vm {
     &mut self,
     value: &Value,
   ) -> Option<String> {
-    match self.get_property_host(value, &PropertyKey::String("name".to_string())) {
-      Ok(Value::String(name)) => Some(name),
+    match self.get_property_host(value, &PropertyKey::String("name".to_string().into())) {
+      Ok(Value::String(name)) => Some(name.to_string_lossy()),
       Ok(_) => None,
       Err(_) => None,
     }
@@ -2742,10 +2761,9 @@ impl Vm {
           if let Some(PropertyDescriptor::Data {
             value: Value::Symbol(sym, _),
             ..
-          }) = d
-            .properties
-            .get(&PropertyKey::String("[[PrimitiveValue]]".to_string()))
-          {
+          }) = d.properties.get(&PropertyKey::String(
+            "[[PrimitiveValue]]".to_string().into(),
+          )) {
             Some(PropertyKey::Symbol(sym.clone()))
           } else {
             None
@@ -2756,14 +2774,14 @@ impl Vm {
         let prim = self.to_primitive(v, Some("string"))?;
         match prim {
           Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym)),
-          _ => Ok(PropertyKey::String(self.to_string(&prim)?)),
+          _ => Ok(PropertyKey::String(self.to_string(&prim)?.into())),
         }
       }
       _ => {
         let prim = self.to_primitive(v, Some("string"))?;
         match prim {
           Value::Symbol(sym, _) => Ok(PropertyKey::Symbol(sym)),
-          _ => Ok(PropertyKey::String(self.to_string(&prim)?)),
+          _ => Ok(PropertyKey::String(self.to_string(&prim)?.into())),
         }
       }
     }
@@ -2904,12 +2922,7 @@ impl Vm {
     let right = self.to_primitive(right, Some("number"))?;
 
     if let (Value::String(left), Value::String(right)) = (&left, &right) {
-      return Ok(Some(
-        left
-          .encode_utf16()
-          .cmp(right.encode_utf16())
-          .is_lt(),
-      ));
+      return Ok(Some(left.cmp(right).is_lt()));
     }
 
     Ok(
@@ -2965,7 +2978,7 @@ impl Vm {
       let (has_binding, binding_object, with_environment, outer) = {
         let borrowed = current.borrow();
         (
-          borrowed.has_binding(&name),
+          borrowed.has_binding(name.as_str_lossy()),
           borrowed.binding_object(),
           borrowed.is_with_environment(),
           borrowed.outer(),
@@ -2977,7 +2990,10 @@ impl Vm {
       if let Some(binding_object) = binding_object {
         let key = PropertyKey::String(name.clone());
         let found = self.has_property_host(&binding_object, &key)?;
-        if found && (!with_environment || !self.is_unscopable_binding(&binding_object, &name)?) {
+        if found
+          && (!with_environment
+            || !self.is_unscopable_binding(&binding_object, name.as_str_lossy())?)
+        {
           let deleted = self.delete_property_host(&binding_object, &key)?;
           self.bump_object_generation(&binding_object);
           return Ok(Value::Bool(deleted));
@@ -2997,11 +3013,12 @@ impl Vm {
     &mut self,
     iterator: Value,
   ) -> Result<Value, RuntimeError> {
-    let next_fn = self.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
+    let next_fn =
+      self.get_property_host(&iterator, &PropertyKey::String("next".to_string().into()))?;
     let result = self.call_value_with_this(&next_fn, &iterator, &[])?;
-    let done = self.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+    let done = self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
     if self.to_boolean(&done) {
-      let done_key = PropertyKey::String("__tsblitz_iter_done".to_string());
+      let done_key = PropertyKey::String("__tsblitz_iter_done".to_string().into());
       match &iterator {
         Value::Object(obj) => {
           obj.borrow_mut().properties.insert(
@@ -3039,7 +3056,7 @@ impl Vm {
     }
 
     let next_method =
-      self.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
+      self.get_property_host(&iterator, &PropertyKey::String("next".to_string().into()))?;
     if !Self::is_callable_value(&next_method) {
       return Err(self.throw_type_error("Iterator next method is not callable"));
     }
@@ -3094,11 +3111,15 @@ impl Vm {
         self.call_value_with_this(&state.next_method, &state.iterator, &[value])?
       }
       YieldStarResume::Throw(value) => {
-        let throw_method =
-          self.get_property_host(&state.iterator, &PropertyKey::String("throw".to_string()))?;
+        let throw_method = self.get_property_host(
+          &state.iterator,
+          &PropertyKey::String("throw".to_string().into()),
+        )?;
         if matches!(throw_method, Value::Undefined | Value::Null) {
-          let return_method =
-            self.get_property_host(&state.iterator, &PropertyKey::String("return".to_string()))?;
+          let return_method = self.get_property_host(
+            &state.iterator,
+            &PropertyKey::String("return".to_string().into()),
+          )?;
           if !matches!(return_method, Value::Undefined | Value::Null) {
             if !Self::is_callable_value(&return_method) {
               return Err(self.throw_type_error("Iterator return method is not callable"));
@@ -3116,8 +3137,10 @@ impl Vm {
         self.call_value_with_this(&throw_method, &state.iterator, &[value])?
       }
       YieldStarResume::Return(value) => {
-        let return_method =
-          self.get_property_host(&state.iterator, &PropertyKey::String("return".to_string()))?;
+        let return_method = self.get_property_host(
+          &state.iterator,
+          &PropertyKey::String("return".to_string().into()),
+        )?;
         if matches!(return_method, Value::Undefined | Value::Null) {
           return Ok(YieldStarStep::Return(value));
         }
@@ -3131,9 +3154,10 @@ impl Vm {
     if !result.is_object() {
       return Err(self.throw_type_error("Iterator result must be an object"));
     }
-    let done = self.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+    let done = self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
     if self.to_boolean(&done) {
-      let value = self.get_property_host(&result, &PropertyKey::String("value".to_string()))?;
+      let value =
+        self.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
       if is_return {
         Ok(YieldStarStep::Return(value))
       } else {
@@ -3152,7 +3176,7 @@ impl Vm {
     if matches!(iterator, Value::Undefined | Value::Null) {
       return Ok(iterator);
     }
-    let done_key = PropertyKey::String("__tsblitz_iter_done".to_string());
+    let done_key = PropertyKey::String("__tsblitz_iter_done".to_string().into());
     let already_done = match &iterator {
       Value::Object(obj) => obj
         .borrow()
@@ -3188,7 +3212,7 @@ impl Vm {
       return Ok(iterator);
     }
     let return_fn =
-      self.get_property_host(&iterator, &PropertyKey::String("return".to_string()))?;
+      self.get_property_host(&iterator, &PropertyKey::String("return".to_string().into()))?;
     if matches!(return_fn, Value::Undefined | Value::Null) {
       return Ok(iterator);
     }
@@ -3239,7 +3263,7 @@ impl Vm {
         });
     if is_root_binding {
       self.globals.borrow_mut().properties.insert(
-        PropertyKey::String(name.to_string()),
+        PropertyKey::String(name.to_string().into()),
         PropertyDescriptor::ordinary_data(value),
       );
       return Ok(());
@@ -3250,7 +3274,7 @@ impl Vm {
     {
       return Ok(());
     }
-    let key = PropertyKey::String(name.to_string());
+    let key = PropertyKey::String(name.to_string().into());
     let current = self
       .globals
       .borrow()
@@ -3295,7 +3319,7 @@ impl Vm {
     idx: usize,
   ) -> Result<String, RuntimeError> {
     match self.chunk.constants.get(idx) {
-      Some(crate::bytecode::Constant::String(value)) => Ok(value.clone()),
+      Some(crate::bytecode::Constant::String(value)) => Ok(value.to_string_lossy()),
       Some(_) => Err(RuntimeError::from("Constant is not a string")),
       None => Err(RuntimeError::from("String constant index out of bounds")),
     }
@@ -3366,7 +3390,7 @@ impl Vm {
     }
 
     // Get constructor.prototype
-    let proto_key = PropertyKey::String("prototype".to_string());
+    let proto_key = PropertyKey::String("prototype".to_string().into());
     let ctor_proto = get_property(constructor, &proto_key, 0)?;
     // prototype must be an object
     match ctor_proto {
@@ -3487,7 +3511,7 @@ impl Vm {
 // ---------------------------------------------------------------------------
 
 /// Return own keys for a value when applicable.
-fn list_own_keys_of_value(v: &Value) -> Option<Vec<String>> {
+fn list_own_keys_of_value(v: &Value) -> Option<Vec<js_string::JsString>> {
   match v {
     Value::Object(data) => Some(
       data
@@ -3614,14 +3638,14 @@ pub(super) fn array_index_from_key(key: &PropertyKey) -> Option<usize> {
   if s.is_empty() {
     return None;
   }
-  if s != "0" && s.starts_with('0') {
+  if s != "0" && s.code_unit_at(0) == Some(u16::from(b'0')) {
     return None;
   }
   let idx = s.parse::<u32>().ok()?;
   if idx == u32::MAX {
     return None;
   }
-  if !crate::runtime_utils::decimal_u64_eq_str(idx as u64, s) {
+  if !crate::runtime_utils::decimal_u64_eq_str(idx as u64, s.as_str_lossy()) {
     return None;
   }
   Some(idx as usize)
@@ -3630,7 +3654,7 @@ pub(super) fn array_index_from_key(key: &PropertyKey) -> Option<usize> {
 pub(super) fn array_length(props: &ObjectData) -> usize {
   props
     .properties
-    .get(&PropertyKey::String("length".to_string()))
+    .get(&PropertyKey::String("length".to_string().into()))
     .and_then(|desc| match desc {
       PropertyDescriptor::Data {
         value: Value::Number(n),
@@ -3797,14 +3821,14 @@ pub(super) fn set_property(
           }
           a[i] = Some(value);
           p.properties.insert(
-            PropertyKey::String("length".to_string()),
+            PropertyKey::String("length".to_string().into()),
             PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(next_len))),
           );
         } else {
           p.properties
             .insert(key.clone(), PropertyDescriptor::ordinary_data(value));
           p.properties.insert(
-            PropertyKey::String("length".to_string()),
+            PropertyKey::String("length".to_string().into()),
             PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(next_len))),
           );
         }
@@ -3825,7 +3849,7 @@ pub(super) fn set_property(
         }
         let mut p = props.borrow_mut();
         p.properties.insert(
-          PropertyKey::String("length".to_string()),
+          PropertyKey::String("length".to_string().into()),
           PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(new_len))),
         );
         return Ok(());
@@ -3939,7 +3963,7 @@ pub(crate) fn build_module_namespace_object(exports: &HashMap<String, SharedValu
     };
     let getter: BuiltinFn = Rc::new(move |_vm, _args| Ok(slot.borrow().clone()));
     namespace.borrow_mut().properties.insert(
-      PropertyKey::String(name),
+      PropertyKey::String(name.into()),
       PropertyDescriptor::Accessor {
         get: Some(Value::Builtin(getter)),
         set: None,
@@ -3951,7 +3975,7 @@ pub(crate) fn build_module_namespace_object(exports: &HashMap<String, SharedValu
   namespace.borrow_mut().properties.insert(
     PropertyKey::Symbol(SymbolId::well_known_to_string_tag()),
     PropertyDescriptor::Data {
-      value: Value::String("Module".to_string()),
+      value: Value::String("Module".to_string().into()),
       writable: false,
       enumerable: false,
       configurable: false,

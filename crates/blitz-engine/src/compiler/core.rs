@@ -427,7 +427,7 @@ impl Compiler {
     module_index: usize,
     name: &str,
   ) -> Result<u16, CompilerError> {
-    let descriptor = Constant::String(format!("{module_index}\0{name}"));
+    let descriptor = Constant::String(format!("{module_index}\0{name}").into());
     let index = self
       .chunk
       .constants
@@ -962,7 +962,7 @@ impl Compiler {
     // add a local constant instead of reusing the stale index.
     let idx = self
       .chunk
-      .add_constant(Constant::String(name.to_string()));
+      .add_constant(Constant::String(name.to_string().into()));
     self.globals.insert(name.to_string(), idx);
     idx
   }
@@ -975,14 +975,14 @@ impl Compiler {
     name: &str,
   ) -> Value {
     if let Some(s) = self.private_names.get(name) {
-      return Value::String(s.clone());
+      return Value::String(s.clone().into());
     }
     // Create a synthetic key that is unlikely to collide with public names.
     let key = format!("\u{1F}private#{}", name);
     self
       .private_names
       .insert(name.to_string(), key.clone());
-    Value::String(key)
+    Value::String(key.into())
   }
 
   /// Emits a `GetGlobal` operation for the given global name.
@@ -1039,7 +1039,7 @@ impl Compiler {
     home_slot: usize,
   ) -> Result<(), CompilerError> {
     self.emit(Op::Copy, LINE);
-    self.emit_constant(Value::String("[[HomeObject]]".to_string()), LINE);
+    self.emit_constant(Value::String("[[HomeObject]]".to_string().into()), LINE);
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(u8::try_from(home_slot).expect("home_slot fits in u8"), LINE);
     self.emit(Op::SetProperty, LINE);

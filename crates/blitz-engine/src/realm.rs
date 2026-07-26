@@ -196,7 +196,7 @@ impl Realm {
       .global_object
       .borrow()
       .properties
-      .get(&PropertyKey::String(name.to_string()))
+      .get(&PropertyKey::String(name.to_string().into()))
       .and_then(|desc| match desc {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         _ => None,
@@ -210,7 +210,7 @@ impl Realm {
     value: Value,
   ) {
     self.global_object.borrow_mut().properties.insert(
-      PropertyKey::String(name.to_string()),
+      PropertyKey::String(name.to_string().into()),
       PropertyDescriptor::ordinary_data(value),
     );
   }

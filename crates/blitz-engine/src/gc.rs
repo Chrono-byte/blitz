@@ -729,11 +729,11 @@ mod tests {
     let b = track_object(Rc::new(RefCell::new(ObjectData::new())));
 
     a.borrow_mut().properties.insert(
-      crate::value::PropertyKey::String("peer".to_string()),
+      crate::value::PropertyKey::String("peer".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&b))),
     );
     b.borrow_mut().properties.insert(
-      crate::value::PropertyKey::String("peer".to_string()),
+      crate::value::PropertyKey::String("peer".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&a))),
     );
 

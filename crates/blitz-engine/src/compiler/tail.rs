@@ -194,7 +194,7 @@ impl super::Compiler {
       if m.optional {
         self.compile_optional_member_access(&m.object, |this| {
           this.emit(Op::Copy, LINE);
-          this.emit_constant(Value::String(m.property.name.to_string()), LINE);
+          this.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
           this.emit(Op::GetProperty, LINE);
           let slot = this.alloc_ic_slot()?;
           this.emit_byte(slot, LINE);
@@ -203,7 +203,7 @@ impl super::Compiler {
       } else {
         self.compile_expr_oast(&m.object)?;
         self.emit(Op::Copy, LINE);
-        self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+        self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
         let slot = self.alloc_ic_slot()?;
         self.emit_byte(slot, LINE);
@@ -301,14 +301,14 @@ impl super::Compiler {
         .as_ref()
         .map(ToString::to_string)
         .unwrap_or_default();
-      self.emit_constant(Value::String(cooked), LINE);
+      self.emit_constant(Value::String(cooked.into()), LINE);
     }
     self.emit(Op::BuildArray, LINE);
     self.emit_byte(self.checked_arg_count(t.quasi.quasis.len())?, LINE);
     self.emit(Op::Copy, LINE);
-    self.emit_constant(Value::String("raw".to_string()), LINE);
+    self.emit_constant(Value::String("raw".to_string().into()), LINE);
     for quasi in &t.quasi.quasis {
-      self.emit_constant(Value::String(quasi.value.raw.to_string()), LINE);
+      self.emit_constant(Value::String(quasi.value.raw.to_string().into()), LINE);
     }
     self.emit(Op::BuildArray, LINE);
     self.emit_byte(self.checked_arg_count(t.quasi.quasis.len())?, LINE);

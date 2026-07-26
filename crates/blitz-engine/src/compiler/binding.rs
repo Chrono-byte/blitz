@@ -143,11 +143,11 @@ impl super::Compiler {
   /// that cannot be statically determined.
   pub(super) fn binding_property_key_to_value(key: &oast::PropertyKey<'_>) -> Option<Value> {
     match key {
-      oast::PropertyKey::StaticIdentifier(i) => Some(Value::String(i.name.to_string())),
-      oast::PropertyKey::Identifier(i) => Some(Value::String(i.name.to_string())),
-      oast::PropertyKey::StringLiteral(s) => Some(Value::String(s.value.to_string())),
+      oast::PropertyKey::StaticIdentifier(i) => Some(Value::String(i.name.to_string().into())),
+      oast::PropertyKey::Identifier(i) => Some(Value::String(i.name.to_string().into())),
+      oast::PropertyKey::StringLiteral(s) => Some(Value::String(s.value.to_string().into())),
       oast::PropertyKey::NumericLiteral(n) => {
-        Some(Value::String(super::numeric_property_key(n.value)))
+        Some(Value::String(super::numeric_property_key(n.value).into()))
       }
       _ => None,
     }
@@ -288,7 +288,7 @@ impl super::Compiler {
     self.emit(Op::StoreLocal, LINE);
     self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
     self.compile_expr_oast(&m.object)?;
-    self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+    self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
     self.emit(Op::SetProperty, LINE);
@@ -340,7 +340,7 @@ impl super::Compiler {
           self.emit_get_builtin_name("setFunctionNameIfAnonymous");
           self.emit(Op::LoadLocal, LINE);
           self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
-          self.emit_constant(Value::String(name), LINE);
+          self.emit_constant(Value::String(name.into()), LINE);
           self.emit(Op::Call, LINE);
           self.emit_byte(2, LINE);
           self.emit(Op::StoreLocal, LINE);
@@ -385,7 +385,7 @@ impl super::Compiler {
     let iterator_slot = self.alloc_temp_local("array_assign_iterator");
     self.emit(Op::Copy, LINE);
     self.emit_get_global_name("Symbol");
-    self.emit_constant(Value::String("iterator".to_string()), LINE);
+    self.emit_constant(Value::String("iterator".to_string().into()), LINE);
     self.emit(Op::GetProperty, LINE);
     let iterator_ic = self.alloc_ic_slot()?;
     self.emit_byte(iterator_ic, LINE);
@@ -401,13 +401,13 @@ impl super::Compiler {
       self.emit(Op::IteratorNext, LINE);
       if let Some(el) = el {
         self.emit(Op::Copy, LINE);
-        self.emit_constant(Value::String("done".to_string()), LINE);
+        self.emit_constant(Value::String("done".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
         self.emit(Op::JumpIfTrue, LINE);
         let done_jump = self.current_ip();
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
-        self.emit_constant(Value::String("value".to_string()), LINE);
+        self.emit_constant(Value::String("value".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
         self.compile_assignment_target_maybe_default_oast(el)?;
         self.emit(Op::Jump, LINE);
@@ -448,7 +448,7 @@ impl super::Compiler {
       match prop {
         oast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(p) => {
           self.emit(Op::Copy, LINE);
-          self.emit_constant(Value::String(p.binding.name.to_string()), LINE);
+          self.emit_constant(Value::String(p.binding.name.to_string().into()), LINE);
           self.emit(Op::GetProperty, LINE);
           if let Some(init) = &p.init {
             let temp_slot = self.alloc_temp_local("assign_prop_default");
@@ -469,7 +469,7 @@ impl super::Compiler {
               self.emit_get_builtin_name("setFunctionNameIfAnonymous");
               self.emit(Op::LoadLocal, LINE);
               self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
-              self.emit_constant(Value::String(p.binding.name.to_string()), LINE);
+              self.emit_constant(Value::String(p.binding.name.to_string().into()), LINE);
               self.emit(Op::Call, LINE);
               self.emit_byte(2, LINE);
               self.emit(Op::StoreLocal, LINE);
@@ -552,7 +552,7 @@ impl super::Compiler {
           self.emit_get_builtin_name("setFunctionNameIfAnonymous");
           self.emit(Op::LoadLocal, LINE);
           self.emit_byte(self.slot_to_u8(temp_slot)?, LINE);
-          self.emit_constant(Value::String(name), LINE);
+          self.emit_constant(Value::String(name.into()), LINE);
           self.emit(Op::Call, LINE);
           self.emit_byte(2, LINE);
           self.emit(Op::StoreLocal, LINE);
@@ -571,7 +571,7 @@ impl super::Compiler {
         let iterator_slot = self.alloc_temp_local("array_binding_iterator");
         self.emit(Op::Copy, LINE);
         self.emit_get_global_name("Symbol");
-        self.emit_constant(Value::String("iterator".to_string()), LINE);
+        self.emit_constant(Value::String("iterator".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
         let iterator_ic = self.alloc_ic_slot()?;
         self.emit_byte(iterator_ic, LINE);
@@ -588,13 +588,13 @@ impl super::Compiler {
 
           if let Some(el) = el {
             self.emit(Op::Copy, LINE);
-            self.emit_constant(Value::String("done".to_string()), LINE);
+            self.emit_constant(Value::String("done".to_string().into()), LINE);
             self.emit(Op::GetProperty, LINE);
             self.emit(Op::JumpIfTrue, LINE);
             let done_jump = self.current_ip();
             self.emit_byte(0, LINE);
             self.emit_byte(0, LINE);
-            self.emit_constant(Value::String("value".to_string()), LINE);
+            self.emit_constant(Value::String("value".to_string().into()), LINE);
             self.emit(Op::GetProperty, LINE);
             self.compile_binding_pattern_assignment_oast(el, kind)?;
             self.emit(Op::Jump, LINE);

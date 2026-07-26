@@ -99,7 +99,7 @@ pub(crate) fn install_global_bindings(
   );
 
   g.properties.insert(
-    PKey::String("globalThis".to_string()),
+    PKey::String("globalThis".to_string().into()),
     PropertyDescriptor::Data {
       value: Value::Object(Rc::clone(globals)),
       writable: true,
@@ -108,7 +108,7 @@ pub(crate) fn install_global_bindings(
     },
   );
   g.properties
-    .entry(PKey::String("NaN".to_string()))
+    .entry(PKey::String("NaN".to_string().into()))
     .or_insert(PropertyDescriptor::Data {
       value: Value::Number(f64::NAN),
       writable: false,
@@ -116,7 +116,7 @@ pub(crate) fn install_global_bindings(
       configurable: false,
     });
   g.properties
-    .entry(PKey::String("Infinity".to_string()))
+    .entry(PKey::String("Infinity".to_string().into()))
     .or_insert(PropertyDescriptor::Data {
       value: Value::Number(f64::INFINITY),
       writable: false,
@@ -124,7 +124,7 @@ pub(crate) fn install_global_bindings(
       configurable: false,
     });
   g.properties
-    .entry(PKey::String("undefined".to_string()))
+    .entry(PKey::String("undefined".to_string().into()))
     .or_insert(PropertyDescriptor::Data {
       value: Value::Undefined,
       writable: false,
@@ -133,7 +133,7 @@ pub(crate) fn install_global_bindings(
     });
   builtins::globals::install_global_function_builtins(&mut g);
   g.properties.insert(
-    PKey::String("Reflect".to_string()),
+    PKey::String("Reflect".to_string().into()),
     PropertyDescriptor::builtin_data(Value::Object(Rc::clone(values.reflect_obj))),
   );
 
@@ -172,7 +172,7 @@ pub(crate) fn install_global_bindings(
     ("Set", values.set_ctor_val),
   ] {
     g.properties.insert(
-      PKey::String(name.to_string()),
+      PKey::String(name.to_string().into()),
       PropertyDescriptor::builtin_data(value.clone()),
     );
   }
@@ -189,11 +189,11 @@ pub(crate) fn install_global_bindings(
   set_builtin_name(values.set_ctor_val, "Set");
 
   g.properties.insert(
-    PKey::String("Math".to_string()),
+    PKey::String("Math".to_string().into()),
     PropertyDescriptor::builtin_data(Value::Object(Rc::clone(values.math))),
   );
   g.properties.insert(
-    PKey::String("JSON".to_string()),
+    PKey::String("JSON".to_string().into()),
     PropertyDescriptor::builtin_data(Value::Object(Rc::clone(values.json_obj))),
   );
 
@@ -205,7 +205,7 @@ pub(crate) fn install_global_bindings(
       Rc::clone(function_proto_map),
     ))));
     ctor_map.borrow_mut().properties.insert(
-      PKey::String("prototype".to_string()),
+      PKey::String("prototype".to_string().into()),
       PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&proto_map))),
     );
     let name_owned = name.to_string();
@@ -223,16 +223,16 @@ pub(crate) fn install_global_bindings(
     });
     let ctor_val = Value::BuiltinObject(ctor_fn, Rc::clone(&ctor_map));
     ctor_map.borrow_mut().properties.insert(
-      PKey::String("name".to_string()),
+      PKey::String("name".to_string().into()),
       PropertyDescriptor::Data {
-        value: Value::String(name.to_string()),
+        value: Value::String(name.to_string().into()),
         writable: false,
         enumerable: false,
         configurable: true,
       },
     );
     proto_map.borrow_mut().properties.insert(
-      PKey::String("constructor".to_string()),
+      PKey::String("constructor".to_string().into()),
       PropertyDescriptor::builtin_data(ctor_val.clone()),
     );
     ctor_val
@@ -244,15 +244,15 @@ pub(crate) fn install_global_bindings(
     Value::Object(Rc::clone(object_proto_map)),
   ))));
   g.properties.insert(
-    PKey::String("WeakRef".to_string()),
+    PKey::String("WeakRef".to_string().into()),
     PropertyDescriptor::builtin_data(weakref_ctor_val),
   );
   g.properties.insert(
-    PKey::String("FinalizationRegistry".to_string()),
+    PKey::String("FinalizationRegistry".to_string().into()),
     PropertyDescriptor::builtin_data(finalization_registry_ctor_val),
   );
   g.properties.insert(
-    PKey::String("Temporal".to_string()),
+    PKey::String("Temporal".to_string().into()),
     PropertyDescriptor::builtin_data(temporal_namespace),
   );
 
@@ -267,7 +267,7 @@ pub(crate) fn install_global_bindings(
     Value::Object(Rc::clone(&proxy_function_proto)),
   )));
   proxy_ctor_map.borrow_mut().properties.insert(
-    PKey::String("prototype".to_string()),
+    PKey::String("prototype".to_string().into()),
     PropertyDescriptor::builtin_prototype(Value::Object(proxy_proto_map)),
   );
   let proxy_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
@@ -288,11 +288,11 @@ pub(crate) fn install_global_bindings(
   });
   let proxy_ctor_val = Value::BuiltinObject(Rc::clone(&proxy_ctor_fn), Rc::clone(&proxy_ctor_map));
   proxy_ctor_map.borrow_mut().properties.insert(
-    PKey::String("name".to_string()),
-    PropertyDescriptor::builtin_metadata(Value::String("Proxy".to_string())),
+    PKey::String("name".to_string().into()),
+    PropertyDescriptor::builtin_metadata(Value::String("Proxy".to_string().into())),
   );
   proxy_ctor_map.borrow_mut().properties.insert(
-    PKey::String("revocable".to_string()),
+    PKey::String("revocable".to_string().into()),
     PropertyDescriptor::builtin_data({
       let proxy_function_proto_for_builtin = Rc::clone(&proxy_function_proto);
       let proxy_function_proto_for_revoke = Rc::clone(&proxy_function_proto);
@@ -324,11 +324,11 @@ pub(crate) fn install_global_bindings(
           set_builtin_length(&revoke_fn, 0.0);
           let result = Rc::new(RefCell::new(ObjectData::new()));
           result.borrow_mut().properties.insert(
-            PKey::String("proxy".to_string()),
+            PKey::String("proxy".to_string().into()),
             PropertyDescriptor::ordinary_data(Value::Proxy(proxy)),
           );
           result.borrow_mut().properties.insert(
-            PKey::String("revoke".to_string()),
+            PKey::String("revoke".to_string().into()),
             PropertyDescriptor::ordinary_data(revoke_fn),
           );
           Ok(Value::Object(result))
@@ -341,15 +341,15 @@ pub(crate) fn install_global_bindings(
     }),
   );
   g.properties.insert(
-    PKey::String("WeakMap".to_string()),
+    PKey::String("WeakMap".to_string().into()),
     PropertyDescriptor::builtin_data(weakmap_ctor_val),
   );
   g.properties.insert(
-    PKey::String("WeakSet".to_string()),
+    PKey::String("WeakSet".to_string().into()),
     PropertyDescriptor::builtin_data(weakset_ctor_val),
   );
   g.properties.insert(
-    PKey::String("Proxy".to_string()),
+    PKey::String("Proxy".to_string().into()),
     PropertyDescriptor::builtin_data(proxy_ctor_val),
   );
 
@@ -360,7 +360,7 @@ pub(crate) fn install_global_bindings(
     func_val
   };
   g.properties.insert(
-    PKey::String("isNaN".to_string()),
+    PKey::String("isNaN".to_string().into()),
     PropertyDescriptor::builtin_data(insert_math_builtin(
       "isNaN",
       1.0,
@@ -372,7 +372,7 @@ pub(crate) fn install_global_bindings(
     )),
   );
   g.properties.insert(
-    PKey::String("isFinite".to_string()),
+    PKey::String("isFinite".to_string().into()),
     PropertyDescriptor::builtin_data(insert_math_builtin(
       "isFinite",
       1.0,

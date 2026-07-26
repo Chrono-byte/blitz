@@ -1,10 +1,33 @@
 // SPDX-License-Identifier: MPL-2.0
 use crate::{Error, ErrorKind};
+use std::fmt;
 
 /// Parsed ECMAScript regular-expression flags.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Flags {
   bits: u16,
+}
+
+impl fmt::Display for Flags {
+  fn fmt(
+    &self,
+    formatter: &mut fmt::Formatter<'_>,
+  ) -> fmt::Result {
+    for (enabled, flag) in [
+      (self.has_indices(), 'd'),
+      (self.global(), 'g'),
+      (self.ignore_case(), 'i'),
+      (self.multiline(), 'm'),
+      (self.dot_all(), 's'),
+      (self.unicode(), 'u'),
+      (self.sticky(), 'y'),
+    ] {
+      if enabled {
+        write!(formatter, "{flag}")?;
+      }
+    }
+    Ok(())
+  }
 }
 
 impl Flags {

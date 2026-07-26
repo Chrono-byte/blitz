@@ -8,8 +8,10 @@ pub(crate) fn promise_constructor_matches(
   promise: &Value,
   constructor: &Value,
 ) -> Result<bool, RuntimeError> {
-  let promise_constructor =
-    vm.get_property_host(promise, &PropertyKey::String("constructor".to_string()))?;
+  let promise_constructor = vm.get_property_host(
+    promise,
+    &PropertyKey::String("constructor".to_string().into()),
+  )?;
   Ok(strict_equal(&promise_constructor, constructor))
 }
 
@@ -39,7 +41,7 @@ pub(crate) fn get_iterator_record(
   if !iterator.is_object() {
     return Err(vm.throw_type_error("Iterator method did not return an object"));
   }
-  let next = vm.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
+  let next = vm.get_property_host(&iterator, &PropertyKey::String("next".to_string().into()))?;
   if !Vm::is_callable_value(&next) {
     return Err(vm.throw_type_error("Iterator next is not callable"));
   }
@@ -56,13 +58,13 @@ pub(crate) fn iterator_step(
   if !result.is_object() {
     return Err(vm.throw_type_error("Iterator result is not an object"));
   }
-  let done = vm.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+  let done = vm.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
   if vm.to_boolean(&done) {
     return Ok(None);
   }
   Ok(Some(vm.get_property_host(
     &result,
-    &PropertyKey::String("value".to_string()),
+    &PropertyKey::String("value".to_string().into()),
   )?))
 }
 
@@ -99,23 +101,28 @@ pub(crate) fn collect_iterable_values(
         let mut items = Vec::new();
         loop {
           let next_fn =
-            vm.get_property_host(&iter_obj, &PropertyKey::String("next".to_string()))?;
+            vm.get_property_host(&iter_obj, &PropertyKey::String("next".to_string().into()))?;
           let result = vm.call_value_with_this(&next_fn, &iter_obj, &[])?;
-          let done_val = vm.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+          let done_val =
+            vm.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
           if vm.to_boolean(&done_val) {
             break;
           }
-          let val = vm.get_property_host(&result, &PropertyKey::String("value".to_string()))?;
+          let val =
+            vm.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
           items.push(val);
         }
         Ok(items)
       } else {
-        let len_val = vm.get_property_host(other, &PropertyKey::String("length".to_string()))?;
+        let len_val =
+          vm.get_property_host(other, &PropertyKey::String("length".to_string().into()))?;
         let len = to_length(vm, &len_val)?;
         let mut items = Vec::with_capacity(len);
         for idx in 0..len {
-          let item =
-            vm.get_property_host(other, &PropertyKey::String(usize_to_decimal_string(idx)))?;
+          let item = vm.get_property_host(
+            other,
+            &PropertyKey::String(usize_to_decimal_string(idx).into()),
+          )?;
           items.push(item);
         }
         Ok(items)
@@ -206,7 +213,7 @@ fn resolve_promise_with_value_inner(
   }
 
   if value.is_object() {
-    let then_val = vm.get_property_host(&value, &PropertyKey::String("then".to_string()))?;
+    let then_val = vm.get_property_host(&value, &PropertyKey::String("then".to_string().into()))?;
     if Vm::is_callable_value(&then_val) {
       // Per-spec PromiseResolveThenableJob semantics: calling a thenable's
       // `then` should not synchronously settle the outer promise. Instead
@@ -254,7 +261,7 @@ fn resolve_promise_with_value_inner(
             let reason = vm
               .last_uncaught_exception
               .take()
-              .unwrap_or(Value::String(format!("{}", err)));
+              .unwrap_or(Value::String(format!("{}", err).into()));
             reject_pending_promise(vm, &res_p, reason);
             Ok(())
           }
@@ -390,7 +397,7 @@ pub(crate) fn shadowrealm_evaluate(
   let target = args.first().unwrap_or(&undefined);
   let record = require_shadow_realm_record(vm, target)?;
   let source = match args.get(1) {
-    Some(Value::String(s)) => s.as_str(),
+    Some(Value::String(s)) => s.as_str_lossy(),
     _ => {
       return Err(vm.throw_type_error("ShadowRealm.prototype.evaluate requires a string argument"));
     }
@@ -488,7 +495,7 @@ pub(crate) fn shadowrealm_import_value(
         let inner_vm = record_handle.borrow_vm();
         let mut loader = inner_vm.module_loader_mut();
         let entry = loader
-          .construct(&base_dir, &specifier_clone)
+          .construct(&base_dir, specifier_clone.as_str_lossy())
           .map_err(|err| format!("module construct failed: {}", err))?;
         loader
           .instantiate_all()
@@ -505,7 +512,7 @@ pub(crate) fn shadowrealm_import_value(
       let slot = entry
         .borrow()
         .exports
-        .get(&export_clone)
+        .get(export_clone.as_str_lossy())
         .cloned()
         .ok_or_else(|| format!("export {} not found", export_clone))?;
       Ok(slot.borrow().clone())
@@ -528,7 +535,9 @@ pub(crate) fn shadowrealm_import_value(
                         "Transfer list contains a duplicate ArrayBuffer",
                       )
                       .unwrap_or(Value::String(
-                        "Transfer list contains a duplicate ArrayBuffer".to_string(),
+                        "Transfer list contains a duplicate ArrayBuffer"
+                          .to_string()
+                          .into(),
                       ));
                     reject_pending_promise(vm, &promise, err_val);
                     return Ok(());
@@ -541,7 +550,9 @@ pub(crate) fn shadowrealm_import_value(
                     "Transfer list entries must be ArrayBuffer objects",
                   )
                   .unwrap_or(Value::String(
-                    "Transfer list entries must be ArrayBuffer objects".to_string(),
+                    "Transfer list entries must be ArrayBuffer objects"
+                      .to_string()
+                      .into(),
                   ));
                 reject_pending_promise(vm, &promise, err_val);
                 return Ok(());
@@ -553,7 +564,9 @@ pub(crate) fn shadowrealm_import_value(
                     "Transfer list entries must be ArrayBuffer objects",
                   )
                   .unwrap_or(Value::String(
-                    "Transfer list entries must be ArrayBuffer objects".to_string(),
+                    "Transfer list entries must be ArrayBuffer objects"
+                      .to_string()
+                      .into(),
                   ));
                 reject_pending_promise(vm, &promise, err_val);
                 return Ok(());
@@ -568,7 +581,7 @@ pub(crate) fn shadowrealm_import_value(
           Err(err) => {
             let err_val = vm
               .create_intrinsic_error("TypeError", &format!("ShadowRealm clone failed: {}", err))
-              .unwrap_or(Value::String(err));
+              .unwrap_or(Value::String(err.into()));
             reject_pending_promise(vm, &promise, err_val);
           }
         }
@@ -576,7 +589,7 @@ pub(crate) fn shadowrealm_import_value(
       Err(msg) => {
         let err_val = vm
           .create_intrinsic_error("TypeError", &msg)
-          .unwrap_or(Value::String(msg.clone()));
+          .unwrap_or(Value::String(msg.clone().into()));
         reject_pending_promise(vm, &promise, err_val);
       }
     }
@@ -607,7 +620,7 @@ pub(crate) fn dynamic_import_value(
       let reason = vm
         .last_uncaught_exception
         .take()
-        .unwrap_or(Value::String(err.to_string()));
+        .unwrap_or(Value::String(err.to_string().into()));
       reject_pending_promise(vm, &promise, reason);
       return Ok(promise_value);
     }
@@ -624,7 +637,11 @@ pub(crate) fn dynamic_import_value(
     let entry = {
       let mut loader = loader_handle.borrow_mut();
       let entry = loader
-        .construct_from_importer(&base_dir, importer_specifier.as_deref(), &specifier_str)
+        .construct_from_importer(
+          &base_dir,
+          importer_specifier.as_deref(),
+          specifier_str.as_str_lossy(),
+        )
         .map_err(|err| {
           host_error_object(
             vm,
@@ -654,10 +671,9 @@ pub(crate) fn dynamic_import_value(
               &format!("dynamic import evaluate failed: {}", err),
             ))
           })
-          .unwrap_or(Value::String(format!(
-            "dynamic import evaluate failed: {}",
-            err
-          )))
+          .unwrap_or(Value::String(
+            format!("dynamic import evaluate failed: {}", err).into(),
+          ))
       })?;
 
     if !matches!(options, Value::Undefined) {
@@ -666,10 +682,13 @@ pub(crate) fn dynamic_import_value(
       // side effects; import attributes are not implemented yet.
     }
 
-    let module_index = entry
-      .borrow()
-      .module_index
-      .ok_or_else(|| Value::String("dynamic import failed: module missing index".to_string()))?;
+    let module_index = entry.borrow().module_index.ok_or_else(|| {
+      Value::String(
+        "dynamic import failed: module missing index"
+          .to_string()
+          .into(),
+      )
+    })?;
     let exports = {
       let loader = loader_handle.borrow();
       loader
@@ -687,7 +706,13 @@ pub(crate) fn dynamic_import_value(
       vm.ensure_module_exports(index, exports);
     }
     vm.module_namespace_value(module_index)
-      .ok_or_else(|| Value::String("dynamic import failed: module namespace missing".to_string()))
+      .ok_or_else(|| {
+        Value::String(
+          "dynamic import failed: module namespace missing"
+            .to_string()
+            .into(),
+        )
+      })
   })();
 
   match result {

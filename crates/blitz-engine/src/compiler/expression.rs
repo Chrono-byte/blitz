@@ -89,7 +89,7 @@ impl super::Compiler {
     }
     self.emit(Op::GetThis, LINE);
     self.emit(Op::Copy, LINE);
-    self.emit_constant(Value::String(property.to_string()), LINE);
+    self.emit_constant(Value::String(property.to_string().into()), LINE);
     self.emit(Op::GetSuperProperty, LINE);
     if !preserve_receiver {
       self.emit(Op::Exchange, LINE);
@@ -131,7 +131,7 @@ impl super::Compiler {
     }
     self.emit(Op::GetThis, LINE);
     self.emit(Op::Copy, LINE);
-    self.emit_constant(Value::String(property.to_string()), LINE);
+    self.emit_constant(Value::String(property.to_string().into()), LINE);
     self.compile_expr_oast(value_expr)?;
     self.emit(Op::SetSuperProperty, LINE);
     self.emit(Op::Exchange, LINE);
@@ -171,7 +171,7 @@ impl super::Compiler {
       LINE,
     );
 
-    self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+    self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
     let key_slot = self.alloc_temp_local("ref_key");
     self.emit(Op::StoreLocal, LINE);
     self.emit_byte(u8::try_from(key_slot).expect("key_slot fits in u8"), LINE);
@@ -416,7 +416,7 @@ impl super::Compiler {
       }
       OExpr::StringLiteral(s) => {
         self.validate_literal_early_errors(expr)?;
-        self.emit_constant(Value::String(s.value.to_string()), LINE)
+        self.emit_constant(Value::String(s.value.to_string().into()), LINE)
       }
       OExpr::TemplateLiteral(t) => {
         let first = t
@@ -425,7 +425,7 @@ impl super::Compiler {
           .and_then(|q| q.value.cooked.as_ref())
           .map(ToString::to_string)
           .unwrap_or_default();
-        self.emit_constant(Value::String(first), LINE);
+        self.emit_constant(Value::String(first.into()), LINE);
         for (i, expr) in t.expressions.iter().enumerate() {
           self.compile_expr_oast(expr)?;
           self.emit(Op::Add, LINE);
@@ -435,7 +435,7 @@ impl super::Compiler {
             .and_then(|q| q.value.cooked.as_ref())
             .map(ToString::to_string)
             .unwrap_or_default();
-          self.emit_constant(Value::String(tail), LINE);
+          self.emit_constant(Value::String(tail.into()), LINE);
           self.emit(Op::Add, LINE);
         }
       }
@@ -448,7 +448,7 @@ impl super::Compiler {
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_default();
-          self.emit_constant(Value::String(cooked), LINE);
+          self.emit_constant(Value::String(cooked.into()), LINE);
         }
         self.emit(Op::BuildArray, LINE);
         self.emit_byte(
@@ -456,9 +456,9 @@ impl super::Compiler {
           LINE,
         );
         self.emit(Op::Copy, LINE);
-        self.emit_constant(Value::String("raw".to_string()), LINE);
+        self.emit_constant(Value::String("raw".to_string().into()), LINE);
         for quasi in &t.quasi.quasis {
-          self.emit_constant(Value::String(quasi.value.raw.to_string()), LINE);
+          self.emit_constant(Value::String(quasi.value.raw.to_string().into()), LINE);
         }
         self.emit(Op::BuildArray, LINE);
         self.emit_byte(
@@ -525,7 +525,7 @@ impl super::Compiler {
                 self.emit_constant(
                   Value::Symbol(
                     crate::value::SymbolId::well_known_iterator(),
-                    Some("Symbol.iterator".to_string()),
+                    Some("Symbol.iterator".to_string().into()),
                   ),
                   LINE,
                 );
@@ -561,7 +561,7 @@ impl super::Compiler {
               oast::PropertyKey::NumericLiteral(n) => super::numeric_property_key(n.value),
               _ => continue,
             };
-            self.emit_constant(Value::String(key), LINE);
+            self.emit_constant(Value::String(key.into()), LINE);
             if p.shorthand {
               match &p.key {
                 oast::PropertyKey::StaticIdentifier(ident) => {
@@ -620,11 +620,15 @@ impl super::Compiler {
               None
             } else {
               Some(match &p.key {
-                oast::PropertyKey::StaticIdentifier(ident) => Value::String(ident.name.to_string()),
-                oast::PropertyKey::Identifier(ident) => Value::String(ident.name.to_string()),
-                oast::PropertyKey::StringLiteral(s) => Value::String(s.value.to_string()),
+                oast::PropertyKey::StaticIdentifier(ident) => {
+                  Value::String(ident.name.to_string().into())
+                }
+                oast::PropertyKey::Identifier(ident) => {
+                  Value::String(ident.name.to_string().into())
+                }
+                oast::PropertyKey::StringLiteral(s) => Value::String(s.value.to_string().into()),
                 oast::PropertyKey::NumericLiteral(n) => {
-                  Value::String(super::numeric_property_key(n.value))
+                  Value::String(super::numeric_property_key(n.value).into())
                 }
                 _ => {
                   return Err(crate::errors::CompilerError::from(
@@ -656,11 +660,11 @@ impl super::Compiler {
               }
             };
             let method_name_owned = if let Some(Value::String(s)) = &key_value {
-              s.clone()
+              s.to_string_lossy()
             } else {
               "<accessor>".to_string()
             };
-            self.emit_constant(Value::String(descriptor_prop_name.to_string()), LINE);
+            self.emit_constant(Value::String(descriptor_prop_name.to_string().into()), LINE);
             if let oast::Expression::FunctionExpression(f) = &p.value {
               let self_name = f.id.as_ref().map(|id| id.name.as_str());
               let (proto, _env_len) =
@@ -671,9 +675,9 @@ impl super::Compiler {
             } else {
               self.compile_expr_oast(&p.value)?;
             }
-            self.emit_constant(Value::String("enumerable".to_string()), LINE);
+            self.emit_constant(Value::String("enumerable".to_string().into()), LINE);
             self.emit_constant(Value::Bool(true), LINE);
-            self.emit_constant(Value::String("configurable".to_string()), LINE);
+            self.emit_constant(Value::String("configurable".to_string().into()), LINE);
             self.emit_constant(Value::Bool(true), LINE);
             self.emit(Op::BuildObject, LINE);
             self.emit_byte(3, LINE);
@@ -686,7 +690,7 @@ impl super::Compiler {
           if let oast::ObjectPropertyKind::SpreadProperty(spread) = &obj.properties[idx] {
             self.emit(Op::Copy, LINE);
             self.emit_get_global_name("Object");
-            self.emit_constant(Value::String("assign".to_string()), LINE);
+            self.emit_constant(Value::String("assign".to_string().into()), LINE);
             self.emit(Op::GetProperty, LINE);
             let slot = self.alloc_ic_slot()?;
             self.emit_byte(slot, LINE);
@@ -808,7 +812,7 @@ impl super::Compiler {
                 self.emit_super_property_set_static(m.property.name.as_str(), &a.right)?;
               } else {
                 self.compile_expr_oast(&m.object)?;
-                self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
                 self.compile_expr_oast(&a.right)?;
                 self.emit(Op::SetProperty, LINE);
                 let slot = self.alloc_ic_slot()?;
@@ -907,11 +911,11 @@ impl super::Compiler {
               if matches!(&m.object, OExpr::Super(_)) {
                 self.emit(Op::GetThis, LINE);
                 self.emit(Op::Copy, LINE);
-                self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
                 self.emit(Op::GetSuperProperty, LINE);
                 self.compile_expr_oast(&a.right)?;
                 self.emit_compound_assignment_op(a.operator);
-                self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
                 self.emit(Op::Exchange, LINE);
                 self.emit(Op::SetSuperProperty, LINE);
                 self.emit(Op::Exchange, LINE);
@@ -1264,7 +1268,7 @@ impl super::Compiler {
         oast::UnaryOperator::Delete => {
           if let OExpr::StaticMemberExpression(m) = &u.argument {
             self.compile_expr_oast(&m.object)?;
-            self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+            self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
             self.emit(Op::DeleteProperty, LINE);
           } else if let OExpr::ComputedMemberExpression(m) = &u.argument {
             self.compile_expr_oast(&m.object)?;
@@ -1276,7 +1280,7 @@ impl super::Compiler {
             {
               self.emit_constant(Value::Bool(false), LINE);
             } else {
-              self.emit_constant(Value::String(id.name.to_string()), LINE);
+              self.emit_constant(Value::String(id.name.to_string().into()), LINE);
               self.emit(Op::DeleteIdentifier, LINE);
             }
           } else {
@@ -1591,7 +1595,7 @@ impl super::Compiler {
             self.emit(Op::JumpIfNullish, LINE);
             let nullish = self.current_ip();
             self.emit_jump_placeholder();
-            self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+            self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
             self.emit(Op::GetProperty, LINE);
             let slot = self.alloc_ic_slot()?;
             self.emit_byte(slot, LINE);
@@ -1603,7 +1607,7 @@ impl super::Compiler {
             self.emit(Op::Undefined, LINE);
             self.patch_jump(end);
           } else {
-            self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+            self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
             self.emit(Op::GetProperty, LINE);
             let slot = self.alloc_ic_slot()?;
             self.emit_byte(slot, LINE);
@@ -1681,7 +1685,7 @@ impl super::Compiler {
                 self.emit(Op::JumpIfNullish, LINE);
                 let nullish = self.current_ip();
                 self.emit_jump_placeholder();
-                self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
                 self.emit(Op::GetProperty, LINE);
                 let slot = self.alloc_ic_slot()?;
                 self.emit_byte(slot, LINE);
@@ -1693,7 +1697,7 @@ impl super::Compiler {
                 self.emit(Op::Undefined, LINE);
                 self.patch_jump(end);
               } else {
-                self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+                self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
                 self.emit(Op::GetProperty, LINE);
                 let slot = self.alloc_ic_slot()?;
                 self.emit_byte(slot, LINE);
@@ -1925,7 +1929,7 @@ impl super::Compiler {
           if m.optional {
             self.compile_optional_member_access(&m.object, |this: &mut Self| {
               this.emit(Op::Copy, LINE);
-              this.emit_constant(Value::String(m.property.name.to_string()), LINE);
+              this.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
               this.emit(Op::GetProperty, LINE);
               let slot = this.alloc_ic_slot()?;
               this.emit_byte(slot, LINE);
@@ -1934,7 +1938,7 @@ impl super::Compiler {
           } else {
             self.compile_expr_oast(&m.object)?;
             self.emit(Op::Copy, LINE);
-            self.emit_constant(Value::String(m.property.name.to_string()), LINE);
+            self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
             self.emit(Op::GetProperty, LINE);
             let slot = self.alloc_ic_slot()?;
             self.emit_byte(slot, LINE);
@@ -2031,8 +2035,11 @@ impl super::Compiler {
       }
       OExpr::RegExpLiteral(re) => {
         self.emit_get_global_name("RegExp");
-        self.emit_constant(Value::String(re.regex.pattern.text.to_string()), LINE);
-        self.emit_constant(Value::String(re.regex.flags.to_string()), LINE);
+        self.emit_constant(
+          Value::String(re.regex.pattern.text.to_string().into()),
+          LINE,
+        );
+        self.emit_constant(Value::String(re.regex.flags.to_string().into()), LINE);
         self.emit(Op::Call, LINE);
         self.emit_byte(2, LINE);
       }

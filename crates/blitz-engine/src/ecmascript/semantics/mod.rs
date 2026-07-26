@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 //! Language-semantic operations and intrinsic bootstrapping.
+use js_string::{JsString, JsStringBuilder};
 use num_bigint::BigInt as BigIntValue;
 use num_traits::ToPrimitive;
-use regex::RegexBuilder;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -11,8 +11,8 @@ use std::rc::Rc;
 use crate::ecmascript::builtins;
 use crate::realm::Intrinsics;
 use crate::runtime_utils::{
-  char_index_to_byte_index, collect_iterable_values, static_builtin_arg_offset, strict_equal,
-  syntax_error, to_index, to_integer_or_infinity, to_length,
+  collect_iterable_values, static_builtin_arg_offset, strict_equal, syntax_error, to_index,
+  to_integer_or_infinity, to_length,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::{Parser, RuntimeError, Vm, compiler};
@@ -66,13 +66,13 @@ pub(crate) fn create_list_from_array_like(
     return Err(vm.throw_type_error("CreateListFromArrayLike requires an object"));
   }
 
-  let length = vm.get_property_host(receiver, &PropertyKey::String("length".to_string()))?;
+  let length = vm.get_property_host(receiver, &PropertyKey::String("length".to_string().into()))?;
   let length = to_length(vm, &length)?;
   let mut values = Vec::with_capacity(length);
   for index in 0..length {
     values.push(vm.get_property_host(
       receiver,
-      &PropertyKey::String(usize_to_decimal_string(index)),
+      &PropertyKey::String(usize_to_decimal_string(index).into()),
     )?);
   }
   Ok(values)
@@ -89,7 +89,7 @@ fn array_like_length(
       ..
     }) = props_ref
       .properties
-      .get(&PropertyKey::String("length".to_string()))
+      .get(&PropertyKey::String("length".to_string().into()))
     {
       let max_safe_len = 9_007_199_254_740_991u128;
       if len_num.is_nan() || *len_num <= 0.0 {
@@ -107,7 +107,8 @@ fn array_like_length(
     }
   }
 
-  let len_val = vm.get_property_host(receiver, &PropertyKey::String("length".to_string()))?;
+  let len_val =
+    vm.get_property_host(receiver, &PropertyKey::String("length".to_string().into()))?;
   let len_num = vm.to_number_value(&len_val)?;
   let max_safe_len = 9_007_199_254_740_991u128;
   if len_num.is_nan() || len_num <= 0.0 {
@@ -154,7 +155,7 @@ fn array_length_is_writable(receiver: &Value) -> bool {
     Value::Array(_, props) => props
       .borrow()
       .properties
-      .get(&PropertyKey::String("length".to_string()))
+      .get(&PropertyKey::String("length".to_string().into()))
       .is_none_or(|desc| matches!(desc, PropertyDescriptor::Data { writable: true, .. })),
     _ => true,
   }
@@ -195,17 +196,19 @@ fn json_stringify_value(
     Value::String(s) => Some({
       let mut out = String::with_capacity(s.len() + 2);
       out.push('"');
-      for ch in s.chars() {
-        match ch {
-          '"' => out.push_str("\\\""),
-          '\\' => out.push_str("\\\\"),
-          '\n' => out.push_str("\\n"),
-          '\r' => out.push_str("\\r"),
-          '\t' => out.push_str("\\t"),
-          '\u{08}' => out.push_str("\\b"),
-          '\u{0c}' => out.push_str("\\f"),
-          c if c < ' ' => out.push_str(&format!("\\u{:04x}", c as u32)),
-          c => out.push(c),
+      for unit in s.code_units() {
+        match unit {
+          0x0022 => out.push_str("\\\""),
+          0x005C => out.push_str("\\\\"),
+          0x000A => out.push_str("\\n"),
+          0x000D => out.push_str("\\r"),
+          0x0009 => out.push_str("\\t"),
+          0x0008 => out.push_str("\\b"),
+          0x000C => out.push_str("\\f"),
+          0x0020..=0x007E => {
+            out.push(char::from_u32(u32::from(unit)).expect("ASCII is a Unicode scalar"));
+          }
+          unit => out.push_str(&format!("\\u{unit:04x}")),
         }
       }
       out.push('"');
@@ -243,8 +246,8 @@ fn json_stringify_value(
         let PropertyKey::String(name) = key else {
           continue;
         };
-        let key_value =
-          json_stringify_value(vm, &Value::String(name.clone()), seen)?.expect("strings stringify");
+        let key_value = json_stringify_value(vm, &Value::String(name.clone().into()), seen)?
+          .expect("strings stringify");
         let prop_value = vm.get_property_host(value, &PropertyKey::String(name))?;
         if let Some(serialized) = json_stringify_value(vm, &prop_value, seen)? {
           parts.push(format!("{}:{}", key_value, serialized));
@@ -257,112 +260,96 @@ fn json_stringify_value(
   Ok(result)
 }
 
-fn build_regex(
-  pattern: &str,
-  flags: &str,
-) -> Result<regex::Regex, RuntimeError> {
-  fn simplified_harness_pattern(pattern: &str) -> Option<&'static str> {
-    if pattern.starts_with("(?:[A-Za-z") {
-      Some("(?:[A-Za-z])")
-    } else if pattern.starts_with("(?:[0-9A-Z_a-z") {
-      Some("(?:[0-9A-Z_a-z])")
-    } else {
-      None
-    }
-  }
-
-  let build_with = |pattern: &str| {
-    let mut builder = RegexBuilder::new(pattern);
-    builder.case_insensitive(flags.contains('i'));
-    builder.multi_line(flags.contains('m'));
-    builder.dot_matches_new_line(flags.contains('s'));
-    builder.build()
-  };
-
-  match build_with(pattern) {
-    Ok(re) => Ok(re),
-    Err(_) if simplified_harness_pattern(pattern).is_some() => {
-      build_with(simplified_harness_pattern(pattern).expect("checked is_some"))
-        .map_err(|e| RuntimeError::from(format!("RegExp build: {}", e)))
-    }
-    Err(e) => Err(RuntimeError::from(format!("RegExp build: {}", e))),
-  }
-}
-
 pub(crate) fn get_substitution(
-  matched: &str,
-  subject: &str,
+  matched: &JsString,
+  subject: &JsString,
   start: usize,
   end: usize,
-  captures: &[Option<String>],
-  replacement: &str,
-) -> String {
-  let mut output = String::new();
-  let mut chars = replacement.chars().peekable();
-  while let Some(character) = chars.next() {
-    if character != '$' {
-      output.push(character);
+  captures: &[Option<JsString>],
+  named_captures: Option<&[(JsString, Option<JsString>)]>,
+  replacement: &JsString,
+) -> JsString {
+  let mut output = JsStringBuilder::with_capacity(replacement.len());
+  let units = replacement.as_slice();
+  let mut cursor = 0;
+  while cursor < units.len() {
+    let unit = units[cursor];
+    cursor += 1;
+    if unit != u16::from(b'$') {
+      output.push_code_unit(unit);
       continue;
     }
-    match chars.peek().copied() {
-      Some('$') => {
-        chars.next();
-        output.push('$');
+    match units.get(cursor).copied() {
+      Some(next) if next == u16::from(b'$') => {
+        cursor += 1;
+        output.push_code_unit(u16::from(b'$'));
       }
-      Some('&') => {
-        chars.next();
-        output.push_str(matched);
+      Some(next) if next == u16::from(b'&') => {
+        cursor += 1;
+        output.push_string(matched);
       }
-      Some('`') => {
-        chars.next();
-        output.push_str(&subject[..start]);
+      Some(next) if next == u16::from(b'`') => {
+        cursor += 1;
+        output.push_string(
+          &subject
+            .slice(0..start)
+            .expect("match start is within the subject"),
+        );
       }
-      Some('\'') => {
-        chars.next();
-        output.push_str(&subject[end..]);
+      Some(next) if next == u16::from(b'\'') => {
+        cursor += 1;
+        output.push_string(
+          &subject
+            .slice(end..subject.len())
+            .expect("match end is within the subject"),
+        );
       }
-      Some(digit @ '1'..='9') => {
-        chars.next();
-        let mut index = digit.to_digit(10).unwrap_or(0) as usize;
-        if let Some(next @ '0'..='9') = chars.peek().copied() {
-          let two_digit = index * 10 + next.to_digit(10).unwrap_or(0) as usize;
+      Some(digit) if (u16::from(b'1')..=u16::from(b'9')).contains(&digit) => {
+        cursor += 1;
+        let mut index = usize::from(digit - u16::from(b'0'));
+        if let Some(next) = units.get(cursor).copied()
+          && (u16::from(b'0')..=u16::from(b'9')).contains(&next)
+        {
+          let two_digit = index * 10 + usize::from(next - u16::from(b'0'));
           if two_digit <= captures.len() {
-            chars.next();
+            cursor += 1;
             index = two_digit;
           }
         }
         if index <= captures.len() {
           if let Some(capture) = &captures[index - 1] {
-            output.push_str(capture);
+            output.push_string(capture);
           }
         } else {
-          output.push('$');
-          output.push(digit);
+          output.push_code_unit(u16::from(b'$'));
+          output.push_code_unit(digit);
         }
       }
-      _ => output.push('$'),
+      Some(next) if next == u16::from(b'<') && named_captures.is_some() => {
+        let name_start = cursor + 1;
+        let Some(relative_end) = units[name_start..]
+          .iter()
+          .position(|unit| *unit == u16::from(b'>'))
+        else {
+          output.push_code_unit(u16::from(b'$'));
+          continue;
+        };
+        let name_end = name_start + relative_end;
+        let name = JsString::from_utf16(units[name_start..name_end].to_vec());
+        cursor = name_end + 1;
+        if let Some(value) = named_captures
+          .and_then(|captures| {
+            captures
+              .iter()
+              .find(|(candidate, _)| candidate == &name)
+          })
+          .and_then(|(_, value)| value.as_ref())
+        {
+          output.push_string(value);
+        }
+      }
+      _ => output.push_code_unit(u16::from(b'$')),
     }
   }
-  output
-}
-
-fn sticky_caret_allows(
-  subject: &str,
-  start_index: usize,
-  pattern: &str,
-  multiline: bool,
-) -> bool {
-  if !pattern.starts_with('^') {
-    return true;
-  }
-  if start_index == 0 {
-    return true;
-  }
-  if !multiline {
-    return false;
-  }
-  subject
-    .chars()
-    .nth(start_index.saturating_sub(1))
-    .is_some_and(|c| c == '\n' || c == '\r')
+  output.finish()
 }

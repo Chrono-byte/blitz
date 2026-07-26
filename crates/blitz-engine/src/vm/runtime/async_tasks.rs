@@ -116,7 +116,7 @@ impl Vm {
       self.handlers = caller_handlers;
       self.maybe_collect_garbage_prototype();
       if let Err(err) = result {
-        let exc_val = Value::String(format!("{}", err));
+        let exc_val = Value::String(format!("{}", err).into());
         self.last_uncaught_exception = Some(exc_val.clone());
         if let Some(hook_rc) = self
           .unhandled_rejection_hook
@@ -149,7 +149,7 @@ impl Vm {
         // Record the last uncaught exception so callers or host hooks
         // can inspect it. Convert the runtime error into a JS value
         // string for now; hosts may implement richer reporting.
-        let exc_val = Value::String(format!("{}", err));
+        let exc_val = Value::String(format!("{}", err).into());
         self.last_uncaught_exception = Some(exc_val.clone());
         // If a host hook is installed, call it with Undefined promise
         // to indicate this was a microtask exception.
@@ -333,7 +333,7 @@ impl Vm {
         let reason = self
           .last_uncaught_exception
           .take()
-          .unwrap_or_else(|| Value::String(format!("{}", err)));
+          .unwrap_or_else(|| Value::String(format!("{}", err).into()));
         let mut reason_cell = Some(reason);
         self.queue_microtask(move |vm| {
           if crate::trace::enabled() {
@@ -459,7 +459,7 @@ mod tests {
     );
     assert!(matches!(
         vm.last_uncaught_exception.as_ref(),
-        Some(Value::String(s)) if s.contains("microtask failed")
+        Some(Value::String(s)) if s.as_str_lossy().contains("microtask failed")
     ));
     assert_eq!(
       hook_calls.borrow().as_slice(),

@@ -16,27 +16,28 @@ mod tests {
   fn decode_uri_keeps_reserved_escapes() {
     let mut vm = test_vm();
 
-    let preserved = global_decode_uri(&mut vm, &[Value::String("%3B%2F%3F".to_string())])
+    let preserved = global_decode_uri(&mut vm, &[Value::String("%3B%2F%3F".to_string().into())])
       .expect("decodeURI should succeed");
-    assert_eq!(preserved, Value::String("%3B%2F%3F".to_string()));
+    assert_eq!(preserved, Value::String("%3B%2F%3F".to_string().into()));
 
-    let decoded = global_decode_uri_component(&mut vm, &[Value::String("%3B%2F%3F".to_string())])
-      .expect("decodeURIComponent should succeed");
-    assert_eq!(decoded, Value::String(";/?".to_string()));
+    let decoded =
+      global_decode_uri_component(&mut vm, &[Value::String("%3B%2F%3F".to_string().into())])
+        .expect("decodeURIComponent should succeed");
+    assert_eq!(decoded, Value::String(";/?".to_string().into()));
   }
 
   #[test]
   fn decode_uri_streams_literal_utf8_bytes() {
     let mut vm = test_vm();
-    let value = global_decode_uri(&mut vm, &[Value::String("héllo".to_string())])
+    let value = global_decode_uri(&mut vm, &[Value::String("héllo".to_string().into())])
       .expect("decodeURI should accept raw utf8");
-    assert_eq!(value, Value::String("héllo".to_string()));
+    assert_eq!(value, Value::String("héllo".to_string().into()));
   }
 
   #[test]
   fn decode_uri_rejects_invalid_utf8_escapes() {
     let mut vm = test_vm();
-    let error = global_decode_uri_component(&mut vm, &[Value::String("%FF".to_string())])
+    let error = global_decode_uri_component(&mut vm, &[Value::String("%FF".to_string().into())])
       .expect_err("decodeURIComponent must reject malformed UTF-8");
     assert!(error.to_string().contains("URIError"));
   }

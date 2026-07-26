@@ -101,7 +101,7 @@ pub(crate) fn new_array_buffer(
   );
   object.set_internal_slot(ARRAY_BUFFER_SHARED_SLOT, Value::Bool(shared));
   object.properties.insert(
-    PropertyKey::String("byteLength".to_string()),
+    PropertyKey::String("byteLength".to_string().into()),
     PropertyDescriptor::ordinary_data(Value::Number(length as f64)),
   );
   (Value::Object(Rc::new(RefCell::new(object))), data)
@@ -120,7 +120,10 @@ pub(crate) fn new_byte_view(
     TYPED_ARRAY_DATA_SLOT,
     Value::Array(Rc::clone(&data), Rc::new(RefCell::new(ObjectData::new()))),
   );
-  object.set_internal_slot(TYPED_ARRAY_KIND_SLOT, Value::String(kind.to_string()));
+  object.set_internal_slot(
+    TYPED_ARRAY_KIND_SLOT,
+    Value::String(kind.to_string().into()),
+  );
   object.set_internal_slot(TYPED_ARRAY_BYTES_PER_ELEMENT_SLOT, Value::Number(1.0));
   object.set_internal_slot(TYPED_ARRAY_LENGTH_SLOT, Value::Number(length as f64));
   object.set_internal_slot(TYPED_ARRAY_BYTE_LENGTH_SLOT, Value::Number(length as f64));
@@ -137,7 +140,7 @@ pub(crate) fn new_byte_view(
     ("buffer", buffer),
   ] {
     object.properties.insert(
-      PropertyKey::String(name.to_string()),
+      PropertyKey::String(name.to_string().into()),
       PropertyDescriptor::ordinary_data(value),
     );
   }
@@ -151,7 +154,7 @@ pub(crate) fn byte_view_details(value: &Value) -> Option<ByteViewDetails> {
   let kind = match internal_slot(object, TYPED_ARRAY_KIND_SLOT)? {
     Value::String(kind)
       if matches!(
-        kind.as_str(),
+        kind.as_str_lossy(),
         "Uint8Array" | "Int8Array" | "Uint8ClampedArray"
       ) =>
     {
@@ -178,7 +181,7 @@ pub(crate) fn byte_view_details(value: &Value) -> Option<ByteViewDetails> {
     object: Rc::clone(object),
     buffer,
     data,
-    kind,
+    kind: kind.to_string(),
     length,
     byte_offset,
     prototype: object.borrow().get_prototype(),
