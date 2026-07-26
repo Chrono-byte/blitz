@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use blitz::errors::RuntimeError;
 use blitz::gc;
+use blitz::module::PrelinkedHostModule;
 use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use blitz::{HostRoot, Vm};
 use tokio::sync::mpsc;
@@ -517,8 +518,7 @@ pub fn try_install_runtime(
   let events = EventRegistry::new(64).expect("runtime event capacity is non-zero");
   let server_slot = Rc::new(RefCell::new(None));
   let terminal_slot = Rc::new(RefCell::new(None));
-  let previous_bridge = vm.get_global("__blitz_host_v1");
-  let capabilities = install_host_bridge(
+  let (host_bridge, capabilities) = create_host_bridge(
     vm,
     requests_tx.clone(),
     websocket_events_tx.clone(),
@@ -541,7 +541,6 @@ pub fn try_install_runtime(
     crate::effect_assets::EFFECT_MANIFEST_BYTES,
     crate::effect_assets::STDLIB_MANIFEST_BYTES,
   ) {
-    restore_host_bridge(vm, previous_bridge);
     return Err(RuntimeInstallError::Policy(error));
   }
   let policy_validation = policy_started.elapsed();
@@ -567,8 +566,15 @@ pub fn try_install_runtime(
     .filter(|(specifier, _)| {
       !specifier.starts_with("node:") || allowed_node_modules.contains(&specifier.as_str())
     });
-  if let Err(error) = vm.register_prelinked_graph_with_declarations(graph, declarations) {
-    restore_host_bridge(vm, previous_bridge);
+  let host_module = PrelinkedHostModule {
+    specifier: "blitz-internal:host".to_string(),
+    exports: HashMap::from([("host".to_string(), host_bridge)]),
+  };
+  if let Err(error) = vm.register_prelinked_graph_with_declarations_and_host_modules(
+    graph,
+    declarations,
+    vec![host_module],
+  ) {
     return Err(RuntimeInstallError::Registration(error.to_string()));
   }
   let graph_registration = registration_started.elapsed();
@@ -1234,7 +1240,7 @@ fn terminal_primitive(
 /// connections idempotently. The transitional limitation remains that requests
 /// are forwarded to the ordinary runtime event channel rather than invoking
 /// the `blitz:app` router/layers; host capability validation does not hide it.
-fn install_host_bridge(
+fn create_host_bridge(
   vm: &mut Vm,
   requests: mpsc::Sender<HttpRequestEvent>,
   websocket_events: mpsc::Sender<WebSocketEvent>,
@@ -1243,7 +1249,7 @@ fn install_host_bridge(
   terminal: Rc<RefCell<Option<terminal::TerminalState>>>,
   node_file_system_allowed: bool,
   crypto_random_allowed: bool,
-) -> HostBridgeCapabilities {
+) -> (Value, HostBridgeCapabilities) {
   let app_transport = object(vm.realm().object_prototype());
   set(
     &app_transport,
@@ -1291,20 +1297,7 @@ fn install_host_bridge(
   if let Value::Object(object) = &bridge {
     object.borrow_mut().extensible = false;
   }
-  vm.realm()
-    .global()
-    .borrow_mut()
-    .properties
-    .insert(
-      PropertyKey::String("__blitz_host_v1".to_string()),
-      PropertyDescriptor::Data {
-        value: bridge,
-        writable: false,
-        enumerable: false,
-        configurable: false,
-      },
-    );
-  HostBridgeCapabilities::new(HOST_BRIDGE_ABI_VERSION)
+  let capabilities = HostBridgeCapabilities::new(HOST_BRIDGE_ABI_VERSION)
     .with_primitive(
       APP_TRANSPORT_PRIMITIVE,
       HOST_BRIDGE_ABI_VERSION,
@@ -1339,22 +1332,8 @@ fn install_host_bridge(
       WEB_SOCKET_PRIMITIVE,
       HOST_BRIDGE_ABI_VERSION,
       WEB_SOCKET_METHODS.iter().copied(),
-    )
-}
-
-fn restore_host_bridge(
-  vm: &mut Vm,
-  previous: Option<Value>,
-) {
-  if let Some(previous) = previous {
-    vm.realm().set_global("__blitz_host_v1", previous);
-  } else {
-    vm.realm()
-      .global()
-      .borrow_mut()
-      .properties
-      .shift_remove(&PropertyKey::String("__blitz_host_v1".to_string()));
-  }
+    );
+  (bridge, capabilities)
 }
 
 fn object(prototype: Value) -> Value {
@@ -1696,42 +1675,20 @@ mod tests {
   }
 
   #[test]
-  fn private_host_bridge_is_immutable_and_non_enumerable() {
+  fn private_host_bridge_is_not_exposed_on_the_global_object() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     let mut vm = Vm::new(Rc::clone(&globals));
     let _runtime = install_runtime(
       &mut vm,
       RuntimeOptions::from_host(vec!["blitz-test".to_string()]),
     );
-    let descriptor = globals
-      .borrow()
-      .properties
-      .get(&PropertyKey::String("__blitz_host_v1".to_string()))
-      .cloned()
-      .expect("host bridge descriptor");
-    let PropertyDescriptor::Data {
-      value: Value::Object(bridge),
-      writable,
-      enumerable,
-      configurable,
-    } = descriptor
-    else {
-      panic!("host bridge is an object data property");
-    };
-    assert!(!writable);
-    assert!(!enumerable);
-    assert!(!configurable);
-    assert!(!bridge.borrow().extensible);
-    let app_transport = bridge
-      .borrow()
-      .properties
-      .get(&PropertyKey::String("appTransport".to_string()))
-      .and_then(|descriptor| match descriptor {
-        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-        PropertyDescriptor::Accessor { .. } => None,
-      })
-      .expect("app transport primitive");
-    assert!(matches!(app_transport, Value::Object(object) if !object.borrow().extensible));
+    assert_eq!(vm.get_global("__blitz_host_v1"), None);
+    assert!(
+      !globals
+        .borrow()
+        .properties
+        .contains_key(&PropertyKey::String("__blitz_host_v1".to_string()))
+    );
   }
 
   #[test]

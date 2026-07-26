@@ -1,0 +1,782 @@
+{
+  "formatVersion": 1,
+  "referenceNodeVersion": "24.18.0",
+  "coverageMetric": {
+    "kind": "public-built-in-roots",
+    "inventoryTotal": 58,
+    "supportedRoots": 35,
+    "percent": 60.34,
+    "note": "A supported root has a registered, declared, tested initial compatibility slice; this percentage does not claim complete export-level Node API parity."
+  },
+  "profiles": {
+    "core": [
+      "node:assert",
+      "node:assert/strict",
+      "node:async_hooks",
+      "node:console",
+      "node:constants",
+      "node:diagnostics_channel",
+      "node:events",
+      "node:module",
+      "node:os",
+      "node:path",
+      "node:path/posix",
+      "node:path/win32",
+      "node:perf_hooks",
+      "node:process",
+      "node:querystring",
+      "node:stream",
+      "node:stream/consumers",
+      "node:stream/promises",
+      "node:string_decoder",
+      "node:timers",
+      "node:timers/promises",
+      "node:tty",
+      "node:url",
+      "node:util",
+      "node:util/types"
+    ],
+    "tooling": [
+      "node:assert",
+      "node:assert/strict",
+      "node:async_hooks",
+      "node:console",
+      "node:constants",
+      "node:crypto",
+      "node:diagnostics_channel",
+      "node:events",
+      "node:fs",
+      "node:fs/promises",
+      "node:module",
+      "node:os",
+      "node:path",
+      "node:path/posix",
+      "node:path/win32",
+      "node:perf_hooks",
+      "node:process",
+      "node:querystring",
+      "node:readline",
+      "node:readline/promises",
+      "node:stream",
+      "node:stream/consumers",
+      "node:stream/promises",
+      "node:string_decoder",
+      "node:timers",
+      "node:timers/promises",
+      "node:tty",
+      "node:url",
+      "node:util",
+      "node:util/types"
+    ],
+    "full": [
+      "node:assert",
+      "node:assert/strict",
+      "node:async_hooks",
+      "node:console",
+      "node:constants",
+      "node:crypto",
+      "node:diagnostics_channel",
+      "node:domain",
+      "node:events",
+      "node:fs",
+      "node:fs/promises",
+      "node:module",
+      "node:os",
+      "node:path",
+      "node:path/posix",
+      "node:path/win32",
+      "node:perf_hooks",
+      "node:process",
+      "node:punycode",
+      "node:querystring",
+      "node:readline",
+      "node:readline/promises",
+      "node:sea",
+      "node:stream",
+      "node:stream/consumers",
+      "node:stream/promises",
+      "node:string_decoder",
+      "node:sys",
+      "node:timers",
+      "node:timers/promises",
+      "node:trace_events",
+      "node:tty",
+      "node:url",
+      "node:util",
+      "node:util/types"
+    ]
+  },
+  "modules": [
+    {
+      "specifier": "node:assert",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-assert.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:assert/strict",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-assert-strict.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:async_hooks",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-async-hooks.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:buffer",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:child_process",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:cluster",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:console",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-console.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:constants",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-constants.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:crypto",
+      "status": "supported-slice",
+      "profiles": [
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-crypto.d.ts",
+      "hostPrimitives": [
+        "node-crypto-random"
+      ],
+      "tests": [
+        "host::node_crypto::tests",
+        "modules::tests::typechecks_tooling_node_module_declarations"
+      ]
+    },
+    {
+      "specifier": "node:dgram",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:diagnostics_channel",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-diagnostics-channel.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:dns",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:dns/promises",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:domain",
+      "status": "supported-slice",
+      "profiles": [
+        "full"
+      ],
+      "declaration": "declarations/node-domain.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_full_profile_compatibility_roots"
+      ]
+    },
+    {
+      "specifier": "node:events",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-events.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_node_event_emitter_lifecycle"
+      ]
+    },
+    {
+      "specifier": "node:fs",
+      "status": "supported-slice",
+      "profiles": [
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-fs.d.ts",
+      "hostPrimitives": [
+        "node-file-system"
+      ],
+      "tests": [
+        "modules::tests::evaluates_tooling_filesystem_sync_and_promises",
+        "host::node_fs::tests"
+      ]
+    },
+    {
+      "specifier": "node:fs/promises",
+      "status": "supported-slice",
+      "profiles": [
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-fs-promises.d.ts",
+      "hostPrimitives": [
+        "node-file-system"
+      ],
+      "tests": [
+        "modules::tests::evaluates_tooling_filesystem_sync_and_promises",
+        "host::node_fs::tests"
+      ]
+    },
+    {
+      "specifier": "node:http",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:http2",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:https",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:inspector",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:inspector/promises",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:module",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-module.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:net",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:os",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-os.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:path",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-path.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:path/posix",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-path-posix.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:path/win32",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-path-win32.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:perf_hooks",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-perf-hooks.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:process",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-process.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:punycode",
+      "status": "supported-slice",
+      "profiles": [
+        "full"
+      ],
+      "declaration": "declarations/node-punycode.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_full_profile_compatibility_roots"
+      ]
+    },
+    {
+      "specifier": "node:querystring",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-querystring.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:readline",
+      "status": "supported-slice",
+      "profiles": [
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-readline.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_tooling_readline_callbacks_and_promises",
+        "tools/effect-assets/scripts/test-readline.ts"
+      ]
+    },
+    {
+      "specifier": "node:readline/promises",
+      "status": "supported-slice",
+      "profiles": [
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-readline-promises.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_tooling_readline_callbacks_and_promises",
+        "tools/effect-assets/scripts/test-readline.ts"
+      ]
+    },
+    {
+      "specifier": "node:repl",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:sea",
+      "status": "supported-slice",
+      "profiles": [
+        "full"
+      ],
+      "declaration": "declarations/node-sea.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_full_profile_compatibility_roots"
+      ]
+    },
+    {
+      "specifier": "node:sqlite",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:stream",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-stream.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:stream/consumers",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-stream-consumers.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:stream/promises",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-stream-promises.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:stream/web",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:string_decoder",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-string-decoder.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "tools/effect-assets/scripts/test-string-decoder.ts",
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:sys",
+      "status": "supported-slice",
+      "profiles": [
+        "full"
+      ],
+      "declaration": "declarations/node-sys.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_full_profile_compatibility_roots"
+      ]
+    },
+    {
+      "specifier": "node:test",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:test/reporters",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:timers",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-timers.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:timers/promises",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-timers-promises.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:tls",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:trace_events",
+      "status": "supported-slice",
+      "profiles": [
+        "full"
+      ],
+      "declaration": "declarations/node-trace-events.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_full_profile_compatibility_roots"
+      ]
+    },
+    {
+      "specifier": "node:tty",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-tty.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:url",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-url.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:util",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-util.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:util/types",
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-util-types.d.ts",
+      "hostPrimitives": [],
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity"
+      ]
+    },
+    {
+      "specifier": "node:v8",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:vm",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:wasi",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:worker_threads",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    },
+    {
+      "specifier": "node:zlib",
+      "status": "planned-or-deferred",
+      "profiles": [],
+      "declaration": null,
+      "hostPrimitives": [],
+      "tests": []
+    }
+  ]
+}

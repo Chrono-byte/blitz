@@ -1,5 +1,6 @@
+import { host } from "blitz-internal:host";
+
 const bridge = () => {
-  const host = globalThis.__blitz_host_v1;
   if (host === undefined || host.abiVersion !== 1) {
     throw new Error("Blitz host ABI v1 is not installed");
   }

@@ -152,6 +152,7 @@ mod tests {
           blitz::module::ModuleLoaderPipelineSnapshot::default(),
           "installing bundled Effect roots must not use the source pipeline"
         );
+        vm.collect_garbage_prototype();
 
         let directory = std::env::temp_dir().join(format!(
           "blitz-effect-compatibility-{}-{}",
@@ -623,8 +624,10 @@ mod tests {
     );
     let loader_handle = vm.module_loader_handle();
     let mut loader = loader_handle.borrow_mut();
-    let result = loader.construct(Path::new("."), "blitz-internal:app-transport");
-    assert!(matches!(result, Err(error) if error.to_string().contains("private")));
+    for specifier in ["blitz-internal:host", "blitz-internal:app-transport"] {
+      let result = loader.construct(Path::new("."), specifier);
+      assert!(matches!(result, Err(error) if error.to_string().contains("private")));
+    }
   }
 
   #[test]
@@ -993,7 +996,7 @@ mod tests {
   }
 
   #[test]
-  fn app_transport_is_lazy_typed_and_scoped() {
+  fn app_transport_is_lazy_typed_and_private() {
     run_effect_compatibility_entry(
       blitz::js!(
         module,
@@ -1001,83 +1004,24 @@ mod tests {
         import * as Cause from 'effect/Cause';
         import * as Effect from 'effect/Effect';
         import * as Exit from 'effect/Exit';
-        import * as Fiber from 'effect/Fiber';
         import { App } from 'blitz:app';
 
-        const transport = globalThis.__blitz_host_v1.appTransport;
-        const options = { hostname: '127.0.0.1', port: 0, rpcPath: '/rpc' };
         const app = App.make({ rpc: { _tag: 'BlitzRouter' } });
         const lazyServe = app.serve({ hostname: '127.0.0.1', port: 0 });
-        const server = Effect.runSync(transport.openAppServer(options));
-        const pending = Effect.runFork(transport.awaitShutdown(server));
-        const boundPort = Number(server.localAddr.split(':')[1]);
-        const bindFailure = Effect.runSyncExit(
-          transport.openAppServer({
-            hostname: '127.0.0.1',
-            port: boundPort,
-            rpcPath: '/rpc'
-          })
-        );
-        const bindFailureOption = Exit.isFailure(bindFailure)
-          ? Cause.failureOption(bindFailure.cause)
-          : { _tag: 'None' };
-        const scopedAddress = Effect.runSync(
-          Effect.scoped(
-            Effect.flatMap(
-              Effect.acquireRelease(
-                transport.openAppServer(options),
-                acquired => transport.closeAppServer(acquired)
-              ),
-              acquired => Effect.succeed(acquired.localAddr)
-            )
-          )
-        );
-        Effect.runSync(transport.closeAppServer(server));
-        Effect.runSync(transport.closeAppServer(server));
-
-        const appFiber = Effect.runFork(
-          app.serve({
-            hostname: '127.0.0.1',
-            port: boundPort,
-            rpcPath: '/rpc'
-          })
-        );
-        const interruptedApp = Effect.runSync(Fiber.interrupt(appFiber));
-        const rebound = Effect.runSync(
-          transport.openAppServer({
-            hostname: '127.0.0.1',
-            port: boundPort,
-            rpcPath: '/rpc'
-          })
-        );
-        Effect.runSync(transport.closeAppServer(rebound));
-
         const invalid = Effect.runSyncExit(
-          app.serve({
-            hostname: '127.0.0.1',
-            port: 0,
-            rpcPath: '/'
-          })
+          app.serve({ hostname: '127.0.0.1', port: 0, rpcPath: '/' })
         );
         const invalidFailure = Exit.isFailure(invalid)
           ? Cause.failureOption(invalid.cause)
           : { _tag: 'None' };
 
         globalThis.app_serve_is_lazy_effect = typeof lazyServe.pipe === 'function';
-        globalThis.app_transport_address = server.localAddr;
-        globalThis.app_transport_await_is_non_blocking =
-          typeof pending.unsafePoll === 'function';
-        globalThis.app_transport_scoped_address = scopedAddress;
         globalThis.app_transport_invalid_is_typed =
           invalidFailure._tag === 'Some' &&
           invalidFailure.value._tag === 'ServeError' &&
           invalidFailure.value.reason === 'InvalidOptions';
-        globalThis.app_transport_bind_is_typed =
-          bindFailureOption._tag === 'Some' &&
-          bindFailureOption.value._tag === 'ServeError' &&
-          bindFailureOption.value.reason === 'Bind';
-        globalThis.app_transport_interrupt_released =
-          Exit.isInterrupted(interruptedApp) && rebound.localAddr === server.localAddr;
+        globalThis.app_host_bridge_is_hidden =
+          !Object.getOwnPropertyNames(globalThis).includes('__blitz_host_v1');
       "#
       ),
       |vm| {
@@ -1085,28 +1029,12 @@ mod tests {
           vm.get_global("app_serve_is_lazy_effect"),
           Some(Value::Bool(true))
         );
-        assert!(matches!(
-          vm.get_global("app_transport_address"),
-          Some(Value::String(address)) if address.starts_with("127.0.0.1:")
-        ));
-        assert_eq!(
-          vm.get_global("app_transport_await_is_non_blocking"),
-          Some(Value::Bool(true))
-        );
-        assert!(matches!(
-          vm.get_global("app_transport_scoped_address"),
-          Some(Value::String(address)) if address.starts_with("127.0.0.1:")
-        ));
         assert_eq!(
           vm.get_global("app_transport_invalid_is_typed"),
           Some(Value::Bool(true))
         );
         assert_eq!(
-          vm.get_global("app_transport_bind_is_typed"),
-          Some(Value::Bool(true))
-        );
-        assert_eq!(
-          vm.get_global("app_transport_interrupt_released"),
+          vm.get_global("app_host_bridge_is_hidden"),
           Some(Value::Bool(true))
         );
       },

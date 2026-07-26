@@ -856,6 +856,39 @@ impl Vm {
       .register_prelinked_graph_with_declarations(graph, declarations)
   }
 
+  /// Register a parser-free graph, declarations, and private host modules atomically.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if graph, declaration, host-module, or collision
+  /// validation fails.
+  pub fn register_prelinked_graph_with_declarations_and_host_modules<I, S, T>(
+    &mut self,
+    graph: crate::prelinked::PrelinkedModuleGraph,
+    declarations: I,
+    host_modules: Vec<crate::module::PrelinkedHostModule>,
+  ) -> Result<(), crate::errors::BundlerError>
+  where
+    I: IntoIterator<Item = (S, T)>,
+    S: Into<String>,
+    T: Into<String>,
+  {
+    let host_roots = host_modules
+      .iter()
+      .flat_map(|module| module.exports.values().cloned())
+      .collect::<Vec<_>>();
+    self
+      .module_loader
+      .borrow_mut()
+      .register_prelinked_graph_with_declarations_and_host_modules(
+        graph,
+        declarations,
+        host_modules,
+      )?;
+    self.host_roots.extend(host_roots);
+    Ok(())
+  }
+
   /// Register one host-provided virtual module in this VM's realm loader.
   ///
   /// # Errors

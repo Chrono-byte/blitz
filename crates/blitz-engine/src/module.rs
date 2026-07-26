@@ -610,6 +610,8 @@ pub struct ModuleRecord {
   pub namespace_exports: HashMap<String, usize>,
   /// Star export sources.
   pub star_exports: Vec<String>,
+  /// Whether this prelinked module is initialized entirely by its embedder.
+  host_initialized: bool,
 }
 
 impl ModuleRecord {
@@ -638,6 +640,7 @@ impl ModuleRecord {
     )
   }
 
+  #[allow(clippy::too_many_arguments)]
   fn new_prelinked(
     path: PathBuf,
     specifier: String,
@@ -646,6 +649,7 @@ impl ModuleRecord {
     chunk: Chunk,
     declaration_source: Option<String>,
     content_hash: u64,
+    host_initialized: bool,
   ) -> Self {
     let mut record = Self::new(
       path,
@@ -656,6 +660,7 @@ impl ModuleRecord {
       Some(content_hash),
     );
     record.module_index = Some(module_index);
+    record.host_initialized = host_initialized;
     record
   }
 
@@ -686,6 +691,7 @@ impl ModuleRecord {
       namespace_export_sources: Vec::new(),
       namespace_exports: HashMap::new(),
       star_exports: Vec::new(),
+      host_initialized: false,
     }
   }
 
@@ -737,9 +743,22 @@ struct PrelinkedModuleLocation {
   module_position: usize,
 }
 
+/// A private prelinked module whose exports are supplied by the embedder.
+///
+/// Its bundled bytecode is retained for artifact validation but is not
+/// executed. Every declared export must be initialized by the embedder.
+#[derive(Clone)]
+pub struct PrelinkedHostModule {
+  /// Canonical private module specifier present in the prelinked graph.
+  pub specifier: String,
+  /// Complete export-name to realm-value mapping for the module.
+  pub exports: HashMap<String, Value>,
+}
+
 struct RegisteredPrelinkedGraph {
   graph: Arc<PrelinkedModuleGraph>,
   declarations: HashMap<String, String>,
+  host_module_bindings: HashMap<u32, Vec<(u32, Value)>>,
   binding_slots: Option<Vec<SharedValue>>,
 }
 
@@ -834,7 +853,11 @@ impl ModuleLoader {
     &mut self,
     graph: PrelinkedModuleGraph,
   ) -> Result<(), BundlerError> {
-    self.register_prelinked_graph_with_declarations(graph, std::iter::empty::<(String, String)>())
+    self.register_prelinked_graph_with_declarations_and_host_modules(
+      graph,
+      std::iter::empty::<(String, String)>(),
+      Vec::new(),
+    )
   }
 
   /// Register a parser-free graph and declaration sources atomically.
@@ -851,6 +874,34 @@ impl ModuleLoader {
     &mut self,
     graph: PrelinkedModuleGraph,
     declarations: I,
+  ) -> Result<(), BundlerError>
+  where
+    I: IntoIterator<Item = (S, T)>,
+    S: Into<String>,
+    T: Into<String>,
+  {
+    self.register_prelinked_graph_with_declarations_and_host_modules(
+      graph,
+      declarations,
+      Vec::new(),
+    )
+  }
+
+  /// Register a parser-free graph, declarations, and private host modules atomically.
+  ///
+  /// Host-module targets must be private modules in `graph`, and the embedder
+  /// must provide every declared export exactly once. Host-module bytecode is
+  /// validated with the graph but is never executed.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error before registration for invalid graph metadata,
+  /// declarations, host modules, or existing identity/index collisions.
+  pub fn register_prelinked_graph_with_declarations_and_host_modules<I, S, T>(
+    &mut self,
+    graph: PrelinkedModuleGraph,
+    declarations: I,
+    host_modules: Vec<PrelinkedHostModule>,
   ) -> Result<(), BundlerError>
   where
     I: IntoIterator<Item = (S, T)>,
@@ -887,6 +938,62 @@ impl ModuleLoader {
           "Duplicate prelinked declaration target: {specifier}"
         )));
       }
+    }
+
+    let public_module_indices = graph
+      .public_roots
+      .iter()
+      .copied()
+      .collect::<HashSet<_>>();
+    let modules_by_specifier = graph
+      .modules
+      .iter()
+      .map(|module| (module.specifier.as_str(), module))
+      .collect::<HashMap<_, _>>();
+    let mut host_module_bindings = HashMap::new();
+    for host_module in host_modules {
+      let module = modules_by_specifier
+        .get(host_module.specifier.as_str())
+        .ok_or_else(|| {
+          BundlerError::from(format!(
+            "Prelinked host module target {:?} is not in the graph",
+            host_module.specifier
+          ))
+        })?;
+      if public_module_indices.contains(&module.module_index) {
+        return Err(BundlerError::from(format!(
+          "Prelinked host module target {:?} is public",
+          host_module.specifier
+        )));
+      }
+      if host_module_bindings.contains_key(&module.module_index) {
+        return Err(BundlerError::from(format!(
+          "Duplicate prelinked host module target: {}",
+          host_module.specifier
+        )));
+      }
+      let declared_exports = module
+        .exports
+        .iter()
+        .map(|export| (export.exported_name.as_str(), export.binding_id))
+        .collect::<HashMap<_, _>>();
+      if host_module.exports.len() != declared_exports.len()
+        || host_module
+          .exports
+          .keys()
+          .any(|name| !declared_exports.contains_key(name.as_str()))
+      {
+        return Err(BundlerError::from(format!(
+          "Prelinked host module {:?} must initialize exactly its declared exports",
+          host_module.specifier
+        )));
+      }
+      let bindings = host_module
+        .exports
+        .into_iter()
+        .map(|(name, value)| (declared_exports[name.as_str()], value))
+        .collect();
+      host_module_bindings.insert(module.module_index, bindings);
     }
 
     let fixed_indices = self.fixed_module_indices();
@@ -965,6 +1072,7 @@ impl ModuleLoader {
       .push(RegisteredPrelinkedGraph {
         graph,
         declarations: declarations_by_specifier,
+        host_module_bindings,
         binding_slots: None,
       });
     Ok(())
@@ -1137,6 +1245,14 @@ impl ModuleLoader {
       .get(location.graph_id)
       .and_then(|registration| registration.declarations.get(&module.specifier))
       .cloned();
+    let host_initialized = self
+      .prelinked_graphs
+      .get(location.graph_id)
+      .is_some_and(|registration| {
+        registration
+          .host_module_bindings
+          .contains_key(&module.module_index)
+      });
     let record = Rc::new(RefCell::new(ModuleRecord::new_prelinked(
       virtual_path.clone(),
       module.specifier.clone(),
@@ -1145,6 +1261,7 @@ impl ModuleLoader {
       module.chunk,
       declaration_source,
       content_hash,
+      host_initialized,
     )));
     // Preallocate the record identity before traversing bundled edges so
     // cycles always reuse this exact record.
@@ -1442,6 +1559,20 @@ impl ModuleLoader {
             .map(|_| Rc::new(RefCell::new(Value::Undefined)))
             .collect(),
         );
+        let slots = registration
+          .binding_slots
+          .as_ref()
+          .expect("prelinked binding slots were just allocated");
+        for bindings in registration.host_module_bindings.values() {
+          for (binding_id, value) in bindings {
+            let binding_id = usize::try_from(*binding_id)
+              .map_err(|_| BundlerError::from("Prelinked host binding ID does not fit usize"))?;
+            let slot = slots
+              .get(binding_id)
+              .ok_or_else(|| BundlerError::from("Prelinked host binding ID is out of range"))?;
+            *slot.borrow_mut() = value.clone();
+          }
+        }
       }
     }
 
@@ -2246,6 +2377,10 @@ impl ModuleLoader {
           continue;
         }
         if matches!(rec.state, ModuleState::Instantiated) {
+          if rec.host_initialized {
+            rec.state = ModuleState::Evaluated;
+            continue;
+          }
           rec.state = ModuleState::Evaluating;
           let chunk = match &rec.payload {
             ModuleRecordPayload::Prelinked { .. } => rec.bytecode.clone().ok_or_else(|| {
@@ -2328,6 +2463,10 @@ impl ModuleLoader {
     for rec_rc in self.map.values() {
       let mut rec = rec_rc.borrow_mut();
       if matches!(rec.state, ModuleState::Instantiated) {
+        if rec.host_initialized {
+          rec.state = ModuleState::Evaluated;
+          continue;
+        }
         rec.state = ModuleState::Evaluating;
         let chunk = match &rec.payload {
           ModuleRecordPayload::Prelinked { .. } => rec.bytecode.clone().ok_or_else(|| {
@@ -2551,16 +2690,20 @@ pub fn evaluate_entry_shared(
   let mut compiled = compile_modules_parallel(compile_jobs, pipeline_counters)?;
 
   for path in order {
-    let maybe_chunk = {
+    let maybe_chunk = 'prepare: {
       let loader_ref = loader.borrow_mut();
       let Some(rec_rc) = loader_ref.map.get(&path).cloned() else {
-        continue;
+        break 'prepare None;
       };
       let rec_rc_return = Rc::clone(&rec_rc);
       let mut rec = rec_rc.borrow_mut();
       if matches!(rec.state, ModuleState::Evaluating) {
         None
       } else if matches!(rec.state, ModuleState::Instantiated) {
+        if rec.host_initialized {
+          rec.state = ModuleState::Evaluated;
+          break 'prepare None;
+        }
         rec.state = ModuleState::Evaluating;
         let chunk = match &rec.payload {
           ModuleRecordPayload::Prelinked { .. } => rec.bytecode.clone().ok_or_else(|| {
@@ -3581,6 +3724,76 @@ mod tests {
       .expect("public prelinked entry resolves and evaluates");
     assert_eq!(vm.get_global("visibilityResult"), Some(Value::Number(42.0)));
     assert!(loader.map.contains_key(&entry_path));
+  }
+
+  #[test]
+  fn private_prelinked_host_module_injects_exports_without_executing_bytecode() {
+    let graph = synthetic_graph(
+      vec![
+        PrelinkedModule {
+          specifier: "host:private".to_string(),
+          module_index: 0,
+          source_sha256: [1; 32],
+          dependencies: vec![],
+          exports: vec![export("host", 0)],
+          imports: vec![],
+          chunk: compile_prelinked_chunk(
+            crate::js!(
+              module,
+              "export const host = undefined; globalThis.hostInitializerRan = true;"
+            ),
+            0,
+            &[],
+            &["host"],
+          ),
+        },
+        PrelinkedModule {
+          specifier: "host:entry".to_string(),
+          module_index: 1,
+          source_sha256: [2; 32],
+          dependencies: vec![0],
+          exports: vec![],
+          imports: vec![import("host", 0)],
+          chunk: compile_prelinked_chunk(
+            crate::js!(
+              module,
+              "import { host } from 'host:private'; globalThis.injectedHost = host;"
+            ),
+            1,
+            &[("host", 0, "host")],
+            &[],
+          ),
+        },
+      ],
+      1,
+      vec![1],
+    );
+    let host_module = PrelinkedHostModule {
+      specifier: "host:private".to_string(),
+      exports: HashMap::from([("host".to_string(), Value::Number(7.0))]),
+    };
+    let mut loader = ModuleLoader::new();
+    loader
+      .register_prelinked_graph_with_declarations_and_host_modules(
+        graph,
+        std::iter::empty::<(String, String)>(),
+        vec![host_module],
+      )
+      .expect("host graph registers");
+    loader
+      .construct(Path::new("."), "host:entry")
+      .expect("host entry constructs");
+    loader
+      .instantiate_all()
+      .expect("host entry instantiates");
+
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    loader
+      .evaluate_entry(Path::new("host:entry"), &mut vm, false)
+      .expect("host entry evaluates");
+    assert_eq!(vm.get_global("injectedHost"), Some(Value::Number(7.0)));
+    assert_eq!(vm.get_global("hostInitializerRan"), None);
   }
 
   #[test]

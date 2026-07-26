@@ -1151,6 +1151,14 @@ mod tests {
       let mut loader = loader.borrow_mut();
       loader
         .register_virtual_module(VirtualModule::javascript(
+          "blitz-internal:host",
+          "export const host = globalThis.__blitz_host_v1;",
+          SourceType::mjs(),
+          None,
+        ))
+        .expect("register test host bridge module");
+      loader
+        .register_virtual_module(VirtualModule::javascript(
           "blitz-internal:node-file-system",
           include_str!(
             "../../../../tools/effect-assets/src/facades/blitz-internal-node-file-system.js"

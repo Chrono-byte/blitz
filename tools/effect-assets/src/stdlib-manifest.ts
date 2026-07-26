@@ -39,6 +39,13 @@ export const STDLIB_INPUTS = [
     }],
   },
   {
+    specifier: "blitz-internal:host",
+    source: "facades/blitz-internal-host.js",
+    declaration: undefined,
+    visibility: "private",
+    hostPrimitives: [],
+  },
+  {
     specifier: "blitz:match",
     source: "facades/blitz-match.js",
     declaration: "blitz-match.d.ts",
