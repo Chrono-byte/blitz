@@ -77,7 +77,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   ));
   function_ctor_map.borrow_mut().properties.insert(
     PKey::String("prototype".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&function_proto_map))),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&function_proto_map))),
   );
 
   let generator_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
@@ -91,7 +91,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(
       PKey::String("prototype".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&generator_proto_map))),
+      PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&generator_proto_map))),
     );
 
   let throw_type_error_val = builtin_object(
@@ -104,7 +104,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   )));
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("prototype".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&object_proto_map))),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&object_proto_map))),
   );
 
   let array_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::with_prototype(
@@ -137,12 +137,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("forEach".to_string()),
-    PropertyDescriptor::data(for_each_fn),
+    PropertyDescriptor::builtin_data(for_each_fn),
   );
   let array_proto_for_map = Rc::clone(&array_proto_map);
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("map".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -187,7 +187,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("join".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let this = args.first().cloned().unwrap_or(Value::Undefined);
         let sep = match args.get(1) {
@@ -220,7 +220,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("toString".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let this = args.first().cloned().unwrap_or(Value::Undefined);
         let join = vm.get_property_host(&this, &PKey::String("join".to_string()))?;
@@ -313,11 +313,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         &function_proto_map,
       );
       set_builtin_length(&sort_fn, 1.0);
-      PropertyDescriptor::data(sort_fn)
+      PropertyDescriptor::builtin_data(sort_fn)
     });
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("toReversed".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new({
         let array_proto_map = Rc::clone(&array_proto_map);
         move |vm, args| {
@@ -350,7 +350,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("toSorted".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new({
         let array_proto_map = Rc::clone(&array_proto_map);
         move |vm, args| {
@@ -420,7 +420,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("with".to_string()),
-    non_enum_data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new({
           let array_proto_map = Rc::clone(&array_proto_map);
@@ -476,7 +476,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("push".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|_vm, args| {
         let this = args.first().cloned().unwrap_or(Value::Undefined);
         let (items, props) = match this {
@@ -491,7 +491,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         drop(vec);
         props.borrow_mut().properties.insert(
           PKey::String("length".to_string()),
-          PropertyDescriptor::data(Value::Number(new_len)),
+          PropertyDescriptor::ordinary_data(Value::Number(new_len)),
         );
         Ok(Value::Number(new_len))
       }),
@@ -607,7 +607,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         &function_proto_map,
       );
       set_builtin_length(&splice_fn, 2.0);
-      PropertyDescriptor::data(splice_fn)
+      PropertyDescriptor::builtin_data(splice_fn)
     });
   array_proto_map
     .borrow_mut()
@@ -652,7 +652,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         &function_proto_map,
       );
       set_builtin_length(&shift_fn, 0.0);
-      PropertyDescriptor::data(shift_fn)
+      PropertyDescriptor::builtin_data(shift_fn)
     });
   array_proto_map
     .borrow_mut()
@@ -711,11 +711,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         &function_proto_map,
       );
       set_builtin_length(&unshift_fn, 0.0);
-      PropertyDescriptor::data(unshift_fn)
+      PropertyDescriptor::builtin_data(unshift_fn)
     });
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("toSpliced".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new({
         let array_proto_map = Rc::clone(&array_proto_map);
         move |vm, args| {
@@ -794,7 +794,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("concat".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new({
         let array_proto_map = Rc::clone(&array_proto_map);
         move |_vm, args| {
@@ -837,7 +837,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(
       PKey::Symbol(SymbolId::well_known_iterator()),
-      PropertyDescriptor::data(builtin_object(
+      PropertyDescriptor::builtin_data(builtin_object(
         Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
         &function_proto_map,
       )),
@@ -847,7 +847,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(
       PKey::String("next".to_string()),
-      PropertyDescriptor::data(builtin_object(
+      PropertyDescriptor::builtin_data(builtin_object(
         Rc::new(|vm, args| {
           let this = args.first().cloned().unwrap_or(Value::Undefined);
           let iter_obj = match this {
@@ -856,11 +856,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
               let result = Rc::new(RefCell::new(ObjectData::new()));
               result.borrow_mut().properties.insert(
                 PKey::String("done".to_string()),
-                PropertyDescriptor::data(Value::Bool(true)),
+                PropertyDescriptor::ordinary_data(Value::Bool(true)),
               );
               result.borrow_mut().properties.insert(
                 PKey::String("value".to_string()),
-                PropertyDescriptor::data(Value::Undefined),
+                PropertyDescriptor::ordinary_data(Value::Undefined),
               );
               return Ok(Value::Object(result));
             }
@@ -912,11 +912,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           if index >= len {
             result.borrow_mut().properties.insert(
               PKey::String("done".to_string()),
-              PropertyDescriptor::data(Value::Bool(true)),
+              PropertyDescriptor::ordinary_data(Value::Bool(true)),
             );
             result.borrow_mut().properties.insert(
               PKey::String("value".to_string()),
-              PropertyDescriptor::data(Value::Undefined),
+              PropertyDescriptor::ordinary_data(Value::Undefined),
             );
           } else {
             let element = vm.get_property_host(&iterated, &PKey::String(index.to_string()))?;
@@ -929,15 +929,15 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             };
             iter_obj.borrow_mut().properties.insert(
               PKey::String("[[ArrayIteratorNextIndex]]".to_string()),
-              PropertyDescriptor::data(Value::Number(usize_to_f64(index + 1))),
+              PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(index + 1))),
             );
             result.borrow_mut().properties.insert(
               PKey::String("done".to_string()),
-              PropertyDescriptor::data(Value::Bool(false)),
+              PropertyDescriptor::ordinary_data(Value::Bool(false)),
             );
             result.borrow_mut().properties.insert(
               PKey::String("value".to_string()),
-              PropertyDescriptor::data(value),
+              PropertyDescriptor::ordinary_data(value),
             );
           }
           Ok(Value::Object(result))
@@ -956,15 +956,15 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           ))));
           iter.borrow_mut().properties.insert(
             PKey::String("[[IteratedObject]]".to_string()),
-            PropertyDescriptor::data(this),
+            PropertyDescriptor::ordinary_data(this),
           );
           iter.borrow_mut().properties.insert(
             PKey::String("[[ArrayIteratorNextIndex]]".to_string()),
-            PropertyDescriptor::data(Value::Number(0.0)),
+            PropertyDescriptor::ordinary_data(Value::Number(0.0)),
           );
           iter.borrow_mut().properties.insert(
             PKey::String("[[ArrayIteratorKind]]".to_string()),
-            PropertyDescriptor::data(Value::String(kind.to_string())),
+            PropertyDescriptor::ordinary_data(Value::String(kind.to_string())),
           );
           Ok(Value::Object(iter))
         }
@@ -980,25 +980,25 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_name(&array_entries_builtin, "entries");
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("values".to_string()),
-    PropertyDescriptor::data(array_values_builtin.clone()),
+    PropertyDescriptor::builtin_data(array_values_builtin.clone()),
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("keys".to_string()),
-    PropertyDescriptor::data(array_keys_builtin.clone()),
+    PropertyDescriptor::builtin_data(array_keys_builtin.clone()),
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("entries".to_string()),
-    PropertyDescriptor::data(array_entries_builtin.clone()),
+    PropertyDescriptor::builtin_data(array_entries_builtin.clone()),
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::Symbol(SymbolId::well_known_iterator()),
-    PropertyDescriptor::data(array_values_builtin.clone()),
+    PropertyDescriptor::builtin_data(array_values_builtin.clone()),
   );
   // Array.prototype.filter
   let array_proto_for_filter = Rc::clone(&array_proto_map);
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("filter".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1034,7 +1034,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_filter)));
         props.borrow_mut().properties.insert(
           PKey::String("length".to_string()),
-          PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
+          PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
         );
         Ok(Value::Array(arr_rc, props))
       }),
@@ -1044,7 +1044,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   // Array.prototype.find
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("find".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1078,7 +1078,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("at".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let len = array_like_length(vm, &receiver)?;
@@ -1137,11 +1137,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&array_includes, 1.0);
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("includes".to_string()),
-    non_enum_data(array_includes),
+    PropertyDescriptor::builtin_data(array_includes),
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("indexOf".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let search = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1172,7 +1172,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("slice".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new({
         let array_proto_for_slice = Rc::clone(&array_proto_map);
         move |vm, args| {
@@ -1317,7 +1317,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   // Array.prototype.reduce
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("reduce".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1373,7 +1373,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let array_proto_for_flat = Rc::clone(&array_proto_map);
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("flat".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let depth = if let Some(d) = args.get(1) {
@@ -1425,7 +1425,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_flat)));
         props.borrow_mut().properties.insert(
           PKey::String("length".to_string()),
-          PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
+          PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
         );
         Ok(Value::Array(arr_rc, props))
       }),
@@ -1434,7 +1434,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("copyWithin".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let len = array_like_length(vm, &receiver)?;
@@ -1486,7 +1486,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("every".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1513,7 +1513,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("fill".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let fill_value = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1546,7 +1546,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("findIndex".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1577,7 +1577,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("findLast".to_string()),
-    non_enum_data({
+    PropertyDescriptor::builtin_data({
       let find_last_fn = builtin_object(
         Rc::new(move |vm, args| {
           let this = args.first().cloned().unwrap_or(Value::Undefined);
@@ -1617,7 +1617,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("findLastIndex".to_string()),
-    non_enum_data({
+    PropertyDescriptor::builtin_data({
       let find_last_index_fn = builtin_object(
         Rc::new(move |vm, args| {
           let this = args.first().cloned().unwrap_or(Value::Undefined);
@@ -1655,7 +1655,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("flatMap".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new({
         let array_proto_map = Rc::clone(&array_proto_map);
         move |vm, args| {
@@ -1690,7 +1690,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
             .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
           props.borrow_mut().properties.insert(
             PKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
+            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
           );
           Ok(Value::Array(arr_rc, props))
         }
@@ -1700,7 +1700,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("pop".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let len = array_like_length(vm, &receiver)?;
@@ -1730,7 +1730,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("reduceRight".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1780,7 +1780,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("reverse".to_string()),
-    non_enum_data({
+    PropertyDescriptor::builtin_data({
       let reverse_fn = builtin_object(
         Rc::new(move |vm, args| {
           let this = args.first().cloned().unwrap_or(Value::Undefined);
@@ -1862,7 +1862,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("some".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1889,7 +1889,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("toLocaleString".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let len = array_like_length(vm, &receiver)?;
@@ -1928,7 +1928,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   )));
   array_ctor_map.borrow_mut().properties.insert(
     PKey::String("prototype".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&array_proto_map))),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&array_proto_map))),
   );
 
   let error_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::with_prototype(
@@ -1939,7 +1939,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   )));
   error_ctor_map.borrow_mut().properties.insert(
     PKey::String("prototype".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&error_proto_map))),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&error_proto_map))),
   );
 
   let aggregate_error_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
@@ -1953,7 +1953,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(
       PKey::String("prototype".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&aggregate_error_proto_map))),
+      PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&aggregate_error_proto_map))),
     );
 
   let function_ctor_globals = Rc::clone(globals);
@@ -1993,7 +1993,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
         props.borrow_mut().properties.insert(
           PKey::String("[[RealmGlobals]]".to_string()),
-          PropertyDescriptor::data(Value::Object(Rc::clone(&function_ctor_globals))),
+          PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&function_ctor_globals))),
         );
       }
       _ => {}
@@ -2012,15 +2012,15 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   function_proto_map.borrow_mut().properties.insert(
     PKey::String("constructor".to_string()),
-    non_enum_data(function_ctor_val.clone()),
+    PropertyDescriptor::builtin_data(function_ctor_val.clone()),
   );
   function_proto_map.borrow_mut().properties.insert(
     PKey::String("call".to_string()),
-    non_enum_data(function_call_val),
+    PropertyDescriptor::builtin_data(function_call_val),
   );
   function_proto_map.borrow_mut().properties.insert(
     PKey::String("apply".to_string()),
-    non_enum_data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let callee = args.first().cloned().unwrap_or(Value::Undefined);
         let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -2039,7 +2039,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   function_proto_map.borrow_mut().properties.insert(
     PKey::String("bind".to_string()),
-    non_enum_data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new({
         let function_proto_map = Rc::clone(&function_proto_map);
         move |_vm, args| {
@@ -2076,15 +2076,15 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           if let Value::BuiltinObject(_, props) = &bound_fn {
             props.borrow_mut().properties.insert(
               PKey::String("[[BoundTargetFunction]]".to_string()),
-              PropertyDescriptor::data(target),
+              PropertyDescriptor::ordinary_data(target),
             );
             props.borrow_mut().properties.insert(
               PKey::String("[[BoundThis]]".to_string()),
-              PropertyDescriptor::data(bound_this),
+              PropertyDescriptor::ordinary_data(bound_this),
             );
             props.borrow_mut().properties.insert(
               PKey::String("[[BoundArguments]]".to_string()),
-              PropertyDescriptor::data(array_from_values(bound_args)),
+              PropertyDescriptor::ordinary_data(array_from_values(bound_args)),
             );
           }
           Ok(bound_fn)
@@ -2096,7 +2096,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
 
   function_proto_map.borrow_mut().properties.insert(
     PKey::String("toString".to_string()),
-    non_enum_data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let this = args.first().cloned().unwrap_or(Value::Undefined);
         let source = if Vm::is_callable_value(&this) {
@@ -2147,7 +2147,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
 
   object_proto_map.borrow_mut().properties.insert(
     PKey::String("constructor".to_string()),
-    non_enum_data(object_ctor_val.clone()),
+    PropertyDescriptor::builtin_data(object_ctor_val.clone()),
   );
 
   // 27.2 Promise Objects
@@ -2160,7 +2160,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   ))));
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("apply".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -2183,7 +2183,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("construct".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -2328,7 +2328,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("ownKeys".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let target = args.get(1).cloned().unwrap_or(Value::Undefined);
         if !target.is_object() {
@@ -2346,7 +2346,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("deleteProperty".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -2362,7 +2362,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("defineProperty".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -2382,7 +2382,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("get".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -2402,7 +2402,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("getOwnPropertyDescriptor".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let object_proto_map = Rc::clone(&object_proto_map);
       builtin_object(
         Rc::new(move |vm, args| {
@@ -2424,7 +2424,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("getPrototypeOf".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -2438,7 +2438,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("has".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -2454,7 +2454,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("isExtensible".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -2468,7 +2468,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("preventExtensions".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -2482,7 +2482,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("setPrototypeOf".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -2505,7 +2505,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect_obj.borrow_mut().properties.insert(
     PKey::String("set".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Reflect");
         let target = args.get(off).cloned().unwrap_or(Value::Undefined);
@@ -2652,7 +2652,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         ObjectData::with_prototype(Value::Object(Rc::clone(&date_proto_map_rc)));
       date_obj_data.properties.insert(
         PropertyKey::String("[[PrimitiveValue]]".to_string()),
-        PropertyDescriptor::data(Value::Number(timestamp)),
+        PropertyDescriptor::ordinary_data(Value::Number(timestamp)),
       );
       let date_obj = Rc::new(RefCell::new(date_obj_data));
       Ok(Value::Object(date_obj))
@@ -2661,11 +2661,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let date_ctor_val = Value::BuiltinObject(Rc::clone(&date_ctor_fn), Rc::clone(&date_ctor_map));
   date_ctor_map.borrow_mut().properties.insert(
     PKey::String("prototype".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&date_proto_map))),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&date_proto_map))),
   );
   date_ctor_map.borrow_mut().properties.insert(
     PKey::String("now".to_string()),
-    non_enum_data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|_vm, _args| {
         let millis = std::time::SystemTime::now()
           .duration_since(std::time::UNIX_EPOCH)
@@ -2677,11 +2677,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   date_proto_map.borrow_mut().properties.insert(
     PKey::String("constructor".to_string()),
-    PropertyDescriptor::data(date_ctor_val.clone()),
+    PropertyDescriptor::builtin_data(date_ctor_val.clone()),
   );
   date_proto_map.borrow_mut().properties.insert(
     PKey::String("valueOf".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|_vm, args| {
         let this = args.first().cloned().unwrap_or(Value::Undefined);
         let res = if let Value::Object(obj) = this
@@ -2701,7 +2701,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   date_proto_map.borrow_mut().properties.insert(
     PKey::String("getTime".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|_vm, args| {
         let this = args.first().cloned().unwrap_or(Value::Undefined);
         if let Value::Object(obj) = this
@@ -2719,7 +2719,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   date_proto_map.borrow_mut().properties.insert(
     PKey::String("getTimezoneOffset".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|_vm, _args| {
         // Return UTC offset in minutes (simplified - assuming UTC for now)
         Ok(Value::Number(0.0))
@@ -2729,7 +2729,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   date_proto_map.borrow_mut().properties.insert(
     PKey::String("toISOString".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|_vm, args| {
         let this = args.first().cloned().unwrap_or(Value::Undefined);
         if let Value::Object(obj) = this
@@ -2816,14 +2816,14 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(
       PKey::String("prototype".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&arraybuffer_proto_map))),
+      PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&arraybuffer_proto_map))),
     );
   arraybuffer_proto_map
     .borrow_mut()
     .properties
     .insert(
       PKey::String("constructor".to_string()),
-      PropertyDescriptor::data(arraybuffer_ctor_val.clone()),
+      PropertyDescriptor::builtin_data(arraybuffer_ctor_val.clone()),
     );
 
   // SharedArrayBuffer constructor (minimal)
@@ -2866,14 +2866,14 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(
       PKey::String("prototype".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&sharedarraybuffer_proto_map))),
+      PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&sharedarraybuffer_proto_map))),
     );
   sharedarraybuffer_proto_map
     .borrow_mut()
     .properties
     .insert(
       PKey::String("constructor".to_string()),
-      PropertyDescriptor::data(sharedarraybuffer_ctor_val.clone()),
+      PropertyDescriptor::builtin_data(sharedarraybuffer_ctor_val.clone()),
     );
 
   // %TypedArray% intrinsic constructor and TypedArray constructors
@@ -2888,14 +2888,14 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(
       PKey::String("prototype".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&typedarray_proto_map))),
+      PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&typedarray_proto_map))),
     );
   typedarray_ctor_map
     .borrow_mut()
     .properties
     .insert(
       PKey::String("name".to_string()),
-      PropertyDescriptor::data(Value::String("TypedArray".to_string())),
+      PropertyDescriptor::builtin_metadata(Value::String("TypedArray".to_string())),
     );
   let typedarray_ctor_fn: BuiltinFn = Rc::new(move |_vm, _args| {
     Err(RuntimeError::from(
@@ -2908,42 +2908,42 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(
       PKey::String("constructor".to_string()),
-      PropertyDescriptor::data(typedarray_ctor_val.clone()),
+      PropertyDescriptor::builtin_data(typedarray_ctor_val.clone()),
     );
   typedarray_proto_map
     .borrow_mut()
     .properties
     .insert(
       PKey::String("values".to_string()),
-      PropertyDescriptor::data(array_values_builtin.clone()),
+      PropertyDescriptor::builtin_data(array_values_builtin.clone()),
     );
   typedarray_proto_map
     .borrow_mut()
     .properties
     .insert(
       PKey::String("keys".to_string()),
-      PropertyDescriptor::data(array_keys_builtin),
+      PropertyDescriptor::builtin_data(array_keys_builtin),
     );
   typedarray_proto_map
     .borrow_mut()
     .properties
     .insert(
       PKey::String("entries".to_string()),
-      PropertyDescriptor::data(array_entries_builtin),
+      PropertyDescriptor::builtin_data(array_entries_builtin),
     );
   typedarray_proto_map
     .borrow_mut()
     .properties
     .insert(
       PKey::Symbol(SymbolId::well_known_iterator()),
-      PropertyDescriptor::data(array_values_builtin),
+      PropertyDescriptor::builtin_data(array_values_builtin),
     );
   typedarray_proto_map
     .borrow_mut()
     .properties
     .insert(
       PKey::String("fill".to_string()),
-      PropertyDescriptor::data(builtin_object(
+      PropertyDescriptor::builtin_data(builtin_object(
         Rc::new(|vm, args| {
           let receiver = args.first().cloned().unwrap_or(Value::Undefined);
           let fill_value = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -3001,7 +3001,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(
       PKey::String("subarray".to_string()),
-      PropertyDescriptor::data(subarray_builtin),
+      PropertyDescriptor::builtin_data(subarray_builtin),
     );
 
   let slice_builtin = {
@@ -3054,7 +3054,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(
       PKey::String("slice".to_string()),
-      PropertyDescriptor::data(slice_builtin),
+      PropertyDescriptor::builtin_data(slice_builtin),
     );
 
   let set_builtin = builtin_object(
@@ -3098,7 +3098,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(
       PKey::String("set".to_string()),
-      PropertyDescriptor::data(set_builtin),
+      PropertyDescriptor::builtin_data(set_builtin),
     );
 
   macro_rules! create_typed_array_ctor {
@@ -3280,44 +3280,44 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           let mut typed_array_data = ObjectData::with_prototype(instance_proto);
           typed_array_data.properties.insert(
             PropertyKey::String("[[TypedArrayData]]".to_string()),
-            PropertyDescriptor::data(typed_data_value),
+            PropertyDescriptor::ordinary_data(typed_data_value),
           );
           typed_array_data.properties.insert(
             PropertyKey::String("[[TypedArrayKind]]".to_string()),
-            PropertyDescriptor::data(Value::String(ctor_name.clone())),
+            PropertyDescriptor::ordinary_data(Value::String(ctor_name.clone())),
           );
           typed_array_data.properties.insert(
             PropertyKey::String("[[TypedArrayBytesPerElement]]".to_string()),
-            PropertyDescriptor::data(Value::Number(usize_to_f64($element_count))),
+            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64($element_count))),
           );
           typed_array_data.properties.insert(
             PropertyKey::String("[[TypedArrayLength]]".to_string()),
-            PropertyDescriptor::data(Value::Number(usize_to_f64(length))),
+            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(length))),
           );
           typed_array_data.properties.insert(
             PropertyKey::String("[[TypedArrayByteLength]]".to_string()),
-            PropertyDescriptor::data(Value::Number(usize_to_f64(view_byte_length))),
+            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(view_byte_length))),
           );
           typed_array_data.properties.insert(
             PropertyKey::String("[[TypedArrayByteOffset]]".to_string()),
-            PropertyDescriptor::data(Value::Number(usize_to_f64(byte_offset))),
+            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(byte_offset))),
           );
           typed_array_data.properties.insert(
             PropertyKey::String("[[TypedArrayBuffer]]".to_string()),
-            PropertyDescriptor::data(buffer_slot.clone()),
+            PropertyDescriptor::ordinary_data(buffer_slot.clone()),
           );
           typed_array_data.properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(usize_to_f64(length))),
+            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(length))),
           );
           typed_array_data.properties.insert(
             PropertyKey::String("byteLength".to_string()),
-            PropertyDescriptor::data(Value::Number(usize_to_f64(view_byte_length))),
+            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(view_byte_length))),
           );
           for (idx, value) in initial_values.into_iter().enumerate() {
             typed_array_data.properties.insert(
               PropertyKey::String(usize_to_decimal_string(idx)),
-              PropertyDescriptor::data(value),
+              PropertyDescriptor::ordinary_data(value),
             );
           }
           let typed_array_obj = Rc::new(RefCell::new(typed_array_data));
@@ -3327,19 +3327,19 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       let ctor_val = Value::BuiltinObject(ctor_fn.clone(), ctor_map.clone());
       ctor_map.borrow_mut().properties.insert(
         PKey::String("prototype".to_string()),
-        PropertyDescriptor::data(Value::Object(proto_map.clone())),
+        PropertyDescriptor::builtin_prototype(Value::Object(proto_map.clone())),
       );
       ctor_map.borrow_mut().properties.insert(
         PKey::String("name".to_string()),
-        PropertyDescriptor::data(Value::String($name.to_string())),
+        PropertyDescriptor::builtin_metadata(Value::String($name.to_string())),
       );
       ctor_map.borrow_mut().properties.insert(
         PKey::String("BYTES_PER_ELEMENT".to_string()),
-        PropertyDescriptor::data(Value::Number(usize_to_f64($element_count))),
+        PropertyDescriptor::immutable_data(Value::Number(usize_to_f64($element_count))),
       );
       proto_map.borrow_mut().properties.insert(
         PKey::String("constructor".to_string()),
-        PropertyDescriptor::data(ctor_val.clone()),
+        PropertyDescriptor::builtin_data(ctor_val.clone()),
       );
       (ctor_val, ctor_map)
     }};
@@ -3425,27 +3425,27 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       let mut dataview_data = ObjectData::with_prototype(Value::Object(Rc::clone(&proto_map_rc)));
       dataview_data.properties.insert(
         PropertyKey::String("[[DataViewBuffer]]".to_string()),
-        PropertyDescriptor::data(buffer.clone()),
+        PropertyDescriptor::ordinary_data(buffer.clone()),
       );
       dataview_data.properties.insert(
         PropertyKey::String("[[DataViewByteOffset]]".to_string()),
-        PropertyDescriptor::data(Value::Number(usize_to_f64(byte_offset))),
+        PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(byte_offset))),
       );
       dataview_data.properties.insert(
         PropertyKey::String("[[DataViewByteLength]]".to_string()),
-        PropertyDescriptor::data(Value::Number(usize_to_f64(byte_length))),
+        PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(byte_length))),
       );
       dataview_data.properties.insert(
         PropertyKey::String("buffer".to_string()),
-        PropertyDescriptor::data(buffer),
+        PropertyDescriptor::ordinary_data(buffer),
       );
       dataview_data.properties.insert(
         PropertyKey::String("byteLength".to_string()),
-        PropertyDescriptor::data(Value::Number(usize_to_f64(byte_length))),
+        PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(byte_length))),
       );
       dataview_data.properties.insert(
         PropertyKey::String("byteOffset".to_string()),
-        PropertyDescriptor::data(Value::Number(usize_to_f64(byte_offset))),
+        PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(byte_offset))),
       );
       let dataview_obj = Rc::new(RefCell::new(dataview_data));
       Ok(Value::Object(dataview_obj))
@@ -3455,11 +3455,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     Value::BuiltinObject(Rc::clone(&dataview_ctor_fn), Rc::clone(&dataview_ctor_map));
   dataview_ctor_map.borrow_mut().properties.insert(
     PKey::String("prototype".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&dataview_proto_map))),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&dataview_proto_map))),
   );
   dataview_proto_map.borrow_mut().properties.insert(
     PKey::String("constructor".to_string()),
-    PropertyDescriptor::data(dataview_ctor_val.clone()),
+    PropertyDescriptor::builtin_data(dataview_ctor_val.clone()),
   );
 
   let (map_ctor_val, set_ctor_val, iterator_proto, map_iterator_proto, set_iterator_proto) =
@@ -3492,11 +3492,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&object_to_string, 0.0);
   object_proto_map.borrow_mut().properties.insert(
     PKey::String("toString".to_string()),
-    non_enum_data(object_to_string),
+    PropertyDescriptor::builtin_data(object_to_string),
   );
   object_proto_map.borrow_mut().properties.insert(
     PKey::String("join".to_string()),
-    non_enum_data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let this = args.first().cloned().unwrap_or(Value::Undefined);
         let sep = match args.get(1) {
@@ -3529,7 +3529,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_proto_map.borrow_mut().properties.insert(
     PKey::String("valueOf".to_string()),
-    non_enum_data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|_vm, args| {
         // Builtins invoked as methods receive the receiver as args[0].
         // Return the receiver (this) per standard Object.prototype.valueOf.
@@ -3558,7 +3558,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&object_to_locale_string, 0.0);
   object_proto_map.borrow_mut().properties.insert(
     PKey::String("toLocaleString".to_string()),
-    non_enum_data(object_to_locale_string),
+    PropertyDescriptor::builtin_data(object_to_locale_string),
   );
   let has_own_property = builtin_object(
     Rc::new(|vm, args| {
@@ -3573,7 +3573,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&has_own_property, 1.0);
   object_proto_map.borrow_mut().properties.insert(
     PKey::String("hasOwnProperty".to_string()),
-    non_enum_data(has_own_property),
+    PropertyDescriptor::builtin_data(has_own_property),
   );
   let property_is_enumerable = builtin_object(
     Rc::new(|vm, args| {
@@ -3593,7 +3593,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&property_is_enumerable, 1.0);
   object_proto_map.borrow_mut().properties.insert(
     PKey::String("propertyIsEnumerable".to_string()),
-    non_enum_data(property_is_enumerable),
+    PropertyDescriptor::builtin_data(property_is_enumerable),
   );
   let is_prototype_of = builtin_object(
     Rc::new(|vm, args| {
@@ -3606,7 +3606,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&is_prototype_of, 1.0);
   object_proto_map.borrow_mut().properties.insert(
     PKey::String("isPrototypeOf".to_string()),
-    non_enum_data(is_prototype_of),
+    PropertyDescriptor::builtin_data(is_prototype_of),
   );
   let define_getter = builtin_object(
     Rc::new(|vm, args| {
@@ -3621,19 +3621,19 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       let mut desc = ObjectData::new();
       desc.properties.insert(
         PKey::String("get".to_string()),
-        PropertyDescriptor::data(getter),
+        PropertyDescriptor::ordinary_data(getter),
       );
       desc.properties.insert(
         PKey::String("set".to_string()),
-        PropertyDescriptor::data(Value::Undefined),
+        PropertyDescriptor::ordinary_data(Value::Undefined),
       );
       desc.properties.insert(
         PKey::String("enumerable".to_string()),
-        PropertyDescriptor::data(Value::Bool(true)),
+        PropertyDescriptor::ordinary_data(Value::Bool(true)),
       );
       desc.properties.insert(
         PKey::String("configurable".to_string()),
-        PropertyDescriptor::data(Value::Bool(true)),
+        PropertyDescriptor::ordinary_data(Value::Bool(true)),
       );
       let desc = Value::Object(Rc::new(RefCell::new(desc)));
       if !vm.define_property_value(&this, &property_key_to_value(&key), &desc)? {
@@ -3646,7 +3646,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&define_getter, 2.0);
   object_proto_map.borrow_mut().properties.insert(
     PKey::String("__defineGetter__".to_string()),
-    non_enum_data(define_getter),
+    PropertyDescriptor::builtin_data(define_getter),
   );
   let define_setter = builtin_object(
     Rc::new(|vm, args| {
@@ -3661,19 +3661,19 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       let mut desc = ObjectData::new();
       desc.properties.insert(
         PKey::String("get".to_string()),
-        PropertyDescriptor::data(Value::Undefined),
+        PropertyDescriptor::ordinary_data(Value::Undefined),
       );
       desc.properties.insert(
         PKey::String("set".to_string()),
-        PropertyDescriptor::data(setter),
+        PropertyDescriptor::ordinary_data(setter),
       );
       desc.properties.insert(
         PKey::String("enumerable".to_string()),
-        PropertyDescriptor::data(Value::Bool(true)),
+        PropertyDescriptor::ordinary_data(Value::Bool(true)),
       );
       desc.properties.insert(
         PKey::String("configurable".to_string()),
-        PropertyDescriptor::data(Value::Bool(true)),
+        PropertyDescriptor::ordinary_data(Value::Bool(true)),
       );
       let desc = Value::Object(Rc::new(RefCell::new(desc)));
       if !vm.define_property_value(&this, &property_key_to_value(&key), &desc)? {
@@ -3686,7 +3686,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&define_setter, 2.0);
   object_proto_map.borrow_mut().properties.insert(
     PKey::String("__defineSetter__".to_string()),
-    non_enum_data(define_setter),
+    PropertyDescriptor::builtin_data(define_setter),
   );
   let lookup_getter = builtin_object(
     Rc::new(|vm, args| {
@@ -3706,7 +3706,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&lookup_getter, 1.0);
   object_proto_map.borrow_mut().properties.insert(
     PKey::String("__lookupGetter__".to_string()),
-    non_enum_data(lookup_getter),
+    PropertyDescriptor::builtin_data(lookup_getter),
   );
   let lookup_setter = builtin_object(
     Rc::new(|vm, args| {
@@ -3726,11 +3726,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&lookup_setter, 1.0);
   object_proto_map.borrow_mut().properties.insert(
     PKey::String("__lookupSetter__".to_string()),
-    non_enum_data(lookup_setter),
+    PropertyDescriptor::builtin_data(lookup_setter),
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("create".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let object_proto_map = Rc::clone(&object_proto_map);
       let builtin = builtin_object(
         Rc::new(move |vm, args| {
@@ -3775,7 +3775,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("assign".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
@@ -3817,11 +3817,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         &function_proto_map,
       );
       set_builtin_length(&builtin, 2.0);
-      PropertyDescriptor::data(builtin)
+      PropertyDescriptor::builtin_data(builtin)
     });
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("hasOwn".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
@@ -3844,7 +3844,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("getPrototypeOf".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
@@ -3863,7 +3863,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("getOwnPropertyDescriptor".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let object_proto_map = Rc::clone(&object_proto_map);
       let builtin = builtin_object(
         Rc::new(move |vm, args| {
@@ -3908,7 +3908,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         &function_proto_map,
       );
       set_builtin_length(&builtin, 1.0);
-      PropertyDescriptor::data(builtin)
+      PropertyDescriptor::builtin_data(builtin)
     },
   );
 
@@ -3924,9 +3924,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           for key in vm.own_property_keys_value(&target)? {
             if let Some(desc) = vm.get_own_property_value(&target, &key)? {
               let descriptor_value = descriptor_value_from_descriptor(&object_proto_map, &desc);
-              result
-                .properties
-                .insert(key.clone(), PropertyDescriptor::data(descriptor_value));
+              result.properties.insert(
+                key.clone(),
+                PropertyDescriptor::ordinary_data(descriptor_value),
+              );
             }
           }
           Ok(Value::Object(Rc::new(RefCell::new(result))))
@@ -3934,12 +3935,12 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         &function_proto_map,
       );
       set_builtin_length(&builtin, 1.0);
-      PropertyDescriptor::data(builtin)
+      PropertyDescriptor::builtin_data(builtin)
     },
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("getOwnPropertyNames".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
@@ -3959,7 +3960,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           let props = Rc::new(RefCell::new(ObjectData::new()));
           props.borrow_mut().properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
+            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
           );
           Ok(Value::Array(arr_rc, props))
         }),
@@ -3971,7 +3972,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("keys".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
@@ -3994,7 +3995,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("values".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
@@ -4014,7 +4015,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("entries".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
@@ -4064,7 +4065,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         &function_proto_map,
       );
       set_builtin_length(&builtin, 3.0);
-      PropertyDescriptor::data(builtin)
+      PropertyDescriptor::builtin_data(builtin)
     });
 
   object_ctor_map
@@ -4104,7 +4105,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         &function_proto_map,
       );
       set_builtin_length(&builtin, 2.0);
-      PropertyDescriptor::data(builtin)
+      PropertyDescriptor::builtin_data(builtin)
     });
   object_ctor_map
     .borrow_mut()
@@ -4122,7 +4123,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         &function_proto_map,
       );
       set_builtin_length(&builtin, 1.0);
-      PropertyDescriptor::data(builtin)
+      PropertyDescriptor::builtin_data(builtin)
     });
   object_ctor_map
     .borrow_mut()
@@ -4143,11 +4144,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
         &function_proto_map,
       );
       set_builtin_length(&builtin, 1.0);
-      PropertyDescriptor::data(builtin)
+      PropertyDescriptor::builtin_data(builtin)
     });
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("setPrototypeOf".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
@@ -4182,7 +4183,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("freeze".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
@@ -4203,7 +4204,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("seal".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
@@ -4224,7 +4225,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("isSealed".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
@@ -4242,7 +4243,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("isFrozen".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Object");
@@ -4260,7 +4261,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("fromEntries".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let object_proto_for_from_entries = Rc::clone(&object_proto_map);
       let builtin = builtin_object(
         Rc::new(move |vm, args| {
@@ -4288,7 +4289,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   object_ctor_map.borrow_mut().properties.insert(
     PKey::String("groupBy".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let object_proto_for_group_by = Rc::clone(&object_proto_map);
       let builtin = builtin_object(
         Rc::new(move |vm, args| {
@@ -4315,9 +4316,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
           let mut result = ObjectData::new();
           result.set_prototype_value(Value::Null);
           for (key, group) in groups {
-            result
-              .properties
-              .insert(key, PropertyDescriptor::data(array_from_values(group)));
+            result.properties.insert(
+              key,
+              PropertyDescriptor::ordinary_data(array_from_values(group)),
+            );
           }
           let _ = &object_proto_for_group_by;
           Ok(Value::Object(Rc::new(RefCell::new(result))))
@@ -4343,7 +4345,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   )));
   regexp_ctor_map.borrow_mut().properties.insert(
     PKey::String("prototype".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&regexp_proto_map))),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&regexp_proto_map))),
   );
   let regexp_proto_for_ctor = Rc::clone(&regexp_proto_map);
   let regexp_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
@@ -4441,7 +4443,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&regexp_ctor_val, 2.0);
   regexp_proto_map.borrow_mut().properties.insert(
     PKey::String("constructor".to_string()),
-    PropertyDescriptor::data(regexp_ctor_val.clone()),
+    PropertyDescriptor::builtin_data(regexp_ctor_val.clone()),
   );
   let regexp_to_string = builtin_object(
     Rc::new(|vm, args| {
@@ -4458,7 +4460,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&regexp_to_string, 0.0);
   regexp_proto_map.borrow_mut().properties.insert(
     PKey::String("toString".to_string()),
-    non_enum_data(regexp_to_string),
+    PropertyDescriptor::builtin_data(regexp_to_string),
   );
   let regexp_exec = builtin_object(
     Rc::new(|vm, args| {
@@ -4560,10 +4562,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   set_builtin_name(&regexp_exec, "exec");
   set_builtin_length(&regexp_exec, 1.0);
-  regexp_proto_map
-    .borrow_mut()
-    .properties
-    .insert(PKey::String("exec".to_string()), non_enum_data(regexp_exec));
+  regexp_proto_map.borrow_mut().properties.insert(
+    PKey::String("exec".to_string()),
+    PropertyDescriptor::builtin_data(regexp_exec),
+  );
   let regexp_test = builtin_object(
     Rc::new(|vm, args| {
       let this = args.first().cloned().unwrap_or(Value::Undefined);
@@ -4618,10 +4620,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   set_builtin_name(&regexp_test, "test");
   set_builtin_length(&regexp_test, 1.0);
-  regexp_proto_map
-    .borrow_mut()
-    .properties
-    .insert(PKey::String("test".to_string()), non_enum_data(regexp_test));
+  regexp_proto_map.borrow_mut().properties.insert(
+    PKey::String("test".to_string()),
+    PropertyDescriptor::builtin_data(regexp_test),
+  );
 
   let regexp_replace = builtin_object(
     Rc::new(|vm, args| {
@@ -4703,7 +4705,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   set_builtin_length(&regexp_replace, 2.0);
   regexp_proto_map.borrow_mut().properties.insert(
     PKey::Symbol(SymbolId::well_known_replace()),
-    non_enum_data(regexp_replace),
+    PropertyDescriptor::builtin_data(regexp_replace),
   );
 
   let error_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
@@ -4720,7 +4722,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     if let Some(message) = message.clone() {
       inst.properties.insert(
         PKey::String("message".to_string()),
-        PropertyDescriptor::data(message),
+        PropertyDescriptor::builtin_data(message),
       );
     }
     let stack = message.map_or_else(
@@ -4732,26 +4734,26 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     )?;
     inst.properties.insert(
       PKey::String("stack".to_string()),
-      PropertyDescriptor::data(Value::String(stack)),
+      PropertyDescriptor::builtin_data(Value::String(stack)),
     );
     inst.properties.insert(
       PKey::String("constructor".to_string()),
-      PropertyDescriptor::data(ctor),
+      PropertyDescriptor::builtin_data(ctor),
     );
     Ok(Value::Object(Rc::new(RefCell::new(inst))))
   });
   let error_ctor_val = Value::BuiltinObject(Rc::clone(&error_ctor_fn), Rc::clone(&error_ctor_map));
   error_ctor_map.borrow_mut().properties.insert(
     PKey::String("name".to_string()),
-    PropertyDescriptor::data(Value::String("Error".to_string())),
+    PropertyDescriptor::builtin_data(Value::String("Error".to_string())),
   );
   error_proto_map.borrow_mut().properties.insert(
     PKey::String("constructor".to_string()),
-    PropertyDescriptor::data(error_ctor_val.clone()),
+    PropertyDescriptor::builtin_data(error_ctor_val.clone()),
   );
   error_proto_map.borrow_mut().properties.insert(
     PKey::String("name".to_string()),
-    PropertyDescriptor::data(Value::String("Error".to_string())),
+    PropertyDescriptor::builtin_data(Value::String("Error".to_string())),
   );
 
   let aggregate_error_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
@@ -4767,16 +4769,16 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     if let Some(message) = args.get(2).cloned() {
       inst.properties.insert(
         PKey::String("message".to_string()),
-        PropertyDescriptor::data(message),
+        PropertyDescriptor::builtin_data(message),
       );
     }
     inst.properties.insert(
       PKey::String("name".to_string()),
-      PropertyDescriptor::data(Value::String("AggregateError".to_string())),
+      PropertyDescriptor::builtin_data(Value::String("AggregateError".to_string())),
     );
     inst.properties.insert(
       PKey::String("constructor".to_string()),
-      PropertyDescriptor::data(ctor),
+      PropertyDescriptor::builtin_data(ctor),
     );
     Ok(Value::Object(Rc::new(RefCell::new(inst))))
   });
@@ -4789,21 +4791,21 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     .properties
     .insert(
       PKey::String("name".to_string()),
-      PropertyDescriptor::data(Value::String("AggregateError".to_string())),
+      PropertyDescriptor::builtin_data(Value::String("AggregateError".to_string())),
     );
   aggregate_error_proto_map
     .borrow_mut()
     .properties
     .insert(
       PKey::String("constructor".to_string()),
-      PropertyDescriptor::data(aggregate_error_ctor_val.clone()),
+      PropertyDescriptor::builtin_data(aggregate_error_ctor_val.clone()),
     );
   aggregate_error_proto_map
     .borrow_mut()
     .properties
     .insert(
       PKey::String("name".to_string()),
-      PropertyDescriptor::data(Value::String("AggregateError".to_string())),
+      PropertyDescriptor::builtin_data(Value::String("AggregateError".to_string())),
     );
 
   let _make_error_ctor = |name: &str, proto_map: &Rc<RefCell<ObjectData>>| {
@@ -4812,7 +4814,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     ))));
     ctor_props.borrow_mut().properties.insert(
       PKey::String("prototype".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(proto_map))),
+      PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(proto_map))),
     );
     let ctor_name = name.to_string();
     let instance_name = name.to_string();
@@ -4829,27 +4831,27 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       if let Some(message) = args.get(1).cloned() {
         inst.properties.insert(
           PKey::String("message".to_string()),
-          PropertyDescriptor::data(message),
+          PropertyDescriptor::builtin_data(message),
         );
       }
       inst.properties.insert(
         PKey::String("name".to_string()),
-        PropertyDescriptor::data(Value::String(instance_name.clone())),
+        PropertyDescriptor::builtin_data(Value::String(instance_name.clone())),
       );
       Ok(Value::Object(Rc::new(RefCell::new(inst))))
     });
     let ctor_val = Value::BuiltinObject(ctor_fn, Rc::clone(&ctor_props));
     ctor_props.borrow_mut().properties.insert(
       PKey::String("name".to_string()),
-      PropertyDescriptor::data(Value::String(name.to_string())),
+      PropertyDescriptor::builtin_data(Value::String(name.to_string())),
     );
     proto_map.borrow_mut().properties.insert(
       PKey::String("constructor".to_string()),
-      PropertyDescriptor::data(ctor_val.clone()),
+      PropertyDescriptor::builtin_data(ctor_val.clone()),
     );
     proto_map.borrow_mut().properties.insert(
       PKey::String("name".to_string()),
-      PropertyDescriptor::data(Value::String(name.to_string())),
+      PropertyDescriptor::builtin_data(Value::String(name.to_string())),
     );
     (name.to_string(), ctor_val)
   };
@@ -4890,10 +4892,10 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     let builtin = builtin_object(function, &function_proto_map);
     set_builtin_name(&builtin, name);
     set_builtin_length(&builtin, length);
-    math
-      .borrow_mut()
-      .properties
-      .insert(PKey::String(name.to_string()), non_enum_data(builtin));
+    math.borrow_mut().properties.insert(
+      PKey::String(name.to_string()),
+      PropertyDescriptor::builtin_data(builtin),
+    );
   };
   install_math(
     "pow",
@@ -4974,7 +4976,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   let reflect = Rc::new(RefCell::new(ObjectData::new()));
   reflect.borrow_mut().properties.insert(
     PKey::String("construct".to_string()),
-    PropertyDescriptor::data(Value::BuiltinObject(
+    PropertyDescriptor::builtin_data(Value::BuiltinObject(
       Rc::new(|vm, args| {
         let target = args.get(1).cloned().unwrap_or(Value::Undefined);
         let arguments_list = args.get(2).cloned().unwrap_or(Value::Undefined);
@@ -5024,7 +5026,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   );
   reflect.borrow_mut().properties.insert(
     PKey::String("ownKeys".to_string()),
-    PropertyDescriptor::data(Value::BuiltinObject(
+    PropertyDescriptor::builtin_data(Value::BuiltinObject(
       Rc::new(|vm, args| {
         let target = args.get(1).cloned().unwrap_or(Value::Undefined);
         if !target.is_object() {
@@ -5051,7 +5053,7 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
   ))));
   json_obj.borrow_mut().properties.insert(
     PKey::String("stringify".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new({
         move |_vm, args| {
           let off = if args.len() > 1 { 1 } else { 0 };

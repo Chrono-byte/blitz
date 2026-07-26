@@ -1065,7 +1065,7 @@ mod test {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       crate::value::PropertyKey::String("globalThis".to_string()),
-      crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      crate::value::PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = Vm::new(globals);
     drop(vm.run(chunk).expect("run ok"));
@@ -1092,7 +1092,7 @@ mod test {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       crate::value::PropertyKey::String("globalThis".to_string()),
-      crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      crate::value::PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = Vm::new(globals);
     drop(vm.run(chunk).expect("run ok"));
@@ -1119,7 +1119,7 @@ mod test {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       crate::value::PropertyKey::String("globalThis".to_string()),
-      crate::value::PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      crate::value::PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = Vm::new(globals);
     drop(vm.run(chunk).expect("run ok"));

@@ -23,7 +23,7 @@ fn test_globals() -> Rc<RefCell<ObjectData>> {
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
     PropertyKey::String("globalThis".to_string()),
-    PropertyDescriptor::data(Value::Object(Clone::clone(&globals))),
+    PropertyDescriptor::ordinary_data(Value::Object(Clone::clone(&globals))),
   );
   runtime_utils::install_minimal_kernel_constructors(&globals);
   globals
@@ -855,7 +855,7 @@ mod test {
     let globals = test_globals();
     globals.borrow_mut().properties.insert(
       PropertyKey::String("capture".to_string()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(|_vm, args| {
         Ok(args.first().cloned().unwrap_or(Value::Undefined))
       }))),
     );
@@ -910,6 +910,87 @@ mod test {
     assert_eq!(vm.get_global("desc_enumerable"), Some(Value::Bool(false)));
     assert_eq!(vm.get_global("desc_writable"), Some(Value::Bool(false)));
     assert_eq!(vm.get_global("desc_configurable"), Some(Value::Bool(false)));
+  }
+
+  #[test]
+  fn standard_builtin_methods_use_non_enumerable_data_descriptors() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const arrayMethod = Object.getOwnPropertyDescriptor(Array.prototype, "forEach");
+        const promiseMethod = Object.getOwnPropertyDescriptor(Promise.prototype, "then");
+        const ordinary = Object.getOwnPropertyDescriptor({ value: 1 }, "value");
+        const arrayKeys = Object.keys(Array.prototype);
+        const promiseKeys = Object.keys(Promise.prototype);
+        const intrinsicTablesAreHidden = [
+          Array.prototype,
+          Promise.prototype,
+          Object.prototype,
+          String.prototype,
+          Map.prototype,
+          Set.prototype,
+          Reflect,
+          Math,
+          JSON
+        ].every(object => Object.keys(object).length === 0);
+
+        Array.prototype.forEach = 42;
+        const reassigned = Array.prototype.forEach === 42;
+        const deleted = delete Array.prototype.forEach;
+
+        globalThis.result = [
+          arrayMethod.writable,
+          arrayMethod.enumerable,
+          arrayMethod.configurable,
+          promiseMethod.writable,
+          promiseMethod.enumerable,
+          promiseMethod.configurable,
+          ordinary.writable,
+          ordinary.enumerable,
+          ordinary.configurable,
+          arrayKeys.includes("forEach"),
+          promiseKeys.includes("then"),
+          intrinsicTablesAreHidden,
+          reassigned,
+          deleted
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "true,false,true,true,false,true,true,true,true,false,false,true,true,true".to_string()
+      ))
+    );
+  }
+
+  #[test]
+  fn standard_builtin_metadata_and_constants_use_spec_attributes() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const prototype = Object.getOwnPropertyDescriptor(Array, "prototype");
+        const name = Object.getOwnPropertyDescriptor(Array, "name");
+        const length = Object.getOwnPropertyDescriptor(Array, "length");
+        const iterator = Object.getOwnPropertyDescriptor(Symbol, "iterator");
+        const nan = Object.getOwnPropertyDescriptor(globalThis, "NaN");
+
+        globalThis.result = [
+          prototype.writable, prototype.enumerable, prototype.configurable,
+          name.writable, name.enumerable, name.configurable,
+          length.writable, length.enumerable, length.configurable,
+          iterator.writable, iterator.enumerable, iterator.configurable,
+          nan.writable, nan.enumerable, nan.configurable
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "false,false,false,false,false,true,false,false,true,false,false,false,false,false,false"
+          .to_string()
+      ))
+    );
   }
 
   #[test]
@@ -1773,7 +1854,7 @@ mod test {
     let proto = Rc::new(RefCell::new(ObjectData::new()));
     proto.borrow_mut().properties.insert(
       PropertyKey::String("inherited".to_string()),
-      PropertyDescriptor::data(Value::Number(7.0)),
+      PropertyDescriptor::ordinary_data(Value::Number(7.0)),
     );
 
     let props = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
@@ -1781,7 +1862,7 @@ mod test {
     ))));
     props.borrow_mut().properties.insert(
       PropertyKey::String("own".to_string()),
-      PropertyDescriptor::data(Value::Number(3.0)),
+      PropertyDescriptor::ordinary_data(Value::Number(3.0)),
     );
 
     let builtin = Value::BuiltinObject(Rc::new(|_, _| Ok(Value::Undefined)), props);
@@ -1965,7 +2046,7 @@ mod test {
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
       PropertyKey::String("length".to_string()),
-      PropertyDescriptor::data(Value::Number(2.0)),
+      PropertyDescriptor::ordinary_data(Value::Number(2.0)),
     );
     let arr = Value::Array(arr_data, props);
 
@@ -2180,7 +2261,7 @@ mod test {
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
       PropertyKey::String("length".to_string()),
-      PropertyDescriptor::data(Value::Number(1.0)),
+      PropertyDescriptor::ordinary_data(Value::Number(1.0)),
     );
     let arr = Value::Array(Clone::clone(&arr_data), props);
     let key = PropertyKey::String("4294967295".to_string());
@@ -2206,7 +2287,7 @@ mod test {
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
       PropertyKey::String("length".to_string()),
-      PropertyDescriptor::data(Value::Number(1.0)),
+      PropertyDescriptor::ordinary_data(Value::Number(1.0)),
     );
     let arr = Value::Array(Clone::clone(&arr_data), props);
     let key = PropertyKey::String("4294967294".to_string());
@@ -2235,7 +2316,7 @@ mod test {
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
       PropertyKey::String("length".to_string()),
-      PropertyDescriptor::data(Value::Number(2.0)),
+      PropertyDescriptor::ordinary_data(Value::Number(2.0)),
     );
     let arr = Value::Array(arr_data, Clone::clone(&props));
     let getter = Value::Builtin(Rc::new(|_, _| Ok(Value::Undefined)));
@@ -2949,11 +3030,11 @@ mod test {
     let globals = test_globals();
     globals.borrow_mut().properties.insert(
       PropertyKey::String("NaN".to_string()),
-      PropertyDescriptor::data(Value::Number(f64::NAN)),
+      PropertyDescriptor::ordinary_data(Value::Number(f64::NAN)),
     );
     globals.borrow_mut().properties.insert(
       PropertyKey::String("Infinity".to_string()),
-      PropertyDescriptor::data(Value::Number(f64::INFINITY)),
+      PropertyDescriptor::ordinary_data(Value::Number(f64::INFINITY)),
     );
     let mut vm = Vm::new(globals);
 
@@ -3313,7 +3394,7 @@ mod test {
     let globals = test_globals();
     globals.borrow_mut().properties.insert(
       PropertyKey::String("bump".to_string()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new({
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new({
         let calls = Clone::clone(&calls);
         move |_vm, _args| {
           *calls.borrow_mut() += 1;
@@ -3340,7 +3421,7 @@ mod test {
     let globals = test_globals();
     globals.borrow_mut().properties.insert(
       PropertyKey::String("bump".to_string()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new({
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new({
         let calls = Clone::clone(&calls);
         move |_vm, _args| {
           *calls.borrow_mut() += 1;
@@ -3728,11 +3809,11 @@ mod test {
     let globals = test_globals();
     globals.borrow_mut().properties.insert(
       PropertyKey::String("NaN".to_string()),
-      PropertyDescriptor::data(Value::Number(f64::NAN)),
+      PropertyDescriptor::ordinary_data(Value::Number(f64::NAN)),
     );
     globals.borrow_mut().properties.insert(
       PropertyKey::String("Infinity".to_string()),
-      PropertyDescriptor::data(Value::Number(f64::INFINITY)),
+      PropertyDescriptor::ordinary_data(Value::Number(f64::INFINITY)),
     );
     runtime_utils::install_minimal_kernel_constructors(&globals);
     let mut vm = Vm::new(globals);
@@ -4057,22 +4138,22 @@ mod test {
     let mut proto = ObjectData::new();
     proto.properties.insert(
       PropertyKey::String("b".to_string()),
-      PropertyDescriptor::data(Value::Number(2.0)),
+      PropertyDescriptor::ordinary_data(Value::Number(2.0)),
     );
     proto.properties.insert(
       PropertyKey::String("1".to_string()),
-      PropertyDescriptor::data(Value::Number(1.0)),
+      PropertyDescriptor::ordinary_data(Value::Number(1.0)),
     );
     let proto = Rc::new(RefCell::new(proto));
 
     let mut obj = ObjectData::with_prototype(Value::Object(proto));
     obj.properties.insert(
       PropertyKey::String("a".to_string()),
-      PropertyDescriptor::data(Value::Number(3.0)),
+      PropertyDescriptor::ordinary_data(Value::Number(3.0)),
     );
     obj.properties.insert(
       PropertyKey::String("1".to_string()),
-      PropertyDescriptor::data(Value::Number(4.0)),
+      PropertyDescriptor::ordinary_data(Value::Number(4.0)),
     );
     let obj = Value::Object(Rc::new(RefCell::new(obj)));
 

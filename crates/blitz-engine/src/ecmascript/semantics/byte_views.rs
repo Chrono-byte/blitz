@@ -102,7 +102,7 @@ pub(crate) fn new_array_buffer(
   object.set_internal_slot(ARRAY_BUFFER_SHARED_SLOT, Value::Bool(shared));
   object.properties.insert(
     PropertyKey::String("byteLength".to_string()),
-    PropertyDescriptor::data(Value::Number(length as f64)),
+    PropertyDescriptor::ordinary_data(Value::Number(length as f64)),
   );
   (Value::Object(Rc::new(RefCell::new(object))), data)
 }
@@ -138,7 +138,7 @@ pub(crate) fn new_byte_view(
   ] {
     object.properties.insert(
       PropertyKey::String(name.to_string()),
-      PropertyDescriptor::data(value),
+      PropertyDescriptor::ordinary_data(value),
     );
   }
   Value::Object(Rc::new(RefCell::new(object)))

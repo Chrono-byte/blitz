@@ -83,7 +83,7 @@ fn set_method(
   };
   properties.borrow_mut().properties.insert(
     PropertyKey::String(name.to_string()),
-    PropertyDescriptor::data(Value::Builtin(function)),
+    PropertyDescriptor::ordinary_data(Value::Builtin(function)),
   );
 }
 
@@ -392,7 +392,7 @@ mod tests {
     let mut data = ObjectData::new();
     data.properties.insert(
       PropertyKey::String("answer".to_string()),
-      PropertyDescriptor::data(Value::Number(42.0)),
+      PropertyDescriptor::ordinary_data(Value::Number(42.0)),
     );
     let object = Value::Object(Rc::new(RefCell::new(data)));
 

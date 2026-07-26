@@ -1270,12 +1270,12 @@ fn install_websocket_constructor(
   ] {
     props.borrow_mut().properties.insert(
       PropertyKey::String(name.to_string()),
-      PropertyDescriptor::data(Value::Number(value)),
+      PropertyDescriptor::ordinary_data(Value::Number(value)),
     );
   }
   props.borrow_mut().properties.insert(
     PropertyKey::String("prototype".to_string()),
-    PropertyDescriptor::data(prototype),
+    PropertyDescriptor::ordinary_data(prototype),
   );
   vm.realm()
     .set_global("WebSocket", Value::BuiltinObject(constructor, props));
@@ -1350,7 +1350,7 @@ fn install_response_constructor(vm: &mut Vm) {
   ))));
   props.borrow_mut().properties.insert(
     PropertyKey::String("prototype".to_string()),
-    PropertyDescriptor::data(prototype),
+    PropertyDescriptor::ordinary_data(prototype),
   );
   vm.realm()
     .set_global("Response", Value::BuiltinObject(constructor, props));
@@ -1370,7 +1370,7 @@ fn install_headers_constructor(vm: &mut Vm) {
   ))));
   props.borrow_mut().properties.insert(
     PropertyKey::String("prototype".to_string()),
-    PropertyDescriptor::data(prototype),
+    PropertyDescriptor::ordinary_data(prototype),
   );
   vm.realm()
     .set_global("Headers", Value::BuiltinObject(constructor, props));
@@ -1482,7 +1482,7 @@ fn set(
   };
   properties.borrow_mut().properties.insert(
     PropertyKey::String(name.to_string()),
-    PropertyDescriptor::data(value),
+    PropertyDescriptor::ordinary_data(value),
   );
 }
 

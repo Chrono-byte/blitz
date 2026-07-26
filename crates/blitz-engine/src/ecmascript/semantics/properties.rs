@@ -81,16 +81,6 @@ fn array_length(props: &ObjectData) -> usize {
     .unwrap_or(0)
 }
 
-/// Creates a non-enumerable data property descriptor.
-pub(crate) fn non_enum_data(value: Value) -> PropertyDescriptor {
-  PropertyDescriptor::Data {
-    value,
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  }
-}
-
 /// 22.1.3.34.1 ThisStringValue ( value )
 pub(crate) fn this_string_value(
   vm: &mut Vm,
@@ -163,19 +153,19 @@ pub(crate) fn descriptor_value_from_descriptor(
     } => {
       obj.properties.insert(
         PropertyKey::String("value".to_string()),
-        PropertyDescriptor::data(value.clone()),
+        PropertyDescriptor::ordinary_data(value.clone()),
       );
       obj.properties.insert(
         PropertyKey::String("writable".to_string()),
-        PropertyDescriptor::data(Value::Bool(*writable)),
+        PropertyDescriptor::ordinary_data(Value::Bool(*writable)),
       );
       obj.properties.insert(
         PropertyKey::String("enumerable".to_string()),
-        PropertyDescriptor::data(Value::Bool(*enumerable)),
+        PropertyDescriptor::ordinary_data(Value::Bool(*enumerable)),
       );
       obj.properties.insert(
         PropertyKey::String("configurable".to_string()),
-        PropertyDescriptor::data(Value::Bool(*configurable)),
+        PropertyDescriptor::ordinary_data(Value::Bool(*configurable)),
       );
     }
     PropertyDescriptor::Accessor {
@@ -186,19 +176,19 @@ pub(crate) fn descriptor_value_from_descriptor(
     } => {
       obj.properties.insert(
         PropertyKey::String("get".to_string()),
-        PropertyDescriptor::data(get.clone().unwrap_or(Value::Undefined)),
+        PropertyDescriptor::ordinary_data(get.clone().unwrap_or(Value::Undefined)),
       );
       obj.properties.insert(
         PropertyKey::String("set".to_string()),
-        PropertyDescriptor::data(set.clone().unwrap_or(Value::Undefined)),
+        PropertyDescriptor::ordinary_data(set.clone().unwrap_or(Value::Undefined)),
       );
       obj.properties.insert(
         PropertyKey::String("enumerable".to_string()),
-        PropertyDescriptor::data(Value::Bool(*enumerable)),
+        PropertyDescriptor::ordinary_data(Value::Bool(*enumerable)),
       );
       obj.properties.insert(
         PropertyKey::String("configurable".to_string()),
-        PropertyDescriptor::data(Value::Bool(*configurable)),
+        PropertyDescriptor::ordinary_data(Value::Bool(*configurable)),
       );
     }
   }

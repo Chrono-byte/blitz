@@ -523,7 +523,7 @@ mod tests {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     Vm::new(globals)
   }

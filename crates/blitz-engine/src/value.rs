@@ -565,13 +565,60 @@ impl ProxyData {
 }
 
 impl PropertyDescriptor {
-  /// Create a default data descriptor with full attributes.
-  pub fn data(value: Value) -> Self {
+  /// Create the descriptor used by ECMAScript `CreateDataProperty`.
+  ///
+  /// This is appropriate for properties produced by assignment, object
+  /// literals, and specification algorithms that explicitly create an
+  /// ordinary data property.
+  pub fn ordinary_data(value: Value) -> Self {
     Self::Data {
       value,
       writable: true,
       enumerable: true,
       configurable: true,
+    }
+  }
+
+  /// Create the default descriptor for a standard built-in data property.
+  ///
+  /// ECMAScript standard built-in data properties are writable and
+  /// configurable, but non-enumerable unless their definition says otherwise.
+  pub fn builtin_data(value: Value) -> Self {
+    Self::Data {
+      value,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    }
+  }
+
+  /// Create the standard descriptor for a built-in constructor's `prototype`.
+  pub fn builtin_prototype(value: Value) -> Self {
+    Self::Data {
+      value,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    }
+  }
+
+  /// Create the descriptor used by built-in function `name` and `length`.
+  pub fn builtin_metadata(value: Value) -> Self {
+    Self::Data {
+      value,
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    }
+  }
+
+  /// Create a non-writable, non-enumerable, non-configurable data property.
+  pub fn immutable_data(value: Value) -> Self {
+    Self::Data {
+      value,
+      writable: false,
+      enumerable: false,
+      configurable: false,
     }
   }
 }
@@ -962,7 +1009,7 @@ pub fn define_native_global(
 ) {
   globals.borrow_mut().properties.insert(
     PropertyKey::String(name.to_string()),
-    PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
+    PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |vm, args| {
       native(vm, Value::Undefined, args)
     }))),
   );

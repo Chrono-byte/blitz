@@ -38,7 +38,7 @@ pub(super) fn install(vm: &mut Vm) {
     .properties
     .insert(
       PropertyKey::String("prototype".to_string()),
-      PropertyDescriptor::data(prototype),
+      PropertyDescriptor::ordinary_data(prototype),
     );
   vm.realm().set_global(
     "URL",
@@ -104,7 +104,7 @@ fn set(
   if let Value::Object(object) = target {
     object.borrow_mut().properties.insert(
       PropertyKey::String(name.to_string()),
-      PropertyDescriptor::data(value),
+      PropertyDescriptor::ordinary_data(value),
     );
   }
 }

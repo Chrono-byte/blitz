@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use num_bigint::BigInt as BigIntValue;
 
-use crate::runtime_utils::{builtin_object, js_number_to_string, non_enum_data, strict_equal};
+use crate::runtime_utils::{builtin_object, js_number_to_string, strict_equal};
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 /// Installs the Number and BigInt constructors and their prototype methods.
@@ -26,7 +26,7 @@ pub(crate) fn install_bigint_and_number_builtins(
   )));
   bigint_ctor_map.borrow_mut().properties.insert(
     PKey::String("prototype".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&bigint_proto_map))),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&bigint_proto_map))),
   );
   let bigint_proto_for_ctor = Rc::clone(&bigint_proto_map);
   let bigint_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
@@ -72,7 +72,7 @@ pub(crate) fn install_bigint_and_number_builtins(
       let obj_rc = Rc::new(RefCell::new(obj));
       obj_rc.borrow_mut().properties.insert(
         PKey::String("[[PrimitiveValue]]".to_string()),
-        PropertyDescriptor::data(Value::BigInt(bigint)),
+        PropertyDescriptor::ordinary_data(Value::BigInt(bigint)),
       );
       Ok(Value::Object(obj_rc))
     } else {
@@ -82,11 +82,11 @@ pub(crate) fn install_bigint_and_number_builtins(
   let bigint_ctor_val = Value::BuiltinObject(bigint_ctor_fn, bigint_ctor_map);
   bigint_proto_map.borrow_mut().properties.insert(
     PKey::String("constructor".to_string()),
-    PropertyDescriptor::data(bigint_ctor_val.clone()),
+    PropertyDescriptor::builtin_data(bigint_ctor_val.clone()),
   );
   bigint_proto_map.borrow_mut().properties.insert(
     PKey::String("valueOf".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let undefined = Value::Undefined;
         let this = args.first().unwrap_or(&undefined);
@@ -111,7 +111,7 @@ pub(crate) fn install_bigint_and_number_builtins(
   );
   bigint_proto_map.borrow_mut().properties.insert(
     PKey::String("toString".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let undefined = Value::Undefined;
         let this = args.first().unwrap_or(&undefined);
@@ -138,7 +138,7 @@ pub(crate) fn install_bigint_and_number_builtins(
   );
   globals.properties.insert(
     PKey::String("BigInt".to_string()),
-    PropertyDescriptor::data(bigint_ctor_val),
+    PropertyDescriptor::builtin_data(bigint_ctor_val),
   );
 
   let number_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
@@ -149,7 +149,7 @@ pub(crate) fn install_bigint_and_number_builtins(
   )));
   number_ctor_map.borrow_mut().properties.insert(
     PKey::String("prototype".to_string()),
-    non_enum_data(Value::Object(Rc::clone(&number_proto_map))),
+    PropertyDescriptor::builtin_data(Value::Object(Rc::clone(&number_proto_map))),
   );
   let number_proto_for_ctor = Rc::clone(&number_proto_map);
   let number_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
@@ -161,7 +161,7 @@ pub(crate) fn install_bigint_and_number_builtins(
       let obj_rc = Rc::new(RefCell::new(obj));
       obj_rc.borrow_mut().properties.insert(
         PKey::String("[[PrimitiveValue]]".to_string()),
-        PropertyDescriptor::data(Value::Number(n)),
+        PropertyDescriptor::ordinary_data(Value::Number(n)),
       );
       return Ok(Value::Object(obj_rc));
     }
@@ -194,11 +194,11 @@ pub(crate) fn install_bigint_and_number_builtins(
   let number_ctor_val = Value::BuiltinObject(number_ctor_fn, Rc::clone(&number_ctor_map));
   number_proto_map.borrow_mut().properties.insert(
     PKey::String("constructor".to_string()),
-    non_enum_data(number_ctor_val.clone()),
+    PropertyDescriptor::builtin_data(number_ctor_val.clone()),
   );
   number_proto_map.borrow_mut().properties.insert(
     PKey::String("valueOf".to_string()),
-    non_enum_data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let undefined = Value::Undefined;
         let this = args.first().unwrap_or(&undefined);
@@ -234,7 +234,7 @@ pub(crate) fn install_bigint_and_number_builtins(
   );
   number_proto_map.borrow_mut().properties.insert(
     PKey::String("toString".to_string()),
-    non_enum_data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let undefined = Value::Undefined;
         let this = args.first().unwrap_or(&undefined);
@@ -331,7 +331,7 @@ pub(crate) fn install_bigint_and_number_builtins(
   for (name, predicate) in number_predicates {
     number_ctor_map.borrow_mut().properties.insert(
       PKey::String(name.to_string()),
-      non_enum_data(builtin_object(
+      PropertyDescriptor::builtin_data(builtin_object(
         Rc::new(move |_vm, args| {
           let value_idx = usize::from(args.len() > 1);
           let result =
@@ -344,6 +344,6 @@ pub(crate) fn install_bigint_and_number_builtins(
   }
   globals.properties.insert(
     PKey::String("Number".to_string()),
-    PropertyDescriptor::data(number_ctor_val),
+    PropertyDescriptor::builtin_data(number_ctor_val),
   );
 }

@@ -237,7 +237,7 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
         Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
           props.borrow_mut().properties.insert(
             PropertyKey::String("[[SuperConstructor]]".to_string()),
-            PropertyDescriptor::data(superclass.clone()),
+            PropertyDescriptor::ordinary_data(superclass.clone()),
           );
           if !matches!(superclass, Value::Null) {
             props.borrow_mut().set_prototype_value(superclass);

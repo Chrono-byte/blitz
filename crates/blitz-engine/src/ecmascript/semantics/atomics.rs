@@ -109,7 +109,7 @@ pub(crate) fn build_atomics_object(
     set_builtin_length(&func_val, length);
     atomics_props.borrow_mut().properties.insert(
       PropertyKey::String(name.to_string()),
-      PropertyDescriptor::data(func_val),
+      PropertyDescriptor::builtin_data(func_val),
     );
   };
   insert_atomics_method(

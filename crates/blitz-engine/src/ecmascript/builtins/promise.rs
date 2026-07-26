@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use crate::runtime_utils::{
   builtin_object, collect_iterable_values, promise_constructor_matches, reject_pending_promise,
-  resolve_promise_with_value, static_builtin_arg_offset,
+  resolve_promise_with_value, set_builtin_length, set_builtin_name, static_builtin_arg_offset,
 };
 use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
@@ -97,17 +97,19 @@ pub(crate) fn create_promise_intrinsics(
 
   promise_ctor_map.borrow_mut().properties.insert(
     PKey::String("prototype".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&promise_proto_map))),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&promise_proto_map))),
   );
   let promise_ctor_val = Value::BuiltinObject(promise_ctor_fn, Rc::clone(&promise_ctor_map));
+  set_builtin_name(&promise_ctor_val, "Promise");
+  set_builtin_length(&promise_ctor_val, 1.0);
 
   promise_proto_map.borrow_mut().properties.insert(
     PKey::String("constructor".to_string()),
-    PropertyDescriptor::data(promise_ctor_val.clone()),
+    PropertyDescriptor::builtin_data(promise_ctor_val.clone()),
   );
   promise_proto_map.borrow_mut().properties.insert(
     PKey::String("then".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let undefined = Value::Undefined;
         let this = args.first().unwrap_or(&undefined);
@@ -254,7 +256,7 @@ pub(crate) fn create_promise_intrinsics(
   );
   promise_proto_map.borrow_mut().properties.insert(
     PKey::String("catch".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let undefined = Value::Undefined;
         let this = args.first().unwrap_or(&undefined);
@@ -272,7 +274,7 @@ pub(crate) fn create_promise_intrinsics(
 
   promise_ctor_map.borrow_mut().properties.insert(
     PKey::String("resolve".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Promise");
         let undefined = Value::Undefined;
@@ -322,7 +324,7 @@ pub(crate) fn create_promise_intrinsics(
 
   promise_ctor_map.borrow_mut().properties.insert(
     PKey::String("all".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Promise");
         let undefined = Value::Undefined;
@@ -452,7 +454,7 @@ pub(crate) fn create_promise_intrinsics(
 
   promise_ctor_map.borrow_mut().properties.insert(
     PKey::String("reject".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Promise");
         let undefined = Value::Undefined;

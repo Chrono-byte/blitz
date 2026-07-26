@@ -1771,7 +1771,7 @@ impl Vm {
       }
       props.borrow_mut().properties.insert(
         PropertyKey::String("length".to_string()),
-        PropertyDescriptor::data(Value::Number(usize_to_f64(new_len))),
+        PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(new_len))),
       );
       self.bump_object_generation(obj);
       return Ok(());
@@ -1983,7 +1983,7 @@ fn partial_descriptor_to_value(
   let mut insert = |name: &str, value: Value| {
     object.properties.insert(
       PropertyKey::String(name.to_string()),
-      PropertyDescriptor::data(value),
+      PropertyDescriptor::ordinary_data(value),
     );
   };
   if desc.has_value {

@@ -519,7 +519,7 @@ fn main() -> Result<(), blitz::errors::Error> {
       let mut g = globals.borrow_mut();
       g.properties.insert(
         blitz::value::PropertyKey::String("globalThis".to_string()),
-        blitz::value::PropertyDescriptor::data(global_this),
+        blitz::value::PropertyDescriptor::ordinary_data(global_this),
       );
     }
     globals
@@ -659,7 +659,7 @@ mod tests {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     globals
   }

@@ -1903,7 +1903,7 @@ fn make_test_globals() -> Rc<RefCell<ObjectData>> {
   let global_this = Value::Object(Clone::clone(&globals));
   globals.borrow_mut().properties.insert(
     PropertyKey::String("globalThis".to_string()),
-    PropertyDescriptor::data(global_this),
+    PropertyDescriptor::ordinary_data(global_this),
   );
   let default_print: NativeFn = Rc::new(|vm, _this, args| {
     eprintln!("[test262 print] {}", print_args(vm, args));
@@ -1912,11 +1912,11 @@ fn make_test_globals() -> Rc<RefCell<ObjectData>> {
   define_native_global(&globals, "print", default_print);
   globals.borrow_mut().properties.insert(
     PropertyKey::String("NaN".to_string()),
-    PropertyDescriptor::data(Value::Number(f64::NAN)),
+    PropertyDescriptor::ordinary_data(Value::Number(f64::NAN)),
   );
   globals.borrow_mut().properties.insert(
     PropertyKey::String("Infinity".to_string()),
-    PropertyDescriptor::data(Value::Number(f64::INFINITY)),
+    PropertyDescriptor::ordinary_data(Value::Number(f64::INFINITY)),
   );
 
   runtime_utils::install_minimal_kernel_constructors(&globals);
@@ -1924,7 +1924,7 @@ fn make_test_globals() -> Rc<RefCell<ObjectData>> {
   let test262_obj = make_test262_object(&globals);
   globals.borrow_mut().properties.insert(
     PropertyKey::String("$262".to_string()),
-    PropertyDescriptor::data(test262_obj),
+    PropertyDescriptor::ordinary_data(test262_obj),
   );
 
   globals
@@ -1974,7 +1974,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
   let eval_globals = Rc::clone(globals);
   data.properties.insert(
     PropertyKey::String("evalScript".to_string()),
-    PropertyDescriptor::data(host_builtin(Rc::new(move |_vm, args| {
+    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(move |_vm, args| {
       builtin_eval_script(&eval_globals, args).map_err(blitz::errors::RuntimeError::from)
     }))),
   );
@@ -1982,20 +1982,20 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
   // IsHTMLDDA: plain object placeholder (full implementation requires exotic object semantics)
   data.properties.insert(
     PropertyKey::String("IsHTMLDDA".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
+    PropertyDescriptor::ordinary_data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
   );
 
   // detachArrayBuffer: null out [[ArrayBufferData]] and set byteLength to 0
   data.properties.insert(
     PropertyKey::String("detachArrayBuffer".to_string()),
-    PropertyDescriptor::data(host_builtin(Rc::new(|_vm, args| {
+    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(|_vm, args| {
       if let Some(Value::Object(obj)) = args.first() {
         let mut obj_data = obj.borrow_mut();
         // Per spec: [[ArrayBufferData]] = null
         obj_data.set_internal_slot("[[ArrayBufferData]]", Value::Null);
         obj_data.properties.insert(
           PropertyKey::String("byteLength".to_string()),
-          PropertyDescriptor::data(Value::Number(0.0)),
+          PropertyDescriptor::ordinary_data(Value::Number(0.0)),
         );
       }
       Ok(Value::Undefined)
@@ -2003,14 +2003,14 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
   );
   data.properties.insert(
     PropertyKey::String("gc".to_string()),
-    PropertyDescriptor::data(host_builtin(Rc::new(|vm, _args| {
+    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(|vm, _args| {
       let _ = vm.collect_garbage_prototype();
       Ok(Value::Undefined)
     }))),
   );
   data.properties.insert(
     PropertyKey::String("AbstractModuleSource".to_string()),
-    PropertyDescriptor::data(Value::Undefined),
+    PropertyDescriptor::ordinary_data(Value::Undefined),
   );
 
   let noop_agent_method: blitz::value::BuiltinFn =
@@ -2025,19 +2025,19 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
   ] {
     agent_obj.borrow_mut().properties.insert(
       PropertyKey::String(name.to_string()),
-      PropertyDescriptor::data(host_builtin(Clone::clone(&noop_agent_method))),
+      PropertyDescriptor::ordinary_data(host_builtin(Clone::clone(&noop_agent_method))),
     );
   }
   data.properties.insert(
     PropertyKey::String("agent".to_string()),
-    PropertyDescriptor::data(Value::Object(agent_obj)),
+    PropertyDescriptor::ordinary_data(Value::Object(agent_obj)),
   );
 
   // createRealm: builds a FRESH realm with fresh intrinsics, NOT a heap clone.
   // Per spec: each realm gets distinct intrinsic identities.
   data.properties.insert(
     PropertyKey::String("createRealm".to_string()),
-    PropertyDescriptor::data(host_builtin(Rc::new(|_vm, _args| {
+    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(|_vm, _args| {
       let realm_global = Rc::new(RefCell::new(ObjectData::new()));
 
       runtime_utils::install_minimal_kernel_constructors(&realm_global);
@@ -2046,13 +2046,13 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
 
       realm_global.borrow_mut().properties.insert(
         PropertyKey::String("$262".to_string()),
-        PropertyDescriptor::data(new_262.clone()),
+        PropertyDescriptor::ordinary_data(new_262.clone()),
       );
 
       if let Value::Object(obj) = &new_262 {
         obj.borrow_mut().properties.insert(
           PropertyKey::String("global".to_string()),
-          PropertyDescriptor::data(Value::Object(realm_global)),
+          PropertyDescriptor::ordinary_data(Value::Object(realm_global)),
         );
       }
 
@@ -2063,7 +2063,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
   // global: the realm's global object
   data.properties.insert(
     PropertyKey::String("global".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(globals))),
+    PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(globals))),
   );
 
   Value::Object(Rc::new(RefCell::new(data)))
@@ -2321,7 +2321,7 @@ fn run_test_file(
     let globals = make_test_globals();
     globals.borrow_mut().properties.insert(
       PropertyKey::String("__TSBLITZ_TEST_PATH".to_string()),
-      PropertyDescriptor::data(Value::String(path.to_string_lossy().to_string())),
+      PropertyDescriptor::ordinary_data(Value::String(path.to_string_lossy().to_string())),
     );
     let mut vm = Vm::new(Clone::clone(&globals));
 
@@ -3089,7 +3089,7 @@ fn main() {
   let global_this = Value::Object(Clone::clone(&globals));
   globals.borrow_mut().properties.insert(
     PropertyKey::String("globalThis".to_string()),
-    PropertyDescriptor::data(global_this),
+    PropertyDescriptor::ordinary_data(global_this),
   );
 
   // Seed the realm with kernel constructors before running tests.
@@ -3100,7 +3100,7 @@ fn main() {
   let test262_obj = make_test262_object(&globals);
   globals.borrow_mut().properties.insert(
     PropertyKey::String("$262".to_string()),
-    PropertyDescriptor::data(test262_obj),
+    PropertyDescriptor::ordinary_data(test262_obj),
   );
 
   let _vm = Vm::new(Clone::clone(&globals));

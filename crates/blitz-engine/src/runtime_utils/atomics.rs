@@ -258,7 +258,7 @@ pub(crate) fn atomics_waiters_array(buffer: &Rc<RefCell<ObjectData>>) -> Rc<RefC
   ))));
   buffer_data.properties.insert(
     PropertyKey::String("[[AtomicsWaiters]]".to_string()),
-    PropertyDescriptor::data(Value::Array(
+    PropertyDescriptor::ordinary_data(Value::Array(
       Rc::clone(&arr),
       gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
     )),
@@ -274,11 +274,11 @@ pub(crate) fn atomics_make_waiter_record(
   let mut data = ObjectData::new();
   data.properties.insert(
     PropertyKey::String("index".to_string()),
-    PropertyDescriptor::data(Value::Number(usize_to_f64(index))),
+    PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(index))),
   );
   data.properties.insert(
     PropertyKey::String("resolve".to_string()),
-    PropertyDescriptor::data(resolve.unwrap_or(Value::Undefined)),
+    PropertyDescriptor::ordinary_data(resolve.unwrap_or(Value::Undefined)),
   );
   Value::Object(gc::track_object(Rc::new(RefCell::new(data))))
 }
@@ -291,11 +291,11 @@ pub(crate) fn atomics_make_wait_result(
   let result = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
   result.borrow_mut().properties.insert(
     PropertyKey::String("async".to_string()),
-    PropertyDescriptor::data(Value::Bool(async_flag)),
+    PropertyDescriptor::ordinary_data(Value::Bool(async_flag)),
   );
   result.borrow_mut().properties.insert(
     PropertyKey::String("value".to_string()),
-    PropertyDescriptor::data(value),
+    PropertyDescriptor::ordinary_data(value),
   );
   Value::Object(result)
 }

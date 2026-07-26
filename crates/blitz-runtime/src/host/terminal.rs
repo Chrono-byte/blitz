@@ -322,7 +322,7 @@ fn set(
   };
   properties.borrow_mut().properties.insert(
     PropertyKey::String(name.to_string()),
-    PropertyDescriptor::data(value),
+    PropertyDescriptor::ordinary_data(value),
   );
 }
 
@@ -363,7 +363,7 @@ mod tests {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = Vm::new(globals);
     let blitz = object(vm.realm().object_prototype());
@@ -407,7 +407,7 @@ mod tests {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = Vm::new(Rc::clone(&globals));
     let blitz = object(vm.realm().object_prototype());

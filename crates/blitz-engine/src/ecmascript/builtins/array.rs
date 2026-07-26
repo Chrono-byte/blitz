@@ -9,9 +9,8 @@ use num_traits::ToPrimitive;
 
 use crate::runtime_utils::{
   array_length_descriptor, builtin_object, canonical_index_key, collect_iterable_values,
-  non_enum_data, reject_pending_promise, resolve_promise_with_value, set_builtin_length,
-  set_builtin_name, static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string,
-  usize_to_f64,
+  reject_pending_promise, resolve_promise_with_value, set_builtin_length, set_builtin_name,
+  static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string, usize_to_f64,
 };
 use crate::value::{
   ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
@@ -48,19 +47,19 @@ fn create_data_property_or_throw(
   let mut descriptor = ObjectData::new();
   descriptor.properties.insert(
     PropertyKey::String("value".to_string()),
-    PropertyDescriptor::data(value.clone()),
+    PropertyDescriptor::ordinary_data(value.clone()),
   );
   descriptor.properties.insert(
     PropertyKey::String("writable".to_string()),
-    PropertyDescriptor::data(Value::Bool(true)),
+    PropertyDescriptor::ordinary_data(Value::Bool(true)),
   );
   descriptor.properties.insert(
     PropertyKey::String("enumerable".to_string()),
-    PropertyDescriptor::data(Value::Bool(true)),
+    PropertyDescriptor::ordinary_data(Value::Bool(true)),
   );
   descriptor.properties.insert(
     PropertyKey::String("configurable".to_string()),
-    PropertyDescriptor::data(Value::Bool(true)),
+    PropertyDescriptor::ordinary_data(Value::Bool(true)),
   );
   let descriptor = Value::Object(Rc::new(RefCell::new(descriptor)));
   if !vm.define_property_value(target, key, &descriptor)? {
@@ -179,9 +178,11 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     Ok(Value::Array(arr_rc, props))
   });
   let array_ctor_val = Value::BuiltinObject(Rc::clone(&array_ctor_fn), Rc::clone(array_ctor_map));
+  set_builtin_name(&array_ctor_val, "Array");
+  set_builtin_length(&array_ctor_val, 1.0);
   array_ctor_map.borrow_mut().properties.insert(
     PKey::String("isArray".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|_vm, args| {
           Ok(Value::Bool(
@@ -196,7 +197,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
   );
   array_ctor_map.borrow_mut().properties.insert(
     PKey::String("of".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let array_proto_for_of = Rc::clone(array_proto_map);
       let function_proto_map = Rc::clone(function_proto_map);
       let builtin = builtin_object(
@@ -222,7 +223,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
   );
   array_ctor_map.borrow_mut().properties.insert(
     PKey::String("from".to_string()),
-    non_enum_data({
+    PropertyDescriptor::builtin_data({
       let function_proto_map = Rc::clone(function_proto_map);
       let builtin = builtin_object(
         Rc::new(move |vm, args| {
@@ -346,7 +347,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
   );
   array_ctor_map.borrow_mut().properties.insert(
     PKey::String("fromAsync".to_string()),
-    PropertyDescriptor::data({
+    PropertyDescriptor::builtin_data({
       let array_proto_for_from_async = Rc::clone(array_proto_map);
       let function_proto_map = Rc::clone(function_proto_map);
       let builtin = builtin_object(
@@ -412,11 +413,11 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("constructor".to_string()),
-    PropertyDescriptor::data(array_ctor_val.clone()),
+    PropertyDescriptor::builtin_data(array_ctor_val.clone()),
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("lastIndexOf".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let undefined = Value::Undefined;
         let receiver = args.first().unwrap_or(&undefined);
@@ -535,7 +536,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("join".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let undefined = Value::Undefined;
         let receiver = args.first().unwrap_or(&undefined);
@@ -661,19 +662,19 @@ fn execute_array_from_async_job(
         let mut desc_data = ObjectData::new();
         desc_data.properties.insert(
           PropertyKey::String("value".to_string()),
-          PropertyDescriptor::data(value),
+          PropertyDescriptor::ordinary_data(value),
         );
         desc_data.properties.insert(
           PropertyKey::String("writable".to_string()),
-          PropertyDescriptor::data(Value::Bool(true)),
+          PropertyDescriptor::ordinary_data(Value::Bool(true)),
         );
         desc_data.properties.insert(
           PropertyKey::String("enumerable".to_string()),
-          PropertyDescriptor::data(Value::Bool(true)),
+          PropertyDescriptor::ordinary_data(Value::Bool(true)),
         );
         desc_data.properties.insert(
           PropertyKey::String("configurable".to_string()),
-          PropertyDescriptor::data(Value::Bool(true)),
+          PropertyDescriptor::ordinary_data(Value::Bool(true)),
         );
         let desc = Value::Object(Rc::new(RefCell::new(desc_data)));
         if !vm.define_property_value(&created, &key, &desc)? {
@@ -703,19 +704,19 @@ fn execute_array_from_async_job(
       let mut desc_data = ObjectData::new();
       desc_data.properties.insert(
         PropertyKey::String("value".to_string()),
-        PropertyDescriptor::data(value),
+        PropertyDescriptor::ordinary_data(value),
       );
       desc_data.properties.insert(
         PropertyKey::String("writable".to_string()),
-        PropertyDescriptor::data(Value::Bool(true)),
+        PropertyDescriptor::ordinary_data(Value::Bool(true)),
       );
       desc_data.properties.insert(
         PropertyKey::String("enumerable".to_string()),
-        PropertyDescriptor::data(Value::Bool(true)),
+        PropertyDescriptor::ordinary_data(Value::Bool(true)),
       );
       desc_data.properties.insert(
         PropertyKey::String("configurable".to_string()),
-        PropertyDescriptor::data(Value::Bool(true)),
+        PropertyDescriptor::ordinary_data(Value::Bool(true)),
       );
       let desc = Value::Object(Rc::new(RefCell::new(desc_data)));
       if !vm.define_property_value(&created, &key, &desc)? {

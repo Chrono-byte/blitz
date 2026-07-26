@@ -73,7 +73,7 @@ impl Vm {
       let key_val = pair[0].clone();
       let value = pair[1].clone();
       let key = self.to_property_key(&key_val)?;
-      entries.push((key, PropertyDescriptor::data(value)));
+      entries.push((key, PropertyDescriptor::ordinary_data(value)));
     }
     let mut map = indexmap::IndexMap::with_capacity(n);
     for (key, desc) in entries {
@@ -230,7 +230,7 @@ impl Vm {
     {
       props.borrow_mut().properties.insert(
         PropertyKey::String("[[HomeObject]]".to_string()),
-        PropertyDescriptor::data(home_object),
+        PropertyDescriptor::ordinary_data(home_object),
       );
     }
 

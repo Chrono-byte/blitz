@@ -136,7 +136,7 @@ impl Vm {
       .set_prototype_value(self.realm.generator_prototype());
     gen_obj.borrow_mut().properties.insert(
       PropertyKey::String("next".to_string()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = next_runner
           .try_borrow_mut()
           .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
@@ -183,7 +183,7 @@ impl Vm {
     );
     gen_obj.borrow_mut().properties.insert(
       PropertyKey::String("throw".to_string()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = throw_runner
           .try_borrow_mut()
           .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
@@ -237,7 +237,7 @@ impl Vm {
     );
     gen_obj.borrow_mut().properties.insert(
       PropertyKey::String("return".to_string()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = return_runner
           .try_borrow_mut()
           .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
@@ -278,7 +278,7 @@ impl Vm {
     );
     gen_obj.borrow_mut().properties.insert(
       PropertyKey::Symbol(SymbolId::well_known_iterator()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(|_vm, args| {
         Ok(args.first().cloned().unwrap_or(Value::Undefined))
       }))),
     );
@@ -332,25 +332,25 @@ impl Vm {
         Value::Object(obj) => {
           obj.borrow_mut().properties.insert(
             PropertyKey::String("constructor".to_string()),
-            crate::runtime_utils::non_enum_data(ctor.clone()),
+            PropertyDescriptor::builtin_data(ctor.clone()),
           );
         }
         Value::Array(_, props) => {
           props.borrow_mut().properties.insert(
             PropertyKey::String("constructor".to_string()),
-            crate::runtime_utils::non_enum_data(ctor.clone()),
+            PropertyDescriptor::builtin_data(ctor.clone()),
           );
         }
         Value::Closure { props, .. } => {
           props.borrow_mut().properties.insert(
             PropertyKey::String("constructor".to_string()),
-            crate::runtime_utils::non_enum_data(ctor.clone()),
+            PropertyDescriptor::builtin_data(ctor.clone()),
           );
         }
         Value::BuiltinObject(_, props) => {
           props.borrow_mut().properties.insert(
             PropertyKey::String("constructor".to_string()),
-            crate::runtime_utils::non_enum_data(ctor.clone()),
+            PropertyDescriptor::builtin_data(ctor.clone()),
           );
         }
         Value::Proxy(_) => {}
@@ -459,7 +459,7 @@ impl Vm {
           ))));
           instance_obj.borrow_mut().properties.insert(
             PropertyKey::String("constructor".to_string()),
-            PropertyDescriptor::data(callee.clone()),
+            PropertyDescriptor::ordinary_data(callee.clone()),
           );
           Value::Object(instance_obj)
         };
@@ -582,7 +582,7 @@ impl Vm {
         ))));
         instance_obj.borrow_mut().properties.insert(
           PropertyKey::String("constructor".to_string()),
-          PropertyDescriptor::data(callee.clone()),
+          PropertyDescriptor::ordinary_data(callee.clone()),
         );
         let instance = Value::Object(instance_obj);
         // Builtin constructors receive:
@@ -987,7 +987,7 @@ impl Vm {
     let props: Rc<RefCell<ObjectData>> = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     props.borrow_mut().properties.insert(
       PropertyKey::String("length".to_string()),
-      PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
+      PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
     );
 
     if let Some(array_val) = self
@@ -1013,7 +1013,7 @@ impl Vm {
       {
         props.borrow_mut().properties.insert(
           PropertyKey::String("forEach".to_string()),
-          PropertyDescriptor::data(for_each_val),
+          PropertyDescriptor::ordinary_data(for_each_val),
         );
       }
     }
@@ -1289,7 +1289,7 @@ impl Vm {
       } else {
         obj_rc.borrow_mut().properties.insert(
           key,
-          PropertyDescriptor::data(
+          PropertyDescriptor::ordinary_data(
             args_for_arguments
               .get(idx)
               .cloned()

@@ -35,11 +35,11 @@ pub fn install(vm: &mut Vm) {
   let mut global = global.borrow_mut();
   global.properties.insert(
     PropertyKey::String("AbortSignal".to_string()),
-    PropertyDescriptor::data(signal_constructor),
+    PropertyDescriptor::ordinary_data(signal_constructor),
   );
   global.properties.insert(
     PropertyKey::String("AbortController".to_string()),
-    PropertyDescriptor::data(controller_constructor),
+    PropertyDescriptor::ordinary_data(controller_constructor),
   );
 }
 

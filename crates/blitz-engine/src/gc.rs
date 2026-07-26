@@ -730,11 +730,11 @@ mod tests {
 
     a.borrow_mut().properties.insert(
       crate::value::PropertyKey::String("peer".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&b))),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&b))),
     );
     b.borrow_mut().properties.insert(
       crate::value::PropertyKey::String("peer".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&a))),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&a))),
     );
 
     let weak_a = Rc::downgrade(&a);

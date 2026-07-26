@@ -357,7 +357,7 @@ mod tests {
     for (key, value) in properties {
       data.properties.insert(
         PropertyKey::String(key.to_string()),
-        PropertyDescriptor::data(value),
+        PropertyDescriptor::ordinary_data(value),
       );
     }
     Value::Object(Rc::new(RefCell::new(data)))
@@ -392,7 +392,7 @@ mod tests {
     let data = Rc::new(RefCell::new(ObjectData::new()));
     data.borrow_mut().properties.insert(
       PropertyKey::String("self".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&data))),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&data))),
     );
 
     assert_eq!(

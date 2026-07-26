@@ -340,11 +340,11 @@ pub(crate) fn host_error_object(
   }
   obj.properties.insert(
     PropertyKey::String("name".to_string()),
-    PropertyDescriptor::data(Value::String(name.to_string())),
+    PropertyDescriptor::ordinary_data(Value::String(name.to_string())),
   );
   obj.properties.insert(
     PropertyKey::String("message".to_string()),
-    PropertyDescriptor::data(Value::String(message.to_string())),
+    PropertyDescriptor::ordinary_data(Value::String(message.to_string())),
   );
   Value::Object(gc::track_object(Rc::new(RefCell::new(obj))))
 }
@@ -472,7 +472,7 @@ fn clone_value_across_realms(
               new_props
                 .borrow_mut()
                 .properties
-                .insert(k.clone(), PropertyDescriptor::data(cloned));
+                .insert(k.clone(), PropertyDescriptor::ordinary_data(cloned));
             }
             _ => {
               return Err("Cannot clone accessor properties across realms".to_string());
@@ -538,7 +538,7 @@ fn clone_value_across_realms(
             let bl = helper(vm, &value, visited, transfer_set)?;
             target_obj.borrow_mut().properties.insert(
               PropertyKey::String("byteLength".to_string()),
-              PropertyDescriptor::data(bl),
+              PropertyDescriptor::ordinary_data(bl),
             );
           }
           if transferring {
@@ -595,19 +595,19 @@ fn clone_value_across_realms(
           target.set_internal_slot(TYPED_ARRAY_BUFFER_SLOT, cloned_buffer.clone());
           target.properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(details.length as f64)),
+            PropertyDescriptor::ordinary_data(Value::Number(details.length as f64)),
           );
           target.properties.insert(
             PropertyKey::String("byteLength".to_string()),
-            PropertyDescriptor::data(Value::Number(details.length as f64)),
+            PropertyDescriptor::ordinary_data(Value::Number(details.length as f64)),
           );
           target.properties.insert(
             PropertyKey::String("byteOffset".to_string()),
-            PropertyDescriptor::data(Value::Number(details.byte_offset as f64)),
+            PropertyDescriptor::ordinary_data(Value::Number(details.byte_offset as f64)),
           );
           target.properties.insert(
             PropertyKey::String("buffer".to_string()),
-            PropertyDescriptor::data(cloned_buffer),
+            PropertyDescriptor::ordinary_data(cloned_buffer),
           );
           drop(target);
           return Ok(Value::Object(target_obj));
@@ -643,7 +643,7 @@ fn clone_value_across_realms(
           let cloned_ta = helper(vm, ta_data, visited, transfer_set)?;
           target_obj.borrow_mut().properties.insert(
             PropertyKey::String("[[TypedArrayData]]".to_string()),
-            PropertyDescriptor::data(cloned_ta),
+            PropertyDescriptor::ordinary_data(cloned_ta),
           );
           // copy common numeric properties (length, byteLength)
           for key_name in &["length", "byteLength"] {
@@ -662,7 +662,7 @@ fn clone_value_across_realms(
                     configurable: false,
                   }
                 } else {
-                  PropertyDescriptor::data(cloned)
+                  PropertyDescriptor::ordinary_data(cloned)
                 },
               );
             }
@@ -676,7 +676,7 @@ fn clone_value_across_realms(
                 let cloned = helper(vm, value, visited, transfer_set)?;
                 target_obj.borrow_mut().properties.insert(
                   PropertyKey::String(s.clone()),
-                  PropertyDescriptor::data(cloned),
+                  PropertyDescriptor::ordinary_data(cloned),
                 );
               } else {
                 return Err("Cannot clone accessor properties across realms".to_string());
@@ -744,7 +744,7 @@ fn clone_value_across_realms(
           let cloned_prim = helper(vm, prim, visited, transfer_set)?;
           target_obj.borrow_mut().properties.insert(
             PropertyKey::String("[[PrimitiveValue]]".to_string()),
-            PropertyDescriptor::data(cloned_prim),
+            PropertyDescriptor::ordinary_data(cloned_prim),
           );
           return Ok(Value::Object(target_obj));
         }
@@ -774,7 +774,7 @@ fn clone_value_across_realms(
               let cloned = helper(vm, value, visited, transfer_set)?;
               target_obj.borrow_mut().properties.insert(
                 PropertyKey::String(key.to_string()),
-                PropertyDescriptor::data(cloned),
+                PropertyDescriptor::ordinary_data(cloned),
               );
             }
           }
@@ -797,7 +797,7 @@ fn clone_value_across_realms(
               target_obj
                 .borrow_mut()
                 .properties
-                .insert(k.clone(), PropertyDescriptor::data(cloned));
+                .insert(k.clone(), PropertyDescriptor::ordinary_data(cloned));
             }
             _ => {
               return Err("Cannot clone accessor properties across realms".to_string());
@@ -859,7 +859,7 @@ mod structured_clone_tests {
       .set_internal_slot(ARRAY_BUFFER_SHARED_SLOT, Value::Bool(false));
     source.borrow_mut().properties.insert(
       PropertyKey::String("byteLength".to_string()),
-      PropertyDescriptor::data(Value::Number(2.0)),
+      PropertyDescriptor::ordinary_data(Value::Number(2.0)),
     );
 
     let transfer_set = HashSet::from([Rc::as_ptr(&backing) as usize]);

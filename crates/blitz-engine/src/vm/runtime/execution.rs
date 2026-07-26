@@ -2297,7 +2297,7 @@ impl Vm {
           let value = self.locals[idx].borrow().clone();
           self.globals.borrow_mut().properties.insert(
             PropertyKey::String(name.clone()),
-            PropertyDescriptor::data(value),
+            PropertyDescriptor::ordinary_data(value),
           );
         }
       }
@@ -2320,11 +2320,11 @@ impl Vm {
     let obj = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     obj.borrow_mut().properties.insert(
       PropertyKey::String("value".to_string()),
-      PropertyDescriptor::data(value),
+      PropertyDescriptor::ordinary_data(value),
     );
     obj.borrow_mut().properties.insert(
       PropertyKey::String("done".to_string()),
-      PropertyDescriptor::data(Value::Bool(done)),
+      PropertyDescriptor::ordinary_data(Value::Bool(done)),
     );
     Value::Object(obj)
   }
@@ -2380,16 +2380,16 @@ impl Vm {
         let mut data = ObjectData::new();
         data.properties.insert(
           PropertyKey::String("[[PrimitiveValue]]".to_string()),
-          PropertyDescriptor::data(Value::Symbol(id, desc.clone())),
+          PropertyDescriptor::ordinary_data(Value::Symbol(id, desc.clone())),
         );
         data.properties.insert(
           PropertyKey::String("__isSymbol".to_string()),
-          PropertyDescriptor::data(Value::Bool(true)),
+          PropertyDescriptor::ordinary_data(Value::Bool(true)),
         );
         if let Some(d) = &desc {
           data.properties.insert(
             PropertyKey::String("description".to_string()),
-            PropertyDescriptor::data(Value::String(d.clone())),
+            PropertyDescriptor::ordinary_data(Value::String(d.clone())),
           );
         }
         // Try to find Symbol.prototype
@@ -3004,16 +3004,16 @@ impl Vm {
       let done_key = PropertyKey::String("__tsblitz_iter_done".to_string());
       match &iterator {
         Value::Object(obj) => {
-          obj
-            .borrow_mut()
-            .properties
-            .insert(done_key, PropertyDescriptor::data(Value::Bool(true)));
+          obj.borrow_mut().properties.insert(
+            done_key,
+            PropertyDescriptor::ordinary_data(Value::Bool(true)),
+          );
         }
         Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
-          props
-            .borrow_mut()
-            .properties
-            .insert(done_key, PropertyDescriptor::data(Value::Bool(true)));
+          props.borrow_mut().properties.insert(
+            done_key,
+            PropertyDescriptor::ordinary_data(Value::Bool(true)),
+          );
         }
         _ => {}
       }
@@ -3240,7 +3240,7 @@ impl Vm {
     if is_root_binding {
       self.globals.borrow_mut().properties.insert(
         PropertyKey::String(name.to_string()),
-        PropertyDescriptor::data(value),
+        PropertyDescriptor::ordinary_data(value),
       );
       return Ok(());
     }
@@ -3279,7 +3279,7 @@ impl Vm {
           .globals
           .borrow_mut()
           .properties
-          .insert(key, PropertyDescriptor::data(value));
+          .insert(key, PropertyDescriptor::ordinary_data(value));
       }
     }
     Ok(())
@@ -3778,7 +3778,7 @@ pub(super) fn set_property(
         return Ok(());
       }
       m.properties
-        .insert(key.clone(), PropertyDescriptor::data(value));
+        .insert(key.clone(), PropertyDescriptor::ordinary_data(value));
       Ok(())
     }
     Value::Array(arr, props) => {
@@ -3798,14 +3798,14 @@ pub(super) fn set_property(
           a[i] = Some(value);
           p.properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(usize_to_f64(next_len))),
+            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(next_len))),
           );
         } else {
           p.properties
-            .insert(key.clone(), PropertyDescriptor::data(value));
+            .insert(key.clone(), PropertyDescriptor::ordinary_data(value));
           p.properties.insert(
             PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(usize_to_f64(next_len))),
+            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(next_len))),
           );
         }
         return Ok(());
@@ -3826,7 +3826,7 @@ pub(super) fn set_property(
         let mut p = props.borrow_mut();
         p.properties.insert(
           PropertyKey::String("length".to_string()),
-          PropertyDescriptor::data(Value::Number(usize_to_f64(new_len))),
+          PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(new_len))),
         );
         return Ok(());
       }
@@ -3854,7 +3854,7 @@ pub(super) fn set_property(
         return Ok(());
       }
       p.properties
-        .insert(key.clone(), PropertyDescriptor::data(value));
+        .insert(key.clone(), PropertyDescriptor::ordinary_data(value));
       Ok(())
     }
     Value::Closure { props, .. } => {
@@ -3882,7 +3882,7 @@ pub(super) fn set_property(
         return Ok(());
       }
       p.properties
-        .insert(key.clone(), PropertyDescriptor::data(value));
+        .insert(key.clone(), PropertyDescriptor::ordinary_data(value));
       Ok(())
     }
     Value::BuiltinObject(_, props) => {
@@ -3910,7 +3910,7 @@ pub(super) fn set_property(
         return Ok(());
       }
       p.properties
-        .insert(key.clone(), PropertyDescriptor::data(value));
+        .insert(key.clone(), PropertyDescriptor::ordinary_data(value));
       Ok(())
     }
     _ => {

@@ -728,7 +728,7 @@ impl ModuleRecord {
       let mut object = ObjectData::new();
       object.properties.insert(
         PropertyKey::String("url".to_string()),
-        PropertyDescriptor::data(Value::String(self.url.clone())),
+        PropertyDescriptor::ordinary_data(Value::String(self.url.clone())),
       );
       object
     }))));

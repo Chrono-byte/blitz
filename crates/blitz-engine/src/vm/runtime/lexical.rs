@@ -325,7 +325,7 @@ impl Vm {
         .globals
         .borrow_mut()
         .properties
-        .insert(key, PropertyDescriptor::data(value));
+        .insert(key, PropertyDescriptor::ordinary_data(value));
     }
 
     if let Some(arguments_object) = self.current_arguments_object.clone()
@@ -354,7 +354,7 @@ impl Vm {
       .globals
       .borrow_mut()
       .properties
-      .insert(key, PropertyDescriptor::data(value.clone()));
+      .insert(key, PropertyDescriptor::ordinary_data(value.clone()));
     for frame in self.call_stack.iter_mut() {
       if let Some(names) = &frame.slot_names
         && let Some(slot) = names

@@ -172,7 +172,7 @@ impl Vm {
       let mut obj = ObjectData::new();
       obj.properties.insert(
         PropertyKey::String("message".to_string()),
-        PropertyDescriptor::data(Value::String(message.to_string())),
+        PropertyDescriptor::ordinary_data(Value::String(message.to_string())),
       );
       return Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(obj)))));
     }
@@ -189,15 +189,15 @@ impl Vm {
     });
     obj.properties.insert(
       PropertyKey::String("constructor".to_string()),
-      PropertyDescriptor::data(ctor),
+      PropertyDescriptor::ordinary_data(ctor),
     );
     obj.properties.insert(
       PropertyKey::String("message".to_string()),
-      PropertyDescriptor::data(Value::String(message.to_string())),
+      PropertyDescriptor::ordinary_data(Value::String(message.to_string())),
     );
     obj.properties.insert(
       PropertyKey::String("name".to_string()),
-      PropertyDescriptor::data(Value::String(name.to_string())),
+      PropertyDescriptor::ordinary_data(Value::String(name.to_string())),
     );
     Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(obj)))))
   }

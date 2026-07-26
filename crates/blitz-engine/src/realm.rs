@@ -211,7 +211,7 @@ impl Realm {
   ) {
     self.global_object.borrow_mut().properties.insert(
       PropertyKey::String(name.to_string()),
-      PropertyDescriptor::data(value),
+      PropertyDescriptor::ordinary_data(value),
     );
   }
 

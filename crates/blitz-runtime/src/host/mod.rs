@@ -823,7 +823,7 @@ fn http_primitive(
         if let Value::Object(object) = &handle {
           object.borrow_mut().properties.insert(
             PropertyKey::String("localAddress".to_string()),
-            PropertyDescriptor::data(local_address),
+            PropertyDescriptor::ordinary_data(local_address),
           );
         }
         effect_succeed(vm, handle)
