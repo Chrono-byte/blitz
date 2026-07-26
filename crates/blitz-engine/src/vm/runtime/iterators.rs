@@ -1,0 +1,235 @@
+// SPDX-License-Identifier: MPL-2.0
+
+use crate::errors::RuntimeError;
+use crate::value::{PropertyDescriptor, PropertyKey, SymbolId, Value};
+use crate::vm::Vm;
+use crate::vm::runtime::execution::{YieldStarStep, ensure_slot};
+use crate::vm::state::{YieldStarResume, YieldStarState};
+use std::sync::Arc;
+
+impl Vm {
+  pub(super) fn iterator_next(
+    &mut self,
+    iterator: Value,
+  ) -> Result<Value, RuntimeError> {
+    let next_fn =
+      self.get_property_host(&iterator, &PropertyKey::String("next".to_string().into()))?;
+    let result = self.call_value_with_this(&next_fn, &iterator, &[])?;
+    let done = self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
+    if self.to_boolean(&done) {
+      let done_key = PropertyKey::String("__tsblitz_iter_done".to_string().into());
+      match &iterator {
+        Value::Object(obj) => {
+          obj.borrow_mut().properties.insert(
+            done_key,
+            PropertyDescriptor::ordinary_data(Value::Bool(true)),
+          );
+        }
+        Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+          props.borrow_mut().properties.insert(
+            done_key,
+            PropertyDescriptor::ordinary_data(Value::Bool(true)),
+          );
+        }
+        _ => {}
+      }
+    }
+    Ok(result)
+  }
+
+  pub(super) fn create_yield_star_state(
+    &mut self,
+    iterable: Value,
+  ) -> Result<YieldStarState, RuntimeError> {
+    let iterator_method = self.get_property_host(
+      &iterable,
+      &PropertyKey::Symbol(SymbolId::well_known_iterator()),
+    )?;
+    if !Self::is_callable_value(&iterator_method) {
+      return Err(self.throw_type_error("Yield-star value is not iterable"));
+    }
+
+    let iterator = self.call_value_with_this(&iterator_method, &iterable, &[])?;
+    if !iterator.is_object() {
+      return Err(self.throw_type_error("Iterator method must return an object"));
+    }
+
+    let next_method =
+      self.get_property_host(&iterator, &PropertyKey::String("next".to_string().into()))?;
+    if !Self::is_callable_value(&next_method) {
+      return Err(self.throw_type_error("Iterator next method is not callable"));
+    }
+
+    Ok(YieldStarState {
+      iterator,
+      next_method,
+      resume: Some(YieldStarResume::Next(Value::Undefined)),
+    })
+  }
+
+  pub(crate) fn begin_generator_return(
+    &mut self,
+    value: Value,
+  ) -> bool {
+    let Some(handler_index) = self
+      .exceptions
+      .handlers
+      .iter()
+      .rposition(|handler| {
+        handler.frame_count == self.execution.call_stack.len()
+          && Arc::ptr_eq(&handler.chunk, &self.execution.active.chunk)
+          && handler.finally.is_some()
+      })
+    else {
+      return false;
+    };
+    let handler = self.exceptions.handlers.remove(handler_index);
+    self.exceptions.handlers.truncate(handler_index);
+    let finally = handler.finally.expect("checked above");
+    ensure_slot(&mut self.execution.active.locals, finally.return_slot);
+    ensure_slot(&mut self.execution.active.locals, finally.did_return_slot);
+    *self.execution.active.locals[finally.return_slot].borrow_mut() = value;
+    *self.execution.active.locals[finally.did_return_slot].borrow_mut() = Value::Bool(true);
+    self.execution.active.lexical_env = handler.saved_lexical_env;
+    self.execution.active.ip = finally.finalizer_ip;
+    self.execution.active.yield_star = None;
+    self
+      .execution
+      .generator_return_frame_count
+      .get_or_insert(self.execution.call_stack.len());
+    true
+  }
+
+  pub(super) fn resume_yield_star(&mut self) -> Result<YieldStarStep, RuntimeError> {
+    let mut state = self
+      .execution
+      .active
+      .yield_star
+      .take()
+      .ok_or_else(|| RuntimeError::from("Missing yield-star state"))?;
+    let resume = state
+      .resume
+      .take()
+      .ok_or_else(|| RuntimeError::from("Missing yield-star resume operation"))?;
+    let is_return = matches!(resume, YieldStarResume::Return(_));
+
+    let result = match resume {
+      YieldStarResume::Next(value) => {
+        self.call_value_with_this(&state.next_method, &state.iterator, &[value])?
+      }
+      YieldStarResume::Throw(value) => {
+        let throw_method = self.get_property_host(
+          &state.iterator,
+          &PropertyKey::String("throw".to_string().into()),
+        )?;
+        if matches!(throw_method, Value::Undefined | Value::Null) {
+          let return_method = self.get_property_host(
+            &state.iterator,
+            &PropertyKey::String("return".to_string().into()),
+          )?;
+          if !matches!(return_method, Value::Undefined | Value::Null) {
+            if !Self::is_callable_value(&return_method) {
+              return Err(self.throw_type_error("Iterator return method is not callable"));
+            }
+            let close_result = self.call_value_with_this(&return_method, &state.iterator, &[])?;
+            if !close_result.is_object() {
+              return Err(self.throw_type_error("Iterator return method must return an object"));
+            }
+          }
+          return Err(self.throw_type_error("Delegated iterator has no throw method"));
+        }
+        if !Self::is_callable_value(&throw_method) {
+          return Err(self.throw_type_error("Iterator throw method is not callable"));
+        }
+        self.call_value_with_this(&throw_method, &state.iterator, &[value])?
+      }
+      YieldStarResume::Return(value) => {
+        let return_method = self.get_property_host(
+          &state.iterator,
+          &PropertyKey::String("return".to_string().into()),
+        )?;
+        if matches!(return_method, Value::Undefined | Value::Null) {
+          return Ok(YieldStarStep::Return(value));
+        }
+        if !Self::is_callable_value(&return_method) {
+          return Err(self.throw_type_error("Iterator return method is not callable"));
+        }
+        self.call_value_with_this(&return_method, &state.iterator, &[value])?
+      }
+    };
+
+    if !result.is_object() {
+      return Err(self.throw_type_error("Iterator result must be an object"));
+    }
+    let done = self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
+    if self.to_boolean(&done) {
+      let value =
+        self.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
+      if is_return {
+        Ok(YieldStarStep::Return(value))
+      } else {
+        Ok(YieldStarStep::Complete(value))
+      }
+    } else {
+      self.execution.active.yield_star = Some(state);
+      Ok(YieldStarStep::Yield(result))
+    }
+  }
+
+  pub(super) fn iterator_close(
+    &mut self,
+    iterator: Value,
+  ) -> Result<Value, RuntimeError> {
+    if matches!(iterator, Value::Undefined | Value::Null) {
+      return Ok(iterator);
+    }
+    let done_key = PropertyKey::String("__tsblitz_iter_done".to_string().into());
+    let already_done = match &iterator {
+      Value::Object(obj) => obj
+        .borrow()
+        .properties
+        .get(&done_key)
+        .is_some_and(|desc| {
+          matches!(
+            desc,
+            PropertyDescriptor::Data {
+              value: Value::Bool(true),
+              ..
+            }
+          )
+        }),
+      Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+        props
+          .borrow()
+          .properties
+          .get(&done_key)
+          .is_some_and(|desc| {
+            matches!(
+              desc,
+              PropertyDescriptor::Data {
+                value: Value::Bool(true),
+                ..
+              }
+            )
+          })
+      }
+      _ => false,
+    };
+    if already_done {
+      return Ok(iterator);
+    }
+    let return_fn =
+      self.get_property_host(&iterator, &PropertyKey::String("return".to_string().into()))?;
+    if matches!(return_fn, Value::Undefined | Value::Null) {
+      return Ok(iterator);
+    }
+    if !Self::is_callable_value(&return_fn) {
+      return Err(self.throw_type_error("Iterator return is not callable"));
+    }
+    let ret = self.call_value_with_this(&return_fn, &iterator, &[])?;
+    if !ret.is_object() {
+      return Err(self.throw_type_error("Iterator return result is not an object"));
+    }
+    Ok(iterator)
+  }
+}

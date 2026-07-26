@@ -415,3 +415,136 @@ impl Vm {
     Ok(self.get_global(name))
   }
 }
+
+impl Vm {
+  pub(super) fn delete_identifier(
+    &mut self,
+    name_val: Value,
+  ) -> Result<Value, RuntimeError> {
+    let name = if let Value::String(s) = name_val {
+      s
+    } else {
+      return Err(self.throw_type_error("DeleteIdentifier requires string constant"));
+    };
+    let mut env = Some(Rc::clone(&self.execution.active.lexical_env));
+    while let Some(current) = env {
+      let (has_binding, binding_object, with_environment, outer) = {
+        let borrowed = current.borrow();
+        (
+          borrowed.has_binding(name.as_str_lossy()),
+          borrowed.binding_object(),
+          borrowed.is_with_environment(),
+          borrowed.outer(),
+        )
+      };
+      if has_binding {
+        return Ok(Value::Bool(false));
+      }
+      if let Some(binding_object) = binding_object {
+        let key = PropertyKey::String(name.clone());
+        let found = self.has_property_host(&binding_object, &key)?;
+        if found
+          && (!with_environment
+            || !self.is_unscopable_binding(&binding_object, name.as_str_lossy())?)
+        {
+          let deleted = self.delete_property_host(&binding_object, &key)?;
+          self.bump_object_generation(&binding_object);
+          return Ok(Value::Bool(deleted));
+        }
+      }
+      env = outer;
+    }
+
+    let global_obj = Value::Object(Rc::clone(&self.realm_state.globals));
+    let key = PropertyKey::String(name.clone());
+    let deleted = self.delete_property_host(&global_obj, &key)?;
+    self.bump_object_generation(&global_obj);
+    Ok(Value::Bool(deleted))
+  }
+
+  pub(super) fn set_global_value(
+    &mut self,
+    name: &str,
+    value: Value,
+  ) -> Result<(), RuntimeError> {
+    // Root bindings mirrored onto the global object have already been written
+    // by the StoreLocal immediately preceding SetGlobal. Avoid resolving and
+    // writing that same lexical cell a second time in the common script path.
+    let is_root_binding = self.execution.call_stack.is_empty()
+      && self.execution.direct_eval_outer.is_none()
+      && !self
+        .execution
+        .active
+        .lexical_env
+        .borrow()
+        .has_object_environment()
+      && self
+        .execution
+        .active
+        .slots
+        .as_ref()
+        .is_some_and(|slots| {
+          slots
+            .names
+            .iter()
+            .any(|maybe_name| maybe_name.as_deref() == Some(name))
+        });
+    if is_root_binding {
+      self
+        .realm_state
+        .globals
+        .borrow_mut()
+        .properties
+        .insert(
+          PropertyKey::String(name.to_string().into()),
+          PropertyDescriptor::ordinary_data(value),
+        );
+      return Ok(());
+    }
+
+    if self.set_lexical_identifier_value(name, value.clone())?
+      || self.set_current_frame_local_by_name(name, value.clone())?
+    {
+      return Ok(());
+    }
+    let key = PropertyKey::String(name.to_string().into());
+    let current = self
+      .realm_state
+      .globals
+      .borrow()
+      .properties
+      .get(&key)
+      .cloned();
+    match current {
+      Some(PropertyDescriptor::Data {
+        writable: false, ..
+      }) => {
+        if self.is_strict_mode() {
+          return Err(
+            self.throw_type_error(&format!("Cannot assign to read only global '{name}'")),
+          );
+        }
+      }
+      Some(PropertyDescriptor::Accessor { .. }) => {
+        let global_obj = Value::Object(Rc::clone(&self.realm_state.globals));
+        self.set_property_tracked(&global_obj, &key, value)?;
+      }
+      None if self.is_strict_mode() => {
+        return Err(self.throw_reference_error(&format!("{name} is not defined")));
+      }
+      _ => {
+        self
+          .realm_state
+          .globals
+          .borrow_mut()
+          .properties
+          .insert(key, PropertyDescriptor::ordinary_data(value));
+      }
+    }
+    Ok(())
+  }
+
+  // -----------------------------------------------------------------------
+  // Stack helpers
+  // -----------------------------------------------------------------------
+}
