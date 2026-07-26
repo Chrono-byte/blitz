@@ -91,7 +91,7 @@ fn stringify_value(
         let PropertyKey::String(name) = key else {
           continue;
         };
-        let key = stringify_value(vm, &Value::String(name.clone().into()), seen)?
+        let key = stringify_value(vm, &Value::String(name.clone()), seen)?
           .expect("strings stringify");
         let property = vm.get_property_host(value, &PropertyKey::String(name))?;
         if let Some(serialized) = stringify_value(vm, &property, seen)? {

@@ -2276,7 +2276,7 @@ impl TypeContext {
           for (index, parameter) in definition.parameters.iter().enumerate() {
             if let Some(argument) = arguments
               .get(index)
-              .or_else(|| parameter.default.as_ref())
+              .or(parameter.default.as_ref())
             {
               definition_environment.insert(
                 parameter.name.clone(),
@@ -2429,7 +2429,7 @@ impl TypeContext {
           arguments.push(
             if let Some(parameter) = call_parameter(&parameters, rest_index, index) {
               let parameter = self.resolve_type_with_environment(parameter, &environment, 0);
-              self.type_of_expr_with_context(expression, &rest_argument_type(&parameter))?
+              self.type_of_expr_with_context(expression, rest_argument_type(&parameter))?
             } else {
               self.type_of_expr_oast(expression)?
             },
@@ -2451,7 +2451,7 @@ impl TypeContext {
             };
             let parameter = self.resolve_type_with_environment(parameter, &environment, 0);
             let actual = self.resolve_type(argument);
-            self.is_assignable(&rest_argument_type(&parameter), &actual)
+            self.is_assignable(rest_argument_type(&parameter), &actual)
           });
         if !compatible {
           return Ok(None);
@@ -3464,11 +3464,11 @@ fn binding_parameter_name(pattern: &oast::BindingPattern<'_>) -> Option<String> 
   }
 }
 
-fn call_parameter<'a>(
-  parameters: &'a [Type],
+fn call_parameter(
+  parameters: &[Type],
   rest_index: Option<usize>,
   index: usize,
-) -> Option<&'a Type> {
+) -> Option<&Type> {
   match rest_index {
     Some(rest_index) if index >= rest_index => parameters.get(rest_index),
     _ => parameters.get(index),

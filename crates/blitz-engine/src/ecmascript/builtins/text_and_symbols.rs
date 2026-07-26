@@ -174,7 +174,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
               .borrow()
               .iter()
               .find_map(|(key, registered)| {
-                (registered == id).then(|| Value::String(key.clone().into()))
+                (registered == id).then(|| Value::String(key.clone()))
               })
               .unwrap_or(Value::Undefined)
           }))
@@ -513,7 +513,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;
       let this = args.first().unwrap_or(&undefined);
-      Ok(Value::String(this_string_value(vm, this)?.into()))
+      Ok(Value::String(this_string_value(vm, this)?))
     }),
     function_proto_map,
   );
@@ -527,7 +527,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;
       let this = args.first().unwrap_or(&undefined);
-      Ok(Value::String(this_string_value(vm, this)?.into()))
+      Ok(Value::String(this_string_value(vm, this)?))
     }),
     function_proto_map,
   );
@@ -868,7 +868,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
             if !Vm::is_callable_value(&method) {
               return Err(vm.throw_type_error("RegExp symbol method is not callable"));
             }
-            return vm.call_value_with_this(&method, &regexp, &[receiver.clone()]);
+            return vm.call_value_with_this(&method, &regexp, std::slice::from_ref(receiver));
           }
         }
         let constructor = vm
@@ -876,7 +876,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
           .unwrap_or(Value::Undefined);
         let created = vm.call_value_with_this(&constructor, &Value::Undefined, &[regexp])?;
         let method = vm.get_property_host(&created, &PKey::Symbol(symbol.clone()))?;
-        vm.call_value_with_this(&method, &created, &[receiver.clone()])
+        vm.call_value_with_this(&method, &created, std::slice::from_ref(receiver))
       }),
       function_proto_map,
     );

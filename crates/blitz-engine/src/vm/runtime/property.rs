@@ -486,7 +486,7 @@ impl Vm {
       return Err(self.throw_type_error("Proxy get trap is not callable"));
     }
     let key_value = match key {
-      PropertyKey::String(name) => Value::String(name.clone().into()),
+      PropertyKey::String(name) => Value::String(name.clone()),
       PropertyKey::Symbol(id) => Value::Symbol(id.clone(), None),
     };
     let trap_result = self.call_with_this(
@@ -1577,7 +1577,7 @@ impl Vm {
     if let Value::Symbol(_, desc) = obj {
       if matches!(key, PropertyKey::String(name) if name == "description") {
         return Ok(match desc {
-          Some(d) => Value::String(d.clone().into()),
+          Some(d) => Value::String(d.clone()),
           None => Value::Undefined,
         });
       }

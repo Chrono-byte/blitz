@@ -10,7 +10,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
   use PropertyKey as PKey;
 
   let array_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::with_prototype(
-    Value::Object(Rc::clone(&object_proto_map)),
+    Value::Object(Rc::clone(object_proto_map)),
   )));
   let for_each_fn = builtin_object(
     Rc::new(|vm, args| {
@@ -35,7 +35,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
       }
       Ok(Value::Undefined)
     }),
-    &function_proto_map,
+    function_proto_map,
   );
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("forEach".to_string().into()),
@@ -84,7 +84,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
         );
         Ok(Value::Array(arr_rc, props))
       }),
-      &function_proto_map,
+      function_proto_map,
     )),
   );
   array_proto_map.borrow_mut().properties.insert(
@@ -117,7 +117,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
           _ => Ok(Value::String("".to_string().into())),
         }
       }),
-      &function_proto_map,
+      function_proto_map,
     )),
   );
   array_proto_map.borrow_mut().properties.insert(
@@ -128,7 +128,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
         let join = vm.get_property_host(&this, &PKey::String("join".to_string().into()))?;
         vm.call_value_with_this(&join, &this, &[])
       }),
-      &function_proto_map,
+      function_proto_map,
     )),
   );
   array_proto_map
@@ -212,7 +212,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
           }
           Ok(this)
         }),
-        &function_proto_map,
+        function_proto_map,
       );
       set_builtin_length(&sort_fn, 1.0);
       PropertyDescriptor::builtin_data(sort_fn)
@@ -247,7 +247,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
           Ok(Value::Array(arr_rc, props))
         }
       }),
-      &function_proto_map,
+      function_proto_map,
     )),
   );
   array_proto_map.borrow_mut().properties.insert(
@@ -317,7 +317,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
           Ok(Value::Array(arr_rc, props))
         }
       }),
-      &function_proto_map,
+      function_proto_map,
     )),
   );
   array_proto_map.borrow_mut().properties.insert(
@@ -369,7 +369,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
             Ok(Value::Array(arr_rc, props))
           }
         }),
-        &function_proto_map,
+        function_proto_map,
       );
       set_builtin_name(&builtin, "with");
       set_builtin_length(&builtin, 2.0);
@@ -397,7 +397,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
         );
         Ok(Value::Number(new_len))
       }),
-      &function_proto_map,
+      function_proto_map,
     )),
   );
   array_proto_map
@@ -506,7 +506,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
             Ok(Value::Array(removed_arr, removed_props))
           }
         }),
-        &function_proto_map,
+        function_proto_map,
       );
       set_builtin_length(&splice_fn, 2.0);
       PropertyDescriptor::builtin_data(splice_fn)
@@ -551,7 +551,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
           )?;
           Ok(result)
         }),
-        &function_proto_map,
+        function_proto_map,
       );
       set_builtin_length(&shift_fn, 0.0);
       PropertyDescriptor::builtin_data(shift_fn)
@@ -612,7 +612,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
           )?;
           Ok(Value::Number(usize_to_f64(new_len)))
         }),
-        &function_proto_map,
+        function_proto_map,
       );
       set_builtin_length(&unshift_fn, 0.0);
       PropertyDescriptor::builtin_data(unshift_fn)
@@ -693,7 +693,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
           Ok(Value::Array(arr_rc, props))
         }
       }),
-      &function_proto_map,
+      function_proto_map,
     )),
   );
   array_proto_map.borrow_mut().properties.insert(
@@ -730,7 +730,7 @@ pub(in crate::ecmascript::builtins::array) fn install_before_iterator(
           Ok(Value::Array(arr_rc, props))
         }
       }),
-      &function_proto_map,
+      function_proto_map,
     )),
   );
 

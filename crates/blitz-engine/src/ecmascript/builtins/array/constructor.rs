@@ -10,11 +10,11 @@ pub(super) fn install(
   use PropertyKey as PKey;
 
   let array_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::with_prototype(
-    Value::Object(Rc::clone(&function_proto_map)),
+    Value::Object(Rc::clone(function_proto_map)),
   )));
   array_ctor_map.borrow_mut().properties.insert(
     PKey::String("prototype".to_string().into()),
-    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&array_proto_map))),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(array_proto_map))),
   );
 
   let array_ctor_props = Rc::clone(&array_ctor_map);

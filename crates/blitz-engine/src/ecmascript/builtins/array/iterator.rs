@@ -18,7 +18,7 @@ pub(super) fn install(
   use PropertyKey as PKey;
 
   let array_iterator_proto: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
-    ObjectData::with_prototype(Value::Object(Rc::clone(&object_proto_map))),
+    ObjectData::with_prototype(Value::Object(Rc::clone(object_proto_map))),
   ));
   array_iterator_proto
     .borrow_mut()
@@ -27,7 +27,7 @@ pub(super) fn install(
       PKey::Symbol(SymbolId::well_known_iterator()),
       PropertyDescriptor::builtin_data(builtin_object(
         Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
-        &function_proto_map,
+        function_proto_map,
       )),
     );
   array_iterator_proto
@@ -133,7 +133,7 @@ pub(super) fn install(
           }
           Ok(Value::Object(result))
         }),
-        &function_proto_map,
+        function_proto_map,
       )),
     );
   let make_array_iterator_builtin = |kind: &'static str| {
@@ -160,7 +160,7 @@ pub(super) fn install(
           Ok(Value::Object(iter))
         }
       }),
-      &function_proto_map,
+      function_proto_map,
     )
   };
   let array_values_builtin = make_array_iterator_builtin("value");

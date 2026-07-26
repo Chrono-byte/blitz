@@ -263,7 +263,7 @@ fn array_index_from_string(name: &js_string::JsString) -> Option<u32> {
 /// Converts a PropertyKey to its corresponding Value.
 pub(crate) fn property_key_to_value(key: &PropertyKey) -> Value {
   match key {
-    PropertyKey::String(name) => Value::String(name.clone().into()),
+    PropertyKey::String(name) => Value::String(name.clone()),
     PropertyKey::Symbol(id) => Value::Symbol(id.clone(), None),
   }
 }

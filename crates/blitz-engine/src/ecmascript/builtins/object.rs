@@ -95,7 +95,7 @@ pub(crate) fn install_object_intrinsics(
         format!("[object {}]", this.object_tag()).into(),
       ))
     }),
-    &function_prototype,
+    function_prototype,
   );
   set_builtin_length(&object_to_string, 0.0);
   object_prototype.borrow_mut().properties.insert(
@@ -133,7 +133,7 @@ pub(crate) fn install_object_intrinsics(
         }
         Ok(Value::String(out.finish()))
       }),
-      &function_prototype,
+      function_prototype,
     )),
   );
   object_prototype.borrow_mut().properties.insert(
@@ -152,7 +152,7 @@ pub(crate) fn install_object_intrinsics(
         }
         Ok(res)
       }),
-      &function_prototype,
+      function_prototype,
     )),
   );
   let object_to_locale_string = builtin_object(
@@ -162,7 +162,7 @@ pub(crate) fn install_object_intrinsics(
       let to_string = vm.get_property_host(&obj, &PKey::String("toString".to_string().into()))?;
       vm.call_value_with_this(&to_string, &obj, &[])
     }),
-    &function_prototype,
+    function_prototype,
   );
   set_builtin_length(&object_to_locale_string, 0.0);
   object_prototype.borrow_mut().properties.insert(
@@ -177,7 +177,7 @@ pub(crate) fn install_object_intrinsics(
       let has_own = vm.get_own_property_value(&this, &key)?.is_some();
       Ok(Value::Bool(has_own))
     }),
-    &function_prototype,
+    function_prototype,
   );
   set_builtin_length(&has_own_property, 1.0);
   object_prototype.borrow_mut().properties.insert(
@@ -197,7 +197,7 @@ pub(crate) fn install_object_intrinsics(
         });
       Ok(Value::Bool(enumerable))
     }),
-    &function_prototype,
+    function_prototype,
   );
   set_builtin_length(&property_is_enumerable, 1.0);
   object_prototype.borrow_mut().properties.insert(
@@ -210,7 +210,7 @@ pub(crate) fn install_object_intrinsics(
       let value = args.get(1).cloned().unwrap_or(Value::Undefined);
       Ok(Value::Bool(vm.is_prototype_of(&this, &value)?))
     }),
-    &function_prototype,
+    function_prototype,
   );
   set_builtin_length(&is_prototype_of, 1.0);
   object_prototype.borrow_mut().properties.insert(
@@ -250,7 +250,7 @@ pub(crate) fn install_object_intrinsics(
       }
       Ok(Value::Undefined)
     }),
-    &function_prototype,
+    function_prototype,
   );
   set_builtin_length(&define_getter, 2.0);
   object_prototype.borrow_mut().properties.insert(
@@ -290,7 +290,7 @@ pub(crate) fn install_object_intrinsics(
       }
       Ok(Value::Undefined)
     }),
-    &function_prototype,
+    function_prototype,
   );
   set_builtin_length(&define_setter, 2.0);
   object_prototype.borrow_mut().properties.insert(
@@ -310,7 +310,7 @@ pub(crate) fn install_object_intrinsics(
       }
       Ok(Value::Undefined)
     }),
-    &function_prototype,
+    function_prototype,
   );
   set_builtin_length(&lookup_getter, 1.0);
   object_prototype.borrow_mut().properties.insert(
@@ -330,7 +330,7 @@ pub(crate) fn install_object_intrinsics(
       }
       Ok(Value::Undefined)
     }),
-    &function_prototype,
+    function_prototype,
   );
   set_builtin_length(&lookup_setter, 1.0);
   object_prototype.borrow_mut().properties.insert(
@@ -343,7 +343,7 @@ pub(crate) fn install_object_intrinsics(
     .insert(
       PKey::String("create".to_string().into()),
       PropertyDescriptor::builtin_data({
-        let object_prototype = Rc::clone(&object_prototype);
+        let object_prototype = Rc::clone(object_prototype);
         let builtin = builtin_object(
           Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
@@ -367,7 +367,7 @@ pub(crate) fn install_object_intrinsics(
               for key in vm.own_enumerable_keys_value(props)? {
                 let descriptor = vm.get_property_host(props, &key)?;
                 let key_value = match &key {
-                  PropertyKey::String(s) => Value::String(s.clone().into()),
+                  PropertyKey::String(s) => Value::String(s.clone()),
                   PropertyKey::Symbol(sym) => Value::Symbol(sym.clone(), None),
                 };
                 let ok = vm.define_property_value(&created, &key_value, &descriptor)?;
@@ -379,7 +379,7 @@ pub(crate) fn install_object_intrinsics(
             let _ = &object_prototype;
             Ok(created)
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 2.0);
         builtin
@@ -409,7 +409,7 @@ pub(crate) fn install_object_intrinsics(
             }
             Ok(target)
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 2.0);
         builtin
@@ -429,7 +429,7 @@ pub(crate) fn install_object_intrinsics(
             .unwrap_or(Value::Undefined);
           Ok(Value::Bool(crate::vm::same_value(&a, &b)))
         }),
-        &function_prototype,
+        function_prototype,
       );
       set_builtin_length(&builtin, 2.0);
       PropertyDescriptor::builtin_data(builtin)
@@ -454,7 +454,7 @@ pub(crate) fn install_object_intrinsics(
               .is_some();
             Ok(Value::Bool(has))
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 2.0);
         builtin
@@ -476,7 +476,7 @@ pub(crate) fn install_object_intrinsics(
             let target = vm.to_object_value(target)?;
             vm.get_prototype_of_value(&target)
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 1.0);
         builtin
@@ -488,7 +488,7 @@ pub(crate) fn install_object_intrinsics(
     .insert(
       PKey::String("getOwnPropertyDescriptor".to_string().into()),
       PropertyDescriptor::builtin_data({
-        let object_prototype = Rc::clone(&object_prototype);
+        let object_prototype = Rc::clone(object_prototype);
         let builtin = builtin_object(
           Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
@@ -503,7 +503,7 @@ pub(crate) fn install_object_intrinsics(
             };
             Ok(descriptor_value_from_descriptor(&object_prototype, &desc))
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 2.0);
         builtin
@@ -530,7 +530,7 @@ pub(crate) fn install_object_intrinsics(
             .collect::<Vec<_>>();
           Ok(array_from_values(symbols))
         }),
-        &function_prototype,
+        function_prototype,
       );
       set_builtin_length(&builtin, 1.0);
       PropertyDescriptor::builtin_data(builtin)
@@ -542,7 +542,7 @@ pub(crate) fn install_object_intrinsics(
     .insert(
       PKey::String("getOwnPropertyDescriptors".to_string().into()),
       {
-        let object_prototype = Rc::clone(&object_prototype);
+        let object_prototype = Rc::clone(object_prototype);
         let builtin = builtin_object(
           Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
@@ -559,7 +559,7 @@ pub(crate) fn install_object_intrinsics(
             }
             Ok(Value::Object(Rc::new(RefCell::new(result))))
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 1.0);
         PropertyDescriptor::builtin_data(builtin)
@@ -594,7 +594,7 @@ pub(crate) fn install_object_intrinsics(
             );
             Ok(Value::Array(arr_rc, props))
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 1.0);
         builtin
@@ -614,13 +614,13 @@ pub(crate) fn install_object_intrinsics(
               .own_enumerable_keys_value(&target)?
               .into_iter()
               .filter_map(|key| match key {
-                PropertyKey::String(s) => Some(Value::String(s.into())),
+                PropertyKey::String(s) => Some(Value::String(s)),
                 _ => None,
               })
               .collect::<Vec<_>>();
             Ok(array_from_values(keys))
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 1.0);
         builtin
@@ -643,7 +643,7 @@ pub(crate) fn install_object_intrinsics(
               .collect::<Result<Vec<_>, _>>()?;
             Ok(array_from_values(values))
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 1.0);
         builtin
@@ -670,7 +670,7 @@ pub(crate) fn install_object_intrinsics(
               .collect::<Result<Vec<_>, RuntimeError>>()?;
             Ok(array_from_values(entries))
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 1.0);
         builtin
@@ -701,7 +701,7 @@ pub(crate) fn install_object_intrinsics(
           }
           Ok(target)
         }),
-        &function_prototype,
+        function_prototype,
       );
       set_builtin_length(&builtin, 3.0);
       PropertyDescriptor::builtin_data(builtin)
@@ -741,7 +741,7 @@ pub(crate) fn install_object_intrinsics(
           }
           Ok(target)
         }),
-        &function_prototype,
+        function_prototype,
       );
       set_builtin_length(&builtin, 2.0);
       PropertyDescriptor::builtin_data(builtin)
@@ -759,7 +759,7 @@ pub(crate) fn install_object_intrinsics(
           }
           Ok(Value::Bool(vm.is_extensible_value(&target)?))
         }),
-        &function_prototype,
+        function_prototype,
       );
       set_builtin_length(&builtin, 1.0);
       PropertyDescriptor::builtin_data(builtin)
@@ -780,7 +780,7 @@ pub(crate) fn install_object_intrinsics(
           }
           Ok(target)
         }),
-        &function_prototype,
+        function_prototype,
       );
       set_builtin_length(&builtin, 1.0);
       PropertyDescriptor::builtin_data(builtin)
@@ -817,7 +817,7 @@ pub(crate) fn install_object_intrinsics(
             }
             Ok(target)
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 2.0);
         builtin
@@ -841,7 +841,7 @@ pub(crate) fn install_object_intrinsics(
             }
             Ok(target)
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 1.0);
         builtin
@@ -865,7 +865,7 @@ pub(crate) fn install_object_intrinsics(
             }
             Ok(target)
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 1.0);
         builtin
@@ -886,7 +886,7 @@ pub(crate) fn install_object_intrinsics(
             }
             Ok(Value::Bool(vm.test_integrity_level(&target, false)?))
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 1.0);
         builtin
@@ -907,7 +907,7 @@ pub(crate) fn install_object_intrinsics(
             }
             Ok(Value::Bool(vm.test_integrity_level(&target, true)?))
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 1.0);
         builtin
@@ -919,7 +919,7 @@ pub(crate) fn install_object_intrinsics(
     .insert(
       PKey::String("fromEntries".to_string().into()),
       PropertyDescriptor::builtin_data({
-        let object_proto_for_from_entries = Rc::clone(&object_prototype);
+        let object_proto_for_from_entries = Rc::clone(object_prototype);
         let builtin = builtin_object(
           Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
@@ -939,7 +939,7 @@ pub(crate) fn install_object_intrinsics(
             }
             Ok(result)
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 1.0);
         builtin
@@ -951,7 +951,7 @@ pub(crate) fn install_object_intrinsics(
     .insert(
       PKey::String("groupBy".to_string().into()),
       PropertyDescriptor::builtin_data({
-        let object_proto_for_group_by = Rc::clone(&object_prototype);
+        let object_proto_for_group_by = Rc::clone(object_prototype);
         let builtin = builtin_object(
           Rc::new(move |vm, args| {
             let off = static_builtin_arg_offset(vm, args, "Object");
@@ -985,7 +985,7 @@ pub(crate) fn install_object_intrinsics(
             let _ = &object_proto_for_group_by;
             Ok(Value::Object(Rc::new(RefCell::new(result))))
           }),
-          &function_prototype,
+          function_prototype,
         );
         set_builtin_length(&builtin, 2.0);
         builtin
