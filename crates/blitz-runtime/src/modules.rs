@@ -150,7 +150,10 @@ mod tests {
     let entry = directory.join("entry.ts");
     std::fs::write(
       &entry,
-      "import process, { argv, cwd, platform } from 'node:process'; if (argv !== process.argv || cwd() !== process.cwd() || platform !== process.platform) throw new Error('node:process exports do not share process state');",
+      blitz::js!(
+        module,
+        "import process, { argv, cwd, platform } from 'node:process'; if (argv !== process.argv || cwd() !== process.cwd() || platform !== process.platform) throw new Error('node:process exports do not share process state');"
+      ),
     )
     .expect("write node:process entry");
 
@@ -177,7 +180,7 @@ mod tests {
     let entry = directory.join("entry.ts");
     std::fs::write(
       &entry,
-      r#"
+      blitz::js!(module, r#"
         import assert from "node:assert";
         import strictAssert from "node:assert/strict";
         import asyncHooks from "node:async_hooks";
@@ -229,7 +232,7 @@ mod tests {
         const parsed = parse("a=1&a=2");
         if (JSON.stringify(parsed) !== '{"a":["1","2"]}') throw new Error("query parse mismatch");
         if (querystring.decode !== parse) throw new Error("query alias mismatch");
-      "#,
+      "#),
     )
     .expect("write pure node entry");
 
@@ -255,7 +258,7 @@ mod tests {
     let entry = directory.join("entry.ts");
     std::fs::write(
       &entry,
-      r#"
+      blitz::js!(module, r#"
         import crypto, { randomUUID } from "node:crypto";
         import fs, { readFileSync } from "node:fs";
         import fsPromises, { readFile } from "node:fs/promises";
@@ -266,7 +269,7 @@ mod tests {
         if (typeof fsPromises !== "object" || typeof readFile !== "function") throw new Error("fs promise declarations");
         if (typeof readline !== "object" || typeof createInterface !== "function") throw new Error("readline declarations");
         if (typeof readlinePromises !== "object" || typeof createPromiseInterface !== "function") throw new Error("readline promise declarations");
-      "#,
+      "#),
     )
     .expect("write tooling type entry");
 
@@ -293,7 +296,7 @@ mod tests {
     let entry = directory.join("entry.mjs");
     std::fs::write(
       &entry,
-      r#"
+      blitz::js!(module, r#"
         import EventEmitter, { getEventListeners, once } from "node:events";
         const emitter = new EventEmitter();
         let result = "";
@@ -306,7 +309,7 @@ mod tests {
           globalThis.nodeEventsPassed = args[0] === 42;
         });
         emitter.emit("done", 42);
-      "#,
+      "#),
     )
     .expect("write node events entry");
 
@@ -322,7 +325,8 @@ mod tests {
     let directory = temporary_directory("node-fs");
     let entry = directory.join("entry.mjs");
     let data = directory.join("data.txt");
-    let source = format!(
+    let source = blitz::js!(
+      format(module),
       r#"
         import crypto, {{ randomUUID }} from "node:crypto";
         import fs from "node:fs";
@@ -354,7 +358,7 @@ mod tests {
     let entry = directory.join("entry.mjs");
     std::fs::write(
       &entry,
-      r#"
+      blitz::js!(module, r#"
         import EventEmitter from "node:events";
         import readline from "node:readline";
         import readlinePromises from "node:readline/promises";
@@ -371,7 +375,7 @@ mod tests {
         const promiseRl = readlinePromises.createInterface({ input: promiseInput, output });
         promiseRl.question("promise: ").then((answer) => { globalThis.nodeReadlinePassed = answer === "ok"; });
         promiseInput.emit("data", "ok\n");
-      "#,
+      "#),
     )
     .expect("write readline entry");
 
@@ -388,7 +392,7 @@ mod tests {
     let entry = directory.join("entry.mjs");
     std::fs::write(
       &entry,
-      r#"
+      blitz::js!(module, r#"
         import domain from "node:domain";
         import punycode from "node:punycode";
         import sea from "node:sea";
@@ -403,7 +407,7 @@ mod tests {
         const tracing = traceEvents.createTracing({ categories: ["blitz"] });
         if (tracing.enabled !== false || traceEvents.getEnabledCategories() !== "") throw new Error("trace state mismatch");
         globalThis.nodeFullCompatPassed = true;
-      "#,
+      "#),
     )
     .expect("write full compatibility entry");
 
@@ -421,7 +425,8 @@ mod tests {
   fn rejects_node_modules_outside_the_selected_profile() {
     let directory = temporary_directory("node-process-off");
     let entry = directory.join("entry.ts");
-    std::fs::write(&entry, "import 'node:process';").expect("write disabled node entry");
+    std::fs::write(&entry, blitz::js!(module, "import 'node:process';"))
+      .expect("write disabled node entry");
 
     let (mut vm, _runtime) = runtime_vm(crate::host::NodeCompatProfile::Off);
     let error = evaluate_entry(&mut vm, &entry).expect_err("disabled node module must fail");
@@ -434,7 +439,8 @@ mod tests {
   fn rejects_unknown_node_modules_with_the_requested_specifier() {
     let directory = temporary_directory("node-unknown");
     let entry = directory.join("entry.mjs");
-    std::fs::write(&entry, "import 'node:future-module';").expect("write unknown node entry");
+    std::fs::write(&entry, blitz::js!(module, "import 'node:future-module';"))
+      .expect("write unknown node entry");
 
     for profile in [
       crate::host::NodeCompatProfile::Off,
@@ -504,7 +510,10 @@ mod tests {
     .expect("write package manifest");
     std::fs::write(
       package.join("index.ts"),
-      "import { base } from 'fixture-dependency'; export const answer: number = base + 1;",
+      blitz::js!(
+        typescript,
+        "import { base } from 'fixture-dependency'; export const answer: number = base + 1;"
+      ),
     )
     .expect("write package source");
     std::fs::write(
@@ -512,12 +521,18 @@ mod tests {
       r#"{ "type": "module", "exports": "./index.js" }"#,
     )
     .expect("write dependency manifest");
-    std::fs::write(dependency.join("index.js"), "export const base = 41;")
-      .expect("write dependency source");
+    std::fs::write(
+      dependency.join("index.js"),
+      blitz::js!(module, "export const base = 41;"),
+    )
+    .expect("write dependency source");
     let entry = directory.join("entry.ts");
     std::fs::write(
       &entry,
-      "import { answer } from 'fixture-package'; globalThis.packageAnswer = answer;",
+      blitz::js!(
+        module,
+        "import { answer } from 'fixture-package'; globalThis.packageAnswer = answer;"
+      ),
     )
     .expect("write entry");
 
@@ -548,22 +563,28 @@ mod tests {
       }"#,
     )
     .expect("write scoped package manifest");
-    std::fs::write(package.join("node.js"), "export const selected = 'node';")
-      .expect("write node export");
+    std::fs::write(
+      package.join("node.js"),
+      blitz::js!(module, "export const selected = 'node';"),
+    )
+    .expect("write node export");
     std::fs::write(
       package.join("import.js"),
-      "export const selected = 'import';",
+      blitz::js!(module, "export const selected = 'import';"),
     )
     .expect("write import export");
     std::fs::write(
       package.join("default.js"),
-      "export const selected = 'default';",
+      blitz::js!(module, "export const selected = 'default';"),
     )
     .expect("write default export");
     let entry = directory.join("entry.ts");
     std::fs::write(
       &entry,
-      "import { selected } from '@fixture/condition'; globalThis.selectedCondition = selected;",
+      blitz::js!(
+        module,
+        "import { selected } from '@fixture/condition'; globalThis.selectedCondition = selected;"
+      ),
     )
     .expect("write scoped package entry");
 
@@ -590,11 +611,14 @@ mod tests {
     .expect("write package manifest");
     std::fs::write(
       package.join("index.js"),
-      "import 'missing-dependency'; export const loaded = true;",
+      blitz::js!(
+        module,
+        "import 'missing-dependency'; export const loaded = true;"
+      ),
     )
     .expect("write package source");
     let entry = directory.join("entry.ts");
-    std::fs::write(&entry, "import 'fixture-package';").expect("write entry");
+    std::fs::write(&entry, blitz::js!(module, "import 'fixture-package';")).expect("write entry");
 
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     let mut vm = Vm::new(globals);
@@ -624,13 +648,16 @@ mod tests {
     .expect("write project tsconfig");
     std::fs::write(
       directory.join("src/lib/value.ts"),
-      "export const mapped: number = 42;",
+      blitz::js!(typescript, "export const mapped: number = 42;"),
     )
     .expect("write mapped source");
     let entry = directory.join("src/entry.ts");
     std::fs::write(
       &entry,
-      "import { mapped } from '@lib/value'; globalThis.mappedAnswer = mapped;",
+      blitz::js!(
+        module,
+        "import { mapped } from '@lib/value'; globalThis.mappedAnswer = mapped;"
+      ),
     )
     .expect("write entry");
 

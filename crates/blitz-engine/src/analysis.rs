@@ -2125,7 +2125,9 @@ mod tests {
     assert!(service.end > service.selection_end);
 
     let object = analyze(
-      "const query = define({ handler: (context) => { const user = context.user; return user; } });",
+      crate::js!(
+        "const query = define({ handler: (context) => { const user = context.user; return user; } });"
+      ),
       Path::new("object-symbols.ts"),
       false,
     );
@@ -2137,7 +2139,8 @@ mod tests {
 
   #[test]
   fn resolves_shadowed_references_by_symbol_identity() {
-    let source = "const value = 1; function read() { const value = 2; return value; } value;";
+    let source =
+      crate::js!("const value = 1; function read() { const value = 2; return value; } value;");
     let result = analyze(source, Path::new("definitions.ts"), false);
     let outer_declaration = source.find("value").expect("outer declaration");
     let inner_declaration = source[outer_declaration + 1..]
@@ -2157,16 +2160,22 @@ mod tests {
 
   #[test]
   fn reports_contextual_callback_parameter_inlay_hints() {
-    let declaration = r#"
+    let declaration = crate::js!(
+      typescript,
+      r#"
       export interface HandlerContext { readonly userId: string }
       export declare const configure: (options: {
         handler: (context: HandlerContext) => void
       }) => void;
-    "#;
-    let source = r#"
+    "#
+    );
+    let source = crate::js!(
+      typescript,
+      r#"
       import { configure } from "example/context";
       configure({ handler: (context) => context.userId });
-    "#;
+    "#
+    );
     let mut project = AnalysisProject::with_module_declarations([(
       "example/context".to_string(),
       declaration.to_string(),
@@ -2186,7 +2195,10 @@ mod tests {
   #[test]
   fn serializes_selected_argument_parameter_name_hints() {
     let result = analyze(
-      "declare function send(message: string): void; declare const input: string; send(input);",
+      crate::js!(
+        typescript,
+        "declare function send(message: string): void; declare const input: string; send(input);"
+      ),
       Path::new("parameter-hints.ts"),
       false,
     );
@@ -2198,13 +2210,19 @@ mod tests {
 
   #[test]
   fn carries_module_documentation_to_imported_definition_hovers() {
-    let declaration = r#"
+    let declaration = crate::js!(
+      typescript,
+      r#"
       export declare const succeed: <Value>(value: Value) => Value;
-    "#;
-    let source = r#"
+    "#
+    );
+    let source = crate::js!(
+      typescript,
+      r#"
       import * as Effect from "effect/Effect";
       Effect.succeed(42);
-    "#;
+    "#
+    );
     let mut project = AnalysisProject::with_module_declarations([(
       "effect/Effect".to_string(),
       declaration.to_string(),
@@ -2230,24 +2248,33 @@ mod tests {
 
   #[test]
   fn resolves_members_from_imported_module_declarations() {
-    let declaration = r#"
+    let declaration = crate::js!(
+      typescript,
+      r#"
       import type * as Effect from "effect/Effect";
       export interface Connection {
         readonly send: (message: string) => Effect.Effect<void>;
         readonly close: () => Effect.Effect<void>;
       }
       export declare const connect: () => Effect.Effect<Connection>;
-    "#;
-    let effect_declaration = r#"
+    "#
+    );
+    let effect_declaration = crate::js!(
+      typescript,
+      r#"
       export interface Effect<Value> {
         readonly pipe: { <Result>(f: (value: Value) => Result): Result };
       }
-    "#;
-    let source = r#"
+    "#
+    );
+    let source = crate::js!(
+      typescript,
+      r#"
       import * as WebSocket from "blitz:websocket";
       const transmit = (connection: WebSocket.Connection) => connection.send("hello").pipe();
       WebSocket.connect().pipe();
-    "#;
+    "#
+    );
     let mut project = AnalysisProject::with_module_declarations([
       ("blitz:websocket".to_string(), declaration.to_string()),
       ("effect/Effect".to_string(), effect_declaration.to_string()),
@@ -2326,12 +2353,15 @@ mod tests {
     .expect("write types package manifest");
     std::fs::write(
       types_directory.join("index.js"),
-      "export function configure() {};",
+      crate::js!(module, "export function configure() {};"),
     )
     .expect("write runtime entry");
     std::fs::write(
       types_directory.join("types/index.d.ts"),
-      "/** Configures the fixture handler. */\nexport declare const configure: (options: { handler: (context: { userId: string }) => void }) => void;",
+      crate::js!(
+        typescript,
+        "/** Configures the fixture handler. */\nexport declare const configure: (options: { handler: (context: { userId: string }) => void }) => void;"
+      ),
     )
     .expect("write package declaration");
     std::fs::write(
@@ -2341,7 +2371,10 @@ mod tests {
     .expect("write legacy package manifest");
     std::fs::write(
       legacy_directory.join("index.d.ts"),
-      "export declare const create: (options: { handler: (context: { name: string }) => void }) => void;",
+      crate::js!(
+        typescript,
+        "export declare const create: (options: { handler: (context: { name: string }) => void }) => void;"
+      ),
     )
     .expect("write legacy declaration");
     std::fs::write(
@@ -2351,19 +2384,25 @@ mod tests {
     .expect("write source package manifest");
     std::fs::write(
       source_package_directory.join("index.ts"),
-      "/** Returns the installed source answer. */\nexport function sourceAnswer(): number { return 42; }",
+      crate::js!(
+        typescript,
+        "/** Returns the installed source answer. */\nexport function sourceAnswer(): number { return 42; }"
+      ),
     )
     .expect("write source package body");
 
     let path = source_directory.join("editor.ts");
-    let source = r#"
+    let source = crate::js!(
+      typescript,
+      r#"
       import { configure } from "fixture-types";
       import { create } from "fixture-typings";
       import { sourceAnswer } from "fixture-source";
       configure({ handler: (context) => context.userId });
       create({ handler: (context) => context.name });
       sourceAnswer();
-    "#;
+    "#
+    );
     let mut project = AnalysisProject::default();
     let result = project.analyze_document(source.to_string(), &path, false);
 
@@ -2431,15 +2470,21 @@ mod tests {
     let declaration = source_directory.join("nearby.d.ts");
     std::fs::write(
       &declaration,
-      "export declare const configure: (options: { handler: (context: { value: number }) => void }) => void;",
+      crate::js!(
+        typescript,
+        "export declare const configure: (options: { handler: (context: { value: number }) => void }) => void;"
+      ),
     )
     .expect("write nearby declaration");
 
     let path = source_directory.join("editor.ts");
-    let source = r#"
+    let source = crate::js!(
+      typescript,
+      r#"
       import { configure } from "./nearby";
       configure({ handler: (context) => context.value });
-    "#;
+    "#
+    );
     let mut project = AnalysisProject::default();
     let result = project.analyze_document(source.to_string(), &path, false);
 
@@ -2474,8 +2519,11 @@ mod tests {
     );
 
     project.update_document(
-      "export declare const configure: (options: { handler: (context: { value: string }) => void }) => void;"
-        .to_string(),
+      crate::js!(
+        typescript,
+        "export declare const configure: (options: { handler: (context: { value: string }) => void }) => void;"
+      )
+      .to_string(),
       &declaration,
     );
     let updated = project.analyze_document(source.to_string(), &path, false);
@@ -2494,11 +2542,18 @@ mod tests {
     let directory = temporary_directory("overlays");
     let dependency = directory.join("dependency.ts");
     let importer = directory.join("importer.ts");
-    let importer_source =
-      "import { value } from \"./dependency.ts\";\nconsole.log(value);".to_string();
+    let importer_source = crate::js!(
+      module,
+      "import { value } from \"./dependency.ts\";\nconsole.log(value);"
+    )
+    .to_string();
     let mut project = AnalysisProject::default();
 
-    project.analyze_document("export const value = 1;".to_string(), &dependency, false);
+    project.analyze_document(
+      crate::js!(module, "export const value = 1;").to_string(),
+      &dependency,
+      false,
+    );
     let first = project.analyze_document(importer_source.clone(), &importer, false);
     let first_target = first
       .definitions
@@ -2527,7 +2582,7 @@ mod tests {
 
   #[test]
   fn resolves_ecmascript_builtin_globals_to_virtual_declarations() {
-    let source = "const values = new Map<string, number>();";
+    let source = crate::js!(typescript, "const values = new Map<string, number>();");
     let result = analyze(source, Path::new("editor.ts"), false);
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     let start = source.find("Map").unwrap();
@@ -2556,7 +2611,10 @@ mod tests {
   #[test]
   fn treats_unloaded_editor_imports_as_external_bindings() {
     let result = analyze(
-      "import * as Ref from \"effect/Ref\"; type ValueRef = Ref.Ref<number>; Ref.make(1);",
+      crate::js!(
+        typescript,
+        "import * as Ref from \"effect/Ref\"; type ValueRef = Ref.Ref<number>; Ref.make(1);"
+      ),
       Path::new("editor.ts"),
       false,
     );

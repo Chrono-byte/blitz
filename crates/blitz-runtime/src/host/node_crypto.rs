@@ -694,7 +694,7 @@ mod tests {
       loader
         .register_virtual_module(VirtualModule::javascript(
           "blitz-internal:host",
-          "export const host = globalThis.__blitz_host_v1;",
+          blitz::js!(module, "export const host = globalThis.__blitz_host_v1;"),
           SourceType::mjs(),
           None,
         ))
@@ -720,7 +720,7 @@ mod tests {
       loader
         .register_virtual_module(VirtualModule::javascript(
           "node-crypto-facade-entry",
-          r#"
+          blitz::js!(module, r#"
             import crypto, { randomBytes, randomFill, randomFillSync, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
             const id = randomUUID();
             if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) throw new Error("invalid RFC 4122 v4 UUID");
@@ -743,7 +743,7 @@ mod tests {
             randomBytes(4, (error, value) => { if (error || !(value instanceof Uint8Array) || value.length !== 4) throw error || new Error("randomBytes callback mismatch"); globalThis.nodeCryptoBytesCallback = true; });
             randomFill(target, 1, 2, (error, value) => { if (error || value !== target) throw error || new Error("randomFill callback mismatch"); globalThis.nodeCryptoFillCallback = true; });
             randomInt(10, (error, value) => { if (error || value < 0 || value >= 10) throw error || new Error("randomInt callback mismatch"); globalThis.nodeCryptoIntCallback = true; });
-          "#,
+          "#),
           SourceType::mjs(),
           None,
         ))

@@ -131,6 +131,21 @@ mod tests {
     source: impl Into<String>,
     assertion: impl FnOnce(&blitz::Vm) + Send + 'static,
   ) {
+    run_effect_compatibility_entry_inner(source, false, assertion);
+  }
+
+  fn run_effect_compatibility_entry_with_scheduler(
+    source: impl Into<String>,
+    assertion: impl FnOnce(&blitz::Vm) + Send + 'static,
+  ) {
+    run_effect_compatibility_entry_inner(source, true, assertion);
+  }
+
+  fn run_effect_compatibility_entry_inner(
+    source: impl Into<String>,
+    flush_scheduler_jobs: bool,
+    assertion: impl FnOnce(&blitz::Vm) + Send + 'static,
+  ) {
     let source = source.into();
     let test_id = NEXT_EFFECT_COMPATIBILITY_TEST_ID.fetch_add(1, Ordering::Relaxed);
     std::thread::Builder::new()
@@ -174,6 +189,10 @@ mod tests {
         }
         blitz::module::evaluate_entry_shared(&loader_handle, &entry, &mut vm, false)
           .expect("execute Effect compatibility graph");
+        if flush_scheduler_jobs {
+          vm.flush_microtasks()
+            .expect("flush Effect compatibility scheduler jobs");
+        }
         std::fs::remove_dir_all(&directory).expect("remove Effect compatibility directory");
 
         assert_eq!(
@@ -1117,7 +1136,7 @@ mod tests {
 
   #[test]
   fn fiber_interrupt_cancellation_uses_supported_scheduler_path() {
-    run_effect_compatibility_entry(
+    run_effect_compatibility_entry_with_scheduler(
       blitz::js!(
         module,
         r#"
@@ -1125,17 +1144,23 @@ mod tests {
         import * as Exit from 'effect/Exit';
         import * as Fiber from 'effect/Fiber';
         import * as Cause from 'effect/Cause';
-        const fiber = Effect.runFork(Effect.never);
-        const interrupted = Effect.runFork(Fiber.interrupt(fiber)).unsafePoll();
-        const exit = interrupted === null ? Exit.succeed(undefined) : interrupted.value;
-        globalThis.fiber_cancelled =
-          interrupted !== null &&
-          Exit.isSuccess(interrupted) &&
-          Exit.isInterrupted(exit) &&
-          Cause.isInterrupted(exit.cause);
+        globalThis.fiber_cleanup_ran = false;
+        const suspended = Effect.async(() =>
+          Effect.sync(() => {
+            globalThis.fiber_cleanup_ran = true;
+          })
+        );
+        const fiber = Effect.runFork(suspended);
+        globalThis.fiber_cancelled = false;
+        Effect.runPromise(Fiber.interrupt(fiber)).then((exit) => {
+          globalThis.fiber_cancelled =
+            Exit.isInterrupted(exit) &&
+            Cause.isInterrupted(exit.cause);
+        });
       "#
       ),
       |vm| {
+        assert_eq!(vm.get_global("fiber_cleanup_ran"), Some(Value::Bool(true)));
         assert_eq!(vm.get_global("fiber_cancelled"), Some(Value::Bool(true)));
       },
     );

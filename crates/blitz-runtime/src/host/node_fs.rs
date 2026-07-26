@@ -1174,7 +1174,7 @@ mod tests {
       loader
         .register_virtual_module(VirtualModule::javascript(
           "blitz-internal:host",
-          "export const host = globalThis.__blitz_host_v1;",
+          blitz::js!(module, "export const host = globalThis.__blitz_host_v1;"),
           SourceType::mjs(),
           None,
         ))
@@ -1209,15 +1209,15 @@ mod tests {
         .register_virtual_module(VirtualModule::javascript(
           "node-fs-facade-entry",
           [
-            "import fs, { readFile as readFileCallback, readFileSync, writeFileSync, statSync, mkdirSync, readdirSync, renameSync, existsSync } from 'node:fs';\n",
-            "import { readFile as readFilePromise, writeFile as writeFilePromise, stat, rm } from 'node:fs/promises';\n",
+            blitz::js!(module, "import fs, { readFile as readFileCallback, readFileSync, writeFileSync, statSync, mkdirSync, readdirSync, renameSync, existsSync } from 'node:fs';\n"),
+            blitz::js!(module, "import { readFile as readFilePromise, writeFile as writeFilePromise, stat, rm } from 'node:fs/promises';\n"),
             &format!(
               "const root = {};\n",
               serde_json::to_string(&directory.to_string_lossy().into_owned())
                 .expect("serialize test path")
             ),
-            "const file = root + '/value.txt';\n",
-            "const moved = root + '/moved.txt';\n",
+            blitz::js!("const file = root + '/value.txt';\n"),
+            blitz::js!("const moved = root + '/moved.txt';\n"),
             "mkdirSync(root);\n",
             "writeFileSync(file, 'hello');\n",
             "if (readFileSync(file, 'utf8') !== 'hello') throw new Error('sync text mismatch');\n",
@@ -1225,11 +1225,11 @@ mod tests {
             "if (!existsSync(file) || !statSync(file).isFile()) throw new Error('sync stat mismatch');\n",
             "try { readFileSync(root + '/missing'); throw new Error('missing read did not throw'); } catch (error) { if (error.code !== 'ENOENT' || error.syscall !== 'open' || error.path !== root + '/missing' || error.errno >= 0) throw error; globalThis.nodeFsErrorPassed = true; }\n",
             "if (readdirSync(root).indexOf('value.txt') < 0) throw new Error('readdir mismatch');\n",
-            "const urlPath = { href: 'file://' + file };\n",
+            blitz::js!("const urlPath = { href: 'file://' + file };\n"),
             "if (readFileSync(urlPath, 'utf8') !== 'hello') throw new Error('URL path mismatch');\n",
             "renameSync(file, moved);\n",
-            "const promiseFile = root + '/promise.txt';\n",
-            "const removable = root + '/removable';\n",
+            blitz::js!("const promiseFile = root + '/promise.txt';\n"),
+            blitz::js!("const removable = root + '/removable';\n"),
             "mkdirSync(removable);\n",
             "writeFilePromise(promiseFile, 'promise').then(() => readFilePromise(promiseFile, 'utf8')).then(value => { if (value !== 'promise') throw new Error('promise read/write mismatch'); globalThis.nodeFsPromiseReadWritePassed = true; });\n",
             "rm(removable, { recursive: true }).then(() => { globalThis.nodeFsPromiseRmPassed = true; });\n",

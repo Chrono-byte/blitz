@@ -3982,7 +3982,9 @@ mod tests {
 
   #[test]
   fn emits_safe_local_and_simple_function_return_hints() {
-    let source = r#"
+    let source = crate::js!(
+      typescript,
+      r#"
       let count = 1;
       const text = "ready";
       const shape = { id: 1 };
@@ -3994,7 +3996,8 @@ mod tests {
       async function asyncValue() { return 1; }
       function recursive() { return recursive(); }
       function conditional(flag: boolean) { if (flag) return 1; }
-    "#;
+    "#
+    );
     let source_type =
       crate::parser::Parser::source_type_for_path(std::path::Path::new("test.ts"), false);
     let session =
@@ -4047,10 +4050,13 @@ mod tests {
 
   #[test]
   fn emits_return_hint_for_expression_arrow_but_not_async_arrow() {
-    let source = r#"
+    let source = crate::js!(
+      typescript,
+      r#"
       const identity = (value: number) => value;
       const asyncValue = async (value: number) => value;
-    "#;
+    "#
+    );
     let source_type =
       crate::parser::Parser::source_type_for_path(std::path::Path::new("test.ts"), false);
     let session =
