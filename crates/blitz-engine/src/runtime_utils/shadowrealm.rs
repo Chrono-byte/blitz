@@ -70,7 +70,7 @@ pub(crate) fn require_shadow_realm_record(
 fn current_test_path(vm: &Vm) -> Option<PathBuf> {
   vm.get_global("__TSBLITZ_TEST_PATH")
     .and_then(|value| match value {
-      Value::String(s) => Some(PathBuf::from(s)),
+      Value::String(s) => Some(PathBuf::from(s.as_str_lossy())),
       _ => None,
     })
 }

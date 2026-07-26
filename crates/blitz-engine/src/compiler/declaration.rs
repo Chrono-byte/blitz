@@ -736,7 +736,7 @@ impl Compiler {
         self.compile_expr_oast(&f.right)?;
         self.emit(Op::Copy, LINE);
         self.emit_get_global_name("Symbol");
-        self.emit_constant(Value::String("iterator".to_string()), LINE);
+        self.emit_constant(Value::String("iterator".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
         let symbol_iterator_slot = self.alloc_ic_slot()?;
         self.emit_byte(symbol_iterator_slot, LINE);
@@ -784,7 +784,7 @@ impl Compiler {
         self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
         self.emit(Op::IteratorNext, LINE);
         self.emit(Op::Copy, LINE);
-        self.emit_constant(Value::String("done".to_string()), LINE);
+        self.emit_constant(Value::String("done".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
         let done_slot = self.alloc_ic_slot()?;
         self.emit_byte(done_slot, LINE);
@@ -792,7 +792,7 @@ impl Compiler {
         let exit_jump = self.current_ip() - 1;
         self.emit_byte(0, LINE);
         self.emit_byte(0, LINE);
-        self.emit_constant(Value::String("value".to_string()), LINE);
+        self.emit_constant(Value::String("value".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
         let value_slot = self.alloc_ic_slot()?;
         self.emit_byte(value_slot, LINE);
@@ -1012,7 +1012,7 @@ impl Compiler {
         self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
         self.emit(Op::LoadLocal, LINE);
         self.emit_byte(self.slot_to_u8(keys_slot)?, LINE);
-        self.emit_constant(Value::String("length".to_string()), LINE);
+        self.emit_constant(Value::String("length".to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
         // Use CompareJump: cond_type 2 = Lt, jump if true
         self.emit_with_payload(Op::CompareJump, 2, LINE);
@@ -1552,7 +1552,7 @@ impl Compiler {
     {
       self.emit(Op::LoadLocal, LINE);
       self.emit_byte(self.slot_to_u8(slot)?, LINE);
-      self.emit_constant(Value::String("prototype".to_string()), LINE);
+      self.emit_constant(Value::String("prototype".to_string().into()), LINE);
       self.emit(Op::GetProperty, LINE);
       let home_slot = self.alloc_temp_local("class_home");
       self.emit(Op::StoreLocal, LINE);
@@ -1698,10 +1698,10 @@ impl Compiler {
   ) {
     match key {
       crate::compiler::core::PreparedClassFieldKey::Named(name) => {
-        self.emit_constant(Value::String(name.clone()), LINE);
+        self.emit_constant(Value::String(name.clone().into()), LINE);
       }
       crate::compiler::core::PreparedClassFieldKey::Private(name) => {
-        self.emit_constant(Value::String(name.clone()), LINE);
+        self.emit_constant(Value::String(name.clone().into()), LINE);
       }
       crate::compiler::core::PreparedClassFieldKey::Computed(binding) => {
         self.emit_get_binding(binding);
@@ -1718,17 +1718,17 @@ impl Compiler {
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(self.slot_to_u8(target_slot)?, LINE);
     self.emit_prepared_class_field_key(&field.key);
-    self.emit_constant(Value::String("value".to_string()), LINE);
+    self.emit_constant(Value::String("value".to_string().into()), LINE);
     if let Some(source) = &field.initializer_source {
       self.compile_class_initializer_source(source)?;
     } else {
       self.emit(Op::Undefined, LINE);
     }
-    self.emit_constant(Value::String("writable".to_string()), LINE);
+    self.emit_constant(Value::String("writable".to_string().into()), LINE);
     self.emit_constant(Value::Bool(true), LINE);
-    self.emit_constant(Value::String("enumerable".to_string()), LINE);
+    self.emit_constant(Value::String("enumerable".to_string().into()), LINE);
     self.emit_constant(Value::Bool(true), LINE);
-    self.emit_constant(Value::String("configurable".to_string()), LINE);
+    self.emit_constant(Value::String("configurable".to_string().into()), LINE);
     self.emit_constant(Value::Bool(true), LINE);
     self.emit(Op::BuildObject, LINE);
     self.emit_byte(4, LINE);
@@ -1746,17 +1746,17 @@ impl Compiler {
       self.emit_get_builtin_name("objectDefineProperty");
       self.emit(Op::GetThis, LINE);
       self.emit_prepared_class_field_key(&field.key);
-      self.emit_constant(Value::String("value".to_string()), LINE);
+      self.emit_constant(Value::String("value".to_string().into()), LINE);
       if let Some(source) = &field.initializer_source {
         self.compile_class_initializer_source(source)?;
       } else {
         self.emit(Op::Undefined, LINE);
       }
-      self.emit_constant(Value::String("writable".to_string()), LINE);
+      self.emit_constant(Value::String("writable".to_string().into()), LINE);
       self.emit_constant(Value::Bool(true), LINE);
-      self.emit_constant(Value::String("enumerable".to_string()), LINE);
+      self.emit_constant(Value::String("enumerable".to_string().into()), LINE);
       self.emit_constant(Value::Bool(true), LINE);
-      self.emit_constant(Value::String("configurable".to_string()), LINE);
+      self.emit_constant(Value::String("configurable".to_string().into()), LINE);
       self.emit_constant(Value::Bool(true), LINE);
       self.emit(Op::BuildObject, LINE);
       self.emit_byte(4, LINE);
@@ -1813,7 +1813,7 @@ impl Compiler {
         let key = self.ensure_private_name_constant(key_name);
         self.emit_constant(key, LINE);
       } else {
-        self.emit_constant(Value::String(key_name.clone()), LINE);
+        self.emit_constant(Value::String(key_name.clone().into()), LINE);
       }
     } else {
       let key_expr = md
@@ -1833,32 +1833,32 @@ impl Compiler {
         ));
       }
     };
-    self.emit_constant(Value::String(first_descriptor_key.to_string()), LINE);
+    self.emit_constant(Value::String(first_descriptor_key.to_string().into()), LINE);
     self.emit(Op::MakeClosure, LINE);
     self.emit_byte(self.function_index_to_u8(fidx)?, LINE);
     self.emit_set_method_home_object(target_slot)?;
 
     let prop_count = match md.kind {
       oast::MethodDefinitionKind::Method => {
-        self.emit_constant(Value::String("writable".to_string()), LINE);
+        self.emit_constant(Value::String("writable".to_string().into()), LINE);
         self.emit_constant(Value::Bool(true), LINE);
-        self.emit_constant(Value::String("enumerable".to_string()), LINE);
+        self.emit_constant(Value::String("enumerable".to_string().into()), LINE);
         self.emit_constant(Value::Bool(false), LINE);
-        self.emit_constant(Value::String("configurable".to_string()), LINE);
+        self.emit_constant(Value::String("configurable".to_string().into()), LINE);
         self.emit_constant(Value::Bool(true), LINE);
         4
       }
       oast::MethodDefinitionKind::Get => {
-        self.emit_constant(Value::String("enumerable".to_string()), LINE);
+        self.emit_constant(Value::String("enumerable".to_string().into()), LINE);
         self.emit_constant(Value::Bool(false), LINE);
-        self.emit_constant(Value::String("configurable".to_string()), LINE);
+        self.emit_constant(Value::String("configurable".to_string().into()), LINE);
         self.emit_constant(Value::Bool(true), LINE);
         3
       }
       oast::MethodDefinitionKind::Set => {
-        self.emit_constant(Value::String("enumerable".to_string()), LINE);
+        self.emit_constant(Value::String("enumerable".to_string().into()), LINE);
         self.emit_constant(Value::Bool(false), LINE);
-        self.emit_constant(Value::String("configurable".to_string()), LINE);
+        self.emit_constant(Value::String("configurable".to_string().into()), LINE);
         self.emit_constant(Value::Bool(true), LINE);
         3
       }
@@ -1915,7 +1915,7 @@ impl Compiler {
             let Value::String(key) = self.ensure_private_name_constant(&identifier.name) else {
               unreachable!("private names use string keys")
             };
-            crate::compiler::core::PreparedClassFieldKey::Private(key)
+            crate::compiler::core::PreparedClassFieldKey::Private(key.to_string())
           }
           _ => {
             return Err(crate::errors::CompilerError::from(
@@ -2005,7 +2005,7 @@ impl Compiler {
         inner.emit(Op::GetGlobal, LINE);
         let global_idx = inner.global_name_index("Array");
         inner.emit_u16(inner.global_index_to_u16(global_idx)?, LINE);
-        inner.emit_constant(Value::String("from".to_string()), LINE);
+        inner.emit_constant(Value::String("from".to_string().into()), LINE);
         inner.emit(Op::GetProperty, LINE);
         let from_slot = inner.alloc_ic_slot()?;
         inner.emit_byte(from_slot, LINE);
@@ -2115,7 +2115,7 @@ impl Compiler {
     {
       self.emit(Op::LoadLocal, LINE);
       self.emit_byte(self.slot_to_u8(ctor_slot)?, LINE);
-      self.emit_constant(Value::String("prototype".to_string()), LINE);
+      self.emit_constant(Value::String("prototype".to_string().into()), LINE);
       self.emit(Op::GetProperty, LINE);
       let home_slot = self.alloc_temp_local("class_home");
       self.emit(Op::StoreLocal, LINE);

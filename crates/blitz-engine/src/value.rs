@@ -58,6 +58,7 @@
 //! ```
 
 use indexmap::IndexMap;
+use js_string::JsString;
 use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
@@ -210,8 +211,8 @@ impl Default for SymbolId {
 /// Property key variant (string or symbol).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PropertyKey {
-  /// String key
-  String(String),
+  /// ECMAScript string key.
+  String(JsString),
   /// Symbol key
   Symbol(SymbolId),
 }
@@ -565,13 +566,60 @@ impl ProxyData {
 }
 
 impl PropertyDescriptor {
-  /// Create a default data descriptor with full attributes.
-  pub fn data(value: Value) -> Self {
+  /// Create the descriptor used by ECMAScript `CreateDataProperty`.
+  ///
+  /// This is appropriate for properties produced by assignment, object
+  /// literals, and specification algorithms that explicitly create an
+  /// ordinary data property.
+  pub fn ordinary_data(value: Value) -> Self {
     Self::Data {
       value,
       writable: true,
       enumerable: true,
       configurable: true,
+    }
+  }
+
+  /// Create the default descriptor for a standard built-in data property.
+  ///
+  /// ECMAScript standard built-in data properties are writable and
+  /// configurable, but non-enumerable unless their definition says otherwise.
+  pub fn builtin_data(value: Value) -> Self {
+    Self::Data {
+      value,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    }
+  }
+
+  /// Create the standard descriptor for a built-in constructor's `prototype`.
+  pub fn builtin_prototype(value: Value) -> Self {
+    Self::Data {
+      value,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    }
+  }
+
+  /// Create the descriptor used by built-in function `name` and `length`.
+  pub fn builtin_metadata(value: Value) -> Self {
+    Self::Data {
+      value,
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    }
+  }
+
+  /// Create a non-writable, non-enumerable, non-configurable data property.
+  pub fn immutable_data(value: Value) -> Self {
+    Self::Data {
+      value,
+      writable: false,
+      enumerable: false,
+      configurable: false,
     }
   }
 }
@@ -589,6 +637,8 @@ pub struct ObjectData {
   pub weak_prototype: Option<WeakObject>,
   /// VM-internal slots that are never exposed through ECMAScript property operations.
   pub(crate) internal_slots: IndexMap<&'static str, Value>,
+  /// Compiled matcher for objects with a `[[RegExpMatcher]]` internal slot.
+  pub(crate) regexp_matcher: Option<regex_js::Regex>,
   /// Lexical environment captured by function objects, if any.
   pub captured_lexical_env: Option<Rc<RefCell<crate::environment::EnvironmentRecord>>>,
   /// Extensible flag
@@ -615,6 +665,7 @@ impl ObjectData {
       strong_prototype: None,
       weak_prototype: None,
       internal_slots: IndexMap::new(),
+      regexp_matcher: None,
       captured_lexical_env: None,
       extensible: true,
     }
@@ -635,6 +686,7 @@ impl ObjectData {
       strong_prototype: None,
       weak_prototype: Some(WeakObject::new(prototype)),
       internal_slots: IndexMap::new(),
+      regexp_matcher: None,
       captured_lexical_env: None,
       extensible: true,
     }
@@ -737,8 +789,8 @@ pub enum Value {
   Uninitialized,
   /// Number value
   Number(f64),
-  /// String value
-  String(String),
+  /// ECMAScript UTF-16 string value.
+  String(JsString),
   /// Boolean value
   Bool(bool),
   /// Undefined value
@@ -746,7 +798,7 @@ pub enum Value {
   /// BigInt value
   BigInt(BigIntValue),
   /// Symbol value
-  Symbol(SymbolId, Option<String>),
+  Symbol(SymbolId, Option<JsString>),
   /// Null value
   Null,
   /// Object value with property descriptors and prototype
@@ -923,14 +975,13 @@ impl Value {
         let props_ref = props.borrow();
         if props_ref
           .properties
-          .contains_key(&PropertyKey::String("prototype".to_string()))
+          .contains_key(&PropertyKey::String("prototype".to_string().into()))
         {
           return true;
         }
-        if let Some(PropertyDescriptor::Data { value, .. }) = props_ref
-          .properties
-          .get(&PropertyKey::String("[[BoundTargetFunction]]".to_string()))
-        {
+        if let Some(PropertyDescriptor::Data { value, .. }) = props_ref.properties.get(
+          &PropertyKey::String("[[BoundTargetFunction]]".to_string().into()),
+        ) {
           return value.is_constructable();
         }
         false
@@ -961,8 +1012,8 @@ pub fn define_native_global(
   native: NativeFn,
 ) {
   globals.borrow_mut().properties.insert(
-    PropertyKey::String(name.to_string()),
-    PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
+    PropertyKey::String(name.to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |vm, args| {
       native(vm, Value::Undefined, args)
     }))),
   );
@@ -972,12 +1023,12 @@ fn function_display_name_from_props(props: &Rc<RefCell<ObjectData>>) -> Option<S
   let props = props.borrow();
   match props
     .properties
-    .get(&PropertyKey::String("name".to_string()))
+    .get(&PropertyKey::String("name".to_string().into()))
   {
     Some(PropertyDescriptor::Data {
       value: Value::String(name),
       ..
-    }) if !name.is_empty() => Some(name.clone()),
+    }) if !name.is_empty() => Some(name.to_string_lossy()),
     _ => None,
   }
 }
@@ -1087,9 +1138,9 @@ mod tests {
   fn builtin_object_display_uses_name_property() {
     let props = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
-      PropertyKey::String("name".to_string()),
+      PropertyKey::String("name".to_string().into()),
       PropertyDescriptor::Data {
-        value: Value::String("Object".to_string()),
+        value: Value::String("Object".to_string().into()),
         writable: false,
         enumerable: false,
         configurable: true,

@@ -139,8 +139,8 @@ mod tests {
       .spawn(move || {
         let globals = Rc::new(RefCell::new(ObjectData::new()));
         globals.borrow_mut().properties.insert(
-          PropertyKey::String("globalThis".to_string()),
-          PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+          PropertyKey::String("globalThis".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
         );
         let mut vm = blitz::Vm::new(globals);
         let _runtime = crate::host::install_runtime(
@@ -417,8 +417,8 @@ mod tests {
       .spawn(|| {
         let globals = Rc::new(RefCell::new(ObjectData::new()));
         globals.borrow_mut().properties.insert(
-          PropertyKey::String("globalThis".to_string()),
-          PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+          PropertyKey::String("globalThis".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
         );
         let mut vm = blitz::Vm::new(globals);
         let _runtime = crate::host::install_runtime(
@@ -487,8 +487,8 @@ mod tests {
   fn source_importing_effect_retains_declaration_metadata_through_typecheck() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyKey::String("globalThis".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = blitz::Vm::new(globals);
     let _runtime = crate::host::install_runtime(
@@ -768,7 +768,7 @@ mod tests {
         );
         assert_eq!(
           vm.get_global("effect_boundary_recovered"),
-          Some(Value::String("recovered".to_string()))
+          Some(Value::String("recovered".to_string().into()))
         );
         assert_eq!(
           vm.get_global("effect_boundary_failed"),
@@ -776,7 +776,7 @@ mod tests {
         );
         assert_eq!(
           vm.get_global("effect_boundary_sequenced"),
-          Some(Value::String("right".to_string()))
+          Some(Value::String("right".to_string().into()))
         );
       },
     );
@@ -962,7 +962,7 @@ mod tests {
     run_effect_compatibility_entry(source, |vm| {
       assert_eq!(
         vm.get_global("fs_text"),
-        Some(Value::String("hello filesystem".to_string()))
+        Some(Value::String("hello filesystem".to_string().into()))
       );
       assert_eq!(vm.get_global("fs_typed_error"), Some(Value::Bool(true)));
     });
@@ -989,7 +989,7 @@ mod tests {
       |vm| {
         assert_eq!(
           vm.get_global("terminal_result"),
-          Some(Value::String("closed".to_string()))
+          Some(Value::String("closed".to_string().into()))
         );
       },
     );
@@ -1064,7 +1064,7 @@ mod tests {
       |vm| {
         assert_eq!(
           vm.get_global("abort_signal_detached_reason"),
-          Some(Value::String("detached".to_string()))
+          Some(Value::String("detached".to_string().into()))
         );
         assert_eq!(
           vm.get_global("abort_signal_aborted"),
@@ -1072,7 +1072,7 @@ mod tests {
         );
         assert_eq!(
           vm.get_global("abort_signal_reason"),
-          Some(Value::String("stop".to_string()))
+          Some(Value::String("stop".to_string().into()))
         );
         assert_eq!(
           vm.get_global("abort_listener_calls"),
@@ -1145,8 +1145,8 @@ mod tests {
   fn runtime_installation_has_zero_bundled_pipeline_counters() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyKey::String("globalThis".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = blitz::Vm::new(globals);
     let _runtime = crate::host::install_runtime(

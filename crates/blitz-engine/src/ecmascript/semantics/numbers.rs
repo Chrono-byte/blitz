@@ -261,11 +261,11 @@ pub(crate) fn global_parse_int(
     None
   };
   let s = match value {
-    Value::String(s) => s.as_str(),
+    Value::String(s) => s.as_str_lossy(),
     _ => {
       let s = vm.to_string(value)?;
       return Ok(Value::Number(
-        parse_int_string(s.trim_start(), radix_arg).unwrap_or(f64::NAN),
+        parse_int_string(s.as_str_lossy().trim_start(), radix_arg).unwrap_or(f64::NAN),
       ));
     }
   };
@@ -281,10 +281,10 @@ pub(crate) fn global_parse_float(
   let undefined = Value::Undefined;
   let value = args.first().unwrap_or(&undefined);
   let s = match value {
-    Value::String(s) => s.as_str(),
+    Value::String(s) => s.as_str_lossy(),
     _ => {
       let s = vm.to_string(value)?;
-      return Ok(Value::Number(parse_float_string(&s)));
+      return Ok(Value::Number(parse_float_string(s.as_str_lossy())));
     }
   };
   let parsed = parse_float_string(s);

@@ -478,7 +478,9 @@ fn validate_chunk_tree(
     let constant_bytes = match constant {
       Constant::String(value) => value.len(),
       Constant::BigInt(value) => value.to_signed_bytes_le().len(),
-      Constant::Symbol(_, description) => description.as_ref().map_or(0, String::len),
+      Constant::Symbol(_, description) => description
+        .as_ref()
+        .map_or(0, |value| value.len() * 2),
       Constant::Uninitialized
       | Constant::Number(_)
       | Constant::Bool(_)
@@ -536,12 +538,13 @@ fn validate_chunk_tree(
         ));
       }
     };
-    let (target_index, target_name) = parse_descriptor(descriptor).map_err(|reason| {
-      invalid_descriptor(
-        specifier,
-        format!("instruction {instruction_index}: {reason}"),
-      )
-    })?;
+    let (target_index, target_name) =
+      parse_descriptor(descriptor.as_str_lossy()).map_err(|reason| {
+        invalid_descriptor(
+          specifier,
+          format!("instruction {instruction_index}: {reason}"),
+        )
+      })?;
     let Some(target_exports) = exports_by_module.get(&target_index) else {
       return Err(invalid_descriptor(
         specifier,
@@ -852,7 +855,7 @@ mod tests {
     let chunk = &mut invalid_descriptor.modules[1].chunk;
     chunk
       .constants
-      .push(Constant::String("0\0missing".to_string()));
+      .push(Constant::String("0\0missing".to_string().into()));
     chunk.code[0] = encode_risc_aux16(Op::GetModuleExport, 0, 0);
     assert!(matches!(
       invalid_descriptor.validate(),
@@ -865,7 +868,7 @@ mod tests {
     let chunk = &mut missing_edge.modules[1].chunk;
     chunk
       .constants
-      .push(Constant::String("0\0value".to_string()));
+      .push(Constant::String("0\0value".to_string().into()));
     chunk.code[0] = encode_risc_aux16(Op::GetModuleExport, 0, 0);
     assert!(
       missing_edge
@@ -887,7 +890,7 @@ mod tests {
     let chunk = &mut binding_drift.modules[1].chunk;
     chunk
       .constants
-      .push(Constant::String("0\0value".to_string()));
+      .push(Constant::String("0\0value".to_string().into()));
     chunk.code[0] = encode_risc_aux16(Op::GetModuleExport, 0, 0);
     assert!(matches!(
       binding_drift.validate(),
@@ -899,7 +902,7 @@ mod tests {
     let chunk = &mut foreign_write.modules[1].chunk;
     chunk
       .constants
-      .push(Constant::String("0\0value".to_string()));
+      .push(Constant::String("0\0value".to_string().into()));
     chunk.code[0] = encode_risc_aux16(Op::SetModuleExport, 0, 0);
     assert!(matches!(
       foreign_write.validate(),
@@ -911,7 +914,7 @@ mod tests {
     let chunk = &mut dynamic_import.modules[1].chunk;
     chunk
       .constants
-      .push(Constant::String("dynamicImport".to_string()));
+      .push(Constant::String("dynamicImport".to_string().into()));
     chunk.code[0] = encode_risc_aux16(Op::GetBuiltin, 0, 0);
     assert!(
       dynamic_import

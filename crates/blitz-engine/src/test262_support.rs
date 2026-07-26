@@ -25,7 +25,7 @@ fn print_args(
 ) -> String {
   let value = args.first().cloned().unwrap_or(Value::Undefined);
   match vm.to_string(&value) {
-    Ok(s) => s,
+    Ok(s) => s.to_string(),
     Err(_) => format!("{}", value),
   }
 }
@@ -43,9 +43,10 @@ fn builtin_eval_script(
   };
 
   let chunk = crate::typecheck::with_strict_override(None, || {
-    let session = Parser::parse_source(&src).map_err(|e| format!("evalScript parse: {}", e))?;
+    let src = src.as_str_lossy();
+    let session = Parser::parse_source(src).map_err(|e| format!("evalScript parse: {}", e))?;
     let prog = session.program();
-    compiler::compile_oxc(prog, &src).map_err(|e| format!("evalScript compile: {}", e))
+    compiler::compile_oxc(prog, src).map_err(|e| format!("evalScript compile: {}", e))
   })?;
   let mut eval_vm = Vm::new(Rc::clone(globals));
   eval_vm
@@ -61,7 +62,7 @@ fn make_test262_object(
   let function_proto = globals
     .borrow()
     .properties
-    .get(&PropertyKey::String("Function".to_string()))
+    .get(&PropertyKey::String("Function".to_string().into()))
     .and_then(|desc| match desc {
       PropertyDescriptor::Data { value, .. } => Some(value.clone()),
       _ => None,
@@ -70,7 +71,7 @@ fn make_test262_object(
       Value::Object(obj) => obj
         .borrow()
         .properties
-        .get(&PropertyKey::String("prototype".to_string()))
+        .get(&PropertyKey::String("prototype".to_string().into()))
         .and_then(|desc| match desc {
           PropertyDescriptor::Data { value, .. } => Some(value.clone()),
           _ => None,
@@ -78,7 +79,7 @@ fn make_test262_object(
       Value::BuiltinObject(_, props) => props
         .borrow()
         .properties
-        .get(&PropertyKey::String("prototype".to_string()))
+        .get(&PropertyKey::String("prototype".to_string().into()))
         .and_then(|desc| match desc {
           PropertyDescriptor::Data { value, .. } => Some(value.clone()),
           _ => None,
@@ -96,39 +97,39 @@ fn make_test262_object(
 
   let eval_globals = Rc::clone(globals);
   data.properties.insert(
-    PropertyKey::String("evalScript".to_string()),
-    PropertyDescriptor::data(host_builtin(Rc::new(move |_vm, args| {
+    PropertyKey::String("evalScript".to_string().into()),
+    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(move |_vm, args| {
       builtin_eval_script(&eval_globals, args).map_err(crate::errors::RuntimeError::from)
     }))),
   );
   data.properties.insert(
-    PropertyKey::String("IsHTMLDDA".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
+    PropertyKey::String("IsHTMLDDA".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Object(Rc::new(RefCell::new(ObjectData::new())))),
   );
   data.properties.insert(
-    PropertyKey::String("detachArrayBuffer".to_string()),
-    PropertyDescriptor::data(host_builtin(Rc::new(|_vm, args| {
+    PropertyKey::String("detachArrayBuffer".to_string().into()),
+    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(|_vm, args| {
       if let Some(Value::Object(obj)) = args.first() {
         let mut obj_data = obj.borrow_mut();
         obj_data.set_internal_slot(ARRAY_BUFFER_DATA_SLOT, Value::Null);
         obj_data.properties.insert(
-          PropertyKey::String("byteLength".to_string()),
-          PropertyDescriptor::data(Value::Number(0.0)),
+          PropertyKey::String("byteLength".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::Number(0.0)),
         );
       }
       Ok(Value::Undefined)
     }))),
   );
   data.properties.insert(
-    PropertyKey::String("gc".to_string()),
-    PropertyDescriptor::data(host_builtin(Rc::new(|vm, _args| {
+    PropertyKey::String("gc".to_string().into()),
+    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(|vm, _args| {
       let _ = vm.collect_garbage_prototype();
       Ok(Value::Undefined)
     }))),
   );
   data.properties.insert(
-    PropertyKey::String("AbstractModuleSource".to_string()),
-    PropertyDescriptor::data(Value::Undefined),
+    PropertyKey::String("AbstractModuleSource".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Undefined),
   );
 
   let noop_agent_method: BuiltinFn = Rc::new(|_: &mut Vm, _: &[Value]| Ok(Value::Undefined));
@@ -141,35 +142,35 @@ fn make_test262_object(
     "report",
   ] {
     agent_obj.borrow_mut().properties.insert(
-      PropertyKey::String(name.to_string()),
-      PropertyDescriptor::data(host_builtin(noop_agent_method.clone())),
+      PropertyKey::String(name.to_string().into()),
+      PropertyDescriptor::ordinary_data(host_builtin(noop_agent_method.clone())),
     );
   }
   data.properties.insert(
-    PropertyKey::String("agent".to_string()),
-    PropertyDescriptor::data(Value::Object(agent_obj)),
+    PropertyKey::String("agent".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Object(agent_obj)),
   );
 
   let print_native = Rc::clone(print_native);
   data.properties.insert(
-    PropertyKey::String("createRealm".to_string()),
-    PropertyDescriptor::data(host_builtin(Rc::new(move |_vm, _args| {
+    PropertyKey::String("createRealm".to_string().into()),
+    PropertyDescriptor::ordinary_data(host_builtin(Rc::new(move |_vm, _args| {
       let realm_global = Rc::new(RefCell::new(ObjectData::new()));
       realm_global.borrow_mut().properties.insert(
-        PropertyKey::String("globalThis".to_string()),
-        PropertyDescriptor::data(Value::Object(realm_global.clone())),
+        PropertyKey::String("globalThis".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Object(realm_global.clone())),
       );
       define_native_global(&realm_global, "print", print_native.clone());
       runtime_utils::install_minimal_kernel_constructors(&realm_global);
       let new_262 = make_test262_object(&realm_global, &print_native);
       realm_global.borrow_mut().properties.insert(
-        PropertyKey::String("$262".to_string()),
-        PropertyDescriptor::data(new_262.clone()),
+        PropertyKey::String("$262".to_string().into()),
+        PropertyDescriptor::ordinary_data(new_262.clone()),
       );
       if let Value::Object(obj) = &new_262 {
         obj.borrow_mut().properties.insert(
-          PropertyKey::String("global".to_string()),
-          PropertyDescriptor::data(Value::Object(realm_global)),
+          PropertyKey::String("global".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::Object(realm_global)),
         );
       }
       Ok(new_262)
@@ -177,8 +178,8 @@ fn make_test262_object(
   );
 
   data.properties.insert(
-    PropertyKey::String("global".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(globals))),
+    PropertyKey::String("global".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(globals))),
   );
 
   Value::Object(Rc::new(RefCell::new(data)))
@@ -199,25 +200,25 @@ pub fn async_completion_marker(s: &str) -> Option<AsyncCompletion> {
 pub fn make_test262_globals_with_print(print_native: NativeFn) -> Rc<RefCell<ObjectData>> {
   let globals: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
-    PropertyKey::String("globalThis".to_string()),
-    PropertyDescriptor::data(Value::Object(globals.clone())),
+    PropertyKey::String("globalThis".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Object(globals.clone())),
   );
 
   define_native_global(&globals, "print", print_native.clone());
   globals.borrow_mut().properties.insert(
-    PropertyKey::String("NaN".to_string()),
-    PropertyDescriptor::data(Value::Number(f64::NAN)),
+    PropertyKey::String("NaN".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Number(f64::NAN)),
   );
   globals.borrow_mut().properties.insert(
-    PropertyKey::String("Infinity".to_string()),
-    PropertyDescriptor::data(Value::Number(f64::INFINITY)),
+    PropertyKey::String("Infinity".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Number(f64::INFINITY)),
   );
 
   runtime_utils::install_minimal_kernel_constructors(&globals);
   let test262_obj = make_test262_object(&globals, &print_native);
   globals.borrow_mut().properties.insert(
-    PropertyKey::String("$262".to_string()),
-    PropertyDescriptor::data(test262_obj),
+    PropertyKey::String("$262".to_string().into()),
+    PropertyDescriptor::ordinary_data(test262_obj),
   );
   globals
 }

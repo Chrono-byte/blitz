@@ -66,7 +66,7 @@ fn benchmark_globals() -> Rc<RefCell<ObjectData>> {
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
     PropertyKey::String("globalThis".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+    PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
   );
   runtime_utils::install_minimal_kernel_constructors(&globals);
   globals

@@ -54,8 +54,8 @@ mod tests {
   fn runtime_vm(profile: crate::host::NodeCompatProfile) -> (Vm, crate::host::RuntimeHandle) {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyKey::String("globalThis".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = Vm::new(globals);
     let mut options = crate::host::RuntimeOptions::from_host(vec!["blitz-test".to_string()]);
@@ -573,7 +573,7 @@ mod tests {
 
     assert_eq!(
       vm.get_global("selectedCondition"),
-      Some(Value::String("node".to_string()))
+      Some(Value::String("node".to_string().into()))
     );
     std::fs::remove_dir_all(directory).expect("remove scoped package project");
   }

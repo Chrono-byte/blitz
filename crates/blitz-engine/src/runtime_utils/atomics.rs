@@ -64,7 +64,7 @@ fn atomics_value_to_bigint(
     Value::BigInt(n) => n.clone(),
     Value::Number(n) => BigIntValue::from_f64(n.trunc())
       .ok_or_else(|| vm.throw_type_error("Atomics BigInt operations require BigInt values"))?,
-    Value::String(s) => BigIntValue::parse_bytes(s.as_bytes(), 10)
+    Value::String(s) => BigIntValue::parse_bytes(s.as_str_lossy().as_bytes(), 10)
       .ok_or_else(|| vm.throw_type_error("Atomics BigInt operations require BigInt values"))?,
     _ => {
       let prim = vm.to_primitive(value, Some("number"))?;
@@ -112,38 +112,35 @@ pub(crate) fn atomics_view_info(
     if matches!(
       view_data
         .properties
-        .get(&PropertyKey::String("[[TypedArrayKind]]".to_string())),
+        .get(&PropertyKey::String("[[TypedArrayKind]]".to_string().into())),
       Some(PropertyDescriptor::Data {
         value: Value::String(kind),
         ..
-      }) if matches!(kind.as_str(), "Uint8Array" | "Int8Array" | "Uint8ClampedArray")
+      }) if matches!(kind.as_str_lossy(), "Uint8Array" | "Int8Array" | "Uint8ClampedArray")
     ) {
       return Err(vm.throw_type_error("Atomics requires a TypedArray"));
     }
-    let data = match view_data
-      .properties
-      .get(&PropertyKey::String("[[TypedArrayData]]".to_string()))
-    {
+    let data = match view_data.properties.get(&PropertyKey::String(
+      "[[TypedArrayData]]".to_string().into(),
+    )) {
       Some(PropertyDescriptor::Data {
         value: Value::Array(arr, _),
         ..
       }) => Rc::clone(arr),
       _ => return Err(vm.throw_type_error("Atomics requires a TypedArray")),
     };
-    let kind_name = match view_data
-      .properties
-      .get(&PropertyKey::String("[[TypedArrayKind]]".to_string()))
-    {
+    let kind_name = match view_data.properties.get(&PropertyKey::String(
+      "[[TypedArrayKind]]".to_string().into(),
+    )) {
       Some(PropertyDescriptor::Data {
         value: Value::String(kind),
         ..
       }) => kind.clone(),
       _ => return Err(vm.throw_type_error("Atomics requires a TypedArray")),
     };
-    let length = match view_data
-      .properties
-      .get(&PropertyKey::String("[[TypedArrayLength]]".to_string()))
-    {
+    let length = match view_data.properties.get(&PropertyKey::String(
+      "[[TypedArrayLength]]".to_string().into(),
+    )) {
       Some(PropertyDescriptor::Data {
         value: Value::Number(n),
         ..
@@ -153,10 +150,9 @@ pub(crate) fn atomics_view_info(
         .unwrap_or(data.borrow().len()),
       _ => data.borrow().len(),
     };
-    let buffer = match view_data
-      .properties
-      .get(&PropertyKey::String("[[TypedArrayBuffer]]".to_string()))
-    {
+    let buffer = match view_data.properties.get(&PropertyKey::String(
+      "[[TypedArrayBuffer]]".to_string().into(),
+    )) {
       Some(PropertyDescriptor::Data {
         value: Value::Object(buffer),
         ..
@@ -166,9 +162,9 @@ pub(crate) fn atomics_view_info(
     let is_shared = {
       let buffer_data = buffer.borrow();
       matches!(
-        buffer_data
-          .properties
-          .get(&PropertyKey::String("[[IsSharedArrayBuffer]]".to_string())),
+        buffer_data.properties.get(&PropertyKey::String(
+          "[[IsSharedArrayBuffer]]".to_string().into()
+        )),
         Some(PropertyDescriptor::Data {
           value: Value::Bool(true),
           ..
@@ -177,13 +173,13 @@ pub(crate) fn atomics_view_info(
     };
     (data, buffer, kind_name, length, is_shared)
   };
-  let value_kind = atomics_value_kind(&kind_name)
+  let value_kind = atomics_value_kind(kind_name.as_str_lossy())
     .ok_or_else(|| vm.throw_type_error("Atomics requires a numeric or BigInt typed array"))?;
   Ok(AtomicsViewInfo {
     view: Rc::clone(view_obj),
     data,
     buffer,
-    kind_name,
+    kind_name: kind_name.to_string(),
     value_kind,
     length,
     is_shared,
@@ -209,7 +205,7 @@ fn atomics_read_view_slot(
   info: &AtomicsViewInfo,
   index: usize,
 ) -> Result<Value, RuntimeError> {
-  let prop_key = PropertyKey::String(index.to_string());
+  let prop_key = PropertyKey::String(index.to_string().into());
   let value = vm.get_property_host(&Value::Object(Rc::clone(&info.view)), &prop_key)?;
   if !matches!(value, Value::Undefined) {
     return Ok(value);
@@ -247,18 +243,17 @@ pub(crate) fn atomics_waiters_array(buffer: &Rc<RefCell<ObjectData>>) -> Rc<RefC
   if let Some(PropertyDescriptor::Data {
     value: Value::Array(arr, _),
     ..
-  }) = buffer_data
-    .properties
-    .get(&PropertyKey::String("[[AtomicsWaiters]]".to_string()))
-  {
+  }) = buffer_data.properties.get(&PropertyKey::String(
+    "[[AtomicsWaiters]]".to_string().into(),
+  )) {
     return Rc::clone(arr);
   }
   let arr = gc::track_array(Rc::new(RefCell::new(ArrayData::from(
     Vec::<Option<Value>>::new(),
   ))));
   buffer_data.properties.insert(
-    PropertyKey::String("[[AtomicsWaiters]]".to_string()),
-    PropertyDescriptor::data(Value::Array(
+    PropertyKey::String("[[AtomicsWaiters]]".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Array(
       Rc::clone(&arr),
       gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
     )),
@@ -273,12 +268,12 @@ pub(crate) fn atomics_make_waiter_record(
 ) -> Value {
   let mut data = ObjectData::new();
   data.properties.insert(
-    PropertyKey::String("index".to_string()),
-    PropertyDescriptor::data(Value::Number(usize_to_f64(index))),
+    PropertyKey::String("index".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(index))),
   );
   data.properties.insert(
-    PropertyKey::String("resolve".to_string()),
-    PropertyDescriptor::data(resolve.unwrap_or(Value::Undefined)),
+    PropertyKey::String("resolve".to_string().into()),
+    PropertyDescriptor::ordinary_data(resolve.unwrap_or(Value::Undefined)),
   );
   Value::Object(gc::track_object(Rc::new(RefCell::new(data))))
 }
@@ -290,12 +285,12 @@ pub(crate) fn atomics_make_wait_result(
 ) -> Value {
   let result = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
   result.borrow_mut().properties.insert(
-    PropertyKey::String("async".to_string()),
-    PropertyDescriptor::data(Value::Bool(async_flag)),
+    PropertyKey::String("async".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Bool(async_flag)),
   );
   result.borrow_mut().properties.insert(
-    PropertyKey::String("value".to_string()),
-    PropertyDescriptor::data(value),
+    PropertyKey::String("value".to_string().into()),
+    PropertyDescriptor::ordinary_data(value),
   );
   Value::Object(result)
 }
@@ -325,7 +320,7 @@ pub(crate) fn atomics_wake_waiters(
         continue;
       };
       let record_index =
-        match vm.get_property_host(&waiter, &PropertyKey::String("index".to_string())) {
+        match vm.get_property_host(&waiter, &PropertyKey::String("index".to_string().into())) {
           Ok(Value::Number(n)) if n.is_finite() && n >= 0.0 => match n.trunc().to_usize() {
             Some(index) => index,
             None => {
@@ -348,13 +343,14 @@ pub(crate) fn atomics_wake_waiters(
   }
 
   for waiter in &to_wake {
-    if let Ok(resolve) = vm.get_property_host(waiter, &PropertyKey::String("resolve".to_string()))
+    if let Ok(resolve) =
+      vm.get_property_host(waiter, &PropertyKey::String("resolve".to_string().into()))
       && !matches!(resolve, Value::Undefined)
     {
       drop(vm.call_value_with_this(
         &resolve,
         &Value::Undefined,
-        &[Value::String("ok".to_string())],
+        &[Value::String("ok".to_string().into())],
       ));
     }
   }

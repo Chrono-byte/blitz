@@ -11,6 +11,7 @@ use crate::ecmascript::semantics::usize_to_f64;
 use crate::runtime_utils::canonical_index_key;
 use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value};
 use crate::{RuntimeError, gc};
+use js_string::JsString;
 use num_traits::ToPrimitive;
 
 /// Gets the own property descriptor for a key on an object.
@@ -70,7 +71,7 @@ pub(crate) fn own_property_descriptor(
 fn array_length(props: &ObjectData) -> usize {
   props
     .properties
-    .get(&PropertyKey::String("length".to_string()))
+    .get(&PropertyKey::String("length".to_string().into()))
     .and_then(|desc| match desc {
       PropertyDescriptor::Data {
         value: Value::Number(n),
@@ -81,29 +82,17 @@ fn array_length(props: &ObjectData) -> usize {
     .unwrap_or(0)
 }
 
-/// Creates a non-enumerable data property descriptor.
-pub(crate) fn non_enum_data(value: Value) -> PropertyDescriptor {
-  PropertyDescriptor::Data {
-    value,
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  }
-}
-
 /// 22.1.3.34.1 ThisStringValue ( value )
 pub(crate) fn this_string_value(
   vm: &mut Vm,
   value: &Value,
-) -> Result<String, RuntimeError> {
+) -> Result<JsString, RuntimeError> {
   match value {
     Value::String(s) => Ok(s.clone()),
     Value::Object(obj) => {
-      if let Some(PropertyDescriptor::Data { value, .. }) = obj
-        .borrow()
-        .properties
-        .get(&PropertyKey::String("[[PrimitiveValue]]".to_string()))
-        && let Value::String(s) = value
+      if let Some(PropertyDescriptor::Data { value, .. }) = obj.borrow().properties.get(
+        &PropertyKey::String("[[PrimitiveValue]]".to_string().into()),
+      ) && let Value::String(s) = value
       {
         return Ok(s.clone());
       }
@@ -121,11 +110,9 @@ pub(crate) fn this_boolean_value(
   match value {
     Value::Bool(b) => Ok(*b),
     Value::Object(obj) => {
-      if let Some(PropertyDescriptor::Data { value, .. }) = obj
-        .borrow()
-        .properties
-        .get(&PropertyKey::String("[[PrimitiveValue]]".to_string()))
-        && let Value::Bool(b) = value
+      if let Some(PropertyDescriptor::Data { value, .. }) = obj.borrow().properties.get(
+        &PropertyKey::String("[[PrimitiveValue]]".to_string().into()),
+      ) && let Value::Bool(b) = value
       {
         return Ok(*b);
       }
@@ -162,20 +149,20 @@ pub(crate) fn descriptor_value_from_descriptor(
       configurable,
     } => {
       obj.properties.insert(
-        PropertyKey::String("value".to_string()),
-        PropertyDescriptor::data(value.clone()),
+        PropertyKey::String("value".to_string().into()),
+        PropertyDescriptor::ordinary_data(value.clone()),
       );
       obj.properties.insert(
-        PropertyKey::String("writable".to_string()),
-        PropertyDescriptor::data(Value::Bool(*writable)),
+        PropertyKey::String("writable".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Bool(*writable)),
       );
       obj.properties.insert(
-        PropertyKey::String("enumerable".to_string()),
-        PropertyDescriptor::data(Value::Bool(*enumerable)),
+        PropertyKey::String("enumerable".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Bool(*enumerable)),
       );
       obj.properties.insert(
-        PropertyKey::String("configurable".to_string()),
-        PropertyDescriptor::data(Value::Bool(*configurable)),
+        PropertyKey::String("configurable".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Bool(*configurable)),
       );
     }
     PropertyDescriptor::Accessor {
@@ -185,20 +172,20 @@ pub(crate) fn descriptor_value_from_descriptor(
       configurable,
     } => {
       obj.properties.insert(
-        PropertyKey::String("get".to_string()),
-        PropertyDescriptor::data(get.clone().unwrap_or(Value::Undefined)),
+        PropertyKey::String("get".to_string().into()),
+        PropertyDescriptor::ordinary_data(get.clone().unwrap_or(Value::Undefined)),
       );
       obj.properties.insert(
-        PropertyKey::String("set".to_string()),
-        PropertyDescriptor::data(set.clone().unwrap_or(Value::Undefined)),
+        PropertyKey::String("set".to_string().into()),
+        PropertyDescriptor::ordinary_data(set.clone().unwrap_or(Value::Undefined)),
       );
       obj.properties.insert(
-        PropertyKey::String("enumerable".to_string()),
-        PropertyDescriptor::data(Value::Bool(*enumerable)),
+        PropertyKey::String("enumerable".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Bool(*enumerable)),
       );
       obj.properties.insert(
-        PropertyKey::String("configurable".to_string()),
-        PropertyDescriptor::data(Value::Bool(*configurable)),
+        PropertyKey::String("configurable".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Bool(*configurable)),
       );
     }
   }
@@ -212,7 +199,7 @@ pub(crate) fn own_property_keys(obj: &Value) -> Vec<PropertyKey> {
     Value::Object(data) => {
       if let Some(details) = byte_view_details(&Value::Object(Rc::clone(data))) {
         for index in 0..details.length {
-          keys.push(PropertyKey::String(usize_to_decimal_string(index)));
+          keys.push(PropertyKey::String(usize_to_decimal_string(index).into()));
         }
       }
       keys.extend(data.borrow().properties.keys().cloned());
@@ -226,7 +213,7 @@ pub(crate) fn own_property_keys(obj: &Value) -> Vec<PropertyKey> {
     Value::Array(arr, props) => {
       for (idx, slot) in arr.borrow().iter().enumerate() {
         if slot.is_some() {
-          keys.push(PropertyKey::String(usize_to_decimal_string(idx)));
+          keys.push(PropertyKey::String(usize_to_decimal_string(idx).into()));
         }
       }
       keys.extend(props.borrow().properties.keys().cloned());
@@ -267,7 +254,7 @@ fn order_property_keys(keys: Vec<PropertyKey>) -> Vec<PropertyKey> {
     .collect()
 }
 
-fn array_index_from_string(name: &str) -> Option<u32> {
+fn array_index_from_string(name: &js_string::JsString) -> Option<u32> {
   let index = canonical_index_key(name)?;
   let index = u32::try_from(index).ok()?;
   (index != u32::MAX).then_some(index)
@@ -276,7 +263,7 @@ fn array_index_from_string(name: &str) -> Option<u32> {
 /// Converts a PropertyKey to its corresponding Value.
 pub(crate) fn property_key_to_value(key: &PropertyKey) -> Value {
   match key {
-    PropertyKey::String(name) => Value::String(name.clone()),
+    PropertyKey::String(name) => Value::String(name.clone().into()),
     PropertyKey::Symbol(id) => Value::Symbol(id.clone(), None),
   }
 }
@@ -339,7 +326,7 @@ pub(crate) fn array_from_values(values: Vec<Value>) -> Value {
   )));
   let props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
   props.borrow_mut().properties.insert(
-    PropertyKey::String("length".to_string()),
+    PropertyKey::String("length".to_string().into()),
     array_length_descriptor(arr_rc.borrow().len()),
   );
   Value::Array(arr_rc, props)

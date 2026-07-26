@@ -7,8 +7,8 @@ use std::rc::Rc;
 use num_traits::ToPrimitive;
 
 use crate::runtime_utils::{
-  array_from_values, builtin_object, non_enum_data, same_value_zero, set_builtin_length,
-  set_builtin_name, static_builtin_arg_offset, usize_to_f64,
+  array_from_values, builtin_object, same_value_zero, set_builtin_length, set_builtin_name,
+  static_builtin_arg_offset, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 
@@ -90,12 +90,12 @@ fn iterator_result(
 ) -> Value {
   let mut result = ObjectData::with_prototype(vm.realm().object_prototype());
   result.properties.insert(
-    PropertyKey::String("value".to_string()),
-    PropertyDescriptor::data(value),
+    PropertyKey::String("value".to_string().into()),
+    PropertyDescriptor::ordinary_data(value),
   );
   result.properties.insert(
-    PropertyKey::String("done".to_string()),
-    PropertyDescriptor::data(Value::Bool(done)),
+    PropertyKey::String("done".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Bool(done)),
   );
   Value::Object(Rc::new(RefCell::new(result)))
 }
@@ -173,7 +173,8 @@ fn close_collection_iterator(
   vm: &mut crate::vm::Vm,
   iterator: &Value,
 ) -> Result<(), crate::errors::RuntimeError> {
-  let return_method = vm.get_property_host(iterator, &PropertyKey::String("return".to_string()))?;
+  let return_method =
+    vm.get_property_host(iterator, &PropertyKey::String("return".to_string().into()))?;
   if matches!(return_method, Value::Undefined | Value::Null) {
     return Ok(());
   }
@@ -205,7 +206,8 @@ fn consume_collection_iterable(
   if !iterator.is_object() {
     return Err(vm.throw_type_error("Iterator method must return an object"));
   }
-  let next_method = vm.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
+  let next_method =
+    vm.get_property_host(&iterator, &PropertyKey::String("next".to_string().into()))?;
   if !crate::vm::Vm::is_callable_value(&next_method) {
     return Err(vm.throw_type_error("Iterator next method is not callable"));
   }
@@ -216,11 +218,17 @@ fn consume_collection_iterable(
       if !next_result.is_object() {
         return Err(vm.throw_type_error("Iterator result must be an object"));
       }
-      let done = vm.get_property_host(&next_result, &PropertyKey::String("done".to_string()))?;
+      let done = vm.get_property_host(
+        &next_result,
+        &PropertyKey::String("done".to_string().into()),
+      )?;
       if vm.to_boolean(&done) {
         return Ok(());
       }
-      let value = vm.get_property_host(&next_result, &PropertyKey::String("value".to_string()))?;
+      let value = vm.get_property_host(
+        &next_result,
+        &PropertyKey::String("value".to_string().into()),
+      )?;
       consume(vm, value)?;
     }
   })();
@@ -264,7 +272,7 @@ pub(crate) fn install_map_set_constructors(
   ))));
   iterator_proto.borrow_mut().properties.insert(
     PKey::Symbol(SymbolId::well_known_iterator()),
-    non_enum_data(method(
+    PropertyDescriptor::builtin_data(method(
       Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
       function_proto_map,
       "[Symbol.iterator]",
@@ -347,15 +355,15 @@ pub(crate) fn install_map_set_constructors(
     "next",
     0.0,
   );
-  map_iterator_proto
-    .borrow_mut()
-    .properties
-    .insert(PKey::String("next".to_string()), non_enum_data(map_next));
+  map_iterator_proto.borrow_mut().properties.insert(
+    PKey::String("next".to_string().into()),
+    PropertyDescriptor::builtin_data(map_next),
+  );
 
   map_iterator_proto.borrow_mut().properties.insert(
     PKey::Symbol(SymbolId::well_known_to_string_tag()),
     PropertyDescriptor::Data {
-      value: Value::String("Map Iterator".to_string()),
+      value: Value::String("Map Iterator".to_string().into()),
       writable: false,
       enumerable: false,
       configurable: true,
@@ -422,14 +430,14 @@ pub(crate) fn install_map_set_constructors(
     "next",
     0.0,
   );
-  set_iterator_proto
-    .borrow_mut()
-    .properties
-    .insert(PKey::String("next".to_string()), non_enum_data(set_next));
+  set_iterator_proto.borrow_mut().properties.insert(
+    PKey::String("next".to_string().into()),
+    PropertyDescriptor::builtin_data(set_next),
+  );
   set_iterator_proto.borrow_mut().properties.insert(
     PKey::Symbol(SymbolId::well_known_to_string_tag()),
     PropertyDescriptor::Data {
-      value: Value::String("Set Iterator".to_string()),
+      value: Value::String("Set Iterator".to_string().into()),
       writable: false,
       enumerable: false,
       configurable: true,
@@ -463,7 +471,7 @@ pub(crate) fn install_map_set_constructors(
     if matches!(iterable, Value::Undefined) {
       return Ok(receiver);
     }
-    let adder = vm.get_property_host(&receiver, &PKey::String("set".to_string()))?;
+    let adder = vm.get_property_host(&receiver, &PKey::String("set".to_string().into()))?;
     if !crate::vm::Vm::is_callable_value(&adder) {
       return Err(vm.throw_type_error("Map.prototype.set is not callable"));
     }
@@ -471,8 +479,8 @@ pub(crate) fn install_map_set_constructors(
       if !item.is_object() {
         return Err(vm.throw_type_error("Iterator value is not an entry object"));
       }
-      let key = vm.get_property_host(&item, &PKey::String("0".to_string()))?;
-      let value = vm.get_property_host(&item, &PKey::String("1".to_string()))?;
+      let key = vm.get_property_host(&item, &PKey::String("0".to_string().into()))?;
+      let value = vm.get_property_host(&item, &PKey::String("1".to_string().into()))?;
       drop(vm.call_value_with_this(&adder, &receiver, &[key, value])?);
       Ok(())
     })?;
@@ -482,7 +490,7 @@ pub(crate) fn install_map_set_constructors(
   set_builtin_name(&map_ctor_val, "Map");
   set_builtin_length(&map_ctor_val, 0.0);
   map_ctor.borrow_mut().properties.insert(
-    PKey::String("prototype".to_string()),
+    PKey::String("prototype".to_string().into()),
     PropertyDescriptor::Data {
       value: Value::Object(Rc::clone(&map_proto)),
       writable: false,
@@ -491,8 +499,8 @@ pub(crate) fn install_map_set_constructors(
     },
   );
   map_proto.borrow_mut().properties.insert(
-    PKey::String("constructor".to_string()),
-    non_enum_data(map_ctor_val.clone()),
+    PKey::String("constructor".to_string().into()),
+    PropertyDescriptor::builtin_data(map_ctor_val.clone()),
   );
 
   let map_data = map_data_key;
@@ -516,10 +524,10 @@ pub(crate) fn install_map_set_constructors(
     "get",
     1.0,
   );
-  map_proto
-    .borrow_mut()
-    .properties
-    .insert(PKey::String("get".to_string()), non_enum_data(map_get));
+  map_proto.borrow_mut().properties.insert(
+    PKey::String("get".to_string().into()),
+    PropertyDescriptor::builtin_data(map_get),
+  );
 
   let map_data = map_data_key;
   let map_has = method(
@@ -540,10 +548,10 @@ pub(crate) fn install_map_set_constructors(
     "has",
     1.0,
   );
-  map_proto
-    .borrow_mut()
-    .properties
-    .insert(PKey::String("has".to_string()), non_enum_data(map_has));
+  map_proto.borrow_mut().properties.insert(
+    PKey::String("has".to_string().into()),
+    PropertyDescriptor::builtin_data(map_has),
+  );
 
   let map_data = map_data_key;
   let map_delete = method(
@@ -571,8 +579,8 @@ pub(crate) fn install_map_set_constructors(
     1.0,
   );
   map_proto.borrow_mut().properties.insert(
-    PKey::String("delete".to_string()),
-    non_enum_data(map_delete),
+    PKey::String("delete".to_string().into()),
+    PropertyDescriptor::builtin_data(map_delete),
   );
 
   let map_data = map_data_key;
@@ -609,10 +617,10 @@ pub(crate) fn install_map_set_constructors(
     "set",
     2.0,
   );
-  map_proto
-    .borrow_mut()
-    .properties
-    .insert(PKey::String("set".to_string()), non_enum_data(map_set));
+  map_proto.borrow_mut().properties.insert(
+    PKey::String("set".to_string().into()),
+    PropertyDescriptor::builtin_data(map_set),
+  );
 
   let map_data = map_data_key;
   let map_clear = method(
@@ -630,10 +638,10 @@ pub(crate) fn install_map_set_constructors(
     "clear",
     0.0,
   );
-  map_proto
-    .borrow_mut()
-    .properties
-    .insert(PKey::String("clear".to_string()), non_enum_data(map_clear));
+  map_proto.borrow_mut().properties.insert(
+    PKey::String("clear".to_string().into()),
+    PropertyDescriptor::builtin_data(map_clear),
+  );
 
   let map_data = map_data_key;
   let map_for_each = method(
@@ -670,8 +678,8 @@ pub(crate) fn install_map_set_constructors(
     1.0,
   );
   map_proto.borrow_mut().properties.insert(
-    PKey::String("forEach".to_string()),
-    non_enum_data(map_for_each),
+    PKey::String("forEach".to_string().into()),
+    PropertyDescriptor::builtin_data(map_for_each),
   );
 
   let map_data = map_data_key;
@@ -691,7 +699,7 @@ pub(crate) fn install_map_set_constructors(
     0.0,
   );
   map_proto.borrow_mut().properties.insert(
-    PKey::String("size".to_string()),
+    PKey::String("size".to_string().into()),
     PropertyDescriptor::Accessor {
       get: Some(map_size),
       set: None,
@@ -729,10 +737,10 @@ pub(crate) fn install_map_set_constructors(
       name,
       0.0,
     );
-    map_proto
-      .borrow_mut()
-      .properties
-      .insert(PKey::String(name.to_string()), non_enum_data(function));
+    map_proto.borrow_mut().properties.insert(
+      PKey::String(name.to_string().into()),
+      PropertyDescriptor::builtin_data(function),
+    );
   }
 
   let map_data = map_data_key;
@@ -762,17 +770,17 @@ pub(crate) fn install_map_set_constructors(
     0.0,
   );
   map_proto.borrow_mut().properties.insert(
-    PKey::String("entries".to_string()),
-    non_enum_data(entries_function.clone()),
+    PKey::String("entries".to_string().into()),
+    PropertyDescriptor::builtin_data(entries_function.clone()),
   );
   map_proto.borrow_mut().properties.insert(
     PKey::Symbol(SymbolId::well_known_iterator()),
-    non_enum_data(entries_function),
+    PropertyDescriptor::builtin_data(entries_function),
   );
   map_proto.borrow_mut().properties.insert(
     PKey::Symbol(SymbolId::well_known_to_string_tag()),
     PropertyDescriptor::Data {
-      value: Value::String("Map".to_string()),
+      value: Value::String("Map".to_string().into()),
       writable: false,
       enumerable: false,
       configurable: true,
@@ -806,7 +814,7 @@ pub(crate) fn install_map_set_constructors(
     if matches!(iterable, Value::Undefined) {
       return Ok(receiver);
     }
-    let adder = vm.get_property_host(&receiver, &PKey::String("add".to_string()))?;
+    let adder = vm.get_property_host(&receiver, &PKey::String("add".to_string().into()))?;
     if !crate::vm::Vm::is_callable_value(&adder) {
       return Err(vm.throw_type_error("Set.prototype.add is not callable"));
     }
@@ -820,7 +828,7 @@ pub(crate) fn install_map_set_constructors(
   set_builtin_name(&set_ctor_val, "Set");
   set_builtin_length(&set_ctor_val, 0.0);
   set_ctor.borrow_mut().properties.insert(
-    PKey::String("prototype".to_string()),
+    PKey::String("prototype".to_string().into()),
     PropertyDescriptor::Data {
       value: Value::Object(Rc::clone(&set_proto)),
       writable: false,
@@ -829,8 +837,8 @@ pub(crate) fn install_map_set_constructors(
     },
   );
   set_proto.borrow_mut().properties.insert(
-    PKey::String("constructor".to_string()),
-    non_enum_data(set_ctor_val.clone()),
+    PKey::String("constructor".to_string().into()),
+    PropertyDescriptor::builtin_data(set_ctor_val.clone()),
   );
 
   let set_data = set_data_key;
@@ -857,10 +865,10 @@ pub(crate) fn install_map_set_constructors(
     "add",
     1.0,
   );
-  set_proto
-    .borrow_mut()
-    .properties
-    .insert(PKey::String("add".to_string()), non_enum_data(set_add));
+  set_proto.borrow_mut().properties.insert(
+    PKey::String("add".to_string().into()),
+    PropertyDescriptor::builtin_data(set_add),
+  );
 
   let set_data = set_data_key;
   let set_has = method(
@@ -883,10 +891,10 @@ pub(crate) fn install_map_set_constructors(
     "has",
     1.0,
   );
-  set_proto
-    .borrow_mut()
-    .properties
-    .insert(PKey::String("has".to_string()), non_enum_data(set_has));
+  set_proto.borrow_mut().properties.insert(
+    PKey::String("has".to_string().into()),
+    PropertyDescriptor::builtin_data(set_has),
+  );
 
   let set_data = set_data_key;
   let set_delete = method(
@@ -913,8 +921,8 @@ pub(crate) fn install_map_set_constructors(
     1.0,
   );
   set_proto.borrow_mut().properties.insert(
-    PKey::String("delete".to_string()),
-    non_enum_data(set_delete),
+    PKey::String("delete".to_string().into()),
+    PropertyDescriptor::builtin_data(set_delete),
   );
 
   let set_data = set_data_key;
@@ -933,10 +941,10 @@ pub(crate) fn install_map_set_constructors(
     "clear",
     0.0,
   );
-  set_proto
-    .borrow_mut()
-    .properties
-    .insert(PKey::String("clear".to_string()), non_enum_data(set_clear));
+  set_proto.borrow_mut().properties.insert(
+    PKey::String("clear".to_string().into()),
+    PropertyDescriptor::builtin_data(set_clear),
+  );
 
   let set_data = set_data_key;
   let set_for_each = method(
@@ -974,8 +982,8 @@ pub(crate) fn install_map_set_constructors(
     1.0,
   );
   set_proto.borrow_mut().properties.insert(
-    PKey::String("forEach".to_string()),
-    non_enum_data(set_for_each),
+    PKey::String("forEach".to_string().into()),
+    PropertyDescriptor::builtin_data(set_for_each),
   );
 
   let set_data = set_data_key;
@@ -995,7 +1003,7 @@ pub(crate) fn install_map_set_constructors(
     0.0,
   );
   set_proto.borrow_mut().properties.insert(
-    PKey::String("size".to_string()),
+    PKey::String("size".to_string().into()),
     PropertyDescriptor::Accessor {
       get: Some(set_size),
       set: None,
@@ -1031,16 +1039,16 @@ pub(crate) fn install_map_set_constructors(
     0.0,
   );
   set_proto.borrow_mut().properties.insert(
-    PKey::String("values".to_string()),
-    non_enum_data(set_values.clone()),
+    PKey::String("values".to_string().into()),
+    PropertyDescriptor::builtin_data(set_values.clone()),
   );
   set_proto.borrow_mut().properties.insert(
-    PKey::String("keys".to_string()),
-    non_enum_data(set_values.clone()),
+    PKey::String("keys".to_string().into()),
+    PropertyDescriptor::builtin_data(set_values.clone()),
   );
   set_proto.borrow_mut().properties.insert(
     PKey::Symbol(SymbolId::well_known_iterator()),
-    non_enum_data(set_values),
+    PropertyDescriptor::builtin_data(set_values),
   );
 
   let set_data = set_data_key;
@@ -1070,13 +1078,13 @@ pub(crate) fn install_map_set_constructors(
     0.0,
   );
   set_proto.borrow_mut().properties.insert(
-    PKey::String("entries".to_string()),
-    non_enum_data(set_entries),
+    PKey::String("entries".to_string().into()),
+    PropertyDescriptor::builtin_data(set_entries),
   );
   set_proto.borrow_mut().properties.insert(
     PKey::Symbol(SymbolId::well_known_to_string_tag()),
     PropertyDescriptor::Data {
-      value: Value::String("Set".to_string()),
+      value: Value::String("Set".to_string().into()),
       writable: false,
       enumerable: false,
       configurable: true,

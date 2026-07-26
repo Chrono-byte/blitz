@@ -500,7 +500,7 @@ fn main() -> Result<(), blitz::errors::Error> {
     let print_native: blitz::value::NativeFn = Rc::new(move |vm, _this, args| {
       let value = args.first().cloned().unwrap_or(Value::Undefined);
       let rendered = match vm.to_string(&value) {
-        Ok(s) => s,
+        Ok(s) => s.to_string_lossy(),
         Err(_) => format!("{}", value),
       };
       if let Some(marker) = test262_support::async_completion_marker(&rendered) {
@@ -518,8 +518,8 @@ fn main() -> Result<(), blitz::errors::Error> {
     {
       let mut g = globals.borrow_mut();
       g.properties.insert(
-        blitz::value::PropertyKey::String("globalThis".to_string()),
-        blitz::value::PropertyDescriptor::data(global_this),
+        blitz::value::PropertyKey::String("globalThis".to_string().into()),
+        blitz::value::PropertyDescriptor::ordinary_data(global_this),
       );
     }
     globals
@@ -659,7 +659,7 @@ mod tests {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
       PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     globals
   }

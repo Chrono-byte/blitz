@@ -114,7 +114,7 @@ fn random_uuid(
     uuid.push(char::from(HEX[usize::from(byte >> 4)]));
     uuid.push(char::from(HEX[usize::from(byte & 0x0f)]));
   }
-  Ok(success(vm, Value::String(uuid)))
+  Ok(success(vm, Value::String(uuid.into())))
 }
 
 fn random_bytes(
@@ -457,8 +457,12 @@ fn failure(
 ) -> Value {
   let result = object(vm.realm().object_prototype());
   set(&result, OK, Value::Bool(false));
-  set(&result, "code", Value::String(code.to_string()));
-  set(&result, "message", Value::String(message.to_string()));
+  set(&result, "code", Value::String(code.to_string().into()));
+  set(
+    &result,
+    "message",
+    Value::String(message.to_string().into()),
+  );
   result
 }
 
@@ -492,7 +496,11 @@ fn permission_failure(
     "ERR_ACCESS_DENIED",
     "Permission denied: secure Node crypto random access is disabled",
   );
-  set(&result, "operation", Value::String(operation.to_string()));
+  set(
+    &result,
+    "operation",
+    Value::String(operation.to_string().into()),
+  );
   result
 }
 
@@ -506,8 +514,16 @@ fn entropy_failure(
     "ERR_SYSTEM_ERROR",
     &format!("{operation} could not obtain secure operating-system entropy: {message}"),
   );
-  set(&result, "operation", Value::String(operation.to_string()));
-  set(&result, "syscall", Value::String("getrandom".to_string()));
+  set(
+    &result,
+    "operation",
+    Value::String(operation.to_string().into()),
+  );
+  set(
+    &result,
+    "syscall",
+    Value::String("getrandom".to_string().into()),
+  );
   result
 }
 
@@ -522,8 +538,8 @@ mod tests {
   fn test_vm() -> Vm {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyKey::String("globalThis".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     Vm::new(globals)
   }
@@ -538,7 +554,7 @@ mod tests {
     match value
       .borrow()
       .properties
-      .get(&PropertyKey::String(name.to_string()))
+      .get(&PropertyKey::String(name.to_string().into()))
     {
       Some(PropertyDescriptor::Data { value, .. }) => value.clone(),
       _ => Value::Undefined,
@@ -553,8 +569,8 @@ mod tests {
       panic!("randomUUID should return a string");
     };
     assert_eq!(uuid.len(), 36);
-    assert_eq!(&uuid[14..15], "4");
-    assert!(matches!(uuid.as_bytes()[19], b'8'..=b'b'));
+    assert_eq!(&uuid.as_str_lossy()[14..15], "4");
+    assert!(matches!(uuid.as_str_lossy().as_bytes()[19], b'8'..=b'b'));
 
     let bytes = random_bytes(&mut vm, &[Value::Undefined, Value::Number(32.0)])
       .expect("randomBytes operation");
@@ -593,8 +609,12 @@ mod tests {
     let equal = timing_safe_equal(&mut vm, &[Value::Undefined, target.clone(), target.clone()])
       .expect("timingSafeEqual operation");
     assert_eq!(property(&equal, VALUE), Value::Bool(true));
-    vm.set_property_host(&target, &Value::String("0".to_string()), Value::Number(1.0))
-      .expect("set deterministic comparison byte");
+    vm.set_property_host(
+      &target,
+      &Value::String("0".to_string().into()),
+      Value::Number(1.0),
+    )
+    .expect("set deterministic comparison byte");
     let other = vm
       .construct_value(&constructor, &[Value::Number(8.0)])
       .expect("construct other target");
@@ -612,7 +632,11 @@ mod tests {
       timing_safe_equal(&mut vm, &[Value::Undefined, short, long]).expect("length error operation");
     assert_eq!(
       property(&bad_length, "code"),
-      Value::String("ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH".to_string())
+      Value::String(
+        "ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH"
+          .to_string()
+          .into()
+      )
     );
   }
 
@@ -636,19 +660,22 @@ mod tests {
     .expect("invalid randomInt operation");
     assert_eq!(
       property(&invalid, "code"),
-      Value::String("ERR_OUT_OF_RANGE".to_string())
+      Value::String("ERR_OUT_OF_RANGE".to_string().into())
     );
 
     let denied = install(&vm, false);
     let method = vm
-      .get_property_host(&denied, &PropertyKey::String("randomBytes".to_string()))
+      .get_property_host(
+        &denied,
+        &PropertyKey::String("randomBytes".to_string().into()),
+      )
       .expect("randomBytes method");
     let denied = vm
       .call_value_with_this(&method, &denied, &[Value::Number(8.0)])
       .expect("permission result");
     assert_eq!(
       property(&denied, "code"),
-      Value::String("ERR_ACCESS_DENIED".to_string())
+      Value::String("ERR_ACCESS_DENIED".to_string().into())
     );
   }
 

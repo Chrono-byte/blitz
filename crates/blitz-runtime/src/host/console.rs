@@ -82,8 +82,8 @@ fn set_method(
     return;
   };
   properties.borrow_mut().properties.insert(
-    PropertyKey::String(name.to_string()),
-    PropertyDescriptor::data(Value::Builtin(function)),
+    PropertyKey::String(name.to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Builtin(function)),
   );
 }
 
@@ -243,7 +243,7 @@ fn format_arguments(
   };
 
   let mut output = String::new();
-  let mut chars = template.chars().peekable();
+  let mut chars = template.as_str_lossy().chars().peekable();
   let mut next_argument = 1;
   while let Some(character) = chars.next() {
     if character != '%' {
@@ -291,7 +291,8 @@ fn stringify(
   value: &Value,
 ) -> String {
   vm.to_string(value)
-    .unwrap_or_else(|_| format!("{value}"))
+    .unwrap_or_else(|_| format!("{value}").into())
+    .to_string_lossy()
 }
 
 fn format_console_argument(
@@ -379,7 +380,7 @@ mod tests {
       "clear",
     ] {
       let method = vm
-        .get_property_host(&console, &PropertyKey::String(name.to_string()))
+        .get_property_host(&console, &PropertyKey::String(name.to_string().into()))
         .unwrap_or_else(|_| panic!("read console.{name}"));
       assert!(method.is_callable(), "console.{name} should be callable");
     }
@@ -391,8 +392,8 @@ mod tests {
     let mut vm = Vm::new(globals);
     let mut data = ObjectData::new();
     data.properties.insert(
-      PropertyKey::String("answer".to_string()),
-      PropertyDescriptor::data(Value::Number(42.0)),
+      PropertyKey::String("answer".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Number(42.0)),
     );
     let object = Value::Object(Rc::new(RefCell::new(data)));
 
@@ -401,11 +402,14 @@ mod tests {
       "{ answer: 42 }"
     );
     assert_eq!(
-      format_arguments(&mut vm, &[Value::String("%o".to_string()), object.clone()]),
+      format_arguments(
+        &mut vm,
+        &[Value::String("%o".to_string().into()), object.clone()]
+      ),
       "{ answer: 42 }"
     );
     assert_eq!(
-      format_arguments(&mut vm, &[Value::String("%s".to_string()), object]),
+      format_arguments(&mut vm, &[Value::String("%s".to_string().into()), object]),
       "[object Object]"
     );
   }

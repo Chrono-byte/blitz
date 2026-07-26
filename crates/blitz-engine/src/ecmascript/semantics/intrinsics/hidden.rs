@@ -31,7 +31,7 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
     "directEval".to_string(),
     Value::Builtin(Rc::new(|vm, args| {
       let src = match args.first() {
-        Some(Value::String(s)) => s.as_str(),
+        Some(Value::String(s)) => s.as_str_lossy(),
         Some(other) => return Ok(other.clone()),
         None => return Ok(Value::Undefined),
       };
@@ -92,13 +92,15 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
       let iterator = args.first().cloned().unwrap_or(Value::Undefined);
       let mut out = Vec::new();
       loop {
-        let next = vm.get_property_host(&iterator, &PropertyKey::String("next".to_string()))?;
+        let next =
+          vm.get_property_host(&iterator, &PropertyKey::String("next".to_string().into()))?;
         let step = vm.call_value_with_this(&next, &iterator, &[])?;
-        let done = vm.get_property_host(&step, &PropertyKey::String("done".to_string()))?;
+        let done = vm.get_property_host(&step, &PropertyKey::String("done".to_string().into()))?;
         if vm.to_boolean(&done) {
           break;
         }
-        let value = vm.get_property_host(&step, &PropertyKey::String("value".to_string()))?;
+        let value =
+          vm.get_property_host(&step, &PropertyKey::String("value".to_string().into()))?;
         out.push(value);
       }
       Ok(array_from_values(out))
@@ -119,7 +121,7 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
         Value::Closure { props, .. } => {
           let (has_name, current) = {
             let props_ref = props.borrow();
-            let key = PropertyKey::String("name".to_string());
+            let key = PropertyKey::String("name".to_string().into());
             let current = props_ref
               .properties
               .get(&key)
@@ -134,11 +136,11 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
           };
           if !has_name
             || current
-              .as_deref()
+              .as_ref()
               .is_some_and(|s| s == "<anonymous>" || s == "<arrow>")
           {
             props.borrow_mut().properties.insert(
-              PropertyKey::String("name".to_string()),
+              PropertyKey::String("name".to_string().into()),
               PropertyDescriptor::Data {
                 value: Value::String(name),
                 writable: false,
@@ -151,7 +153,7 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
         Value::BuiltinObject(_, props) => {
           let (has_name, current) = {
             let props_ref = props.borrow();
-            let key = PropertyKey::String("name".to_string());
+            let key = PropertyKey::String("name".to_string().into());
             let current = props_ref
               .properties
               .get(&key)
@@ -166,11 +168,11 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
           };
           if !has_name
             || current
-              .as_deref()
+              .as_ref()
               .is_some_and(|s| s == "<anonymous>" || s == "<arrow>")
           {
             props.borrow_mut().properties.insert(
-              PropertyKey::String("name".to_string()),
+              PropertyKey::String("name".to_string().into()),
               PropertyDescriptor::Data {
                 value: Value::String(name),
                 writable: false,
@@ -225,8 +227,10 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
         if !superclass.is_constructable() {
           return Err(vm.throw_type_error("Class extends value is not a constructor or null"));
         }
-        let proto =
-          vm.get_property_host(&superclass, &PropertyKey::String("prototype".to_string()))?;
+        let proto = vm.get_property_host(
+          &superclass,
+          &PropertyKey::String("prototype".to_string().into()),
+        )?;
         if !matches!(proto, Value::Null | Value::Object(_) | Value::Array(..)) {
           return Err(vm.throw_type_error("Superclass prototype must be an object or null"));
         }
@@ -236,14 +240,14 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
       match &ctor {
         Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
           props.borrow_mut().properties.insert(
-            PropertyKey::String("[[SuperConstructor]]".to_string()),
-            PropertyDescriptor::data(superclass.clone()),
+            PropertyKey::String("[[SuperConstructor]]".to_string().into()),
+            PropertyDescriptor::ordinary_data(superclass.clone()),
           );
           if !matches!(superclass, Value::Null) {
             props.borrow_mut().set_prototype_value(superclass);
           }
           let ctor_proto =
-            vm.get_property_host(&ctor, &PropertyKey::String("prototype".to_string()))?;
+            vm.get_property_host(&ctor, &PropertyKey::String("prototype".to_string().into()))?;
           match ctor_proto {
             Value::Object(obj) => {
               obj.borrow_mut().set_prototype_value(super_proto);

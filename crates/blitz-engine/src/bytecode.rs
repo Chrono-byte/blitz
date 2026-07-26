@@ -41,6 +41,7 @@
 
 use crate::typecheck::Type;
 use crate::value::{SymbolId, Value};
+use js_string::JsString;
 use num_bigint::BigInt;
 use oxc_span::Span;
 use std::convert::TryFrom;
@@ -170,7 +171,7 @@ pub enum Constant {
   /// Number literal.
   Number(f64),
   /// String literal.
-  String(String),
+  String(JsString),
   /// Boolean literal.
   Bool(bool),
   /// Undefined literal.
@@ -178,7 +179,7 @@ pub enum Constant {
   /// BigInt literal.
   BigInt(BigInt),
   /// Symbol literal.
-  Symbol(SymbolId, Option<String>),
+  Symbol(SymbolId, Option<JsString>),
   /// Null literal.
   Null,
 }

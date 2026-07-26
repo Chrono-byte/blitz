@@ -331,7 +331,7 @@ pub(crate) fn host_error_object(
     .realm()
     .get_intrinsic_constructor(name)
     .and_then(|ctor| {
-      vm.get_property_host(&ctor, &PropertyKey::String("prototype".to_string()))
+      vm.get_property_host(&ctor, &PropertyKey::String("prototype".to_string().into()))
         .ok()
     })
     .or_else(|| vm.realm().intrinsics.error_prototype.clone());
@@ -339,51 +339,29 @@ pub(crate) fn host_error_object(
     obj.set_prototype_value(proto);
   }
   obj.properties.insert(
-    PropertyKey::String("name".to_string()),
-    PropertyDescriptor::data(Value::String(name.to_string())),
+    PropertyKey::String("name".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::String(name.to_string().into())),
   );
   obj.properties.insert(
-    PropertyKey::String("message".to_string()),
-    PropertyDescriptor::data(Value::String(message.to_string())),
+    PropertyKey::String("message".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::String(message.to_string().into())),
   );
   Value::Object(gc::track_object(Rc::new(RefCell::new(obj))))
 }
 
 /// Parses a string as a canonical array index, returning the numeric index if valid.
-pub(crate) fn canonical_index_key(s: &str) -> Option<u64> {
+pub(crate) fn canonical_index_key(s: &js_string::JsString) -> Option<u64> {
   if s.is_empty() {
     return None;
   }
-  if s != "0" && s.starts_with('0') {
+  if s != "0" && s.code_unit_at(0) == Some(u16::from(b'0')) {
     return None;
   }
   let idx = s.parse::<u64>().ok()?;
-  if !decimal_u64_eq_str(idx, s) {
+  if !decimal_u64_eq_str(idx, s.as_str_lossy()) {
     return None;
   }
   Some(idx)
-}
-
-/// Returns the UTF-16 code unit at the given index, if one exists.
-pub(crate) fn char_code_at(
-  string: &str,
-  index: usize,
-) -> Option<u32> {
-  string.encode_utf16().nth(index).map(u32::from)
-}
-
-/// Returns the byte index corresponding to the given character index in the string.
-pub(crate) fn char_index_to_byte_index(
-  string: &str,
-  index: usize,
-) -> usize {
-  if index == 0 {
-    return 0;
-  }
-  string
-    .char_indices()
-    .nth(index)
-    .map_or(string.len(), |(byte_idx, _)| byte_idx)
 }
 
 /// Structured-clone helper for cross-realm value transfers used by ShadowRealm
@@ -443,7 +421,7 @@ fn clone_value_across_realms(
         }
         // insert length property placeholder
         new_props.borrow_mut().properties.insert(
-          PropertyKey::String("length".to_string()),
+          PropertyKey::String("length".to_string().into()),
           array_length_descriptor(len),
         );
         let new_val = Value::Array(Rc::clone(&new_arr), Rc::clone(&new_props));
@@ -459,7 +437,7 @@ fn clone_value_across_realms(
           }
         } else {
           props_rc.borrow_mut().properties.insert(
-            PropertyKey::String("length".to_string()),
+            PropertyKey::String("length".to_string().into()),
             array_length_descriptor(0),
           );
         }
@@ -472,7 +450,7 @@ fn clone_value_across_realms(
               new_props
                 .borrow_mut()
                 .properties
-                .insert(k.clone(), PropertyDescriptor::data(cloned));
+                .insert(k.clone(), PropertyDescriptor::ordinary_data(cloned));
             }
             _ => {
               return Err("Cannot clone accessor properties across realms".to_string());
@@ -504,7 +482,7 @@ fn clone_value_across_realms(
         };
         let array_buffer_byte_length = borrow
           .properties
-          .get(&PropertyKey::String("byteLength".to_string()))
+          .get(&PropertyKey::String("byteLength".to_string().into()))
           .and_then(|descriptor| match descriptor {
             PropertyDescriptor::Data { value, .. } => Some(value.clone()),
             PropertyDescriptor::Accessor { .. } => None,
@@ -537,8 +515,8 @@ fn clone_value_across_realms(
           if let Some(value) = array_buffer_byte_length {
             let bl = helper(vm, &value, visited, transfer_set)?;
             target_obj.borrow_mut().properties.insert(
-              PropertyKey::String("byteLength".to_string()),
-              PropertyDescriptor::data(bl),
+              PropertyKey::String("byteLength".to_string().into()),
+              PropertyDescriptor::ordinary_data(bl),
             );
           }
           if transferring {
@@ -548,7 +526,7 @@ fn clone_value_across_realms(
             if let Some(PropertyDescriptor::Data { value, .. }) = obj_rc
               .borrow_mut()
               .properties
-              .get_mut(&PropertyKey::String("byteLength".to_string()))
+              .get_mut(&PropertyKey::String("byteLength".to_string().into()))
             {
               *value = Value::Number(0.0);
             }
@@ -579,7 +557,10 @@ fn clone_value_across_realms(
           let cloned_buffer = helper(vm, &details.buffer, visited, transfer_set)?;
           let mut target = target_obj.borrow_mut();
           target.set_internal_slot(TYPED_ARRAY_DATA_SLOT, cloned_data);
-          target.set_internal_slot(TYPED_ARRAY_KIND_SLOT, Value::String(details.kind.clone()));
+          target.set_internal_slot(
+            TYPED_ARRAY_KIND_SLOT,
+            Value::String(details.kind.clone().into()),
+          );
           target.set_internal_slot(
             TYPED_ARRAY_LENGTH_SLOT,
             Value::Number(details.length as f64),
@@ -594,42 +575,40 @@ fn clone_value_across_realms(
           );
           target.set_internal_slot(TYPED_ARRAY_BUFFER_SLOT, cloned_buffer.clone());
           target.properties.insert(
-            PropertyKey::String("length".to_string()),
-            PropertyDescriptor::data(Value::Number(details.length as f64)),
+            PropertyKey::String("length".to_string().into()),
+            PropertyDescriptor::ordinary_data(Value::Number(details.length as f64)),
           );
           target.properties.insert(
-            PropertyKey::String("byteLength".to_string()),
-            PropertyDescriptor::data(Value::Number(details.length as f64)),
+            PropertyKey::String("byteLength".to_string().into()),
+            PropertyDescriptor::ordinary_data(Value::Number(details.length as f64)),
           );
           target.properties.insert(
-            PropertyKey::String("byteOffset".to_string()),
-            PropertyDescriptor::data(Value::Number(details.byte_offset as f64)),
+            PropertyKey::String("byteOffset".to_string().into()),
+            PropertyDescriptor::ordinary_data(Value::Number(details.byte_offset as f64)),
           );
           target.properties.insert(
-            PropertyKey::String("buffer".to_string()),
-            PropertyDescriptor::data(cloned_buffer),
+            PropertyKey::String("buffer".to_string().into()),
+            PropertyDescriptor::ordinary_data(cloned_buffer),
           );
           drop(target);
           return Ok(Value::Object(target_obj));
         }
 
         // Wider TypedArrays retain their existing representation for now.
-        if let Some(PropertyDescriptor::Data { value: ta_data, .. }) = borrow
-          .properties
-          .get(&PropertyKey::String("[[TypedArrayData]]".to_string()))
-          && !matches!(
-            borrow
-              .properties
-              .get(&PropertyKey::String("[[TypedArrayKind]]".to_string())),
-            Some(PropertyDescriptor::Data {
-              value: Value::String(kind),
-              ..
-            }) if matches!(
-              kind.as_str(),
-              "Uint8Array" | "Int8Array" | "Uint8ClampedArray"
-            )
+        if let Some(PropertyDescriptor::Data { value: ta_data, .. }) = borrow.properties.get(
+          &PropertyKey::String("[[TypedArrayData]]".to_string().into()),
+        ) && !matches!(
+          borrow
+            .properties
+            .get(&PropertyKey::String("[[TypedArrayKind]]".to_string().into())),
+          Some(PropertyDescriptor::Data {
+            value: Value::String(kind),
+            ..
+          }) if matches!(
+            kind.as_str_lossy(),
+            "Uint8Array" | "Int8Array" | "Uint8ClampedArray"
           )
-        {
+        ) {
           let mut out = ObjectData::new();
           if let Some(proto) = vm.realm().get_intrinsic_prototype("Array") {
             // This clone path uses Array.prototype rather than restoring the
@@ -642,18 +621,18 @@ fn clone_value_across_realms(
 
           let cloned_ta = helper(vm, ta_data, visited, transfer_set)?;
           target_obj.borrow_mut().properties.insert(
-            PropertyKey::String("[[TypedArrayData]]".to_string()),
-            PropertyDescriptor::data(cloned_ta),
+            PropertyKey::String("[[TypedArrayData]]".to_string().into()),
+            PropertyDescriptor::ordinary_data(cloned_ta),
           );
           // copy common numeric properties (length, byteLength)
           for key_name in &["length", "byteLength"] {
             if let Some(PropertyDescriptor::Data { value, .. }) = borrow
               .properties
-              .get(&PropertyKey::String(key_name.to_string()))
+              .get(&PropertyKey::String(key_name.to_string().into()))
             {
               let cloned = helper(vm, value, visited, transfer_set)?;
               target_obj.borrow_mut().properties.insert(
-                PropertyKey::String(key_name.to_string()),
+                PropertyKey::String(key_name.to_string().into()),
                 if key_name == &"length" {
                   PropertyDescriptor::Data {
                     value: cloned,
@@ -662,7 +641,7 @@ fn clone_value_across_realms(
                     configurable: false,
                   }
                 } else {
-                  PropertyDescriptor::data(cloned)
+                  PropertyDescriptor::ordinary_data(cloned)
                 },
               );
             }
@@ -676,7 +655,7 @@ fn clone_value_across_realms(
                 let cloned = helper(vm, value, visited, transfer_set)?;
                 target_obj.borrow_mut().properties.insert(
                   PropertyKey::String(s.clone()),
-                  PropertyDescriptor::data(cloned),
+                  PropertyDescriptor::ordinary_data(cloned),
                 );
               } else {
                 return Err("Cannot clone accessor properties across realms".to_string());
@@ -729,10 +708,9 @@ fn clone_value_across_realms(
         }
 
         // Date: look for [[PrimitiveValue]] internal slot
-        if let Some(PropertyDescriptor::Data { value: prim, .. }) = borrow
-          .properties
-          .get(&PropertyKey::String("[[PrimitiveValue]]".to_string()))
-        {
+        if let Some(PropertyDescriptor::Data { value: prim, .. }) = borrow.properties.get(
+          &PropertyKey::String("[[PrimitiveValue]]".to_string().into()),
+        ) {
           let mut out = ObjectData::new();
           if let Some(proto) = vm.realm().get_intrinsic_prototype("Date") {
             out.set_prototype_value(proto);
@@ -743,8 +721,8 @@ fn clone_value_across_realms(
 
           let cloned_prim = helper(vm, prim, visited, transfer_set)?;
           target_obj.borrow_mut().properties.insert(
-            PropertyKey::String("[[PrimitiveValue]]".to_string()),
-            PropertyDescriptor::data(cloned_prim),
+            PropertyKey::String("[[PrimitiveValue]]".to_string().into()),
+            PropertyDescriptor::ordinary_data(cloned_prim),
           );
           return Ok(Value::Object(target_obj));
         }
@@ -752,10 +730,10 @@ fn clone_value_across_realms(
         // RegExp: look for 'source' and 'flags' properties
         if borrow
           .properties
-          .contains_key(&PropertyKey::String("source".to_string()))
+          .contains_key(&PropertyKey::String("source".to_string().into()))
           && borrow
             .properties
-            .contains_key(&PropertyKey::String("flags".to_string()))
+            .contains_key(&PropertyKey::String("flags".to_string().into()))
         {
           let mut out = ObjectData::new();
           if let Some(proto) = vm.realm().get_intrinsic_prototype("Object") {
@@ -769,12 +747,12 @@ fn clone_value_across_realms(
           for key in ["source", "flags", "lastIndex"] {
             if let Some(PropertyDescriptor::Data { value, .. }) = borrow
               .properties
-              .get(&PropertyKey::String(key.to_string()))
+              .get(&PropertyKey::String(key.to_string().into()))
             {
               let cloned = helper(vm, value, visited, transfer_set)?;
               target_obj.borrow_mut().properties.insert(
-                PropertyKey::String(key.to_string()),
-                PropertyDescriptor::data(cloned),
+                PropertyKey::String(key.to_string().into()),
+                PropertyDescriptor::ordinary_data(cloned),
               );
             }
           }
@@ -797,7 +775,7 @@ fn clone_value_across_realms(
               target_obj
                 .borrow_mut()
                 .properties
-                .insert(k.clone(), PropertyDescriptor::data(cloned));
+                .insert(k.clone(), PropertyDescriptor::ordinary_data(cloned));
             }
             _ => {
               return Err("Cannot clone accessor properties across realms".to_string());
@@ -845,7 +823,7 @@ mod structured_clone_tests {
     ]))));
     let backing_props = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     backing_props.borrow_mut().properties.insert(
-      PropertyKey::String("length".to_string()),
+      PropertyKey::String("length".to_string().into()),
       array_length_descriptor(2),
     );
     let backing_value = Value::Array(Rc::clone(&backing), backing_props);
@@ -858,8 +836,8 @@ mod structured_clone_tests {
       .borrow_mut()
       .set_internal_slot(ARRAY_BUFFER_SHARED_SLOT, Value::Bool(false));
     source.borrow_mut().properties.insert(
-      PropertyKey::String("byteLength".to_string()),
-      PropertyDescriptor::data(Value::Number(2.0)),
+      PropertyKey::String("byteLength".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Number(2.0)),
     );
 
     let transfer_set = HashSet::from([Rc::as_ptr(&backing) as usize]);
@@ -875,7 +853,7 @@ mod structured_clone_tests {
       source
         .borrow()
         .properties
-        .get(&PropertyKey::String("byteLength".to_string())),
+        .get(&PropertyKey::String("byteLength".to_string().into())),
       Some(PropertyDescriptor::Data {
         value: Value::Number(0.0),
         ..

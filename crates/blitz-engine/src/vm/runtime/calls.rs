@@ -83,14 +83,15 @@ impl Vm {
 
         loop {
           let next_fn =
-            self.get_property_host(&iter_obj, &PropertyKey::String("next".to_string()))?;
+            self.get_property_host(&iter_obj, &PropertyKey::String("next".to_string().into()))?;
           let result = self.call_value_with_this(&next_fn, &iter_obj, &[])?;
           let done_val =
-            self.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+            self.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
           if self.to_boolean(&done_val) {
             break;
           }
-          let val = self.get_property_host(&result, &PropertyKey::String("value".to_string()))?;
+          let val =
+            self.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
           flat.push(val);
         }
       }
@@ -135,8 +136,8 @@ impl Vm {
       .borrow_mut()
       .set_prototype_value(self.realm.generator_prototype());
     gen_obj.borrow_mut().properties.insert(
-      PropertyKey::String("next".to_string()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
+      PropertyKey::String("next".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = next_runner
           .try_borrow_mut()
           .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
@@ -182,8 +183,8 @@ impl Vm {
       }))),
     );
     gen_obj.borrow_mut().properties.insert(
-      PropertyKey::String("throw".to_string()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
+      PropertyKey::String("throw".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = throw_runner
           .try_borrow_mut()
           .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
@@ -236,8 +237,8 @@ impl Vm {
       }))),
     );
     gen_obj.borrow_mut().properties.insert(
-      PropertyKey::String("return".to_string()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new(move |vm, args| {
+      PropertyKey::String("return".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |vm, args| {
         let mut runner = return_runner
           .try_borrow_mut()
           .map_err(|_| RuntimeError::from("TypeError: generator is already executing"))?;
@@ -278,7 +279,7 @@ impl Vm {
     );
     gen_obj.borrow_mut().properties.insert(
       PropertyKey::Symbol(SymbolId::well_known_iterator()),
-      PropertyDescriptor::data(Value::Builtin(Rc::new(|_vm, args| {
+      PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(|_vm, args| {
         Ok(args.first().cloned().unwrap_or(Value::Undefined))
       }))),
     );
@@ -331,26 +332,26 @@ impl Vm {
       match value {
         Value::Object(obj) => {
           obj.borrow_mut().properties.insert(
-            PropertyKey::String("constructor".to_string()),
-            crate::runtime_utils::non_enum_data(ctor.clone()),
+            PropertyKey::String("constructor".to_string().into()),
+            PropertyDescriptor::builtin_data(ctor.clone()),
           );
         }
         Value::Array(_, props) => {
           props.borrow_mut().properties.insert(
-            PropertyKey::String("constructor".to_string()),
-            crate::runtime_utils::non_enum_data(ctor.clone()),
+            PropertyKey::String("constructor".to_string().into()),
+            PropertyDescriptor::builtin_data(ctor.clone()),
           );
         }
         Value::Closure { props, .. } => {
           props.borrow_mut().properties.insert(
-            PropertyKey::String("constructor".to_string()),
-            crate::runtime_utils::non_enum_data(ctor.clone()),
+            PropertyKey::String("constructor".to_string().into()),
+            PropertyDescriptor::builtin_data(ctor.clone()),
           );
         }
         Value::BuiltinObject(_, props) => {
           props.borrow_mut().properties.insert(
-            PropertyKey::String("constructor".to_string()),
-            crate::runtime_utils::non_enum_data(ctor.clone()),
+            PropertyKey::String("constructor".to_string().into()),
+            PropertyDescriptor::builtin_data(ctor.clone()),
           );
         }
         Value::Proxy(_) => {}
@@ -404,8 +405,10 @@ impl Vm {
             };
             (proxy.target.clone(), handler)
           };
-          let trap =
-            self.get_property_value(&handler, &PropertyKey::String("construct".to_string()))?;
+          let trap = self.get_property_value(
+            &handler,
+            &PropertyKey::String("construct".to_string().into()),
+          )?;
           let new_target = self
             .construct_new_target
             .clone()
@@ -445,7 +448,10 @@ impl Vm {
             .clone()
             .unwrap_or_else(|| callee.clone());
           let proto = self
-            .get_property_value(&proto_source, &PropertyKey::String("prototype".to_string()))
+            .get_property_value(
+              &proto_source,
+              &PropertyKey::String("prototype".to_string().into()),
+            )
             .unwrap_or(Value::Null);
           let instance_proto = match proto {
             Value::Object(_)
@@ -458,8 +464,8 @@ impl Vm {
             instance_proto,
           ))));
           instance_obj.borrow_mut().properties.insert(
-            PropertyKey::String("constructor".to_string()),
-            PropertyDescriptor::data(callee.clone()),
+            PropertyKey::String("constructor".to_string().into()),
+            PropertyDescriptor::ordinary_data(callee.clone()),
           );
           Value::Object(instance_obj)
         };
@@ -526,7 +532,9 @@ impl Vm {
         let bound_target = props
           .borrow()
           .properties
-          .get(&PropertyKey::String("[[BoundTargetFunction]]".to_string()))
+          .get(&PropertyKey::String(
+            "[[BoundTargetFunction]]".to_string().into(),
+          ))
           .and_then(|desc| match desc {
             PropertyDescriptor::Data { value, .. } => Some(value.clone()),
             _ => None,
@@ -535,7 +543,9 @@ impl Vm {
           let bound_args = props
             .borrow()
             .properties
-            .get(&PropertyKey::String("[[BoundArguments]]".to_string()))
+            .get(&PropertyKey::String(
+              "[[BoundArguments]]".to_string().into(),
+            ))
             .and_then(|desc| match desc {
               PropertyDescriptor::Data {
                 value: Value::Array(arr, _),
@@ -568,7 +578,10 @@ impl Vm {
           .clone()
           .unwrap_or_else(|| callee.clone());
         let proto = self
-          .get_property_value(&proto_source, &PropertyKey::String("prototype".to_string()))
+          .get_property_value(
+            &proto_source,
+            &PropertyKey::String("prototype".to_string().into()),
+          )
           .unwrap_or(Value::Null);
         let instance_proto = match proto {
           Value::Object(_)
@@ -581,8 +594,8 @@ impl Vm {
           instance_proto,
         ))));
         instance_obj.borrow_mut().properties.insert(
-          PropertyKey::String("constructor".to_string()),
-          PropertyDescriptor::data(callee.clone()),
+          PropertyKey::String("constructor".to_string().into()),
+          PropertyDescriptor::ordinary_data(callee.clone()),
         );
         let instance = Value::Object(instance_obj);
         // Builtin constructors receive:
@@ -665,16 +678,17 @@ impl Vm {
     if args.len() == 1
       && let Some(arguments) = args.first()
       && matches!(
-        own_property_descriptor(arguments, &PropertyKey::String("callee".to_string())),
+        own_property_descriptor(arguments, &PropertyKey::String("callee".to_string().into())),
         Some(PropertyDescriptor::Accessor { .. })
       )
       && let Ok(length) =
-        self.get_property_host(arguments, &PropertyKey::String("length".to_string()))
+        self.get_property_host(arguments, &PropertyKey::String("length".to_string().into()))
       && let Ok(length) = to_length(self, &length)
     {
       let mut flattened = Vec::with_capacity(length);
       for index in 0..length {
-        flattened.push(self.get_property_host(arguments, &PropertyKey::String(index.to_string()))?);
+        flattened
+          .push(self.get_property_host(arguments, &PropertyKey::String(index.to_string().into()))?);
       }
       args = flattened;
     }
@@ -694,7 +708,7 @@ impl Vm {
     let super_constructor = self
       .get_property_value(
         &callee,
-        &PropertyKey::String("[[SuperConstructor]]".to_string()),
+        &PropertyKey::String("[[SuperConstructor]]".to_string().into()),
       )
       .unwrap_or_else(|_| self.get_prototype(&callee));
     if matches!(super_constructor, Value::Null | Value::Undefined) {
@@ -795,7 +809,7 @@ impl Vm {
             return Err(self.throw_type_error("Proxy target is not callable"));
           }
           let trap =
-            self.get_property_value(&handler, &PropertyKey::String("apply".to_string()))?;
+            self.get_property_value(&handler, &PropertyKey::String("apply".to_string().into()))?;
           if matches!(trap, Value::Undefined | Value::Null) {
             return self.call_with_this(&target, &this_arg_owned, args);
           }
@@ -986,34 +1000,37 @@ impl Vm {
     let arr_rc = Rc::new(RefCell::new(ArrayData::from(rest_slice)));
     let props: Rc<RefCell<ObjectData>> = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     props.borrow_mut().properties.insert(
-      PropertyKey::String("length".to_string()),
-      PropertyDescriptor::data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
+      PropertyKey::String("length".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
     );
 
     if let Some(array_val) = self
       .globals
       .borrow()
       .properties
-      .get(&PropertyKey::String("Array".to_string()))
+      .get(&PropertyKey::String("Array".to_string().into()))
       .and_then(|d| match d {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         _ => None,
       })
-      && let Ok(proto_val) =
-        get_property(&array_val, &PropertyKey::String("prototype".to_string()), 0)
+      && let Ok(proto_val) = get_property(
+        &array_val,
+        &PropertyKey::String("prototype".to_string().into()),
+        0,
+      )
       && !matches!(proto_val, Value::Null)
     {
       props.borrow_mut().set_prototype_value(proto_val);
       let proto_for_lookup = props.borrow().get_prototype();
       if let Ok(for_each_val) = get_property(
         &proto_for_lookup,
-        &PropertyKey::String("forEach".to_string()),
+        &PropertyKey::String("forEach".to_string().into()),
         0,
       ) && !matches!(for_each_val, Value::Undefined)
       {
         props.borrow_mut().properties.insert(
-          PropertyKey::String("forEach".to_string()),
-          PropertyDescriptor::data(for_each_val),
+          PropertyKey::String("forEach".to_string().into()),
+          PropertyDescriptor::ordinary_data(for_each_val),
         );
       }
     }
@@ -1157,7 +1174,7 @@ impl Vm {
           gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
         for (idx, maybe_value) in args_for_arguments.iter().enumerate() {
           props.borrow_mut().properties.insert(
-            PropertyKey::String(usize_to_decimal_string(idx)),
+            PropertyKey::String(usize_to_decimal_string(idx).into()),
             PropertyDescriptor::Data {
               value: maybe_value.clone().unwrap_or(Value::Undefined),
               writable: true,
@@ -1171,7 +1188,7 @@ impl Vm {
             Err(vm.throw_type_error("Access to strict arguments callee/caller is forbidden"))
           }));
           props.borrow_mut().properties.insert(
-            PropertyKey::String("callee".to_string()),
+            PropertyKey::String("callee".to_string().into()),
             PropertyDescriptor::Accessor {
               get: Some(poison.clone()),
               set: Some(poison.clone()),
@@ -1180,7 +1197,7 @@ impl Vm {
             },
           );
           props.borrow_mut().properties.insert(
-            PropertyKey::String("caller".to_string()),
+            PropertyKey::String("caller".to_string().into()),
             PropertyDescriptor::Accessor {
               get: Some(poison.clone()),
               set: Some(poison),
@@ -1190,7 +1207,7 @@ impl Vm {
           );
         }
         props.borrow_mut().properties.insert(
-          PropertyKey::String("length".to_string()),
+          PropertyKey::String("length".to_string().into()),
           PropertyDescriptor::Data {
             value: Value::Number(usize_to_f64(args_for_arguments.len())),
             writable: true,
@@ -1271,7 +1288,7 @@ impl Vm {
     let arg_count = args_for_arguments.len();
     let mapped_count = proto.arity.min(self.locals.len());
     for idx in 0..arg_count {
-      let key = PropertyKey::String(usize_to_decimal_string(idx));
+      let key = PropertyKey::String(usize_to_decimal_string(idx).into());
       if idx < mapped_count {
         obj_rc.borrow_mut().properties.insert(
           key,
@@ -1289,7 +1306,7 @@ impl Vm {
       } else {
         obj_rc.borrow_mut().properties.insert(
           key,
-          PropertyDescriptor::data(
+          PropertyDescriptor::ordinary_data(
             args_for_arguments
               .get(idx)
               .cloned()
@@ -1300,7 +1317,7 @@ impl Vm {
       }
     }
     obj_rc.borrow_mut().properties.insert(
-      PropertyKey::String("callee".to_string()),
+      PropertyKey::String("callee".to_string().into()),
       PropertyDescriptor::Data {
         value: callee,
         writable: true,
@@ -1309,7 +1326,7 @@ impl Vm {
       },
     );
     obj_rc.borrow_mut().properties.insert(
-      PropertyKey::String("length".to_string()),
+      PropertyKey::String("length".to_string().into()),
       PropertyDescriptor::Data {
         value: Value::Number(usize_to_f64(arg_count)),
         writable: true,

@@ -1,51 +1,46 @@
 // SPDX-License-Identifier: MPL-2.0
 //! Text and symbol builtin functions and prototype methods
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use js_string::{JsString, JsStringBuilder};
 use num_traits::ToPrimitive;
 
 use crate::runtime_utils::{
-  array_from_values, builtin_object, char_code_at, char_index_to_byte_index, non_enum_data,
-  require_object_coercible, set_builtin_length, set_builtin_name, static_builtin_arg_offset,
-  this_boolean_value, this_string_value, this_string_value_ref, to_length, usize_to_decimal_string,
-  usize_to_f64,
+  array_from_values, builtin_object, require_object_coercible, set_builtin_length,
+  set_builtin_name, static_builtin_arg_offset, this_boolean_value, this_string_value, to_length,
+  usize_to_decimal_string, usize_to_f64,
 };
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
 
 thread_local! {
   /// Agent-wide symbol registry used by `Symbol.for` and `Symbol.keyFor`.
-  static SYMBOL_REGISTRY: RefCell<HashMap<String, SymbolId>> = RefCell::new(HashMap::new());
+  static SYMBOL_REGISTRY: RefCell<HashMap<JsString, SymbolId>> = RefCell::new(HashMap::new());
 }
 
-fn utf16_encode_code_point(cp: u32) -> String {
+fn utf16_encode_code_point(cp: u32) -> JsString {
   if cp <= 0xFFFF {
-    char::from_u32(cp)
-      .unwrap_or('\u{FFFD}')
-      .to_string()
-  } else {
-    let cp = cp - 0x1_0000;
-    let high = 0xD800 + ((cp >> 10) as u16);
-    let low = 0xDC00 + ((cp & 0x3FF) as u16);
-    String::from_utf16_lossy(&[high, low])
+    return JsString::from_utf16(vec![cp as u16]);
   }
+  let mut builder = JsStringBuilder::new();
+  let _ = builder.push_code_point(cp);
+  builder.finish()
 }
 
 fn string_constructor_to_string(
   vm: &mut Vm,
   value: &Value,
-) -> Result<String, crate::errors::RuntimeError> {
+) -> Result<JsString, crate::errors::RuntimeError> {
   match value {
     Value::Symbol(_, desc) if vm.current_new_target().is_some() => {
       Err(vm.throw_type_error("Cannot convert a Symbol value to a string"))
     }
     Value::Symbol(_, desc) => Ok(match desc {
-      Some(d) => format!("Symbol({})", d),
-      None => "Symbol()".to_string(),
+      Some(d) => format!("Symbol({})", d).into(),
+      None => "Symbol()".into(),
     }),
     Value::String(_)
     | Value::Number(_)
@@ -86,22 +81,22 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     Value::Object(Rc::clone(function_proto_map)),
   )));
   string_ctor_map.borrow_mut().properties.insert(
-    PKey::String("prototype".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&string_proto_map))),
+    PKey::String("prototype".to_string().into()),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&string_proto_map))),
   );
 
   let boolean_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
     ObjectData::with_prototype(Value::Object(Rc::clone(object_proto_map))),
   ));
   boolean_proto_map.borrow_mut().properties.insert(
-    PKey::String("[[PrimitiveValue]]".to_string()),
-    PropertyDescriptor::data(Value::Bool(false)),
+    PKey::String("[[PrimitiveValue]]".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Bool(false)),
   );
   let boolean_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
     ObjectData::with_prototype(Value::Object(Rc::clone(function_proto_map))),
   ));
   boolean_ctor_map.borrow_mut().properties.insert(
-    PKey::String("prototype".to_string()),
+    PKey::String("prototype".to_string().into()),
     PropertyDescriptor::Data {
       value: Value::Object(Rc::clone(&boolean_proto_map)),
       writable: false,
@@ -130,12 +125,12 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     Value::Object(Rc::clone(function_proto_map)),
   )));
   symbol_ctor_map.borrow_mut().properties.insert(
-    PKey::String("prototype".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&symbol_proto_map))),
+    PKey::String("prototype".to_string().into()),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&symbol_proto_map))),
   );
   symbol_ctor_map.borrow_mut().properties.insert(
-    PKey::String("for".to_string()),
-    non_enum_data({
+    PKey::String("for".to_string().into()),
+    PropertyDescriptor::builtin_data({
       let symbol_for = builtin_object(
         Rc::new(|vm, args| {
           let offset = static_builtin_arg_offset(vm, args, "Symbol");
@@ -157,8 +152,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     }),
   );
   symbol_ctor_map.borrow_mut().properties.insert(
-    PKey::String("keyFor".to_string()),
-    non_enum_data({
+    PKey::String("keyFor".to_string().into()),
+    PropertyDescriptor::builtin_data({
       let key_for = builtin_object(
         Rc::new(|vm, args| {
           let offset = static_builtin_arg_offset(vm, args, "Symbol");
@@ -169,7 +164,9 @@ pub(crate) fn install_string_boolean_symbol_builtins(
             registry
               .borrow()
               .iter()
-              .find_map(|(key, registered)| (registered == id).then(|| Value::String(key.clone())))
+              .find_map(|(key, registered)| {
+                (registered == id).then(|| Value::String(key.clone().into()))
+              })
               .unwrap_or(Value::Undefined)
           }))
         }),
@@ -184,8 +181,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     Value::BuiltinObject(Rc::clone(&symbol_ctor_fn), Rc::clone(&symbol_ctor_map));
   set_builtin_length(&symbol_ctor_val, 0.0);
   symbol_proto_map.borrow_mut().properties.insert(
-    PKey::String("constructor".to_string()),
-    PropertyDescriptor::data(symbol_ctor_val.clone()),
+    PKey::String("constructor".to_string().into()),
+    PropertyDescriptor::builtin_data(symbol_ctor_val.clone()),
   );
   let symbol_to_string = builtin_object(
     Rc::new(|vm, args| {
@@ -193,8 +190,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       let this = args.first().unwrap_or(&undefined);
       match this {
         Value::Symbol(_, desc) => Ok(Value::String(match desc {
-          Some(d) => format!("Symbol({})", d),
-          None => "Symbol()".to_string(),
+          Some(d) => format!("Symbol({})", d).into(),
+          None => "Symbol()".to_string().into(),
         })),
         Value::Object(obj) => {
           let borrowed = obj.borrow();
@@ -203,11 +200,11 @@ pub(crate) fn install_string_boolean_symbol_builtins(
             ..
           }) = borrowed
             .properties
-            .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+            .get(&PKey::String("[[PrimitiveValue]]".to_string().into()))
           {
             Ok(Value::String(match desc {
-              Some(d) => format!("Symbol({})", d),
-              None => "Symbol()".to_string(),
+              Some(d) => format!("Symbol({})", d).into(),
+              None => "Symbol()".to_string().into(),
             }))
           } else {
             Err(vm.throw_type_error("Symbol.prototype.toString called on incompatible receiver"))
@@ -221,8 +218,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   set_builtin_name(&symbol_to_string, "toString");
   set_builtin_length(&symbol_to_string, 0.0);
   symbol_proto_map.borrow_mut().properties.insert(
-    PKey::String("toString".to_string()),
-    PropertyDescriptor::data(symbol_to_string),
+    PKey::String("toString".to_string().into()),
+    PropertyDescriptor::builtin_data(symbol_to_string),
   );
   let symbol_value_of = builtin_object(
     Rc::new(|vm, args| {
@@ -237,7 +234,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
             ..
           }) = borrowed
             .properties
-            .get(&PKey::String("[[PrimitiveValue]]".to_string()))
+            .get(&PKey::String("[[PrimitiveValue]]".to_string().into()))
           {
             return Ok(Value::Symbol(id.clone(), desc.clone()));
           }
@@ -251,105 +248,105 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   set_builtin_name(&symbol_value_of, "valueOf");
   set_builtin_length(&symbol_value_of, 0.0);
   symbol_proto_map.borrow_mut().properties.insert(
-    PKey::String("valueOf".to_string()),
-    PropertyDescriptor::data(symbol_value_of),
+    PKey::String("valueOf".to_string().into()),
+    PropertyDescriptor::builtin_data(symbol_value_of),
   );
   for (name, sym) in [
     (
       "iterator",
       Value::Symbol(
         SymbolId::well_known_iterator(),
-        Some("Symbol.iterator".to_string()),
+        Some("Symbol.iterator".to_string().into()),
       ),
     ),
     (
       "asyncIterator",
       Value::Symbol(
         SymbolId::well_known_async_iterator(),
-        Some("Symbol.asyncIterator".to_string()),
+        Some("Symbol.asyncIterator".to_string().into()),
       ),
     ),
     (
       "toPrimitive",
       Value::Symbol(
         SymbolId::well_known_to_primitive(),
-        Some("Symbol.toPrimitive".to_string()),
+        Some("Symbol.toPrimitive".to_string().into()),
       ),
     ),
     (
       "toStringTag",
       Value::Symbol(
         SymbolId::well_known_to_string_tag(),
-        Some("Symbol.toStringTag".to_string()),
+        Some("Symbol.toStringTag".to_string().into()),
       ),
     ),
     (
       "species",
       Value::Symbol(
         SymbolId::well_known_species(),
-        Some("Symbol.species".to_string()),
+        Some("Symbol.species".to_string().into()),
       ),
     ),
     (
       "hasInstance",
       Value::Symbol(
         SymbolId::well_known_has_instance(),
-        Some("Symbol.hasInstance".to_string()),
+        Some("Symbol.hasInstance".to_string().into()),
       ),
     ),
     (
       "isConcatSpreadable",
       Value::Symbol(
         SymbolId::well_known_is_concat_spreadable(),
-        Some("Symbol.isConcatSpreadable".to_string()),
+        Some("Symbol.isConcatSpreadable".to_string().into()),
       ),
     ),
     (
       "match",
       Value::Symbol(
         SymbolId::well_known_match(),
-        Some("Symbol.match".to_string()),
+        Some("Symbol.match".to_string().into()),
       ),
     ),
     (
       "matchAll",
       Value::Symbol(
         SymbolId::well_known_match_all(),
-        Some("Symbol.matchAll".to_string()),
+        Some("Symbol.matchAll".to_string().into()),
       ),
     ),
     (
       "replace",
       Value::Symbol(
         SymbolId::well_known_replace(),
-        Some("Symbol.replace".to_string()),
+        Some("Symbol.replace".to_string().into()),
       ),
     ),
     (
       "search",
       Value::Symbol(
         SymbolId::well_known_search(),
-        Some("Symbol.search".to_string()),
+        Some("Symbol.search".to_string().into()),
       ),
     ),
     (
       "split",
       Value::Symbol(
         SymbolId::well_known_split(),
-        Some("Symbol.split".to_string()),
+        Some("Symbol.split".to_string().into()),
       ),
     ),
     (
       "unscopables",
       Value::Symbol(
         SymbolId::well_known_unscopables(),
-        Some("Symbol.unscopables".to_string()),
+        Some("Symbol.unscopables".to_string().into()),
       ),
     ),
   ] {
     symbol_ctor_map.borrow_mut().properties.insert(
-      PKey::String(name.to_string()),
-      PropertyDescriptor::data(sym),
+      PKey::String(name.to_string().into()),
+      PropertyDescriptor::immutable_data(sym),
     );
   }
 
@@ -362,7 +359,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     };
     let receiver = args.first().cloned().unwrap_or(Value::Undefined);
     let s = match args.get(value_idx) {
-      None => String::new(),
+      None => JsString::empty(),
       Some(v) => string_constructor_to_string(vm, v)?,
     };
     if vm.current_new_target().is_some()
@@ -372,23 +369,26 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         let mut obj = obj_rc.borrow_mut();
         obj.set_prototype_value(Value::Object(Rc::clone(&string_proto_for_ctor)));
         obj.properties.insert(
-          PKey::String("[[PrimitiveValue]]".to_string()),
-          PropertyDescriptor::data(Value::String(s.clone())),
+          PKey::String("[[PrimitiveValue]]".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::String(s.clone())),
         );
         obj.properties.insert(
-          PKey::String("length".to_string()),
+          PKey::String("length".to_string().into()),
           PropertyDescriptor::Data {
-            value: Value::Number(usize_to_f64(s.encode_utf16().count())),
+            value: Value::Number(usize_to_f64(s.len())),
             writable: false,
             enumerable: false,
             configurable: false,
           },
         );
-        for (idx, ch) in s.chars().enumerate() {
+        for idx in 0..s.len() {
           obj.properties.insert(
-            PKey::String(usize_to_decimal_string(idx)),
+            PKey::String(usize_to_decimal_string(idx).into()),
             PropertyDescriptor::Data {
-              value: Value::String(ch.to_string()),
+              value: Value::String(
+                s.slice(idx..idx + 1)
+                  .expect("string index is within bounds"),
+              ),
               writable: false,
               enumerable: true,
               configurable: false,
@@ -405,12 +405,12 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   set_builtin_length(&string_ctor_val, 1.0);
   set_builtin_name(&string_ctor_val, "String");
   string_ctor_map.borrow_mut().properties.insert(
-    PKey::String("fromCharCode".to_string()),
-    non_enum_data({
+    PKey::String("fromCharCode".to_string().into()),
+    PropertyDescriptor::builtin_data({
       let from_char_code = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "String");
-          let mut out = String::new();
+          let mut out = JsStringBuilder::new();
           for arg in args.iter().skip(off) {
             let n = vm.to_number_value(arg)?;
             let int = if n.is_nan() || !n.is_finite() {
@@ -419,9 +419,9 @@ pub(crate) fn install_string_boolean_symbol_builtins(
               n.trunc() as i64 as u32
             };
             let unit = (int & 0xFFFF) as u16;
-            out.push(char::from_u32(unit as u32).unwrap_or('\u{FFFD}'));
+            out.push_code_unit(unit);
           }
-          Ok(Value::String(out))
+          Ok(Value::String(out.finish()))
         }),
         function_proto_map,
       );
@@ -431,20 +431,20 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     }),
   );
   string_ctor_map.borrow_mut().properties.insert(
-    PKey::String("fromCodePoint".to_string()),
-    non_enum_data({
+    PKey::String("fromCodePoint".to_string().into()),
+    PropertyDescriptor::builtin_data({
       let from_code_point = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "String");
-          let mut out = String::new();
+          let mut out = JsStringBuilder::new();
           for arg in args.iter().skip(off) {
             let n = vm.to_number_value(arg)?;
             if !n.is_finite() || n.fract() != 0.0 || !(0.0..=0x10FFFF as f64).contains(&n) {
               return Err(vm.throw_range_error("Invalid code point"));
             }
-            out.push_str(&utf16_encode_code_point(n as u32));
+            out.push_string(&utf16_encode_code_point(n as u32));
           }
-          Ok(Value::String(out))
+          Ok(Value::String(out.finish()))
         }),
         function_proto_map,
       );
@@ -454,38 +454,40 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     }),
   );
   string_ctor_map.borrow_mut().properties.insert(
-    PKey::String("raw".to_string()),
-    non_enum_data({
+    PKey::String("raw".to_string().into()),
+    PropertyDescriptor::builtin_data({
       let raw_fn = builtin_object(
         Rc::new(|vm, args| {
           let off = static_builtin_arg_offset(vm, args, "String");
           let template = args.get(off).cloned().unwrap_or(Value::Undefined);
           let template_obj = vm.to_object_value(template)?;
-          let raw = vm.get_property_host(&template_obj, &PKey::String("raw".to_string()))?;
+          let raw = vm.get_property_host(&template_obj, &PKey::String("raw".to_string().into()))?;
           let raw_obj =
             if matches!(raw, Value::Undefined) && matches!(template_obj, Value::Array(..)) {
               template_obj.clone()
             } else {
               vm.to_object_value(raw)?
             };
-          let len_value = vm.get_property_host(&raw_obj, &PKey::String("length".to_string()))?;
+          let len_value =
+            vm.get_property_host(&raw_obj, &PKey::String("length".to_string().into()))?;
           let literal_count = to_length(vm, &len_value)?;
           if literal_count == 0 {
-            return Ok(Value::String(String::new()));
+            return Ok(Value::String(String::new().into()));
           }
           let substitutions = args.get(off + 1..).unwrap_or(&[]);
-          let mut out = String::new();
+          let mut out = JsStringBuilder::new();
           for i in 0..literal_count {
-            let next = vm.get_property_host(&raw_obj, &PKey::String(usize_to_decimal_string(i)))?;
-            out.push_str(&vm.to_string(&next)?);
+            let next =
+              vm.get_property_host(&raw_obj, &PKey::String(usize_to_decimal_string(i).into()))?;
+            out.push_string(&vm.to_string(&next)?);
             if i + 1 == literal_count {
               break;
             }
             if let Some(subst) = substitutions.get(i) {
-              out.push_str(&vm.to_string(subst)?);
+              out.push_string(&vm.to_string(subst)?);
             }
           }
-          Ok(Value::String(out))
+          Ok(Value::String(out.finish()))
         }),
         function_proto_map,
       );
@@ -495,36 +497,36 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     }),
   );
   string_proto_map.borrow_mut().properties.insert(
-    PKey::String("constructor".to_string()),
-    PropertyDescriptor::data(string_ctor_val.clone()),
+    PKey::String("constructor".to_string().into()),
+    PropertyDescriptor::builtin_data(string_ctor_val.clone()),
   );
   let string_value_of = builtin_object(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;
       let this = args.first().unwrap_or(&undefined);
-      Ok(Value::String(this_string_value(vm, this)?))
+      Ok(Value::String(this_string_value(vm, this)?.into()))
     }),
     function_proto_map,
   );
   set_builtin_name(&string_value_of, "valueOf");
   set_builtin_length(&string_value_of, 0.0);
   string_proto_map.borrow_mut().properties.insert(
-    PKey::String("valueOf".to_string()),
-    PropertyDescriptor::data(string_value_of),
+    PKey::String("valueOf".to_string().into()),
+    PropertyDescriptor::builtin_data(string_value_of),
   );
   let string_to_string = builtin_object(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;
       let this = args.first().unwrap_or(&undefined);
-      Ok(Value::String(this_string_value(vm, this)?))
+      Ok(Value::String(this_string_value(vm, this)?.into()))
     }),
     function_proto_map,
   );
   set_builtin_name(&string_to_string, "toString");
   set_builtin_length(&string_to_string, 0.0);
   string_proto_map.borrow_mut().properties.insert(
-    PKey::String("toString".to_string()),
-    PropertyDescriptor::data(string_to_string),
+    PKey::String("toString".to_string().into()),
+    PropertyDescriptor::builtin_data(string_to_string),
   );
   let string_iterator_function_proto = Rc::clone(function_proto_map);
   let string_iterator_object_proto = Rc::clone(object_proto_map);
@@ -533,10 +535,17 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       let undefined = Value::Undefined;
       let receiver = args.first().unwrap_or(&undefined);
       require_object_coercible(vm, receiver)?;
-      let characters = this_string_value_ref(vm, receiver)?
-        .chars()
-        .map(|character| character.to_string())
-        .collect::<Vec<_>>();
+      let string = vm.to_string(receiver)?;
+      let mut characters = Vec::new();
+      let mut string_index = 0;
+      while let Some(point) = string.code_point_at(string_index, true) {
+        characters.push(
+          string
+            .slice(string_index..string_index + point.width())
+            .expect("code point width is within the string"),
+        );
+        string_index += point.width();
+      }
       let position = Rc::new(RefCell::new(0usize));
       let iterator = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
         Rc::clone(&string_iterator_object_proto),
@@ -557,24 +566,24 @@ pub(crate) fn install_string_boolean_symbol_builtins(
             *index += 1;
           }
           result.borrow_mut().properties.insert(
-            PKey::String("value".to_string()),
-            PropertyDescriptor::data(value),
+            PKey::String("value".to_string().into()),
+            PropertyDescriptor::ordinary_data(value),
           );
           result.borrow_mut().properties.insert(
-            PKey::String("done".to_string()),
-            PropertyDescriptor::data(Value::Bool(done)),
+            PKey::String("done".to_string().into()),
+            PropertyDescriptor::ordinary_data(Value::Bool(done)),
           );
           Ok(Value::Object(result))
         }),
         &string_iterator_function_proto,
       );
       iterator.borrow_mut().properties.insert(
-        PKey::String("next".to_string()),
-        PropertyDescriptor::data(next),
+        PKey::String("next".to_string().into()),
+        PropertyDescriptor::builtin_data(next),
       );
       iterator.borrow_mut().properties.insert(
         PKey::Symbol(SymbolId::well_known_iterator()),
-        PropertyDescriptor::data(builtin_object(
+        PropertyDescriptor::builtin_data(builtin_object(
           Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
           &string_iterator_function_proto,
         )),
@@ -587,31 +596,27 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   set_builtin_length(&string_iterator, 0.0);
   string_proto_map.borrow_mut().properties.insert(
     PKey::Symbol(SymbolId::well_known_iterator()),
-    PropertyDescriptor::data(string_iterator),
+    PropertyDescriptor::builtin_data(string_iterator),
   );
   let string_index_of = builtin_object(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;
       let receiver = args.first().unwrap_or(&undefined);
       require_object_coercible(vm, receiver)?;
-      let haystack = this_string_value_ref(vm, receiver)?;
-      let haystack = haystack.as_ref();
+      let haystack = vm.to_string(receiver)?;
       let needle_undefined = Value::Undefined;
       let needle_value = args.get(1).unwrap_or(&needle_undefined);
       let needle = match needle_value {
-        Value::String(s) => Cow::Borrowed(s.as_str()),
-        _ => Cow::Owned(vm.to_string(needle_value)?),
+        Value::String(s) => s.clone(),
+        _ => vm.to_string(needle_value)?,
       };
-      let len_chars = haystack.chars().count();
+      let length = haystack.len();
       let start = if let Some(pos) = args.get(2) {
         let n = vm.to_number_value(pos)?;
         if n.is_nan() || n <= 0.0 {
           0usize
         } else {
-          n.floor()
-            .to_usize()
-            .unwrap_or(len_chars)
-            .min(len_chars)
+          n.floor().to_usize().unwrap_or(length).min(length)
         }
       } else {
         0usize
@@ -619,11 +624,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       if needle.is_empty() {
         return Ok(Value::Number(usize_to_f64(start)));
       }
-      let start_byte = char_index_to_byte_index(haystack, start);
-      if let Some(rel_byte) = haystack[start_byte..].find(needle.as_ref()) {
-        let absolute_byte = start_byte + rel_byte;
-        let absolute_char = haystack[..absolute_byte].chars().count();
-        return Ok(Value::Number(usize_to_f64(absolute_char)));
+      if let Some(index) = haystack.find(&needle, start) {
+        return Ok(Value::Number(usize_to_f64(index)));
       }
       Ok(Value::Number(-1.0))
     }),
@@ -632,8 +634,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   set_builtin_name(&string_index_of, "indexOf");
   set_builtin_length(&string_index_of, 1.0);
   string_proto_map.borrow_mut().properties.insert(
-    PKey::String("indexOf".to_string()),
-    non_enum_data(string_index_of),
+    PKey::String("indexOf".to_string().into()),
+    PropertyDescriptor::builtin_data(string_index_of),
   );
 
   let string_starts_with = builtin_object(
@@ -652,13 +654,13 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         }
       }
       let search = vm.to_string(search)?;
-      let length = value.chars().count();
+      let length = value.len();
       let position = match args.get(2) {
         Some(position) => {
           let number = vm.to_number_value(position)?;
-          if number.is_nan() || number <= 0.0 {
+          if number.is_nan() || number == f64::NEG_INFINITY || number <= 0.0 {
             0
-          } else if !number.is_finite() {
+          } else if number == f64::INFINITY {
             length
           } else {
             number
@@ -670,16 +672,18 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         }
         None => 0,
       };
-      let start = char_index_to_byte_index(&value, position);
-      Ok(Value::Bool(value[start..].starts_with(&search)))
+      let suffix = value
+        .slice(position..value.len())
+        .expect("position was clamped to string length");
+      Ok(Value::Bool(suffix.starts_with(&search)))
     }),
     function_proto_map,
   );
   set_builtin_name(&string_starts_with, "startsWith");
   set_builtin_length(&string_starts_with, 1.0);
   string_proto_map.borrow_mut().properties.insert(
-    PKey::String("startsWith".to_string()),
-    non_enum_data(string_starts_with),
+    PKey::String("startsWith".to_string().into()),
+    PropertyDescriptor::builtin_data(string_starts_with),
   );
 
   let string_char_code_at = builtin_object(
@@ -687,20 +691,19 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       let undefined = Value::Undefined;
       let receiver = args.first().unwrap_or(&undefined);
       require_object_coercible(vm, receiver)?;
-      let s = this_string_value_ref(vm, receiver)?;
-      let s = s.as_ref();
+      let s = vm.to_string(receiver)?;
       let pos = match args.get(1) {
         Some(v) => vm.to_number_value(v)?,
         None => 0.0,
       };
-      let index = if pos.is_nan() || pos <= 0.0 {
+      let index = if pos.is_nan() || pos == 0.0 {
         0usize
-      } else if !pos.is_finite() {
+      } else if !pos.is_finite() || pos < 0.0 {
         return Ok(Value::Number(f64::NAN));
       } else {
         pos.trunc().to_usize().unwrap_or(0)
       };
-      match char_code_at(s, index) {
+      match s.code_unit_at(index) {
         Some(code) => Ok(Value::Number(f64::from(code))),
         None => Ok(Value::Number(f64::NAN)),
       }
@@ -710,8 +713,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   set_builtin_name(&string_char_code_at, "charCodeAt");
   set_builtin_length(&string_char_code_at, 1.0);
   string_proto_map.borrow_mut().properties.insert(
-    PKey::String("charCodeAt".to_string()),
-    non_enum_data(string_char_code_at),
+    PKey::String("charCodeAt".to_string().into()),
+    PropertyDescriptor::builtin_data(string_char_code_at),
   );
 
   let string_slice = builtin_object(
@@ -719,13 +722,18 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       let undefined = Value::Undefined;
       let receiver = args.first().unwrap_or(&undefined);
       require_object_coercible(vm, receiver)?;
-      let s = this_string_value_ref(vm, receiver)?;
-      let s = s.as_ref();
-      let len = s.chars().count().to_isize().unwrap_or(isize::MAX);
+      let s = vm.to_string(receiver)?;
+      let len = s.len().to_isize().unwrap_or(isize::MAX);
       let to_int = |vm: &mut Vm, v: &Value| -> Result<isize, crate::errors::RuntimeError> {
         let n = vm.to_number_value(v)?;
-        if !n.is_finite() {
+        if n.is_nan() || n == 0.0 {
           return Ok(0);
+        }
+        if n == f64::NEG_INFINITY {
+          return Ok(isize::MIN);
+        }
+        if n == f64::INFINITY {
+          return Ok(isize::MAX);
         }
         Ok(n.trunc().to_isize().unwrap_or(0))
       };
@@ -734,7 +742,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         None => 0,
       };
       let from = if start_raw < 0 {
-        (len + start_raw).max(0)
+        len.saturating_add(start_raw).max(0)
       } else {
         start_raw.min(len)
       };
@@ -746,24 +754,25 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         None => len,
       };
       let to = if end_raw < 0 {
-        (len + end_raw).max(0)
+        len.saturating_add(end_raw).max(0)
       } else {
         end_raw.min(len)
       };
       if to <= from {
-        return Ok(Value::String(String::new()));
+        return Ok(Value::String(String::new().into()));
       }
-      let start_byte = char_index_to_byte_index(s, usize::try_from(from).unwrap_or(0));
-      let end_byte = char_index_to_byte_index(s, usize::try_from(to).unwrap_or(0));
-      Ok(Value::String(s[start_byte..end_byte].to_string()))
+      let value = s
+        .slice(usize::try_from(from).unwrap_or(0)..usize::try_from(to).unwrap_or(0))
+        .expect("slice bounds were clamped to string length");
+      Ok(Value::String(value))
     }),
     function_proto_map,
   );
   set_builtin_name(&string_slice, "slice");
   set_builtin_length(&string_slice, 2.0);
   string_proto_map.borrow_mut().properties.insert(
-    PKey::String("slice".to_string()),
-    non_enum_data(string_slice),
+    PKey::String("slice".to_string().into()),
+    PropertyDescriptor::builtin_data(string_slice),
   );
 
   let install_trim = |name: &str, trim_start: bool, trim_end: bool| {
@@ -772,44 +781,40 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         let undefined = Value::Undefined;
         let receiver = args.first().unwrap_or(&undefined);
         require_object_coercible(vm, receiver)?;
-        let value = this_string_value_ref(vm, receiver)?;
-        let is_trimmable = |character: char| {
+        let value = vm.to_string(receiver)?;
+        let is_trimmable = |unit: u16| {
           matches!(
-            character,
-            '\u{0009}'
-              | '\u{000A}'
-              | '\u{000B}'
-              | '\u{000C}'
-              | '\u{000D}'
-              | '\u{0020}'
-              | '\u{00A0}'
-              | '\u{1680}'
-              | '\u{2000}'
-              ..='\u{200A}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202F}'
-                | '\u{205F}'
-                | '\u{3000}'
-                | '\u{FEFF}'
+            unit,
+            0x0009 | 0x000A | 0x000B | 0x000C | 0x000D | 0x0020 | 0x00A0 | 0x1680 | 0x2000
+              ..=0x200A | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000 | 0xFEFF
           )
         };
-        let trimmed = match (trim_start, trim_end) {
-          (true, true) => value.trim_matches(is_trimmable),
-          (true, false) => value.trim_start_matches(is_trimmable),
-          (false, true) => value.trim_end_matches(is_trimmable),
-          (false, false) => value.as_ref(),
-        };
-        Ok(Value::String(trimmed.to_string()))
+        let mut start = 0;
+        let mut end = value.len();
+        if trim_start {
+          while start < end && is_trimmable(value.as_slice()[start]) {
+            start += 1;
+          }
+        }
+        if trim_end {
+          while end > start && is_trimmable(value.as_slice()[end - 1]) {
+            end -= 1;
+          }
+        }
+        Ok(Value::String(
+          value
+            .slice(start..end)
+            .expect("trim bounds are within the string"),
+        ))
       }),
       function_proto_map,
     );
     set_builtin_name(&trim, name);
     set_builtin_length(&trim, 0.0);
-    string_proto_map
-      .borrow_mut()
-      .properties
-      .insert(PKey::String(name.to_string()), non_enum_data(trim));
+    string_proto_map.borrow_mut().properties.insert(
+      PKey::String(name.to_string().into()),
+      PropertyDescriptor::builtin_data(trim),
+    );
   };
   install_trim("trim", true, true);
   install_trim("trimStart", true, false);
@@ -823,15 +828,9 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         require_object_coercible(vm, receiver)?;
         let value = vm.to_string(receiver)?;
         let converted = if uppercase {
-          value
-            .chars()
-            .flat_map(char::to_uppercase)
-            .collect()
+          value.to_uppercase()
         } else {
-          value
-            .chars()
-            .flat_map(char::to_lowercase)
-            .collect()
+          value.to_lowercase()
         };
         Ok(Value::String(converted))
       }),
@@ -839,13 +838,48 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     );
     set_builtin_name(&conversion, name);
     set_builtin_length(&conversion, 0.0);
-    string_proto_map
-      .borrow_mut()
-      .properties
-      .insert(PKey::String(name.to_string()), non_enum_data(conversion));
+    string_proto_map.borrow_mut().properties.insert(
+      PKey::String(name.to_string().into()),
+      PropertyDescriptor::builtin_data(conversion),
+    );
   };
   install_case_conversion("toLowerCase", false);
   install_case_conversion("toUpperCase", true);
+
+  let install_regexp_dispatch = |name: &str, symbol: SymbolId| {
+    let method = builtin_object(
+      Rc::new(move |vm, args| {
+        let undefined = Value::Undefined;
+        let receiver = args.first().unwrap_or(&undefined);
+        require_object_coercible(vm, receiver)?;
+        let regexp = args.get(1).cloned().unwrap_or(Value::Undefined);
+        if !matches!(regexp, Value::Null | Value::Undefined) {
+          let method = vm.get_property_host(&regexp, &PKey::Symbol(symbol.clone()))?;
+          if !matches!(method, Value::Null | Value::Undefined) {
+            if !Vm::is_callable_value(&method) {
+              return Err(vm.throw_type_error("RegExp symbol method is not callable"));
+            }
+            return vm.call_value_with_this(&method, &regexp, &[receiver.clone()]);
+          }
+        }
+        let constructor = vm
+          .get_global("RegExp")
+          .unwrap_or(Value::Undefined);
+        let created = vm.call_value_with_this(&constructor, &Value::Undefined, &[regexp])?;
+        let method = vm.get_property_host(&created, &PKey::Symbol(symbol.clone()))?;
+        vm.call_value_with_this(&method, &created, &[receiver.clone()])
+      }),
+      function_proto_map,
+    );
+    set_builtin_name(&method, name);
+    set_builtin_length(&method, 1.0);
+    string_proto_map.borrow_mut().properties.insert(
+      PKey::String(name.into()),
+      PropertyDescriptor::builtin_data(method),
+    );
+  };
+  install_regexp_dispatch("match", SymbolId::well_known_match());
+  install_regexp_dispatch("search", SymbolId::well_known_search());
 
   let string_replace = builtin_object(
     Rc::new(|vm, args| {
@@ -867,7 +901,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
 
       let subject = vm.to_string(receiver)?;
       let search = vm.to_string(&search)?;
-      let Some(position) = subject.find(&search) else {
+      let Some(position) = subject.find(&search, 0) else {
         return Ok(Value::String(subject));
       };
       let end = position + search.len();
@@ -876,8 +910,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
           &replacement,
           &Value::Undefined,
           &[
-            Value::String(search),
-            Value::Number(usize_to_f64(subject[..position].chars().count())),
+            Value::String(search.clone()),
+            Value::Number(usize_to_f64(position)),
             Value::String(subject.clone()),
           ],
         )?;
@@ -890,23 +924,25 @@ pub(crate) fn install_string_boolean_symbol_builtins(
           position,
           end,
           &[],
+          None,
           &replacement,
         )
       };
-      Ok(Value::String(format!(
-        "{}{}{}",
-        &subject[..position],
-        replacement,
-        &subject[end..]
-      )))
+      let prefix = subject
+        .slice(0..position)
+        .expect("match start is within the subject");
+      let suffix = subject
+        .slice(end..subject.len())
+        .expect("match end is within the subject");
+      Ok(Value::String(prefix.concat(&replacement).concat(&suffix)))
     }),
     function_proto_map,
   );
   set_builtin_name(&string_replace, "replace");
   set_builtin_length(&string_replace, 2.0);
   string_proto_map.borrow_mut().properties.insert(
-    PKey::String("replace".to_string()),
-    non_enum_data(string_replace),
+    PKey::String("replace".to_string().into()),
+    PropertyDescriptor::builtin_data(string_replace),
   );
 
   let string_split = builtin_object(
@@ -914,45 +950,63 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       let undefined = Value::Undefined;
       let receiver = args.first().unwrap_or(&undefined);
       require_object_coercible(vm, receiver)?;
-      let s = this_string_value_ref(vm, receiver)?;
-      let s = s.as_ref();
       let separator = args.get(1).unwrap_or(&Value::Undefined);
-      let limit = args
-        .get(2)
-        .map(|v| to_length(vm, v))
-        .transpose()?;
-
-      let parts: Vec<Value> = match separator {
-        Value::Undefined => vec![Value::String(s.to_string())],
-        Value::String(sep) => {
-          if sep.is_empty() {
-            s.chars()
-              .map(|ch| Value::String(ch.to_string()))
-              .collect()
-          } else {
-            s.split(sep)
-              .map(|part| Value::String(part.to_string()))
-              .collect()
+      let limit_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+      if !matches!(separator, Value::Null | Value::Undefined) {
+        let splitter =
+          vm.get_property_host(separator, &PKey::Symbol(SymbolId::well_known_split()))?;
+        if !matches!(splitter, Value::Null | Value::Undefined) {
+          if !Vm::is_callable_value(&splitter) {
+            return Err(vm.throw_type_error("Symbol.split method is not callable"));
           }
+          return vm.call_value_with_this(&splitter, separator, &[receiver.clone(), limit_arg]);
         }
-        other => {
-          let sep = vm.to_string(other)?;
-          if sep.is_empty() {
-            s.chars()
-              .map(|ch| Value::String(ch.to_string()))
-              .collect()
-          } else {
-            s.split(&sep)
-              .map(|part| Value::String(part.to_string()))
-              .collect()
-          }
-        }
-      };
-      let parts = if let Some(limit) = limit {
-        parts.into_iter().take(limit).collect()
+      }
+      let s = vm.to_string(receiver)?;
+      let limit = if matches!(limit_arg, Value::Undefined) {
+        usize::try_from(u32::MAX).unwrap_or(usize::MAX)
       } else {
-        parts
+        usize::try_from(vm.to_uint32_value(&limit_arg)?).unwrap_or(usize::MAX)
       };
+      if limit == 0 {
+        return Ok(array_from_values(Vec::new()));
+      }
+
+      let separator = match separator {
+        Value::Undefined => None,
+        Value::String(value) => Some(value.clone()),
+        other => Some(vm.to_string(other)?),
+      };
+      let parts: Vec<Value> = if let Some(separator) = separator {
+        if separator.is_empty() {
+          (0..s.len())
+            .map(|index| {
+              Value::String(
+                s.slice(index..index + 1)
+                  .expect("string index is within bounds"),
+              )
+            })
+            .collect()
+        } else {
+          let mut parts = Vec::new();
+          let mut start = 0;
+          while let Some(index) = s.find(&separator, start) {
+            parts.push(Value::String(
+              s.slice(start..index)
+                .expect("split range is within bounds"),
+            ));
+            start = index + separator.len();
+          }
+          parts.push(Value::String(
+            s.slice(start..s.len())
+              .expect("split tail is within bounds"),
+          ));
+          parts
+        }
+      } else {
+        vec![Value::String(s)]
+      };
+      let parts = parts.into_iter().take(limit).collect();
 
       Ok(array_from_values(parts))
     }),
@@ -961,8 +1015,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   set_builtin_name(&string_split, "split");
   set_builtin_length(&string_split, 1.0);
   string_proto_map.borrow_mut().properties.insert(
-    PKey::String("split".to_string()),
-    non_enum_data(string_split),
+    PKey::String("split".to_string().into()),
+    PropertyDescriptor::builtin_data(string_split),
   );
 
   let boolean_ctor_fn: BuiltinFn = Rc::new(|vm, args| {
@@ -981,8 +1035,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
       && let Value::Object(obj) = &receiver
     {
       obj.borrow_mut().properties.insert(
-        PKey::String("[[PrimitiveValue]]".to_string()),
-        PropertyDescriptor::data(prim),
+        PKey::String("[[PrimitiveValue]]".to_string().into()),
+        PropertyDescriptor::ordinary_data(prim),
       );
       return Ok(receiver);
     }
@@ -992,8 +1046,8 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   set_builtin_length(&boolean_ctor_val, 1.0);
   set_builtin_name(&boolean_ctor_val, "Boolean");
   boolean_proto_map.borrow_mut().properties.insert(
-    PKey::String("constructor".to_string()),
-    PropertyDescriptor::data(boolean_ctor_val.clone()),
+    PKey::String("constructor".to_string().into()),
+    PropertyDescriptor::builtin_data(boolean_ctor_val.clone()),
   );
   let boolean_value_of = builtin_object(
     Rc::new(|vm, args| {
@@ -1006,37 +1060,41 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   set_builtin_name(&boolean_value_of, "valueOf");
   set_builtin_length(&boolean_value_of, 0.0);
   boolean_proto_map.borrow_mut().properties.insert(
-    PKey::String("valueOf".to_string()),
-    PropertyDescriptor::data(boolean_value_of),
+    PKey::String("valueOf".to_string().into()),
+    PropertyDescriptor::builtin_data(boolean_value_of),
   );
   let boolean_to_string = builtin_object(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;
       let this = args.first().unwrap_or(&undefined);
       let b = this_boolean_value(vm, this)?;
-      Ok(Value::String(if b { "true" } else { "false" }.to_string()))
+      Ok(Value::String(
+        if b { "true" } else { "false" }
+          .to_string()
+          .into(),
+      ))
     }),
     function_proto_map,
   );
   set_builtin_name(&boolean_to_string, "toString");
   set_builtin_length(&boolean_to_string, 0.0);
   boolean_proto_map.borrow_mut().properties.insert(
-    PKey::String("toString".to_string()),
-    PropertyDescriptor::data(boolean_to_string),
+    PKey::String("toString".to_string().into()),
+    PropertyDescriptor::builtin_data(boolean_to_string),
   );
 
   set_builtin_name(&string_ctor_val, "String");
   set_builtin_name(&symbol_ctor_val, "Symbol");
   globals.properties.insert(
-    PKey::String("String".to_string()),
-    non_enum_data(string_ctor_val),
+    PKey::String("String".to_string().into()),
+    PropertyDescriptor::builtin_data(string_ctor_val),
   );
   globals.properties.insert(
-    PKey::String("Boolean".to_string()),
-    non_enum_data(boolean_ctor_val),
+    PKey::String("Boolean".to_string().into()),
+    PropertyDescriptor::builtin_data(boolean_ctor_val),
   );
   globals.properties.insert(
-    PKey::String("Symbol".to_string()),
-    PropertyDescriptor::data(symbol_ctor_val),
+    PKey::String("Symbol".to_string().into()),
+    PropertyDescriptor::builtin_data(symbol_ctor_val),
   );
 }

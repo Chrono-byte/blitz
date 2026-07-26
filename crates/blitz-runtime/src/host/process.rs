@@ -19,33 +19,45 @@ pub(super) fn install(
   let process = object(object_prototype.clone());
   let environment = object(object_prototype.clone());
   for (name, value) in options.env {
-    set(&environment, &name, Value::String(value));
+    set(&environment, &name, Value::String(value.into()));
   }
 
   let versions = object(object_prototype);
   set(
     &versions,
     "blitz",
-    Value::String(env!("CARGO_PKG_VERSION").to_string()),
+    Value::String(env!("CARGO_PKG_VERSION").to_string().into()),
   );
 
   let argv = vm.new_array(
     options
       .argv
       .into_iter()
-      .map(|argument| Some(Value::String(argument)))
+      .map(|argument| Some(Value::String(argument.into())))
       .collect(),
   );
 
   set(&process, "argv", argv);
   set(&process, "env", environment);
-  set(&process, "execPath", Value::String(options.exec_path));
-  set(&process, "platform", Value::String(platform().to_string()));
-  set(&process, "arch", Value::String(architecture().to_string()));
+  set(
+    &process,
+    "execPath",
+    Value::String(options.exec_path.into()),
+  );
+  set(
+    &process,
+    "platform",
+    Value::String(platform().to_string().into()),
+  );
+  set(
+    &process,
+    "arch",
+    Value::String(architecture().to_string().into()),
+  );
   set(
     &process,
     "version",
-    Value::String(format!("v{}", env!("CARGO_PKG_VERSION"))),
+    Value::String(format!("v{}", env!("CARGO_PKG_VERSION")).into()),
   );
   set(&process, "versions", versions);
   set(
@@ -53,7 +65,7 @@ pub(super) fn install(
     "cwd",
     Value::Builtin(Rc::new(|_vm, _args| {
       std::env::current_dir()
-        .map(|path| Value::String(path.to_string_lossy().into_owned()))
+        .map(|path| Value::String(path.to_string_lossy().into_owned().into()))
         .map_err(|error| RuntimeError::from(format!("Failed to get current directory: {error}")))
     })),
   );
@@ -78,8 +90,8 @@ fn set(
     return;
   };
   properties.borrow_mut().properties.insert(
-    PropertyKey::String(name.to_string()),
-    PropertyDescriptor::data(value),
+    PropertyKey::String(name.to_string().into()),
+    PropertyDescriptor::ordinary_data(value),
   );
 }
 
@@ -120,8 +132,8 @@ mod tests {
   fn installs_process_metadata_for_scripts() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyKey::String("globalThis".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = Vm::new(globals);
     install(
@@ -156,7 +168,7 @@ mod tests {
 
     assert_eq!(
       vm.get_global("hostResult"),
-      Some(Value::String("hello:works".to_string()))
+      Some(Value::String("hello:works".to_string().into()))
     );
     assert!(matches!(
       vm.get_global("hostCwdIsString"),
@@ -164,7 +176,7 @@ mod tests {
     ));
     assert_eq!(
       vm.get_global("hostVersion"),
-      Some(Value::String(env!("CARGO_PKG_VERSION").to_string()))
+      Some(Value::String(env!("CARGO_PKG_VERSION").to_string().into()))
     );
     assert!(matches!(
       vm.get_global("hostAlias"),

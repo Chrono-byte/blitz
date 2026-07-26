@@ -19,12 +19,7 @@ pub(crate) fn set_builtin_length(
   target: &Value,
   length: f64,
 ) {
-  let desc = PropertyDescriptor::Data {
-    value: Value::Number(length),
-    writable: false,
-    enumerable: false,
-    configurable: true,
-  };
+  let desc = PropertyDescriptor::builtin_metadata(Value::Number(length));
   match target {
     Value::Object(props)
     | Value::Array(_, props)
@@ -33,7 +28,7 @@ pub(crate) fn set_builtin_length(
       props
         .borrow_mut()
         .properties
-        .insert(PropertyKey::String("length".to_string()), desc);
+        .insert(PropertyKey::String("length".to_string().into()), desc);
     }
     _ => {}
   }
@@ -44,12 +39,7 @@ pub(crate) fn set_builtin_name(
   target: &Value,
   name: &str,
 ) {
-  let desc = PropertyDescriptor::Data {
-    value: Value::String(name.to_string()),
-    writable: false,
-    enumerable: false,
-    configurable: true,
-  };
+  let desc = PropertyDescriptor::builtin_metadata(Value::String(name.to_string().into()));
   match target {
     Value::Object(props)
     | Value::Array(_, props)
@@ -58,7 +48,7 @@ pub(crate) fn set_builtin_name(
       props
         .borrow_mut()
         .properties
-        .insert(PropertyKey::String("name".to_string()), desc);
+        .insert(PropertyKey::String("name".to_string().into()), desc);
     }
     _ => {}
   }

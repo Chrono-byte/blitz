@@ -34,7 +34,7 @@ fn read(text: bool) -> BuiltinFn {
     };
     let thunk: BuiltinFn = Rc::new(move |vm, _args| match std::fs::read(&path) {
       Ok(bytes) if text => match String::from_utf8(bytes) {
-        Ok(value) => effect_succeed(vm, Value::String(value)),
+        Ok(value) => effect_succeed(vm, Value::String(value.into())),
         Err(error) => {
           let failure = fs_error(
             vm,
@@ -67,7 +67,7 @@ fn write(text: bool) -> BuiltinFn {
     };
     let data = if text {
       match args.get(2) {
-        Some(Value::String(value)) => value.as_bytes().to_vec(),
+        Some(Value::String(value)) => value.as_str_lossy().as_bytes().to_vec(),
         _ => {
           let failure = fs_error(
             vm,
@@ -115,10 +115,10 @@ fn path_value(
   operation: &str,
 ) -> Result<PathBuf, Value> {
   let path = match value {
-    Some(Value::String(path)) => PathBuf::from(path),
+    Some(Value::String(path)) => PathBuf::from(path.as_str_lossy()),
     Some(value @ Value::Object(_)) => {
       let href = vm
-        .get_property_host(value, &PropertyKey::String("href".to_string()))
+        .get_property_host(value, &PropertyKey::String("href".to_string().into()))
         .map_err(|error| fs_error(vm, "InvalidPath", operation, None, error.to_string()))?;
       let Value::String(href) = href else {
         return Err(fs_error(
@@ -129,7 +129,7 @@ fn path_value(
           "path object must be a file URL".to_string(),
         ));
       };
-      Url::parse(&href)
+      Url::parse(href.as_str_lossy())
         .ok()
         .and_then(|url| url.to_file_path().ok())
         .ok_or_else(|| {
@@ -169,7 +169,7 @@ fn bytes_value(
   value: &Value,
 ) -> Result<Vec<u8>, String> {
   let length = vm
-    .get_property_host(value, &PropertyKey::String("length".to_string()))
+    .get_property_host(value, &PropertyKey::String("length".to_string().into()))
     .map_err(|error| error.to_string())?;
   let Value::Number(length) = length else {
     return Err("writeFile requires a Uint8Array".to_string());
@@ -184,7 +184,7 @@ fn bytes_value(
   let mut bytes = Vec::with_capacity(length);
   for index in 0..length {
     let item = vm
-      .get_property_host(value, &PropertyKey::String(index.to_string()))
+      .get_property_host(value, &PropertyKey::String(index.to_string().into()))
       .map_err(|error| error.to_string())?;
     let Value::Number(item) = item else {
       return Err("writeFile requires numeric bytes".to_string());
@@ -248,16 +248,24 @@ fn fs_error(
   message: String,
 ) -> Value {
   let error = object(vm.realm().object_prototype());
-  set(&error, "_tag", Value::String("FileSystemError".to_string()));
-  set(&error, "reason", Value::String(reason.to_string()));
-  set(&error, "operation", Value::String(operation.to_string()));
+  set(
+    &error,
+    "_tag",
+    Value::String("FileSystemError".to_string().into()),
+  );
+  set(&error, "reason", Value::String(reason.to_string().into()));
+  set(
+    &error,
+    "operation",
+    Value::String(operation.to_string().into()),
+  );
   if let Some(path) = path {
     set(
       &error,
       "path",
-      Value::String(path.to_string_lossy().into_owned()),
+      Value::String(path.to_string_lossy().into_owned().into()),
     );
   }
-  set(&error, "message", Value::String(message));
+  set(&error, "message", Value::String(message.into()));
   error
 }

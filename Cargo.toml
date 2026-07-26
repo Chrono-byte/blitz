@@ -4,6 +4,9 @@ members = [
   "crates/blitz-engine",
   "crates/blitz-macros",
   "crates/blitz-runtime",
+  "crates/blitz-test262",
+  "crates/js-string",
+  "crates/regex-js",
   "tools/effect-bytecode",
 ]
 resolver = "2"
@@ -19,6 +22,8 @@ blitz-runtime = { path = "crates/blitz-runtime" }
 bytes = "1"
 clap = { version = "4.5.57", features = ["derive"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+unicode-case-mapping = "1"
+unicode-id-start = "1.4"
 fastwebsockets = { version = "0.10", features = ["upgrade"] }
 fastrand = "2.1"
 futures = "0.3"
@@ -26,6 +31,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 indexmap = "2"
+js-string = { path = "crates/js-string" }
 num-bigint = "0.4"
 num-traits = "0.2"
 ouroboros = "0.18"
@@ -38,6 +44,7 @@ oxc_span = "0.141.0"
 oxc_str = "0.141.0"
 oxc_syntax = "0.141.0"
 regex = "1"
+regex-js = { path = "crates/regex-js" }
 rustyline = "18"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

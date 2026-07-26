@@ -34,12 +34,12 @@ pub fn install(vm: &mut Vm) {
   let global = vm.realm().global();
   let mut global = global.borrow_mut();
   global.properties.insert(
-    PropertyKey::String("AbortSignal".to_string()),
-    PropertyDescriptor::data(signal_constructor),
+    PropertyKey::String("AbortSignal".to_string().into()),
+    PropertyDescriptor::ordinary_data(signal_constructor),
   );
   global.properties.insert(
-    PropertyKey::String("AbortController".to_string()),
-    PropertyDescriptor::data(controller_constructor),
+    PropertyKey::String("AbortController".to_string().into()),
+    PropertyDescriptor::ordinary_data(controller_constructor),
   );
 }
 
@@ -69,7 +69,7 @@ fn make_signal_constructor(
   put(
     &constructor_map_value,
     "name",
-    Value::String("AbortSignal".to_string()),
+    Value::String("AbortSignal".to_string().into()),
   );
   put(&constructor_map_value, "length", Value::Number(0.0));
 
@@ -117,7 +117,7 @@ fn make_controller_constructor(
   put(
     &constructor_map_value,
     "name",
-    Value::String("AbortController".to_string()),
+    Value::String("AbortController".to_string().into()),
   );
   put(&constructor_map_value, "length", Value::Number(0.0));
   value
@@ -208,7 +208,7 @@ fn add_event_listener(
 ) -> Result<Value, RuntimeError> {
   let signal = vm.this_value();
   let event_type = args.get(1).cloned().unwrap_or(Value::Undefined);
-  if vm.to_string(&event_type)?.as_str() != "abort" {
+  if vm.to_string(&event_type)?.as_str_lossy() != "abort" {
     return Ok(Value::Undefined);
   }
   let Some(listener) = args
@@ -240,7 +240,7 @@ fn remove_event_listener(
 ) -> Result<Value, RuntimeError> {
   let signal = vm.this_value();
   let event_type = args.get(1).cloned().unwrap_or(Value::Undefined);
-  if vm.to_string(&event_type)?.as_str() != "abort" {
+  if vm.to_string(&event_type)?.as_str_lossy() != "abort" {
     return Ok(Value::Undefined);
   }
   let Some(listener) = args.get(2) else {
@@ -355,7 +355,7 @@ fn listener_record(
 
 fn abort_event(signal: &Value) -> Value {
   let event = object(Value::Null);
-  put(&event, "type", Value::String("abort".to_string()));
+  put(&event, "type", Value::String("abort".to_string().into()));
   put(&event, "target", signal.clone());
   put(&event, "currentTarget", signal.clone());
   event
@@ -363,11 +363,15 @@ fn abort_event(signal: &Value) -> Value {
 
 fn default_reason() -> Value {
   let reason = object(Value::Null);
-  put(&reason, "name", Value::String("AbortError".to_string()));
+  put(
+    &reason,
+    "name",
+    Value::String("AbortError".to_string().into()),
+  );
   put(
     &reason,
     "message",
-    Value::String("This operation was aborted".to_string()),
+    Value::String("This operation was aborted".to_string().into()),
   );
   reason
 }
@@ -392,7 +396,7 @@ fn put(
 ) {
   if let Value::Object(object) = target {
     object.borrow_mut().properties.insert(
-      PropertyKey::String(name.to_string()),
+      PropertyKey::String(name.to_string().into()),
       PropertyDescriptor::Data {
         value,
         writable: true,
@@ -411,7 +415,7 @@ fn get_property(
     Value::Object(object) => object
       .borrow()
       .properties
-      .get(&PropertyKey::String(name.to_string()))
+      .get(&PropertyKey::String(name.to_string().into()))
       .and_then(|descriptor| match descriptor {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         PropertyDescriptor::Accessor { .. } => None,
@@ -420,7 +424,7 @@ fn get_property(
     Value::BuiltinObject(_, object) => object
       .borrow()
       .properties
-      .get(&PropertyKey::String(name.to_string()))
+      .get(&PropertyKey::String(name.to_string().into()))
       .and_then(|descriptor| match descriptor {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         PropertyDescriptor::Accessor { .. } => None,

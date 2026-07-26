@@ -95,17 +95,17 @@ impl Vm {
     thrown: &Value,
   ) -> String {
     let name: Option<String> = self
-      .get_property_value(thrown, &PropertyKey::String("name".to_string()))
+      .get_property_value(thrown, &PropertyKey::String("name".to_string().into()))
       .ok()
       .and_then(|value| match value {
-        Value::String(s) => Some(s),
+        Value::String(s) => Some(s.to_string_lossy()),
         _ => None,
       });
     let message: Option<String> = self
-      .get_property_value(thrown, &PropertyKey::String("message".to_string()))
+      .get_property_value(thrown, &PropertyKey::String("message".to_string().into()))
       .ok()
       .and_then(|value| match value {
-        Value::String(s) => Some(s),
+        Value::String(s) => Some(s.to_string_lossy()),
         _ => None,
       });
 
@@ -115,7 +115,8 @@ impl Vm {
       (None, Some(message)) if !message.is_empty() => message,
       _ => self
         .to_string(thrown)
-        .unwrap_or_else(|_| format!("{}", thrown)),
+        .unwrap_or_else(|_| format!("{}", thrown).into())
+        .to_string(),
     }
   }
 
@@ -126,7 +127,7 @@ impl Vm {
   ) -> RuntimeError {
     let err_val = self
       .create_intrinsic_error("TypeError", message)
-      .unwrap_or(Value::String(message.to_string()));
+      .unwrap_or(Value::String(message.to_string().into()));
     self.throw_exception(err_val)
   }
 
@@ -137,7 +138,7 @@ impl Vm {
   ) -> RuntimeError {
     let err_val = self
       .create_intrinsic_error("RangeError", message)
-      .unwrap_or(Value::String(message.to_string()));
+      .unwrap_or(Value::String(message.to_string().into()));
     self.throw_exception(err_val)
   }
 
@@ -148,7 +149,7 @@ impl Vm {
   ) -> RuntimeError {
     let err_val = self
       .create_intrinsic_error("ReferenceError", message)
-      .unwrap_or(Value::String(message.to_string()));
+      .unwrap_or(Value::String(message.to_string().into()));
     self.throw_exception(err_val)
   }
 
@@ -171,13 +172,13 @@ impl Vm {
     if matches!(ctor, Value::Undefined) {
       let mut obj = ObjectData::new();
       obj.properties.insert(
-        PropertyKey::String("message".to_string()),
-        PropertyDescriptor::data(Value::String(message.to_string())),
+        PropertyKey::String("message".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::String(message.to_string().into())),
       );
       return Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(obj)))));
     }
     let proto = self
-      .get_property_host(&ctor, &PropertyKey::String("prototype".to_string()))
+      .get_property_host(&ctor, &PropertyKey::String("prototype".to_string().into()))
       .unwrap_or(Value::Null);
     let mut obj = ObjectData::with_prototype(match proto {
       Value::Object(_)
@@ -188,16 +189,16 @@ impl Vm {
       _ => Value::Null,
     });
     obj.properties.insert(
-      PropertyKey::String("constructor".to_string()),
-      PropertyDescriptor::data(ctor),
+      PropertyKey::String("constructor".to_string().into()),
+      PropertyDescriptor::ordinary_data(ctor),
     );
     obj.properties.insert(
-      PropertyKey::String("message".to_string()),
-      PropertyDescriptor::data(Value::String(message.to_string())),
+      PropertyKey::String("message".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::String(message.to_string().into())),
     );
     obj.properties.insert(
-      PropertyKey::String("name".to_string()),
-      PropertyDescriptor::data(Value::String(name.to_string())),
+      PropertyKey::String("name".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::String(name.to_string().into())),
     );
     Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(obj)))))
   }

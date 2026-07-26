@@ -89,7 +89,11 @@ fn read_file(
   match read_bounded(&path) {
     Ok(bytes) if text => Ok(success(
       vm,
-      Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+      Value::String(
+        String::from_utf8_lossy(&bytes)
+          .into_owned()
+          .into(),
+      ),
     )),
     Ok(bytes) => {
       let value = make_uint8_array(vm, bytes)?;
@@ -150,7 +154,7 @@ fn write_file(
   };
   let flag = match args.get(3) {
     None | Some(Value::Undefined) => "w",
-    Some(Value::String(flag)) => flag.as_str(),
+    Some(Value::String(flag)) => flag.as_str_lossy(),
     Some(_) => {
       return Ok(failure(
         vm,
@@ -248,7 +252,13 @@ fn readdir(
     set(
       &item,
       "name",
-      Value::String(entry.file_name().to_string_lossy().into_owned()),
+      Value::String(
+        entry
+          .file_name()
+          .to_string_lossy()
+          .into_owned()
+          .into(),
+      ),
     );
     set(&item, "isFile", Value::Bool(file_type.is_file()));
     set(&item, "isDirectory", Value::Bool(file_type.is_dir()));
@@ -372,9 +382,10 @@ fn path_value(
     ));
   };
   let path = match value {
-    Value::String(path) => PathBuf::from(path),
+    Value::String(path) => PathBuf::from(path.as_str_lossy()),
     Value::Object(_) => {
-      let href = match vm.get_property_host(value, &PropertyKey::String("href".to_string())) {
+      let href = match vm.get_property_host(value, &PropertyKey::String("href".to_string().into()))
+      {
         Ok(Value::String(href)) => href,
         Ok(_) => {
           return Err(failure(
@@ -399,7 +410,7 @@ fn path_value(
           ));
         }
       };
-      let parsed = match Url::parse(&href) {
+      let parsed = match Url::parse(href.as_str_lossy()) {
         Ok(parsed) => parsed,
         Err(error) => {
           return Err(failure(
@@ -461,7 +472,12 @@ fn read_encoding(
   match value {
     None | Some(Value::Undefined) | Some(Value::Null) => Ok(false),
     Some(Value::String(encoding))
-      if encoding.eq_ignore_ascii_case("utf8") || encoding.eq_ignore_ascii_case("utf-8") =>
+      if encoding
+        .as_str_lossy()
+        .eq_ignore_ascii_case("utf8")
+        || encoding
+          .as_str_lossy()
+          .eq_ignore_ascii_case("utf-8") =>
     {
       Ok(true)
     }
@@ -523,9 +539,10 @@ fn bytes_value(
         format!("Data exceeds the Blitz node:fs limit of {MAX_FILE_BYTES} bytes"),
       ));
     }
-    return Ok(value.as_bytes().to_vec());
+    return Ok(value.as_str_lossy().as_bytes().to_vec());
   }
-  let length = match vm.get_property_host(value, &PropertyKey::String("length".to_string())) {
+  let length = match vm.get_property_host(value, &PropertyKey::String("length".to_string().into()))
+  {
     Ok(Value::Number(length)) if length.is_finite() && length >= 0.0 && length.fract() == 0.0 => {
       match length.to_string().parse::<usize>() {
         Ok(length) => length,
@@ -578,7 +595,7 @@ fn bytes_value(
   }
   let mut bytes = Vec::with_capacity(length);
   for index in 0..length {
-    let item = match vm.get_property_host(value, &PropertyKey::String(index.to_string())) {
+    let item = match vm.get_property_host(value, &PropertyKey::String(index.to_string().into())) {
       Ok(Value::Number(item))
         if item.is_finite() && item.fract() == 0.0 && (0.0..=255.0).contains(&item) =>
       {
@@ -905,28 +922,32 @@ fn failure(
 ) -> Value {
   let result = object(vm.realm().object_prototype());
   set(&result, OK, Value::Bool(false));
-  set(&result, "code", Value::String(code.to_string()));
+  set(&result, "code", Value::String(code.to_string().into()));
   if let Some(errno) = errno {
     set(&result, "errno", Value::Number(f64::from(errno)));
   }
   if let Some(syscall) = syscall {
-    set(&result, "syscall", Value::String(syscall.to_string()));
+    set(
+      &result,
+      "syscall",
+      Value::String(syscall.to_string().into()),
+    );
   }
   if let Some(path) = path {
     set(
       &result,
       "path",
-      Value::String(path.to_string_lossy().into_owned()),
+      Value::String(path.to_string_lossy().into_owned().into()),
     );
   }
   if let Some(dest) = dest {
     set(
       &result,
       "dest",
-      Value::String(dest.to_string_lossy().into_owned()),
+      Value::String(dest.to_string_lossy().into_owned().into()),
     );
   }
-  set(&result, "message", Value::String(message));
+  set(&result, "message", Value::String(message.into()));
   result
 }
 
@@ -983,8 +1004,8 @@ mod tests {
   fn test_vm() -> Vm {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyKey::String("globalThis".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     Vm::new(globals)
   }
@@ -1002,15 +1023,15 @@ mod tests {
     fs::create_dir_all(&directory).expect("create test directory");
     let path = directory.join("value.txt");
     let mut vm = test_vm();
-    let path_value = Value::String(path.to_string_lossy().into_owned());
-    let data = Value::String("hello".to_string());
+    let path_value = Value::String(path.to_string_lossy().into_owned().into());
+    let data = Value::String("hello".to_string().into());
     let write = write_file(
       &mut vm,
       &[
         Value::Undefined,
         path_value.clone(),
         data,
-        Value::String("w".to_string()),
+        Value::String("w".to_string().into()),
       ],
     )
     .expect("write operation");
@@ -1022,7 +1043,7 @@ mod tests {
     assert!(matches!(property(&stats, OK), Value::Bool(true)));
 
     let nested = directory.join("nested");
-    let nested_value = Value::String(nested.to_string_lossy().into_owned());
+    let nested_value = Value::String(nested.to_string_lossy().into_owned().into());
     let made = mkdir(
       &mut vm,
       &[Value::Undefined, nested_value.clone(), Value::Bool(true)],
@@ -1033,7 +1054,7 @@ mod tests {
       &mut vm,
       &[
         Value::Undefined,
-        Value::String(directory.to_string_lossy().into_owned()),
+        Value::String(directory.to_string_lossy().into_owned().into()),
       ],
     )
     .expect("readdir operation");
@@ -1044,7 +1065,7 @@ mod tests {
       &[
         Value::Undefined,
         path_value,
-        Value::String(moved.to_string_lossy().into_owned()),
+        Value::String(moved.to_string_lossy().into_owned().into()),
       ],
     )
     .expect("rename operation");
@@ -1053,7 +1074,7 @@ mod tests {
       &mut vm,
       &[
         Value::Undefined,
-        Value::String(moved.to_string_lossy().into_owned()),
+        Value::String(moved.to_string_lossy().into_owned().into()),
       ],
     )
     .expect("unlink operation");
@@ -1063,7 +1084,7 @@ mod tests {
       &[
         Value::Undefined,
         nested_value,
-        Value::Bool(false),
+        Value::Bool(true),
         Value::Bool(false),
       ],
     )
@@ -1081,18 +1102,19 @@ mod tests {
           directory
             .join("missing")
             .to_string_lossy()
-            .into_owned(),
+            .into_owned()
+            .into(),
         ),
       ],
     )
     .expect("missing read operation");
     assert_eq!(
       property(&missing, "code"),
-      Value::String("ENOENT".to_string())
+      Value::String("ENOENT".to_string().into())
     );
     assert_eq!(
       property(&missing, "syscall"),
-      Value::String("open".to_string())
+      Value::String("open".to_string().into())
     );
     assert!(matches!(property(&missing, "errno"), Value::Number(value) if value < 0.0));
 
@@ -1110,17 +1132,17 @@ mod tests {
         &Value::Undefined,
         &[
           Value::Undefined,
-          Value::String("/definitely/not/read".to_string()),
+          Value::String("/definitely/not/read".to_string().into()),
         ],
       )
       .expect("permission denial is a result record");
     assert_eq!(
       property(&result, "code"),
-      Value::String("ERR_ACCESS_DENIED".to_string())
+      Value::String("ERR_ACCESS_DENIED".to_string().into())
     );
     assert_eq!(
       property(&result, "syscall"),
-      Value::String("readFile".to_string())
+      Value::String("readFile".to_string().into())
     );
   }
 
@@ -1263,7 +1285,7 @@ mod tests {
     match object
       .borrow()
       .properties
-      .get(&PropertyKey::String(name.to_string()))
+      .get(&PropertyKey::String(name.to_string().into()))
     {
       Some(blitz::value::PropertyDescriptor::Data { value, .. }) => value.clone(),
       _ => Value::Undefined,

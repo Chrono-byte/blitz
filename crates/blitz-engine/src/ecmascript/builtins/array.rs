@@ -5,13 +5,13 @@ use std::cell::RefCell;
 use std::env;
 use std::rc::Rc;
 
+use js_string::{JsString, JsStringBuilder};
 use num_traits::ToPrimitive;
 
 use crate::runtime_utils::{
   array_length_descriptor, builtin_object, canonical_index_key, collect_iterable_values,
-  non_enum_data, reject_pending_promise, resolve_promise_with_value, set_builtin_length,
-  set_builtin_name, static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string,
-  usize_to_f64,
+  reject_pending_promise, resolve_promise_with_value, set_builtin_length, set_builtin_name,
+  static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string, usize_to_f64,
 };
 use crate::value::{
   ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
@@ -38,7 +38,7 @@ fn create_data_property_or_throw(
       ..
     }) = properties
       .properties
-      .get(&PropertyKey::String("length".to_string()))
+      .get(&PropertyKey::String("length".to_string().into()))
       && usize_to_f64(index) >= *length
     {
       return Err(vm.throw_type_error("Array.from cannot extend an array with readonly length"));
@@ -47,20 +47,20 @@ fn create_data_property_or_throw(
 
   let mut descriptor = ObjectData::new();
   descriptor.properties.insert(
-    PropertyKey::String("value".to_string()),
-    PropertyDescriptor::data(value.clone()),
+    PropertyKey::String("value".to_string().into()),
+    PropertyDescriptor::ordinary_data(value.clone()),
   );
   descriptor.properties.insert(
-    PropertyKey::String("writable".to_string()),
-    PropertyDescriptor::data(Value::Bool(true)),
+    PropertyKey::String("writable".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Bool(true)),
   );
   descriptor.properties.insert(
-    PropertyKey::String("enumerable".to_string()),
-    PropertyDescriptor::data(Value::Bool(true)),
+    PropertyKey::String("enumerable".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Bool(true)),
   );
   descriptor.properties.insert(
-    PropertyKey::String("configurable".to_string()),
-    PropertyDescriptor::data(Value::Bool(true)),
+    PropertyKey::String("configurable".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Bool(true)),
   );
   let descriptor = Value::Object(Rc::new(RefCell::new(descriptor)));
   if !vm.define_property_value(target, key, &descriptor)? {
@@ -85,7 +85,7 @@ fn create_data_property_or_throw(
     properties
       .properties
       .shift_remove(&PropertyKey::String(key.clone()));
-    let length_key = PropertyKey::String("length".to_string());
+    let length_key = PropertyKey::String("length".to_string().into());
     let length_descriptor = match properties.properties.get(&length_key).cloned() {
       Some(PropertyDescriptor::Data {
         writable,
@@ -162,13 +162,13 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     };
     let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
     props.borrow_mut().properties.insert(
-      PKey::String("length".to_string()),
+      PKey::String("length".to_string().into()),
       array_length_descriptor(length),
     );
     if let Some(pval) = array_ctor_props
       .borrow()
       .properties
-      .get(&PKey::String("prototype".to_string()))
+      .get(&PKey::String("prototype".to_string().into()))
       .and_then(|d| match d {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         _ => None,
@@ -179,9 +179,11 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     Ok(Value::Array(arr_rc, props))
   });
   let array_ctor_val = Value::BuiltinObject(Rc::clone(&array_ctor_fn), Rc::clone(array_ctor_map));
+  set_builtin_name(&array_ctor_val, "Array");
+  set_builtin_length(&array_ctor_val, 1.0);
   array_ctor_map.borrow_mut().properties.insert(
-    PKey::String("isArray".to_string()),
-    PropertyDescriptor::data({
+    PKey::String("isArray".to_string().into()),
+    PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
         Rc::new(|_vm, args| {
           Ok(Value::Bool(
@@ -195,8 +197,8 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     }),
   );
   array_ctor_map.borrow_mut().properties.insert(
-    PKey::String("of".to_string()),
-    PropertyDescriptor::data({
+    PKey::String("of".to_string().into()),
+    PropertyDescriptor::builtin_data({
       let array_proto_for_of = Rc::clone(array_proto_map);
       let function_proto_map = Rc::clone(function_proto_map);
       let builtin = builtin_object(
@@ -209,7 +211,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
             .borrow_mut()
             .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_of)));
           props.borrow_mut().properties.insert(
-            PKey::String("length".to_string()),
+            PKey::String("length".to_string().into()),
             array_length_descriptor(arr_rc.borrow().len()),
           );
           Ok(Value::Array(arr_rc, props))
@@ -221,8 +223,8 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     }),
   );
   array_ctor_map.borrow_mut().properties.insert(
-    PKey::String("from".to_string()),
-    non_enum_data({
+    PKey::String("from".to_string().into()),
+    PropertyDescriptor::builtin_data({
       let function_proto_map = Rc::clone(function_proto_map);
       let builtin = builtin_object(
         Rc::new(move |vm, args| {
@@ -286,7 +288,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                   }
                 }
               };
-              let key = Value::String(index.to_string());
+              let key = Value::String(index.to_string().into());
               if let Err(error) = create_data_property_or_throw(vm, &result, &key, value) {
                 drop(crate::runtime_utils::iterator_close(vm, &iterator));
                 return Err(error);
@@ -302,13 +304,14 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
             }
             vm.set_property_host(
               &result,
-              &Value::String("length".to_string()),
+              &Value::String("length".to_string().into()),
               Value::Number(usize_to_f64(index)),
             )?;
             return Ok(result);
           }
 
-          let length_value = vm.get_property_host(&source, &PKey::String("length".to_string()))?;
+          let length_value =
+            vm.get_property_host(&source, &PKey::String("length".to_string().into()))?;
           let length = to_length(vm, &length_value)?;
           let result = if constructor.is_constructable() {
             vm.construct_value(&constructor, &[Value::Number(usize_to_f64(length))])?
@@ -317,7 +320,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
           };
 
           for index in 0..length {
-            let key = PKey::String(index.to_string());
+            let key = PKey::String(index.to_string().into());
             let value = vm.get_property_host(&source, &key)?;
             let value = if matches!(map_fn, Value::Undefined) {
               value
@@ -328,11 +331,16 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                 &[value, Value::Number(usize_to_f64(index))],
               )?
             };
-            create_data_property_or_throw(vm, &result, &Value::String(index.to_string()), value)?;
+            create_data_property_or_throw(
+              vm,
+              &result,
+              &Value::String(index.to_string().into()),
+              value,
+            )?;
           }
           vm.set_property_host(
             &result,
-            &Value::String("length".to_string()),
+            &Value::String("length".to_string().into()),
             Value::Number(usize_to_f64(length)),
           )?;
           Ok(result)
@@ -345,8 +353,8 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     }),
   );
   array_ctor_map.borrow_mut().properties.insert(
-    PKey::String("fromAsync".to_string()),
-    PropertyDescriptor::data({
+    PKey::String("fromAsync".to_string().into()),
+    PropertyDescriptor::builtin_data({
       let array_proto_for_from_async = Rc::clone(array_proto_map);
       let function_proto_map = Rc::clone(function_proto_map);
       let builtin = builtin_object(
@@ -396,7 +404,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
                 let reason = vm
                   .last_uncaught_exception
                   .take()
-                  .unwrap_or_else(|| Value::String(format!("{}", err)));
+                  .unwrap_or_else(|| Value::String(format!("{}", err).into()));
                 reject_pending_promise(vm, &result_promise_for_job, reason);
               }
             }
@@ -411,17 +419,17 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     }),
   );
   array_proto_map.borrow_mut().properties.insert(
-    PKey::String("constructor".to_string()),
-    PropertyDescriptor::data(array_ctor_val.clone()),
+    PKey::String("constructor".to_string().into()),
+    PropertyDescriptor::builtin_data(array_ctor_val.clone()),
   );
   array_proto_map.borrow_mut().properties.insert(
-    PKey::String("lastIndexOf".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PKey::String("lastIndexOf".to_string().into()),
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let undefined = Value::Undefined;
         let receiver = args.first().unwrap_or(&undefined);
         let search = args.get(1).unwrap_or(&undefined);
-        let length = vm.get_property_host(receiver, &PKey::String("length".to_string()))?;
+        let length = vm.get_property_host(receiver, &PKey::String("length".to_string().into()))?;
         let len_num = vm.to_number_value(&length)?;
         if !len_num.is_finite() || len_num <= 0.0 {
           return Ok(Value::Number(-1.0));
@@ -503,7 +511,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
           candidates.sort_unstable();
           candidates.dedup();
           for idx in candidates.into_iter().rev() {
-            let key = PKey::String(u64_to_decimal_string(idx));
+            let key = PKey::String(u64_to_decimal_string(idx).into());
             let element = vm.get_property_host(receiver, &key)?;
             if strict_equal(&element, search) {
               return Ok(Value::Number(idx.to_f64().unwrap_or(f64::NAN)));
@@ -513,7 +521,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
         }
 
         while k >= 0 {
-          let key = PKey::String(u64_to_decimal_string(k as u64));
+          let key = PKey::String(u64_to_decimal_string(k as u64).into());
           if vm.has_property_host(receiver, &key)? {
             let element = vm.get_property_host(receiver, &key)?;
             if env::var("TSBLITZ_TRACE").ok().as_deref() == Some("1") {
@@ -534,29 +542,29 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     )),
   );
   array_proto_map.borrow_mut().properties.insert(
-    PKey::String("join".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PKey::String("join".to_string().into()),
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let undefined = Value::Undefined;
         let receiver = args.first().unwrap_or(&undefined);
         let sep = match args.get(1) {
-          Some(Value::Undefined) | None => ",".to_string(),
+          Some(Value::Undefined) | None => JsString::from(","),
           Some(v) => vm.to_string(v)?,
         };
         let Value::Array(arr, _) = receiver else {
-          return Ok(Value::String(String::new()));
+          return Ok(Value::String(String::new().into()));
         };
-        let mut out = String::new();
+        let mut out = JsStringBuilder::new();
         for (idx, item) in arr.borrow().iter().enumerate() {
           if idx > 0 {
-            out.push_str(&sep);
+            out.push_string(&sep);
           }
           match item {
             Some(Value::Undefined) | Some(Value::Null) | None => {}
-            Some(v) => out.push_str(&vm.to_string(v)?),
+            Some(v) => out.push_string(&vm.to_string(v)?),
           }
         }
-        Ok(Value::String(out))
+        Ok(Value::String(out.finish()))
       }),
       function_proto_map,
     )),
@@ -583,7 +591,8 @@ fn close_iterator(
   vm: &mut Vm,
   iter_obj: &Value,
 ) -> Result<(), crate::errors::RuntimeError> {
-  let return_fn = vm.get_property_host(iter_obj, &PropertyKey::String("return".to_string()))?;
+  let return_fn =
+    vm.get_property_host(iter_obj, &PropertyKey::String("return".to_string().into()))?;
   if Vm::is_callable_value(&return_fn) {
     drop(vm.call_value_with_this(&return_fn, iter_obj, &[])?);
   }
@@ -623,7 +632,7 @@ fn execute_array_from_async_job(
       .borrow_mut()
       .set_prototype_value(Value::Object(Rc::clone(array_proto_for_from_async)));
     props.borrow_mut().properties.insert(
-      PropertyKey::String("length".to_string()),
+      PropertyKey::String("length".to_string().into()),
       array_length_descriptor(len),
     );
     Value::Array(Rc::new(RefCell::new(ArrayData::from(out))), props)
@@ -642,13 +651,16 @@ fn execute_array_from_async_job(
     let mut index = 0usize;
     let iter_result: Result<(), crate::errors::RuntimeError> = (|| {
       loop {
-        let next_fn = vm.get_property_host(&iter_obj, &PropertyKey::String("next".to_string()))?;
+        let next_fn =
+          vm.get_property_host(&iter_obj, &PropertyKey::String("next".to_string().into()))?;
         let result = vm.call_value_with_this(&next_fn, &iter_obj, &[])?;
-        let done_val = vm.get_property_host(&result, &PropertyKey::String("done".to_string()))?;
+        let done_val =
+          vm.get_property_host(&result, &PropertyKey::String("done".to_string().into()))?;
         if vm.to_boolean(&done_val) {
           break;
         }
-        let mut value = vm.get_property_host(&result, &PropertyKey::String("value".to_string()))?;
+        let mut value =
+          vm.get_property_host(&result, &PropertyKey::String("value".to_string().into()))?;
         if !matches!(map_fn, Value::Undefined) {
           let mapped = vm.call_value_with_this(
             map_fn,
@@ -657,23 +669,23 @@ fn execute_array_from_async_job(
           )?;
           value = vm.await_value(mapped)?;
         }
-        let key = Value::String(index.to_string());
+        let key = Value::String(index.to_string().into());
         let mut desc_data = ObjectData::new();
         desc_data.properties.insert(
-          PropertyKey::String("value".to_string()),
-          PropertyDescriptor::data(value),
+          PropertyKey::String("value".to_string().into()),
+          PropertyDescriptor::ordinary_data(value),
         );
         desc_data.properties.insert(
-          PropertyKey::String("writable".to_string()),
-          PropertyDescriptor::data(Value::Bool(true)),
+          PropertyKey::String("writable".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::Bool(true)),
         );
         desc_data.properties.insert(
-          PropertyKey::String("enumerable".to_string()),
-          PropertyDescriptor::data(Value::Bool(true)),
+          PropertyKey::String("enumerable".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::Bool(true)),
         );
         desc_data.properties.insert(
-          PropertyKey::String("configurable".to_string()),
-          PropertyDescriptor::data(Value::Bool(true)),
+          PropertyKey::String("configurable".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::Bool(true)),
         );
         let desc = Value::Object(Rc::new(RefCell::new(desc_data)));
         if !vm.define_property_value(&created, &key, &desc)? {
@@ -688,7 +700,7 @@ fn execute_array_from_async_job(
       return Err(err);
     }
 
-    let len_key = Value::String("length".to_string());
+    let len_key = Value::String("length".to_string().into());
     vm.set_property_host(&created, &len_key, Value::Number(usize_to_f64(index)))?;
   } else {
     let items = collect_iterable_values(vm, source)?;
@@ -699,30 +711,30 @@ fn execute_array_from_async_job(
           vm.call_value_with_this(map_fn, this_arg, &[value, Value::Number(usize_to_f64(i))])?;
         value = vm.await_value(mapped)?;
       }
-      let key = Value::String(i.to_string());
+      let key = Value::String(i.to_string().into());
       let mut desc_data = ObjectData::new();
       desc_data.properties.insert(
-        PropertyKey::String("value".to_string()),
-        PropertyDescriptor::data(value),
+        PropertyKey::String("value".to_string().into()),
+        PropertyDescriptor::ordinary_data(value),
       );
       desc_data.properties.insert(
-        PropertyKey::String("writable".to_string()),
-        PropertyDescriptor::data(Value::Bool(true)),
+        PropertyKey::String("writable".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Bool(true)),
       );
       desc_data.properties.insert(
-        PropertyKey::String("enumerable".to_string()),
-        PropertyDescriptor::data(Value::Bool(true)),
+        PropertyKey::String("enumerable".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Bool(true)),
       );
       desc_data.properties.insert(
-        PropertyKey::String("configurable".to_string()),
-        PropertyDescriptor::data(Value::Bool(true)),
+        PropertyKey::String("configurable".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Bool(true)),
       );
       let desc = Value::Object(Rc::new(RefCell::new(desc_data)));
       if !vm.define_property_value(&created, &key, &desc)? {
         return Err(vm.throw_type_error("Array.fromAsync failed to define element"));
       }
     }
-    let len_key = Value::String("length".to_string());
+    let len_key = Value::String("length".to_string().into());
     vm.set_property_host(&created, &len_key, Value::Number(usize_to_f64(len)))?;
   }
 

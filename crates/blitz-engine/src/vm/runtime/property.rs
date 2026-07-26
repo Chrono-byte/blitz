@@ -25,8 +25,10 @@ impl Vm {
     };
 
     let (target, handler) = proxy_target_and_handler(self, proxy, "isExtensible")?;
-    let trap =
-      self.get_property_value(&handler, &PropertyKey::String("isExtensible".to_string()))?;
+    let trap = self.get_property_value(
+      &handler,
+      &PropertyKey::String("isExtensible".to_string().into()),
+    )?;
     if matches!(trap, Value::Undefined | Value::Null) {
       return self.is_extensible_value(&target);
     }
@@ -53,7 +55,7 @@ impl Vm {
       let (target, handler) = proxy_target_and_handler(self, proxy, "preventExtensions")?;
       let trap = self.get_property_value(
         &handler,
-        &PropertyKey::String("preventExtensions".to_string()),
+        &PropertyKey::String("preventExtensions".to_string().into()),
       )?;
       if matches!(trap, Value::Undefined | Value::Null) {
         return self.prevent_extensions_value(&target);
@@ -87,8 +89,10 @@ impl Vm {
     };
 
     let (target, handler) = proxy_target_and_handler(self, proxy, "getPrototypeOf")?;
-    let trap =
-      self.get_property_value(&handler, &PropertyKey::String("getPrototypeOf".to_string()))?;
+    let trap = self.get_property_value(
+      &handler,
+      &PropertyKey::String("getPrototypeOf".to_string().into()),
+    )?;
     if matches!(trap, Value::Undefined | Value::Null) {
       return self.get_prototype_of_value(&target);
     }
@@ -119,8 +123,10 @@ impl Vm {
   ) -> Result<bool, RuntimeError> {
     if let Value::Proxy(proxy) = obj {
       let (target, handler) = proxy_target_and_handler(self, proxy, "setPrototypeOf")?;
-      let trap =
-        self.get_property_value(&handler, &PropertyKey::String("setPrototypeOf".to_string()))?;
+      let trap = self.get_property_value(
+        &handler,
+        &PropertyKey::String("setPrototypeOf".to_string().into()),
+      )?;
       if matches!(trap, Value::Undefined | Value::Null) {
         return self.set_prototype_of_value(&target, proto);
       }
@@ -228,7 +234,7 @@ impl Vm {
     let (target, handler) = proxy_target_and_handler(self, proxy, "getOwnPropertyDescriptor")?;
     let trap = self.get_property_value(
       &handler,
-      &PropertyKey::String("getOwnPropertyDescriptor".to_string()),
+      &PropertyKey::String("getOwnPropertyDescriptor".to_string().into()),
     )?;
     if matches!(trap, Value::Undefined | Value::Null) {
       return self.get_own_property_value(&target, key);
@@ -302,7 +308,8 @@ impl Vm {
       };
       (proxy.target.clone(), handler)
     };
-    let trap = self.get_property_value(&handler, &PropertyKey::String("ownKeys".to_string()))?;
+    let trap =
+      self.get_property_value(&handler, &PropertyKey::String("ownKeys".to_string().into()))?;
     if matches!(trap, Value::Undefined | Value::Null) {
       return self.own_property_keys_value(&target);
     }
@@ -314,12 +321,15 @@ impl Vm {
     if !trap_result.is_object() {
       return Err(self.throw_type_error("Proxy ownKeys trap must return an object"));
     }
-    let length =
-      self.get_property_value(&trap_result, &PropertyKey::String("length".to_string()))?;
+    let length = self.get_property_value(
+      &trap_result,
+      &PropertyKey::String("length".to_string().into()),
+    )?;
     let length = to_length(self, &length)?;
     let mut trap_keys = Vec::with_capacity(length);
     for index in 0..length {
-      let key = self.get_property_value(&trap_result, &PropertyKey::String(index.to_string()))?;
+      let key =
+        self.get_property_value(&trap_result, &PropertyKey::String(index.to_string().into()))?;
       let key = match key {
         Value::String(name) => PropertyKey::String(name),
         Value::Symbol(id, _) => PropertyKey::Symbol(id),
@@ -464,7 +474,7 @@ impl Vm {
       };
       (proxy.target.clone(), handler)
     };
-    let trap = self.get_property_value(&handler, &PropertyKey::String("get".to_string()))?;
+    let trap = self.get_property_value(&handler, &PropertyKey::String("get".to_string().into()))?;
     if matches!(trap, Value::Undefined | Value::Null) {
       return self.get_property_with_receiver(&target, key, receiver);
     }
@@ -472,7 +482,7 @@ impl Vm {
       return Err(self.throw_type_error("Proxy get trap is not callable"));
     }
     let key_value = match key {
-      PropertyKey::String(name) => Value::String(name.clone()),
+      PropertyKey::String(name) => Value::String(name.clone().into()),
       PropertyKey::Symbol(id) => Value::Symbol(id.clone(), None),
     };
     let trap_result = self.call_with_this(
@@ -522,7 +532,7 @@ impl Vm {
       return Err(RuntimeError::from("expected proxy value"));
     };
     let (target, handler) = proxy_target_and_handler(self, proxy, "set")?;
-    let trap = self.get_property_value(&handler, &PropertyKey::String("set".to_string()))?;
+    let trap = self.get_property_value(&handler, &PropertyKey::String("set".to_string().into()))?;
     if matches!(trap, Value::Undefined | Value::Null) {
       return self.set_property_value(&target, key, value, receiver);
     }
@@ -687,12 +697,12 @@ impl Vm {
     }
     if let Value::String(text) = obj {
       if matches!(key, PropertyKey::String(name) if name == "length") {
-        return Ok(Value::Number(usize_to_f64(text.chars().count())));
+        return Ok(Value::Number(usize_to_f64(text.len())));
       }
       if let Some(i) = array_index_from_key(key)
-        && let Some(ch) = text.chars().nth(i)
+        && let Some(ch) = text.slice(i..i.saturating_add(1))
       {
-        return Ok(Value::String(ch.to_string()));
+        return Ok(Value::String(ch));
       }
     }
     Ok(Value::Undefined)
@@ -854,7 +864,8 @@ impl Vm {
   ) -> Result<bool, RuntimeError> {
     if let Value::Proxy(proxy) = obj {
       let (target, handler) = proxy_target_and_handler(self, proxy, "has")?;
-      let trap = self.get_property_value(&handler, &PropertyKey::String("has".to_string()))?;
+      let trap =
+        self.get_property_value(&handler, &PropertyKey::String("has".to_string().into()))?;
       if matches!(trap, Value::Undefined | Value::Null) {
         return self.has_property_host(&target, key);
       }
@@ -904,8 +915,10 @@ impl Vm {
     let deleted_res: Result<bool, RuntimeError> = match obj {
       Value::Proxy(proxy) => {
         let (target, handler) = proxy_target_and_handler(self, proxy, "deleteProperty")?;
-        let trap =
-          self.get_property_value(&handler, &PropertyKey::String("deleteProperty".to_string()))?;
+        let trap = self.get_property_value(
+          &handler,
+          &PropertyKey::String("deleteProperty".to_string().into()),
+        )?;
         if matches!(trap, Value::Undefined | Value::Null) {
           return self.delete_property_host(&target, key);
         }
@@ -1105,7 +1118,7 @@ impl Vm {
       object: &Value,
       field: &str,
     ) -> Result<Option<Value>, RuntimeError> {
-      let key = PropertyKey::String(field.to_string());
+      let key = PropertyKey::String(field.to_string().into());
       if !vm.has_property_host(object, &key)? {
         return Ok(None);
       }
@@ -1168,8 +1181,10 @@ impl Vm {
   ) -> Result<bool, RuntimeError> {
     if let Value::Proxy(proxy) = obj {
       let (target, handler) = proxy_target_and_handler(self, proxy, "defineProperty")?;
-      let trap =
-        self.get_property_value(&handler, &PropertyKey::String("defineProperty".to_string()))?;
+      let trap = self.get_property_value(
+        &handler,
+        &PropertyKey::String("defineProperty".to_string().into()),
+      )?;
       if matches!(trap, Value::Undefined | Value::Null) {
         return self.define_own_property(&target, key, desc);
       }
@@ -1504,25 +1519,27 @@ impl Vm {
     }
     if let Value::String(text) = obj {
       if matches!(key, PropertyKey::String(name) if name == "length") {
-        return Ok(Value::Number(usize_to_f64(text.chars().count())));
+        return Ok(Value::Number(usize_to_f64(text.len())));
       }
       if let Some(i) = array_index_from_key(key)
-        && let Some(ch) = text.chars().nth(i)
+        && let Some(ch) = text.slice(i..i.saturating_add(1))
       {
-        return Ok(Value::String(ch.to_string()));
+        return Ok(Value::String(ch));
       }
       let string_ctor = self
         .globals
         .borrow()
         .properties
-        .get(&PropertyKey::String("String".to_string()))
+        .get(&PropertyKey::String("String".to_string().into()))
         .and_then(|d| match d {
           PropertyDescriptor::Data { value, .. } => Some(value.clone()),
           _ => None,
         });
       if let Some(string_ctor) = string_ctor
-        && let Ok(proto) =
-          self.get_property_value(&string_ctor, &PropertyKey::String("prototype".to_string()))
+        && let Ok(proto) = self.get_property_value(
+          &string_ctor,
+          &PropertyKey::String("prototype".to_string().into()),
+        )
         && !matches!(proto, Value::Null)
         && let Ok(v) = get_property(&proto, key, 0)
       {
@@ -1534,14 +1551,16 @@ impl Vm {
         .globals
         .borrow()
         .properties
-        .get(&PropertyKey::String("Array".to_string()))
+        .get(&PropertyKey::String("Array".to_string().into()))
         .and_then(|d| match d {
           PropertyDescriptor::Data { value, .. } => Some(value.clone()),
           _ => None,
         });
       if let Some(array_ctor) = array_ctor
-        && let Ok(proto) =
-          self.get_property_value(&array_ctor, &PropertyKey::String("prototype".to_string()))
+        && let Ok(proto) = self.get_property_value(
+          &array_ctor,
+          &PropertyKey::String("prototype".to_string().into()),
+        )
         && !matches!(proto, Value::Null)
         && let Ok(v) = get_property(&proto, key, 0)
       {
@@ -1551,7 +1570,7 @@ impl Vm {
     if let Value::Symbol(_, desc) = obj {
       if matches!(key, PropertyKey::String(name) if name == "description") {
         return Ok(match desc {
-          Some(d) => Value::String(d.clone()),
+          Some(d) => Value::String(d.clone().into()),
           None => Value::Undefined,
         });
       }
@@ -1559,14 +1578,16 @@ impl Vm {
         .globals
         .borrow()
         .properties
-        .get(&PropertyKey::String("Symbol".to_string()))
+        .get(&PropertyKey::String("Symbol".to_string().into()))
         .and_then(|d| match d {
           PropertyDescriptor::Data { value, .. } => Some(value.clone()),
           _ => None,
         });
       if let Some(symbol_ctor) = symbol_ctor
-        && let Ok(proto) =
-          self.get_property_value(&symbol_ctor, &PropertyKey::String("prototype".to_string()))
+        && let Ok(proto) = self.get_property_value(
+          &symbol_ctor,
+          &PropertyKey::String("prototype".to_string().into()),
+        )
         && !matches!(proto, Value::Null)
         && let Ok(v) = get_property(&proto, key, 0)
       {
@@ -1576,8 +1597,11 @@ impl Vm {
     if matches!(key, PropertyKey::String(name) if name == "constructor") {
       let proto = self.get_prototype(obj);
       if !matches!(proto, Value::Null)
-        && let Ok(constructor) =
-          get_property(&proto, &PropertyKey::String("constructor".to_string()), 0)
+        && let Ok(constructor) = get_property(
+          &proto,
+          &PropertyKey::String("constructor".to_string().into()),
+          0,
+        )
         && !matches!(constructor, Value::Undefined)
       {
         return Ok(constructor);
@@ -1770,8 +1794,8 @@ impl Vm {
         a.truncate(new_len);
       }
       props.borrow_mut().properties.insert(
-        PropertyKey::String("length".to_string()),
-        PropertyDescriptor::data(Value::Number(usize_to_f64(new_len))),
+        PropertyKey::String("length".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(new_len))),
       );
       self.bump_object_generation(obj);
       return Ok(());
@@ -1982,8 +2006,8 @@ fn partial_descriptor_to_value(
   let mut object = ObjectData::with_prototype(prototype);
   let mut insert = |name: &str, value: Value| {
     object.properties.insert(
-      PropertyKey::String(name.to_string()),
-      PropertyDescriptor::data(value),
+      PropertyKey::String(name.to_string().into()),
+      PropertyDescriptor::ordinary_data(value),
     );
   };
   if desc.has_value {

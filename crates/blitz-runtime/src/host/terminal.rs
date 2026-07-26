@@ -119,7 +119,7 @@ impl TerminalState {
         let callback = vm.host_root(self.0.borrow().line_callback);
         if let Some(callback) = callback.filter(Value::is_callable)
           && let Err(error) =
-            vm.call_value_with_this(&callback, &Value::Undefined, &[Value::String(line)])
+            vm.call_value_with_this(&callback, &Value::Undefined, &[Value::String(line.into())])
         {
           print_external(self, format!("Input handler error: {error}"));
         }
@@ -200,9 +200,13 @@ pub(super) fn install(
 
   let prompt_state = state.clone();
   let set_prompt: BuiltinFn = Rc::new(move |vm, args| {
-    let prompt = args
-      .get(1)
-      .map_or_else(|| Ok(String::new()), |value| vm.to_string(value))?;
+    let prompt = args.get(1).map_or_else(
+      || Ok(String::new()),
+      |value| {
+        vm.to_string(value)
+          .map(|value| value.to_string_lossy())
+      },
+    )?;
     if let Ok(mut current) = prompt_state.0.borrow().prompt.lock() {
       *current = prompt;
     }
@@ -219,9 +223,13 @@ pub(super) fn install(
 
   let output_state = state.clone();
   let write_line: BuiltinFn = Rc::new(move |vm, args| {
-    let message = args
-      .get(1)
-      .map_or_else(|| Ok(String::new()), |value| vm.to_string(value))?;
+    let message = args.get(1).map_or_else(
+      || Ok(String::new()),
+      |value| {
+        vm.to_string(value)
+          .map(|value| value.to_string_lossy())
+      },
+    )?;
     print_external(&output_state, message);
     Ok(Value::Undefined)
   });
@@ -321,8 +329,8 @@ fn set(
     return;
   };
   properties.borrow_mut().properties.insert(
-    PropertyKey::String(name.to_string()),
-    PropertyDescriptor::data(value),
+    PropertyKey::String(name.to_string().into()),
+    PropertyDescriptor::ordinary_data(value),
   );
 }
 
@@ -347,11 +355,11 @@ mod tests {
       ("stdout", &["write", "writeLine"][..]),
     ] {
       let object = vm
-        .get_property_host(&blitz, &PropertyKey::String(container.to_string()))
+        .get_property_host(&blitz, &PropertyKey::String(container.to_string().into()))
         .unwrap_or_else(|_| panic!("read Blitz.{container}"));
       for method in methods {
         let value = vm
-          .get_property_host(&object, &PropertyKey::String((*method).to_string()))
+          .get_property_host(&object, &PropertyKey::String((*method).to_string().into()))
           .unwrap_or_else(|_| panic!("read Blitz.{container}.{method}"));
         assert!(value.is_callable());
       }
@@ -362,8 +370,8 @@ mod tests {
   fn dispatches_line_to_persistent_handler_with_captured_bindings() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyKey::String("globalThis".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = Vm::new(globals);
     let blitz = object(vm.realm().object_prototype());
@@ -398,7 +406,7 @@ mod tests {
       .expect("dispatch terminal line");
     assert_eq!(
       vm.get_global("sentLine"),
-      Some(Value::String("MSG meow".to_string()))
+      Some(Value::String("MSG meow".to_string().into()))
     );
   }
 
@@ -406,8 +414,8 @@ mod tests {
   fn dispatches_irc_line_handler_after_sibling_socket_callbacks() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     globals.borrow_mut().properties.insert(
-      PropertyKey::String("globalThis".to_string()),
-      PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+      PropertyKey::String("globalThis".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
     let mut vm = Vm::new(Rc::clone(&globals));
     let blitz = object(vm.realm().object_prototype());
@@ -465,7 +473,7 @@ mod tests {
     globals
       .borrow_mut()
       .properties
-      .shift_remove(&PropertyKey::String("handleInput".to_string()));
+      .shift_remove(&PropertyKey::String("handleInput".to_string().into()));
     vm.collect_garbage_prototype();
 
     state
@@ -474,7 +482,7 @@ mod tests {
 
     assert_eq!(
       vm.get_global("sentLine"),
-      Some(Value::String("MSG hello".to_string()))
+      Some(Value::String("MSG hello".to_string().into()))
     );
   }
 }

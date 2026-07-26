@@ -666,7 +666,7 @@ fn install_scheduler(
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String("performance".to_string()),
+      PropertyKey::String("performance".to_string().into()),
       PropertyDescriptor::Data {
         value: performance,
         writable: true,
@@ -687,7 +687,7 @@ fn install_global_function(
     .borrow_mut()
     .properties
     .insert(
-      PropertyKey::String(name.to_string()),
+      PropertyKey::String(name.to_string().into()),
       PropertyDescriptor::Data {
         value: Value::Builtin(function),
         writable: true,
@@ -792,19 +792,19 @@ fn http_primitive(
       );
       return effect_fail(vm, error);
     };
-    let handler = match vm.get_property_host(&options, &PropertyKey::String("handler".to_string()))
-    {
-      Ok(handler) if handler.is_callable() => handler,
-      _ => {
-        let error = http_error(
-          vm,
-          "InvalidOptions",
-          "listen",
-          "HTTP handler must be callable",
-        );
-        return effect_fail(vm, error);
-      }
-    };
+    let handler =
+      match vm.get_property_host(&options, &PropertyKey::String("handler".to_string().into())) {
+        Ok(handler) if handler.is_callable() => handler,
+        _ => {
+          let error = http_error(
+            vm,
+            "InvalidOptions",
+            "listen",
+            "HTTP handler must be callable",
+          );
+          return effect_fail(vm, error);
+        }
+      };
     let Some(state) = open_server.borrow().clone() else {
       let error = http_error(vm, "Transport", "listen", "HTTP host is not initialized");
       return effect_fail(vm, error);
@@ -812,18 +812,18 @@ fn http_primitive(
     match server::serve_method(state)(vm, &[Value::Undefined, options, handler]) {
       Ok(handle) => {
         let local_address = match (
-          vm.get_property_host(&handle, &PropertyKey::String("hostname".to_string())),
-          vm.get_property_host(&handle, &PropertyKey::String("port".to_string())),
+          vm.get_property_host(&handle, &PropertyKey::String("hostname".to_string().into())),
+          vm.get_property_host(&handle, &PropertyKey::String("port".to_string().into())),
         ) {
           (Ok(Value::String(hostname)), Ok(Value::Number(port))) => {
-            Value::String(format!("{hostname}:{}", port.trunc()))
+            Value::String(format!("{hostname}:{}", port.trunc()).into())
           }
-          _ => Value::String(String::new()),
+          _ => Value::String(String::new().into()),
         };
         if let Value::Object(object) = &handle {
           object.borrow_mut().properties.insert(
-            PropertyKey::String("localAddress".to_string()),
-            PropertyDescriptor::data(local_address),
+            PropertyKey::String("localAddress".to_string().into()),
+            PropertyDescriptor::ordinary_data(local_address),
           );
         }
         effect_succeed(vm, handle)
@@ -846,7 +846,8 @@ fn http_primitive(
     let Some(handle) = args.get(1) else {
       return effect_succeed(vm, Value::Undefined);
     };
-    let shutdown = vm.get_property_host(handle, &PropertyKey::String("shutdown".to_string()))?;
+    let shutdown =
+      vm.get_property_host(handle, &PropertyKey::String("shutdown".to_string().into()))?;
     if shutdown.is_callable() {
       let result = vm.call_value_with_this(&shutdown, handle, &[])?;
       let _value = vm.await_value(result)?;
@@ -876,10 +877,18 @@ fn http_error(
   message: &str,
 ) -> Value {
   let error = object(vm.realm().object_prototype());
-  set(&error, "_tag", Value::String("HttpServerError".to_string()));
-  set(&error, "reason", Value::String(reason.to_string()));
-  set(&error, "operation", Value::String(operation.to_string()));
-  set(&error, "message", Value::String(message.to_string()));
+  set(
+    &error,
+    "_tag",
+    Value::String("HttpServerError".to_string().into()),
+  );
+  set(&error, "reason", Value::String(reason.to_string().into()));
+  set(
+    &error,
+    "operation",
+    Value::String(operation.to_string().into()),
+  );
+  set(&error, "message", Value::String(message.to_string().into()));
   error
 }
 
@@ -892,7 +901,7 @@ fn websocket_primitive(
   let connect: BuiltinFn = Rc::new(|vm, args| {
     let options = args.get(1).cloned().unwrap_or(Value::Undefined);
     let complete = args.get(2).cloned().unwrap_or(Value::Undefined);
-    let url = vm.get_property_host(&options, &PropertyKey::String("url".to_string()))?;
+    let url = vm.get_property_host(&options, &PropertyKey::String("url".to_string().into()))?;
     let constructor = vm
       .get_global("WebSocket")
       .ok_or_else(|| RuntimeError::from("WebSocket is not installed"))?;
@@ -965,7 +974,8 @@ fn websocket_primitive(
   let accept: BuiltinFn = Rc::new(|vm, args| {
     let upgrade = args.get(1).cloned().unwrap_or(Value::Undefined);
     let complete = args.get(2).cloned().unwrap_or(Value::Undefined);
-    let socket = vm.get_property_host(&upgrade, &PropertyKey::String("socket".to_string()))?;
+    let socket =
+      vm.get_property_host(&upgrade, &PropertyKey::String("socket".to_string().into()))?;
     if complete.is_callable() {
       complete_success(vm, &complete, socket.clone())?;
     }
@@ -977,7 +987,7 @@ fn websocket_primitive(
     let socket = args.get(1).cloned().unwrap_or(Value::Undefined);
     let message = args.get(2).cloned().unwrap_or(Value::Undefined);
     let complete = args.get(3).cloned().unwrap_or(Value::Undefined);
-    let method = vm.get_property_host(&socket, &PropertyKey::String("send".to_string()))?;
+    let method = vm.get_property_host(&socket, &PropertyKey::String("send".to_string().into()))?;
     match vm.call_value_with_this(&method, &socket, &[message]) {
       Ok(_) if complete.is_callable() => complete_success(vm, &complete, Value::Undefined)?,
       Ok(_) => {}
@@ -994,9 +1004,10 @@ fn websocket_primitive(
     let socket = args.get(1).cloned().unwrap_or(Value::Undefined);
     let options = args.get(2).cloned().unwrap_or(Value::Undefined);
     let complete = args.get(3).cloned().unwrap_or(Value::Undefined);
-    let code = vm.get_property_host(&options, &PropertyKey::String("code".to_string()))?;
-    let reason = vm.get_property_host(&options, &PropertyKey::String("reason".to_string()))?;
-    let method = vm.get_property_host(&socket, &PropertyKey::String("close".to_string()))?;
+    let code = vm.get_property_host(&options, &PropertyKey::String("code".to_string().into()))?;
+    let reason =
+      vm.get_property_host(&options, &PropertyKey::String("reason".to_string().into()))?;
+    let method = vm.get_property_host(&socket, &PropertyKey::String("close".to_string().into()))?;
     let arguments = if matches!(code, Value::Undefined) {
       Vec::new()
     } else if matches!(reason, Value::Undefined) {
@@ -1030,16 +1041,17 @@ fn websocket_primitive(
         let source = args.get(1).cloned().unwrap_or(Value::Undefined);
         let event = object(vm.realm().object_prototype());
         if event_type == "message" {
-          let data = vm.get_property_host(&source, &PropertyKey::String("data".to_string()))?;
+          let data =
+            vm.get_property_host(&source, &PropertyKey::String("data".to_string().into()))?;
           let kind = if matches!(data, Value::String(_)) {
             "text"
           } else {
             "binary"
           };
-          set(&event, "type", Value::String(kind.to_string()));
+          set(&event, "type", Value::String(kind.to_string().into()));
           set(&event, "data", data);
         } else {
-          set(&event, "type", Value::String(event_type.clone()));
+          set(&event, "type", Value::String(event_type.clone().into()));
           if event_type == "error" {
             set(&event, "error", source);
           }
@@ -1064,7 +1076,10 @@ fn websocket_primitive(
 
   let cancel: BuiltinFn = Rc::new(|vm, args| {
     let operation = args.get(1).cloned().unwrap_or(Value::Undefined);
-    let cancel = vm.get_property_host(&operation, &PropertyKey::String("__cancel".to_string()))?;
+    let cancel = vm.get_property_host(
+      &operation,
+      &PropertyKey::String("__cancel".to_string().into()),
+    )?;
     if cancel.is_callable() {
       vm.call_value_with_this(&cancel, &operation, &[])?;
     }
@@ -1083,7 +1098,7 @@ fn set_socket_handler(
   property: &str,
   value: Value,
 ) -> Result<(), RuntimeError> {
-  vm.set_property_host(socket, &Value::String(property.to_string()), value)?;
+  vm.set_property_host(socket, &Value::String(property.to_string().into()), value)?;
   Ok(())
 }
 
@@ -1106,10 +1121,18 @@ fn complete_failure(
   message: &str,
 ) -> Result<(), RuntimeError> {
   let error = object(vm.realm().object_prototype());
-  set(&error, "_tag", Value::String("WebSocketError".to_string()));
-  set(&error, "reason", Value::String("Host".to_string()));
-  set(&error, "operation", Value::String(operation.to_string()));
-  set(&error, "message", Value::String(message.to_string()));
+  set(
+    &error,
+    "_tag",
+    Value::String("WebSocketError".to_string().into()),
+  );
+  set(&error, "reason", Value::String("Host".to_string().into()));
+  set(
+    &error,
+    "operation",
+    Value::String(operation.to_string().into()),
+  );
+  set(&error, "message", Value::String(message.to_string().into()));
   let result = object(vm.realm().object_prototype());
   set(&result, "ok", Value::Bool(false));
   set(&result, "error", error);
@@ -1126,9 +1149,13 @@ fn terminal_primitive(
   for name in ["write", "writeLine"] {
     let state = Rc::clone(&terminal);
     let method: BuiltinFn = Rc::new(move |vm, args| {
-      let text = args
-        .get(1)
-        .map_or_else(|| Ok(String::new()), |value| vm.to_string(value))?;
+      let text = args.get(1).map_or_else(
+        || Ok(String::new()),
+        |value| {
+          vm.to_string(value)
+            .map(|value| value.to_string_lossy())
+        },
+      )?;
       let complete = args.get(2).cloned().unwrap_or(Value::Undefined);
       if let Some(terminal) = state.borrow().clone() {
         terminal.write(text);
@@ -1143,9 +1170,13 @@ fn terminal_primitive(
 
   let prompt_state = Rc::clone(&terminal);
   let set_prompt: BuiltinFn = Rc::new(move |vm, args| {
-    let prompt = args
-      .get(1)
-      .map_or_else(|| Ok(String::new()), |value| vm.to_string(value))?;
+    let prompt = args.get(1).map_or_else(
+      || Ok(String::new()),
+      |value| {
+        vm.to_string(value)
+          .map(|value| value.to_string_lossy())
+      },
+    )?;
     let complete = args.get(2).cloned().unwrap_or(Value::Undefined);
     if let Some(terminal) = prompt_state.borrow().clone() {
       terminal.set_prompt(prompt);
@@ -1171,14 +1202,14 @@ fn terminal_primitive(
     let callback_root = vm.create_host_root(on_event);
     let line: BuiltinFn = Rc::new(move |vm, args| {
       let event = object(vm.realm().object_prototype());
-      set(&event, "type", Value::String("line".to_string()));
+      set(&event, "type", Value::String("line".to_string().into()));
       set(
         &event,
         "line",
         args
           .get(1)
           .cloned()
-          .unwrap_or(Value::String(String::new())),
+          .unwrap_or(Value::String(String::new().into())),
       );
       if let Some(callback) = vm.host_root(callback_root) {
         vm.call_value_with_this(&callback, &Value::Undefined, &[event])?;
@@ -1188,7 +1219,7 @@ fn terminal_primitive(
     let close_root = callback_root;
     let close: BuiltinFn = Rc::new(move |vm, _args| {
       let event = object(vm.realm().object_prototype());
-      set(&event, "type", Value::String("close".to_string()));
+      set(&event, "type", Value::String("close".to_string().into()));
       if let Some(callback) = vm.host_root(close_root) {
         vm.call_value_with_this(&callback, &Value::Undefined, &[event])?;
       }
@@ -1223,7 +1254,10 @@ fn terminal_primitive(
 
   let cancel: BuiltinFn = Rc::new(|vm, args| {
     let operation = args.get(1).cloned().unwrap_or(Value::Undefined);
-    let cancel = vm.get_property_host(&operation, &PropertyKey::String("__cancel".to_string()))?;
+    let cancel = vm.get_property_host(
+      &operation,
+      &PropertyKey::String("__cancel".to_string().into()),
+    )?;
     if cancel.is_callable() {
       vm.call_value_with_this(&cancel, &operation, &[])?;
     }
@@ -1352,7 +1386,7 @@ fn set(
 ) {
   if let Value::Object(object) = target {
     object.borrow_mut().properties.insert(
-      PropertyKey::String(name.to_string()),
+      PropertyKey::String(name.to_string().into()),
       PropertyDescriptor::Data {
         value,
         writable: false,
@@ -1398,9 +1432,10 @@ fn transport_options(
   vm: &mut Vm,
   value: &Value,
 ) -> Result<AppTransportOptions, RuntimeError> {
-  let hostname_value = vm.get_property_host(value, &PropertyKey::String("hostname".to_string()))?;
+  let hostname_value =
+    vm.get_property_host(value, &PropertyKey::String("hostname".to_string().into()))?;
   let hostname = vm.to_string(&hostname_value)?;
-  let port_value = vm.get_property_host(value, &PropertyKey::String("port".to_string()))?;
+  let port_value = vm.get_property_host(value, &PropertyKey::String("port".to_string().into()))?;
   let port_number = vm.to_number_value(&port_value)?.trunc();
   if !port_number.is_finite() || !(0.0_f64..=f64::from(u16::MAX)).contains(&port_number) {
     return Err(RuntimeError::from("application transport port is invalid"));
@@ -1409,10 +1444,11 @@ fn transport_options(
     .to_string()
     .parse::<u16>()
     .map_err(|_| RuntimeError::from("application transport port is invalid"))?;
-  let rpc_path_value = vm.get_property_host(value, &PropertyKey::String("rpcPath".to_string()))?;
-  let rpc_path = vm.to_string(&rpc_path_value)?;
+  let rpc_path_value =
+    vm.get_property_host(value, &PropertyKey::String("rpcPath".to_string().into()))?;
+  let rpc_path = vm.to_string(&rpc_path_value)?.to_string_lossy();
   Ok(AppTransportOptions {
-    hostname,
+    hostname: hostname.to_string_lossy(),
     port,
     rpc_path,
   })
@@ -1424,9 +1460,13 @@ fn serve_error_value(
   message: String,
 ) -> Value {
   let error = object(vm.realm().object_prototype());
-  set(&error, "_tag", Value::String("ServeError".to_string()));
-  set(&error, "reason", Value::String(reason.to_string()));
-  set(&error, "message", Value::String(message));
+  set(
+    &error,
+    "_tag",
+    Value::String("ServeError".to_string().into()),
+  );
+  set(&error, "reason", Value::String(reason.to_string().into()));
+  set(&error, "message", Value::String(message.into()));
   error
 }
 
@@ -1517,7 +1557,7 @@ fn resource_value(
   set(
     &server,
     "localAddr",
-    Value::String(resource.local_addr().to_string()),
+    Value::String(resource.local_addr().to_string().into()),
   );
   let close_resource = Arc::clone(&resource);
   let close: BuiltinFn = Rc::new(move |vm, _args| {
@@ -1534,7 +1574,10 @@ fn close_app_server_method() -> BuiltinFn {
     let server = args
       .get(1)
       .ok_or_else(|| RuntimeError::from("closeAppServer requires a server"))?;
-    let close = vm.get_property_host(server, &PropertyKey::String("__blitz_close".to_string()))?;
+    let close = vm.get_property_host(
+      server,
+      &PropertyKey::String("__blitz_close".to_string().into()),
+    )?;
     let thunk = match close {
       Value::Builtin(close) => close,
       _ => return Err(RuntimeError::from("invalid application server resource")),
@@ -1548,7 +1591,10 @@ fn await_shutdown_method() -> BuiltinFn {
     let server = args
       .get(1)
       .ok_or_else(|| RuntimeError::from("awaitShutdown requires a server"))?;
-    let close = vm.get_property_host(server, &PropertyKey::String("__blitz_close".to_string()))?;
+    let close = vm.get_property_host(
+      server,
+      &PropertyKey::String("__blitz_close".to_string().into()),
+    )?;
     if !matches!(close, Value::Builtin(_)) {
       return Err(RuntimeError::from("invalid application server resource"));
     }
@@ -1690,7 +1736,7 @@ mod tests {
       !globals
         .borrow()
         .properties
-        .contains_key(&PropertyKey::String("__blitz_host_v1".to_string()))
+        .contains_key(&PropertyKey::String("__blitz_host_v1".to_string().into()))
     );
   }
 
@@ -1875,7 +1921,7 @@ mod tests {
 
     assert_eq!(
       vm.get_global("compatTransport"),
-      Some(Value::String("tcp".to_string()))
+      Some(Value::String("tcp".to_string().into()))
     );
     assert_eq!(vm.get_global("compatPort"), Some(Value::Bool(true)));
     assert_eq!(vm.get_global("compatShutdown"), Some(Value::Bool(true)));
@@ -2231,13 +2277,13 @@ mod tests {
           .run_once(&mut vm)
           .expect("drive client event")
       );
-      if vm.get_global("clientResult") == Some(Value::String("echo:hello".to_string())) {
+      if vm.get_global("clientResult") == Some(Value::String("echo:hello".to_string().into())) {
         break;
       }
     }
     assert_eq!(
       vm.get_global("clientResult"),
-      Some(Value::String("echo:hello".to_string()))
+      Some(Value::String("echo:hello".to_string().into()))
     );
     runtime
       .shutdown(&mut vm)

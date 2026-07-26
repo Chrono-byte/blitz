@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use crate::runtime_utils::{
   builtin_object, collect_iterable_values, promise_constructor_matches, reject_pending_promise,
-  resolve_promise_with_value, static_builtin_arg_offset,
+  resolve_promise_with_value, set_builtin_length, set_builtin_name, static_builtin_arg_offset,
 };
 use crate::value::{BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value};
 use crate::vm::Vm;
@@ -56,7 +56,7 @@ pub(crate) fn create_promise_intrinsics(
           let reason = vm
             .last_uncaught_exception
             .take()
-            .unwrap_or(Value::String(format!("{}", err)));
+            .unwrap_or(Value::String(format!("{}", err).into()));
           reject_pending_promise(vm, &promise_for_resolve, reason);
         }
         Ok(Value::Undefined)
@@ -87,7 +87,7 @@ pub(crate) fn create_promise_intrinsics(
         let reason = vm
           .last_uncaught_exception
           .take()
-          .unwrap_or(Value::String(format!("{}", err)));
+          .unwrap_or(Value::String(format!("{}", err).into()));
         reject_pending_promise(vm, &promise, reason);
       }
 
@@ -96,18 +96,20 @@ pub(crate) fn create_promise_intrinsics(
   };
 
   promise_ctor_map.borrow_mut().properties.insert(
-    PKey::String("prototype".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&promise_proto_map))),
+    PKey::String("prototype".to_string().into()),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&promise_proto_map))),
   );
   let promise_ctor_val = Value::BuiltinObject(promise_ctor_fn, Rc::clone(&promise_ctor_map));
+  set_builtin_name(&promise_ctor_val, "Promise");
+  set_builtin_length(&promise_ctor_val, 1.0);
 
   promise_proto_map.borrow_mut().properties.insert(
-    PKey::String("constructor".to_string()),
-    PropertyDescriptor::data(promise_ctor_val.clone()),
+    PKey::String("constructor".to_string().into()),
+    PropertyDescriptor::builtin_data(promise_ctor_val.clone()),
   );
   promise_proto_map.borrow_mut().properties.insert(
-    PKey::String("then".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PKey::String("then".to_string().into()),
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let undefined = Value::Undefined;
         let this = args.first().unwrap_or(&undefined);
@@ -154,7 +156,7 @@ pub(crate) fn create_promise_intrinsics(
                     let reason = vm
                       .last_uncaught_exception
                       .take()
-                      .unwrap_or(Value::String(format!("{}", err)));
+                      .unwrap_or(Value::String(format!("{}", err).into()));
                     reject_pending_promise(vm, &res_p_f, reason);
                   }
                 }
@@ -177,7 +179,7 @@ pub(crate) fn create_promise_intrinsics(
                     let reject_reason = vm
                       .last_uncaught_exception
                       .take()
-                      .unwrap_or(Value::String(format!("{}", err)));
+                      .unwrap_or(Value::String(format!("{}", err).into()));
                     reject_pending_promise(vm, &res_p_r, reject_reason);
                   }
                 }
@@ -206,7 +208,7 @@ pub(crate) fn create_promise_intrinsics(
                       let reason = vm
                         .last_uncaught_exception
                         .take()
-                        .unwrap_or(Value::String(format!("{}", err)));
+                        .unwrap_or(Value::String(format!("{}", err).into()));
                       reject_pending_promise(vm, &res_p_f, reason);
                     }
                   }
@@ -234,7 +236,7 @@ pub(crate) fn create_promise_intrinsics(
                       let reject_reason = vm
                         .last_uncaught_exception
                         .take()
-                        .unwrap_or(Value::String(format!("{}", err)));
+                        .unwrap_or(Value::String(format!("{}", err).into()));
                       reject_pending_promise(vm, &res_p_r, reject_reason);
                     }
                   }
@@ -253,14 +255,15 @@ pub(crate) fn create_promise_intrinsics(
     )),
   );
   promise_proto_map.borrow_mut().properties.insert(
-    PKey::String("catch".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PKey::String("catch".to_string().into()),
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let undefined = Value::Undefined;
         let this = args.first().unwrap_or(&undefined);
         let on_rejected = args.get(1).cloned().unwrap_or(Value::Undefined);
         if let Value::Promise(_) = this {
-          let then_method = vm.get_property_host(this, &PropertyKey::String("then".to_string()))?;
+          let then_method =
+            vm.get_property_host(this, &PropertyKey::String("then".to_string().into()))?;
           vm.call_value_with_this(&then_method, this, &[Value::Undefined, on_rejected])
         } else {
           Err(vm.throw_type_error("Promise.prototype.catch called on non-promise"))
@@ -271,8 +274,8 @@ pub(crate) fn create_promise_intrinsics(
   );
 
   promise_ctor_map.borrow_mut().properties.insert(
-    PKey::String("resolve".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PKey::String("resolve".to_string().into()),
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Promise");
         let undefined = Value::Undefined;
@@ -309,7 +312,7 @@ pub(crate) fn create_promise_intrinsics(
           let reason = vm
             .last_uncaught_exception
             .take()
-            .unwrap_or(Value::String(format!("{}", err)));
+            .unwrap_or(Value::String(format!("{}", err).into()));
           if let Value::Promise(promise_state) = &promise {
             reject_pending_promise(vm, promise_state, reason);
           }
@@ -321,8 +324,8 @@ pub(crate) fn create_promise_intrinsics(
   );
 
   promise_ctor_map.borrow_mut().properties.insert(
-    PKey::String("all".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PKey::String("all".to_string().into()),
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Promise");
         let undefined = Value::Undefined;
@@ -358,7 +361,7 @@ pub(crate) fn create_promise_intrinsics(
           Err(err) => {
             let reason = vm
               .create_intrinsic_error("TypeError", &format!("Promise.all iterable error: {}", err))
-              .unwrap_or(Value::String(format!("{}", err)));
+              .unwrap_or(Value::String(format!("{}", err).into()));
             drop(vm.call_value_with_this(&reject_fn, &Value::Undefined, &[reason]));
             return Ok(promise);
           }
@@ -376,7 +379,8 @@ pub(crate) fn create_promise_intrinsics(
         let settled = Rc::new(RefCell::new(false));
 
         for (idx, item) in items.into_iter().enumerate() {
-          let then_val = vm.get_property_host(&item, &PropertyKey::String("then".to_string()))?;
+          let then_val =
+            vm.get_property_host(&item, &PropertyKey::String("then".to_string().into()))?;
           if Vm::is_callable_value(&then_val) {
             let results_rc = Rc::clone(&results);
             let remaining_rc = Rc::clone(&remaining);
@@ -426,7 +430,7 @@ pub(crate) fn create_promise_intrinsics(
               let reason = vm
                 .last_uncaught_exception
                 .take()
-                .unwrap_or(Value::String(format!("{}", err)));
+                .unwrap_or(Value::String(format!("{}", err).into()));
               drop(vm.call_value_with_this(&reject_fn, &Value::Undefined, &[reason]));
               return Ok(promise);
             }
@@ -451,8 +455,8 @@ pub(crate) fn create_promise_intrinsics(
   );
 
   promise_ctor_map.borrow_mut().properties.insert(
-    PKey::String("reject".to_string()),
-    PropertyDescriptor::data(builtin_object(
+    PKey::String("reject".to_string().into()),
+    PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
         let off = static_builtin_arg_offset(vm, args, "Promise");
         let undefined = Value::Undefined;
@@ -484,7 +488,7 @@ pub(crate) fn create_promise_intrinsics(
           let reject_reason = vm
             .last_uncaught_exception
             .take()
-            .unwrap_or(Value::String(format!("{}", err)));
+            .unwrap_or(Value::String(format!("{}", err).into()));
           if let Value::Promise(promise_state) = &promise {
             reject_pending_promise(vm, promise_state, reject_reason);
           }

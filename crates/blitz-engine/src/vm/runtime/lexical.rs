@@ -86,7 +86,7 @@ impl Vm {
     }
     Ok(
       self
-        .get_property_host(&unscopables, &PropertyKey::String(name.to_string()))?
+        .get_property_host(&unscopables, &PropertyKey::String(name.to_string().into()))?
         .is_truthy(),
     )
   }
@@ -110,7 +110,7 @@ impl Vm {
         return Ok(Some(value));
       }
       if let Some(binding_object) = binding_object {
-        let key = PropertyKey::String(name.to_string());
+        let key = PropertyKey::String(name.to_string().into());
         let found = self.has_property_host(&binding_object, &key)?;
         if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
           return Ok(Some(self.get_property_host(&binding_object, &key)?));
@@ -229,10 +229,10 @@ impl Vm {
       }
       if let Some(binding_object) = binding_object {
         let name_str = name.to_string();
-        let key = PropertyKey::String(name_str.clone());
+        let key = PropertyKey::String(name_str.clone().into());
         let found = self.has_property_host(&binding_object, &key)?;
         if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
-          drop(self.set_property_host(&binding_object, &Value::String(name_str), value)?);
+          drop(self.set_property_host(&binding_object, &Value::String(name_str.into()), value)?);
           return Ok(true);
         }
       }
@@ -258,10 +258,10 @@ impl Vm {
       };
       if let Some(binding_object) = binding_object {
         let name_str = name.to_string();
-        let key = PropertyKey::String(name_str.clone());
+        let key = PropertyKey::String(name_str.clone().into());
         let found = self.has_property_host(&binding_object, &key)?;
         if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
-          drop(self.set_property_host(&binding_object, &Value::String(name_str), value)?);
+          drop(self.set_property_host(&binding_object, &Value::String(name_str.into()), value)?);
           self.bump_object_generation(&binding_object);
           return Ok(true);
         }
@@ -320,23 +320,27 @@ impl Vm {
         .and_then(Clone::clone)
         .is_some()
     {
-      let key = PropertyKey::String(name.to_string());
+      let key = PropertyKey::String(name.to_string().into());
       self
         .globals
         .borrow_mut()
         .properties
-        .insert(key, PropertyDescriptor::data(value));
+        .insert(key, PropertyDescriptor::ordinary_data(value));
     }
 
     if let Some(arguments_object) = self.current_arguments_object.clone()
       && slot < self.current_arguments_mapped_count
     {
-      let key = PropertyKey::String(slot.to_string());
+      let key = PropertyKey::String(slot.to_string().into());
       if let Some((PropertyDescriptor::Data { writable: true, .. }, _)) =
         self.lookup_property_descriptor(&arguments_object, &key, 0)?
       {
         let value = self.locals[slot].borrow().clone();
-        drop(self.set_property_host(&arguments_object, &Value::String(slot.to_string()), value)?);
+        drop(self.set_property_host(
+          &arguments_object,
+          &Value::String(slot.to_string().into()),
+          value,
+        )?);
         self.bump_object_generation(&arguments_object);
       }
     }
@@ -349,12 +353,12 @@ impl Vm {
     name: &str,
     value: &Value,
   ) {
-    let key = PropertyKey::String(name.to_string());
+    let key = PropertyKey::String(name.to_string().into());
     self
       .globals
       .borrow_mut()
       .properties
-      .insert(key, PropertyDescriptor::data(value.clone()));
+      .insert(key, PropertyDescriptor::ordinary_data(value.clone()));
     for frame in self.call_stack.iter_mut() {
       if let Some(names) = &frame.slot_names
         && let Some(slot) = names

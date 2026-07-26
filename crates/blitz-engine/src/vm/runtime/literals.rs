@@ -26,7 +26,7 @@ impl Vm {
     let arr_rc = Rc::new(RefCell::new(ArrayData::from(elems)));
     let props: Rc<RefCell<ObjectData>> = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     props.borrow_mut().properties.insert(
-      PropertyKey::String("length".to_string()),
+      PropertyKey::String("length".to_string().into()),
       array_length_descriptor(n),
     );
 
@@ -34,13 +34,16 @@ impl Vm {
       .globals
       .borrow()
       .properties
-      .get(&PropertyKey::String("Array".to_string()))
+      .get(&PropertyKey::String("Array".to_string().into()))
       .and_then(|d| match d {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         _ => None,
       })
-      && let Ok(proto_val) =
-        get_property(&array_val, &PropertyKey::String("prototype".to_string()), 0)
+      && let Ok(proto_val) = get_property(
+        &array_val,
+        &PropertyKey::String("prototype".to_string().into()),
+        0,
+      )
       && !matches!(proto_val, Value::Null)
     {
       props.borrow_mut().set_prototype_value(proto_val);
@@ -73,7 +76,7 @@ impl Vm {
       let key_val = pair[0].clone();
       let value = pair[1].clone();
       let key = self.to_property_key(&key_val)?;
-      entries.push((key, PropertyDescriptor::data(value)));
+      entries.push((key, PropertyDescriptor::ordinary_data(value)));
     }
     let mut map = indexmap::IndexMap::with_capacity(n);
     for (key, desc) in entries {
@@ -85,14 +88,14 @@ impl Vm {
       .globals
       .borrow()
       .properties
-      .get(&PropertyKey::String("Object".to_string()))
+      .get(&PropertyKey::String("Object".to_string().into()))
       .and_then(|d| match d {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         _ => None,
       })
       && let Ok(proto_val) = get_property(
         &object_val,
-        &PropertyKey::String("prototype".to_string()),
+        &PropertyKey::String("prototype".to_string().into()),
         0,
       )
       && !matches!(proto_val, Value::Null)
@@ -131,14 +134,14 @@ impl Vm {
       .globals
       .borrow()
       .properties
-      .get(&PropertyKey::String("Function".to_string()))
+      .get(&PropertyKey::String("Function".to_string().into()))
       .and_then(|d| match d {
         PropertyDescriptor::Data { value, .. } => Some(value.clone()),
         _ => None,
       })
       && let Ok(function_proto) = get_property(
         &function_val,
-        &PropertyKey::String("prototype".to_string()),
+        &PropertyKey::String("prototype".to_string().into()),
         0,
       )
       && !matches!(function_proto, Value::Null)
@@ -229,16 +232,16 @@ impl Vm {
       && let Some(home_object) = self.current_method_home_object()
     {
       props.borrow_mut().properties.insert(
-        PropertyKey::String("[[HomeObject]]".to_string()),
-        PropertyDescriptor::data(home_object),
+        PropertyKey::String("[[HomeObject]]".to_string().into()),
+        PropertyDescriptor::ordinary_data(home_object),
       );
     }
 
     // Set the `name` property
     props.borrow_mut().properties.insert(
-      PropertyKey::String("name".to_string()),
+      PropertyKey::String("name".to_string().into()),
       PropertyDescriptor::Data {
-        value: Value::String(closure_proto.name.clone()),
+        value: Value::String(closure_proto.name.clone().into()),
         writable: false,
         enumerable: false,
         configurable: true,
@@ -247,7 +250,7 @@ impl Vm {
 
     // Set the `length` property
     props.borrow_mut().properties.insert(
-      PropertyKey::String("length".to_string()),
+      PropertyKey::String("length".to_string().into()),
       PropertyDescriptor::Data {
         value: Value::Number(usize_to_f64(closure_proto.arity)),
         writable: false,
@@ -274,7 +277,7 @@ impl Vm {
 
       if let Value::Object(proto_obj_map) = &proto_obj {
         proto_obj_map.borrow_mut().properties.insert(
-          PropertyKey::String("constructor".to_string()),
+          PropertyKey::String("constructor".to_string().into()),
           PropertyDescriptor::Data {
             value: closure.clone(),
             writable: true,
@@ -285,7 +288,7 @@ impl Vm {
       }
 
       props.borrow_mut().properties.insert(
-        PropertyKey::String("prototype".to_string()),
+        PropertyKey::String("prototype".to_string().into()),
         PropertyDescriptor::Data {
           value: proto_obj,
           writable: true,
@@ -310,7 +313,7 @@ impl Vm {
         && let Some(PropertyDescriptor::Data { value, .. }) = props
           .borrow()
           .properties
-          .get(&PropertyKey::String("prototype".to_string()))
+          .get(&PropertyKey::String("prototype".to_string().into()))
         && let Value::Object(proto_obj_map) = value
       {
         eprintln!(

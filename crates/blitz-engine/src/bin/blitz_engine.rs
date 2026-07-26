@@ -56,8 +56,8 @@ fn main() -> Result<(), blitz::errors::Error> {
 fn engine_globals() -> Rc<RefCell<ObjectData>> {
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
-    PropertyKey::String("globalThis".to_string()),
-    PropertyDescriptor::data(Value::Object(Rc::clone(&globals))),
+    PropertyKey::String("globalThis".to_string().into()),
+    PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
   );
   globals
 }
