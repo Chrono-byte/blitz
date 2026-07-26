@@ -7,16 +7,17 @@ use crate::runtime_utils::strict_equal;
 use crate::typecheck;
 use crate::value::ArrayData;
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-fn test262_harness_path(name: &str) -> PathBuf {
-  Path::new(env!("CARGO_MANIFEST_DIR"))
-    .join("..")
-    .join("..")
-    .join("test262")
-    .join("harness")
-    .join(name)
+fn test262_harness_source(name: &str) -> &'static str {
+  match name {
+    "assert.js" => include_str!("../../../../../../test262/harness/assert.js"),
+    "sta.js" => include_str!("../../../../../../test262/harness/sta.js"),
+    "propertyHelper.js" => {
+      include_str!("../../../../../../test262/harness/propertyHelper.js")
+    }
+    _ => panic!("unknown Test262 harness: {name}"),
+  }
 }
 
 fn test_globals() -> Rc<RefCell<ObjectData>> {
@@ -3330,9 +3331,8 @@ mod test {
     let mut vm = Vm::new(globals);
 
     for harness_name in ["assert.js", "sta.js"] {
-      let path = test262_harness_path(harness_name);
-      let src = std::fs::read_to_string(&path).expect("read harness");
-      let session = Parser::parse_source(&src).expect("parse harness");
+      let src = test262_harness_source(harness_name);
+      let session = Parser::parse_source(src).expect("parse harness");
       let program = session.program();
       let chunk = compiler::compile(program, session.source()).expect("compile harness");
       vm.run(chunk).expect("run harness");
@@ -4118,9 +4118,8 @@ mod test {
     let mut vm = Vm::new(globals);
 
     for harness_name in ["assert.js", "sta.js", "propertyHelper.js"] {
-      let path = test262_harness_path(harness_name);
-      let src = std::fs::read_to_string(&path).expect("read harness");
-      let session = Parser::parse_source(&src).expect("parse harness");
+      let src = test262_harness_source(harness_name);
+      let session = Parser::parse_source(src).expect("parse harness");
       let program = session.program();
       let chunk = compiler::compile_oxc(program, session.source()).expect("compile harness");
       vm.run(chunk).expect("run harness");
