@@ -58,11 +58,11 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
       }
       match vm.run_nested(chunk, true) {
         Ok(value) => Ok(value),
-        Err(err) => {
-          if let Some(thrown) = vm.last_uncaught_exception.take() {
+        Err(failure) => {
+          if let Some(thrown) = failure.thrown {
             Err(vm.throw_exception(thrown))
           } else {
-            Err(err)
+            Err(failure.error)
           }
         }
       }

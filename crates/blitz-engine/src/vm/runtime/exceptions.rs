@@ -13,11 +13,11 @@ impl Vm {
     &mut self,
     thrown: Value,
   ) -> Result<(), RuntimeError> {
-    let handler = match self.handlers.pop() {
+    let handler = match self.exceptions.handlers.pop() {
       Some(h) => h,
       None => {
-        self.pending_exception_frame_count = None;
-        self.last_uncaught_exception = Some(thrown.clone());
+        self.exceptions.pending_frame_count = None;
+        self.exceptions.last_uncaught = Some(thrown.clone());
         return Err(match thrown {
           Value::String(s) => RuntimeError::from(format!("Uncaught: {}", s)),
           other => RuntimeError::from(format!(
@@ -28,35 +28,24 @@ impl Vm {
       }
     };
 
-    let mut restored_strict_mode = None;
-    while self.call_stack.len() > handler.frame_count {
-      if let Some(frame) = self.call_stack.pop() {
-        self.chunk = frame.chunk;
-        self.ip = frame.ip;
-        self.unwound_risc_state = frame.risc_state;
-        self.locals = frame.locals;
-        self.this_value = frame.this_value;
-        self.current_closure_env = frame.closure_env;
-        self.current_slot_types = frame.slot_types;
-        self.current_slot_names = frame.slot_names;
-        self.current_slot_immutable = frame.slot_immutable;
-        self.current_slot_sloppy_immutable_silent = frame.slot_sloppy_immutable_silent;
-        self.current_arguments_object = frame.arguments_object;
-        self.current_arguments_mapped_count = frame.arguments_mapped_count;
-        restored_strict_mode = Some(frame.is_strict);
+    while self.execution.call_stack.len() > handler.frame_count {
+      if let Some(frame) = self.execution.call_stack.pop() {
+        self.exceptions.unwound_risc_state = frame.risc_state;
+        self.execution.active = frame.context;
       }
-    }
-    if let Some(strict) = restored_strict_mode {
-      self.current_strict_mode = strict;
     }
     self.prune_stale_handlers();
 
-    self.pending_exception_frame_count = Some(handler.frame_count);
-    self.chunk = handler.chunk;
-    self.ip = handler.handler_ip;
-    self.lexical_env = handler.saved_lexical_env;
+    self.exceptions.pending_frame_count = Some(handler.frame_count);
+    self.execution.active.chunk = handler.chunk;
+    self.execution.active.ip = handler.handler_ip;
+    self.execution.active.lexical_env = handler.saved_lexical_env;
 
-    self.locals.truncate(handler.saved_locals_len);
+    self
+      .execution
+      .active
+      .locals
+      .truncate(handler.saved_locals_len);
 
     Ok(())
   }
@@ -68,12 +57,12 @@ impl Vm {
   ) -> Result<(), RuntimeError> {
     match self.unwind_to_handler(thrown.clone()) {
       Ok(()) => {
-        self.pending_exception = Some(thrown);
+        self.exceptions.pending = Some(thrown);
         Ok(())
       }
       Err(err) => {
-        self.pending_exception = None;
-        self.pending_exception_frame_count = None;
+        self.exceptions.pending = None;
+        self.exceptions.pending_frame_count = None;
         Err(err)
       }
     }
@@ -165,6 +154,7 @@ impl Vm {
     message: &str,
   ) -> Result<Value, RuntimeError> {
     let ctor = self
+      .realm_state
       .realm
       .get_intrinsic_constructor(name)
       .or_else(|| self.get_global(name))

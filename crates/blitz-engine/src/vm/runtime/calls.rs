@@ -11,7 +11,8 @@ use crate::value::{
 use crate::vm::Vm;
 use crate::vm::runtime::execution::get_property;
 use crate::vm::state::{
-  Frame, GeneratorRunner, LOCALS_INITIAL_CAPACITY, RiscExecutionState, RiscRunOutcome,
+  ArgumentsState, ExecutionContext, Frame, GeneratorRunner, LOCALS_INITIAL_CAPACITY,
+  RiscExecutionState, RiscRunOutcome, SlotMetadata,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -23,7 +24,7 @@ impl Vm {
     runner: &mut GeneratorRunner,
     fallback: RuntimeError,
   ) -> RuntimeError {
-    let Some(thrown) = runner.vm.last_uncaught_exception.take() else {
+    let Some(thrown) = runner.vm.exceptions.last_uncaught.take() else {
       return fallback;
     };
     self
@@ -111,8 +112,8 @@ impl Vm {
     let mut child = self.fork_execution();
     child.push_call_frame(proto, closure_env, call_args, this_value, callee.clone())?;
     let mut risc_state = RiscExecutionState::new(
-      child.this_value.clone(),
-      child.chunk.risc_spill_count as usize,
+      child.execution.active.this_value.clone(),
+      child.execution.active.chunk.risc_spill_count as usize,
     );
     match child.run_risc_state(&mut risc_state, true)? {
       RiscRunOutcome::Initialized => {}
@@ -134,7 +135,7 @@ impl Vm {
     let gen_obj = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     gen_obj
       .borrow_mut()
-      .set_prototype_value(self.realm.generator_prototype());
+      .set_prototype_value(self.realm_state.realm.generator_prototype());
     gen_obj.borrow_mut().properties.insert(
       PropertyKey::String("next".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |vm, args| {
@@ -311,9 +312,9 @@ impl Vm {
     args: &[Value],
     new_target: Value,
   ) -> Result<Value, RuntimeError> {
-    let previous_new_target = self.construct_new_target.replace(new_target);
+    let previous_new_target = self.construction.new_target.replace(new_target);
     let result = self.construct_value(callee, args);
-    self.construct_new_target = previous_new_target;
+    self.construction.new_target = previous_new_target;
     result
   }
 
@@ -359,37 +360,48 @@ impl Vm {
       }
       Ok(())
     };
-    let temp_root_base = self.gc_temp_roots.len();
-    self.gc_temp_roots.push(callee.clone());
-    self.gc_temp_roots.extend(args.iter().cloned());
+    let temp_root_base = self.roots.temporary.len();
+    self.roots.temporary.push(callee.clone());
+    self.roots.temporary.extend(args.iter().cloned());
 
     if !callee.is_constructable() {
       if crate::trace::enabled() {
         eprintln!(
           "[trace] construct_value: callee not constructable ip={} actual={}",
-          self.ip.saturating_sub(1),
+          self.execution.active.ip.saturating_sub(1),
           callee.type_name()
         );
         crate::trace::value_string("[trace]   callee", callee);
         // Dump a small window of bytecode around the current ip to help
         // correlate the failing instruction with constants and nearby ops.
-        let cur_ip = self.ip.saturating_sub(1);
+        let cur_ip = self.execution.active.ip.saturating_sub(1);
         let start = cur_ip.saturating_sub(16);
-        let end = (cur_ip + 16).min(self.chunk.code.len());
+        let end = (cur_ip + 16).min(self.execution.active.chunk.code.len());
         eprintln!("[trace]   bytecode window ({}..{}):", start, end);
         for i in start..end {
-          let instr = self.chunk.code[i];
+          let instr = self.execution.active.chunk.code[i];
           let b = (instr & 0xFF) as u8;
           eprintln!("[trace]     {:04} 0x{:02x}", i, b);
         }
         // Print a short constant pool summary
-        eprintln!("[trace]   constants (len={}):", self.chunk.constants.len());
-        for (i, constant) in self.chunk.constants.iter().enumerate().take(32) {
+        eprintln!(
+          "[trace]   constants (len={}):",
+          self.execution.active.chunk.constants.len()
+        );
+        for (i, constant) in self
+          .execution
+          .active
+          .chunk
+          .constants
+          .iter()
+          .enumerate()
+          .take(32)
+        {
           let value = constant.to_value();
           crate::trace::value_string(&format!("[trace]     const[{}]", i), &value);
         }
       }
-      self.gc_temp_roots.truncate(temp_root_base);
+      self.roots.temporary.truncate(temp_root_base);
       return Err(self.throw_type_error(&format!(
         "Construct: not a constructor (actual={})",
         callee.type_name()
@@ -410,13 +422,14 @@ impl Vm {
             &PropertyKey::String("construct".to_string().into()),
           )?;
           let new_target = self
-            .construct_new_target
+            .construction
+            .new_target
             .clone()
             .unwrap_or_else(|| callee.clone());
           if matches!(trap, Value::Undefined | Value::Null) {
-            let previous_new_target = self.construct_new_target.replace(new_target);
+            let previous_new_target = self.construction.new_target.replace(new_target);
             let result = self.construct_value(&target, args);
-            self.construct_new_target = previous_new_target;
+            self.construction.new_target = previous_new_target;
             return result;
           }
           if !Self::is_callable_value(&trap) {
@@ -431,7 +444,7 @@ impl Vm {
           }
           Ok(trap_result)
         })();
-        self.gc_temp_roots.truncate(temp_root_base);
+        self.roots.temporary.truncate(temp_root_base);
         result
       }
       Value::Closure { .. } => {
@@ -444,7 +457,8 @@ impl Vm {
           Value::Undefined
         } else {
           let proto_source = self
-            .construct_new_target
+            .construction
+            .new_target
             .clone()
             .unwrap_or_else(|| callee.clone());
           let proto = self
@@ -469,26 +483,27 @@ impl Vm {
           );
           Value::Object(instance_obj)
         };
-        let prev_new_target = self.construct_new_target.clone();
-        let prev_recent_return = self.recent_return_value.take();
+        let prev_new_target = self.construction.new_target.clone();
+        let prev_recent_return = self.construction.recent_return_value.take();
         let active_new_target = prev_new_target
           .clone()
           .unwrap_or_else(|| callee.clone());
-        self.construct_new_target = Some(active_new_target);
+        self.construction.new_target = Some(active_new_target);
         if is_derived_constructor {
-          self.derived_constructor_this.push(None);
+          self.construction.derived_this.push(None);
         }
         let result = self.call_with_this(callee, &instance, args);
-        self.construct_new_target = prev_new_target;
+        self.construction.new_target = prev_new_target;
         let initialized_this = if is_derived_constructor {
           self
-            .derived_constructor_this
+            .construction
+            .derived_this
             .pop()
             .expect("derived constructor state must remain balanced")
         } else {
           None
         };
-        self.recent_return_value = prev_recent_return;
+        self.construction.recent_return_value = prev_recent_return;
         let result = result?;
         let result = match result {
           Value::Object(_)
@@ -502,7 +517,7 @@ impl Vm {
           }
           _ if is_derived_constructor => {
             let Some(this_obj) = initialized_this else {
-              self.gc_temp_roots.truncate(temp_root_base);
+              self.roots.temporary.truncate(temp_root_base);
               return Err(self.throw_reference_error(
                 "Must call super constructor before returning from derived constructor",
               ));
@@ -521,11 +536,11 @@ impl Vm {
             | Value::Proxy(_)
             | Value::Promise(_)
         ) {
-          self.recent_return_value = Some(result.clone());
+          self.construction.recent_return_value = Some(result.clone());
         } else {
-          self.recent_return_value = None;
+          self.construction.recent_return_value = None;
         }
-        self.gc_temp_roots.truncate(temp_root_base);
+        self.roots.temporary.truncate(temp_root_base);
         Ok(result)
       }
       Value::BuiltinObject(_, props) => {
@@ -562,19 +577,20 @@ impl Vm {
             .unwrap_or_default();
           let mut combined = bound_args;
           combined.extend_from_slice(args);
-          let prev_new_target = self.construct_new_target.clone();
+          let prev_new_target = self.construction.new_target.clone();
           let active_new_target = prev_new_target
             .clone()
             .unwrap_or_else(|| target.clone());
-          self.construct_new_target = Some(active_new_target);
+          self.construction.new_target = Some(active_new_target);
           let result = self.construct_value(&target, &combined);
-          self.construct_new_target = prev_new_target;
-          self.gc_temp_roots.truncate(temp_root_base);
+          self.construction.new_target = prev_new_target;
+          self.roots.temporary.truncate(temp_root_base);
           return result;
         }
 
         let proto_source = self
-          .construct_new_target
+          .construction
+          .new_target
           .clone()
           .unwrap_or_else(|| callee.clone());
         let proto = self
@@ -603,13 +619,13 @@ impl Vm {
         // args[1..] = user-provided arguments
         // Keep [[NewTarget]] in VM state so builtins can inspect it
         // without perturbing user-visible argument positions.
-        let prev_new_target = self.construct_new_target.clone();
+        let prev_new_target = self.construction.new_target.clone();
         let active_new_target = prev_new_target
           .clone()
           .unwrap_or_else(|| callee.clone());
-        self.construct_new_target = Some(active_new_target);
+        self.construction.new_target = Some(active_new_target);
         let result = self.call_with_this(callee, &instance, args);
-        self.construct_new_target = prev_new_target;
+        self.construction.new_target = prev_new_target;
         let result = result?;
         let result = match result {
           Value::Object(_)
@@ -633,17 +649,18 @@ impl Vm {
             | Value::Proxy(_)
             | Value::Promise(_)
         ) {
-          self.recent_return_value = Some(result.clone());
+          self.construction.recent_return_value = Some(result.clone());
         } else {
-          self.recent_return_value = None;
+          self.construction.recent_return_value = None;
         }
-        self.gc_temp_roots.truncate(temp_root_base);
+        self.roots.temporary.truncate(temp_root_base);
         Ok(result)
       }
       Value::Builtin(f) => {
-        let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, false);
+        let prev_builtin_this =
+          std::mem::replace(&mut self.execution.builtin_this_arg_prepended, false);
         let result = (f.as_ref())(self, args);
-        self.builtin_this_arg_prepended = prev_builtin_this;
+        self.execution.builtin_this_arg_prepended = prev_builtin_this;
         if let Ok(value) = &result {
           if matches!(
             value,
@@ -653,16 +670,16 @@ impl Vm {
               | Value::BuiltinObject(_, _)
               | Value::Promise(_)
           ) {
-            self.recent_return_value = Some(value.clone());
+            self.construction.recent_return_value = Some(value.clone());
           } else {
-            self.recent_return_value = None;
+            self.construction.recent_return_value = None;
           }
         }
-        self.gc_temp_roots.truncate(temp_root_base);
+        self.roots.temporary.truncate(temp_root_base);
         result
       }
       _ => {
-        self.gc_temp_roots.truncate(temp_root_base);
+        self.roots.temporary.truncate(temp_root_base);
         Err(RuntimeError::from(format!(
           "Construct: not a constructor (actual={})",
           callee.type_name()
@@ -694,6 +711,7 @@ impl Vm {
     }
 
     let frame = self
+      .execution
       .call_stack
       .last()
       .ok_or_else(|| RuntimeError::from("super() outside function frame"))?;
@@ -719,15 +737,15 @@ impl Vm {
     }
 
     let new_target = self.current_new_target().unwrap_or(callee);
-    let previous_new_target = self.construct_new_target.replace(new_target);
+    let previous_new_target = self.construction.new_target.replace(new_target);
     let result = self.construct_value(&super_constructor, &args);
-    self.construct_new_target = previous_new_target;
+    self.construction.new_target = previous_new_target;
     let result = result?;
-    self.this_value = result.clone();
-    if let Some(initialized_this) = self.derived_constructor_this.last_mut() {
+    self.execution.active.this_value = result.clone();
+    if let Some(initialized_this) = self.construction.derived_this.last_mut() {
       *initialized_this = Some(result.clone());
     }
-    self.recent_return_value = Some(result.clone());
+    self.construction.recent_return_value = Some(result.clone());
     Ok(result)
   }
 
@@ -743,27 +761,28 @@ impl Vm {
   ) -> Result<Value, RuntimeError> {
     match callee {
       Value::Builtin(f) | Value::BuiltinObject(f, _) => {
-        let temp_root_base = self.gc_temp_roots.len();
-        self.gc_temp_roots.push(callee.clone());
-        self.gc_temp_roots.extend(args.iter().cloned());
+        let temp_root_base = self.roots.temporary.len();
+        self.roots.temporary.push(callee.clone());
+        self.roots.temporary.extend(args.iter().cloned());
 
-        let prev_this = std::mem::replace(&mut self.this_value, Value::Undefined);
-        let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, false);
-        let prev_closure_env = self.current_closure_env.clone();
-        let prev_slot_types = self.current_slot_types.clone();
-        let prev_lexical_env = Rc::clone(&self.lexical_env);
+        let prev_this = std::mem::replace(&mut self.execution.active.this_value, Value::Undefined);
+        let prev_builtin_this =
+          std::mem::replace(&mut self.execution.builtin_this_arg_prepended, false);
+        let prev_closure_env = self.execution.active.closure_env.clone();
+        let prev_slots = self.execution.active.slots.clone();
+        let prev_lexical_env = Rc::clone(&self.execution.active.lexical_env);
         let result = (f.as_ref())(self, args);
-        self.builtin_this_arg_prepended = prev_builtin_this;
-        self.this_value = prev_this;
-        self.current_closure_env = prev_closure_env;
-        self.current_slot_types = prev_slot_types;
-        self.lexical_env = prev_lexical_env;
+        self.execution.builtin_this_arg_prepended = prev_builtin_this;
+        self.execution.active.this_value = prev_this;
+        self.execution.active.closure_env = prev_closure_env;
+        self.execution.active.slots = prev_slots;
+        self.execution.active.lexical_env = prev_lexical_env;
 
         let result = (|| {
           let result = result?;
-          self.gc_temp_roots.push(result.clone());
+          self.roots.temporary.push(result.clone());
           self.run_microtasks_if_needed()?;
-          self.recent_return_value = matches!(
+          self.construction.recent_return_value = matches!(
             result,
             Value::Object(_)
               | Value::Array(..)
@@ -775,7 +794,7 @@ impl Vm {
           .then(|| result.clone());
           Ok(result)
         })();
-        self.gc_temp_roots.truncate(temp_root_base);
+        self.roots.temporary.truncate(temp_root_base);
         result
       }
       _ => self.call_with_this(callee, &Value::Undefined, args),
@@ -790,11 +809,11 @@ impl Vm {
     this_arg: &Value,
     args: &[Value],
   ) -> Result<Value, RuntimeError> {
-    let temp_root_base = self.gc_temp_roots.len();
-    self.gc_temp_roots.push(callee.clone());
+    let temp_root_base = self.roots.temporary.len();
+    self.roots.temporary.push(callee.clone());
     let this_arg_owned = this_arg.clone();
-    self.gc_temp_roots.push(this_arg_owned.clone());
-    self.gc_temp_roots.extend(args.iter().cloned());
+    self.roots.temporary.push(this_arg_owned.clone());
+    self.roots.temporary.extend(args.iter().cloned());
     let result = (|| -> Result<Value, RuntimeError> {
       match callee {
         Value::Proxy(proxy) => {
@@ -831,25 +850,26 @@ impl Vm {
           let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
           call_args.push(this_arg_owned.clone());
           call_args.extend_from_slice(args);
-          let prev_this = std::mem::replace(&mut self.this_value, this_arg_owned);
-          let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, true);
-          let prev_closure_env = self.current_closure_env.clone();
-          let prev_slot_types = self.current_slot_types.clone();
-          let prev_lexical_env = Rc::clone(&self.lexical_env);
+          let prev_this = std::mem::replace(&mut self.execution.active.this_value, this_arg_owned);
+          let prev_builtin_this =
+            std::mem::replace(&mut self.execution.builtin_this_arg_prepended, true);
+          let prev_closure_env = self.execution.active.closure_env.clone();
+          let prev_slots = self.execution.active.slots.clone();
+          let prev_lexical_env = Rc::clone(&self.execution.active.lexical_env);
           let result = (f.as_ref())(self, &call_args);
-          self.builtin_this_arg_prepended = prev_builtin_this;
-          self.this_value = prev_this;
-          self.current_closure_env = prev_closure_env;
-          self.current_slot_types = prev_slot_types;
-          self.lexical_env = prev_lexical_env;
+          self.execution.builtin_this_arg_prepended = prev_builtin_this;
+          self.execution.active.this_value = prev_this;
+          self.execution.active.closure_env = prev_closure_env;
+          self.execution.active.slots = prev_slots;
+          self.execution.active.lexical_env = prev_lexical_env;
           let result = result?;
-          let result_root_base = self.gc_temp_roots.len();
-          self.gc_temp_roots.push(result.clone());
+          let result_root_base = self.roots.temporary.len();
+          self.roots.temporary.push(result.clone());
           let post_call = (|| {
             self.run_microtasks_if_needed()?;
             Ok::<(), RuntimeError>(())
           })();
-          self.gc_temp_roots.truncate(result_root_base);
+          self.roots.temporary.truncate(result_root_base);
           post_call?;
           if matches!(
             result,
@@ -859,9 +879,9 @@ impl Vm {
               | Value::BuiltinObject(_, _)
               | Value::Promise(_)
           ) {
-            self.recent_return_value = Some(result.clone());
+            self.construction.recent_return_value = Some(result.clone());
           } else {
-            self.recent_return_value = None;
+            self.construction.recent_return_value = None;
           }
           Ok(result)
         }
@@ -869,25 +889,26 @@ impl Vm {
           let mut call_args: Vec<Value> = Vec::with_capacity(args.len() + 1);
           call_args.push(this_arg_owned.clone());
           call_args.extend_from_slice(args);
-          let prev_this = std::mem::replace(&mut self.this_value, this_arg_owned);
-          let prev_builtin_this = std::mem::replace(&mut self.builtin_this_arg_prepended, true);
-          let prev_closure_env = self.current_closure_env.clone();
-          let prev_slot_types = self.current_slot_types.clone();
-          let prev_lexical_env = Rc::clone(&self.lexical_env);
+          let prev_this = std::mem::replace(&mut self.execution.active.this_value, this_arg_owned);
+          let prev_builtin_this =
+            std::mem::replace(&mut self.execution.builtin_this_arg_prepended, true);
+          let prev_closure_env = self.execution.active.closure_env.clone();
+          let prev_slots = self.execution.active.slots.clone();
+          let prev_lexical_env = Rc::clone(&self.execution.active.lexical_env);
           let result = (f.as_ref())(self, &call_args);
-          self.builtin_this_arg_prepended = prev_builtin_this;
-          self.this_value = prev_this;
-          self.current_closure_env = prev_closure_env;
-          self.current_slot_types = prev_slot_types;
-          self.lexical_env = prev_lexical_env;
+          self.execution.builtin_this_arg_prepended = prev_builtin_this;
+          self.execution.active.this_value = prev_this;
+          self.execution.active.closure_env = prev_closure_env;
+          self.execution.active.slots = prev_slots;
+          self.execution.active.lexical_env = prev_lexical_env;
           let result = result?;
-          let result_root_base = self.gc_temp_roots.len();
-          self.gc_temp_roots.push(result.clone());
+          let result_root_base = self.roots.temporary.len();
+          self.roots.temporary.push(result.clone());
           let post_call = (|| {
             self.run_microtasks_if_needed()?;
             Ok::<(), RuntimeError>(())
           })();
-          self.gc_temp_roots.truncate(result_root_base);
+          self.roots.temporary.truncate(result_root_base);
           post_call?;
           if matches!(
             result,
@@ -897,14 +918,14 @@ impl Vm {
               | Value::BuiltinObject(_, _)
               | Value::Promise(_)
           ) {
-            self.recent_return_value = Some(result.clone());
+            self.construction.recent_return_value = Some(result.clone());
           } else {
-            self.recent_return_value = None;
+            self.construction.recent_return_value = None;
           }
           Ok(result)
         }
         Value::Closure { proto, .. } => {
-          if proto.is_class_constructor && self.construct_new_target.is_none() {
+          if proto.is_class_constructor && self.construction.new_target.is_none() {
             return Err(self.throw_class_constructor_call_error(proto));
           }
           let mut call_args: Vec<Value> = Vec::with_capacity(args.len());
@@ -927,30 +948,24 @@ impl Vm {
           } else if proto.is_async {
             self.invoke_async_closure(proto, &closure_env, call_args, this_arg, callee)
           } else {
-            let caller_chunk = Arc::clone(&self.chunk);
-            let caller_ip = self.ip;
-            let caller_locals = self.locals.clone();
-            let caller_this = self.this_value.clone();
-            let caller_env = self.current_closure_env.clone();
-            let caller_slot_types = self.current_slot_types.clone();
-            let caller_strict_mode = self.current_strict_mode;
-            let caller_frame_len = self.call_stack.len();
-            let caller_handler_len = self.handlers.len();
+            let caller_context = self.execution.active.clone();
+            let caller_frame_len = self.execution.call_stack.len();
+            let caller_handler_len = self.exceptions.handlers.len();
             self.push_call_frame(proto, &closure_env, call_args, this_arg, callee.clone())?;
             let result = self
               .run_risc_loop(false)
               .and_then(|value| self.execute_return(value));
-            if result.is_ok() || self.pending_exception.is_none() {
+            if result.is_ok() || self.exceptions.pending.is_none() {
               // Restore the suspended caller state after the callee returns.
-              self.chunk = caller_chunk;
-              self.ip = caller_ip;
-              self.locals = caller_locals;
-              self.this_value = caller_this;
-              self.current_closure_env = caller_env;
-              self.current_slot_types = caller_slot_types;
-              self.call_stack.truncate(caller_frame_len);
-              self.current_strict_mode = caller_strict_mode;
-              self.handlers.truncate(caller_handler_len);
+              self.execution.active = caller_context;
+              self
+                .execution
+                .call_stack
+                .truncate(caller_frame_len);
+              self
+                .exceptions
+                .handlers
+                .truncate(caller_handler_len);
             }
             result
           }
@@ -966,7 +981,7 @@ impl Vm {
         }
       }
     })();
-    self.gc_temp_roots.truncate(temp_root_base);
+    self.roots.temporary.truncate(temp_root_base);
     result
   }
 
@@ -1005,6 +1020,7 @@ impl Vm {
     );
 
     if let Some(array_val) = self
+      .realm_state
       .globals
       .borrow()
       .properties
@@ -1064,56 +1080,59 @@ impl Vm {
     mut this_value: Value,
     callee: Value,
   ) -> Result<(), RuntimeError> {
-    self.pending_closure_env = Some(Rc::clone(closure_env));
+    self.execution.pending_closure_env = Some(Rc::clone(closure_env));
     if !proto.is_strict {
       if matches!(this_value, Value::Undefined | Value::Null) {
-        this_value = Value::Object(Rc::clone(&self.globals));
+        this_value = Value::Object(Rc::clone(&self.realm_state.globals));
       } else {
         this_value = match self.to_object_value(this_value) {
           Ok(value) => value,
           Err(err) => {
-            self.pending_closure_env = None;
+            self.execution.pending_closure_env = None;
             return Err(err);
           }
         };
       }
     }
 
-    self.chunk = Arc::clone(&proto.chunk);
-    self.ip = 0;
-    self.current_closure_env = Some(Rc::clone(closure_env));
-    self.current_slot_types = Some(proto.slot_types.clone());
-    self.current_slot_names = Some(proto.slot_names.clone());
-    self.current_slot_immutable = Some(proto.slot_immutable.clone());
-    self.current_slot_sloppy_immutable_silent = Some(proto.slot_sloppy_immutable_silent.clone());
-    self.yield_star_state = None;
-    self.this_value = if proto.is_derived_constructor {
+    self.execution.active.chunk = Arc::clone(&proto.chunk);
+    self.execution.active.ip = 0;
+    self.execution.active.closure_env = Some(Rc::clone(closure_env));
+    self.execution.active.slots = Some(SlotMetadata {
+      types: proto.slot_types.clone(),
+      names: proto.slot_names.clone(),
+      immutable: proto.slot_immutable.clone(),
+      sloppy_immutable_silent: proto.slot_sloppy_immutable_silent.clone(),
+    });
+    self.execution.active.yield_star = None;
+    self.execution.active.this_value = if proto.is_derived_constructor {
       Value::Uninitialized
     } else {
       this_value
     };
 
-    self.locals = std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
-      .take(proto.slot_types.len().max(proto.arity))
-      .collect();
+    self.execution.active.locals =
+      std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
+        .take(proto.slot_types.len().max(proto.arity))
+        .collect();
     for (idx, is_tdz) in proto.lexical_tdz.iter().copied().enumerate() {
-      if is_tdz && idx < self.locals.len() {
-        *self.locals[idx].borrow_mut() = Value::Uninitialized;
+      if is_tdz && idx < self.execution.active.locals.len() {
+        *self.execution.active.locals[idx].borrow_mut() = Value::Uninitialized;
       }
     }
     let captured_lexical_env = match &callee {
       Value::Closure { props, .. } => props
         .borrow()
         .captured_lexical_env()
-        .unwrap_or_else(|| Rc::clone(&self.lexical_env)),
-      _ => Rc::clone(&self.lexical_env),
+        .unwrap_or_else(|| Rc::clone(&self.execution.active.lexical_env)),
+      _ => Rc::clone(&self.execution.active.lexical_env),
     };
     let fn_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(
       captured_lexical_env,
     ))));
     for (idx, maybe_name) in proto.slot_names.iter().enumerate() {
       if let Some(name) = maybe_name
-        && idx < self.locals.len()
+        && idx < self.execution.active.locals.len()
       {
         let initialized = !proto
           .lexical_tdz
@@ -1122,22 +1141,22 @@ impl Vm {
           .unwrap_or(false);
         fn_env.borrow_mut().create_mutable_binding(
           name.clone(),
-          Rc::clone(&self.locals[idx]),
+          Rc::clone(&self.execution.active.locals[idx]),
           initialized,
         );
       }
     }
-    self.lexical_env = fn_env;
+    self.execution.active.lexical_env = fn_env;
     for (i, value) in call_args
       .iter()
       .cloned()
       .enumerate()
       .take(proto.arity)
     {
-      *self.locals[i].borrow_mut() = value;
+      *self.execution.active.locals[i].borrow_mut() = value;
     }
     if crate::trace::enabled() && proto.is_generator && !proto.has_simple_parameter_list {
-      for (idx, slot) in self.locals.iter().enumerate() {
+      for (idx, slot) in self.execution.active.locals.iter().enumerate() {
         let name = proto
           .slot_names
           .get(idx)
@@ -1152,12 +1171,12 @@ impl Vm {
       }
     }
     if let Some(slot) = proto.self_binding_slot
-      && slot < self.locals.len()
+      && slot < self.execution.active.locals.len()
     {
-      *self.locals[slot].borrow_mut() = callee.clone();
+      *self.execution.active.locals[slot].borrow_mut() = callee.clone();
     }
     if let Some(slot) = proto.arguments_slot
-      && slot < self.locals.len()
+      && slot < self.execution.active.locals.len()
     {
       let args_for_arguments: Vec<Option<Value>> = call_args
         .iter()
@@ -1166,9 +1185,9 @@ impl Vm {
       if proto.has_simple_parameter_list && !proto.is_strict {
         let mapped_count = proto.arity.min(args_for_arguments.len());
         let args_obj = self.build_mapped_arguments_object(proto, callee, &args_for_arguments);
-        self.current_arguments_object = Some(args_obj.clone());
-        self.current_arguments_mapped_count = mapped_count;
-        self.locals[slot] = Rc::new(RefCell::new(args_obj));
+        self.execution.active.arguments.object = Some(args_obj.clone());
+        self.execution.active.arguments.mapped_count = mapped_count;
+        self.execution.active.locals[slot] = Rc::new(RefCell::new(args_obj));
       } else {
         let props: Rc<RefCell<ObjectData>> =
           gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
@@ -1215,19 +1234,19 @@ impl Vm {
             configurable: true,
           },
         );
-        let object_proto = self.realm.object_prototype();
+        let object_proto = self.realm_state.realm.object_prototype();
         if !matches!(object_proto, Value::Null) {
           props
             .borrow_mut()
             .set_prototype_value(object_proto);
         }
         self.install_arguments_iterator_property(&props);
-        self.current_arguments_object = None;
-        self.current_arguments_mapped_count = 0;
-        self.locals[slot] = Rc::new(RefCell::new(Value::Object(props)));
+        self.execution.active.arguments.object = None;
+        self.execution.active.arguments.mapped_count = 0;
+        self.execution.active.locals[slot] = Rc::new(RefCell::new(Value::Object(props)));
       }
     }
-    self.pending_closure_env = None;
+    self.execution.pending_closure_env = None;
 
     Ok(())
   }
@@ -1241,35 +1260,35 @@ impl Vm {
     this_value: Value,
     callee: Value,
   ) -> Result<(), RuntimeError> {
-    let caller_strict_mode = self.current_strict_mode;
-
-    self.call_stack.push(Frame {
-      chunk: Arc::clone(&self.chunk),
-      ip: self.ip,
+    let lexical_env = Rc::clone(&self.execution.active.lexical_env);
+    let caller_context = std::mem::replace(
+      &mut self.execution.active,
+      ExecutionContext {
+        chunk: Arc::clone(&proto.chunk),
+        ip: 0,
+        locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
+        this_value: this_value.clone(),
+        closure_env: None,
+        slots: None,
+        lexical_env,
+        yield_star: None,
+        arguments: ArgumentsState {
+          object: None,
+          mapped_count: 0,
+        },
+        strict: proto.is_strict,
+      },
+    );
+    self.execution.call_stack.push(Frame {
+      context: caller_context,
       risc_state: None,
-      locals: std::mem::replace(
-        &mut self.locals,
-        Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
-      ),
-      this_value: std::mem::replace(&mut self.this_value, this_value.clone()),
       callee: callee.clone(),
       // `construct_new_target` is a pending entry value. Moving it into the
       // suspended frame makes it active for this callee while ensuring an
       // ordinary nested call starts with no [[NewTarget]].
-      new_target: self.construct_new_target.take(),
-      closure_env: self.current_closure_env.take(),
+      new_target: self.construction.new_target.take(),
       upvalues: proto.upvalues.clone(),
-      slot_types: self.current_slot_types.take(),
-      slot_names: self.current_slot_names.take(),
-      slot_immutable: self.current_slot_immutable.take(),
-      slot_sloppy_immutable_silent: self.current_slot_sloppy_immutable_silent.take(),
-      is_strict: caller_strict_mode,
-      lexical_env: Rc::clone(&self.lexical_env),
-      yield_star_state: self.yield_star_state.take(),
-      arguments_object: self.current_arguments_object.take(),
-      arguments_mapped_count: self.current_arguments_mapped_count,
     });
-    self.current_strict_mode = proto.is_strict;
 
     self.configure_call_frame(proto, closure_env, call_args, this_value, callee)?;
 
@@ -1286,7 +1305,9 @@ impl Vm {
     let obj_rc: Rc<RefCell<ObjectData>> =
       gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     let arg_count = args_for_arguments.len();
-    let mapped_count = proto.arity.min(self.locals.len());
+    let mapped_count = proto
+      .arity
+      .min(self.execution.active.locals.len());
     for idx in 0..arg_count {
       let key = PropertyKey::String(usize_to_decimal_string(idx).into());
       if idx < mapped_count {
@@ -1334,7 +1355,7 @@ impl Vm {
         configurable: true,
       },
     );
-    let object_proto = self.realm.object_prototype();
+    let object_proto = self.realm_state.realm.object_prototype();
     if !matches!(object_proto, Value::Null) {
       obj_rc
         .borrow_mut()
@@ -1348,7 +1369,7 @@ impl Vm {
     &mut self,
     obj_rc: &Rc<RefCell<ObjectData>>,
   ) {
-    let array_proto = self.realm.array_prototype();
+    let array_proto = self.realm_state.realm.array_prototype();
     let iterator_key = PropertyKey::Symbol(SymbolId::well_known_iterator());
     let Ok(iterator) = self.get_property_host(&array_proto, &iterator_key) else {
       return;

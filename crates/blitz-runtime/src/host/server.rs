@@ -198,7 +198,7 @@ impl ServerState {
       )
     };
     if let Some(handler) = handler {
-      vm.set_host_root(handler, Value::Undefined)?;
+      vm.release_host_root(handler)?;
     }
     self.shutdown_websockets();
     if let Some(server) = server {
@@ -261,7 +261,7 @@ impl ServerState {
         if let Some(event) = success_pending.borrow_mut().take() {
           success_state.complete_request(vm, event, websocket_id, &value);
         }
-        vm.set_host_root(promise_root, Value::Undefined)?;
+        vm.release_host_root(promise_root)?;
         Ok(Value::Undefined)
       });
       let failure_state = self.clone();
@@ -277,15 +277,24 @@ impl ServerState {
           failure_state.finish_request(websocket_id);
           event.respond(HttpResponse::text(500, "Internal Server Error"));
         }
-        vm.set_host_root(failure_root, Value::Undefined)?;
+        vm.release_host_root(failure_root)?;
         Ok(Value::Undefined)
       });
-      let then = vm.get_property_host(&result, &PropertyKey::String("then".to_string().into()))?;
-      vm.call_value_with_this(
-        &then,
-        &result,
-        &[Value::Builtin(on_success), Value::Builtin(on_failure)],
-      )?;
+      let attach_result = (|| {
+        let then =
+          vm.get_property_host(&result, &PropertyKey::String("then".to_string().into()))?;
+        vm.call_value_with_this(
+          &then,
+          &result,
+          &[Value::Builtin(on_success), Value::Builtin(on_failure)],
+        )
+      })();
+      if let Err(error) = attach_result {
+        if vm.host_root(promise_root).is_some() {
+          vm.release_host_root(promise_root)?;
+        }
+        return Err(error);
+      }
       self.0.borrow_mut().current_websocket_id = None;
       return Ok(());
     }
@@ -513,7 +522,7 @@ pub(super) fn serve_method(state: ServerState) -> BuiltinFn {
       let finished_root = vm.create_host_root(finished);
       let mut inner = state.0.borrow_mut();
       if let Some(previous) = inner.finished.replace(finished_root) {
-        vm.set_host_root(previous, Value::Undefined)?;
+        vm.release_host_root(previous)?;
       }
       inner.generation = inner.generation.wrapping_add(1);
       inner.local_addr = Some(local_addr);
@@ -522,7 +531,7 @@ pub(super) fn serve_method(state: ServerState) -> BuiltinFn {
     }
     let callback = vm.create_host_root(callback);
     if let Some(previous) = state.0.borrow_mut().handler.replace(callback) {
-      vm.set_host_root(previous, Value::Undefined)?;
+      vm.release_host_root(previous)?;
     }
 
     let (local_addr, generation, finished) = {

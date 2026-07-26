@@ -21,6 +21,15 @@ thread_local! {
   static SYMBOL_REGISTRY: RefCell<HashMap<JsString, SymbolId>> = RefCell::new(HashMap::new());
 }
 
+pub(crate) struct TextAndSymbolIntrinsics {
+  pub(crate) string_constructor: Value,
+  pub(crate) string_prototype: Value,
+  pub(crate) boolean_constructor: Value,
+  pub(crate) boolean_prototype: Value,
+  pub(crate) symbol_constructor: Value,
+  pub(crate) symbol_prototype: Value,
+}
+
 fn utf16_encode_code_point(cp: u32) -> JsString {
   if cp <= 0xFFFF {
     return JsString::from_utf16(vec![cp as u16]);
@@ -71,7 +80,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   globals: &mut ObjectData,
   object_proto_map: &Rc<RefCell<ObjectData>>,
   function_proto_map: &Rc<RefCell<ObjectData>>,
-) {
+) -> TextAndSymbolIntrinsics {
   use PropertyKey as PKey;
 
   let string_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
@@ -1087,14 +1096,23 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   set_builtin_name(&symbol_ctor_val, "Symbol");
   globals.properties.insert(
     PKey::String("String".to_string().into()),
-    PropertyDescriptor::builtin_data(string_ctor_val),
+    PropertyDescriptor::builtin_data(string_ctor_val.clone()),
   );
   globals.properties.insert(
     PKey::String("Boolean".to_string().into()),
-    PropertyDescriptor::builtin_data(boolean_ctor_val),
+    PropertyDescriptor::builtin_data(boolean_ctor_val.clone()),
   );
   globals.properties.insert(
     PKey::String("Symbol".to_string().into()),
-    PropertyDescriptor::builtin_data(symbol_ctor_val),
+    PropertyDescriptor::builtin_data(symbol_ctor_val.clone()),
   );
+
+  TextAndSymbolIntrinsics {
+    string_constructor: string_ctor_val,
+    string_prototype: Value::Object(string_proto_map),
+    boolean_constructor: boolean_ctor_val,
+    boolean_prototype: Value::Object(boolean_proto_map),
+    symbol_constructor: symbol_ctor_val,
+    symbol_prototype: Value::Object(symbol_proto_map),
+  }
 }

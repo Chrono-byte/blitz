@@ -9,13 +9,20 @@ use num_bigint::BigInt as BigIntValue;
 use crate::runtime_utils::{builtin_object, js_number_to_string, strict_equal};
 use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
+pub(crate) struct NumericIntrinsics {
+  pub(crate) bigint_constructor: Value,
+  pub(crate) bigint_prototype: Value,
+  pub(crate) number_constructor: Value,
+  pub(crate) number_prototype: Value,
+}
+
 /// Installs the Number and BigInt constructors and their prototype methods.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn install_bigint_and_number_builtins(
   globals: &mut ObjectData,
   object_proto_map: &Rc<RefCell<ObjectData>>,
   function_proto_map: &Rc<RefCell<ObjectData>>,
-) {
+) -> NumericIntrinsics {
   use PropertyKey as PKey;
 
   let bigint_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
@@ -138,7 +145,7 @@ pub(crate) fn install_bigint_and_number_builtins(
   );
   globals.properties.insert(
     PKey::String("BigInt".to_string().into()),
-    PropertyDescriptor::builtin_data(bigint_ctor_val),
+    PropertyDescriptor::builtin_data(bigint_ctor_val.clone()),
   );
 
   let number_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
@@ -344,6 +351,13 @@ pub(crate) fn install_bigint_and_number_builtins(
   }
   globals.properties.insert(
     PKey::String("Number".to_string().into()),
-    PropertyDescriptor::builtin_data(number_ctor_val),
+    PropertyDescriptor::builtin_data(number_ctor_val.clone()),
   );
+
+  NumericIntrinsics {
+    bigint_constructor: bigint_ctor_val,
+    bigint_prototype: Value::Object(bigint_proto_map),
+    number_constructor: number_ctor_val,
+    number_prototype: Value::Object(number_proto_map),
+  }
 }

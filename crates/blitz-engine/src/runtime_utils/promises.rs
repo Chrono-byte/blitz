@@ -259,7 +259,8 @@ fn resolve_promise_with_value_inner(
           Ok(_) => Ok(()),
           Err(err) => {
             let reason = vm
-              .last_uncaught_exception
+              .exceptions
+              .last_uncaught
               .take()
               .unwrap_or(Value::String(format!("{}", err).into()));
             reject_pending_promise(vm, &res_p, reason);
@@ -618,7 +619,8 @@ pub(crate) fn dynamic_import_value(
     Ok(s) => s,
     Err(err) => {
       let reason = vm
-        .last_uncaught_exception
+        .exceptions
+        .last_uncaught
         .take()
         .unwrap_or(Value::String(err.to_string().into()));
       reject_pending_promise(vm, &promise, reason);
@@ -633,6 +635,7 @@ pub(crate) fn dynamic_import_value(
   // inaccessible to source resolution in the child VM.
   let loader_handle = vm.module_loader_handle();
   let mut import_vm = Vm::new_with_module_loader(vm.globals_rc(), loader_handle.clone());
+  import_vm.share_host_roots_from(vm);
   let result = (|| -> Result<Value, Value> {
     let entry = {
       let mut loader = loader_handle.borrow_mut();
@@ -662,7 +665,8 @@ pub(crate) fn dynamic_import_value(
     crate::module::evaluate_entry_shared(&loader_handle, &entry_path, &mut import_vm, false)
       .map_err(|err| {
         import_vm
-          .last_uncaught_exception
+          .exceptions
+          .last_uncaught
           .take()
           .or_else(|| {
             Some(host_error_object(

@@ -251,11 +251,21 @@ fn consume_collection_iterable(
 }
 
 /// Installs the Map and Set constructors on the given object and function prototypes.
+pub(crate) struct CollectionIntrinsics {
+  pub(crate) map_constructor: Value,
+  pub(crate) set_constructor: Value,
+  pub(crate) map_prototype: Value,
+  pub(crate) set_prototype: Value,
+  pub(crate) iterator_prototype: Value,
+  pub(crate) map_iterator_prototype: Value,
+  pub(crate) set_iterator_prototype: Value,
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn install_map_set_constructors(
   object_proto_map: &Rc<RefCell<ObjectData>>,
   function_proto_map: &Rc<RefCell<ObjectData>>,
-) -> (Value, Value, Value, Value, Value) {
+) -> CollectionIntrinsics {
   use PropertyKey as PKey;
 
   let map_data_key = MAP_DATA_SLOT;
@@ -1091,11 +1101,13 @@ pub(crate) fn install_map_set_constructors(
     },
   );
 
-  (
-    map_ctor_val,
-    set_ctor_val,
-    Value::Object(iterator_proto),
-    Value::Object(map_iterator_proto),
-    Value::Object(set_iterator_proto),
-  )
+  CollectionIntrinsics {
+    map_constructor: map_ctor_val,
+    set_constructor: set_ctor_val,
+    map_prototype: Value::Object(map_proto),
+    set_prototype: Value::Object(set_proto),
+    iterator_prototype: Value::Object(iterator_proto),
+    map_iterator_prototype: Value::Object(map_iterator_proto),
+    set_iterator_prototype: Value::Object(set_iterator_proto),
+  }
 }

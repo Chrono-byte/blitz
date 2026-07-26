@@ -3,6 +3,11 @@ use super::*;
 use crate::value::ProxyData;
 use std::cell::RefMut;
 
+pub(crate) struct PrimitiveIntrinsics {
+  pub(crate) text: builtins::text_and_symbols::TextAndSymbolIntrinsics,
+  pub(crate) numeric: builtins::primitives::NumericIntrinsics,
+}
+
 /// Contains references to global intrinsic values.
 pub(crate) struct GlobalIntrinsicValues<'a> {
   /// The Reflect object.
@@ -83,16 +88,16 @@ pub(crate) fn install_global_bindings(
   object_proto_map: &Rc<RefCell<ObjectData>>,
   function_proto_map: &Rc<RefCell<ObjectData>>,
   values: &GlobalIntrinsicValues<'_>,
-) {
+) -> PrimitiveIntrinsics {
   use PropertyKey as PKey;
 
   let mut g: RefMut<'_, ObjectData> = globals.borrow_mut();
-  builtins::text_and_symbols::install_string_boolean_symbol_builtins(
+  let text = builtins::text_and_symbols::install_string_boolean_symbol_builtins(
     &mut g,
     object_proto_map,
     function_proto_map,
   );
-  builtins::primitives::install_bigint_and_number_builtins(
+  let numeric = builtins::primitives::install_bigint_and_number_builtins(
     &mut g,
     object_proto_map,
     function_proto_map,
@@ -383,4 +388,6 @@ pub(crate) fn install_global_bindings(
       }),
     )),
   );
+
+  PrimitiveIntrinsics { text, numeric }
 }

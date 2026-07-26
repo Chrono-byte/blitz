@@ -34,19 +34,25 @@ enum YieldStarStep {
   Return(Value),
 }
 
+pub(crate) struct NestedRunFailure {
+  pub(crate) error: RuntimeError,
+  pub(crate) thrown: Option<Value>,
+}
+
 impl Vm {
   fn gc_trace_enabled() -> bool {
     std::env::var_os("TSBLITZ_GC_TRACE").is_some() || crate::trace::enabled()
   }
 
   pub(super) fn prune_stale_handlers(&mut self) {
-    let active_frames = self.call_stack.len();
+    let active_frames = self.execution.call_stack.len();
     while self
+      .exceptions
       .handlers
       .last()
       .is_some_and(|h| h.frame_count > active_frames)
     {
-      self.handlers.pop();
+      self.exceptions.handlers.pop();
     }
   }
 
@@ -56,7 +62,7 @@ impl Vm {
   /// addresses may be recycled by `Rc`. It avoids stale cache hits across
   /// distinct allocations that happen to reuse the same pointer value.
   pub(crate) fn clear_property_get_ic_cache(&mut self) {
-    self.property_get_ic.clear();
+    self.caches.property_get.clear();
   }
 
   // -----------------------------------------------------------------------
@@ -78,62 +84,80 @@ impl Vm {
     globals: Rc<RefCell<ObjectData>>,
     module_loader: Rc<RefCell<ModuleLoader>>,
   ) -> Self {
+    let gc_registration = gc::VmGcRegistration::new();
     let intrinsics = crate::runtime_utils::install_minimal_kernel_constructors(&globals);
     let realm = Realm::with_globals(Rc::clone(&globals));
     let global_env = Rc::new(RefCell::new(EnvironmentRecord::new(None)));
     let mut vm = Self {
-      realm,
-      chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
-      ip: 0,
-      locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
-      this_value: Value::Object(Rc::clone(&globals)),
-      builtin_this_arg_prepended: false,
-      current_closure_env: None,
-      pending_closure_env: None,
-      gc_temp_roots: Vec::new(),
-      host_roots: Vec::new(),
-      globals,
-      call_stack: CallStack::with_capacity(FRAMES_INITIAL_CAPACITY),
-      root_chunk: None,
-      current_slot_types: None,
-      current_slot_names: None,
-      current_slot_immutable: None,
-      current_slot_sloppy_immutable_silent: None,
-      direct_eval_outer_slot_names: None,
-      direct_eval_outer_slot_immutable: None,
-      direct_eval_outer_slot_sloppy_immutable_silent: None,
-      obj_generations: HashMap::new(),
-      property_get_ic: HashMap::new(),
-      bg_runtime: get_global_bg_runtime(),
-      handlers: HandlerStack::with_capacity(32),
-      pending_exception: None,
-      pending_exception_frame_count: None,
-      unwound_risc_state: None,
-      module_loader,
-      module_table: Vec::new(),
-      current_module_specifier: None,
-      construct_new_target: None,
-      recent_return_value: None,
-      derived_constructor_this: Vec::new(),
-      last_uncaught_exception: None,
-      microtasks: VecDeque::new(),
-      dynamic_import_jobs: VecDeque::new(),
-      unhandled_rejection_hook: None,
-      lexical_env: Rc::clone(&global_env),
-      global_env,
-      yield_star_state: None,
-      generator_return_frame_count: None,
-      current_arguments_object: None,
-      current_arguments_mapped_count: 0,
-      current_strict_mode: false,
-      opcode_profiling_enabled: std::env::var("BLITZ_VM_PROFILE")
-        .ok()
-        .is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false")),
-      opcode_counts: [0; OP_COUNT],
-      run_started_at: None,
+      realm_state: RealmState {
+        realm,
+        globals: Rc::clone(&globals),
+        global_env: Rc::clone(&global_env),
+      },
+      execution: ExecutionState {
+        active: ExecutionContext {
+          chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
+          ip: 0,
+          locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
+          this_value: Value::Object(globals),
+          closure_env: None,
+          slots: None,
+          lexical_env: global_env,
+          yield_star: None,
+          arguments: ArgumentsState {
+            object: None,
+            mapped_count: 0,
+          },
+          strict: false,
+        },
+        builtin_this_arg_prepended: false,
+        pending_closure_env: None,
+        call_stack: CallStack::with_capacity(FRAMES_INITIAL_CAPACITY),
+        root_chunk: None,
+        direct_eval_outer: None,
+        generator_return_frame_count: None,
+      },
+      exceptions: ExceptionState {
+        handlers: HandlerStack::with_capacity(32),
+        pending: None,
+        pending_frame_count: None,
+        unwound_risc_state: None,
+        last_uncaught: None,
+      },
+      construction: ConstructionState {
+        new_target: None,
+        recent_return_value: None,
+        derived_this: Vec::new(),
+      },
+      modules: ModuleState {
+        loader: module_loader,
+        table: Vec::new(),
+        current_specifier: None,
+      },
+      jobs: JobState {
+        background_runtime: get_global_bg_runtime(),
+        microtasks: VecDeque::new(),
+        dynamic_imports: VecDeque::new(),
+        unhandled_rejection_hook: None,
+      },
+      caches: CacheState {
+        object_generations: HashMap::new(),
+        property_get: HashMap::new(),
+      },
+      profiling: ProfilingState {
+        enabled: std::env::var("BLITZ_VM_PROFILE")
+          .ok()
+          .is_some_and(|v| v != "0" && !v.eq_ignore_ascii_case("false")),
+        opcode_counts: [0; OP_COUNT],
+        run_started_at: None,
+      },
+      roots: RootState {
+        temporary: Vec::new(),
+        host: Rc::new(RefCell::new(HostRootStore::new())),
+      },
+      _gc_registration: gc_registration,
     };
     vm.populate_realm_intrinsics(intrinsics);
-    gc::reset_allocation_pressure();
     vm
   }
 
@@ -142,8 +166,10 @@ impl Vm {
   /// This is used for `eval`/`Function`-style dynamic execution that must
   /// observe the same realm intrinsics and globals as the caller.
   pub(crate) fn fork_execution(&self) -> Self {
-    let globals = Rc::clone(&self.globals);
+    let gc_registration = gc::VmGcRegistration::new();
+    let globals = Rc::clone(&self.realm_state.globals);
     let this_value = self
+      .realm_state
       .globals
       .borrow()
       .properties
@@ -154,53 +180,71 @@ impl Vm {
       })
       .unwrap_or(Value::Undefined);
     Self {
-      realm: self.realm.clone(),
-      chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
-      ip: 0,
-      locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
-      this_value,
-      builtin_this_arg_prepended: false,
-      current_closure_env: None,
-      pending_closure_env: None,
-      gc_temp_roots: Vec::new(),
-      host_roots: self.host_roots.clone(),
-      globals,
-      call_stack: CallStack::with_capacity(FRAMES_INITIAL_CAPACITY),
-      root_chunk: None,
-      current_slot_types: None,
-      current_slot_names: None,
-      current_slot_immutable: None,
-      current_slot_sloppy_immutable_silent: None,
-      direct_eval_outer_slot_names: None,
-      direct_eval_outer_slot_immutable: None,
-      direct_eval_outer_slot_sloppy_immutable_silent: None,
-      obj_generations: HashMap::new(),
-      property_get_ic: HashMap::new(),
-      bg_runtime: Arc::clone(&self.bg_runtime),
-      handlers: HandlerStack::with_capacity(32),
-      pending_exception: None,
-      pending_exception_frame_count: None,
-      unwound_risc_state: None,
-      module_loader: Rc::clone(&self.module_loader),
-      module_table: Vec::new(),
-      current_module_specifier: None,
-      construct_new_target: None,
-      recent_return_value: None,
-      derived_constructor_this: Vec::new(),
-      last_uncaught_exception: None,
-      microtasks: VecDeque::new(),
-      dynamic_import_jobs: VecDeque::new(),
-      unhandled_rejection_hook: self.unhandled_rejection_hook.clone(),
-      lexical_env: Rc::clone(&self.lexical_env),
-      global_env: Rc::clone(&self.global_env),
-      yield_star_state: None,
-      generator_return_frame_count: None,
-      current_arguments_object: None,
-      current_arguments_mapped_count: 0,
-      current_strict_mode: self.current_strict_mode,
-      opcode_profiling_enabled: self.opcode_profiling_enabled,
-      opcode_counts: [0; OP_COUNT],
-      run_started_at: None,
+      realm_state: RealmState {
+        realm: self.realm_state.realm.clone(),
+        globals,
+        global_env: Rc::clone(&self.realm_state.global_env),
+      },
+      execution: ExecutionState {
+        active: ExecutionContext {
+          chunk: Arc::new(Chunk::new(Arc::new(String::new()))),
+          ip: 0,
+          locals: Vec::with_capacity(LOCALS_INITIAL_CAPACITY),
+          this_value,
+          closure_env: None,
+          slots: None,
+          lexical_env: Rc::clone(&self.execution.active.lexical_env),
+          yield_star: None,
+          arguments: ArgumentsState {
+            object: None,
+            mapped_count: 0,
+          },
+          strict: self.execution.active.strict,
+        },
+        builtin_this_arg_prepended: false,
+        pending_closure_env: None,
+        call_stack: CallStack::with_capacity(FRAMES_INITIAL_CAPACITY),
+        root_chunk: None,
+        direct_eval_outer: None,
+        generator_return_frame_count: None,
+      },
+      exceptions: ExceptionState {
+        handlers: HandlerStack::with_capacity(32),
+        pending: None,
+        pending_frame_count: None,
+        unwound_risc_state: None,
+        last_uncaught: None,
+      },
+      construction: ConstructionState {
+        new_target: None,
+        recent_return_value: None,
+        derived_this: Vec::new(),
+      },
+      modules: ModuleState {
+        loader: Rc::clone(&self.modules.loader),
+        table: Vec::new(),
+        current_specifier: None,
+      },
+      jobs: JobState {
+        background_runtime: Arc::clone(&self.jobs.background_runtime),
+        microtasks: VecDeque::new(),
+        dynamic_imports: VecDeque::new(),
+        unhandled_rejection_hook: self.jobs.unhandled_rejection_hook.clone(),
+      },
+      caches: CacheState {
+        object_generations: HashMap::new(),
+        property_get: HashMap::new(),
+      },
+      profiling: ProfilingState {
+        enabled: self.profiling.enabled,
+        opcode_counts: [0; OP_COUNT],
+        run_started_at: None,
+      },
+      roots: RootState {
+        temporary: Vec::new(),
+        host: Rc::clone(&self.roots.host),
+      },
+      _gc_registration: gc_registration,
     }
   }
 
@@ -209,9 +253,23 @@ impl Vm {
     &mut self,
     value: Value,
   ) -> HostRoot {
-    let root = HostRoot(self.host_roots.len());
-    self.host_roots.push(value);
-    root
+    let mut store = self.roots.host.borrow_mut();
+    let slot = if let Some(slot) = store.free.pop() {
+      store.slots[slot].value = Some(value);
+      slot
+    } else {
+      let slot = store.slots.len();
+      store.slots.push(HostRootSlot {
+        generation: 0,
+        value: Some(value),
+      });
+      slot
+    };
+    HostRoot {
+      store_id: store.id,
+      slot,
+      generation: store.slots[slot].generation,
+    }
   }
 
   /// Replace a retained host value.
@@ -220,11 +278,16 @@ impl Vm {
     root: HostRoot,
     value: Value,
   ) -> Result<(), RuntimeError> {
-    let slot = self
-      .host_roots
-      .get_mut(root.0)
+    let mut store = self.roots.host.borrow_mut();
+    if root.store_id != store.id {
+      return Err(RuntimeError::from("Invalid host root"));
+    }
+    let slot = store
+      .slots
+      .get_mut(root.slot)
+      .filter(|slot| slot.generation == root.generation && slot.value.is_some())
       .ok_or_else(|| RuntimeError::from("Invalid host root"))?;
-    *slot = value;
+    slot.value = Some(value);
     Ok(())
   }
 
@@ -233,13 +296,45 @@ impl Vm {
     &self,
     root: HostRoot,
   ) -> Option<Value> {
-    self.host_roots.get(root.0).cloned()
+    let store = self.roots.host.borrow();
+    (root.store_id == store.id)
+      .then(|| store.slots.get(root.slot))
+      .flatten()
+      .filter(|slot| slot.generation == root.generation)
+      .and_then(|slot| slot.value.clone())
+  }
+
+  /// Release a retained host value and invalidate its handle.
+  pub fn release_host_root(
+    &mut self,
+    root: HostRoot,
+  ) -> Result<(), RuntimeError> {
+    let mut store = self.roots.host.borrow_mut();
+    if root.store_id != store.id {
+      return Err(RuntimeError::from("Invalid host root"));
+    }
+    let slot = store
+      .slots
+      .get_mut(root.slot)
+      .filter(|slot| slot.generation == root.generation && slot.value.is_some())
+      .ok_or_else(|| RuntimeError::from("Invalid host root"))?;
+    slot.value = None;
+    slot.generation = slot.generation.wrapping_add(1);
+    store.free.push(root.slot);
+    Ok(())
+  }
+
+  pub(crate) fn share_host_roots_from(
+    &mut self,
+    other: &Self,
+  ) {
+    self.roots.host = Rc::clone(&other.roots.host);
   }
 
   fn begin_opcode_profile_run(&mut self) {
-    if self.opcode_profiling_enabled {
-      self.opcode_counts = [0; OP_COUNT];
-      self.run_started_at = Some(std::time::Instant::now());
+    if self.profiling.enabled {
+      self.profiling.opcode_counts = [0; OP_COUNT];
+      self.profiling.run_started_at = Some(std::time::Instant::now());
     }
   }
 
@@ -247,16 +342,17 @@ impl Vm {
     &mut self,
     outcome: &str,
   ) {
-    if !self.opcode_profiling_enabled {
+    if !self.profiling.enabled {
       return;
     }
 
     let elapsed = self
+      .profiling
       .run_started_at
       .take()
       .map(|t| t.elapsed())
       .unwrap_or_default();
-    let total: u64 = self.opcode_counts.iter().sum();
+    let total: u64 = self.profiling.opcode_counts.iter().sum();
     eprintln!(
       "[vm-profile] outcome={} elapsed={:?} total_ops={}",
       outcome, elapsed, total
@@ -266,6 +362,7 @@ impl Vm {
     }
 
     let mut ranked: Vec<(Op, u64)> = self
+      .profiling
       .opcode_counts
       .iter()
       .enumerate()
@@ -290,17 +387,17 @@ impl Vm {
 
   /// Return the current `this` value.
   pub fn this_value(&self) -> Value {
-    self.this_value.clone()
+    self.execution.active.this_value.clone()
   }
 
   /// Return whether the current host builtin call includes `this` at `args[0]`.
   pub fn builtin_this_arg_prepended(&self) -> bool {
-    self.builtin_this_arg_prepended
+    self.execution.builtin_this_arg_prepended
   }
 
   /// Return whether a JavaScript exception is currently unwinding to a handler.
   pub(crate) fn has_pending_exception(&self) -> bool {
-    self.pending_exception.is_some()
+    self.exceptions.pending.is_some()
   }
 
   /// Close an iterator from a host callback without disturbing its pending
@@ -328,12 +425,13 @@ impl Vm {
   /// Return the current `[[NewTarget]]` value.
   pub fn current_new_target(&self) -> Option<Value> {
     self
+      .execution
       .call_stack
       .last()
       .and_then(|frame| frame.new_target.clone())
       // During constructor entry the pending value has not yet been moved
       // into the suspended caller frame.
-      .or_else(|| self.construct_new_target.clone())
+      .or_else(|| self.construction.new_target.clone())
   }
 
   /// Return the dynamic eval context flags for the currently executing code.
@@ -342,7 +440,7 @@ impl Vm {
   /// `super` is valid only when the current frame has a home object.
   pub(crate) fn current_eval_context_flags(&self) -> (bool, bool) {
     (
-      self.current_closure_env.is_some(),
+      self.execution.active.closure_env.is_some(),
       self.current_method_home_object().is_some(),
     )
   }
@@ -354,7 +452,7 @@ impl Vm {
   }
 
   fn get_this(&self) -> Value {
-    self.this_value.clone()
+    self.execution.active.this_value.clone()
   }
 
   pub(super) fn closure_lexical_this(callee: &Value) -> Option<Value> {
@@ -368,7 +466,7 @@ impl Vm {
   }
 
   pub(super) fn current_method_home_object(&self) -> Option<Value> {
-    let frame = self.call_stack.last()?;
+    let frame = self.execution.call_stack.last()?;
     match &frame.callee {
       Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
         let props = props.borrow();
@@ -406,30 +504,35 @@ impl Vm {
       }
       Value::Promise(_) => self.promise_prototype_value(),
       Value::String(_) => self
+        .realm_state
         .realm
         .intrinsics
         .string_prototype
         .clone()
         .unwrap_or(Value::Null),
       Value::Number(_) => self
+        .realm_state
         .realm
         .intrinsics
         .number_prototype
         .clone()
         .unwrap_or(Value::Null),
       Value::Bool(_) => self
+        .realm_state
         .realm
         .intrinsics
         .boolean_prototype
         .clone()
         .unwrap_or(Value::Null),
       Value::Symbol(_, _) => self
+        .realm_state
         .realm
         .intrinsics
         .symbol_prototype
         .clone()
         .unwrap_or(Value::Null),
       Value::BigInt(_) => self
+        .realm_state
         .realm
         .intrinsics
         .bigint_prototype
@@ -437,6 +540,7 @@ impl Vm {
         .unwrap_or(Value::Null),
       Value::Null | Value::Undefined | Value::Uninitialized => Value::Null,
       Value::Builtin(_) => self
+        .realm_state
         .realm
         .intrinsics
         .function_prototype
@@ -448,13 +552,18 @@ impl Vm {
   /// Resolve `Promise.prototype` from the realm's intrinsic table or from
   /// the current global constructor as a fallback.
   pub(super) fn promise_prototype_value(&self) -> Value {
-    if let Some(proto) = self.realm.intrinsics.promise_prototype.clone()
+    if let Some(proto) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .promise_prototype
+      .clone()
       && !matches!(proto, Value::Null | Value::Undefined)
     {
       return proto;
     }
 
-    if let Some(ctor) = self.realm.get_global("Promise")
+    if let Some(ctor) = self.realm_state.realm.get_global("Promise")
       && let Ok(proto) = get_property(
         &ctor,
         &PropertyKey::String("prototype".to_string().into()),
@@ -481,7 +590,13 @@ impl Vm {
       array_length_descriptor(len),
     );
 
-    if let Some(proto) = self.realm.intrinsics.array_prototype.clone() {
+    if let Some(proto) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .array_prototype
+      .clone()
+    {
       props.borrow_mut().set_prototype_value(proto);
     }
 
@@ -494,12 +609,12 @@ impl Vm {
     // host-side microtask/import-job closures. Collecting while those queues
     // are non-empty can reclaim still-live JS values reachable only through
     // those opaque Rust closures, leading to stalled async work.
-    if !self.microtasks.is_empty() || !self.dynamic_import_jobs.is_empty() {
+    if !self.jobs.microtasks.is_empty() || !self.jobs.dynamic_imports.is_empty() {
       if Self::gc_trace_enabled() {
         eprintln!(
           "[gc] skip collect: pending_jobs microtasks={} import_jobs={}",
-          self.microtasks.len(),
-          self.dynamic_import_jobs.len()
+          self.jobs.microtasks.len(),
+          self.jobs.dynamic_imports.len()
         );
       }
       return gc::GcStats::default();
@@ -513,39 +628,47 @@ impl Vm {
 
     let mut roots: Vec<Value> = Vec::new();
     let mut env_roots: Vec<Rc<RefCell<Vec<SharedValue>>>> = Vec::new();
-    roots.push(Value::Object(Rc::clone(&self.globals)));
-    roots.extend(self.locals.iter().map(|c| c.borrow().clone()));
-    roots.push(self.this_value.clone());
-    if let Some(value) = &self.construct_new_target {
+    roots.push(Value::Object(Rc::clone(&self.realm_state.globals)));
+    roots.extend(
+      self
+        .execution
+        .active
+        .locals
+        .iter()
+        .map(|c| c.borrow().clone()),
+    );
+    roots.push(self.execution.active.this_value.clone());
+    if let Some(value) = &self.construction.new_target {
       roots.push(value.clone());
     }
-    if let Some(value) = &self.current_arguments_object {
+    if let Some(value) = &self.execution.active.arguments.object {
       roots.push(value.clone());
     }
-    if let Some(value) = &self.recent_return_value {
+    if let Some(value) = &self.construction.recent_return_value {
       roots.push(value.clone());
     }
     roots.extend(
       self
-        .derived_constructor_this
+        .construction
+        .derived_this
         .iter()
         .filter_map(Clone::clone),
     );
-    if let Some(value) = &self.last_uncaught_exception {
+    if let Some(value) = &self.exceptions.last_uncaught {
       roots.push(value.clone());
     }
-    if let Some(value) = &self.pending_exception {
+    if let Some(value) = &self.exceptions.pending {
       roots.push(value.clone());
     }
-    if let Some(state) = &self.unwound_risc_state {
+    if let Some(state) = &self.exceptions.unwound_risc_state {
       roots.extend(state.registers.iter().cloned());
       roots.extend(state.spills.iter().cloned());
     }
-    if let Some(state) = &self.yield_star_state {
+    if let Some(state) = &self.execution.active.yield_star {
       roots.push(state.iterator.clone());
       roots.push(state.next_method.clone());
     }
-    if let Some(env) = &self.current_closure_env {
+    if let Some(env) = &self.execution.active.closure_env {
       env_roots.push(Rc::clone(env));
       roots.extend(
         env
@@ -554,7 +677,7 @@ impl Vm {
           .map(|cell| cell.borrow().clone()),
       );
     }
-    if let Some(env) = &self.pending_closure_env {
+    if let Some(env) = &self.execution.pending_closure_env {
       env_roots.push(Rc::clone(env));
       roots.extend(
         env
@@ -563,25 +686,43 @@ impl Vm {
           .map(|cell| cell.borrow().clone()),
       );
     }
-    roots.extend(self.gc_temp_roots.iter().cloned());
-    roots.extend(self.host_roots.iter().cloned());
+    roots.extend(self.roots.temporary.iter().cloned());
     roots.extend(
       self
-        .property_get_ic
+        .roots
+        .host
+        .borrow()
+        .slots
+        .iter()
+        .filter_map(|slot| slot.value.clone()),
+    );
+    roots.extend(
+      self
+        .caches
+        .property_get
         .values()
         .map(|entry| entry.value.clone()),
     );
     self
+      .execution
+      .active
       .lexical_env
       .borrow()
       .collect_binding_values(&mut roots);
     self
+      .realm_state
       .global_env
       .borrow()
       .collect_binding_values(&mut roots);
-    for frame in self.call_stack.iter() {
-      roots.extend(frame.locals.iter().map(|c| c.borrow().clone()));
-      roots.push(frame.this_value.clone());
+    for frame in self.execution.call_stack.iter() {
+      roots.extend(
+        frame
+          .context
+          .locals
+          .iter()
+          .map(|c| c.borrow().clone()),
+      );
+      roots.push(frame.context.this_value.clone());
       roots.push(frame.callee.clone());
       if let Some(state) = &frame.risc_state {
         roots.extend(state.registers.iter().cloned());
@@ -590,14 +731,14 @@ impl Vm {
       if let Some(value) = &frame.new_target {
         roots.push(value.clone());
       }
-      if let Some(value) = &frame.arguments_object {
+      if let Some(value) = &frame.context.arguments.object {
         roots.push(value.clone());
       }
-      if let Some(state) = &frame.yield_star_state {
+      if let Some(state) = &frame.context.yield_star {
         roots.push(state.iterator.clone());
         roots.push(state.next_method.clone());
       }
-      if let Some(env) = &frame.closure_env {
+      if let Some(env) = &frame.context.closure_env {
         env_roots.push(Rc::clone(env));
         roots.extend(
           env
@@ -607,32 +748,70 @@ impl Vm {
         );
       }
       frame
+        .context
         .lexical_env
         .borrow()
         .collect_binding_values(&mut roots);
     }
-    for module in &self.module_table {
+    for module in &self.modules.table {
       roots.extend(module.values().map(|cell| cell.borrow().clone()));
     }
-    if let Some(value) = self.realm.intrinsics.object_constructor.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.array_constructor.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.function_constructor.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.string_constructor.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.symbol_constructor.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.error_constructor.clone() {
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .object_constructor
+      .clone()
+    {
       roots.push(value);
     }
     if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .array_constructor
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .function_constructor
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .string_constructor
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .symbol_constructor
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .error_constructor
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
       .realm
       .intrinsics
       .type_error_constructor
@@ -641,6 +820,7 @@ impl Vm {
       roots.push(value);
     }
     if let Some(value) = self
+      .realm_state
       .realm
       .intrinsics
       .range_error_constructor
@@ -649,6 +829,7 @@ impl Vm {
       roots.push(value);
     }
     if let Some(value) = self
+      .realm_state
       .realm
       .intrinsics
       .reference_error_constructor
@@ -657,6 +838,7 @@ impl Vm {
       roots.push(value);
     }
     if let Some(value) = self
+      .realm_state
       .realm
       .intrinsics
       .syntax_error_constructor
@@ -664,55 +846,152 @@ impl Vm {
     {
       roots.push(value);
     }
-    if let Some(value) = self.realm.intrinsics.promise_constructor.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.date_constructor.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.map_constructor.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.number_constructor.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.object_prototype.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.array_prototype.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.function_prototype.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.string_prototype.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.symbol_prototype.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.error_prototype.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.promise_prototype.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.date_prototype.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.map_prototype.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.boolean_prototype.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.number_prototype.clone() {
-      roots.push(value);
-    }
-    if let Some(value) = self.realm.intrinsics.bigint_prototype.clone() {
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .promise_constructor
+      .clone()
+    {
       roots.push(value);
     }
     if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .date_constructor
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .map_constructor
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .number_constructor
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .object_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .array_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .function_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .string_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .symbol_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .error_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .promise_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .date_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .map_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .boolean_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .number_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
+      .bigint_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
       .realm
       .intrinsics
       .eval_error_constructor
@@ -721,6 +1000,7 @@ impl Vm {
       roots.push(value);
     }
     if let Some(value) = self
+      .realm_state
       .realm
       .intrinsics
       .uri_error_constructor
@@ -770,21 +1050,21 @@ impl Vm {
     // Opportunistic prototype-GC is only safe at quiescent points where
     // live JS values are fully represented in the VM root sets. Nested JS
     // calls and pending host jobs still keep additional opaque temporaries.
-    if !self.call_stack.is_empty()
-      || !self.microtasks.is_empty()
-      || !self.dynamic_import_jobs.is_empty()
-      || self.pending_closure_env.is_some()
+    if !self.execution.call_stack.is_empty()
+      || !self.jobs.microtasks.is_empty()
+      || !self.jobs.dynamic_imports.is_empty()
+      || self.execution.pending_closure_env.is_some()
     {
       if Self::gc_trace_enabled() {
         eprintln!(
           "[gc] skip maybe_collect pressure={} threshold={} call_stack={} microtasks={} import_jobs={} pending_closure_env={} temp_roots={}",
           pressure,
           threshold,
-          self.call_stack.len(),
-          self.microtasks.len(),
-          self.dynamic_import_jobs.len(),
-          self.pending_closure_env.is_some(),
-          self.gc_temp_roots.len(),
+          self.execution.call_stack.len(),
+          self.jobs.microtasks.len(),
+          self.jobs.dynamic_imports.len(),
+          self.execution.pending_closure_env.is_some(),
+          self.roots.temporary.len(),
         );
       }
       return;
@@ -802,7 +1082,7 @@ impl Vm {
     &mut self,
     intrinsics: Intrinsics,
   ) {
-    self.realm.set_intrinsics(intrinsics);
+    self.realm_state.realm.set_intrinsics(intrinsics);
   }
 
   /// Provide mutable access to the per-VM module loader, creating it if missing.
@@ -811,13 +1091,13 @@ impl Vm {
   ///
   /// Panics if the module loader cannot be borrowed mutably.
   pub fn module_loader_mut(&self) -> std::cell::RefMut<'_, ModuleLoader> {
-    self.module_loader.borrow_mut()
+    self.modules.loader.borrow_mut()
   }
 
   /// Return a snapshot of this VM realm's module-loader pipeline counters.
   #[must_use]
   pub fn module_loader_pipeline_snapshot(&self) -> crate::module::ModuleLoaderPipelineSnapshot {
-    self.module_loader.borrow().pipeline_snapshot()
+    self.modules.loader.borrow().pipeline_snapshot()
   }
 
   /// Validate and register a parser-free prelinked graph in this VM's realm.
@@ -831,7 +1111,8 @@ impl Vm {
     graph: crate::prelinked::PrelinkedModuleGraph,
   ) -> Result<(), crate::errors::BundlerError> {
     self
-      .module_loader
+      .modules
+      .loader
       .borrow_mut()
       .register_prelinked_graph(graph)
   }
@@ -856,7 +1137,8 @@ impl Vm {
     T: Into<String>,
   {
     self
-      .module_loader
+      .modules
+      .loader
       .borrow_mut()
       .register_prelinked_graph_with_declarations(graph, declarations)
   }
@@ -883,14 +1165,17 @@ impl Vm {
       .flat_map(|module| module.exports.values().cloned())
       .collect::<Vec<_>>();
     self
-      .module_loader
+      .modules
+      .loader
       .borrow_mut()
       .register_prelinked_graph_with_declarations_and_host_modules(
         graph,
         declarations,
         host_modules,
       )?;
-    self.host_roots.extend(host_roots);
+    for value in host_roots {
+      self.create_host_root(value);
+    }
     Ok(())
   }
 
@@ -904,7 +1189,8 @@ impl Vm {
     module: crate::module::VirtualModule,
   ) -> Result<(), crate::errors::BundlerError> {
     self
-      .module_loader
+      .modules
+      .loader
       .borrow_mut()
       .register_virtual_module(module)
   }
@@ -920,7 +1206,8 @@ impl Vm {
     canonical_specifier: impl Into<String>,
   ) -> Result<(), crate::errors::BundlerError> {
     self
-      .module_loader
+      .modules
+      .loader
       .borrow_mut()
       .register_virtual_alias(alias, canonical_specifier)
   }
@@ -935,14 +1222,15 @@ impl Vm {
     registry: crate::module::VirtualModuleRegistry,
   ) -> Result<(), crate::errors::BundlerError> {
     self
-      .module_loader
+      .modules
+      .loader
       .borrow_mut()
       .register_virtual_modules(registry)
   }
 
   /// Return the canonical specifier of the module currently being evaluated.
   pub(crate) fn current_module_specifier(&self) -> Option<&str> {
-    self.current_module_specifier.as_deref()
+    self.modules.current_specifier.as_deref()
   }
 
   /// Set the canonical specifier of the module currently being evaluated.
@@ -950,12 +1238,12 @@ impl Vm {
     &mut self,
     specifier: Option<String>,
   ) {
-    self.current_module_specifier = specifier;
+    self.modules.current_specifier = specifier;
   }
 
   /// Return a shared handle to the module loader for this VM's realm.
   pub fn module_loader_handle(&self) -> Rc<RefCell<ModuleLoader>> {
-    Rc::clone(&self.module_loader)
+    Rc::clone(&self.modules.loader)
   }
 
   /// Install a module's export slot map into the VM module table at the
@@ -970,10 +1258,10 @@ impl Vm {
     let namespace = build_module_namespace_object(&exports);
     exports.insert("*".to_string(), Rc::new(RefCell::new(namespace)));
     // Ensure table is large enough
-    while self.module_table.len() <= module_index {
-      self.module_table.push(HashMap::new());
+    while self.modules.table.len() <= module_index {
+      self.modules.table.push(HashMap::new());
     }
-    self.module_table[module_index] = exports;
+    self.modules.table[module_index] = exports;
   }
 
   /// Install exports only when this VM has not seen the module yet.
@@ -988,7 +1276,8 @@ impl Vm {
     exports: HashMap<String, SharedValue>,
   ) {
     let installed = self
-      .module_table
+      .modules
+      .table
       .get(module_index)
       .is_some_and(|module| module.contains_key("*"));
     if !installed {
@@ -1002,7 +1291,8 @@ impl Vm {
     module_index: usize,
   ) -> Option<Value> {
     self
-      .module_table
+      .modules
+      .table
       .get(module_index)
       .and_then(|exports| exports.get("*"))
       .map(|slot| slot.borrow().clone())
@@ -1014,6 +1304,7 @@ impl Vm {
     name: &str,
   ) -> Option<Value> {
     self
+      .realm_state
       .globals
       .borrow()
       .properties
@@ -1026,28 +1317,28 @@ impl Vm {
 
   /// Returns the current globals object for the active realm.
   pub fn globals_rc(&self) -> Rc<RefCell<ObjectData>> {
-    Rc::clone(&self.globals)
+    Rc::clone(&self.realm_state.globals)
   }
 
   /// Returns a reference to the Realm this VM operates in.
   pub fn realm(&self) -> &Realm {
-    &self.realm
+    &self.realm_state.realm
   }
 
   /// Returns a mutable reference to the Realm this VM operates in.
   pub fn realm_mut(&mut self) -> &mut Realm {
-    &mut self.realm
+    &mut self.realm_state.realm
   }
 
   /// Returns whether the current execution frame is in strict mode.
   /// If there are no frames (root-level execution), returns false.
   pub fn is_strict_mode(&self) -> bool {
-    self.current_strict_mode
+    self.execution.active.strict
   }
 
   /// Returns whether the current execution context is in strict mode.
   pub(crate) fn active_strict_mode(&self) -> bool {
-    self.current_strict_mode
+    self.execution.active.strict
   }
 
   /// Sets the current strict mode flag.
@@ -1055,7 +1346,7 @@ impl Vm {
     &mut self,
     strict: bool,
   ) {
-    self.current_strict_mode = strict;
+    self.execution.active.strict = strict;
   }
 
   /// Return own keys for a global value if it is an object or closure.
@@ -1063,7 +1354,7 @@ impl Vm {
     &self,
     name: &str,
   ) -> Option<Vec<String>> {
-    let g = self.globals.borrow();
+    let g = self.realm_state.globals.borrow();
     let v = g
       .properties
       .get(&PropertyKey::String(name.to_string().into()))
@@ -1084,7 +1375,7 @@ impl Vm {
     &self,
     name: &str,
   ) -> Option<Vec<String>> {
-    let g = self.globals.borrow();
+    let g = self.realm_state.globals.borrow();
     let v = g
       .properties
       .get(&PropertyKey::String(name.to_string().into()))
@@ -1168,22 +1459,18 @@ impl Vm {
     &mut self,
     keep_globals: &HashSet<String>,
   ) {
-    self.locals.clear();
-    self.call_stack.clear();
-    self.current_strict_mode = self.chunk.root_strict;
-    self.handlers.clear();
-    self.pending_exception = None;
-    self.pending_exception_frame_count = None;
-    self.unwound_risc_state = None;
-    self.root_chunk = None;
-    self.current_slot_types = None;
-    self.current_slot_names = None;
-    self.current_slot_immutable = None;
-    self.current_slot_sloppy_immutable_silent = None;
-    self.direct_eval_outer_slot_names = None;
-    self.direct_eval_outer_slot_immutable = None;
-    self.direct_eval_outer_slot_sloppy_immutable_silent = None;
-    self.this_value = self
+    self.execution.active.locals.clear();
+    self.execution.call_stack.clear();
+    self.execution.active.strict = self.execution.active.chunk.root_strict;
+    self.exceptions.handlers.clear();
+    self.exceptions.pending = None;
+    self.exceptions.pending_frame_count = None;
+    self.exceptions.unwound_risc_state = None;
+    self.execution.root_chunk = None;
+    self.execution.active.slots = None;
+    self.execution.direct_eval_outer = None;
+    self.execution.active.this_value = self
+      .realm_state
       .globals
       .borrow()
       .properties
@@ -1193,18 +1480,24 @@ impl Vm {
         _ => None,
       })
       .unwrap_or(Value::Undefined);
-    self.current_closure_env = None;
-    self.pending_closure_env = None;
-    self.gc_temp_roots.clear();
-    self.lexical_env = Rc::clone(&self.global_env);
-    self.yield_star_state = None;
-    self.generator_return_frame_count = None;
-    self.ip = 0;
-    self.chunk = Arc::new(Chunk::new(Arc::new(String::new())));
-    self.obj_generations.clear();
-    self.property_get_ic.clear();
+    self.execution.active.closure_env = None;
+    self.execution.pending_closure_env = None;
+    self.roots.temporary.clear();
+    self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
+    self.execution.active.yield_star = None;
+    self.execution.generator_return_frame_count = None;
+    self.construction.new_target = None;
+    self.construction.recent_return_value = None;
+    self.construction.derived_this.clear();
+    self.exceptions.last_uncaught = None;
+    self.execution.active.arguments.object = None;
+    self.execution.active.arguments.mapped_count = 0;
+    self.execution.active.ip = 0;
+    self.execution.active.chunk = Arc::new(Chunk::new(Arc::new(String::new())));
+    self.caches.object_generations.clear();
+    self.caches.property_get.clear();
     gc::reset_allocation_pressure();
-    let mut g = self.globals.borrow_mut();
+    let mut g = self.realm_state.globals.borrow_mut();
     g.properties.retain(
       |k, _| matches!(k, PropertyKey::String(s) if keep_globals.contains(s.as_str_lossy())),
     );
@@ -1234,31 +1527,33 @@ impl Vm {
     chunk: Chunk,
   ) -> Result<Value, RuntimeError> {
     let chunk_rc = Arc::new(chunk);
-    self.root_chunk = Some(Arc::clone(&chunk_rc));
-    self.chunk = chunk_rc;
-    self.ip = 0;
-    self.locals.clear();
-    self.call_stack.clear();
-    self.current_strict_mode = self.chunk.root_strict;
-    self.handlers.clear();
-    self.pending_exception = None;
-    self.pending_exception_frame_count = None;
-    self.unwound_risc_state = None;
-    self.property_get_ic.clear();
-    self.current_slot_types = None;
-    self.current_slot_names = None;
-    self.current_slot_immutable = None;
-    self.current_slot_sloppy_immutable_silent = None;
-    self.direct_eval_outer_slot_names = None;
-    self.direct_eval_outer_slot_immutable = None;
-    self.direct_eval_outer_slot_sloppy_immutable_silent = None;
-    self.current_closure_env = None;
-    self.pending_closure_env = None;
-    self.gc_temp_roots.clear();
-    self.lexical_env = Rc::clone(&self.global_env);
-    self.yield_star_state = None;
-    self.generator_return_frame_count = None;
-    self.this_value = self
+    self.execution.root_chunk = Some(Arc::clone(&chunk_rc));
+    self.execution.active.chunk = chunk_rc;
+    self.execution.active.ip = 0;
+    self.execution.active.locals.clear();
+    self.execution.call_stack.clear();
+    self.execution.active.strict = self.execution.active.chunk.root_strict;
+    self.exceptions.handlers.clear();
+    self.exceptions.pending = None;
+    self.exceptions.pending_frame_count = None;
+    self.exceptions.unwound_risc_state = None;
+    self.caches.property_get.clear();
+    self.execution.active.slots = None;
+    self.execution.direct_eval_outer = None;
+    self.execution.active.closure_env = None;
+    self.execution.pending_closure_env = None;
+    self.roots.temporary.clear();
+    self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
+    self.execution.active.yield_star = None;
+    self.execution.generator_return_frame_count = None;
+    self.construction.new_target = None;
+    self.construction.recent_return_value = None;
+    self.construction.derived_this.clear();
+    self.exceptions.last_uncaught = None;
+    self.execution.active.arguments.object = None;
+    self.execution.active.arguments.mapped_count = 0;
+    self.execution.active.this_value = self
+      .realm_state
       .globals
       .borrow()
       .properties
@@ -1280,8 +1575,8 @@ impl Vm {
     _root_execution: bool,
   ) -> Result<Value, RuntimeError> {
     let mut state = RiscExecutionState::new(
-      self.this_value.clone(),
-      self.chunk.risc_spill_count as usize,
+      self.execution.active.this_value.clone(),
+      self.execution.active.chunk.risc_spill_count as usize,
     );
     match self.run_risc_state(&mut state, false)? {
       RiscRunOutcome::Return(value) => Ok(value),
@@ -1299,38 +1594,44 @@ impl Vm {
     state: &mut RiscExecutionState,
     stop_at_generator_init: bool,
   ) -> Result<RiscRunOutcome, RuntimeError> {
-    let boundary_frame_count = self.call_stack.len();
+    let boundary_frame_count = self.execution.call_stack.len();
     let registers = &mut state.registers;
     let spills = &mut state.spills;
 
     if self
-      .pending_exception_frame_count
+      .exceptions
+      .pending_frame_count
       .is_some_and(|target| target >= boundary_frame_count)
-      && let Some(exception) = self.pending_exception.take()
+      && let Some(exception) = self.exceptions.pending.take()
     {
-      self.pending_exception_frame_count = None;
+      self.exceptions.pending_frame_count = None;
       registers[7] = exception;
     }
 
     loop {
       let word = *self
+        .execution
+        .active
         .chunk
         .code
-        .get(self.ip)
+        .get(self.execution.active.ip)
         .ok_or_else(|| RuntimeError::from("RISC instruction pointer out of bounds"))?;
-      let instruction_ip = self.ip;
-      self.ip += 1;
+      let instruction_ip = self.execution.active.ip;
+      self.execution.active.ip += 1;
       let op = Op::from_byte((word & 0xFF) as u8)
         .ok_or_else(|| RuntimeError::from("invalid RISC opcode"))?;
       let rd = decode_rd(word) as usize;
       let rs = decode_rs(word) as usize;
-      if self.opcode_profiling_enabled {
-        self.opcode_counts[op as usize] = self.opcode_counts[op as usize].saturating_add(1);
+      if self.profiling.enabled {
+        self.profiling.opcode_counts[op as usize] =
+          self.profiling.opcode_counts[op as usize].saturating_add(1);
       }
       if crate::trace::enabled() {
         eprintln!(
           "[trace] risc {}",
           self
+            .execution
+            .active
             .chunk
             .disassemble_at(instruction_ip)
             .unwrap_or_else(|_| format!("ip={instruction_ip}"))
@@ -1342,6 +1643,8 @@ impl Vm {
         match op {
           Op::Const => {
             registers[rd] = self
+              .execution
+              .active
               .chunk
               .constants
               .get(decode_risc_aux16(word) as usize)
@@ -1371,6 +1674,8 @@ impl Vm {
           Op::LoadLocal => {
             let slot = decode_risc_aux16(word) as usize;
             let value = self
+              .execution
+              .active
               .locals
               .get(slot)
               .map(|cell| cell.borrow().clone())
@@ -1384,36 +1689,52 @@ impl Vm {
           }
           Op::StoreLocal => {
             let slot = decode_risc_aux16(word) as usize;
-            ensure_slot(&mut self.locals, slot);
-            let was_uninitialized = matches!(*self.locals[slot].borrow(), Value::Uninitialized);
+            ensure_slot(&mut self.execution.active.locals, slot);
+            let was_uninitialized = matches!(
+              *self.execution.active.locals[slot].borrow(),
+              Value::Uninitialized
+            );
             let immutable = self
-              .current_slot_immutable
+              .execution
+              .active
+              .slots
               .as_ref()
-              .and_then(|flags| flags.get(slot))
+              .and_then(|slots| slots.immutable.get(slot))
               .copied()
               .unwrap_or(false);
             let initializes = immutable && was_uninitialized;
             if immutable && !initializes {
               let sloppy_silent = self
-                .current_slot_sloppy_immutable_silent
+                .execution
+                .active
+                .slots
                 .as_ref()
-                .and_then(|flags| flags.get(slot))
+                .and_then(|slots| slots.sloppy_immutable_silent.get(slot))
                 .copied()
                 .unwrap_or(false);
               if self.is_strict_mode() || !sloppy_silent {
                 return Err(self.throw_type_error("Assignment to constant variable"));
               }
             } else {
-              let has_object_environment = self.lexical_env.borrow().has_object_environment();
+              let has_object_environment = self
+                .execution
+                .active
+                .lexical_env
+                .borrow()
+                .has_object_environment();
               let slot_name = (has_object_environment || was_uninitialized)
                 .then(|| {
                   self
-                    .current_slot_names
+                    .execution
+                    .active
+                    .slots
                     .as_ref()
-                    .and_then(|names| names.get(slot))
+                    .and_then(|slots| slots.names.get(slot))
                     .and_then(Clone::clone)
                     .or_else(|| {
                       self
+                        .execution
+                        .active
                         .chunk
                         .root_slot_names
                         .get(slot)
@@ -1428,15 +1749,17 @@ impl Vm {
                   false
                 };
               if !wrote_with_environment {
-                *self.locals[slot].borrow_mut() = registers[rd].clone();
+                *self.execution.active.locals[slot].borrow_mut() = registers[rd].clone();
                 if was_uninitialized && let Some(name) = slot_name {
                   let _ = self
+                    .execution
+                    .active
                     .lexical_env
                     .borrow_mut()
                     .set_binding_initialized_in_chain(&name, true);
                 }
-                if let Some(arguments_object) = self.current_arguments_object.clone()
-                  && slot < self.current_arguments_mapped_count
+                if let Some(arguments_object) = self.execution.active.arguments.object.clone()
+                  && slot < self.execution.active.arguments.mapped_count
                 {
                   let key = PropertyKey::String(slot.to_string().into());
                   if let Some((PropertyDescriptor::Data { writable: true, .. }, _)) =
@@ -1451,20 +1774,24 @@ impl Vm {
           }
           Op::CloneLocalCell => {
             let slot = decode_risc_aux16(word) as usize;
-            ensure_slot(&mut self.locals, slot);
-            let value = self.locals[slot].borrow().clone();
-            self.locals[slot] = Rc::new(RefCell::new(value));
+            ensure_slot(&mut self.execution.active.locals, slot);
+            let value = self.execution.active.locals[slot]
+              .borrow()
+              .clone();
+            self.execution.active.locals[slot] = Rc::new(RefCell::new(value));
           }
           Op::ResetLocalCell => {
             let slot = decode_risc_aux16(word) as usize;
-            ensure_slot(&mut self.locals, slot);
-            self.locals[slot] = Rc::new(RefCell::new(Value::Uninitialized));
+            ensure_slot(&mut self.execution.active.locals, slot);
+            self.execution.active.locals[slot] = Rc::new(RefCell::new(Value::Uninitialized));
           }
           Op::GetUpvalue => {
             let index = decode_risc_aux16(word) as usize;
             let value = {
               let environment = self
-                .current_closure_env
+                .execution
+                .active
+                .closure_env
                 .as_ref()
                 .ok_or("GetUpvalue without closure environment")?;
               let environment = environment.borrow();
@@ -1488,6 +1815,7 @@ impl Vm {
           Op::SetUpvalue => {
             let index = decode_risc_aux16(word) as usize;
             let (mirror_global_name, immutable, sloppy_immutable_silent) = self
+              .execution
               .call_stack
               .last()
               .and_then(|frame| frame.upvalues.get(index))
@@ -1504,7 +1832,9 @@ impl Vm {
               }
             } else {
               let environment = self
-                .current_closure_env
+                .execution
+                .active
+                .closure_env
                 .as_ref()
                 .ok_or("SetUpvalue without closure environment")?;
               let cell = {
@@ -1545,6 +1875,7 @@ impl Vm {
           Op::GetBuiltin => {
             let name = self.string_constant(decode_risc_aux16(word) as usize)?;
             let value = self
+              .realm_state
               .realm
               .get_hidden_builtin(&name)
               .ok_or_else(|| RuntimeError::from(format!("GetBuiltin: '{name}' not found")))?;
@@ -1559,7 +1890,8 @@ impl Vm {
             let (module_index, name) =
               self.module_export_descriptor(decode_risc_aux16(word) as usize)?;
             registers[rd] = self
-              .module_table
+              .modules
+              .table
               .get(module_index)
               .and_then(|module| module.get(&name).cloned())
               .map_or(Value::Undefined, |slot| slot.borrow().clone());
@@ -1567,13 +1899,13 @@ impl Vm {
           Op::SetModuleExport => {
             let (module_index, name) =
               self.module_export_descriptor(decode_risc_aux16(word) as usize)?;
-            while self.module_table.len() <= module_index {
-              self.module_table.push(HashMap::new());
+            while self.modules.table.len() <= module_index {
+              self.modules.table.push(HashMap::new());
             }
-            if let Some(slot) = self.module_table[module_index].get(&name) {
+            if let Some(slot) = self.modules.table[module_index].get(&name) {
               *slot.borrow_mut() = registers[rd].clone();
             } else {
-              self.module_table[module_index]
+              self.modules.table[module_index]
                 .insert(name, Rc::new(RefCell::new(registers[rd].clone())));
             }
           }
@@ -1697,8 +2029,9 @@ impl Vm {
             } else {
               offset
             };
-            self.ip = usize::try_from(self.ip as i64 + offset as i64)
-              .map_err(|_| RuntimeError::from("negative RISC jump target"))?;
+            self.execution.active.ip =
+              usize::try_from(self.execution.active.ip as i64 + offset as i64)
+                .map_err(|_| RuntimeError::from("negative RISC jump target"))?;
           }
           Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
             let value = &registers[rd];
@@ -1709,8 +2042,10 @@ impl Vm {
               _ => unreachable!(),
             };
             if take {
-              self.ip = usize::try_from(self.ip as i64 + decode_risc_cond_offset(word) as i64)
-                .map_err(|_| RuntimeError::from("negative RISC conditional target"))?;
+              self.execution.active.ip = usize::try_from(
+                self.execution.active.ip as i64 + decode_risc_cond_offset(word) as i64,
+              )
+              .map_err(|_| RuntimeError::from("negative RISC conditional target"))?;
             }
           }
           Op::CompareJump => {
@@ -1737,8 +2072,9 @@ impl Vm {
               _ => unreachable!(),
             };
             if !result {
-              self.ip = usize::try_from(self.ip as i64 + offset as i64)
-                .map_err(|_| RuntimeError::from("negative RISC compare target"))?;
+              self.execution.active.ip =
+                usize::try_from(self.execution.active.ip as i64 + offset as i64)
+                  .map_err(|_| RuntimeError::from("negative RISC compare target"))?;
             }
           }
           Op::GetProperty => {
@@ -1787,7 +2123,7 @@ impl Vm {
           }
           Op::BuildArray => {
             let count = decode_risc_aux16(word) as usize;
-            let base = self.chunk.risc_value_spill_count as usize;
+            let base = self.execution.active.chunk.risc_value_spill_count as usize;
             let values = spills
               .get(base..base + count)
               .ok_or_else(|| RuntimeError::from("RISC array operand window out of bounds"))?
@@ -1797,7 +2133,7 @@ impl Vm {
           Op::BuildObject => {
             let count = decode_risc_aux16(word) as usize;
             let operand_count = count.saturating_mul(2);
-            let base = self.chunk.risc_value_spill_count as usize;
+            let base = self.execution.active.chunk.risc_value_spill_count as usize;
             let values = spills
               .get(base..base + operand_count)
               .ok_or_else(|| RuntimeError::from("RISC object operand window out of bounds"))?
@@ -1822,7 +2158,7 @@ impl Vm {
               .map(|index| registers[2 + index].clone())
               .collect();
             let overflow = count.saturating_sub(6);
-            let base = self.chunk.risc_value_spill_count as usize;
+            let base = self.execution.active.chunk.risc_value_spill_count as usize;
             args.extend_from_slice(
               spills
                 .get(base..base + overflow)
@@ -1834,7 +2170,7 @@ impl Vm {
               && !proto.is_generator
               && !proto.is_async
             {
-              if proto.is_class_constructor && self.construct_new_target.is_none() {
+              if proto.is_class_constructor && self.construction.new_target.is_none() {
                 return Err(self.throw_class_constructor_call_error(proto));
               }
               let call_args = self.prepare_call_args(&args, proto)?;
@@ -1856,14 +2192,18 @@ impl Vm {
               };
               self.push_call_frame(proto, env, call_args, this_arg, callee.clone())?;
               self
+                .execution
                 .call_stack
                 .last_mut()
                 .expect("call frame was just pushed")
                 .risc_state = Some(caller_state);
               registers.fill(Value::Undefined);
-              registers[1] = self.this_value.clone();
+              registers[1] = self.execution.active.this_value.clone();
               spills.clear();
-              spills.resize(self.chunk.risc_spill_count as usize, Value::Undefined);
+              spills.resize(
+                self.execution.active.chunk.risc_spill_count as usize,
+                Value::Undefined,
+              );
               state.resume_register = None;
               switched_risc_context = true;
             } else if op != Op::TailCall {
@@ -1877,7 +2217,7 @@ impl Vm {
               && !proto.is_generator
               && !proto.is_async
             {
-              if proto.is_class_constructor && self.construct_new_target.is_none() {
+              if proto.is_class_constructor && self.construction.new_target.is_none() {
                 return Err(self.throw_class_constructor_call_error(proto));
               }
               let call_args = self.prepare_call_args(&args, proto)?;
@@ -1887,24 +2227,28 @@ impl Vm {
               } else {
                 this_arg
               };
-              let active_depth = self.call_stack.len();
+              let active_depth = self.execution.call_stack.len();
               while self
+                .exceptions
                 .handlers
                 .last()
                 .is_some_and(|handler| handler.frame_count >= active_depth)
               {
-                self.handlers.pop();
+                self.exceptions.handlers.pop();
               }
-              if let Some(frame) = self.call_stack.last_mut() {
+              if let Some(frame) = self.execution.call_stack.last_mut() {
                 frame.callee = callee.clone();
                 frame.new_target = None;
                 frame.upvalues = proto.upvalues.clone();
               }
               self.configure_call_frame(proto, env, call_args, this_arg, callee.clone())?;
               registers.fill(Value::Undefined);
-              registers[1] = self.this_value.clone();
+              registers[1] = self.execution.active.this_value.clone();
               spills.clear();
-              spills.resize(self.chunk.risc_spill_count as usize, Value::Undefined);
+              spills.resize(
+                self.execution.active.chunk.risc_spill_count as usize,
+                Value::Undefined,
+              );
               state.resume_register = None;
               switched_risc_context = true;
             } else {
@@ -1918,7 +2262,7 @@ impl Vm {
               .map(|index| registers[2 + index].clone())
               .collect();
             let overflow = count.saturating_sub(6);
-            let base = self.chunk.risc_value_spill_count as usize;
+            let base = self.execution.active.chunk.risc_value_spill_count as usize;
             args.extend_from_slice(
               spills
                 .get(base..base + overflow)
@@ -1929,7 +2273,7 @@ impl Vm {
           }
           Op::SuperConstruct => {
             let count = decode_risc_aux16(word) as usize;
-            let base = self.chunk.risc_value_spill_count as usize;
+            let base = self.execution.active.chunk.risc_value_spill_count as usize;
             let args = spills
               .get(base..base + count)
               .ok_or_else(|| RuntimeError::from("RISC super operand window out of bounds"))?
@@ -1943,9 +2287,11 @@ impl Vm {
             } else {
               offset
             };
-            let handler_ip = usize::try_from(self.ip as i64 + offset as i64)
+            let handler_ip = usize::try_from(self.execution.active.ip as i64 + offset as i64)
               .map_err(|_| RuntimeError::from("negative RISC handler target"))?;
             let finally = self
+              .execution
+              .active
               .chunk
               .finally_handlers
               .iter()
@@ -1955,17 +2301,17 @@ impl Vm {
                 return_slot: handler.return_slot,
                 did_return_slot: handler.did_return_slot,
               });
-            self.handlers.push(HandlerRecord {
-              chunk: Arc::clone(&self.chunk),
+            self.exceptions.handlers.push(HandlerRecord {
+              chunk: Arc::clone(&self.execution.active.chunk),
               handler_ip,
-              saved_locals_len: self.locals.len(),
-              frame_count: self.call_stack.len(),
-              saved_lexical_env: Rc::clone(&self.lexical_env),
+              saved_locals_len: self.execution.active.locals.len(),
+              frame_count: self.execution.call_stack.len(),
+              saved_lexical_env: Rc::clone(&self.execution.active.lexical_env),
               finally,
             });
           }
           Op::PopHandler => {
-            self.handlers.pop();
+            self.exceptions.handlers.pop();
           }
           Op::Throw => {
             self.throw_value(registers[rd].clone())?;
@@ -1982,15 +2328,17 @@ impl Vm {
           }
           Op::PushWithEnv => {
             let object = self.to_object_value(registers[rd].clone())?;
-            self.lexical_env = Rc::new(RefCell::new(EnvironmentRecord::new_object(
-              Some(Rc::clone(&self.lexical_env)),
-              object,
-              true,
-            )));
+            self.execution.active.lexical_env =
+              Rc::new(RefCell::new(EnvironmentRecord::new_object(
+                Some(Rc::clone(&self.execution.active.lexical_env)),
+                object,
+                true,
+              )));
           }
           Op::PopEnv => {
-            let outer = self.lexical_env.borrow().outer();
-            self.lexical_env = outer.unwrap_or_else(|| Rc::clone(&self.global_env));
+            let outer = self.execution.active.lexical_env.borrow().outer();
+            self.execution.active.lexical_env =
+              outer.unwrap_or_else(|| Rc::clone(&self.realm_state.global_env));
           }
           Op::GeneratorInitDone if stop_at_generator_init => {
             return Ok(Some(RiscRunOutcome::Initialized));
@@ -2001,12 +2349,13 @@ impl Vm {
             return Ok(Some(RiscRunOutcome::Yield(registers[rd].clone())));
           }
           Op::YieldStar => {
-            if self.yield_star_state.is_none() {
-              self.yield_star_state = Some(self.create_yield_star_state(registers[rd].clone())?);
+            if self.execution.active.yield_star.is_none() {
+              self.execution.active.yield_star =
+                Some(self.create_yield_star_state(registers[rd].clone())?);
             }
             match self.resume_yield_star()? {
               YieldStarStep::Yield(value) => {
-                self.ip = self.ip.saturating_sub(1);
+                self.execution.active.ip = self.execution.active.ip.saturating_sub(1);
                 return Ok(Some(RiscRunOutcome::YieldStar(value)));
               }
               YieldStarStep::Complete(value) => registers[rd] = value,
@@ -2035,7 +2384,10 @@ impl Vm {
                     self.throw_value(reason)?;
                     return Err(RuntimeError::from("JS exception"));
                   }
-                  None if !self.microtasks.is_empty() || !self.dynamic_import_jobs.is_empty() => {
+                  None
+                    if !self.jobs.microtasks.is_empty()
+                      || !self.jobs.dynamic_imports.is_empty() =>
+                  {
                     self.run_microtasks_if_needed()?;
                     self.maybe_collect_garbage_prototype();
                   }
@@ -2051,13 +2403,15 @@ impl Vm {
           }
           Op::Return => {
             let result = registers[rd].clone();
-            if self.generator_return_frame_count == Some(self.call_stack.len()) {
+            if self.execution.generator_return_frame_count == Some(self.execution.call_stack.len())
+            {
               if self.begin_generator_return(result.clone()) {
                 return Ok(None);
               }
-              self.generator_return_frame_count = None;
+              self.execution.generator_return_frame_count = None;
             }
             if let Some(caller_state) = self
+              .execution
               .call_stack
               .last_mut()
               .and_then(|frame| frame.risc_state.take())
@@ -2070,12 +2424,12 @@ impl Vm {
               switched_risc_context = true;
               return Ok(None);
             }
-            if self.call_stack.is_empty() {
-              let temp_root_base = self.gc_temp_roots.len();
-              self.gc_temp_roots.push(result.clone());
+            if self.execution.call_stack.is_empty() {
+              let temp_root_base = self.roots.temporary.len();
+              self.roots.temporary.push(result.clone());
               self.run_microtasks_if_needed()?;
               let _ = self.collect_garbage_prototype();
-              self.gc_temp_roots.truncate(temp_root_base);
+              self.roots.temporary.truncate(temp_root_base);
               self.finish_opcode_profile_run("risc-return");
             }
             return Ok(Some(RiscRunOutcome::Return(result)));
@@ -2088,19 +2442,21 @@ impl Vm {
         Ok(None) if switched_risc_context => continue,
         Ok(None) => {}
         Err(_error)
-          if self.pending_exception.is_some()
+          if self.exceptions.pending.is_some()
             && self
-              .pending_exception_frame_count
+              .exceptions
+              .pending_frame_count
               .is_some_and(|target| target >= boundary_frame_count) =>
         {
-          if let Some(caller_state) = self.unwound_risc_state.take() {
+          if let Some(caller_state) = self.exceptions.unwound_risc_state.take() {
             registers.clone_from(&caller_state.registers);
             spills.clone_from(&caller_state.spills);
             state.resume_register = caller_state.resume_register;
           }
-          self.pending_exception_frame_count = None;
+          self.exceptions.pending_frame_count = None;
           registers[7] = self
-            .pending_exception
+            .exceptions
+            .pending
             .take()
             .unwrap_or(Value::Undefined);
           continue;
@@ -2108,13 +2464,17 @@ impl Vm {
         Err(error) => return Err(error),
       }
       if gc::allocation_pressure() >= gc_allocation_pressure_threshold() {
-        let temp_root_base = self.gc_temp_roots.len();
+        let temp_root_base = self.roots.temporary.len();
         self
-          .gc_temp_roots
+          .roots
+          .temporary
           .extend(registers.iter().cloned());
-        self.gc_temp_roots.extend(spills.iter().cloned());
+        self
+          .roots
+          .temporary
+          .extend(spills.iter().cloned());
         self.maybe_collect_garbage_prototype();
-        self.gc_temp_roots.truncate(temp_root_base);
+        self.roots.temporary.truncate(temp_root_base);
       }
     }
   }
@@ -2128,100 +2488,59 @@ impl Vm {
     &mut self,
     chunk: Chunk,
     direct_eval: bool,
-  ) -> Result<Value, RuntimeError> {
-    chunk
-      .verify()
-      .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
-    let saved_chunk = Arc::clone(&self.chunk);
-    let saved_ip = self.ip;
-    let saved_root_chunk = self.root_chunk.clone();
-    let saved_current_strict_mode = self.current_strict_mode;
-    let saved_current_closure_env = self.current_closure_env.clone();
-    let saved_pending_closure_env = self.pending_closure_env.clone();
-    let saved_gc_temp_roots = self.gc_temp_roots.clone();
-    let saved_this_value = self.this_value.clone();
-    let saved_yield_star_state = self.yield_star_state.clone();
-    let saved_current_arguments_object = self.current_arguments_object.clone();
-    let saved_current_arguments_mapped_count = self.current_arguments_mapped_count;
-    let saved_recent_return_value = self.recent_return_value.clone();
-    let saved_last_uncaught_exception = self.last_uncaught_exception.clone();
-    let saved_pending_exception = self.pending_exception.clone();
-    let saved_pending_exception_frame_count = self.pending_exception_frame_count;
-    let saved_lexical_env = if direct_eval {
-      Some(Rc::clone(&self.lexical_env))
-    } else {
-      None
-    };
-    let saved_locals = if direct_eval {
-      Some(self.locals.clone())
-    } else {
-      None
-    };
-    let saved_current_slot_types = if direct_eval {
-      self.current_slot_types.clone()
-    } else {
-      None
-    };
-    let saved_current_slot_names = if direct_eval {
-      self.current_slot_names.clone()
-    } else {
-      None
-    };
-    let saved_current_slot_immutable = if direct_eval {
-      self.current_slot_immutable.clone()
-    } else {
-      None
-    };
-    let saved_current_slot_sloppy_immutable_silent = if direct_eval {
-      self.current_slot_sloppy_immutable_silent.clone()
-    } else {
-      None
-    };
-    let saved_direct_eval_outer_slot_names = if direct_eval {
-      self.direct_eval_outer_slot_names.clone()
-    } else {
-      None
-    };
-    let saved_direct_eval_outer_slot_immutable = if direct_eval {
-      self.direct_eval_outer_slot_immutable.clone()
-    } else {
-      None
-    };
-    let saved_direct_eval_outer_slot_sloppy_immutable_silent = if direct_eval {
-      self
-        .direct_eval_outer_slot_sloppy_immutable_silent
-        .clone()
-    } else {
-      None
-    };
+  ) -> Result<Value, NestedRunFailure> {
+    chunk.verify().map_err(|error| NestedRunFailure {
+      error: RuntimeError::from(format!("Invalid bytecode: {}", error)),
+      thrown: None,
+    })?;
+    let saved_context = self.execution.active.clone();
+    let saved_root_chunk = self.execution.root_chunk.clone();
+    let saved_pending_closure_env = self.execution.pending_closure_env.clone();
+    let saved_gc_temp_roots = self.roots.temporary.clone();
+    let saved_recent_return_value = self.construction.recent_return_value.clone();
+    let saved_last_uncaught_exception = self.exceptions.last_uncaught.take();
+    let saved_pending_exception = self.exceptions.pending.clone();
+    let saved_pending_exception_frame_count = self.exceptions.pending_frame_count;
+    let saved_direct_eval_outer = self.execution.direct_eval_outer.clone();
 
     if direct_eval {
-      self.direct_eval_outer_slot_names = self.current_slot_names.clone();
-      self.direct_eval_outer_slot_immutable = self.current_slot_immutable.clone();
-      self.direct_eval_outer_slot_sloppy_immutable_silent =
-        self.current_slot_sloppy_immutable_silent.clone();
+      self.execution.direct_eval_outer =
+        self
+          .execution
+          .active
+          .slots
+          .as_ref()
+          .map(|slots| DirectEvalState {
+            names: slots.names.clone(),
+            immutable: slots.immutable.clone(),
+            sloppy_immutable_silent: slots.sloppy_immutable_silent.clone(),
+          });
     }
 
     let chunk_rc = Arc::new(chunk);
-    self.root_chunk = Some(Arc::clone(&chunk_rc));
-    self.chunk = chunk_rc;
-    self.ip = 0;
-    self.current_strict_mode = self.chunk.root_strict;
-    self.gc_temp_roots.clear();
-    self.yield_star_state = None;
-    if self.chunk.root_slot_names.is_empty() {
+    self.execution.root_chunk = Some(Arc::clone(&chunk_rc));
+    self.execution.active.chunk = chunk_rc;
+    self.execution.active.ip = 0;
+    self.execution.active.strict = self.execution.active.chunk.root_strict;
+    self.roots.temporary.clear();
+    self.execution.active.yield_star = None;
+    if self
+      .execution
+      .active
+      .chunk
+      .root_slot_names
+      .is_empty()
+    {
       if !direct_eval {
-        self.locals.clear();
-        self.current_slot_types = None;
-        self.current_slot_names = None;
-        self.current_slot_immutable = None;
-        self.current_slot_sloppy_immutable_silent = None;
+        self.execution.active.locals.clear();
+        self.execution.active.slots = None;
       }
     } else {
       self.initialize_root_bindings();
     }
     if !direct_eval {
-      self.this_value = self
+      self.execution.active.this_value = self
+        .realm_state
         .globals
         .borrow()
         .properties
@@ -2235,47 +2554,49 @@ impl Vm {
     self.begin_opcode_profile_run();
 
     let result = self.run_risc_loop(true);
+    let nested_thrown = self.exceptions.last_uncaught.take();
 
-    self.chunk = saved_chunk;
-    self.ip = saved_ip;
-    self.root_chunk = saved_root_chunk;
-    self.current_strict_mode = saved_current_strict_mode;
-    self.current_closure_env = saved_current_closure_env;
-    self.pending_closure_env = saved_pending_closure_env;
-    self.gc_temp_roots = saved_gc_temp_roots;
-    self.this_value = saved_this_value;
-    self.yield_star_state = saved_yield_star_state;
-    self.current_arguments_object = saved_current_arguments_object;
-    self.current_arguments_mapped_count = saved_current_arguments_mapped_count;
-    self.recent_return_value = saved_recent_return_value;
-    self.last_uncaught_exception = saved_last_uncaught_exception;
-    self.pending_exception = saved_pending_exception;
-    self.pending_exception_frame_count = saved_pending_exception_frame_count;
-    if direct_eval {
-      if let Some(lexical_env) = saved_lexical_env {
-        self.lexical_env = lexical_env;
-      }
-      if let Some(locals) = saved_locals {
-        self.locals = locals;
-      }
-      self.current_slot_types = saved_current_slot_types;
-      self.current_slot_names = saved_current_slot_names;
-      self.current_slot_immutable = saved_current_slot_immutable;
-      self.current_slot_sloppy_immutable_silent = saved_current_slot_sloppy_immutable_silent;
-      self.direct_eval_outer_slot_names = saved_direct_eval_outer_slot_names;
-      self.direct_eval_outer_slot_immutable = saved_direct_eval_outer_slot_immutable;
-      self.direct_eval_outer_slot_sloppy_immutable_silent =
-        saved_direct_eval_outer_slot_sloppy_immutable_silent;
-    }
+    self.execution.active = saved_context;
+    self.execution.root_chunk = saved_root_chunk;
+    self.execution.pending_closure_env = saved_pending_closure_env;
+    self.roots.temporary = saved_gc_temp_roots;
+    self.construction.recent_return_value = saved_recent_return_value;
+    self.exceptions.last_uncaught = saved_last_uncaught_exception;
+    self.exceptions.pending = saved_pending_exception;
+    self.exceptions.pending_frame_count = saved_pending_exception_frame_count;
+    self.execution.direct_eval_outer = saved_direct_eval_outer;
 
-    result
+    result.map_err(|error| NestedRunFailure {
+      error,
+      thrown: nested_thrown,
+    })
   }
 
   fn initialize_root_bindings(&mut self) {
-    let slot_names = self.chunk.root_slot_names.clone();
-    let slot_tdz = self.chunk.root_lexical_tdz.clone();
-    let slot_types = self.chunk.root_slot_types.clone();
-    let slot_immutable = self.chunk.root_slot_immutable.clone();
+    let slot_names = self
+      .execution
+      .active
+      .chunk
+      .root_slot_names
+      .clone();
+    let slot_tdz = self
+      .execution
+      .active
+      .chunk
+      .root_lexical_tdz
+      .clone();
+    let slot_types = self
+      .execution
+      .active
+      .chunk
+      .root_slot_types
+      .clone();
+    let slot_immutable = self
+      .execution
+      .active
+      .chunk
+      .root_slot_immutable
+      .clone();
     let slot_sloppy_immutable_silent = vec![false; slot_names.len()];
     let slot_count = slot_names
       .len()
@@ -2286,50 +2607,58 @@ impl Vm {
       return;
     }
 
-    self.locals = std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
-      .take(slot_count)
-      .collect();
+    self.execution.active.locals =
+      std::iter::repeat_with(|| Rc::new(RefCell::new(Value::Undefined)))
+        .take(slot_count)
+        .collect();
     for (idx, is_tdz) in slot_tdz.iter().copied().enumerate() {
-      if is_tdz && idx < self.locals.len() {
-        *self.locals[idx].borrow_mut() = Value::Uninitialized;
+      if is_tdz && idx < self.execution.active.locals.len() {
+        *self.execution.active.locals[idx].borrow_mut() = Value::Uninitialized;
       }
     }
 
     let root_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(Rc::clone(
-      &self.lexical_env,
+      &self.execution.active.lexical_env,
     )))));
     for (idx, maybe_name) in slot_names.iter().enumerate() {
       if let Some(name) = maybe_name
-        && idx < self.locals.len()
+        && idx < self.execution.active.locals.len()
       {
         let initialized = !slot_tdz.get(idx).copied().unwrap_or(false);
         if slot_immutable.get(idx).copied().unwrap_or(false) {
           root_env.borrow_mut().create_immutable_binding(
             name.clone(),
-            Rc::clone(&self.locals[idx]),
+            Rc::clone(&self.execution.active.locals[idx]),
             initialized,
           );
         } else {
           root_env.borrow_mut().create_mutable_binding(
             name.clone(),
-            Rc::clone(&self.locals[idx]),
+            Rc::clone(&self.execution.active.locals[idx]),
             initialized,
           );
         }
         if initialized {
-          let value = self.locals[idx].borrow().clone();
-          self.globals.borrow_mut().properties.insert(
-            PropertyKey::String(name.clone().into()),
-            PropertyDescriptor::ordinary_data(value),
-          );
+          let value = self.execution.active.locals[idx].borrow().clone();
+          self
+            .realm_state
+            .globals
+            .borrow_mut()
+            .properties
+            .insert(
+              PropertyKey::String(name.clone().into()),
+              PropertyDescriptor::ordinary_data(value),
+            );
         }
       }
     }
-    self.lexical_env = root_env;
-    self.current_slot_types = Some(slot_types);
-    self.current_slot_names = Some(slot_names);
-    self.current_slot_immutable = Some(slot_immutable);
-    self.current_slot_sloppy_immutable_silent = Some(slot_sloppy_immutable_silent);
+    self.execution.active.lexical_env = root_env;
+    self.execution.active.slots = Some(SlotMetadata {
+      types: slot_types,
+      names: slot_names,
+      immutable: slot_immutable,
+      sloppy_immutable_silent: slot_sloppy_immutable_silent,
+    });
   }
 
   // -----------------------------------------------------------------------
@@ -2416,7 +2745,13 @@ impl Vm {
           );
         }
         // Try to find Symbol.prototype
-        if let Some(proto) = self.realm.intrinsics.symbol_prototype.clone() {
+        if let Some(proto) = self
+          .realm_state
+          .realm
+          .intrinsics
+          .symbol_prototype
+          .clone()
+        {
           data.set_prototype_value(proto);
         }
         Ok(Value::Object(gc::track_object(Rc::new(RefCell::new(data)))))
@@ -2461,11 +2796,11 @@ impl Vm {
     child.set_current_strict_mode(strict);
     match child.run_nested(chunk, false) {
       Ok(value) => Ok(value),
-      Err(err) => {
-        if let Some(thrown) = child.last_uncaught_exception.take() {
+      Err(failure) => {
+        if let Some(thrown) = failure.thrown {
           Err(self.throw_exception(thrown))
         } else {
-          Err(err)
+          Err(failure.error)
         }
       }
     }
@@ -2497,11 +2832,11 @@ impl Vm {
       .map_err(|e| RuntimeError::from(format!("compile: {}", e)))?;
     match self.run_nested(chunk, true) {
       Ok(value) => Ok(value),
-      Err(err) => {
-        if let Some(thrown) = self.last_uncaught_exception.take() {
+      Err(failure) => {
+        if let Some(thrown) = failure.thrown {
           Err(self.throw_exception(thrown))
         } else {
-          Err(err)
+          Err(failure.error)
         }
       }
     }
@@ -2525,8 +2860,8 @@ impl Vm {
       | Value::Builtin(_)
       | Value::BuiltinObject(_, _)
       | Value::Promise(_) => {
-        let temp_root_base = self.gc_temp_roots.len();
-        self.gc_temp_roots.push(v.clone());
+        let temp_root_base = self.roots.temporary.len();
+        self.roots.temporary.push(v.clone());
         if crate::trace::enabled() {
           eprintln!(
             "[trace] to_primitive called on {} with hint={:?}",
@@ -2575,7 +2910,7 @@ impl Vm {
             if crate::trace::enabled() {
               crate::trace::value_string("[trace] @@toPrimitive accepted primitive", &rv);
             }
-            self.gc_temp_roots.truncate(temp_root_base);
+            self.roots.temporary.truncate(temp_root_base);
             return Ok(rv);
           } else if crate::trace::enabled() {
             crate::trace::value_string("[trace] @@toPrimitive produced non-primitive", &rv);
@@ -2618,12 +2953,12 @@ impl Vm {
                 | Value::BuiltinObject(_, _)
                 | Value::Promise(_)
             ) {
-              self.gc_temp_roots.truncate(temp_root_base);
+              self.roots.temporary.truncate(temp_root_base);
               return Ok(rv);
             }
           }
         }
-        self.gc_temp_roots.truncate(temp_root_base);
+        self.roots.temporary.truncate(temp_root_base);
         Err(self.throw_type_error("Cannot convert object to primitive value"))
       }
       _ => Ok(v.clone()),
@@ -2938,6 +3273,7 @@ impl Vm {
     result: Value,
   ) -> Result<Value, RuntimeError> {
     let frame = self
+      .execution
       .call_stack
       .pop()
       .ok_or("Return without call frame")?;
@@ -2945,20 +3281,7 @@ impl Vm {
     // Runtime return-type check intentionally disabled in JS-first mode.
     // TypeScript return annotations are erased at runtime.
 
-    self.current_slot_types = frame.slot_types;
-    self.current_slot_names = frame.slot_names;
-    self.current_slot_immutable = frame.slot_immutable;
-    self.current_slot_sloppy_immutable_silent = frame.slot_sloppy_immutable_silent;
-    self.chunk = frame.chunk;
-    self.ip = frame.ip;
-    self.locals = frame.locals;
-    self.this_value = frame.this_value;
-    self.current_closure_env = frame.closure_env;
-    self.lexical_env = frame.lexical_env;
-    self.yield_star_state = frame.yield_star_state;
-    self.current_arguments_object = frame.arguments_object;
-    self.current_arguments_mapped_count = frame.arguments_mapped_count;
-    self.current_strict_mode = frame.is_strict;
+    self.execution.active = frame.context;
     self.prune_stale_handlers();
 
     Ok(result)
@@ -2973,7 +3296,7 @@ impl Vm {
     } else {
       return Err(self.throw_type_error("DeleteIdentifier requires string constant"));
     };
-    let mut env = Some(Rc::clone(&self.lexical_env));
+    let mut env = Some(Rc::clone(&self.execution.active.lexical_env));
     while let Some(current) = env {
       let (has_binding, binding_object, with_environment, outer) = {
         let borrowed = current.borrow();
@@ -3002,7 +3325,7 @@ impl Vm {
       env = outer;
     }
 
-    let global_obj = Value::Object(Rc::clone(&self.globals));
+    let global_obj = Value::Object(Rc::clone(&self.realm_state.globals));
     let key = PropertyKey::String(name.clone());
     let deleted = self.delete_property_host(&global_obj, &key)?;
     self.bump_object_generation(&global_obj);
@@ -3072,32 +3395,40 @@ impl Vm {
     &mut self,
     value: Value,
   ) -> bool {
-    let Some(handler_index) = self.handlers.iter().rposition(|handler| {
-      handler.frame_count == self.call_stack.len()
-        && Arc::ptr_eq(&handler.chunk, &self.chunk)
-        && handler.finally.is_some()
-    }) else {
+    let Some(handler_index) = self
+      .exceptions
+      .handlers
+      .iter()
+      .rposition(|handler| {
+        handler.frame_count == self.execution.call_stack.len()
+          && Arc::ptr_eq(&handler.chunk, &self.execution.active.chunk)
+          && handler.finally.is_some()
+      })
+    else {
       return false;
     };
-    let handler = self.handlers.remove(handler_index);
-    self.handlers.truncate(handler_index);
+    let handler = self.exceptions.handlers.remove(handler_index);
+    self.exceptions.handlers.truncate(handler_index);
     let finally = handler.finally.expect("checked above");
-    ensure_slot(&mut self.locals, finally.return_slot);
-    ensure_slot(&mut self.locals, finally.did_return_slot);
-    *self.locals[finally.return_slot].borrow_mut() = value;
-    *self.locals[finally.did_return_slot].borrow_mut() = Value::Bool(true);
-    self.lexical_env = handler.saved_lexical_env;
-    self.ip = finally.finalizer_ip;
-    self.yield_star_state = None;
+    ensure_slot(&mut self.execution.active.locals, finally.return_slot);
+    ensure_slot(&mut self.execution.active.locals, finally.did_return_slot);
+    *self.execution.active.locals[finally.return_slot].borrow_mut() = value;
+    *self.execution.active.locals[finally.did_return_slot].borrow_mut() = Value::Bool(true);
+    self.execution.active.lexical_env = handler.saved_lexical_env;
+    self.execution.active.ip = finally.finalizer_ip;
+    self.execution.active.yield_star = None;
     self
+      .execution
       .generator_return_frame_count
-      .get_or_insert(self.call_stack.len());
+      .get_or_insert(self.execution.call_stack.len());
     true
   }
 
   fn resume_yield_star(&mut self) -> Result<YieldStarStep, RuntimeError> {
     let mut state = self
-      .yield_star_state
+      .execution
+      .active
+      .yield_star
       .take()
       .ok_or_else(|| RuntimeError::from("Missing yield-star state"))?;
     let resume = state
@@ -3164,7 +3495,7 @@ impl Vm {
         Ok(YieldStarStep::Complete(value))
       }
     } else {
-      self.yield_star_state = Some(state);
+      self.execution.active.yield_star = Some(state);
       Ok(YieldStarStep::Yield(result))
     }
   }
@@ -3238,7 +3569,11 @@ impl Vm {
       _ => None,
     };
     if let Some(p) = ptr {
-      *self.obj_generations.entry(p).or_insert(0) += 1;
+      *self
+        .caches
+        .object_generations
+        .entry(p)
+        .or_insert(0) += 1;
     }
   }
 
@@ -3250,22 +3585,35 @@ impl Vm {
     // Root bindings mirrored onto the global object have already been written
     // by the StoreLocal immediately preceding SetGlobal. Avoid resolving and
     // writing that same lexical cell a second time in the common script path.
-    let is_root_binding = self.call_stack.is_empty()
-      && self.direct_eval_outer_slot_names.is_none()
-      && !self.lexical_env.borrow().has_object_environment()
+    let is_root_binding = self.execution.call_stack.is_empty()
+      && self.execution.direct_eval_outer.is_none()
+      && !self
+        .execution
+        .active
+        .lexical_env
+        .borrow()
+        .has_object_environment()
       && self
-        .current_slot_names
+        .execution
+        .active
+        .slots
         .as_ref()
-        .is_some_and(|names| {
-          names
+        .is_some_and(|slots| {
+          slots
+            .names
             .iter()
             .any(|maybe_name| maybe_name.as_deref() == Some(name))
         });
     if is_root_binding {
-      self.globals.borrow_mut().properties.insert(
-        PropertyKey::String(name.to_string().into()),
-        PropertyDescriptor::ordinary_data(value),
-      );
+      self
+        .realm_state
+        .globals
+        .borrow_mut()
+        .properties
+        .insert(
+          PropertyKey::String(name.to_string().into()),
+          PropertyDescriptor::ordinary_data(value),
+        );
       return Ok(());
     }
 
@@ -3276,6 +3624,7 @@ impl Vm {
     }
     let key = PropertyKey::String(name.to_string().into());
     let current = self
+      .realm_state
       .globals
       .borrow()
       .properties
@@ -3292,7 +3641,7 @@ impl Vm {
         }
       }
       Some(PropertyDescriptor::Accessor { .. }) => {
-        let global_obj = Value::Object(Rc::clone(&self.globals));
+        let global_obj = Value::Object(Rc::clone(&self.realm_state.globals));
         self.set_property_tracked(&global_obj, &key, value)?;
       }
       None if self.is_strict_mode() => {
@@ -3300,6 +3649,7 @@ impl Vm {
       }
       _ => {
         self
+          .realm_state
           .globals
           .borrow_mut()
           .properties
@@ -3318,7 +3668,7 @@ impl Vm {
     &self,
     idx: usize,
   ) -> Result<String, RuntimeError> {
-    match self.chunk.constants.get(idx) {
+    match self.execution.active.chunk.constants.get(idx) {
       Some(crate::bytecode::Constant::String(value)) => Ok(value.to_string_lossy()),
       Some(_) => Err(RuntimeError::from("Constant is not a string")),
       None => Err(RuntimeError::from("String constant index out of bounds")),
@@ -3350,10 +3700,15 @@ impl Vm {
     }
     eprintln!("[diag] {label}: actual={}", offender.type_name());
     crate::trace::value_string("[diag] offending value", offender);
-    let start = self.ip.saturating_sub(8);
-    let end = usize::min(self.ip + 8, self.chunk.code.len());
+    let start = self.execution.active.ip.saturating_sub(8);
+    let end = usize::min(
+      self.execution.active.ip + 8,
+      self.execution.active.chunk.code.len(),
+    );
     for ip in start..end {
       let instruction = self
+        .execution
+        .active
         .chunk
         .disassemble_at(ip)
         .unwrap_or_else(|error| format!("{ip:#06} <{error}>"));

@@ -29,6 +29,7 @@
 
 use crate::bytecode::{Chunk, OP_COUNT};
 use crate::environment::EnvironmentRecord;
+use crate::gc;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
 use crate::typecheck::Type;
@@ -37,6 +38,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::runtime::Runtime;
@@ -91,8 +93,9 @@ pub(super) fn gc_allocation_pressure_threshold() -> usize {
   })
 }
 
-type Microtask = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
-type DynamicImportJob = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
+pub(super) type Microtask = Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
+pub(super) type DynamicImportJob =
+  Box<dyn FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError>>;
 
 #[derive(Clone)]
 pub(super) struct PropertyGetIcEntry {
@@ -106,8 +109,8 @@ pub(super) struct PropertyGetIcEntry {
 //
 // - `UnhandledRejectionHookInner` captures the underlying FnMut signature.
 // - `UnhandledRejectionHook` wraps the inner type in the `Rc<RefCell<...>>` used throughout the VM.
-type UnhandledRejectionHookInner = dyn FnMut(&mut Vm, Value, Value);
-type UnhandledRejectionHook = Rc<RefCell<UnhandledRejectionHookInner>>;
+pub(super) type UnhandledRejectionHookInner = dyn FnMut(&mut Vm, Value, Value);
+pub(super) type UnhandledRejectionHook = Rc<RefCell<UnhandledRejectionHookInner>>;
 
 // ---------------------------------------------------------------------------
 // Global background Tokio runtime (lazy, shared across all Vm instances)
@@ -143,113 +146,147 @@ pub(super) fn get_global_bg_runtime() -> Arc<Runtime> {
 
 /// Virtual machine for executing RISC bytecode.
 pub struct Vm {
-  /// The ECMAScript Realm this VM operates in.
+  pub(super) realm_state: RealmState,
+  pub(super) execution: ExecutionState,
+  pub(crate) exceptions: ExceptionState,
+  pub(super) construction: ConstructionState,
+  pub(super) modules: ModuleState,
+  pub(super) jobs: JobState,
+  pub(super) caches: CacheState,
+  pub(super) profiling: ProfilingState,
+  pub(super) roots: RootState,
+  /// Keeps this VM represented in the thread-local prototype heap lifetime.
+  ///
+  /// This is deliberately last so it is dropped after every Value-holding
+  /// field above it.
+  pub(super) _gc_registration: gc::VmGcRegistration,
+}
+
+pub(super) struct RealmState {
   pub(super) realm: Realm,
-  /// Chunk being executed.
-  pub(super) chunk: Arc<Chunk>,
-  /// Instruction pointer within the chunk.
-  pub(super) ip: usize,
-  /// Local variables for the current frame.
-  pub(super) locals: Vec<SharedValue>,
-  /// Current `this` binding.
-  pub(super) this_value: Value,
-  /// Whether the current builtin call received an explicit receiver in args[0].
-  pub(super) builtin_this_arg_prepended: bool,
-  /// Upvalue environment for the currently executing closure, if any.
-  pub(super) current_closure_env: Option<Rc<RefCell<Vec<SharedValue>>>>,
-  /// Temporary root for a callee closure environment while a call frame is
-  /// being prepared.
-  pub(super) pending_closure_env: Option<Rc<RefCell<Vec<SharedValue>>>>,
-  /// Temporary roots for values that are in flight through host helpers or
-  /// call setup and are not yet anchored in the VM state.
-  pub(super) gc_temp_roots: Vec<Value>,
-  /// Persistent values retained by host integrations outside the JS object graph.
-  pub(super) host_roots: Vec<Value>,
-  /// Global variables (derived from realm.global_object for convenience).
   pub(super) globals: Rc<RefCell<ObjectData>>,
-  /// Call-frame stack component.
-  pub(super) call_stack: CallStack,
-  /// Root chunk retained for the duration of root or nested execution.
-  pub(super) root_chunk: Option<Arc<Chunk>>,
-  /// Slot-type metadata for the current function, carried across frame changes.
-  pub(super) current_slot_types: Option<Vec<Option<Type>>>,
-  /// Slot names for the current function.
-  pub(super) current_slot_names: Option<Vec<Option<String>>>,
-  /// Per-slot immutability flags for the current function.
-  pub(super) current_slot_immutable: Option<Vec<bool>>,
-  /// Per-slot flag for immutable bindings that ignore sloppy writes.
-  pub(super) current_slot_sloppy_immutable_silent: Option<Vec<bool>>,
-  /// Caller slot names visible while executing direct eval.
-  pub(super) direct_eval_outer_slot_names: Option<Vec<Option<String>>>,
-  /// Caller slot immutability visible while executing direct eval.
-  pub(super) direct_eval_outer_slot_immutable: Option<Vec<bool>>,
-  /// Caller sloppy-write-ignore immutability flags for direct eval.
-  pub(super) direct_eval_outer_slot_sloppy_immutable_silent: Option<Vec<bool>>,
-  /// Per-object mutation generation counter, keyed by `Rc` pointer address.
-  /// Incremented on every `SetProperty` so that stale IC entries are
-  /// detected and evicted on the next lookup.
-  pub(super) obj_generations: HashMap<usize, u64>,
-  /// Monomorphic per-instruction cache for own data-property reads.
-  pub(super) property_get_ic: HashMap<(usize, usize), PropertyGetIcEntry>,
-  /// Background Tokio runtime handle.
-  pub(super) bg_runtime: Arc<Runtime>,
-  /// Exception-handler stack.
-  pub(super) handlers: HandlerStack,
-  /// Exception value unwound to the active handler but not yet loaded into r7.
-  pub(super) pending_exception: Option<Value>,
-  /// Frame depth of the handler selected for the pending exception.
-  pub(super) pending_exception_frame_count: Option<usize>,
-  /// Caller register state restored while unwinding interpreter-managed frames.
-  pub(super) unwound_risc_state: Option<RiscExecutionState>,
-  /// Shared module loader for this realm, reused across VMs with the same globals.
-  pub(super) module_loader: Rc<RefCell<ModuleLoader>>,
-  /// Per-VM module table: vector indexed by module index, each mapping export name -> shared slot
-  pub(super) module_table: Vec<HashMap<String, SharedValue>>,
-  /// Current canonical module specifier while evaluating module code.
-  pub(super) current_module_specifier: Option<String>,
-  /// Current [[NewTarget]] while evaluating a constructor call.
-  pub(super) construct_new_target: Option<Value>,
-  /// Recently returned heap value, kept alive across the return boundary
-  /// until the caller has a chance to store it.
-  pub(super) recent_return_value: Option<Value>,
-  /// Per-construction initialized `this` values for active derived constructors.
-  pub(super) derived_constructor_this: Vec<Option<Value>>,
-  /// Last uncaught thrown JS value observed during unwinding.
-  pub(crate) last_uncaught_exception: Option<Value>,
-  /// ECMAScript microtask queue.
-  pub(super) microtasks: VecDeque<Microtask>,
-  /// Queue for pending dynamic import jobs.
-  pub(super) dynamic_import_jobs: VecDeque<DynamicImportJob>,
-  /// Optional hook invoked when an unhandled rejection or microtask exception
-  /// is observed. The hook receives two Values: the first is the promise
-  /// object (or Undefined for non-promise microtask exceptions) and the
-  /// second is the rejection reason / exception value.
-  pub(super) unhandled_rejection_hook: Option<UnhandledRejectionHook>,
-  /// Store of lexical environment records for the current execution context.
-  pub(super) lexical_env: Rc<RefCell<EnvironmentRecord>>,
-  /// Store of global environment records for the current execution context.
   pub(super) global_env: Rc<RefCell<EnvironmentRecord>>,
-  /// Iterator delegation state for the current `yield*` expression, if any.
-  pub(super) yield_star_state: Option<YieldStarState>,
-  /// Frame depth of a generator return completion currently crossing finalizers.
+}
+
+#[derive(Clone)]
+pub(crate) struct SlotMetadata {
+  /// TypeScript annotations carried for diagnostics; erased by JS execution.
+  #[allow(dead_code)]
+  pub(crate) types: Vec<Option<Type>>,
+  pub(crate) names: Vec<Option<String>>,
+  pub(crate) immutable: Vec<bool>,
+  pub(crate) sloppy_immutable_silent: Vec<bool>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ArgumentsState {
+  pub(crate) object: Option<Value>,
+  pub(crate) mapped_count: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct ExecutionContext {
+  pub(crate) chunk: Arc<Chunk>,
+  pub(crate) ip: usize,
+  pub(crate) locals: Vec<SharedValue>,
+  pub(crate) this_value: Value,
+  pub(crate) closure_env: Option<Rc<RefCell<Vec<SharedValue>>>>,
+  pub(crate) slots: Option<SlotMetadata>,
+  pub(crate) lexical_env: Rc<RefCell<EnvironmentRecord>>,
+  pub(crate) yield_star: Option<YieldStarState>,
+  pub(crate) arguments: ArgumentsState,
+  pub(crate) strict: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct DirectEvalState {
+  pub(super) names: Vec<Option<String>>,
+  pub(super) immutable: Vec<bool>,
+  pub(super) sloppy_immutable_silent: Vec<bool>,
+}
+
+pub(super) struct ExecutionState {
+  pub(super) active: ExecutionContext,
+  pub(super) builtin_this_arg_prepended: bool,
+  pub(super) pending_closure_env: Option<Rc<RefCell<Vec<SharedValue>>>>,
+  pub(super) call_stack: CallStack,
+  pub(super) root_chunk: Option<Arc<Chunk>>,
+  pub(super) direct_eval_outer: Option<DirectEvalState>,
   pub(super) generator_return_frame_count: Option<usize>,
-  /// Live arguments object for the currently executing frame, if any.
-  pub(super) current_arguments_object: Option<Value>,
-  /// Number of leading arguments currently mapped to local slots.
-  pub(super) current_arguments_mapped_count: usize,
-  /// Current strict-mode state for the active call context.
-  pub(super) current_strict_mode: bool,
-  /// Whether runtime opcode profiling is enabled for this VM instance.
-  pub(super) opcode_profiling_enabled: bool,
-  /// Per-opcode execution counters for the current run.
+}
+
+pub(crate) struct ExceptionState {
+  pub(super) handlers: HandlerStack,
+  pub(super) pending: Option<Value>,
+  pub(super) pending_frame_count: Option<usize>,
+  pub(super) unwound_risc_state: Option<RiscExecutionState>,
+  pub(crate) last_uncaught: Option<Value>,
+}
+
+pub(super) struct ConstructionState {
+  pub(super) new_target: Option<Value>,
+  pub(super) recent_return_value: Option<Value>,
+  pub(super) derived_this: Vec<Option<Value>>,
+}
+
+pub(super) struct ModuleState {
+  pub(super) loader: Rc<RefCell<ModuleLoader>>,
+  pub(super) table: Vec<HashMap<String, SharedValue>>,
+  pub(super) current_specifier: Option<String>,
+}
+
+pub(super) struct JobState {
+  pub(super) background_runtime: Arc<Runtime>,
+  pub(super) microtasks: VecDeque<Microtask>,
+  pub(super) dynamic_imports: VecDeque<DynamicImportJob>,
+  pub(super) unhandled_rejection_hook: Option<UnhandledRejectionHook>,
+}
+
+pub(super) struct CacheState {
+  pub(super) object_generations: HashMap<usize, u64>,
+  pub(super) property_get: HashMap<(usize, usize), PropertyGetIcEntry>,
+}
+
+pub(super) struct ProfilingState {
+  pub(super) enabled: bool,
   pub(super) opcode_counts: [u64; OP_COUNT],
-  /// Run start timestamp for the current profiling window.
   pub(super) run_started_at: Option<Instant>,
 }
 
+pub(super) struct RootState {
+  pub(super) temporary: Vec<Value>,
+  pub(super) host: Rc<RefCell<HostRootStore>>,
+}
+
 /// Opaque handle to a value retained by the VM for a host integration.
-#[derive(Clone, Copy)]
-pub struct HostRoot(pub(super) usize);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostRoot {
+  pub(super) store_id: u64,
+  pub(super) slot: usize,
+  pub(super) generation: u64,
+}
+
+pub(super) struct HostRootSlot {
+  pub(super) generation: u64,
+  pub(super) value: Option<Value>,
+}
+
+pub(super) struct HostRootStore {
+  pub(super) id: u64,
+  pub(super) slots: Vec<HostRootSlot>,
+  pub(super) free: Vec<usize>,
+}
+
+impl HostRootStore {
+  pub(super) fn new() -> Self {
+    static NEXT_HOST_ROOT_STORE_ID: AtomicU64 = AtomicU64::new(1);
+    Self {
+      id: NEXT_HOST_ROOT_STORE_ID.fetch_add(1, Ordering::Relaxed),
+      slots: Vec::new(),
+      free: Vec::new(),
+    }
+  }
+}
 
 thread_local! {
     static SHARED_MODULE_LOADERS: RefCell<HashMap<usize, Weak<RefCell<ModuleLoader>>>> =

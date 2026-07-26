@@ -54,7 +54,8 @@ pub(crate) fn create_promise_intrinsics(
         };
         if let Err(err) = resolve_promise_with_value(vm, &promise_for_resolve, value) {
           let reason = vm
-            .last_uncaught_exception
+            .exceptions
+            .last_uncaught
             .take()
             .unwrap_or(Value::String(format!("{}", err).into()));
           reject_pending_promise(vm, &promise_for_resolve, reason);
@@ -80,12 +81,13 @@ pub(crate) fn create_promise_intrinsics(
         Ok(Value::Undefined)
       }));
 
-      vm.last_uncaught_exception = None;
+      vm.exceptions.last_uncaught = None;
       if let Err(err) =
         vm.call_value_with_this(executor, &Value::Undefined, &[resolve_fn, reject_fn])
       {
         let reason = vm
-          .last_uncaught_exception
+          .exceptions
+          .last_uncaught
           .take()
           .unwrap_or(Value::String(format!("{}", err).into()));
         reject_pending_promise(vm, &promise, reason);
@@ -149,12 +151,13 @@ pub(crate) fn create_promise_intrinsics(
                   resolve_promise_with_value(vm, &res_p_f, value)?;
                   return Ok(Value::Undefined);
                 }
-                vm.last_uncaught_exception = None;
+                vm.exceptions.last_uncaught = None;
                 match vm.call_value_with_this(&user_on_fulfilled, &Value::Undefined, &[value]) {
                   Ok(out) => resolve_promise_with_value(vm, &res_p_f, out)?,
                   Err(err) => {
                     let reason = vm
-                      .last_uncaught_exception
+                      .exceptions
+                      .last_uncaught
                       .take()
                       .unwrap_or(Value::String(format!("{}", err).into()));
                     reject_pending_promise(vm, &res_p_f, reason);
@@ -172,12 +175,13 @@ pub(crate) fn create_promise_intrinsics(
                   reject_pending_promise(vm, &res_p_r, reason);
                   return Ok(Value::Undefined);
                 }
-                vm.last_uncaught_exception = None;
+                vm.exceptions.last_uncaught = None;
                 match vm.call_value_with_this(&user_on_rejected, &Value::Undefined, &[reason]) {
                   Ok(out) => resolve_promise_with_value(vm, &res_p_r, out)?,
                   Err(err) => {
                     let reject_reason = vm
-                      .last_uncaught_exception
+                      .exceptions
+                      .last_uncaught
                       .take()
                       .unwrap_or(Value::String(format!("{}", err).into()));
                     reject_pending_promise(vm, &res_p_r, reject_reason);
@@ -197,7 +201,7 @@ pub(crate) fn create_promise_intrinsics(
                 if matches!(user_on_fulfilled, Value::Undefined) {
                   resolve_promise_with_value(vm, &res_p_f, value.clone())?;
                 } else {
-                  vm.last_uncaught_exception = None;
+                  vm.exceptions.last_uncaught = None;
                   match vm.call_value_with_this(
                     &user_on_fulfilled,
                     &Value::Undefined,
@@ -206,7 +210,8 @@ pub(crate) fn create_promise_intrinsics(
                     Ok(out) => resolve_promise_with_value(vm, &res_p_f, out)?,
                     Err(err) => {
                       let reason = vm
-                        .last_uncaught_exception
+                        .exceptions
+                        .last_uncaught
                         .take()
                         .unwrap_or(Value::String(format!("{}", err).into()));
                       reject_pending_promise(vm, &res_p_f, reason);
@@ -225,7 +230,7 @@ pub(crate) fn create_promise_intrinsics(
                 if matches!(user_on_rejected, Value::Undefined) {
                   reject_pending_promise(vm, &res_p_r, reason.clone());
                 } else {
-                  vm.last_uncaught_exception = None;
+                  vm.exceptions.last_uncaught = None;
                   match vm.call_value_with_this(
                     &user_on_rejected,
                     &Value::Undefined,
@@ -234,7 +239,8 @@ pub(crate) fn create_promise_intrinsics(
                     Ok(out) => resolve_promise_with_value(vm, &res_p_r, out)?,
                     Err(err) => {
                       let reject_reason = vm
-                        .last_uncaught_exception
+                        .exceptions
+                        .last_uncaught
                         .take()
                         .unwrap_or(Value::String(format!("{}", err).into()));
                       reject_pending_promise(vm, &res_p_r, reject_reason);
@@ -310,7 +316,8 @@ pub(crate) fn create_promise_intrinsics(
           vm.call_value_with_this(&resolve_fn, &Value::Undefined, std::slice::from_ref(value))
         {
           let reason = vm
-            .last_uncaught_exception
+            .exceptions
+            .last_uncaught
             .take()
             .unwrap_or(Value::String(format!("{}", err).into()));
           if let Value::Promise(promise_state) = &promise {
@@ -428,7 +435,8 @@ pub(crate) fn create_promise_intrinsics(
             if let Err(err) = vm.call_value_with_this(&then_val, &item, &[resolve_cb, reject_cb]) {
               *settled.borrow_mut() = true;
               let reason = vm
-                .last_uncaught_exception
+                .exceptions
+                .last_uncaught
                 .take()
                 .unwrap_or(Value::String(format!("{}", err).into()));
               drop(vm.call_value_with_this(&reject_fn, &Value::Undefined, &[reason]));
@@ -486,7 +494,8 @@ pub(crate) fn create_promise_intrinsics(
           vm.call_value_with_this(&reject_fn, &Value::Undefined, std::slice::from_ref(reason))
         {
           let reject_reason = vm
-            .last_uncaught_exception
+            .exceptions
+            .last_uncaught
             .take()
             .unwrap_or(Value::String(format!("{}", err).into()));
           if let Value::Promise(promise_state) = &promise {

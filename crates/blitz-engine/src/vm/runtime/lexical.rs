@@ -9,16 +9,16 @@ use std::rc::Rc;
 impl Vm {
   /// Enter a new declarative lexical environment whose outer is the current environment.
   pub fn enter_lexical_scope(&mut self) {
-    self.lexical_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(Rc::clone(
-      &self.lexical_env,
-    )))));
+    self.execution.active.lexical_env = Rc::new(RefCell::new(EnvironmentRecord::new(Some(
+      Rc::clone(&self.execution.active.lexical_env),
+    ))));
   }
 
   /// Leave the current lexical environment and restore its outer.
   pub fn exit_lexical_scope(&mut self) {
-    let outer = self.lexical_env.borrow().outer();
+    let outer = self.execution.active.lexical_env.borrow().outer();
     if let Some(outer) = outer {
-      self.lexical_env = outer;
+      self.execution.active.lexical_env = outer;
     }
   }
 
@@ -38,7 +38,7 @@ impl Vm {
       let Some(name) = maybe_name.as_deref() else {
         continue;
       };
-      let mut env = Some(Rc::clone(&self.lexical_env));
+      let mut env = Some(Rc::clone(&self.execution.active.lexical_env));
       while let Some(current) = env {
         let (conflict, outer) = {
           let borrowed = current.borrow();
@@ -61,7 +61,7 @@ impl Vm {
     &mut self,
     env: Rc<RefCell<EnvironmentRecord>>,
   ) {
-    self.lexical_env = env;
+    self.execution.active.lexical_env = env;
   }
 
   /// Adopt the caller's live bindings and slot metadata for a nested eval run.
@@ -69,7 +69,7 @@ impl Vm {
     &mut self,
     parent: &Vm,
   ) {
-    self.set_lexical_env(Rc::clone(&parent.lexical_env));
+    self.set_lexical_env(Rc::clone(&parent.execution.active.lexical_env));
   }
 
   pub(super) fn is_unscopable_binding(
@@ -95,7 +95,7 @@ impl Vm {
     &mut self,
     name: &str,
   ) -> Result<Option<Value>, RuntimeError> {
-    let mut env = Some(Rc::clone(&self.lexical_env));
+    let mut env = Some(Rc::clone(&self.execution.active.lexical_env));
     while let Some(current) = env {
       let (binding_value, binding_object, with_environment, outer) = {
         let borrowed = current.borrow();
@@ -119,7 +119,7 @@ impl Vm {
       env = outer;
     }
 
-    if let Some(frame) = self.call_stack.last()
+    if let Some(frame) = self.execution.call_stack.last()
       && let Value::Closure { proto, .. } = &frame.callee
       && proto.name == name
     {
@@ -134,7 +134,7 @@ impl Vm {
     name: &str,
     value: Value,
   ) -> Result<bool, RuntimeError> {
-    let mut env = Some(Rc::clone(&self.lexical_env));
+    let mut env = Some(Rc::clone(&self.execution.active.lexical_env));
     while let Some(current) = env {
       let (has_decl_binding, binding_object, with_environment, outer) = {
         let borrowed = current.borrow();
@@ -147,10 +147,13 @@ impl Vm {
       };
       if has_decl_binding {
         let current_slot = self
-          .current_slot_names
+          .execution
+          .active
+          .slots
           .as_ref()
-          .and_then(|names| {
-            names
+          .and_then(|slots| {
+            slots
+              .names
               .iter()
               .enumerate()
               .find_map(|(idx, maybe_name)| {
@@ -161,10 +164,12 @@ impl Vm {
               })
           });
         let outer_slot = self
-          .direct_eval_outer_slot_names
+          .execution
+          .direct_eval_outer
           .as_ref()
-          .and_then(|names| {
-            names
+          .and_then(|outer| {
+            outer
+              .names
               .iter()
               .enumerate()
               .find_map(|(idx, maybe_name)| {
@@ -180,32 +185,38 @@ impl Vm {
         {
           let immutable = if use_outer {
             self
-              .direct_eval_outer_slot_immutable
+              .execution
+              .direct_eval_outer
               .as_ref()
-              .and_then(|flags| flags.get(slot))
+              .and_then(|outer| outer.immutable.get(slot))
               .copied()
               .unwrap_or(false)
           } else {
             self
-              .current_slot_immutable
+              .execution
+              .active
+              .slots
               .as_ref()
-              .and_then(|flags| flags.get(slot))
+              .and_then(|slots| slots.immutable.get(slot))
               .copied()
               .unwrap_or(false)
           };
           if immutable {
             let sloppy_silent = if use_outer {
               self
-                .direct_eval_outer_slot_sloppy_immutable_silent
+                .execution
+                .direct_eval_outer
                 .as_ref()
-                .and_then(|flags| flags.get(slot))
+                .and_then(|outer| outer.sloppy_immutable_silent.get(slot))
                 .copied()
                 .unwrap_or(false)
             } else {
               self
-                .current_slot_sloppy_immutable_silent
+                .execution
+                .active
+                .slots
                 .as_ref()
-                .and_then(|flags| flags.get(slot))
+                .and_then(|slots| slots.sloppy_immutable_silent.get(slot))
                 .copied()
                 .unwrap_or(false)
             };
@@ -221,7 +232,7 @@ impl Vm {
           .set_mutable_binding(name, value.clone());
         let should_sync_global = outer_env
           .as_ref()
-          .is_none_or(|outer_rc| Rc::ptr_eq(outer_rc, &self.global_env));
+          .is_none_or(|outer_rc| Rc::ptr_eq(outer_rc, &self.realm_state.global_env));
         if should_sync_global {
           self.sync_named_binding_to_global_and_frames(name, &value);
         }
@@ -246,7 +257,7 @@ impl Vm {
     name: &str,
     value: Value,
   ) -> Result<bool, RuntimeError> {
-    let mut env = Some(Rc::clone(&self.lexical_env));
+    let mut env = Some(Rc::clone(&self.execution.active.lexical_env));
     while let Some(current) = env {
       let (binding_object, with_environment, outer) = {
         let borrowed = current.borrow();
@@ -276,8 +287,9 @@ impl Vm {
     name: &str,
     value: Value,
   ) -> Result<bool, RuntimeError> {
-    let slot = if let Some(names) = &self.current_slot_names {
-      names
+    let slot = if let Some(slots) = &self.execution.active.slots {
+      slots
+        .names
         .iter()
         .enumerate()
         .find_map(|(idx, maybe_name)| {
@@ -288,6 +300,8 @@ impl Vm {
         })
     } else {
       self
+        .execution
+        .active
         .chunk
         .root_slot_names
         .iter()
@@ -304,16 +318,20 @@ impl Vm {
       return Ok(false);
     };
 
-    super::execution::ensure_slot(&mut self.locals, slot);
-    *self.locals[slot].borrow_mut() = value.clone();
+    super::execution::ensure_slot(&mut self.execution.active.locals, slot);
+    *self.execution.active.locals[slot].borrow_mut() = value.clone();
     let _ = self
+      .execution
+      .active
       .lexical_env
       .borrow_mut()
       .set_binding_initialized_in_chain(name, true);
     self.sync_named_binding_to_global_and_frames(name, &value);
 
-    if self.current_slot_names.is_none()
+    if self.execution.active.slots.is_none()
       && self
+        .execution
+        .active
         .chunk
         .root_slot_names
         .get(slot)
@@ -322,20 +340,23 @@ impl Vm {
     {
       let key = PropertyKey::String(name.to_string().into());
       self
+        .realm_state
         .globals
         .borrow_mut()
         .properties
         .insert(key, PropertyDescriptor::ordinary_data(value));
     }
 
-    if let Some(arguments_object) = self.current_arguments_object.clone()
-      && slot < self.current_arguments_mapped_count
+    if let Some(arguments_object) = self.execution.active.arguments.object.clone()
+      && slot < self.execution.active.arguments.mapped_count
     {
       let key = PropertyKey::String(slot.to_string().into());
       if let Some((PropertyDescriptor::Data { writable: true, .. }, _)) =
         self.lookup_property_descriptor(&arguments_object, &key, 0)?
       {
-        let value = self.locals[slot].borrow().clone();
+        let value = self.execution.active.locals[slot]
+          .borrow()
+          .clone();
         drop(self.set_property_host(
           &arguments_object,
           &Value::String(slot.to_string().into()),
@@ -355,13 +376,15 @@ impl Vm {
   ) {
     let key = PropertyKey::String(name.to_string().into());
     self
+      .realm_state
       .globals
       .borrow_mut()
       .properties
       .insert(key, PropertyDescriptor::ordinary_data(value.clone()));
-    for frame in self.call_stack.iter_mut() {
-      if let Some(names) = &frame.slot_names
-        && let Some(slot) = names
+    for frame in self.execution.call_stack.iter_mut() {
+      if let Some(slots) = &frame.context.slots
+        && let Some(slot) = slots
+          .names
           .iter()
           .enumerate()
           .find_map(|(idx, maybe_name)| {
@@ -370,7 +393,7 @@ impl Vm {
               .filter(|n| *n == name)
               .map(|_| idx)
           })
-        && let Some(cell) = frame.locals.get(slot)
+        && let Some(cell) = frame.context.locals.get(slot)
       {
         *cell.borrow_mut() = value.clone();
       }

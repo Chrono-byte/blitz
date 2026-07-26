@@ -1,0 +1,208 @@
+// SPDX-License-Identifier: MPL-2.0
+//! Function constructor and `Function.prototype` builtins.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use crate::RuntimeError;
+use crate::compiler;
+use crate::ecmascript::semantics::builtin_object;
+use crate::ecmascript::semantics::create_list_from_array_like;
+use crate::parser::Parser;
+use crate::runtime_utils::syntax_error;
+use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::vm::Vm;
+
+fn function_call(
+  vm: &mut Vm,
+  args: &[Value],
+) -> Result<Value, RuntimeError> {
+  let callee = args.first().cloned().unwrap_or(Value::Undefined);
+  let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+  let rest = args.get(2..).unwrap_or(&[]);
+  vm.call_value_with_this(&callee, &this_arg, rest)
+}
+
+fn function_apply(
+  vm: &mut Vm,
+  args: &[Value],
+) -> Result<Value, RuntimeError> {
+  let callee = args.first().cloned().unwrap_or(Value::Undefined);
+  let this_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+  if !Vm::is_callable_value(&callee) {
+    return Err(vm.throw_type_error("Function.prototype.apply called on non-callable"));
+  }
+
+  let call_args = match args.get(2) {
+    None | Some(Value::Undefined) | Some(Value::Null) => Vec::new(),
+    Some(arguments_list) => create_list_from_array_like(vm, arguments_list)?,
+  };
+  vm.call_value_with_this(&callee, &this_arg, &call_args)
+}
+
+fn function_to_string(
+  vm: &mut Vm,
+  args: &[Value],
+) -> Result<Value, RuntimeError> {
+  let this = args.first().cloned().unwrap_or(Value::Undefined);
+  let source = if Vm::is_callable_value(&this) {
+    vm.function_to_string(&this)?
+  } else {
+    // Be forgiving for harness message formatting. Test262's assert helpers
+    // stringify a few function-like prototype objects.
+    format!("[object {}]", this.object_tag())
+  };
+  Ok(Value::String(source.into()))
+}
+
+/// The Function constructor installed into the global object.
+pub(crate) struct FunctionIntrinsics {
+  pub(crate) constructor: Value,
+}
+
+/// Creates the Function constructor and installs the properties of
+/// `Function.prototype` on the preallocated foundation objects.
+///
+/// The foundation allocator owns the cyclic Function constructor/prototype
+/// graph. Keeping those allocations there ensures that all builtin functions
+/// created here retain the original prototype identities.
+pub(crate) fn create_function_intrinsics(
+  globals: &Rc<RefCell<ObjectData>>,
+  function_constructor_properties: &Rc<RefCell<ObjectData>>,
+  function_prototype: &Rc<RefCell<ObjectData>>,
+) -> FunctionIntrinsics {
+  use PropertyKey as PKey;
+
+  let function_ctor_globals = Rc::clone(globals);
+  let function_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+    let off = if vm.current_new_target().is_some() {
+      1
+    } else {
+      0
+    };
+    let user_args = args.get(off..).unwrap_or(&[]);
+    let body_src = if let Some(last) = user_args.last() {
+      vm.to_string(last)?
+    } else {
+      js_string::JsString::empty()
+    };
+    let param_count = user_args.len().saturating_sub(1);
+    let mut params = Vec::with_capacity(param_count);
+    for idx in 0..param_count {
+      params.push(vm.to_string(&user_args[idx])?);
+    }
+    let source = crate::js!(
+      format(script),
+      "(function __tsblitz_dynamic({}) {{\n{}\n}})",
+      params
+        .iter()
+        .map(js_string::JsString::as_str_lossy)
+        .collect::<Vec<_>>()
+        .join(","),
+      body_src
+    );
+    let chunk = crate::typecheck::with_strict_override(None, || {
+      let session =
+        Parser::parse_source(&source).map_err(|e| syntax_error(vm, format!("parse: {}", e)))?;
+      let prog = session.program();
+      compiler::compile_oxc_repl(prog, &source)
+        .map_err(|e| syntax_error(vm, format!("compile: {}", e)))
+    })?;
+    let mut child = vm.fork_execution();
+    let result = child.run(chunk)?;
+    match &result {
+      Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
+        props.borrow_mut().properties.insert(
+          PKey::String("[[RealmGlobals]]".to_string().into()),
+          PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&function_ctor_globals))),
+        );
+      }
+      _ => {}
+    }
+    Ok(result)
+  });
+  let constructor =
+    Value::BuiltinObject(function_ctor_fn, Rc::clone(function_constructor_properties));
+
+  let function_call = builtin_object(Rc::new(function_call), function_prototype);
+  function_prototype.borrow_mut().properties.insert(
+    PKey::String("constructor".to_string().into()),
+    PropertyDescriptor::builtin_data(constructor.clone()),
+  );
+  function_prototype.borrow_mut().properties.insert(
+    PKey::String("call".to_string().into()),
+    PropertyDescriptor::builtin_data(function_call),
+  );
+  function_prototype.borrow_mut().properties.insert(
+    PKey::String("apply".to_string().into()),
+    PropertyDescriptor::builtin_data(builtin_object(Rc::new(function_apply), function_prototype)),
+  );
+  function_prototype.borrow_mut().properties.insert(
+    PKey::String("bind".to_string().into()),
+    PropertyDescriptor::builtin_data(builtin_object(
+      Rc::new({
+        let function_prototype = Rc::clone(function_prototype);
+        move |_vm, args| {
+          let target = args.first().cloned().unwrap_or(Value::Undefined);
+          let bound_this = args.get(1).cloned().unwrap_or(Value::Undefined);
+          let bound_args: Vec<Value> = args.iter().skip(2).cloned().collect();
+          if crate::trace::enabled() {
+            eprintln!(
+              "[trace] bind create target={:?} bound_this={:?} bound_args={:?}",
+              target, bound_this, bound_args
+            );
+          }
+          let bound_target = target.clone();
+          let bound_this_arg = bound_this.clone();
+          let prefix_args = bound_args.clone();
+          let bound_fn = builtin_object(
+            Rc::new(move |vm, call_args| {
+              if crate::trace::enabled() {
+                eprintln!(
+                  "[trace] bound fn call target={:?} this={:?} args={:?}",
+                  bound_target, bound_this_arg, call_args
+                );
+              }
+              let mut combined = prefix_args.clone();
+              if vm.builtin_this_arg_prepended() {
+                combined.extend(call_args.iter().skip(1).cloned());
+              } else {
+                combined.extend(call_args.iter().cloned());
+              }
+              vm.call_value_with_this(&bound_target, &bound_this_arg, &combined)
+            }),
+            &function_prototype,
+          );
+          if let Value::BuiltinObject(_, props) = &bound_fn {
+            props.borrow_mut().properties.insert(
+              PKey::String("[[BoundTargetFunction]]".to_string().into()),
+              PropertyDescriptor::ordinary_data(target),
+            );
+            props.borrow_mut().properties.insert(
+              PKey::String("[[BoundThis]]".to_string().into()),
+              PropertyDescriptor::ordinary_data(bound_this),
+            );
+            props.borrow_mut().properties.insert(
+              PKey::String("[[BoundArguments]]".to_string().into()),
+              PropertyDescriptor::ordinary_data(crate::runtime_utils::array_from_values(
+                bound_args,
+              )),
+            );
+          }
+          Ok(bound_fn)
+        }
+      }),
+      function_prototype,
+    )),
+  );
+
+  function_prototype.borrow_mut().properties.insert(
+    PKey::String("toString".to_string().into()),
+    PropertyDescriptor::builtin_data(builtin_object(
+      Rc::new(function_to_string),
+      function_prototype,
+    )),
+  );
+
+  FunctionIntrinsics { constructor }
+}
