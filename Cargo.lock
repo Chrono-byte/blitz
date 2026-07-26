@@ -186,6 +186,7 @@ dependencies = [
  "bytes",
  "crc32fast",
  "fastwebsockets",
+ "getrandom",
  "http-body-util",
  "hyper",
  "hyper-util",

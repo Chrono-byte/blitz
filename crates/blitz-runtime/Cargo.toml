@@ -10,6 +10,7 @@ blitz.workspace = true
 bytes.workspace = true
 crc32fast = "1.5.0"
 fastwebsockets.workspace = true
+getrandom = "0.2"
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true

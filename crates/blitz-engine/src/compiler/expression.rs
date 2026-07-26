@@ -1866,7 +1866,13 @@ impl super::Compiler {
         self.emit(Op::GetNewTarget, LINE);
       }
       OExpr::ImportMeta(_) => {
-        self.emit(Op::Undefined, LINE);
+        if self.current_module.is_some() {
+          self.emit_get_builtin_name("importMeta");
+          self.emit(Op::Call, LINE);
+          self.emit_byte(0, LINE);
+        } else {
+          self.emit(Op::Undefined, LINE);
+        }
       }
       OExpr::CallExpression(c) => {
         if self.compile_spread_call_tail(c)? {

@@ -643,7 +643,10 @@ mod tests {
 
   #[test]
   fn expanded_generated_public_roots_are_importable() {
-    let roots = public_declaration_sources();
+    let roots = public_declaration_sources()
+      .into_iter()
+      .filter(|(specifier, _)| !specifier.starts_with("node:"))
+      .collect::<Vec<_>>();
     let imports = roots
       .iter()
       .enumerate()

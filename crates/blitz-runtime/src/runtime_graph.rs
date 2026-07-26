@@ -45,6 +45,32 @@ pub const APP_TRANSPORT_METHODS: &[&str] = &["openAppServer", "closeAppServer", 
 /// Methods required by the filesystem adapter.
 pub const FILE_SYSTEM_METHODS: &[&str] =
   &["readFile", "readTextFile", "writeFile", "writeTextFile"];
+/// Stable name of the direct Node filesystem host primitive.
+pub const NODE_FILE_SYSTEM_PRIMITIVE: &str = "node-file-system";
+/// Methods required by the direct Node filesystem adapter.
+pub const NODE_FILE_SYSTEM_METHODS: &[&str] = &[
+  "readFile",
+  "writeFile",
+  "stat",
+  "mkdir",
+  "readdir",
+  "rm",
+  "unlink",
+  "rename",
+  "exists",
+];
+/// Stable name of the version-one Node crypto random host primitive.
+pub const NODE_CRYPTO_RANDOM_PRIMITIVE: &str = "node-crypto-random";
+/// ABI version of the Node crypto random host primitive.
+pub const NODE_CRYPTO_RANDOM_ABI_VERSION: u16 = 1;
+/// Methods required by the initial Node crypto random adapter.
+pub const NODE_CRYPTO_RANDOM_METHODS: &[&str] = &[
+  "randomUUID",
+  "randomBytes",
+  "randomFill",
+  "randomInt",
+  "timingSafeEqual",
+];
 /// Methods required by the HTTP adapter.
 pub const HTTP_METHODS: &[&str] = &["openServer", "closeServer", "awaitShutdown"];
 /// Methods required by the terminal adapter.

@@ -11,6 +11,8 @@ mod abort;
 mod console;
 pub mod event_loop;
 mod fs;
+mod node_crypto;
+mod node_fs;
 mod process;
 pub mod scheduler;
 mod server;
@@ -38,8 +40,10 @@ use crate::net::http::HttpRequestEvent;
 use crate::net::websocket::WebSocketEvent;
 use crate::runtime_graph::{
   APP_TRANSPORT_METHODS, APP_TRANSPORT_PRIMITIVE, FILE_SYSTEM_METHODS, FILE_SYSTEM_PRIMITIVE,
-  HOST_BRIDGE_ABI_VERSION, HTTP_METHODS, HTTP_PRIMITIVE, HostBridgeCapabilities, RuntimeGraphError,
-  TERMINAL_METHODS, TERMINAL_PRIMITIVE, WEB_SOCKET_METHODS, WEB_SOCKET_PRIMITIVE,
+  HOST_BRIDGE_ABI_VERSION, HTTP_METHODS, HTTP_PRIMITIVE, HostBridgeCapabilities,
+  NODE_CRYPTO_RANDOM_ABI_VERSION, NODE_CRYPTO_RANDOM_METHODS, NODE_CRYPTO_RANDOM_PRIMITIVE,
+  NODE_FILE_SYSTEM_METHODS, NODE_FILE_SYSTEM_PRIMITIVE, RuntimeGraphError, TERMINAL_METHODS,
+  TERMINAL_PRIMITIVE, WEB_SOCKET_METHODS, WEB_SOCKET_PRIMITIVE,
 };
 use event_loop::{EventRegistry, EventSender, ResourceHandle, ResourceRegistry};
 use scheduler::{TimerId, TimerKind, TimerScheduler, WakeupEvent};
@@ -50,9 +54,137 @@ use terminal::TerminalEvent;
 pub enum NodeCompatProfile {
   /// Do not expose any `node:*` modules.
   Off,
-  /// Expose the tested process-local compatibility modules.
+  /// Expose the completed process-local compatibility modules.
   #[default]
   Core,
+  /// Expose completed modules needed by development tooling.
+  Tooling,
+  /// Expose every completed Node compatibility module.
+  Full,
+}
+
+impl NodeCompatProfile {
+  // Keep these lists explicit. A new generated `node:*` root must not become
+  // available merely by being added to the runtime graph; it needs a reviewed
+  // compatibility entry in each profile that should expose it.
+  const CORE_MODULES: &'static [&'static str] = &[
+    "node:assert",
+    "node:assert/strict",
+    "node:async_hooks",
+    "node:console",
+    "node:constants",
+    "node:diagnostics_channel",
+    "node:events",
+    "node:module",
+    "node:os",
+    "node:path",
+    "node:path/posix",
+    "node:path/win32",
+    "node:perf_hooks",
+    "node:process",
+    "node:querystring",
+    "node:stream",
+    "node:stream/consumers",
+    "node:stream/promises",
+    "node:string_decoder",
+    "node:timers",
+    "node:timers/promises",
+    "node:tty",
+    "node:url",
+    "node:util",
+    "node:util/types",
+  ];
+  const TOOLING_MODULES: &'static [&'static str] = &[
+    "node:assert",
+    "node:assert/strict",
+    "node:async_hooks",
+    "node:console",
+    "node:constants",
+    "node:crypto",
+    "node:diagnostics_channel",
+    "node:events",
+    "node:fs",
+    "node:fs/promises",
+    "node:module",
+    "node:os",
+    "node:path",
+    "node:path/posix",
+    "node:path/win32",
+    "node:perf_hooks",
+    "node:process",
+    "node:querystring",
+    "node:readline",
+    "node:readline/promises",
+    "node:stream",
+    "node:stream/consumers",
+    "node:stream/promises",
+    "node:string_decoder",
+    "node:timers",
+    "node:timers/promises",
+    "node:tty",
+    "node:url",
+    "node:util",
+    "node:util/types",
+  ];
+  const FULL_MODULES: &'static [&'static str] = &[
+    "node:assert",
+    "node:assert/strict",
+    "node:async_hooks",
+    "node:console",
+    "node:constants",
+    "node:crypto",
+    "node:diagnostics_channel",
+    "node:domain",
+    "node:events",
+    "node:fs",
+    "node:fs/promises",
+    "node:module",
+    "node:os",
+    "node:path",
+    "node:path/posix",
+    "node:path/win32",
+    "node:perf_hooks",
+    "node:process",
+    "node:punycode",
+    "node:querystring",
+    "node:readline",
+    "node:readline/promises",
+    "node:sea",
+    "node:stream",
+    "node:stream/consumers",
+    "node:stream/promises",
+    "node:string_decoder",
+    "node:sys",
+    "node:timers",
+    "node:timers/promises",
+    "node:trace_events",
+    "node:tty",
+    "node:url",
+    "node:util",
+    "node:util/types",
+  ];
+
+  /// Return the canonical `node:*` roots enabled by this profile.
+  #[must_use]
+  pub const fn allowed_modules(self) -> &'static [&'static str] {
+    match self {
+      Self::Off => &[],
+      Self::Core => Self::CORE_MODULES,
+      Self::Tooling => Self::TOOLING_MODULES,
+      Self::Full => Self::FULL_MODULES,
+    }
+  }
+
+  /// Return the stable name used by host-facing diagnostics.
+  #[must_use]
+  pub const fn name(self) -> &'static str {
+    match self {
+      Self::Off => "off",
+      Self::Core => "core",
+      Self::Tooling => "tooling",
+      Self::Full => "full",
+    }
+  }
 }
 
 /// Host configuration installed into a Blitz VM.
@@ -393,6 +525,15 @@ pub fn try_install_runtime(
     events.resources(),
     Rc::clone(&server_slot),
     Rc::clone(&terminal_slot),
+    options
+      .node_compat
+      .allowed_modules()
+      .iter()
+      .any(|module| matches!(*module, "node:fs" | "node:fs/promises")),
+    options
+      .node_compat
+      .allowed_modules()
+      .contains(&"node:crypto"),
   );
   let policy_started = Instant::now();
   if let Err(error) = bundle.validate_pinned_for_host(
@@ -406,25 +547,25 @@ pub fn try_install_runtime(
   let policy_validation = policy_started.elapsed();
   let registration_started = Instant::now();
   let mut graph = bundle.graph.clone();
-  let node_roots = graph
+  let allowed_node_modules = options.node_compat.allowed_modules();
+  let disabled_node_roots = graph
     .public_roots
     .iter()
     .copied()
     .filter(|module_index| {
-      graph
-        .module(*module_index)
-        .is_some_and(|module| module.specifier.starts_with("node:"))
+      graph.module(*module_index).is_some_and(|module| {
+        module.specifier.starts_with("node:")
+          && !allowed_node_modules.contains(&module.specifier.as_str())
+      })
     })
-    .collect::<std::collections::HashSet<_>>();
-  if options.node_compat == NodeCompatProfile::Off {
-    graph
-      .public_roots
-      .retain(|module_index| !node_roots.contains(module_index));
-  }
+    .collect::<Vec<_>>();
+  graph
+    .public_roots
+    .retain(|module_index| !disabled_node_roots.contains(module_index));
   let declarations = crate::effect_assets::public_declaration_sources()
     .into_iter()
     .filter(|(specifier, _)| {
-      options.node_compat != NodeCompatProfile::Off || !specifier.starts_with("node:")
+      !specifier.starts_with("node:") || allowed_node_modules.contains(&specifier.as_str())
     });
   if let Err(error) = vm.register_prelinked_graph_with_declarations(graph, declarations) {
     restore_host_bridge(vm, previous_bridge);
@@ -1100,6 +1241,8 @@ fn install_host_bridge(
   resources: ResourceRegistry,
   server: Rc<RefCell<Option<server::ServerState>>>,
   terminal: Rc<RefCell<Option<terminal::TerminalState>>>,
+  node_file_system_allowed: bool,
+  crypto_random_allowed: bool,
 ) -> HostBridgeCapabilities {
   let app_transport = object(vm.realm().object_prototype());
   set(
@@ -1132,6 +1275,16 @@ fn install_host_bridge(
   );
   set(&bridge, "appTransport", app_transport);
   set(&bridge, "fileSystem", fs::install(vm));
+  set(
+    &bridge,
+    "nodeFileSystem",
+    node_fs::install(vm, node_file_system_allowed),
+  );
+  set(
+    &bridge,
+    "nodeCryptoRandom",
+    node_crypto::install(vm, crypto_random_allowed),
+  );
   set(&bridge, "http", http_primitive(vm, Rc::clone(&server)));
   set(&bridge, "webSocket", websocket_primitive(vm, server));
   set(&bridge, "terminal", terminal_primitive(vm, terminal));
@@ -1161,6 +1314,16 @@ fn install_host_bridge(
       FILE_SYSTEM_PRIMITIVE,
       HOST_BRIDGE_ABI_VERSION,
       FILE_SYSTEM_METHODS.iter().copied(),
+    )
+    .with_primitive(
+      NODE_FILE_SYSTEM_PRIMITIVE,
+      HOST_BRIDGE_ABI_VERSION,
+      NODE_FILE_SYSTEM_METHODS.iter().copied(),
+    )
+    .with_primitive(
+      NODE_CRYPTO_RANDOM_PRIMITIVE,
+      NODE_CRYPTO_RANDOM_ABI_VERSION,
+      NODE_CRYPTO_RANDOM_METHODS.iter().copied(),
     )
     .with_primitive(
       HTTP_PRIMITIVE,

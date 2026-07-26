@@ -44,6 +44,23 @@ over same-named npm packages.
 A phase indicates dependency order, not one large pull request. Every row is a
 separately reviewable vertical slice.
 
+## Current implementation snapshot
+
+The generated graph currently exposes tested initial slices for 35 of the 58
+public Node 24.18.0 built-in roots (60.34% root coverage) across explicit
+`core`, `tooling`, and `full` allowlists. Root coverage means the declared
+slice resolves, runs, typechecks, and has compatibility tests; it does not mean
+every Node export is implemented. See the authoritative machine-readable
+[`node-compat-support.json`](node-compat-support.json) for profile membership,
+declarations, host primitives, and tests.
+
+Notable remaining blockers include faithful Buffer byte aliasing, Web Streams,
+networking/HTTP, filesystem watchers, moving bounded `fs/promises` host calls
+off the VM thread, compression, CommonJS, workers, and VM contexts. The Vite milestone therefore remains open. Status labels in the
+inventory tables below describe the route to complete module parity; a root
+with a landed partial slice is tracked precisely in the machine-readable
+matrix rather than relabeling the whole module as complete.
+
 ## Shared prerequisites
 
 ### N0.1 Module registry
