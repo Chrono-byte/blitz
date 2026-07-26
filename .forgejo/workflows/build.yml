@@ -2,7 +2,33 @@ name: Build
 
 on:
   push:
+    branches:
+      - main
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**/Cargo.toml"
+      - "crates/**/build.rs"
+      - "crates/**/src/**"
+      - "crates/blitz-runtime/assets/**"
+      - "examples/**"
+      - "tools/effect-assets/src/facades/**"
+      - "tools/effect-bytecode/Cargo.toml"
+      - "tools/effect-bytecode/src/**"
+      - ".forgejo/workflows/build.yml"
   pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**/Cargo.toml"
+      - "crates/**/build.rs"
+      - "crates/**/src/**"
+      - "crates/blitz-runtime/assets/**"
+      - "examples/**"
+      - "tools/effect-assets/src/facades/**"
+      - "tools/effect-bytecode/Cargo.toml"
+      - "tools/effect-bytecode/src/**"
+      - ".forgejo/workflows/build.yml"
   workflow_dispatch:
 
 env:

@@ -2,7 +2,27 @@ name: Tests
 
 on:
   push:
+    branches:
+      - main
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "examples/**"
+      - "test262/harness/**"
+      - "tools/effect-assets/**"
+      - "tools/effect-bytecode/**"
+      - ".forgejo/workflows/test.yml"
   pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "examples/**"
+      - "test262/harness/**"
+      - "tools/effect-assets/**"
+      - "tools/effect-bytecode/**"
+      - ".forgejo/workflows/test.yml"
   workflow_dispatch:
 
 env:

@@ -2,7 +2,35 @@ name: Lint and format
 
 on:
   push:
+    branches:
+      - main
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "crates/**/*.rs"
+      - "crates/**/Cargo.toml"
+      - "crates/blitz-runtime/assets/**"
+      - "examples/**"
+      - "tools/effect-assets/src/facades/**"
+      - "tools/effect-bytecode/**/*.rs"
+      - "tools/effect-bytecode/Cargo.toml"
+      - ".forgejo/workflows/lint.yml"
   pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "clippy.toml"
+      - "rustfmt.toml"
+      - "crates/**/*.rs"
+      - "crates/**/Cargo.toml"
+      - "crates/blitz-runtime/assets/**"
+      - "examples/**"
+      - "tools/effect-assets/src/facades/**"
+      - "tools/effect-bytecode/**/*.rs"
+      - "tools/effect-bytecode/Cargo.toml"
+      - ".forgejo/workflows/lint.yml"
   workflow_dispatch:
 
 env:
