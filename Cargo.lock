@@ -201,6 +201,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "blitz-test262"
+version = "0.1.2"
+dependencies = [
+ "blitz-engine",
+ "clap",
+ "futures",
+ "oxc_span",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

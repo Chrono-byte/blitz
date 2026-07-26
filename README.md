@@ -7,7 +7,9 @@ Key layers
 ----------
 
 - `crates/blitz-engine/` — the host-neutral parser, compiler, VM, ECMAScript
-  builtins, raw engine executable, Test262 runner, and benchmarks.
+  builtins, raw engine executable, and benchmarks.
+- `crates/blitz-test262/` — the dedicated Test262 discovery, execution,
+  isolation, and reporting harness built on the engine.
 - `crates/blitz-runtime/` — reusable host capabilities, application primitives,
   RPC routing, and application examples.
 - `crates/blitz-cli/` — the `blitz` executable and its current `run`, `check`,
@@ -40,6 +42,9 @@ Write-Output "const answer: number = 42;" | cargo run -p blitz-cli -- analyze --
 
 # Exercise the raw engine without host capabilities.
 cargo run -p blitz-engine --bin blitz-engine -- path/to/engine-test.js
+
+# Run the dedicated Test262 conformance harness.
+cargo run -p blitz-test262 --bin test262
 ```
 
 The default runtime exposes the Effect-native `blitz:*` modules described in

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 /*!
-Test262 connector script for Blitz.
+Dedicated Test262 runner for Blitz.
 
 Usage:
 - Optionally set `TEST262_FILTER` to a substring to limit which tests are run

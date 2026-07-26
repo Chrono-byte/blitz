@@ -1,0 +1,24 @@
+[package]
+name = "blitz-test262"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+description = "Test262 conformance runner for the Blitz ECMAScript engine"
+readme = "README.md"
+
+[[bin]]
+name = "test262"
+path = "src/main.rs"
+
+[dependencies]
+blitz.workspace = true
+clap.workspace = true
+futures.workspace = true
+oxc_span.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
