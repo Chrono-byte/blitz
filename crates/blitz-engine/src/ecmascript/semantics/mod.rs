@@ -19,6 +19,8 @@ use crate::{Parser, RuntimeError, Vm, compiler};
 
 /// Atomics operations for shared array buffers.
 pub mod atomics;
+/// Internal backing and branding for byte-oriented ArrayBuffer views.
+pub(crate) mod byte_views;
 /// ECMAScript intrinsic objects and global bindings.
 pub mod intrinsics;
 /// Numeric parsing and coercion operations.
@@ -32,6 +34,7 @@ pub mod uri;
 
 pub(crate) use crate::runtime_utils::same_value_zero;
 pub(crate) use crate::value::ArrayData;
+pub(crate) use byte_views::*;
 pub(crate) use intrinsics::{
   builtin_object, install_minimal_kernel_constructors, set_builtin_length, set_builtin_name,
 };

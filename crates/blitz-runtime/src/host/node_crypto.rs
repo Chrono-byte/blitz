@@ -13,7 +13,7 @@ use std::rc::Rc;
 use blitz::Vm;
 use blitz::errors::RuntimeError;
 use blitz::gc;
-use blitz::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use blitz::value::{ArrayData, ObjectData, Uint8ArrayByteView, Value};
 use getrandom::getrandom;
 
 use super::{object, set};
@@ -155,7 +155,8 @@ fn random_fill(
     Ok(offset) => offset.unwrap_or(0),
     Err(error) => return Ok(error),
   };
-  if offset > view.length {
+  let view_length = view.len();
+  if offset > view_length {
     return Ok(range_failure(
       vm,
       "offset",
@@ -163,13 +164,13 @@ fn random_fill(
     ));
   }
   let size = match index_argument(vm, args.get(3), "size") {
-    Ok(size) => size.unwrap_or(view.length - offset),
+    Ok(size) => size.unwrap_or(view_length - offset),
     Err(error) => return Ok(error),
   };
   let Some(end) = offset.checked_add(size) else {
     return Ok(range_failure(vm, "size", "size is outside the Uint8Array"));
   };
-  if end > view.length || size > MAX_RANDOM_BYTES {
+  if end > view_length || size > MAX_RANDOM_BYTES {
     return Ok(range_failure(
       vm,
       "size",
@@ -183,10 +184,12 @@ fn random_fill(
   if let Err(error) = getrandom(&mut bytes) {
     return Ok(entropy_failure(vm, "randomFill", error.to_string()));
   }
-  for (index, byte) in bytes.into_iter().enumerate() {
-    if let Err(error) = write_byte(vm, &view, offset + index, byte) {
-      return Ok(argument_type_failure(vm, "buffer", error.to_string()));
-    }
+  if !view.write_from(offset, &bytes) {
+    return Ok(argument_type_failure(
+      vm,
+      "buffer",
+      "the Uint8Array became detached during randomFill",
+    ));
   }
   Ok(success(vm, target))
 }
@@ -262,7 +265,8 @@ fn timing_safe_equal(
     Ok(view) => view,
     Err(error) => return Ok(error),
   };
-  if left.length != right.length {
+  let length = left.len();
+  if length != right.len() {
     return Ok(failure(
       vm,
       "ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH",
@@ -270,18 +274,19 @@ fn timing_safe_equal(
     ));
   }
 
+  let mut left_bytes = vec![0; length];
+  let mut right_bytes = vec![0; length];
+  if !left.read_into(0, &mut left_bytes) || !right.read_into(0, &mut right_bytes) {
+    return Ok(argument_type_failure(
+      vm,
+      "buffer",
+      "the Uint8Array became detached during timingSafeEqual",
+    ));
+  }
   // Do not return on a byte mismatch. The length check above is intentionally
   // separate because Node rejects unequal lengths before comparing bytes.
   let mut difference = 0_u8;
-  for index in 0..left.length {
-    let left_byte = match read_byte(vm, &left, index) {
-      Ok(byte) => byte,
-      Err(error) => return Ok(error),
-    };
-    let right_byte = match read_byte(vm, &right, index) {
-      Ok(byte) => byte,
-      Err(error) => return Ok(error),
-    };
+  for (left_byte, right_byte) in left_bytes.into_iter().zip(right_bytes) {
     difference |= left_byte ^ right_byte;
   }
   Ok(success(vm, Value::Bool(difference == 0)))
@@ -302,165 +307,26 @@ fn secure_below(range: u64) -> Result<u64, getrandom::Error> {
   }
 }
 
-struct ByteView {
-  value: Value,
-  data: Rc<RefCell<ArrayData>>,
-  length: usize,
-}
-
 fn byte_view(
   vm: &mut Vm,
   value: &Value,
   argument: &str,
-) -> Result<ByteView, Value> {
-  let Value::Object(object) = value else {
+) -> Result<Uint8ArrayByteView, Value> {
+  let Some(view) = vm.uint8_array_byte_view(value) else {
     return Err(argument_type_failure(
       vm,
       argument,
-      "the argument must be a standalone Uint8Array",
+      "the argument must be an attached Uint8Array or Buffer",
     ));
   };
-
-  let (data, kind, length, buffer) = {
-    let object = object.borrow();
-    let data = match object
-      .properties
-      .get(&PropertyKey::String("[[TypedArrayData]]".to_string()))
-    {
-      Some(PropertyDescriptor::Data {
-        value: Value::Array(data, _),
-        ..
-      }) => Rc::clone(data),
-      _ => {
-        return Err(argument_type_failure(
-          vm,
-          argument,
-          "the argument must be a standalone Uint8Array",
-        ));
-      }
-    };
-    let kind = match object
-      .properties
-      .get(&PropertyKey::String("[[TypedArrayKind]]".to_string()))
-    {
-      Some(PropertyDescriptor::Data {
-        value: Value::String(kind),
-        ..
-      }) => kind.clone(),
-      _ => String::new(),
-    };
-    let length = match object
-      .properties
-      .get(&PropertyKey::String("[[TypedArrayLength]]".to_string()))
-    {
-      Some(PropertyDescriptor::Data {
-        value: Value::Number(length),
-        ..
-      }) if length.is_finite() && *length >= 0.0 && length.fract() == 0.0 => length
-        .to_string()
-        .parse::<usize>()
-        .unwrap_or_default(),
-      _ => 0,
-    };
-    let buffer = object
-      .properties
-      .get(&PropertyKey::String("[[TypedArrayBuffer]]".to_string()))
-      .and_then(|descriptor| match descriptor {
-        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-        PropertyDescriptor::Accessor { .. } => None,
-      })
-      .unwrap_or(Value::Undefined);
-    (data, kind, length, buffer)
-  };
-
-  if kind != "Uint8Array" {
-    return Err(argument_type_failure(
-      vm,
-      argument,
-      "the argument must be a Uint8Array",
-    ));
-  }
-  if !matches!(buffer, Value::Undefined) {
-    return Err(failure(
-      vm,
-      "ERR_NOT_IMPLEMENTED",
-      "ArrayBuffer-backed Uint8Array views are not implemented by Blitz",
-    ));
-  }
-  if length > MAX_RANDOM_BYTES || data.borrow().len() < length {
+  if view.len() > MAX_RANDOM_BYTES {
     return Err(range_failure(
       vm,
       argument,
       "the Uint8Array is outside the supported secure-random byte limit",
     ));
   }
-  Ok(ByteView {
-    value: value.clone(),
-    data,
-    length,
-  })
-}
-
-fn read_byte(
-  vm: &mut Vm,
-  view: &ByteView,
-  index: usize,
-) -> Result<u8, Value> {
-  let key = PropertyKey::String(index.to_string());
-  let value = vm
-    .get_property_host(&view.value, &key)
-    .map_err(|error| argument_type_failure(vm, "buffer", error.to_string()))?;
-  match value {
-    Value::Undefined => view
-      .data
-      .borrow()
-      .get(index)
-      .and_then(|slot| slot.as_ref())
-      .map_or(Ok(0), |value| byte_number(vm, value)),
-    value => byte_number(vm, &value),
-  }
-}
-
-fn write_byte(
-  vm: &mut Vm,
-  view: &ByteView,
-  index: usize,
-  byte: u8,
-) -> Result<(), RuntimeError> {
-  let value = Value::Number(f64::from(byte));
-  vm.set_property_host(
-    &view.value,
-    &Value::String(index.to_string()),
-    value.clone(),
-  )?;
-  if let Some(slot) = view.data.borrow_mut().get_mut(index) {
-    *slot = Some(value);
-  }
-  Ok(())
-}
-
-fn byte_number(
-  vm: &mut Vm,
-  value: &Value,
-) -> Result<u8, Value> {
-  let Value::Number(value) = value else {
-    return Err(argument_type_failure(
-      vm,
-      "buffer",
-      "Uint8Array elements must be numbers",
-    ));
-  };
-  if !value.is_finite() || value.fract() != 0.0 || !(0.0..=255.0).contains(value) {
-    return Err(argument_type_failure(
-      vm,
-      "buffer",
-      "Uint8Array elements must be integers between 0 and 255",
-    ));
-  }
-  value
-    .to_string()
-    .parse::<u8>()
-    .map_err(|_| argument_type_failure(vm, "buffer", "invalid Uint8Array element"))
+  Ok(view)
 }
 
 fn random_size(
@@ -835,6 +701,12 @@ mod tests {
             if (!(bytes instanceof Uint8Array) || bytes.length !== 16) throw new Error("randomBytes slice mismatch");
             const target = new Uint8Array(8);
             if (randomFillSync(target, 2, 3) !== target) throw new Error("randomFillSync return mismatch");
+            const backing = new Uint8Array([17, 17, 17, 17, 17, 17]);
+            const offsetView = new Uint8Array(backing.buffer, 2, 2);
+            if (randomFillSync(offsetView) !== offsetView || backing[0] !== 17 || backing[1] !== 17 || backing[4] !== 17 || backing[5] !== 17) throw new Error("randomFillSync offset view mismatch");
+            const leftBacking = new Uint8Array([9, 1, 2, 9]);
+            const leftView = new Uint8Array(leftBacking.buffer, 1, 2);
+            if (!timingSafeEqual(leftView, new Uint8Array([1, 2]))) throw new Error("timingSafeEqual offset view mismatch");
             if (!timingSafeEqual(target, target)) throw new Error("timingSafeEqual mismatch");
             try { timingSafeEqual(new Uint8Array(1), new Uint8Array(2)); throw new Error("length mismatch did not throw"); } catch (error) { if (error.code !== "ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH") throw error; }
             if (crypto.randomUUID !== randomUUID || crypto.randomBytes !== randomBytes) throw new Error("default export mismatch");

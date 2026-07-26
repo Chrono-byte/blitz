@@ -1,9 +1,8 @@
 import * as HostCrypto from "blitz-internal:node-crypto-random";
 
-// This is an explicit Blitz slice, not a Buffer implementation. The engine's
-// current byte-view model cannot promise Node Buffer/ArrayBuffer aliasing, so
-// randomBytes returns Uint8Array and the fill/compare operations accept only
-// standalone Uint8Array instances.
+// This explicit slice returns Uint8Array from randomBytes. Fill and comparison
+// operations also accept Buffer and ArrayBuffer-backed Uint8Array subviews;
+// the engine owns branding, offsets, aliasing, and byte mutation.
 const codedError = (code, message, ErrorConstructor = Error) => {
   const error = new ErrorConstructor(message);
   error.code = code;
@@ -37,7 +36,7 @@ const requireUint8Array = (value, argument) => {
   if (!(value instanceof Uint8Array)) {
     throw codedError(
       "ERR_INVALID_ARG_TYPE",
-      `The ${argument} argument must be a standalone Uint8Array in the Blitz crypto slice`,
+      `The ${argument} argument must be a Uint8Array or Buffer in the Blitz crypto slice`,
       TypeError,
     );
   }

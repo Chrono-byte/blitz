@@ -20,8 +20,8 @@ parts of the process and module APIs.
 
 ## Implementation status
 
-The compatibility graph now registers 35 of Node 24.18.0's 58 public built-in
-roots (60.34% root coverage) with explicit declarations and tested initial
+The compatibility graph now registers 36 of Node 24.18.0's 58 public built-in
+roots (62.07% root coverage) with explicit declarations and tested initial
 slices. This is root-level coverage, not a claim of complete export-level API
 parity. The machine-readable inventory is
 [`node-compat-support.json`](node-compat-support.json).
@@ -35,8 +35,9 @@ parity. The machine-readable inventory is
   open engine work;
 - canonical module records provide top-level `import.meta.url`; preserving the
   owning module context inside later callbacks remains open;
-- pure/process-local modules, streams, readline, direct-host filesystem, and a
-  secure crypto-random slice are prelinked and declaration-backed; and
+- pure/process-local modules, an initial byte-backed `Buffer` slice, streams,
+  readline, direct-host filesystem, and a secure crypto-random slice are
+  prelinked and declaration-backed; and
 - runtime tests cover profile rejection, package conditions, strict
   typechecking, identity, filesystem operations, event/stream/readline
   lifecycle, and permission-gated secure randomness.
@@ -164,9 +165,13 @@ whole table.
 | `node:querystring` | parse/stringify/escape/unescape compatibility |
 | `node:timers` and `node:timers/promises` | facades over the runtime scheduler, including cancellation where `AbortSignal` exists |
 
-`node:buffer` is intentionally gated on faithful `ArrayBuffer`, typed arrays,
-encoding/decoding, slice/view aliasing, and byte-copy behavior. A nominal
-`Buffer` backed by ordinary arrays is not sufficient.
+`node:buffer` begins with an eight-bit `ArrayBuffer`/`Uint8Array`-backed slice
+whose hidden engine slots preserve byte aliasing and authoritative transfer
+state. A host byte-view API now lets secure crypto operate on Buffer and
+nonzero-offset Uint8Array views without inspecting JavaScript properties.
+Broader Buffer parity remains gated on wider typed arrays, `DataView`, complete
+detached-view metadata, and multi-byte numeric access; ordinary-array emulation
+is not accepted.
 
 ### Slice B: filesystem and diagnostics
 

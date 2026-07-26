@@ -153,6 +153,13 @@ export const STDLIB_INPUTS = [
     hostPrimitives: [],
   },
   {
+    specifier: "node:buffer",
+    source: "facades/node-buffer.js",
+    declaration: "node-buffer.d.ts",
+    visibility: "public",
+    hostPrimitives: [],
+  },
+  {
     specifier: "node:console",
     source: "facades/node-console.js",
     declaration: "node-console.d.ts",

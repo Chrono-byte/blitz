@@ -4,6 +4,9 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::Vm;
+use crate::ecmascript::semantics::byte_views::{
+  byte_view_details, byte_view_index_from_key, byte_view_index_value,
+};
 use crate::ecmascript::semantics::usize_to_f64;
 use crate::runtime_utils::canonical_index_key;
 use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value};
@@ -16,7 +19,19 @@ pub(crate) fn own_property_descriptor(
   key: &PropertyKey,
 ) -> Option<PropertyDescriptor> {
   match obj {
-    Value::Object(data) => data.borrow().properties.get(key).cloned(),
+    Value::Object(data) => {
+      if let Some(index) = byte_view_index_from_key(key)
+        && let Some(value) = byte_view_index_value(&Value::Object(Rc::clone(data)), index)
+      {
+        return Some(PropertyDescriptor::Data {
+          value,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      }
+      data.borrow().properties.get(key).cloned()
+    }
     Value::Proxy(proxy) => {
       let proxy = proxy.borrow();
       if proxy.is_revoked() {
@@ -195,6 +210,11 @@ pub(crate) fn own_property_keys(obj: &Value) -> Vec<PropertyKey> {
   let mut keys = Vec::new();
   match obj {
     Value::Object(data) => {
+      if let Some(details) = byte_view_details(&Value::Object(Rc::clone(data))) {
+        for index in 0..details.length {
+          keys.push(PropertyKey::String(usize_to_decimal_string(index)));
+        }
+      }
       keys.extend(data.borrow().properties.keys().cloned());
     }
     Value::Proxy(proxy) => {

@@ -72,6 +72,7 @@ impl NodeCompatProfile {
     "node:assert",
     "node:assert/strict",
     "node:async_hooks",
+    "node:buffer",
     "node:console",
     "node:constants",
     "node:diagnostics_channel",
@@ -99,6 +100,7 @@ impl NodeCompatProfile {
     "node:assert",
     "node:assert/strict",
     "node:async_hooks",
+    "node:buffer",
     "node:console",
     "node:constants",
     "node:crypto",
@@ -131,6 +133,7 @@ impl NodeCompatProfile {
     "node:assert",
     "node:assert/strict",
     "node:async_hooks",
+    "node:buffer",
     "node:console",
     "node:constants",
     "node:crypto",
@@ -2242,30 +2245,22 @@ mod tests {
   }
 
   #[test]
-  fn irc_chat_demo_scripts_parse_and_compile() {
-    for (name, source) in [
-      ("server", include_str!("../../examples/irc-chat/server.js")),
-      ("alice", include_str!("../../examples/irc-chat/alice.js")),
-      ("bob", include_str!("../../examples/irc-chat/bob.js")),
-    ] {
-      let session =
-        JsParser::parse_source(source).unwrap_or_else(|error| panic!("parse {name} demo: {error}"));
-      compiler::compile_oxc(session.program(), source)
-        .unwrap_or_else(|error| panic!("compile {name} demo: {error}"));
-    }
-  }
-
-  #[test]
   fn effect_irc_chat_v2_scripts_parse_and_compile() {
-    let server = include_str!("../../examples/irc-chat-v2/server.ts");
+    let server = include_str!("../../../../examples/irc-chat-v2/server.ts");
     let session =
       JsParser::parse_source_with_type(server, oxc_span::SourceType::ts().with_module(true))
         .expect("parse Effect IRC server module");
     compiler::compile_oxc(session.program(), server).expect("compile Effect IRC server module");
 
     for (name, source) in [
-      ("alice", include_str!("../../examples/irc-chat-v2/alice.ts")),
-      ("bob", include_str!("../../examples/irc-chat-v2/bob.ts")),
+      (
+        "alice",
+        include_str!("../../../../examples/irc-chat-v2/alice.ts"),
+      ),
+      (
+        "bob",
+        include_str!("../../../../examples/irc-chat-v2/bob.ts"),
+      ),
     ] {
       let session =
         JsParser::parse_source_with_type(source, oxc_span::SourceType::ts().with_module(true))
@@ -2296,8 +2291,8 @@ mod tests {
             node_compat: NodeCompatProfile::Core,
           },
         );
-        let source =
-          include_str!("../../examples/irc-chat-v2/server.ts").replace("port: 8000", "port: 0");
+        let source = include_str!("../../../../examples/irc-chat-v2/server.ts")
+          .replace("port: 8000", "port: 0");
         let directory = env::temp_dir().join(format!("blitz-effect-irc-v2-{}", std::process::id()));
         std::fs::create_dir_all(&directory).expect("create Effect IRC directory");
         let entry = directory.join("server.ts");

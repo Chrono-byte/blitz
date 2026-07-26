@@ -87,6 +87,7 @@ mod tests {
       "node:assert",
       "node:assert/strict",
       "node:async_hooks",
+      "node:buffer",
       "node:console",
       "node:constants",
       "node:diagnostics_channel",
@@ -180,6 +181,7 @@ mod tests {
         import assert from "node:assert";
         import strictAssert from "node:assert/strict";
         import asyncHooks from "node:async_hooks";
+        import bufferModule, { Buffer as ModuleBuffer } from "node:buffer";
         import consoleModule, { log as consoleLog } from "node:console";
         import constants, { COPYFILE_EXCL } from "node:constants";
         import diagnostics, { channel } from "node:diagnostics_channel";
@@ -204,6 +206,9 @@ mod tests {
 
         if (strictAssert !== assert.strict) throw new Error("strict assertion alias mismatch");
         if (typeof asyncHooks !== "object") throw new Error("async hooks mismatch");
+        if (bufferModule.Buffer !== ModuleBuffer) throw new Error("buffer identity mismatch");
+        const bytes = ModuleBuffer.from("hé", "utf8");
+        if (bytes.toString("hex") !== "68c3a9" || bytes.toString() !== "hé") throw new Error("buffer encoding mismatch");
         if (typeof consoleModule !== "object" || typeof consoleLog !== "function") throw new Error("console export mismatch");
         if (constants.COPYFILE_EXCL !== COPYFILE_EXCL) throw new Error("constants mismatch");
         if (typeof diagnostics !== "object" || typeof channel !== "function") throw new Error("diagnostics export mismatch");

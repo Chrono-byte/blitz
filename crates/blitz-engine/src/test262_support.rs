@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 use crate::compiler;
+use crate::ecmascript::semantics::byte_views::ARRAY_BUFFER_DATA_SLOT;
 use crate::parser::Parser;
 use crate::runtime_utils;
 use crate::value::{
@@ -109,10 +110,7 @@ fn make_test262_object(
     PropertyDescriptor::data(host_builtin(Rc::new(|_vm, args| {
       if let Some(Value::Object(obj)) = args.first() {
         let mut obj_data = obj.borrow_mut();
-        obj_data.properties.insert(
-          PropertyKey::String("[[ArrayBufferData]]".to_string()),
-          PropertyDescriptor::data(Value::Null),
-        );
+        obj_data.set_internal_slot(ARRAY_BUFFER_DATA_SLOT, Value::Null);
         obj_data.properties.insert(
           PropertyKey::String("byteLength".to_string()),
           PropertyDescriptor::data(Value::Number(0.0)),

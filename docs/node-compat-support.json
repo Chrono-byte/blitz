@@ -4,8 +4,8 @@
   "coverageMetric": {
     "kind": "public-built-in-roots",
     "inventoryTotal": 58,
-    "supportedRoots": 35,
-    "percent": 60.34,
+    "supportedRoots": 36,
+    "percent": 62.07,
     "note": "A supported root has a registered, declared, tested initial compatibility slice; this percentage does not claim complete export-level Node API parity."
   },
   "profiles": {
@@ -13,6 +13,7 @@
       "node:assert",
       "node:assert/strict",
       "node:async_hooks",
+      "node:buffer",
       "node:console",
       "node:constants",
       "node:diagnostics_channel",
@@ -40,6 +41,7 @@
       "node:assert",
       "node:assert/strict",
       "node:async_hooks",
+      "node:buffer",
       "node:console",
       "node:constants",
       "node:crypto",
@@ -72,6 +74,7 @@
       "node:assert",
       "node:assert/strict",
       "node:async_hooks",
+      "node:buffer",
       "node:console",
       "node:constants",
       "node:crypto",
@@ -151,11 +154,18 @@
     },
     {
       "specifier": "node:buffer",
-      "status": "planned-or-deferred",
-      "profiles": [],
-      "declaration": null,
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-buffer.d.ts",
       "hostPrimitives": [],
-      "tests": []
+      "tests": [
+        "modules::tests::evaluates_pure_node_core_modules_with_alias_identity",
+        "tools/effect-assets/scripts/test-buffer.ts"
+      ]
     },
     {
       "specifier": "node:child_process",
@@ -214,7 +224,8 @@
       ],
       "tests": [
         "host::node_crypto::tests",
-        "modules::tests::typechecks_tooling_node_module_declarations"
+        "modules::tests::typechecks_tooling_node_module_declarations",
+        "tools/effect-assets/scripts/test-buffer.ts"
       ]
     },
     {

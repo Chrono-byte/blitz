@@ -387,6 +387,151 @@ impl DerefMut for ArrayData {
   }
 }
 
+/// Opaque synchronous access to a genuine `Uint8Array` backing store.
+///
+/// Host integrations can use this handle without depending on VM internal-slot
+/// names or invoking JavaScript property operations. Every operation verifies
+/// that the original ArrayBuffer is still attached to the captured backing
+/// store, so a retained handle cannot access bytes after detachment.
+#[derive(Clone)]
+pub struct Uint8ArrayByteView {
+  buffer: Value,
+  data: Rc<RefCell<ArrayData>>,
+  byte_offset: usize,
+  length: usize,
+}
+
+impl Uint8ArrayByteView {
+  pub(crate) fn new(
+    buffer: Value,
+    data: Rc<RefCell<ArrayData>>,
+    byte_offset: usize,
+    length: usize,
+  ) -> Self {
+    Self {
+      buffer,
+      data,
+      byte_offset,
+      length,
+    }
+  }
+
+  fn attached_range(
+    &self,
+    offset: usize,
+    length: usize,
+  ) -> Option<std::ops::Range<usize>> {
+    let Value::Object(buffer) = &self.buffer else {
+      return None;
+    };
+    let attached = buffer
+      .borrow()
+      .internal_slot("[[ArrayBufferData]]")
+      .and_then(|value| match value {
+        Value::Array(data, _) => Some(Rc::ptr_eq(data, &self.data)),
+        _ => None,
+      })
+      .unwrap_or(false);
+    if !attached {
+      return None;
+    }
+    let end = offset.checked_add(length)?;
+    if end > self.length {
+      return None;
+    }
+    let start = self.byte_offset.checked_add(offset)?;
+    let end = start.checked_add(length)?;
+    if end > self.data.borrow().len() {
+      return None;
+    }
+    Some(start..end)
+  }
+
+  /// Return the view length, or zero after its ArrayBuffer is detached.
+  #[must_use]
+  pub fn len(&self) -> usize {
+    self
+      .attached_range(0, self.length)
+      .map_or(0, |range| range.len())
+  }
+
+  /// Return whether this view currently contains no accessible bytes.
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self.len() == 0
+  }
+
+  /// Read one byte from the view.
+  #[must_use]
+  pub fn read(
+    &self,
+    index: usize,
+  ) -> Option<u8> {
+    let range = self.attached_range(index, 1)?;
+    self
+      .data
+      .borrow()
+      .get(range.start)
+      .and_then(|slot| slot.as_ref())
+      .and_then(|value| match value {
+        Value::Number(number) if number.is_finite() && (0.0..=255.0).contains(number) => {
+          Some(*number as u8)
+        }
+        _ => None,
+      })
+  }
+
+  /// Copy bytes from this view into an owned host buffer.
+  #[must_use]
+  pub fn read_into(
+    &self,
+    offset: usize,
+    output: &mut [u8],
+  ) -> bool {
+    let Some(range) = self.attached_range(offset, output.len()) else {
+      return false;
+    };
+    let data = self.data.borrow();
+    for (destination, source) in output.iter_mut().zip(range) {
+      let Some(Value::Number(byte)) = data.get(source).and_then(|slot| slot.as_ref()) else {
+        return false;
+      };
+      if !byte.is_finite() || !(0.0..=255.0).contains(byte) {
+        return false;
+      }
+      *destination = *byte as u8;
+    }
+    true
+  }
+
+  /// Write one byte into the view.
+  #[must_use]
+  pub fn write(
+    &self,
+    index: usize,
+    byte: u8,
+  ) -> bool {
+    self.write_from(index, &[byte])
+  }
+
+  /// Copy host bytes into this view without invoking JavaScript setters.
+  #[must_use]
+  pub fn write_from(
+    &self,
+    offset: usize,
+    bytes: &[u8],
+  ) -> bool {
+    let Some(range) = self.attached_range(offset, bytes.len()) else {
+      return false;
+    };
+    let mut data = self.data.borrow_mut();
+    for (destination, byte) in range.zip(bytes.iter().copied()) {
+      data[destination] = Some(Value::Number(f64::from(byte)));
+    }
+    true
+  }
+}
+
 /// Backing store for proxy objects.
 #[derive(Clone, Debug)]
 pub struct ProxyData {

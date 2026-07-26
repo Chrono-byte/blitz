@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 use super::*;
 use crate::ecmascript::semantics::atomics as semantics_atomics;
+use crate::ecmascript::semantics::byte_views::{array_buffer_is_shared, byte_view_details};
 
 use crate::gc;
 use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, Value};
@@ -88,8 +89,37 @@ pub(crate) fn atomics_view_info(
   let Value::Object(view_obj) = view else {
     return Err(vm.throw_type_error("Atomics requires a TypedArray"));
   };
+  if let Some(details) = byte_view_details(view) {
+    let Value::Object(buffer) = &details.buffer else {
+      return Err(vm.throw_type_error("Atomics requires a TypedArray"));
+    };
+    let is_shared = array_buffer_is_shared(&details.buffer).unwrap_or(false);
+    let value_kind = atomics_value_kind(&details.kind)
+      .ok_or_else(|| vm.throw_type_error("Atomics requires a numeric or BigInt typed array"))?;
+    return Ok(AtomicsViewInfo {
+      view: details.object,
+      data: details.data,
+      buffer: Rc::clone(buffer),
+      kind_name: details.kind,
+      value_kind,
+      length: details.length,
+      is_shared,
+    });
+  }
+
   let (data, buffer, kind_name, length, is_shared) = {
     let view_data = view_obj.borrow();
+    if matches!(
+      view_data
+        .properties
+        .get(&PropertyKey::String("[[TypedArrayKind]]".to_string())),
+      Some(PropertyDescriptor::Data {
+        value: Value::String(kind),
+        ..
+      }) if matches!(kind.as_str(), "Uint8Array" | "Int8Array" | "Uint8ClampedArray")
+    ) {
+      return Err(vm.throw_type_error("Atomics requires a TypedArray"));
+    }
     let data = match view_data
       .properties
       .get(&PropertyKey::String("[[TypedArrayData]]".to_string()))

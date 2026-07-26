@@ -461,6 +461,20 @@
       "host_primitives": []
     },
     {
+      "specifier": "node:buffer",
+      "visibility": "public",
+      "source": {
+        "path": "modules/facades/node-buffer.js",
+        "sha256": "f26e46836738a0cec684659e592cad99515460c8c6c7567aaa467a266f7506d3"
+      },
+      "declaration": {
+        "path": "declarations/node-buffer.d.ts",
+        "sha256": "4df54d89b1a634f86ca1564367bb0aaa325d2a705e962e7cedc967ea13f34c0d"
+      },
+      "dependencies": [],
+      "host_primitives": []
+    },
+    {
       "specifier": "node:console",
       "visibility": "public",
       "source": {
@@ -493,11 +507,11 @@
       "visibility": "public",
       "source": {
         "path": "modules/facades/node-crypto.js",
-        "sha256": "52c3d490ab2f1da292d2f5d9e7d18b8134c7777ef1495297801501a4120f3978"
+        "sha256": "e72dd20544c809b30619a890102b94e68c60edbfd2e8691a6362de414eb65b94"
       },
       "declaration": {
         "path": "declarations/node-crypto.d.ts",
-        "sha256": "df4c48930e4737ea6bbbe2b243a569cd09e6518ce7482d193a530627f242f398"
+        "sha256": "d8d44ad2a8c41f55d074e304ac438162465831cc686428f0f86d210086196449"
       },
       "dependencies": [
         "blitz-internal:node-crypto-random"
@@ -982,6 +996,10 @@
       "sha256": "317c425842301b9f94ff16e1d00c89961a5ca5b46c1c9a0bef9762909b721787"
     },
     {
+      "path": "declarations/node-buffer.d.ts",
+      "sha256": "4df54d89b1a634f86ca1564367bb0aaa325d2a705e962e7cedc967ea13f34c0d"
+    },
+    {
       "path": "declarations/node-console.d.ts",
       "sha256": "be954d3bae160df2c121f62528617bd5de9cc69540911fe4a732adfcd34d4e9c"
     },
@@ -991,7 +1009,7 @@
     },
     {
       "path": "declarations/node-crypto.d.ts",
-      "sha256": "df4c48930e4737ea6bbbe2b243a569cd09e6518ce7482d193a530627f242f398"
+      "sha256": "d8d44ad2a8c41f55d074e304ac438162465831cc686428f0f86d210086196449"
     },
     {
       "path": "declarations/node-diagnostics-channel.d.ts",
@@ -1111,7 +1129,7 @@
     },
     {
       "path": "embedded.rs",
-      "sha256": "6e1e1cff5c5ad78952b0f27259c5b1d61b2a37285e138ddb9c5e5fc32089da19"
+      "sha256": "b7135fbb716787c4c6d6482b3727b80041d59ae5f3634ac80a3c1ebbda8b4d88"
     },
     {
       "path": "modules/facades/blitz-app.js",
@@ -1186,6 +1204,10 @@
       "sha256": "5967c226c7fd4592c6c9dcb66701c3aee51a5909235f48f1c966eddf6d8105dc"
     },
     {
+      "path": "modules/facades/node-buffer.js",
+      "sha256": "f26e46836738a0cec684659e592cad99515460c8c6c7567aaa467a266f7506d3"
+    },
+    {
       "path": "modules/facades/node-console.js",
       "sha256": "d1e2cab293144f015d30aca5616edf4b605adceaa1d6db1b900ba5a24c6b7464"
     },
@@ -1195,7 +1217,7 @@
     },
     {
       "path": "modules/facades/node-crypto.js",
-      "sha256": "52c3d490ab2f1da292d2f5d9e7d18b8134c7777ef1495297801501a4120f3978"
+      "sha256": "e72dd20544c809b30619a890102b94e68c60edbfd2e8691a6362de414eb65b94"
     },
     {
       "path": "modules/facades/node-diagnostics-channel.js",

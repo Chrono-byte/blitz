@@ -1,10 +1,9 @@
 /**
  * The initial Blitz Node 24 crypto slice.
  *
- * This runtime currently has no faithful Buffer/ArrayBuffer byte-view aliasing,
- * so randomBytes returns Uint8Array and randomFill/timingSafeEqual accept
- * standalone Uint8Array values only. Buffer and Web Crypto exports are not
- * declared or exposed by this slice.
+ * randomBytes currently returns Uint8Array. randomFill and timingSafeEqual
+ * accept Uint8Array, including Buffer and ArrayBuffer-backed subviews. Broader
+ * Buffer-shaped crypto results and Web Crypto exports remain outside this slice.
  */
 
 export interface RandomUUIDOptions {

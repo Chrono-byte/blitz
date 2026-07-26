@@ -45,6 +45,123 @@ mod test {
   use super::*;
 
   #[test]
+  fn byte_typed_arrays_share_array_buffer_storage() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const buffer = new ArrayBuffer(8);
+        const bytes = new Uint8Array(buffer);
+        const signed = new Int8Array(buffer, 2, 3);
+        const clamped = new Uint8ClampedArray(buffer, 4, 2);
+        bytes[0] = 255;
+        signed[0] = -2;
+        clamped[0] = 300;
+        bytes[5] = 127;
+        const sub = bytes.subarray(1, 4);
+        sub[0] = 42;
+        const copy = bytes.slice(0, 3);
+        bytes[1] = 99;
+        bytes.set(bytes.subarray(0, 3), 1);
+        globalThis.result = [
+          bytes[0], bytes[1], bytes[2], bytes[3], signed[0], clamped[0], bytes[5],
+          bytes.buffer === buffer, signed.byteOffset, signed.byteLength, signed.length,
+          sub.buffer === buffer, copy[1]
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "255,255,99,254,99,255,127,true,2,3,3,true,42".to_string()
+      ))
+    );
+  }
+
+  #[test]
+  fn byte_view_branding_cannot_be_spoofed_by_properties() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const fake = {
+          "[[TypedArrayKind]]": "Uint8Array",
+          "[[TypedArrayData]]": [99],
+          "[[TypedArrayLength]]": 1,
+          "[[TypedArrayByteOffset]]": 0
+        };
+        let methodRejected = false;
+        try {
+          Uint8Array.prototype.subarray.call(fake);
+        } catch (error) {
+          methodRejected = true;
+        }
+        fake[0] = 7;
+        const fromFake = new Uint8Array(fake);
+        globalThis.result = [
+          methodRejected, fake[0], fromFake.length, fake["[[TypedArrayKind]]"]
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String("true,7,0,Uint8Array".to_string()))
+    );
+  }
+
+  #[test]
+  fn uint8_array_host_view_uses_hidden_brand_offset_and_backing() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const backing = new Uint8Array([9, 1, 2, 9]);
+        globalThis.buffer = backing.buffer;
+        globalThis.view = new Uint8Array(backing.buffer, 1, 2);
+        view["[[TypedArrayKind]]"] = "Int8Array";
+        view["[[TypedArrayByteOffset]]"] = 0;
+      "#
+    ));
+    let view = vm.get_global("view").expect("view global");
+    let host_view = vm
+      .uint8_array_byte_view(&view)
+      .expect("genuine attached Uint8Array view");
+    let mut bytes = [0; 2];
+    assert!(host_view.read_into(0, &mut bytes));
+    assert_eq!(bytes, [1, 2]);
+    assert!(host_view.write_from(0, &[7, 8]));
+    assert_eq!(host_view.read(0), Some(7));
+    assert_eq!(host_view.read(1), Some(8));
+
+    let Value::Object(buffer) = vm.get_global("buffer").expect("buffer global") else {
+      panic!("ArrayBuffer should be an object");
+    };
+    buffer.borrow_mut().set_internal_slot(
+      crate::ecmascript::semantics::byte_views::ARRAY_BUFFER_DATA_SLOT,
+      Value::Null,
+    );
+    assert!(host_view.is_empty());
+    assert_eq!(host_view.read(0), None);
+    assert!(!host_view.write(0, 1));
+
+    let fake = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
+    assert!(vm.uint8_array_byte_view(&fake).is_none());
+  }
+
+  #[test]
+  fn byte_typed_array_numeric_conversions_are_view_specific() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const u = new Uint8Array([257, -1, NaN]);
+        const i = new Int8Array([255, 128, 127]);
+        const c = new Uint8ClampedArray([1.5, 2.5, -1, 300]);
+        globalThis.result = [u[0], u[1], u[2], i[0], i[1], i[2], c[0], c[1], c[2], c[3]].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String("1,255,0,-1,-128,127,2,2,0,255".to_string()))
+    );
+  }
+
+  #[test]
   fn risc_registers_keep_new_closure_environments_alive_during_gc() {
     let (vm, _) = run_script(crate::js!(
       r#"

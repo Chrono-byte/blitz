@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 use super::*;
+use crate::ecmascript::semantics::byte_views::array_buffer_backing;
 
 /// Checks if a promise's constructor matches the given constructor value.
 pub(crate) fn promise_constructor_matches(
@@ -417,13 +418,7 @@ pub(crate) fn shadowrealm_evaluate(
         Value::Object(obj_rc) => {
           // Look up [[ArrayBufferData]] slot and grab underlying
           // array backing Rc pointer address.
-          if let Some(PropertyDescriptor::Data { value: ab_data, .. }) = obj_rc
-            .borrow()
-            .properties
-            .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
-            .cloned()
-            && let Value::Array(backing_rc, _) = ab_data
-          {
+          if let Some(backing_rc) = array_buffer_backing(&Value::Object(Rc::clone(&obj_rc))) {
             if !set.insert(Rc::as_ptr(&backing_rc) as usize) {
               return Err(vm.throw_type_error("Transfer list contains a duplicate ArrayBuffer"));
             }
@@ -525,13 +520,7 @@ pub(crate) fn shadowrealm_import_value(
           for v in arr_rc.borrow().iter().flatten().cloned() {
             match v {
               Value::Object(obj_rc) => {
-                if let Some(PropertyDescriptor::Data { value: ab_data, .. }) = obj_rc
-                  .borrow()
-                  .properties
-                  .get(&PropertyKey::String("[[ArrayBufferData]]".to_string()))
-                  .cloned()
-                  && let Value::Array(backing_rc, _) = ab_data
-                {
+                if let Some(backing_rc) = array_buffer_backing(&Value::Object(Rc::clone(&obj_rc))) {
                   if !set.insert(Rc::as_ptr(&backing_rc) as usize) {
                     let err_val = vm
                       .create_intrinsic_error(

@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
+use crate::ecmascript::semantics::byte_views::{
+  byte_view_index_from_key, byte_view_index_info, byte_view_index_value, encode_byte,
+};
 use crate::ecmascript::semantics::properties::{
   own_property_descriptor, own_property_keys, property_key_to_value,
 };
@@ -1482,6 +1485,11 @@ impl Vm {
     if matches!(obj, Value::Proxy(_)) {
       return self.get_proxy_property(obj, key, obj);
     }
+    if let Some(index) = byte_view_index_from_key(key)
+      && let Some(value) = byte_view_index_value(obj, index)
+    {
+      return Ok(value);
+    }
     if let Some((desc, _holder)) = self.lookup_property_descriptor(obj, key, 0)? {
       return match desc {
         PropertyDescriptor::Data { value, .. } => Ok(value),
@@ -1600,6 +1608,19 @@ impl Vm {
         "Prototype chain cycle detected or too deep",
       ));
     }
+    if let Some(index) = byte_view_index_from_key(key)
+      && let Some(value) = byte_view_index_value(obj, index)
+    {
+      return Ok(Some((
+        PropertyDescriptor::Data {
+          value,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        },
+        obj.clone(),
+      )));
+    }
     match obj {
       Value::Object(data) => {
         let d = data.borrow();
@@ -1708,6 +1729,22 @@ impl Vm {
       let accepted = self.set_proxy_property(obj, key, value, obj)?;
       if !accepted && self.is_strict_mode() {
         return Err(self.throw_type_error("Proxy set trap returned false"));
+      }
+      return Ok(());
+    }
+    if let Some(index) = byte_view_index_from_key(key)
+      && let Some(info) = byte_view_index_info(obj)
+    {
+      if index < info.length {
+        let byte = encode_byte(self, &info.kind, &value)?;
+        if let Some(slot) = info
+          .data
+          .borrow_mut()
+          .get_mut(info.byte_offset + index)
+        {
+          *slot = Some(Value::Number(f64::from(byte)));
+        }
+        self.bump_object_generation(obj);
       }
       return Ok(());
     }
