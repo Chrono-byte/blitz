@@ -47,24 +47,63 @@ cargo run -p blitz-engine --bin blitz-engine -- path/to/engine-test.js
 cargo run -p blitz-test262 --bin test262
 ```
 
-The default runtime exposes the Effect-native `blitz:*` modules described in
-[`EFFECT_STDLIB_DESIGN.md`](docs/EFFECT_STDLIB_DESIGN.md). The immutable Rust
-application/RPC model is documented in
-[`BLITZ_RUNTIME_RPC_SLICE.md`](docs/BLITZ_RUNTIME_RPC_SLICE.md); it preserves
-the low-level compatibility API as an explicit legacy option. The target
-Effect-native host standard library and its migration rules are specified in
-[`EFFECT_STDLIB_DESIGN.md`](docs/EFFECT_STDLIB_DESIGN.md), with phased work
-tracked in
-[`EFFECT_STDLIB_IMPLEMENTATION_PLAN.md`](docs/EFFECT_STDLIB_IMPLEMENTATION_PLAN.md).
-The corrected contracts and complete plans for the remaining runtime APIs are
-in [`EFFECT_RUNTIME_API_EXPANSION_PLAN.md`](docs/EFFECT_RUNTIME_API_EXPANSION_PLAN.md).
-The old `Blitz.*` HTTP/WebSocket example remains available in the
-[legacy IRC example](crates/blitz-runtime/examples/irc-chat/README.md) and is
-not installed by the default CLI runtime.
+Effect-first runtime APIs
+-------------------------
 
-The [Effect-native IRC chat example](crates/blitz-runtime/examples/irc-chat-v2/README.md)
-runs a server and two Blitz terminal clients. The legacy compatibility example
-documents the older `Blitz.stdin`/`Blitz.stdout` terminal APIs.
+Effect is the primary composition model for Blitz-owned runtime capabilities.
+The default runtime prelinks one pinned upstream Effect graph and exposes
+service-based modules such as `blitz:fs`, `blitz:http`, `blitz:terminal`, and
+`blitz:websocket`. Their public JavaScript facades construct real Effect values
+over small private host primitives; Rust owns OS resources but does not
+reimplement Effect, retain JavaScript values in background tasks, or mutate VM
+state outside the VM thread.
+
+The runtime APIs follow a few consistent rules:
+
+- Fallible and asynchronous operations are lazy Effects. Constructing an
+  operation performs no host I/O.
+- Replaceable capabilities are Context services. Accessors retain their service
+  requirements, live implementations are provided as Layers, and tests can
+  provide deterministic or in-memory Layers.
+- Expected failures use narrow tagged values in the Effect error channel.
+  Defects remain defects instead of being converted into generic runtime errors.
+- Resources are Scope-owned. Interruption cancels pending work and runs
+  finalizers; callers do not need manual cleanup for correctness.
+- Incremental input and output use Effect Streams with explicit backpressure.
+- Pure and infallible operations remain ordinary functions. ECMAScript, Web,
+  and Node compatibility APIs keep their standard semantics rather than
+  returning Effects.
+
+```ts
+import * as Effect from "effect/Effect"
+import * as FileSystem from "blitz:fs"
+import * as Runtime from "blitz:runtime"
+
+const program = FileSystem.readTextFile("./config.json").pipe(
+  Effect.map(JSON.parse),
+  Effect.tap((config) => Effect.sync(() => console.log(config))),
+)
+
+Runtime.runMain(program)
+```
+
+`Runtime.runMain` supplies the aggregate live Layer, starts one root fiber,
+maps process termination signals to interruption, and waits for scoped
+finalizers before exit. Applications that need explicit composition can use
+the individual service Layers or `Runtime.provideLive`.
+
+The complete API contracts and boundaries are documented in
+[`EFFECT_STDLIB_DESIGN.md`](docs/EFFECT_STDLIB_DESIGN.md). Delivery phases are
+tracked in
+[`EFFECT_STDLIB_IMPLEMENTATION_PLAN.md`](docs/EFFECT_STDLIB_IMPLEMENTATION_PLAN.md),
+and the remaining runtime workstreams are specified in
+[`EFFECT_RUNTIME_API_EXPANSION_PLAN.md`](docs/EFFECT_RUNTIME_API_EXPANSION_PLAN.md).
+The immutable Rust application/RPC model is documented in
+[`BLITZ_RUNTIME_RPC_SLICE.md`](docs/BLITZ_RUNTIME_RPC_SLICE.md) as an explicit
+legacy compatibility layer.
+
+The [Effect-native IRC chat example](examples/irc-chat-v2/README.md) runs a
+server and two Blitz terminal clients.
 
 `blitz check` accepts explicit source files or recursively checks TypeScript
 files in the current directory. Dependency, build, and declaration trees are
