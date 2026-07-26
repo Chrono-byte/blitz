@@ -1,0 +1,422 @@
+// SPDX-License-Identifier: MPL-2.0
+use std::ops::Range;
+
+use crate::ast::{Assertion, CharacterClass, ClassTerm, Node};
+use crate::canonical::{range_contains, symbols_equal};
+use crate::{Flags, Input, Regex};
+
+/// The UTF-16 span of one capture.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Capture {
+  range: Range<usize>,
+}
+
+impl Capture {
+  /// Return this capture's UTF-16 code-unit range.
+  #[must_use]
+  pub fn range(&self) -> Range<usize> {
+    self.range.clone()
+  }
+}
+
+/// One regular-expression match and its captures.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Match {
+  captures: Vec<Option<Capture>>,
+}
+
+impl Match {
+  /// Return the complete match's UTF-16 range.
+  #[must_use]
+  pub fn range(&self) -> Range<usize> {
+    self
+      .captures
+      .first()
+      .and_then(Option::as_ref)
+      .map_or(0..0, Capture::range)
+  }
+
+  /// Return a capture by index. Capture zero is the complete match.
+  #[must_use]
+  pub fn capture(
+    &self,
+    index: usize,
+  ) -> Option<&Capture> {
+    self.captures.get(index).and_then(Option::as_ref)
+  }
+
+  /// Return all captures, including capture zero.
+  #[must_use]
+  pub fn captures(&self) -> &[Option<Capture>] {
+    &self.captures
+  }
+}
+
+#[derive(Clone)]
+struct State {
+  offset: usize,
+  captures: Vec<Option<Range<usize>>>,
+}
+
+pub(crate) fn find(
+  regex: &Regex,
+  input: &Input,
+  start: usize,
+) -> Option<Match> {
+  if start > input.len() {
+    return None;
+  }
+  let initial = start;
+  let mut candidate = start;
+  loop {
+    let state = State {
+      offset: candidate,
+      captures: vec![None; regex.capture_count + 1],
+    };
+    if let Some(mut matched) = match_node(&regex.body, state, input, regex.flags)
+      .into_iter()
+      .next()
+    {
+      matched.captures[0] = Some(candidate..matched.offset);
+      return Some(Match {
+        captures: matched
+          .captures
+          .into_iter()
+          .map(|range| range.map(|range| Capture { range }))
+          .collect(),
+      });
+    }
+    if regex.flags.sticky() || candidate == input.len() {
+      return None;
+    }
+    candidate = input.advance_string_index(candidate, regex.flags.unicode());
+    if candidate <= initial || candidate > input.len() {
+      return None;
+    }
+  }
+}
+
+fn match_node(
+  node: &Node,
+  state: State,
+  input: &Input,
+  flags: Flags,
+) -> Vec<State> {
+  match node {
+    Node::Empty => vec![state],
+    Node::Literal(expected) => match_symbol(state, input, flags, |actual| {
+      symbols_equal(*expected, actual, flags)
+    }),
+    Node::Dot => match_symbol(state, input, flags, |actual| {
+      flags.dot_all() || !is_line_terminator(actual)
+    }),
+    Node::Class(class) => match_symbol(state, input, flags, |actual| {
+      class_matches(class, actual, flags)
+    }),
+    Node::Assertion(assertion) => match_assertion(assertion, state, input, flags),
+    Node::Backreference(index) => match_backreference(*index, state, input, flags),
+    Node::Sequence(nodes) => match_sequence(nodes, state, input, flags),
+    Node::Alternative(alternatives) => alternatives
+      .iter()
+      .flat_map(|alternative| match_node(alternative, state.clone(), input, flags))
+      .collect(),
+    Node::Group { index, body } => {
+      let start = state.offset;
+      match_node(body, state, input, flags)
+        .into_iter()
+        .map(|mut matched| {
+          if let Some(index) = index {
+            matched.captures[*index] = Some(start..matched.offset);
+          }
+          matched
+        })
+        .collect()
+    }
+    Node::Quantifier {
+      body,
+      min,
+      max,
+      greedy,
+    } => {
+      let mut matches = Vec::new();
+      let repetition_limit = max.unwrap_or_else(|| input.len().saturating_add(1));
+      let mut capture_indices = Vec::new();
+      collect_capture_indices(body, &mut capture_indices);
+      repeat(
+        body,
+        state,
+        0,
+        *min,
+        repetition_limit,
+        *greedy,
+        input,
+        flags,
+        &capture_indices,
+        &mut matches,
+      );
+      matches
+    }
+  }
+}
+
+fn match_sequence(
+  nodes: &[Node],
+  state: State,
+  input: &Input,
+  flags: Flags,
+) -> Vec<State> {
+  let mut states = vec![state];
+  for node in nodes {
+    states = states
+      .into_iter()
+      .flat_map(|state| match_node(node, state, input, flags))
+      .collect();
+    if states.is_empty() {
+      break;
+    }
+  }
+  states
+}
+
+#[allow(clippy::too_many_arguments)]
+fn repeat(
+  body: &Node,
+  state: State,
+  count: usize,
+  min: usize,
+  max: usize,
+  greedy: bool,
+  input: &Input,
+  flags: Flags,
+  capture_indices: &[usize],
+  output: &mut Vec<State>,
+) {
+  if !greedy && count >= min {
+    output.push(state.clone());
+  }
+  if count < max {
+    let mut iteration_state = state.clone();
+    for index in capture_indices {
+      iteration_state.captures[*index] = None;
+    }
+    for next in match_node(body, iteration_state, input, flags) {
+      let progressed = next.offset != state.offset;
+      let next_max = if progressed || count + 1 < min {
+        max
+      } else {
+        count + 1
+      };
+      repeat(
+        body,
+        next,
+        count + 1,
+        min,
+        next_max,
+        greedy,
+        input,
+        flags,
+        capture_indices,
+        output,
+      );
+    }
+  }
+  if greedy && count >= min {
+    output.push(state);
+  }
+}
+
+fn match_symbol(
+  mut state: State,
+  input: &Input,
+  flags: Flags,
+  predicate: impl FnOnce(u32) -> bool,
+) -> Vec<State> {
+  let Some(point) = input.code_point_at(state.offset, flags.unicode()) else {
+    return Vec::new();
+  };
+  let actual = point.value();
+  if !predicate(actual) {
+    return Vec::new();
+  }
+  state.offset += point.width();
+  vec![state]
+}
+
+fn match_assertion(
+  assertion: &Assertion,
+  state: State,
+  input: &Input,
+  flags: Flags,
+) -> Vec<State> {
+  let satisfied = match assertion {
+    Assertion::Start => {
+      state.offset == 0
+        || (flags.multiline()
+          && previous_symbol(input, state.offset, flags.unicode()).is_some_and(is_line_terminator))
+    }
+    Assertion::End => {
+      state.offset == input.len()
+        || (flags.multiline()
+          && input
+            .code_point_at(state.offset, flags.unicode())
+            .is_some_and(|point| is_line_terminator(point.value())))
+    }
+    Assertion::WordBoundary(expected) => {
+      let before = previous_symbol(input, state.offset, flags.unicode())
+        .is_some_and(|symbol| is_word_character(symbol, flags));
+      let after = input
+        .code_point_at(state.offset, flags.unicode())
+        .is_some_and(|point| is_word_character(point.value(), flags));
+      (before != after) == *expected
+    }
+    Assertion::Lookahead { positive, body } => {
+      let matched = match_node(body, state.clone(), input, flags)
+        .into_iter()
+        .next();
+      if *positive {
+        return matched
+          .map(|mut matched| {
+            matched.offset = state.offset;
+            vec![matched]
+          })
+          .unwrap_or_default();
+      }
+      return if matched.is_none() {
+        vec![state]
+      } else {
+        Vec::new()
+      };
+    }
+  };
+  if satisfied { vec![state] } else { Vec::new() }
+}
+
+fn match_backreference(
+  index: usize,
+  mut state: State,
+  input: &Input,
+  flags: Flags,
+) -> Vec<State> {
+  let Some(Some(range)) = state.captures.get(index) else {
+    return vec![state];
+  };
+  let mut expected_offset = range.start;
+  let mut actual_offset = state.offset;
+  while expected_offset < range.end {
+    let Some(expected) = input.code_point_at(expected_offset, flags.unicode()) else {
+      return Vec::new();
+    };
+    let Some(actual) = input.code_point_at(actual_offset, flags.unicode()) else {
+      return Vec::new();
+    };
+    if !symbols_equal(expected.value(), actual.value(), flags) {
+      return Vec::new();
+    }
+    expected_offset += expected.width();
+    actual_offset += actual.width();
+  }
+  state.offset = actual_offset;
+  vec![state]
+}
+
+fn class_matches(
+  class: &CharacterClass,
+  symbol: u32,
+  flags: Flags,
+) -> bool {
+  let matched = class.terms.iter().any(|term| match term {
+    ClassTerm::Range(start, end) => range_contains(*start, *end, symbol, flags),
+    ClassTerm::Characters(characters) => characters
+      .iter()
+      .any(|character| symbols_equal(*character, symbol, flags)),
+    ClassTerm::Digit(positive) => is_digit(symbol) == *positive,
+    ClassTerm::Space(positive) => is_space(symbol) == *positive,
+    ClassTerm::Word(positive) => is_word_character(symbol, flags) == *positive,
+  });
+  matched != class.inverted
+}
+
+fn collect_capture_indices(
+  node: &Node,
+  output: &mut Vec<usize>,
+) {
+  match node {
+    Node::Group { index, body } => {
+      if let Some(index) = index {
+        output.push(*index);
+      }
+      collect_capture_indices(body, output);
+    }
+    Node::Sequence(nodes) | Node::Alternative(nodes) => {
+      for child in nodes {
+        collect_capture_indices(child, output);
+      }
+    }
+    Node::Quantifier { body, .. } | Node::Assertion(Assertion::Lookahead { body, .. }) => {
+      collect_capture_indices(body, output);
+    }
+    _ => {}
+  }
+}
+
+const fn is_digit(symbol: u32) -> bool {
+  symbol >= b'0' as u32 && symbol <= b'9' as u32
+}
+
+const fn is_word(symbol: u32) -> bool {
+  is_digit(symbol)
+    || (symbol >= b'A' as u32 && symbol <= b'Z' as u32)
+    || (symbol >= b'a' as u32 && symbol <= b'z' as u32)
+    || symbol == b'_' as u32
+}
+
+fn is_word_character(
+  symbol: u32,
+  flags: Flags,
+) -> bool {
+  is_word(symbol)
+    || (flags.unicode()
+      && flags.ignore_case()
+      && is_word(crate::canonical::canonicalize(symbol, flags)))
+}
+
+fn is_space(symbol: u32) -> bool {
+  matches!(
+    symbol,
+    0x0009..=0x000D
+      | 0x0020
+      | 0x00A0
+      | 0x1680
+      | 0x2000..=0x200A
+      | 0x2028
+      | 0x2029
+      | 0x202F
+      | 0x205F
+      | 0x3000
+      | 0xFEFF
+  )
+}
+
+const fn is_line_terminator(symbol: u32) -> bool {
+  matches!(symbol, 0x000A | 0x000D | 0x2028 | 0x2029)
+}
+
+fn previous_symbol(
+  input: &Input,
+  offset: usize,
+  unicode: bool,
+) -> Option<u32> {
+  let previous = offset.checked_sub(1)?;
+  let last = *input.as_slice().get(previous)?;
+  if unicode
+    && (0xDC00..=0xDFFF).contains(&last)
+    && let Some(first) = previous
+      .checked_sub(1)
+      .and_then(|index| input.as_slice().get(index))
+      .copied()
+    && (0xD800..=0xDBFF).contains(&first)
+  {
+    return Some(0x1_0000 + ((u32::from(first) - 0xD800) << 10) + (u32::from(last) - 0xDC00));
+  }
+  Some(u32::from(last))
+}

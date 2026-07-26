@@ -1,0 +1,9 @@
+[package]
+name = "js-string"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+description = "Immutable UTF-16 strings with ECMAScript indexing semantics"
+
+[lints]
+workspace = true

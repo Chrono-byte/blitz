@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: MPL-2.0
+use crate::{Error, ErrorKind};
+
+/// Parsed ECMAScript regular-expression flags.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Flags {
+  bits: u16,
+}
+
+impl Flags {
+  const GLOBAL: u16 = 1 << 0;
+  const IGNORE_CASE: u16 = 1 << 1;
+  const MULTILINE: u16 = 1 << 2;
+  const DOT_ALL: u16 = 1 << 3;
+  const UNICODE: u16 = 1 << 4;
+  const STICKY: u16 = 1 << 5;
+  const HAS_INDICES: u16 = 1 << 6;
+
+  /// Parse a JavaScript flag string.
+  pub fn parse(flags: &str) -> Result<Self, Error> {
+    let mut parsed = Self::default();
+    for (offset, character) in flags.encode_utf16().enumerate() {
+      let bit = match character {
+        value if value == u16::from(b'g') => Self::GLOBAL,
+        value if value == u16::from(b'i') => Self::IGNORE_CASE,
+        value if value == u16::from(b'm') => Self::MULTILINE,
+        value if value == u16::from(b's') => Self::DOT_ALL,
+        value if value == u16::from(b'u') => Self::UNICODE,
+        value if value == u16::from(b'y') => Self::STICKY,
+        value if value == u16::from(b'd') => Self::HAS_INDICES,
+        _ => {
+          return Err(Error::new(
+            ErrorKind::InvalidFlag,
+            offset,
+            "invalid regular-expression flag",
+          ));
+        }
+      };
+      if parsed.bits & bit != 0 {
+        return Err(Error::new(
+          ErrorKind::DuplicateFlag,
+          offset,
+          "duplicate regular-expression flag",
+        ));
+      }
+      parsed.bits |= bit;
+    }
+    Ok(parsed)
+  }
+
+  /// Whether the global flag is set.
+  #[must_use]
+  pub const fn global(self) -> bool {
+    self.bits & Self::GLOBAL != 0
+  }
+
+  /// Whether matching ignores case.
+  #[must_use]
+  pub const fn ignore_case(self) -> bool {
+    self.bits & Self::IGNORE_CASE != 0
+  }
+
+  /// Whether line anchors operate in multiline mode.
+  #[must_use]
+  pub const fn multiline(self) -> bool {
+    self.bits & Self::MULTILINE != 0
+  }
+
+  /// Whether dot matches line terminators.
+  #[must_use]
+  pub const fn dot_all(self) -> bool {
+    self.bits & Self::DOT_ALL != 0
+  }
+
+  /// Whether Unicode code-point matching is enabled.
+  #[must_use]
+  pub const fn unicode(self) -> bool {
+    self.bits & Self::UNICODE != 0
+  }
+
+  /// Whether matching is sticky.
+  #[must_use]
+  pub const fn sticky(self) -> bool {
+    self.bits & Self::STICKY != 0
+  }
+
+  /// Whether match indices should be exposed by the host.
+  #[must_use]
+  pub const fn has_indices(self) -> bool {
+    self.bits & Self::HAS_INDICES != 0
+  }
+}
