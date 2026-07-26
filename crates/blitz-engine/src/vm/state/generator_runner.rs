@@ -19,7 +19,7 @@ impl GeneratorRunner {
     &mut self,
     value: Value,
   ) {
-    if let Some(state) = &mut self.vm.yield_star_state {
+    if let Some(state) = &mut self.vm.execution.active.yield_star {
       state.resume = Some(YieldStarResume::Next(value));
     } else {
       self.risc_state.resume_with(value);
@@ -30,7 +30,7 @@ impl GeneratorRunner {
     &mut self,
     value: Value,
   ) -> bool {
-    let Some(state) = &mut self.vm.yield_star_state else {
+    let Some(state) = &mut self.vm.execution.active.yield_star else {
       return false;
     };
     state.resume = Some(YieldStarResume::Throw(value));
@@ -41,7 +41,7 @@ impl GeneratorRunner {
     &mut self,
     value: Value,
   ) -> bool {
-    if let Some(state) = &mut self.vm.yield_star_state {
+    if let Some(state) = &mut self.vm.execution.active.yield_star {
       state.resume = Some(YieldStarResume::Return(value));
       true
     } else {

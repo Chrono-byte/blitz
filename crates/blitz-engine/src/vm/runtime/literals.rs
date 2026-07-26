@@ -31,6 +31,7 @@ impl Vm {
     );
 
     if let Some(array_val) = self
+      .realm_state
       .globals
       .borrow()
       .properties
@@ -55,7 +56,7 @@ impl Vm {
         "[trace] build_array: created Array arr_ptr={:p} props_ptr={:p} ip={}",
         Rc::as_ptr(&arr_rc),
         Rc::as_ptr(&props),
-        self.ip.saturating_sub(1)
+        self.execution.active.ip.saturating_sub(1)
       );
     }
     Ok(array)
@@ -85,6 +86,7 @@ impl Vm {
     let mut data = ObjectData::new();
     data.properties = map;
     if let Some(object_val) = self
+      .realm_state
       .globals
       .borrow()
       .properties
@@ -109,7 +111,7 @@ impl Vm {
       eprintln!(
         "[trace] build_object: created Object obj_ptr={:p} ip={}",
         Rc::as_ptr(&obj_rc),
-        self.ip.saturating_sub(1)
+        self.execution.active.ip.saturating_sub(1)
       );
     }
     Ok(object)
@@ -122,6 +124,8 @@ impl Vm {
     idx: usize,
   ) -> Result<Value, RuntimeError> {
     let proto = self
+      .execution
+      .active
       .chunk
       .functions
       .get(idx)
@@ -131,6 +135,7 @@ impl Vm {
 
     let props: Rc<RefCell<ObjectData>> = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     if let Some(function_val) = self
+      .realm_state
       .globals
       .borrow()
       .properties
@@ -159,7 +164,9 @@ impl Vm {
         closure_proto.name,
         closure_proto.upvalues.len(),
         self
-          .current_closure_env
+          .execution
+          .active
+          .closure_env
           .as_ref()
           .map_or(0, |env| env.borrow().len())
       );
@@ -173,15 +180,19 @@ impl Vm {
     for upvalue in &closure_proto.upvalues {
       let cell = if upvalue.is_local {
         let slot = upvalue.index as usize;
-        ensure_slot(&mut self.locals, slot);
+        ensure_slot(&mut self.execution.active.locals, slot);
         self
+          .execution
+          .active
           .locals
           .get(slot)
           .cloned()
           .ok_or("Bad upvalue local slot")?
       } else {
         let env = self
-          .current_closure_env
+          .execution
+          .active
+          .closure_env
           .as_ref()
           .ok_or("Bad enclosing closure env")?;
         let env_guard = env.borrow();
@@ -213,7 +224,7 @@ impl Vm {
       proto: Rc::clone(&closure_proto),
       env: gc::track_env(Rc::new(RefCell::new(env_cells))),
       lexical_this: if closure_proto.captures_this {
-        Some(Box::new(self.this_value.clone()))
+        Some(Box::new(self.execution.active.this_value.clone()))
       } else {
         None
       },
@@ -221,11 +232,14 @@ impl Vm {
     };
     props
       .borrow_mut()
-      .set_captured_lexical_env(Some(Rc::clone(&self.lexical_env)));
+      .set_captured_lexical_env(Some(Rc::clone(&self.execution.active.lexical_env)));
     if closure_proto.is_generator {
-      props
-        .borrow_mut()
-        .set_prototype_value(self.realm.generator_function_prototype());
+      props.borrow_mut().set_prototype_value(
+        self
+          .realm_state
+          .realm
+          .generator_function_prototype(),
+      );
     }
 
     if closure_proto.captures_this
@@ -261,9 +275,10 @@ impl Vm {
 
     if has_prototype_property {
       let proto_obj = if closure_proto.is_generator {
-        self.realm.generator_prototype()
+        self.realm_state.realm.generator_prototype()
       } else {
         let object_proto = self
+          .realm_state
           .realm
           .intrinsics
           .object_prototype
@@ -305,7 +320,7 @@ impl Vm {
           Rc::as_ptr(props),
           idx,
           Arc::as_ptr(&closure_proto.chunk),
-          self.ip.saturating_sub(1)
+          self.execution.active.ip.saturating_sub(1)
         );
       }
       if has_prototype_property

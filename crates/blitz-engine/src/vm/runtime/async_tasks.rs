@@ -29,7 +29,7 @@ impl Vm {
   ) where
     F: FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError> + 'static,
   {
-    self.microtasks.push_back(Box::new(job));
+    self.jobs.microtasks.push_back(Box::new(job));
   }
 
   /// Queue a dynamic import job to be executed by the host job loop.
@@ -39,7 +39,7 @@ impl Vm {
   ) where
     F: FnMut(&mut Vm) -> Result<(), crate::errors::RuntimeError> + 'static,
   {
-    self.dynamic_import_jobs.push_back(Box::new(job));
+    self.jobs.dynamic_imports.push_back(Box::new(job));
   }
 
   /// Install a host hook which will be invoked for unhandled promise
@@ -52,7 +52,7 @@ impl Vm {
   ) where
     F: FnMut(&mut Vm, Value, Value) + 'static,
   {
-    self.unhandled_rejection_hook = Some(Rc::new(RefCell::new(hook)));
+    self.jobs.unhandled_rejection_hook = Some(Rc::new(RefCell::new(hook)));
   }
 
   /// Create a pending promise owned by a host integration.
@@ -96,6 +96,7 @@ impl Vm {
     reason: Value,
   ) {
     if let Some(hook_rc) = self
+      .jobs
       .unhandled_rejection_hook
       .as_ref()
       .map(Rc::clone)
@@ -110,15 +111,16 @@ impl Vm {
   /// Job failures are recorded on the VM and reported through the host hook;
   /// they do not stop the remaining jobs from being drained.
   pub(crate) fn drain_dynamic_import_jobs(&mut self) -> Result<(), crate::errors::RuntimeError> {
-    while let Some(mut job) = self.dynamic_import_jobs.pop_front() {
-      let caller_handlers = std::mem::take(&mut self.handlers);
+    while let Some(mut job) = self.jobs.dynamic_imports.pop_front() {
+      let caller_handlers = std::mem::take(&mut self.exceptions.handlers);
       let result = job(self);
-      self.handlers = caller_handlers;
+      self.exceptions.handlers = caller_handlers;
       self.maybe_collect_garbage_prototype();
       if let Err(err) = result {
         let exc_val = Value::String(format!("{}", err).into());
-        self.last_uncaught_exception = Some(exc_val.clone());
+        self.exceptions.last_uncaught = Some(exc_val.clone());
         if let Some(hook_rc) = self
+          .jobs
           .unhandled_rejection_hook
           .as_ref()
           .map(Rc::clone)
@@ -140,20 +142,21 @@ impl Vm {
   /// of running microtasks to completion while surfacing exceptions via a
   /// host hook instead of aborting the queue on first error.
   pub(crate) fn drain_microtasks(&mut self) -> Result<(), crate::errors::RuntimeError> {
-    while let Some(mut job) = self.microtasks.pop_front() {
-      let caller_handlers = std::mem::take(&mut self.handlers);
+    while let Some(mut job) = self.jobs.microtasks.pop_front() {
+      let caller_handlers = std::mem::take(&mut self.exceptions.handlers);
       let result = job(self);
-      self.handlers = caller_handlers;
+      self.exceptions.handlers = caller_handlers;
       self.maybe_collect_garbage_prototype();
       if let Err(err) = result {
         // Record the last uncaught exception so callers or host hooks
         // can inspect it. Convert the runtime error into a JS value
         // string for now; hosts may implement richer reporting.
         let exc_val = Value::String(format!("{}", err).into());
-        self.last_uncaught_exception = Some(exc_val.clone());
+        self.exceptions.last_uncaught = Some(exc_val.clone());
         // If a host hook is installed, call it with Undefined promise
         // to indicate this was a microtask exception.
         if let Some(hook_rc) = self
+          .jobs
           .unhandled_rejection_hook
           .as_ref()
           .map(Rc::clone)
@@ -175,8 +178,8 @@ impl Vm {
   /// Job failures are recorded on the VM and reported through the host hook;
   /// they do not stop the remaining jobs from being drained.
   pub(crate) fn run_microtasks_if_needed(&mut self) -> Result<(), crate::errors::RuntimeError> {
-    while !self.microtasks.is_empty() || !self.dynamic_import_jobs.is_empty() {
-      if !self.microtasks.is_empty() {
+    while !self.jobs.microtasks.is_empty() || !self.jobs.dynamic_imports.is_empty() {
+      if !self.jobs.microtasks.is_empty() {
         self.drain_microtasks()?;
         continue;
       }
@@ -209,11 +212,11 @@ impl Vm {
       match settled_state {
         Some(Ok(value)) => return Ok(value),
         Some(Err(reason)) => {
-          self.last_uncaught_exception = Some(reason);
+          self.exceptions.last_uncaught = Some(reason);
           return Err(crate::errors::RuntimeError::from("Promise rejected"));
         }
         None => {
-          if !self.microtasks.is_empty() || !self.dynamic_import_jobs.is_empty() {
+          if !self.jobs.microtasks.is_empty() || !self.jobs.dynamic_imports.is_empty() {
             self.run_microtasks_if_needed()?;
             self.maybe_collect_garbage_prototype();
             continue;
@@ -261,17 +264,17 @@ impl Vm {
     let proto = Rc::clone(proto);
     let env = Rc::clone(env);
     let promise_for_job = Rc::clone(&promise);
-    let caller_chunk = Arc::clone(&self.chunk);
-    let caller_ip = self.ip;
-    let caller_locals = self.locals.clone();
-    let caller_this = self.this_value.clone();
-    let caller_env = self.current_closure_env.clone();
-    let caller_lexical_env = Rc::clone(&self.lexical_env);
-    let caller_slot_types = self.current_slot_types.clone();
-    let caller_frame_len = self.call_stack.len();
-    let caller_handlers = std::mem::take(&mut self.handlers);
+    let caller_chunk = Arc::clone(&self.execution.active.chunk);
+    let caller_ip = self.execution.active.ip;
+    let caller_locals = self.execution.active.locals.clone();
+    let caller_this = self.execution.active.this_value.clone();
+    let caller_env = self.execution.active.closure_env.clone();
+    let caller_lexical_env = Rc::clone(&self.execution.active.lexical_env);
+    let caller_slots = self.execution.active.slots.clone();
+    let caller_frame_len = self.execution.call_stack.len();
+    let caller_handlers = std::mem::take(&mut self.exceptions.handlers);
 
-    self.last_uncaught_exception = None;
+    self.exceptions.last_uncaught = None;
     let exec_result = (|| {
       self.push_call_frame(&proto, &env, call_args, this_arg, callee.clone())?;
       self
@@ -280,15 +283,18 @@ impl Vm {
     })();
     self.maybe_collect_garbage_prototype();
 
-    self.chunk = caller_chunk;
-    self.ip = caller_ip;
-    self.locals = caller_locals;
-    self.this_value = caller_this;
-    self.current_closure_env = caller_env;
-    self.lexical_env = caller_lexical_env;
-    self.current_slot_types = caller_slot_types;
-    self.call_stack.truncate(caller_frame_len);
-    self.handlers = caller_handlers;
+    self.execution.active.chunk = caller_chunk;
+    self.execution.active.ip = caller_ip;
+    self.execution.active.locals = caller_locals;
+    self.execution.active.this_value = caller_this;
+    self.execution.active.closure_env = caller_env;
+    self.execution.active.lexical_env = caller_lexical_env;
+    self.execution.active.slots = caller_slots;
+    self
+      .execution
+      .call_stack
+      .truncate(caller_frame_len);
+    self.exceptions.handlers = caller_handlers;
 
     self.run_microtasks_if_needed()?;
     self.maybe_collect_garbage_prototype();
@@ -331,7 +337,8 @@ impl Vm {
           );
         }
         let reason = self
-          .last_uncaught_exception
+          .exceptions
+          .last_uncaught
           .take()
           .unwrap_or_else(|| Value::String(format!("{}", err).into()));
         let mut reason_cell = Some(reason);
@@ -367,7 +374,7 @@ impl Vm {
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
   {
-    let rt = Arc::clone(&self.bg_runtime);
+    let rt = Arc::clone(&self.jobs.background_runtime);
     let handle = rt.spawn_blocking(f);
     rt.block_on(handle)
       .map_err(|e| crate::errors::RuntimeError::from(format!("Background task failed: {}", e)))
@@ -384,7 +391,7 @@ impl Vm {
     Fut: Future + Send + 'static,
     Fut::Output: Send + 'static,
   {
-    Ok(Arc::clone(&self.bg_runtime).block_on(fut))
+    Ok(Arc::clone(&self.jobs.background_runtime).block_on(fut))
   }
 
   /// Spawn a fire-and-forget task on the background runtime.
@@ -394,7 +401,7 @@ impl Vm {
   ) where
     Fut: Future<Output = ()> + Send + 'static,
   {
-    drop(self.bg_runtime.spawn(fut));
+    drop(self.jobs.background_runtime.spawn(fut));
   }
 }
 
@@ -458,7 +465,7 @@ mod tests {
       ]
     );
     assert!(matches!(
-        vm.last_uncaught_exception.as_ref(),
+        vm.exceptions.last_uncaught.as_ref(),
         Some(Value::String(s)) if s.as_str_lossy().contains("microtask failed")
     ));
     assert_eq!(

@@ -1,138 +1,23 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Array builtin functions and prototype methods
+//! Array constructor and static methods.
 
-use std::cell::RefCell;
-use std::env;
-use std::rc::Rc;
+use super::*;
 
-use js_string::{JsString, JsStringBuilder};
-use num_traits::ToPrimitive;
-
-use crate::runtime_utils::{
-  array_length_descriptor, builtin_object, canonical_index_key, collect_iterable_values,
-  reject_pending_promise, resolve_promise_with_value, set_builtin_length, set_builtin_name,
-  static_builtin_arg_offset, strict_equal, to_length, u64_to_decimal_string, usize_to_f64,
-};
-use crate::value::{
-  ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SymbolId, Value,
-};
-use crate::vm::Vm;
-
-fn create_data_property_or_throw(
-  vm: &mut Vm,
-  target: &Value,
-  key: &Value,
-  value: Value,
-) -> Result<(), crate::errors::RuntimeError> {
-  let dense_index = match (target, key) {
-    (Value::Array(_, _), Value::String(key)) => {
-      canonical_index_key(key).and_then(|index| usize::try_from(index).ok())
-    }
-    _ => None,
-  };
-  if let (Value::Array(_, properties), Some(index)) = (target, dense_index) {
-    let properties = properties.borrow();
-    if let Some(PropertyDescriptor::Data {
-      value: Value::Number(length),
-      writable: false,
-      ..
-    }) = properties
-      .properties
-      .get(&PropertyKey::String("length".to_string().into()))
-      && usize_to_f64(index) >= *length
-    {
-      return Err(vm.throw_type_error("Array.from cannot extend an array with readonly length"));
-    }
-  }
-
-  let mut descriptor = ObjectData::new();
-  descriptor.properties.insert(
-    PropertyKey::String("value".to_string().into()),
-    PropertyDescriptor::ordinary_data(value.clone()),
-  );
-  descriptor.properties.insert(
-    PropertyKey::String("writable".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Bool(true)),
-  );
-  descriptor.properties.insert(
-    PropertyKey::String("enumerable".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Bool(true)),
-  );
-  descriptor.properties.insert(
-    PropertyKey::String("configurable".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Bool(true)),
-  );
-  let descriptor = Value::Object(Rc::new(RefCell::new(descriptor)));
-  if !vm.define_property_value(target, key, &descriptor)? {
-    return Err(vm.throw_type_error("Array.from failed to define element"));
-  }
-
-  // Dense arrays use their element storage as the canonical representation.
-  // `define_property_value` performs all extensibility and descriptor checks;
-  // normalize its successful numeric definition so later array algorithms do
-  // not observe a stale shadow property alongside the dense element.
-  if let (Value::Array(elements, properties), Value::String(key), Some(index)) =
-    (target, key, dense_index)
-  {
-    let mut elements = elements.borrow_mut();
-    if index >= elements.len() {
-      elements.resize(index.saturating_add(1), None);
-    }
-    elements[index] = Some(value);
-    let length = elements.len();
-    drop(elements);
-    let mut properties = properties.borrow_mut();
-    properties
-      .properties
-      .shift_remove(&PropertyKey::String(key.clone()));
-    let length_key = PropertyKey::String("length".to_string().into());
-    let length_descriptor = match properties.properties.get(&length_key).cloned() {
-      Some(PropertyDescriptor::Data {
-        writable,
-        enumerable,
-        configurable,
-        ..
-      }) => PropertyDescriptor::Data {
-        value: Value::Number(usize_to_f64(length)),
-        writable,
-        enumerable,
-        configurable,
-      },
-      _ => array_length_descriptor(length),
-    };
-    properties
-      .properties
-      .insert(length_key, length_descriptor);
-  }
-  Ok(())
-}
-
-fn is_array_value(value: &Value) -> bool {
-  match value {
-    Value::Array(..) => true,
-    Value::Proxy(proxy) => {
-      let target = {
-        let proxy = proxy.borrow();
-        if proxy.is_revoked() {
-          return false;
-        }
-        proxy.target.clone()
-      };
-      is_array_value(&target)
-    }
-    _ => false,
-  }
-}
-
-/// 23.1 Array Objects
-pub(crate) fn install_array_constructor_and_late_prototype_methods(
-  array_ctor_map: &Rc<RefCell<ObjectData>>,
+pub(super) fn install(
   array_proto_map: &Rc<RefCell<ObjectData>>,
   function_proto_map: &Rc<RefCell<ObjectData>>,
 ) -> Value {
   use PropertyKey as PKey;
 
-  let array_ctor_props = Rc::clone(array_ctor_map);
+  let array_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::with_prototype(
+    Value::Object(Rc::clone(&function_proto_map)),
+  )));
+  array_ctor_map.borrow_mut().properties.insert(
+    PKey::String("prototype".to_string().into()),
+    PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&array_proto_map))),
+  );
+
+  let array_ctor_props = Rc::clone(&array_ctor_map);
   let array_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
     let off = static_builtin_arg_offset(vm, args, "Array");
     let tail = &args[off..];
@@ -178,7 +63,7 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
     }
     Ok(Value::Array(arr_rc, props))
   });
-  let array_ctor_val = Value::BuiltinObject(Rc::clone(&array_ctor_fn), Rc::clone(array_ctor_map));
+  let array_ctor_val = Value::BuiltinObject(Rc::clone(&array_ctor_fn), Rc::clone(&array_ctor_map));
   set_builtin_name(&array_ctor_val, "Array");
   set_builtin_length(&array_ctor_val, 1.0);
   array_ctor_map.borrow_mut().properties.insert(
@@ -402,7 +287,8 @@ pub(crate) fn install_array_constructor_and_late_prototype_methods(
               }
               Err(err) => {
                 let reason = vm
-                  .last_uncaught_exception
+                  .exceptions
+                  .last_uncaught
                   .take()
                   .unwrap_or_else(|| Value::String(format!("{}", err).into()));
                 reject_pending_promise(vm, &result_promise_for_job, reason);

@@ -338,9 +338,9 @@ fn release_timer_roots(
   vm: &mut Vm,
   callback: &TimerCallback,
 ) -> Result<(), RuntimeError> {
-  vm.set_host_root(callback.callback, Value::Undefined)?;
+  vm.release_host_root(callback.callback)?;
   for root in &callback.arguments {
-    vm.set_host_root(*root, Value::Undefined)?;
+    vm.release_host_root(*root)?;
   }
   Ok(())
 }
@@ -913,8 +913,8 @@ fn websocket_primitive(
         .host_root(callback_root)
         .filter(Value::is_callable)
       {
+        vm.release_host_root(callback_root)?;
         complete_success(vm, &callback, callback_socket.clone())?;
-        vm.set_host_root(callback_root, Value::Undefined)?;
       }
       Ok(Value::Undefined)
     });
@@ -924,13 +924,21 @@ fn websocket_primitive(
         .host_root(error_root)
         .filter(Value::is_callable)
       {
+        vm.release_host_root(error_root)?;
         complete_failure(vm, &callback, "connect", "WebSocket connection failed")?;
-        vm.set_host_root(error_root, Value::Undefined)?;
       }
       Ok(Value::Undefined)
     });
-    set_socket_handler(vm, &socket, "onopen", Value::Builtin(on_open))?;
-    set_socket_handler(vm, &socket, "onerror", Value::Builtin(on_error))?;
+    let install_result = (|| {
+      set_socket_handler(vm, &socket, "onopen", Value::Builtin(on_open))?;
+      set_socket_handler(vm, &socket, "onerror", Value::Builtin(on_error))
+    })();
+    if let Err(error) = install_result {
+      if vm.host_root(callback_root).is_some() {
+        vm.release_host_root(callback_root)?;
+      }
+      return Err(error);
+    }
     Ok(socket)
   });
   set(&primitive, "connect", Value::Builtin(connect));
@@ -1231,7 +1239,9 @@ fn terminal_primitive(
     let cancel_terminal = terminal.clone();
     let cancel: BuiltinFn = Rc::new(move |vm, _args| {
       cancel_terminal.clear_line_subscription(vm)?;
-      vm.set_host_root(callback_root, Value::Undefined)?;
+      if vm.host_root(callback_root).is_some() {
+        vm.release_host_root(callback_root)?;
+      }
       Ok(Value::Undefined)
     });
     set(&subscription, "__cancel", Value::Builtin(cancel));

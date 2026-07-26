@@ -424,13 +424,17 @@ impl Vm {
       return self.get_property_value(obj, key);
     };
     let receiver_generation = self
-      .obj_generations
+      .caches
+      .object_generations
       .get(&receiver_identity)
       .copied()
       .unwrap_or(0);
-    let site = (std::sync::Arc::as_ptr(&self.chunk) as usize, instruction_ip);
+    let site = (
+      std::sync::Arc::as_ptr(&self.execution.active.chunk) as usize,
+      instruction_ip,
+    );
 
-    if let Some(entry) = self.property_get_ic.get(&site)
+    if let Some(entry) = self.caches.property_get.get(&site)
       && entry.receiver_identity == receiver_identity
       && entry.receiver_generation == receiver_generation
       && entry.key == *key
@@ -443,7 +447,7 @@ impl Vm {
       own_property_descriptor(obj, key),
       Some(PropertyDescriptor::Data { .. })
     ) {
-      self.property_get_ic.insert(
+      self.caches.property_get.insert(
         site,
         PropertyGetIcEntry {
           receiver_identity,
@@ -453,7 +457,7 @@ impl Vm {
         },
       );
     } else {
-      self.property_get_ic.remove(&site);
+      self.caches.property_get.remove(&site);
     }
     Ok(value)
   }
@@ -1090,10 +1094,10 @@ impl Vm {
   ) -> Result<bool, RuntimeError> {
     let prop = self.to_property_key(key)?;
     let receiver = receiver.unwrap_or_else(|| target.clone());
-    let saved_strict = self.current_strict_mode;
-    self.current_strict_mode = false;
+    let saved_strict = self.execution.active.strict;
+    self.execution.active.strict = false;
     let result = self.set_property_value(target, &prop, value, &receiver);
-    self.current_strict_mode = saved_strict;
+    self.execution.active.strict = saved_strict;
     result
   }
 
@@ -1191,7 +1195,8 @@ impl Vm {
       if !Self::is_callable_value(&trap) {
         return Err(self.throw_type_error("Proxy defineProperty trap is not callable"));
       }
-      let descriptor = partial_descriptor_to_value(self.realm().object_prototype(), &desc);
+      let descriptor =
+        partial_descriptor_to_value(self.realm_state.realm.object_prototype(), &desc);
       let trap_result = self.call_with_this(
         &trap,
         &handler,
@@ -1471,13 +1476,13 @@ impl Vm {
     }
     data.properties.insert(key.clone(), new_desc);
     if let Some(index) = array_index_from_key(&key)
-      && index < self.current_arguments_mapped_count
+      && index < self.execution.active.arguments.mapped_count
       && matches!(
-          self.current_arguments_object.as_ref(),
+          self.execution.active.arguments.object.as_ref(),
           Some(current) if values_equal(current, obj)
       )
       && let Some(value) = sync_arguments_value
-      && let Some(cell) = self.locals.get(index)
+      && let Some(cell) = self.execution.active.locals.get(index)
     {
       *cell.borrow_mut() = value;
     }
@@ -1527,6 +1532,7 @@ impl Vm {
         return Ok(Value::String(ch));
       }
       let string_ctor = self
+        .realm_state
         .globals
         .borrow()
         .properties
@@ -1548,6 +1554,7 @@ impl Vm {
     }
     if let Value::Array(_, _) = obj {
       let array_ctor = self
+        .realm_state
         .globals
         .borrow()
         .properties
@@ -1575,6 +1582,7 @@ impl Vm {
         });
       }
       let symbol_ctor = self
+        .realm_state
         .globals
         .borrow()
         .properties
@@ -1715,17 +1723,35 @@ impl Vm {
         }
       }
       Value::Bool(_) => {
-        if let Some(proto) = self.realm.intrinsics.boolean_prototype.clone() {
+        if let Some(proto) = self
+          .realm_state
+          .realm
+          .intrinsics
+          .boolean_prototype
+          .clone()
+        {
           return self.lookup_property_descriptor(&proto, key, depth + 1);
         }
       }
       Value::Number(_) => {
-        if let Some(proto) = self.realm.intrinsics.number_prototype.clone() {
+        if let Some(proto) = self
+          .realm_state
+          .realm
+          .intrinsics
+          .number_prototype
+          .clone()
+        {
           return self.lookup_property_descriptor(&proto, key, depth + 1);
         }
       }
       Value::BigInt(_) => {
-        if let Some(proto) = self.realm.intrinsics.bigint_prototype.clone() {
+        if let Some(proto) = self
+          .realm_state
+          .realm
+          .intrinsics
+          .bigint_prototype
+          .clone()
+        {
           return self.lookup_property_descriptor(&proto, key, depth + 1);
         }
       }
@@ -1825,10 +1851,10 @@ impl Vm {
         PropertyDescriptor::Data { .. } => {}
       }
       if matches!(
-          self.current_arguments_object.as_ref(),
+          self.execution.active.arguments.object.as_ref(),
           Some(current) if values_equal(current, obj)
       ) && let Some(index) = array_index_from_key(key)
-        && index < self.current_arguments_mapped_count
+        && index < self.execution.active.arguments.mapped_count
       {
         sync_arguments_slot = Some(index);
       }
@@ -1848,7 +1874,7 @@ impl Vm {
     set_property(obj, key, value)?;
     self.bump_object_generation(obj);
     if let Some(index) = sync_arguments_slot
-      && let Some(cell) = self.locals.get(index)
+      && let Some(cell) = self.execution.active.locals.get(index)
     {
       *cell.borrow_mut() = self
         .lookup_property_descriptor(obj, key, 0)?

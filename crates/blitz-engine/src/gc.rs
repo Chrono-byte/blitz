@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Experimental garbage collection support.
+//! Garbage collection support.
 //!
-//! This module provides a prototype mark/sweep collector that can reclaim
+//! This module provides a mark/sweep collector that can reclaim
 //! cyclic garbage by tracking heap allocations in weak registries.
 
 use std::cell::Cell;
@@ -69,6 +69,36 @@ struct HeapRegistry {
 thread_local! {
     static HEAP: RefCell<HeapRegistry> = RefCell::new(HeapRegistry::default());
     static ALLOCATION_PRESSURE: Cell<usize> = const { Cell::new(0) };
+    static LIVE_VMS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Registers a VM that can own roots in the thread-local prototype heap.
+///
+/// The collector can only enumerate one VM's roots at a time, so collection
+/// is conservatively deferred while more than one VM is alive on the thread.
+pub(crate) struct VmGcRegistration;
+
+impl VmGcRegistration {
+  pub(crate) fn new() -> Self {
+    LIVE_VMS.with(|count| count.set(count.get().saturating_add(1)));
+    Self
+  }
+}
+
+impl Drop for VmGcRegistration {
+  fn drop(&mut self) {
+    // VMs can themselves be retained by another thread-local and dropped
+    // during TLS teardown after LIVE_VMS has already been destroyed.
+    let _ = LIVE_VMS.try_with(|count| {
+      let current = count.get();
+      debug_assert!(current > 0);
+      count.set(current.saturating_sub(1));
+    });
+  }
+}
+
+pub(crate) fn collection_is_safe() -> bool {
+  LIVE_VMS.with(|count| count.get() <= 1)
 }
 
 fn push_weak<T>(
@@ -190,6 +220,9 @@ pub fn collect_with_env_roots(
   roots: &[Value],
   env_roots: &[Rc<RefCell<Vec<SharedValue>>>],
 ) -> GcStats {
+  if !collection_is_safe() {
+    return GcStats::default();
+  }
   {
     {
       let clear_envs_aggressively = false;

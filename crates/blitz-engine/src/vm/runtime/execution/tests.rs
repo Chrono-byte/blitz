@@ -1160,7 +1160,183 @@ mod test {
 
     assert_eq!(vm.get_global("before_write"), Some(Value::Number(1.0)));
     assert_eq!(vm.get_global("after_write"), Some(Value::Number(2.0)));
-    assert!(!vm.property_get_ic.is_empty());
+    assert!(!vm.caches.property_get.is_empty());
+  }
+
+  #[test]
+  fn host_roots_reuse_slots_without_reviving_stale_handles() {
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    let first = vm.create_host_root(Value::Number(1.0));
+
+    assert_eq!(vm.host_root(first), Some(Value::Number(1.0)));
+    vm.release_host_root(first)
+      .expect("release first root");
+    assert_eq!(vm.host_root(first), None);
+
+    let second = vm.create_host_root(Value::Number(2.0));
+    assert_eq!(first.slot, second.slot);
+    assert_ne!(first.generation, second.generation);
+    assert!(
+      vm.set_host_root(first, Value::Number(3.0))
+        .is_err()
+    );
+    assert!(vm.release_host_root(first).is_err());
+    assert_eq!(vm.host_root(second), Some(Value::Number(2.0)));
+  }
+
+  #[test]
+  fn host_roots_are_shared_by_forks_and_rejected_by_other_vms() {
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    let parent_root = vm.create_host_root(Value::Number(1.0));
+    let mut child = vm.fork_execution();
+
+    child
+      .set_host_root(parent_root, Value::Number(2.0))
+      .expect("fork shares root store");
+    assert_eq!(vm.host_root(parent_root), Some(Value::Number(2.0)));
+
+    let child_root = child.create_host_root(Value::Number(3.0));
+    assert_eq!(vm.host_root(child_root), Some(Value::Number(3.0)));
+    child
+      .release_host_root(child_root)
+      .expect("release child root");
+    assert_eq!(vm.host_root(child_root), None);
+
+    let mut unrelated = Vm::new(test_globals());
+    assert!(
+      unrelated
+        .set_host_root(parent_root, Value::Undefined)
+        .is_err()
+    );
+  }
+
+  #[test]
+  fn prototype_gc_defers_while_multiple_vms_are_alive() {
+    let vm = Vm::new(test_globals());
+    let mut sibling = Vm::new(test_globals());
+    let protected = crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
+    protected.borrow_mut().properties.insert(
+      PropertyKey::String("answer".to_string().into()),
+      PropertyDescriptor::ordinary_data(Value::Number(42.0)),
+    );
+    sibling.create_host_root(Value::Object(Rc::clone(&protected)));
+
+    let stats = vm.collect_garbage_prototype();
+    assert_eq!(stats.swept_objects, 0);
+    assert!(
+      protected
+        .borrow()
+        .properties
+        .contains_key(&PropertyKey::String("answer".to_string().into()))
+    );
+  }
+
+  #[test]
+  fn prototype_gc_preserves_suspended_generator_vm_roots() {
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    let first = crate::js!(
+      r#"
+        function* values() {
+          const held = { answer: 42 };
+          yield 0;
+          return held.answer;
+        }
+        globalThis.iterator = values();
+        iterator.next();
+      "#
+    );
+    let session = Parser::parse_source(first).expect("parse generator setup");
+    let chunk = compiler::compile_oxc(session.program(), session.source()).expect("compile setup");
+    vm.run(chunk).expect("start generator");
+
+    assert_eq!(vm.collect_garbage_prototype().swept_objects, 0);
+
+    let second = crate::js!("globalThis.generatorAnswer = iterator.next().value;");
+    let session = Parser::parse_source(second).expect("parse generator resume");
+    let chunk = compiler::compile_oxc(session.program(), session.source()).expect("compile resume");
+    vm.run(chunk).expect("resume generator");
+    assert_eq!(vm.get_global("generatorAnswer"), Some(Value::Number(42.0)));
+  }
+
+  #[test]
+  fn nested_run_carries_thrown_value_and_restores_outer_exception() {
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    vm.exceptions.last_uncaught = Some(Value::String("outer".to_string().into()));
+
+    let source = crate::js!("throw 42;");
+    let session = Parser::parse_source(source).expect("parse nested throw");
+    let chunk =
+      compiler::compile_oxc_repl(session.program(), session.source()).expect("compile nested");
+    let failure = vm
+      .run_nested(chunk, true)
+      .expect_err("nested run throws");
+
+    assert_eq!(failure.thrown, Some(Value::Number(42.0)));
+    assert_eq!(
+      vm.exceptions.last_uncaught,
+      Some(Value::String("outer".to_string().into()))
+    );
+  }
+
+  #[test]
+  fn direct_eval_throw_is_caught_with_original_identity() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const token = {};
+        let same = false;
+        try {
+          eval("throw token");
+        } catch (error) {
+          same = error === token;
+        }
+        globalThis.directEvalThrowSame = same;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("directEvalThrowSame"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn root_run_and_reset_clear_active_transient_state() {
+    let globals = test_globals();
+    let mut vm = Vm::new(globals);
+    let poison = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
+    let poison_state = |vm: &mut Vm| {
+      vm.construction.new_target = Some(poison.clone());
+      vm.construction.recent_return_value = Some(poison.clone());
+      vm.construction
+        .derived_this
+        .push(Some(poison.clone()));
+      vm.exceptions.last_uncaught = Some(poison.clone());
+      vm.execution.active.arguments.object = Some(poison.clone());
+      vm.execution.active.arguments.mapped_count = 1;
+    };
+    let assert_cleared = |vm: &Vm| {
+      assert!(vm.construction.new_target.is_none());
+      assert!(vm.construction.recent_return_value.is_none());
+      assert!(vm.construction.derived_this.is_empty());
+      assert!(vm.exceptions.last_uncaught.is_none());
+      assert!(vm.execution.active.arguments.object.is_none());
+      assert_eq!(vm.execution.active.arguments.mapped_count, 0);
+    };
+
+    poison_state(&mut vm);
+    let source = crate::js!("undefined;");
+    let session = Parser::parse_source(source).expect("parse root");
+    let chunk = compiler::compile_oxc(session.program(), session.source()).expect("compile root");
+    vm.run(chunk).expect("run root");
+    assert_cleared(&vm);
+
+    poison_state(&mut vm);
+    vm.reset(&HashSet::new());
+    assert_cleared(&vm);
   }
 
   #[test]

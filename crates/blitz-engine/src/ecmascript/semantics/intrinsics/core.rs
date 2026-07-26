@@ -2,6 +2,68 @@
 use super::*;
 use crate::gc;
 
+/// Installs standard built-in properties on one intrinsic object.
+///
+/// Keeping descriptor attributes and function metadata here makes family
+/// installers describe the intrinsic graph instead of repeating its plumbing.
+pub(crate) struct IntrinsicInstaller<'a> {
+  target: &'a Rc<RefCell<ObjectData>>,
+  function_prototype: &'a Rc<RefCell<ObjectData>>,
+}
+
+impl<'a> IntrinsicInstaller<'a> {
+  pub(crate) fn new(
+    target: &'a Rc<RefCell<ObjectData>>,
+    function_prototype: &'a Rc<RefCell<ObjectData>>,
+  ) -> Self {
+    Self {
+      target,
+      function_prototype,
+    }
+  }
+
+  pub(crate) fn data(
+    &self,
+    key: PropertyKey,
+    value: Value,
+  ) {
+    self
+      .target
+      .borrow_mut()
+      .properties
+      .insert(key, PropertyDescriptor::builtin_data(value));
+  }
+
+  pub(crate) fn method<F>(
+    &self,
+    key: &str,
+    length: u8,
+    implementation: F,
+  ) -> Value
+  where
+    F: Fn(&mut Vm, &[Value]) -> Result<Value, RuntimeError> + 'static,
+  {
+    self.named_method(PropertyKey::String(key.into()), key, length, implementation)
+  }
+
+  pub(crate) fn named_method<F>(
+    &self,
+    key: PropertyKey,
+    name: &str,
+    length: u8,
+    implementation: F,
+  ) -> Value
+  where
+    F: Fn(&mut Vm, &[Value]) -> Result<Value, RuntimeError> + 'static,
+  {
+    let function = builtin_object(Rc::new(implementation), self.function_prototype);
+    set_builtin_name(&function, name);
+    set_builtin_length(&function, f64::from(length));
+    self.data(key, function.clone());
+    function
+  }
+}
+
 /// Creates a builtin object value with the given function and prototype chain.
 pub(crate) fn builtin_object(
   f: BuiltinFn,
