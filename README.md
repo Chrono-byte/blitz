@@ -1,131 +1,203 @@
-Blitz
-=====
+# Blitz
 
-Blitz is a compact ECMAScript engine/runtime centered on a minimal Rust kernel that exposes strictly documented native primitives and drives an increasingly capable runtime surface. The Rust base handles JavaScript parsing, direct RISC v2 bytecode compilation, the VM/GC, and defensive kernels so behavior stays auditable and easy to iterate.
+Blitz is an experimental JavaScript and TypeScript application runtime written
+in Rust. It has its own ECMAScript engine and provides Effect-native APIs for
+building applications.
 
-Key layers
-----------
+Unlike runtimes built around V8 or JavaScriptCore, Blitz owns the full stack:
+parsing, bytecode compilation, the VM, garbage collection, and host APIs.
+JavaScript remains a first-class language, while TypeScript can run directly
+and use Blitz's built-in checker.
 
-- `crates/blitz-engine/` — the host-neutral parser, compiler, VM, ECMAScript
-  builtins, raw engine executable, and benchmarks.
-- `crates/blitz-test262/` — the dedicated Test262 discovery, execution,
-  isolation, and reporting harness built on the engine.
-- `crates/blitz-runtime/` — reusable host capabilities, application primitives,
-  RPC routing, and application examples.
-- `crates/blitz-cli/` — the `blitz` executable and its current `run`, `check`,
-  and `analyze` commands.
-- `docs/` and `test262/` — design material and the vendored conformance suite.
+> [!WARNING]
+> Blitz is early. Expect bugs, missing language features, and APIs that change
+> as the runtime develops.
 
-Executables
------------
+## What works today
 
-- `blitz` is the application runtime. It installs host APIs such as `console`
-  and `process` and is the executable intended for JavaScript and TypeScript
-  applications.
-- `blitz-engine` is a host-neutral engine harness. It exposes ECMAScript
-  intrinsics and `globalThis`, but deliberately omits OS and runtime APIs.
+Blitz currently includes:
 
-```powershell
-# Run an application with the Blitz runtime.
+- direct JavaScript and TypeScript execution
+- a register-based bytecode VM and garbage collector
+- an in-process TypeScript checker and editor analysis API
+- a REPL and command-line runtime
+- Effect services for files, HTTP, terminals, and WebSockets
+- selected Web and Node.js compatibility APIs
+- a language server and local Zed extension
+- a dedicated Test262 conformance runner
+
+This is not yet a drop-in replacement for Node.js, Deno, or Bun. Compatibility
+is being added deliberately without changing the engine's ECMAScript behavior
+or the runtime's Effect-native APIs.
+
+## Try it
+
+For now, the easiest way to try Blitz is from this repository. You will need a
+recent Rust toolchain.
+
+```sh
+# Run JavaScript
 cargo run -p blitz-cli -- crates/blitz-runtime/examples/hello.js
 
-# Type annotations are stripped during execution.
-cargo run -p blitz-cli -- run path/to/application.ts
+# Run TypeScript directly
+cargo run -p blitz-cli -- run crates/blitz-runtime/examples/typed.ts
 
-# Type checking uses Blitz's in-process OXC-based checker.
-cargo run -p blitz-cli -- check
-cargo run -p blitz-cli -- check --strict
-cargo run -p blitz-cli -- run --check path/to/application.ts
-
-# Emit compiler-owned JSON for editor tooling (source is read from stdin).
-Write-Output "const answer: number = 42;" | cargo run -p blitz-cli -- analyze --path editor.ts -
-
-# Exercise the raw engine without host capabilities.
-cargo run -p blitz-engine --bin blitz-engine -- path/to/engine-test.js
-
-# Run the dedicated Test262 conformance harness.
-cargo run -p blitz-test262 --bin test262
+# Start the REPL
+cargo run -p blitz-cli
 ```
 
-Effect-first runtime APIs
--------------------------
-
-Effect is the primary composition model for Blitz-owned runtime capabilities.
-The default runtime prelinks one pinned upstream Effect graph and exposes
-service-based modules such as `blitz:fs`, `blitz:http`, `blitz:terminal`, and
-`blitz:websocket`. Their public JavaScript facades construct real Effect values
-over small private host primitives; Rust owns OS resources but does not
-reimplement Effect, retain JavaScript values in background tasks, or mutate VM
-state outside the VM thread.
-
-The runtime APIs follow a few consistent rules:
-
-- Fallible and asynchronous operations are lazy Effects. Constructing an
-  operation performs no host I/O.
-- Replaceable capabilities are Context services. Accessors retain their service
-  requirements, live implementations are provided as Layers, and tests can
-  provide deterministic or in-memory Layers.
-- Expected failures use narrow tagged values in the Effect error channel.
-  Defects remain defects instead of being converted into generic runtime errors.
-- Resources are Scope-owned. Interruption cancels pending work and runs
-  finalizers; callers do not need manual cleanup for correctness.
-- Incremental input and output use Effect Streams with explicit backpressure.
-- Pure and infallible operations remain ordinary functions. ECMAScript, Web,
-  and Node compatibility APIs keep their standard semantics rather than
-  returning Effects.
+A small TypeScript program looks like this:
 
 ```ts
-import * as Effect from "effect/Effect"
-import * as FileSystem from "blitz:fs"
-import * as Runtime from "blitz:runtime"
+const name: string = "Blitz";
+console.log("Hello from", name);
+```
+
+Save it as `hello.ts`, then run:
+
+```sh
+cargo run -p blitz-cli -- run hello.ts
+```
+
+## Type checking
+
+Blitz includes an OXC-based TypeScript checker. It can check individual files
+or discover TypeScript files in a project directory.
+
+```sh
+# Check the current directory
+cargo run -p blitz-cli -- check
+
+# Check one file in strict mode
+cargo run -p blitz-cli -- check --strict path/to/app.ts
+
+# Check a file before running it
+cargo run -p blitz-cli -- run --check path/to/app.ts
+```
+
+The checker supports a growing subset of TypeScript rather than the entire
+language. The current type model and known gaps are documented in
+[docs/TYPESCRIPT.md](docs/TYPESCRIPT.md).
+
+## Effect-native runtime APIs
+
+First-party Blitz APIs use [Effect](https://effect.website) for asynchronous
+work, typed failures, dependency injection, resource cleanup, and streams.
+The runtime bundles Effect, so these modules do not require an npm install.
+
+```ts
+import * as Effect from "effect/Effect";
+import * as FileSystem from "blitz:fs";
+import * as Runtime from "blitz:runtime";
 
 const program = FileSystem.readTextFile("./config.json").pipe(
   Effect.map(JSON.parse),
   Effect.tap((config) => Effect.sync(() => console.log(config))),
-)
+);
 
-Runtime.runMain(program)
+Runtime.runMain(program);
 ```
 
-`Runtime.runMain` supplies the aggregate live Layer, starts one root fiber,
-maps process termination signals to interruption, and waits for scoped
-finalizers before exit. Applications that need explicit composition can use
-the individual service Layers or `Runtime.provideLive`.
+Public services currently include `blitz:fs`, `blitz:http`,
+`blitz:terminal`, and `blitz:websocket`. See the
+[Effect standard library design](docs/EFFECT_STDLIB_DESIGN.md) for the API
+contracts and runtime boundaries.
 
-The complete API contracts and boundaries are documented in
-[`EFFECT_STDLIB_DESIGN.md`](docs/EFFECT_STDLIB_DESIGN.md). Delivery phases are
-tracked in
-[`EFFECT_STDLIB_IMPLEMENTATION_PLAN.md`](docs/EFFECT_STDLIB_IMPLEMENTATION_PLAN.md),
-and the remaining runtime workstreams are specified in
-[`EFFECT_RUNTIME_API_EXPANSION_PLAN.md`](docs/EFFECT_RUNTIME_API_EXPANSION_PLAN.md).
-The immutable Rust application/RPC model is documented in
-[`BLITZ_RUNTIME_RPC_SLICE.md`](docs/BLITZ_RUNTIME_RPC_SLICE.md) as an explicit
-legacy compatibility layer.
+## Node.js compatibility
 
-The [Effect-native IRC chat example](examples/irc-chat-v2/README.md) runs a
-server and two Blitz terminal clients.
+Node.js support is a separate compatibility layer. The CLI provides `off`,
+`core`, `tooling`, and `full` compatibility profiles:
 
-`blitz check` accepts explicit source files or recursively checks TypeScript
-files in the current directory. Dependency, build, and declaration trees are
-skipped. Use `--project <directory-or-tsconfig>` to select another project
-root. The checker currently covers primitive and structural annotations,
-arrays, functions, calls, assignments, returns, unions, interfaces, and type
-aliases; unsupported advanced TypeScript types remain permissive while the
-checker grows. See [the TypeScript model](docs/TYPESCRIPT.md) for the supported
-type language and remaining compatibility layers.
+```sh
+cargo run -p blitz-cli -- --node-compat tooling run path/to/app.ts
+```
 
-Editor tooling
---------------
+A profile only enables compatibility work that has been implemented. It does
+not imply complete Node.js support. The current module-by-module status lives
+in the [compatibility table](crates/blitz-runtime/compat/README.md).
 
-[`language-server/`](language-server/) contains a thin TypeScript LSP adapter
-backed by the compiler's `blitz analyze` JSON API. It currently provides Blitz
-diagnostics, document symbols, completions, hover, and go-to-definition for
-JavaScript, TypeScript, and TSX documents. The local Zed extension lives in
-[`editors/zed/`](editors/zed/) and reuses Zed's built-in JS/TS grammars.
+## Examples
 
-Licensing
----------
+- [Helpdesk API](examples/helpdesk-api/README.md) — a TypeScript and Effect HTTP
+  API with a small React frontend
+- [IRC chat](examples/irc-chat-v2/README.md) — a WebSocket server with terminal
+  clients
+- [Runtime examples](crates/blitz-runtime/examples/README.md) — small JavaScript
+  and TypeScript programs
 
-Blitz code under `crates/` is licensed under the Mozilla Public License 2.0. The vendored `test262/` suite retains its upstream license, and other third-party material retains its applicable license and notices. Do not assume that every file in this repository is MPL-2.0.
+The examples use public modules bundled with Blitz. The runtime examples do not
+need an npm install or a separate TypeScript build step.
 
-See [`LICENSE`](LICENSE) for the MPL-2.0 terms and [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) for third-party material.
+## Project layout
+
+- `crates/blitz-engine` — parser, compiler, VM, garbage collector, and builtins
+- `crates/blitz-runtime` — host capabilities and application APIs
+- `crates/blitz-cli` — the `blitz` command, checker, analysis API, and REPL
+- `crates/blitz-test262` — Test262 discovery, execution, and reporting
+- `crates/js-string` — JavaScript string implementation
+- `crates/regex-js` — JavaScript regular-expression support
+- `language-server` — Language Server Protocol adapter
+- `editors/zed` — local Zed extension
+- `docs` — design documents, plans, and compatibility notes
+
+The engine is host-neutral. It implements language behavior, while
+`blitz-runtime` supplies operating-system and application capabilities. The raw
+engine harness can run without those host APIs:
+
+```sh
+cargo run -p blitz-engine --bin blitz-engine -- path/to/file.js
+```
+
+## Conformance
+
+Blitz uses the official Test262 suite to track ECMAScript behavior. The
+repository contains a dedicated runner rather than mixing conformance behavior
+into the application runtime.
+
+```sh
+cargo run -p blitz-test262 --bin test262
+```
+
+Run it with `--help` to see filtering, edition, worker, manifest, and report
+options. More details are available in the
+[Test262 notes](docs/test262/README.md).
+
+## Editor support
+
+The [language server](language-server/README.md) uses `blitz analyze` for
+compiler-owned diagnostics, symbols, completions, hover information, inlay
+hints, and go-to-definition. A local extension for Zed is available under
+[`editors/zed`](editors/zed).
+
+## Roadmap and documentation
+
+Blitz keeps detailed design work outside the main README:
+
+- [Runtime roadmap](docs/RUNTIME_ROADMAP.md)
+- [TypeScript support](docs/TYPESCRIPT.md)
+- [Effect runtime design](docs/EFFECT_STDLIB_DESIGN.md)
+- [Node.js compatibility plan](docs/NODE_COMPATIBILITY_PLAN.md)
+- [RISC v2 bytecode specification](docs/RISC_V2_SPEC.md)
+
+These documents describe direction as well as completed work. Plans should not
+be read as promises that every listed feature is already available.
+
+## Development
+
+Useful checks before submitting a change:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets
+cargo test --workspace
+```
+
+The language server is a separate Bun workspace. Its development commands are
+listed in [language-server/README.md](language-server/README.md).
+
+## License
+
+Code under `crates/` is licensed under the
+[Mozilla Public License 2.0](LICENSE). Vendored and third-party files keep their
+original licenses; see
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for details.
