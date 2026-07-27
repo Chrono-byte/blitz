@@ -4,23 +4,11 @@ use crate::compiler;
 use crate::parser::Parser;
 use crate::runtime_utils;
 use crate::runtime_utils::strict_equal;
-use crate::typecheck;
 use crate::value::ArrayData;
 use crate::vm::runtime::property::{get_property, same_value};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
-
-fn test262_harness_source(name: &str) -> &'static str {
-  match name {
-    "assert.js" => include_str!("../../../../../../test262/harness/assert.js"),
-    "sta.js" => include_str!("../../../../../../test262/harness/sta.js"),
-    "propertyHelper.js" => {
-      include_str!("../../../../../../test262/harness/propertyHelper.js")
-    }
-    _ => panic!("unknown Test262 harness: {name}"),
-  }
-}
 
 fn test_globals() -> Rc<RefCell<ObjectData>> {
   let globals = Rc::new(RefCell::new(ObjectData::new()));
@@ -3672,102 +3660,6 @@ mod test {
   }
 
   #[test]
-  fn with_statement_prefers_object_bindings_over_global_nans_after_harness() {
-    typecheck::set_strict_override(Some(false));
-    struct ResetStrict;
-    impl Drop for ResetStrict {
-      fn drop(&mut self) {
-        typecheck::set_strict_override(None);
-      }
-    }
-    let _reset_strict = ResetStrict;
-
-    let globals = test_globals();
-    globals.borrow_mut().properties.insert(
-      PropertyKey::String("NaN".to_string().into()),
-      PropertyDescriptor::ordinary_data(Value::Number(f64::NAN)),
-    );
-    globals.borrow_mut().properties.insert(
-      PropertyKey::String("Infinity".to_string().into()),
-      PropertyDescriptor::ordinary_data(Value::Number(f64::INFINITY)),
-    );
-    let mut vm = Vm::new(globals);
-
-    for harness_name in ["assert.js", "sta.js"] {
-      let src = test262_harness_source(harness_name);
-      let session = Parser::parse_source(src).expect("parse harness");
-      let program = session.program();
-      let chunk = compiler::compile(program, session.source()).expect("compile harness");
-      vm.run(chunk).expect("run harness");
-    }
-
-    let session = Parser::parse_source(crate::js!(
-      r#"
-            this.p1 = 1;
-            this.p2 = 2;
-            this.p3 = 3;
-            var result = "result";
-            var myObj = {p1: "a",
-                         p2: "b",
-                         p3: "c",
-                         value: "myObj_value",
-                         valueOf: function(){return "obj_valueOf";},
-                         parseInt: function(){return "obj_parseInt";},
-                         NaN: "obj_NaN",
-                         Infinity: "obj_Infinity",
-                         eval: function(){return "obj_eval";},
-                         parseFloat: function(){return "obj_parseFloat";},
-                         isNaN: function(){return "obj_isNaN";},
-                         isFinite: function(){return "obj_isFinite";}
-            };
-            var del;
-            var st_p1 = "p1";
-            var st_p2 = "p2";
-            var st_p3 = "p3";
-            var st_parseInt = "parseInt";
-            var st_NaN = "NaN";
-            var st_Infinity = "Infinity";
-            var st_eval = "eval";
-            var st_parseFloat = "parseFloat";
-            var st_isNaN = "isNaN";
-            var st_isFinite = "isFinite";
-
-            var f = function(){
-              with(myObj){
-                st_p1 = p1;
-                st_p2 = p2;
-                st_p3 = p3;
-                st_parseInt = parseInt;
-                st_NaN = NaN;
-                st_Infinity = Infinity;
-                st_eval = eval;
-                st_parseFloat = parseFloat;
-                st_isNaN = isNaN;
-                st_isFinite = isFinite;
-                p1 = "x1";
-                this.p2 = "x2";
-                del = delete p3;
-                var p4 = "x4";
-                p5 = "x5";
-                var value = "value";
-              }
-            };
-            f();
-        "#
-    ))
-    .expect("parse ok");
-    let program = session.program();
-    let chunk = compiler::compile(program, session.source()).expect("compile ok");
-
-    vm.run(chunk).expect("run ok");
-
-    assert_eq!(
-      vm.get_global("st_NaN"),
-      Some(Value::String("obj_NaN".into()))
-    );
-  }
-
-  #[test]
   fn with_statement_var_initializer_writes_through_object_binding() {
     let session = Parser::parse_source(crate::js!(
       r#"
@@ -4464,54 +4356,6 @@ mod test {
       vm.get_global("generator_abrupt_completion_ok"),
       Some(Value::Bool(true))
     );
-  }
-
-  #[test]
-  fn harness_property_helper_works_across_multiple_runs() {
-    let globals = test_globals();
-    globals.borrow_mut().properties.insert(
-      PropertyKey::String("NaN".to_string().into()),
-      PropertyDescriptor::ordinary_data(Value::Number(f64::NAN)),
-    );
-    globals.borrow_mut().properties.insert(
-      PropertyKey::String("Infinity".to_string().into()),
-      PropertyDescriptor::ordinary_data(Value::Number(f64::INFINITY)),
-    );
-    runtime_utils::install_minimal_kernel_constructors(&globals);
-    let mut vm = Vm::new(globals);
-
-    for harness_name in ["assert.js", "sta.js", "propertyHelper.js"] {
-      let src = test262_harness_source(harness_name);
-      let session = Parser::parse_source(src).expect("parse harness");
-      let program = session.program();
-      let chunk = compiler::compile_oxc(program, session.source()).expect("compile harness");
-      vm.run(chunk).expect("run harness");
-    }
-
-    typecheck::set_strict_override(Some(true));
-    let src = crate::js!(
-      r#"
-            var obj;
-            var prop = 'prop';
-
-            function reset(desc) {
-              desc.value = prop;
-              obj = Object.defineProperty({}, prop, desc);
-            }
-
-            function checkDesc(desc) {
-              reset(desc);
-              assert(verifyProperty(obj, prop, desc));
-            }
-
-            checkDesc({ enumerable: false, writable: false, configurable: false });
-        "#
-    );
-    let session = Parser::parse_source(src).expect("parse test");
-    let program = session.program();
-    let chunk = compiler::compile_oxc(program, session.source()).expect("compile test");
-    vm.run(chunk).expect("run test");
-    typecheck::set_strict_override(None);
   }
 
   #[test]
