@@ -252,13 +252,13 @@ Integration with existing codebase
 This spec targets the current `blitz` repository layout. Key existing files to integrate
 with are:
 
-- `crates/blitz-engine/src/vm/` — the synchronous interpreter and `Vm::run` loop. The scheduler will call
+- `crates/denko-engine/src/vm/` — the synchronous interpreter and `Vm::run` loop. The scheduler will call
   into `Vm` instances to execute user processes; add small hooks where the interpreter
   decrements reductions and yields (e.g. at opcode dispatch in the main loop).
 - `crates/blitz-cli/src/main.rs` — bootstraps a single `Vm` through the runtime host. Replace the single
   REPL VM with a kernel-managed prelude VM and a scheduler that can spawn multiple
   isolated `Process` instances backed by separate `Vm` state/heap regions.
-- `crates/blitz-engine/src/lib.rs` and `crates/blitz-runtime/src/lib.rs` — engine
+- `crates/denko-engine/src/lib.rs` and `crates/blitz-runtime/src/lib.rs` — engine
   and host-runtime exports. Scheduler and IPC capabilities belong in the
   runtime crate unless they require an engine execution hook.
 

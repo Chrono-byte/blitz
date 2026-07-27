@@ -3,7 +3,7 @@ name = "blitz-cli"
 version.workspace = true
 edition.workspace = true
 license = "MPL-2.0"
-description = "CLI, toolchain, and package-management frontend for Blitz"
+description = "Command-line frontend for the Blitz JavaScript and TypeScript runtime"
 default-run = "blitz"
 
 [[bin]]
@@ -11,10 +11,9 @@ name = "blitz"
 path = "src/main.rs"
 
 [dependencies]
-blitz.workspace = true
+denko.workspace = true
 blitz-runtime.workspace = true
 clap.workspace = true
-rustyline.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

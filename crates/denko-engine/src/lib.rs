@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Blitz: **ECMAScript Engine in Rust**.
+//! Denko: **a host-neutral ECMAScript engine in Rust**.
 //!
 //! # Architecture
 //!
@@ -33,13 +33,13 @@
 //! # Usage
 //!
 //! ```no_run
-//! use blitz::Vm;
+//! use denko::Vm;
 //!
 //! // Example: construct a VM with an empty globals map. Compilation APIs are
 //! // available via the `compiler`/`parser` modules; this snippet shows VM usage.
 //! use std::rc::Rc;
 //! use std::cell::RefCell;
-//! use blitz::value::ObjectData;
+//! use denko::value::ObjectData;
 //! let globals = Rc::new(RefCell::new(ObjectData::new()));
 //! let mut vm = Vm::new(globals);
 //! // vm.run(&bytecode)?; // run compiled bytecode when available
@@ -73,9 +73,9 @@ pub mod value;
 pub mod vm;
 
 // Re-export oxc_ast::ast under the `ast` namespace for compatibility.
-pub use blitz_macros::js;
 pub use bytecode::*;
 pub use compiler::*;
+pub use denko_macros::js;
 pub use errors::*;
 pub use lexer::*;
 pub use module::*;

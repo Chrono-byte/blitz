@@ -14,12 +14,12 @@ tooling, and compatibility APIs.
     -> builtin modules and Web APIs
     -> async event loop and I/O drivers
     -> runtime module installation and host policy
-  -> ECMAScript engine (`crates/blitz-engine`)
+  -> ECMAScript engine (`crates/denko-engine`)
     -> parser and compiler
     -> VM, values, realms, and garbage collector
 ```
 
-`blitz-engine` is the separate host-neutral executable for engine diagnostics
+`denko-engine` is the separate host-neutral executable for engine diagnostics
 and conformance work. It does not install the host capability layer. Embedders
 can continue to consume the `blitz` library without inheriting runtime policy.
 

@@ -10,7 +10,7 @@
 //! Example
 //!
 //! ```
-//! use blitz::vm::Vm;
+//! use denko::vm::Vm;
 //! // construct a VM and run bytecode
 //! ```
 

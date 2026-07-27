@@ -14,7 +14,7 @@ use std::sync::{Arc, OnceLock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use blitz::prelinked::PrelinkedModuleGraph;
+use denko::prelinked::PrelinkedModuleGraph;
 
 /// Version of the runtime wrapper around an engine prelinked graph.
 pub const RUNTIME_GRAPH_FORMAT_VERSION: u16 = 1;
@@ -901,7 +901,7 @@ pub enum RuntimeBundleCodecError {
   /// The runtime manifest failed validation.
   Manifest(RuntimeGraphError),
   /// The engine graph codec rejected the graph payload.
-  GraphCodec(blitz::PrelinkedGraphCodecError),
+  GraphCodec(denko::PrelinkedGraphCodecError),
 }
 
 impl fmt::Display for RuntimeBundleCodecError {
@@ -946,8 +946,8 @@ impl From<RuntimeGraphError> for RuntimeBundleCodecError {
   }
 }
 
-impl From<blitz::PrelinkedGraphCodecError> for RuntimeBundleCodecError {
-  fn from(error: blitz::PrelinkedGraphCodecError) -> Self {
+impl From<denko::PrelinkedGraphCodecError> for RuntimeBundleCodecError {
+  fn from(error: denko::PrelinkedGraphCodecError) -> Self {
     Self::GraphCodec(error)
   }
 }
@@ -957,7 +957,7 @@ pub fn encode_runtime_prelinked_bundle(
   bundle: &RuntimePrelinkedBundle
 ) -> Result<Vec<u8>, RuntimeBundleCodecError> {
   bundle.validate()?;
-  let graph_payload = blitz::encode_prelinked_graph(&bundle.graph)?;
+  let graph_payload = denko::encode_prelinked_graph(&bundle.graph)?;
   let mut writer = RuntimeBundleWriter::default();
   encode_manifest(&mut writer, &bundle.manifest)?;
   writer.bytes_u64(&graph_payload, MAX_RUNTIME_BUNDLE_BYTES, "graph payload")?;
@@ -1022,7 +1022,7 @@ pub fn decode_runtime_prelinked_bundle(
   let manifest = decode_manifest(&mut reader)?;
   let graph_payload = reader.bytes_u64(MAX_RUNTIME_BUNDLE_BYTES, "graph payload")?;
   reader.finish()?;
-  let graph = blitz::decode_prelinked_graph(&graph_payload)?;
+  let graph = denko::decode_prelinked_graph(&graph_payload)?;
   let bundle = RuntimePrelinkedBundle { manifest, graph };
   bundle.validate()?;
   Ok(bundle)
@@ -1479,8 +1479,8 @@ impl<'a> RuntimeBundleReader<'a> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use blitz::bytecode::{BytecodeVersion, Chunk, Op, encode_risc_aux16};
-  use blitz::prelinked::{PRELINKED_MODULE_GRAPH_VERSION, PrelinkedExport, PrelinkedModule};
+  use denko::bytecode::{BytecodeVersion, Chunk, Op, encode_risc_aux16};
+  use denko::prelinked::{PRELINKED_MODULE_GRAPH_VERSION, PrelinkedExport, PrelinkedModule};
   use std::sync::Arc;
 
   fn codec_graph() -> PrelinkedModuleGraph {

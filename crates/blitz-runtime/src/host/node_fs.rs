@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use blitz::Vm;
-use blitz::errors::RuntimeError;
-use blitz::gc;
-use blitz::value::{ArrayData, ObjectData, PropertyKey, Value};
+use denko::Vm;
+use denko::errors::RuntimeError;
+use denko::gc;
+use denko::value::{ArrayData, ObjectData, PropertyKey, Value};
 use url::Url;
 
 use super::{object, set};
@@ -996,7 +996,7 @@ fn io_failure(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+  use denko::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
   use std::cell::RefCell;
   use std::fs;
   use std::rc::Rc;
@@ -1148,7 +1148,7 @@ mod tests {
 
   #[test]
   fn source_facade_covers_sync_callbacks_promises_urls_and_directories() {
-    use blitz::module::{VirtualModule, evaluate_entry_shared};
+    use denko::module::{VirtualModule, evaluate_entry_shared};
     use oxc_span::SourceType;
     use std::path::Path;
 
@@ -1174,7 +1174,7 @@ mod tests {
       loader
         .register_virtual_module(VirtualModule::javascript(
           "blitz-internal:host",
-          blitz::js!(module, "export const host = globalThis.__blitz_host_v1;"),
+          denko::js!(module, "export const host = globalThis.__blitz_host_v1;"),
           SourceType::mjs(),
           None,
         ))
@@ -1209,15 +1209,15 @@ mod tests {
         .register_virtual_module(VirtualModule::javascript(
           "node-fs-facade-entry",
           [
-            blitz::js!(module, "import fs, { readFile as readFileCallback, readFileSync, writeFileSync, statSync, mkdirSync, readdirSync, renameSync, existsSync } from 'node:fs';\n"),
-            blitz::js!(module, "import { readFile as readFilePromise, writeFile as writeFilePromise, stat, rm } from 'node:fs/promises';\n"),
+            denko::js!(module, "import fs, { readFile as readFileCallback, readFileSync, writeFileSync, statSync, mkdirSync, readdirSync, renameSync, existsSync } from 'node:fs';\n"),
+            denko::js!(module, "import { readFile as readFilePromise, writeFile as writeFilePromise, stat, rm } from 'node:fs/promises';\n"),
             &format!(
               "const root = {};\n",
               serde_json::to_string(&directory.to_string_lossy().into_owned())
                 .expect("serialize test path")
             ),
-            blitz::js!("const file = root + '/value.txt';\n"),
-            blitz::js!("const moved = root + '/moved.txt';\n"),
+            denko::js!("const file = root + '/value.txt';\n"),
+            denko::js!("const moved = root + '/moved.txt';\n"),
             "mkdirSync(root);\n",
             "writeFileSync(file, 'hello');\n",
             "if (readFileSync(file, 'utf8') !== 'hello') throw new Error('sync text mismatch');\n",
@@ -1225,11 +1225,11 @@ mod tests {
             "if (!existsSync(file) || !statSync(file).isFile()) throw new Error('sync stat mismatch');\n",
             "try { readFileSync(root + '/missing'); throw new Error('missing read did not throw'); } catch (error) { if (error.code !== 'ENOENT' || error.syscall !== 'open' || error.path !== root + '/missing' || error.errno >= 0) throw error; globalThis.nodeFsErrorPassed = true; }\n",
             "if (readdirSync(root).indexOf('value.txt') < 0) throw new Error('readdir mismatch');\n",
-            blitz::js!("const urlPath = { href: 'file://' + file };\n"),
+            denko::js!("const urlPath = { href: 'file://' + file };\n"),
             "if (readFileSync(urlPath, 'utf8') !== 'hello') throw new Error('URL path mismatch');\n",
             "renameSync(file, moved);\n",
-            blitz::js!("const promiseFile = root + '/promise.txt';\n"),
-            blitz::js!("const removable = root + '/removable';\n"),
+            denko::js!("const promiseFile = root + '/promise.txt';\n"),
+            denko::js!("const removable = root + '/removable';\n"),
             "mkdirSync(removable);\n",
             "writeFilePromise(promiseFile, 'promise').then(() => readFilePromise(promiseFile, 'utf8')).then(value => { if (value !== 'promise') throw new Error('promise read/write mismatch'); globalThis.nodeFsPromiseReadWritePassed = true; });\n",
             "rm(removable, { recursive: true }).then(() => { globalThis.nodeFsPromiseRmPassed = true; });\n",
@@ -1287,7 +1287,7 @@ mod tests {
       .properties
       .get(&PropertyKey::String(name.to_string().into()))
     {
-      Some(blitz::value::PropertyDescriptor::Data { value, .. }) => value.clone(),
+      Some(denko::value::PropertyDescriptor::Data { value, .. }) => value.clone(),
       _ => Value::Undefined,
     }
   }

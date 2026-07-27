@@ -32,7 +32,7 @@
 //! # Example
 //!
 //! ```
-//! use blitz::bytecode::{Chunk, Op};
+//! use denko::bytecode::{Chunk, Op};
 //! use std::sync::Arc;
 //!
 //! let mut chunk = Chunk::new(Arc::new(String::new()));

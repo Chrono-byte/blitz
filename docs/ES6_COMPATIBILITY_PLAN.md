@@ -266,7 +266,7 @@ For every implementation slice:
 1. Add a focused Rust unit test.
 2. Run the exact failing Test262 case.
 3. Run its containing feature directory.
-4. Run `cargo test -p blitz-engine --lib`.
+4. Run `cargo test -p denko-engine --lib`.
 5. Run `cargo test --workspace`.
 6. Run the ES6 smoke manifest.
 

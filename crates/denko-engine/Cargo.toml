@@ -1,17 +1,18 @@
 [package]
-name = "blitz-engine"
+name = "denko-engine"
 version.workspace = true
 edition.workspace = true
 license = "MPL-2.0"
 description = "Host-neutral ECMAScript engine for Blitz"
+readme = "README.md"
 
 [lib]
-name = "blitz"
+name = "denko"
 path = "src/lib.rs"
 
 [[bin]]
-name = "blitz-engine"
-path = "src/bin/blitz_engine.rs"
+name = "denko"
+path = "src/bin/denko.rs"
 
 [[bin]]
 name = "ast_dump"
@@ -22,7 +23,7 @@ name = "vm_suite"
 harness = false
 
 [dependencies]
-blitz-macros.workspace = true
+denko-macros.workspace = true
 clap.workspace = true
 crc32fast = "1.5.0"
 fastrand.workspace = true

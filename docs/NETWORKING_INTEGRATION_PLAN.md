@@ -3,14 +3,14 @@
 ## Goal
 
 Add production-grade networking without moving host policy into
-`blitz-engine` or allowing I/O tasks to mutate VM state. The first implemented
+`denko-engine` or allowing I/O tasks to mutate VM state. The first implemented
 slice includes runtime-owned WebSocket client/server and HTTP server transports
 plus a VM-thread `Blitz.serve` route API. Outbound `fetch`, TLS, and Node
 compatibility build on the same runtime event boundary.
 
 ## Decisions
 
-1. `blitz-engine` remains host-neutral. Networking belongs to
+1. `denko-engine` remains host-neutral. Networking belongs to
    `blitz-runtime`; `blitz-cli` only constructs and drives the runtime.
 2. Tokio is the runtime I/O executor for sockets, DNS, timers, signals,
    filesystem work, and outbound HTTP.
@@ -80,7 +80,7 @@ Blitz.serve((request) => {
 
 The runtime host adapter owns the WebSocket ready-state and buffered-byte state
 machine. Concrete sockets and all I/O also remain in `blitz-runtime`;
-`blitz-engine` has no WebSocket-specific behavior.
+`denko-engine` has no WebSocket-specific behavior.
 
 ## Target architecture
 

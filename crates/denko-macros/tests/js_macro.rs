@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 //! Behavioral coverage for the public source macro.
 
-use blitz_macros::js;
+use denko_macros::js;
 
 const SCRIPT: &str = js!("const answer = 42;");
 const MODULE: &str = js!(module, "export const answer = 42;");

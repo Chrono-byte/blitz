@@ -49,11 +49,11 @@ use serde::{Deserialize, Serialize};
 use tokio::runtime::Builder;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use blitz::compiler;
-use blitz::value::{
+use denko::compiler;
+use denko::value::{
   NativeFn, ObjectData, PropertyDescriptor, PropertyKey, Value, define_native_global,
 };
-use blitz::{parser::Parser, runtime_utils, typecheck, vm::Vm};
+use denko::{parser::Parser, runtime_utils, typecheck, vm::Vm};
 
 /// Calculates a percentage from two i64 values.
 /// This intentionally loses precision when converting i64 to f64 for display purposes.
@@ -148,15 +148,15 @@ fn force_runner_gc() {
   if env::var_os("TSBLITZ_GC_TRACE").is_some() {
     eprintln!(
       "[gc] runner force gc before={:?}",
-      blitz::gc::heap_snapshot()
+      denko::gc::heap_snapshot()
     );
   }
-  let stats = blitz::gc::collect(&[]);
+  let stats = denko::gc::collect(&[]);
   if env::var_os("TSBLITZ_GC_TRACE").is_some() {
     eprintln!(
       "[gc] runner force gc stats={:?} after={:?}",
       stats,
-      blitz::gc::heap_snapshot()
+      denko::gc::heap_snapshot()
     );
   }
 }
@@ -1921,7 +1921,7 @@ fn read_harness_source(path: &Path) -> Result<String, String> {
 fn parse_source_for_path(
   source: &str,
   path: &Path,
-) -> Result<blitz::parser::ParserSession, blitz::errors::ParserError> {
+) -> Result<denko::parser::ParserSession, denko::errors::ParserError> {
   let file_name = path
     .file_name()
     .and_then(|n| n.to_str())
@@ -2057,7 +2057,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     })
     .unwrap_or(Value::Null);
 
-  let host_builtin = |f: blitz::value::BuiltinFn| {
+  let host_builtin = |f: denko::value::BuiltinFn| {
     let props = Rc::new(RefCell::new(ObjectData::with_prototype(
       function_proto.clone(),
     )));
@@ -2069,7 +2069,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
   data.properties.insert(
     PropertyKey::String("evalScript".to_string().into()),
     PropertyDescriptor::ordinary_data(host_builtin(Rc::new(move |_vm, args| {
-      builtin_eval_script(&eval_globals, args).map_err(blitz::errors::RuntimeError::from)
+      builtin_eval_script(&eval_globals, args).map_err(denko::errors::RuntimeError::from)
     }))),
   );
 
@@ -2107,7 +2107,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     PropertyDescriptor::ordinary_data(Value::Undefined),
   );
 
-  let noop_agent_method: blitz::value::BuiltinFn =
+  let noop_agent_method: denko::value::BuiltinFn =
     Rc::new(|_: &mut Vm, _: &[Value]| Ok(Value::Undefined));
   let agent_obj = Rc::new(RefCell::new(ObjectData::new()));
   for name in &[
@@ -2161,7 +2161,7 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
         PropertyKey::String("eval".to_string().into()),
         PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |_vm, args| {
           eval_script_in_vm(&mut eval_vm.borrow_mut(), args)
-            .map_err(blitz::errors::RuntimeError::from)
+            .map_err(denko::errors::RuntimeError::from)
         }))),
       );
 
@@ -2552,7 +2552,7 @@ fn run_test_file(
         }
       }
       if vm.get_global("Test262Error").is_none() {
-        const FIX_SCRIPT: &str = blitz::js!(
+        const FIX_SCRIPT: &str = denko::js!(
           r#"
                     if (typeof Test262Error !== "undefined"
                         && typeof globalThis.Test262Error === "undefined") {
@@ -2696,7 +2696,7 @@ fn run_test_file(
           .instantiate_all()
           .map_err(|e| e.to_string())?;
       }
-      match blitz::module::evaluate_entry_shared(&loader_handle, path, &mut vm, false) {
+      match denko::module::evaluate_entry_shared(&loader_handle, path, &mut vm, false) {
         Ok(()) => Ok(Value::Undefined),
         Err(e) => Err(e.to_string()),
       }
@@ -2705,7 +2705,7 @@ fn run_test_file(
       let mut run_src = String::new();
       if *mode_name == "strict" && !raw_flag {
         // Per INTERPRETING.md: strict-mode run prefixes the entire source with "use strict".
-        run_src.push_str(blitz::js!("\"use strict\";\n"));
+        run_src.push_str(denko::js!("\"use strict\";\n"));
       }
       for inc_src in &include_sources {
         run_src.push_str(inc_src);
@@ -3120,7 +3120,7 @@ fn run_scope_dump_test(
     }
 
     if vm.get_global("Test262Error").is_none() {
-      const FIX_SCRIPT: &str = blitz::js!(
+      const FIX_SCRIPT: &str = denko::js!(
         r#"
                 if (typeof Test262Error !== "undefined"
                     && typeof globalThis.Test262Error === "undefined") {
@@ -3672,7 +3672,7 @@ mod tests {
 
     write_file(
       &file,
-      blitz::js!(
+      denko::js!(
         r#"/*---
 features: [array-grouping]
 ---*/
@@ -3695,7 +3695,7 @@ const ok = 1;
 
     write_file(
       &file,
-      blitz::js!(
+      denko::js!(
         r#"/*---
 es5id: 7.4_A6
 ---*/
@@ -3796,7 +3796,7 @@ var ok = 1;
 
     write_file(
       &es5_file,
-      blitz::js!(
+      denko::js!(
         r#"/*---
 features: [caller]
 ---*/
@@ -3806,7 +3806,7 @@ var ok = 1;
     );
     write_file(
       &es2024_file,
-      blitz::js!(
+      denko::js!(
         r#"/*---
 features: [array-grouping]
 ---*/
@@ -3814,7 +3814,7 @@ const ok = 1;
 "#
       ),
     );
-    write_file(&builtin_file, blitz::js!("const ok = 1;\n"));
+    write_file(&builtin_file, denko::js!("const ok = 1;\n"));
 
     let selected = select_files_to_run(
       vec![builtin_file, es2024_file, es5_file.clone()],
@@ -3985,7 +3985,7 @@ const ok = 1;
       .borrow_mut()
       .set_prototype_value(array_proto);
     let array = Value::Array(
-      Rc::new(RefCell::new(blitz::value::ArrayData::from(vec![
+      Rc::new(RefCell::new(denko::value::ArrayData::from(vec![
         Some(Value::Number(1.0)),
         Some(Value::Number(2.0)),
       ]))),
@@ -4024,7 +4024,7 @@ const ok = 1;
 
   #[test]
   fn extract_front_matter_and_parse_meta_read_test262_metadata() {
-    let src = blitz::js!(
+    let src = denko::js!(
       r#"/*---
 flags: [module, async]
 includes:
@@ -4053,7 +4053,7 @@ const x = 1;
   #[test]
   fn unsupported_reason_checks_module_flag_toggle() {
     let _guard = env_lock().lock().expect("env lock");
-    let src = blitz::js!(module, "/*---\nflags: [module]\n---*/\n");
+    let src = denko::js!(module, "/*---\nflags: [module]\n---*/\n");
     let meta = parse_meta(src);
     let path = Path::new("/tmp/test.js");
 
@@ -4082,14 +4082,14 @@ const x = 1;
     let include_dir = root.join("language");
     let excluded_dir = root.join("built-ins");
 
-    write_file(&include_dir.join("good.js"), blitz::js!("const ok = 1;\n"));
+    write_file(&include_dir.join("good.js"), denko::js!("const ok = 1;\n"));
     write_file(
       &include_dir.join("skip_FIXTURE.js"),
-      blitz::js!("const skip = 1;\n"),
+      denko::js!("const skip = 1;\n"),
     );
     write_file(
       &excluded_dir.join("ignored.js"),
-      blitz::js!("const nope = 1;\n"),
+      denko::js!("const nope = 1;\n"),
     );
 
     let mut out = Vec::new();

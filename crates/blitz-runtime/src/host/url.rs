@@ -5,10 +5,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ::url::Url;
-use blitz::Vm;
-use blitz::errors::RuntimeError;
-use blitz::gc;
-use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use denko::Vm;
+use denko::errors::RuntimeError;
+use denko::gc;
+use denko::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 pub(super) fn install(vm: &mut Vm) {
   let prototype = object(vm.realm().object_prototype());

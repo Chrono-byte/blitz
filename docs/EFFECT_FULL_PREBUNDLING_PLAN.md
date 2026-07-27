@@ -358,7 +358,7 @@ once with `OnceLock` or an equivalent immutable process cache.
 Installation should:
 
 1. decode and validate the complete wrapper without installing records;
-2. validate the generic graph in `blitz-engine`;
+2. validate the generic graph in `denko-engine`;
 3. validate Effect version/hash, stdlib manifest hash, runtime ABI, and host
    bridge ABI in `blitz-runtime`;
 4. install all required Rust host primitives;
@@ -426,7 +426,7 @@ Do not infer this only from elapsed time.
 - synchronous `Effect.runFork` still observes `42`;
 - root and deep imports share runtime identities;
 - corruption fails before module side effects;
-- raw `blitz-engine` still lacks Effect and Blitz stdlib modules;
+- raw `denko-engine` still lacks Effect and Blitz stdlib modules;
 - prelinked Blitz facades import the canonical prelinked Effect exports;
 - IRC chat v2 starts and serves `/health` with the final bundle.
 

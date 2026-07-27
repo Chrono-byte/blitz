@@ -8,10 +8,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use blitz::Vm;
-use blitz::errors::RuntimeError;
-use blitz::gc;
-use blitz::value::{ArrayData, BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use denko::Vm;
+use denko::errors::RuntimeError;
+use denko::gc;
+use denko::value::{ArrayData, BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 const ABORTED: &str = "aborted";
 const REASON: &str = "reason";

@@ -1,6 +1,6 @@
-# Blitz Engine
+# Denko Engine
 
-`blitz-engine` is the ECMAScript semantics boundary.
+`denko-engine` is the ECMAScript semantics boundary.
 
 - Implement parser, compiler, bytecode, and VM behavior according to the ECMAScript specification. Treat Test262 failures as engine correctness work, not opportunities for compatibility shortcuts.
 - Prioritize normative ECMAScript conformance over Annex B. Annex B contains legacy browser compatibility behavior and is a lower priority for this non-browser engine, though supported Annex B behavior should still be implemented correctly.

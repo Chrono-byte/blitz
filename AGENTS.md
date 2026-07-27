@@ -4,7 +4,7 @@ This project is a register based JavaScript VM. It is preferred to keep things o
 
 ## Engine, Runtime, and CLI Boundaries
 
-- `blitz-engine` must implement ECMAScript behavior faithfully. Do not relax or replace language semantics to improve usability.
+- `denko-engine` must implement ECMAScript behavior faithfully. Do not relax or replace language semantics to improve usability.
 - `blitz-runtime` may provide ergonomic host APIs and developer-facing behavior, provided those additions do not alter engine semantics or leak into raw-engine and conformance environments.
 - `blitz-cli` owns command-line and REPL presentation. Presentation may be more helpful than ECMAScript coercion as long as it does not change the evaluated value or observable language behavior.
 - Keep spec operations such as coercion, property access, proxy behavior, and completion values distinct from host-side inspection and formatting.

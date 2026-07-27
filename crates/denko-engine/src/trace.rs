@@ -13,7 +13,7 @@
 //! to emit diagnostic information:
 //!
 //! ```
-//! use blitz::trace;
+//! use denko::trace;
 //!
 //! if trace::enabled() {
 //!     trace::string("debug label", "value to inspect");

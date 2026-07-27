@@ -5,19 +5,19 @@
   clippy::missing_errors_doc
 )]
 
-use blitz::bytecode::BytecodeVersion;
-use blitz::compiler::core::ModuleContext;
-use blitz::module::{
-  ModuleLoader, ModuleRecord, ModuleRecordPayload, VirtualModule, VirtualModuleRegistry,
-};
-use blitz::prelinked::{PrelinkedExport, PrelinkedImport, PrelinkedModule, PrelinkedModuleGraph};
-use blitz::{Chunk, compile_oxc_with_ctx};
 use blitz_runtime::runtime_graph::{
   EFFECT_VERSION, HOST_BRIDGE_ABI_VERSION, HostPrimitiveRequirement, ModuleOrigin,
   ModuleVisibility, RUNTIME_ABI_VERSION, RUNTIME_GRAPH_FORMAT_VERSION, RuntimeGraphManifest,
   RuntimeModuleManifest, RuntimePrelinkedBundle, canonical_manifest_bytes, manifest_sha256,
 };
 use clap::{Args, Parser, Subcommand};
+use denko::bytecode::BytecodeVersion;
+use denko::compiler::core::ModuleContext;
+use denko::module::{
+  ModuleLoader, ModuleRecord, ModuleRecordPayload, VirtualModule, VirtualModuleRegistry,
+};
+use denko::prelinked::{PrelinkedExport, PrelinkedImport, PrelinkedModule, PrelinkedModuleGraph};
+use denko::{Chunk, compile_oxc_with_ctx};
 use oxc_span::SourceType;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -133,7 +133,7 @@ struct InputModule {
 }
 
 #[derive(Clone, Copy)]
-struct BindingKey(*const RefCell<blitz::Value>);
+struct BindingKey(*const RefCell<denko::Value>);
 
 impl std::hash::Hash for BindingKey {
   fn hash<H: std::hash::Hasher>(
@@ -445,7 +445,7 @@ fn build_artifact(root: &Path) -> Result<Vec<u8>, String> {
   source_manifest_hasher.update((canonical_stdlib_manifest.len() as u64).to_le_bytes());
   source_manifest_hasher.update(canonical_stdlib_manifest.as_ref());
   let graph = PrelinkedModuleGraph {
-    format_version: blitz::prelinked::PRELINKED_MODULE_GRAPH_VERSION,
+    format_version: denko::prelinked::PRELINKED_MODULE_GRAPH_VERSION,
     engine_bytecode_version: BytecodeVersion::RiscV2,
     package_name: "effect+blitz-stdlib".to_string(),
     package_version: format!("effect-{EFFECT_VERSION}+runtime-1"),
@@ -520,7 +520,7 @@ fn compile_record(record: &ModuleRecord) -> Result<Chunk, String> {
   };
   let chunk = compile_oxc_with_ctx(session.program(), Some(&context), session.source())
     .map_err(|error| format!("compile {}: {error}", record.specifier))?;
-  let chunk = blitz::runtime_utils::clear_slot_types_in_chunk(chunk);
+  let chunk = denko::runtime_utils::clear_slot_types_in_chunk(chunk);
   chunk
     .verify()
     .map_err(|error| format!("verify compiled {}: {error}", record.specifier))?;

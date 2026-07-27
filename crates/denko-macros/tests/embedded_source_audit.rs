@@ -73,7 +73,7 @@ fn rust_sources(root: &Path) -> impl Iterator<Item = PathBuf> + '_ {
         .components()
         .any(|component| component.as_os_str() == "target")
     })
-    .filter(|path| !path.starts_with(root.join("crates/blitz-macros")))
+    .filter(|path| !path.starts_with(root.join("crates/denko-macros")))
 }
 
 #[test]
@@ -115,7 +115,7 @@ fn rust_source_literals_use_the_javascript_macro() {
 
   assert!(
     failures.is_empty(),
-    "embedded JavaScript/TypeScript must use blitz::js! or crate::js!:\n{}",
+    "embedded JavaScript/TypeScript must use denko::js! or crate::js!:\n{}",
     failures.join("\n")
   );
 }

@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use blitz::parser::Parser as JsParser;
+use denko::parser::Parser as JsParser;
 use std::path::{Path, PathBuf};
 
 /// Resolves explicit files or discovers sources beneath a project root.
 pub(crate) fn paths(
   paths: &[PathBuf],
   project: Option<&Path>,
-) -> Result<Vec<PathBuf>, blitz::errors::Error> {
+) -> Result<Vec<PathBuf>, denko::errors::Error> {
   if project.is_some() && !paths.is_empty() {
     return Err(
-      blitz::errors::RuntimeError::from("--project cannot be combined with source files").into(),
+      denko::errors::RuntimeError::from("--project cannot be combined with source files").into(),
     );
   }
   if !paths.is_empty() {
@@ -35,17 +35,17 @@ pub(crate) fn paths(
 pub(crate) fn run(
   paths: &[PathBuf],
   strict: bool,
-) -> Result<bool, blitz::errors::Error> {
+) -> Result<bool, denko::errors::Error> {
   let mut success = true;
   for path in paths {
     let source = std::fs::read_to_string(path).map_err(|error| {
-      blitz::errors::RuntimeError::from(format!("Failed to read {}: {error}", path.display()))
+      denko::errors::RuntimeError::from(format!("Failed to read {}: {error}", path.display()))
     })?;
     let source_type = JsParser::source_type_for_path(path, false);
     match JsParser::parse_source_with_type(&source, source_type) {
       Ok(session) => {
-        let result = blitz::typecheck::with_strict_override(strict.then_some(true), || {
-          blitz::typecheck::check(session.program())
+        let result = denko::typecheck::with_strict_override(strict.then_some(true), || {
+          denko::typecheck::check(session.program())
         });
         if let Err(error) = result {
           eprintln!("{}: {error}", path.display());
@@ -71,19 +71,19 @@ fn is_typescript_path(path: &Path) -> bool {
 fn collect_files(
   directory: &Path,
   files: &mut Vec<PathBuf>,
-) -> Result<(), blitz::errors::Error> {
+) -> Result<(), denko::errors::Error> {
   let entries = std::fs::read_dir(directory).map_err(|error| {
-    blitz::errors::RuntimeError::from(format!(
+    denko::errors::RuntimeError::from(format!(
       "Failed to read project directory {}: {error}",
       directory.display()
     ))
   })?;
   for entry in entries {
-    let entry = entry.map_err(|error| blitz::errors::RuntimeError::from(error.to_string()))?;
+    let entry = entry.map_err(|error| denko::errors::RuntimeError::from(error.to_string()))?;
     let path = entry.path();
     let file_type = entry
       .file_type()
-      .map_err(|error| blitz::errors::RuntimeError::from(error.to_string()))?;
+      .map_err(|error| denko::errors::RuntimeError::from(error.to_string()))?;
     if file_type.is_symlink() {
       continue;
     }
@@ -149,11 +149,11 @@ mod tests {
     std::fs::create_dir_all(&source_directory).expect("create source directory");
     std::fs::create_dir_all(root.join("node_modules")).expect("create dependency directory");
     let source = source_directory.join("program.ts");
-    std::fs::write(&source, blitz::js!(typescript, "let value: number = 1;"))
+    std::fs::write(&source, denko::js!(typescript, "let value: number = 1;"))
       .expect("write source");
     std::fs::write(
       source_directory.join("types.d.ts"),
-      blitz::js!(typescript, "declare const value: number;"),
+      denko::js!(typescript, "declare const value: number;"),
     )
     .expect("write declaration");
     std::fs::write(root.join("node_modules").join("ignored.ts"), "").expect("write ignored file");
@@ -168,11 +168,11 @@ mod tests {
     std::fs::create_dir_all(&root).expect("create test directory");
     let valid = root.join("valid.ts");
     let invalid = root.join("invalid.ts");
-    std::fs::write(&valid, blitz::js!(typescript, "const answer: number = 42;"))
+    std::fs::write(&valid, denko::js!(typescript, "const answer: number = 42;"))
       .expect("write valid source");
     std::fs::write(
       &invalid,
-      blitz::js!(typescript, "const answer: number = 'wrong';"),
+      denko::js!(typescript, "const answer: number = 'wrong';"),
     )
     .expect("write invalid source");
 

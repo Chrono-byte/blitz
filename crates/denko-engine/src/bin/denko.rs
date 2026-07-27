@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Host-neutral command-line harness for the Blitz ECMAScript engine.
+//! Host-neutral command-line harness for the Denko ECMAScript engine.
 //!
 //! This binary intentionally does not install runtime APIs such as `console`,
 //! `process`, filesystem access, or networking. It is useful for engine
@@ -11,17 +11,17 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use blitz::compiler;
-use blitz::parser::Parser as JsParser;
-use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
-use blitz::vm::Vm;
 use clap::Parser;
+use denko::compiler;
+use denko::parser::Parser as JsParser;
+use denko::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use denko::vm::Vm;
 
 /// Raw engine command-line arguments.
 #[derive(Parser, Debug)]
 #[command(
-  name = "blitz-engine",
-  about = "Host-neutral command-line harness for the Blitz ECMAScript engine"
+  name = "denko",
+  about = "Host-neutral command-line harness for the Denko ECMAScript engine"
 )]
 struct Cli {
   /// JavaScript file to execute. If omitted, the engine REPL is started.
@@ -37,7 +37,7 @@ struct Cli {
   module: bool,
 }
 
-fn main() -> Result<(), blitz::errors::Error> {
+fn main() -> Result<(), denko::errors::Error> {
   let cli = Cli::parse();
   let mut vm = Vm::new(engine_globals());
 
@@ -65,9 +65,9 @@ fn engine_globals() -> Rc<RefCell<ObjectData>> {
 fn run_script(
   vm: &mut Vm,
   path: &Path,
-) -> Result<(), blitz::errors::Error> {
+) -> Result<(), denko::errors::Error> {
   let source = std::fs::read_to_string(path).map_err(|error| {
-    blitz::errors::RuntimeError::from(format!("Failed to read {}: {error}", path.display()))
+    denko::errors::RuntimeError::from(format!("Failed to read {}: {error}", path.display()))
   })?;
   let session = JsParser::parse_source(&source)?;
   let chunk = compiler::compile_oxc(session.program(), &source)?;
@@ -78,7 +78,7 @@ fn run_script(
 fn run_module(
   vm: &mut Vm,
   path: &Path,
-) -> Result<(), blitz::errors::Error> {
+) -> Result<(), denko::errors::Error> {
   let loader_handle = vm.module_loader_handle();
   {
     let mut loader = loader_handle.borrow_mut();
@@ -88,21 +88,21 @@ fn run_module(
         "./{}",
         path
           .file_name()
-          .ok_or_else(|| blitz::errors::RuntimeError::from("module path has no file name"))?
+          .ok_or_else(|| denko::errors::RuntimeError::from("module path has no file name"))?
           .to_string_lossy()
       ),
     )?;
     loader.instantiate_all()?;
   }
-  blitz::module::evaluate_entry_shared(&loader_handle, path, vm, false)?;
+  denko::module::evaluate_entry_shared(&loader_handle, path, vm, false)?;
   Ok(())
 }
 
-fn run_repl(vm: &mut Vm) -> Result<(), blitz::errors::Error> {
-  println!("Blitz engine REPL. Host APIs are disabled. Type exit to quit.");
+fn run_repl(vm: &mut Vm) -> Result<(), denko::errors::Error> {
+  println!("Denko REPL. Host APIs are disabled. Type exit to quit.");
   let mut editor = rustyline::Editor::<(), rustyline::history::DefaultHistory>::new()
-    .map_err(|error| blitz::errors::RuntimeError::from(format!("Readline init error: {error}")))?;
-  let history_path = env::temp_dir().join("blitz_engine_repl_history");
+    .map_err(|error| denko::errors::RuntimeError::from(format!("Readline init error: {error}")))?;
+  let history_path = env::temp_dir().join("denko_repl_history");
   drop(editor.load_history(&history_path));
 
   loop {
@@ -115,7 +115,7 @@ fn run_repl(vm: &mut Vm) -> Result<(), blitz::errors::Error> {
         drop(editor.add_history_entry(line.as_str()));
         match run_repl_source(vm, &line) {
           Ok(value) if !matches!(value, Value::Null | Value::Undefined) => {
-            println!("{}", blitz::inspect::inspect(&value));
+            println!("{}", denko::inspect::inspect(&value));
           }
           Ok(_) => {}
           Err(error) => eprintln!("Error: {error}"),
@@ -138,10 +138,10 @@ fn run_repl(vm: &mut Vm) -> Result<(), blitz::errors::Error> {
 fn run_repl_source(
   vm: &mut Vm,
   source: &str,
-) -> Result<Value, blitz::errors::Error> {
+) -> Result<Value, denko::errors::Error> {
   let session = JsParser::parse_source(source)?;
   let chunk = compiler::compile_oxc_repl(session.program(), source)?;
-  vm.run(chunk).map_err(blitz::errors::Error::from)
+  vm.run(chunk).map_err(denko::errors::Error::from)
 }
 
 #[cfg(test)]

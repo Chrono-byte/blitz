@@ -1696,7 +1696,7 @@ mod tests {
   fn rejects_mixed_sources_within_a_module() {
     let mut graph = graph();
     Arc::make_mut(&mut graph.modules[1].chunk.functions[0].chunk).source_text =
-      Arc::new("function nested() {}".into());
+      Arc::new(crate::js!("function nested() {}").into());
     assert!(
       matches!(encode(&graph), Err(PrelinkedGraphCodecError::InvalidData(message)) if message.contains("share source text"))
     );

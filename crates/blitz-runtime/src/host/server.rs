@@ -6,12 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::rc::Rc;
 
-use blitz::errors::RuntimeError;
-use blitz::gc;
-use blitz::value::{
+use denko::errors::RuntimeError;
+use denko::gc;
+use denko::value::{
   ArrayData, BuiltinFn, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, Value,
 };
-use blitz::{HostRoot, Vm};
+use denko::{HostRoot, Vm};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::watch;

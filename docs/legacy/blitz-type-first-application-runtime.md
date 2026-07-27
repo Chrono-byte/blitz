@@ -223,7 +223,7 @@ Add a pnpm-managed generation workspace that:
 
 Execute upstream Effect code rather than recreating Effect semantics in Rust.
 
-Run compatibility fixtures for Effect, Context, Layer, Scope, Fiber, Stream, Schedule, Match, interruption, and finalization. Any ECMAScript correctness failure is repaired in `blitz-engine`; host facilities such as timers remain in `blitz-runtime`.
+Run compatibility fixtures for Effect, Context, Layer, Scope, Fiber, Stream, Schedule, Match, interruption, and finalization. Any ECMAScript correctness failure is repaired in `denko-engine`; host facilities such as timers remain in `blitz-runtime`.
 
 ### 3. Strict typechecker expansion
 
@@ -440,7 +440,7 @@ Use pnpm-based type and runtime tests with injected transports. Verify that the 
 
 Run:
 
-- `cargo test -p blitz-engine -p blitz-runtime -p blitz-cli`
+- `cargo test -p denko-engine -p blitz-runtime -p blitz-cli`
 - `cargo clippy --workspace --all-targets`
 - pnpm typecheck and test scripts for generated assets and `@blitz/client`
 - Existing HTTP, WebSocket, terminal, module, and Test262-focused fixtures

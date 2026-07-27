@@ -11,5 +11,5 @@ cargo run -p blitz-test262 --bin test262
 ```
 
 Use `--help` for filters, edition selection, worker limits, manifests, and
-report output options. The package depends on `blitz-engine` as a conformance
+report output options. The package depends on `denko-engine` as a conformance
 consumer; it is not part of the engine's runtime surface.

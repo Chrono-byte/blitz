@@ -6,10 +6,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use blitz::Vm;
-use blitz::errors::RuntimeError;
-use blitz::gc;
-use blitz::value::{ArrayData, BuiltinFn, ObjectData, PropertyKey, Value};
+use denko::Vm;
+use denko::errors::RuntimeError;
+use denko::gc;
+use denko::value::{ArrayData, BuiltinFn, ObjectData, PropertyKey, Value};
 use url::Url;
 
 use super::{effect_fail, effect_succeed, effect_suspend, object, set};

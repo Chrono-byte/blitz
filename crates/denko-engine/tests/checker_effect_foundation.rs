@@ -3,20 +3,20 @@
 
 use std::path::Path;
 
-use blitz::parser::Parser;
-use blitz::typecheck::{VirtualDeclaration, check_with_declarations};
+use denko::parser::Parser;
+use denko::typecheck::{VirtualDeclaration, check_with_declarations};
 
 fn check_source(
   source: &str,
   name: &str,
   declarations: &[VirtualDeclaration],
-) -> Result<(), blitz::errors::TypeCheckerError> {
+) -> Result<(), denko::errors::TypeCheckerError> {
   let source_type = Parser::source_type_for_path(Path::new(name), false);
   let session = Parser::parse_source_with_type(source, source_type).expect("parse source");
   check_with_declarations(session.program(), declarations)
 }
 
-fn check_fixture(name: &str) -> Result<(), blitz::errors::TypeCheckerError> {
+fn check_fixture(name: &str) -> Result<(), denko::errors::TypeCheckerError> {
   let source = include_str!(concat!("fixtures/", "effect-foundation-positive.ts"));
   let source_type = Parser::source_type_for_path(Path::new(name), false);
   let session = Parser::parse_source_with_type(source, source_type).expect("parse fixture");
@@ -79,7 +79,7 @@ fn corrected_effect_foundation_fixture_rejects_bad_members_and_identity() {
 
 #[test]
 fn run_main_rejects_open_requirements() {
-  let source = blitz::js!(
+  let source = denko::js!(
     typescript,
     "import type * as Effect from \"effect/Effect\"; import type * as Runtime from \"blitz:runtime\"; const open = null as unknown as Effect.Effect<number, never, \"Clock\">; Runtime.runMain(open);"
   );
@@ -100,13 +100,13 @@ fn run_main_rejects_open_requirements() {
 
 #[test]
 fn missing_virtual_module_is_not_implicit_any() {
-  let source = blitz::js!(
+  let source = denko::js!(
     typescript,
     "import * as Missing from \"missing/module\"; const value = Missing.answer;"
   );
   let declarations = [VirtualDeclaration {
     specifier: "present/module".to_string(),
-    source: blitz::js!(typescript, "export declare const answer: number;").to_string(),
+    source: denko::js!(typescript, "export declare const answer: number;").to_string(),
   }];
   let result = check_source(source, "missing.ts", &declarations);
   assert!(result.is_err());
@@ -117,15 +117,15 @@ fn aggregate_declaration_can_precede_its_dependency() {
   let declarations = [
     VirtualDeclaration {
       specifier: "root".to_string(),
-      source: blitz::js!(typescript, "export * as Dependency from \"dependency\";").to_string(),
+      source: denko::js!(typescript, "export * as Dependency from \"dependency\";").to_string(),
     },
     VirtualDeclaration {
       specifier: "dependency".to_string(),
-      source: blitz::js!(typescript, "export declare const answer: number;").to_string(),
+      source: denko::js!(typescript, "export declare const answer: number;").to_string(),
     },
   ];
   let result = check_source(
-    blitz::js!(
+    denko::js!(
       typescript,
       "import * as Root from \"root\"; const answer: number = Root.Dependency.answer;"
     ),
@@ -139,14 +139,14 @@ fn aggregate_declaration_can_precede_its_dependency() {
 fn namespace_imports_include_type_only_members() {
   let declarations = [VirtualDeclaration {
     specifier: "api".to_string(),
-    source: blitz::js!(
+    source: denko::js!(
       typescript,
       "export interface Service { value: number } export declare const make: () => Service;"
     )
     .to_string(),
   }];
   let result = check_source(
-    blitz::js!(
+    denko::js!(
       typescript,
       "import type * as Api from \"api\"; const service: Api.Service = Api.make();"
     ),
@@ -160,10 +160,10 @@ fn namespace_imports_include_type_only_members() {
 fn missing_virtual_members_are_rejected() {
   let declarations = [VirtualDeclaration {
     specifier: "api".to_string(),
-    source: blitz::js!(typescript, "export declare const answer: number;").to_string(),
+    source: denko::js!(typescript, "export declare const answer: number;").to_string(),
   }];
   let result = check_source(
-    blitz::js!(
+    denko::js!(
       typescript,
       "import * as Api from \"api\"; const value = Api.missing;"
     ),
@@ -177,7 +177,7 @@ fn missing_virtual_members_are_rejected() {
 fn module_local_helpers_resolve_without_becoming_exports() {
   let declarations = [VirtualDeclaration {
     specifier: "effect/Effect".to_string(),
-    source: blitz::js!(typescript, r#"
+    source: denko::js!(typescript, r#"
       export interface Effect<A> {}
       interface Exit<A> { readonly value: A }
       interface RunCallbackOptions<A> { readonly onExit?: (exit: Exit<A>) => void }
@@ -187,7 +187,7 @@ fn module_local_helpers_resolve_without_becoming_exports() {
     .to_string(),
   }, VirtualDeclaration {
     specifier: "effect/Scope".to_string(),
-    source: blitz::js!(typescript, r#"
+    source: denko::js!(typescript, r#"
       interface ExecutionStrategy { readonly _tag: "Sequential" }
       export interface Scope { readonly strategy: ExecutionStrategy }
       export declare const make: (executionStrategy?: ExecutionStrategy) => Scope;
@@ -195,7 +195,7 @@ fn module_local_helpers_resolve_without_becoming_exports() {
     .to_string(),
   }];
   let result = check_source(
-    blitz::js!(
+    denko::js!(
       typescript,
       r#"
       import * as Effect from "effect/Effect";
@@ -211,7 +211,7 @@ fn module_local_helpers_resolve_without_becoming_exports() {
   assert!(result.is_ok(), "{result:?}");
 
   let private_import = check_source(
-    blitz::js!(
+    denko::js!(
       typescript,
       "import type { RunCallbackOptions } from \"effect/Effect\";"
     ),
@@ -220,7 +220,7 @@ fn module_local_helpers_resolve_without_becoming_exports() {
   );
   assert!(private_import.is_err());
   let private_scope_import = check_source(
-    blitz::js!(
+    denko::js!(
       typescript,
       "import type { ExecutionStrategy } from \"effect/Scope\";"
     ),
@@ -234,7 +234,7 @@ fn bundled_effect_declarations() -> Vec<VirtualDeclaration> {
   vec![
     VirtualDeclaration {
       specifier: "effect/Effect".to_string(),
-      source: blitz::js!(typescript, r#"
+      source: denko::js!(typescript, r#"
         interface FiberId {}
         interface Exit<A, E> { readonly value: A; readonly error: E }
         interface RunCallbackOptions<A, E = never> {
@@ -251,7 +251,7 @@ fn bundled_effect_declarations() -> Vec<VirtualDeclaration> {
     },
     VirtualDeclaration {
       specifier: "effect/Scope".to_string(),
-      source: blitz::js!(typescript, r#"
+      source: denko::js!(typescript, r#"
         interface Pipeable<Self> {
           readonly pipe: <A>(ab: (self: Self) => A) => A;
         }
@@ -272,7 +272,7 @@ fn bundled_effect_declarations() -> Vec<VirtualDeclaration> {
 fn bundled_effect_run_callback_and_scope_make_signatures_resolve() {
   let declarations = bundled_effect_declarations();
   let valid = check_source(
-    blitz::js!(
+    denko::js!(
       typescript,
       r#"
       import * as Effect from "effect/Effect";
@@ -292,7 +292,7 @@ fn bundled_effect_run_callback_and_scope_make_signatures_resolve() {
 fn declaration_overloads_and_requirements_are_checked() {
   let declarations = [VirtualDeclaration {
     specifier: "api".to_string(),
-    source: blitz::js!(
+    source: denko::js!(
       typescript,
       r#"
       export declare const overloaded: {
@@ -306,7 +306,7 @@ fn declaration_overloads_and_requirements_are_checked() {
     .to_string(),
   }];
   let valid = check_source(
-    blitz::js!(
+    denko::js!(
       typescript,
       "import type * as Api from \"api\"; const numberResult: number = Api.overloaded(\"ok\"); const stringResult: string = Api.overloaded(1); const effect = null as unknown as Api.Effect<number>; Api.run(effect);"
     ),
@@ -314,7 +314,7 @@ fn declaration_overloads_and_requirements_are_checked() {
     &declarations,
   );
   let invalid = check_source(
-    blitz::js!(
+    denko::js!(
       typescript,
       "import type * as Api from \"api\"; const result: boolean = Api.overloaded(true);"
     ),
@@ -322,7 +322,7 @@ fn declaration_overloads_and_requirements_are_checked() {
     &declarations,
   );
   let open_requirement = check_source(
-    blitz::js!(
+    denko::js!(
       typescript,
       "import type * as Api from \"api\"; const effect = null as unknown as Api.Effect<number, \"Clock\">; Api.run(effect);"
     ),

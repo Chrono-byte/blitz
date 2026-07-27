@@ -10,10 +10,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use blitz::Vm;
-use blitz::errors::RuntimeError;
-use blitz::gc;
-use blitz::value::{ArrayData, ObjectData, Uint8ArrayByteView, Value};
+use denko::Vm;
+use denko::errors::RuntimeError;
+use denko::gc;
+use denko::value::{ArrayData, ObjectData, Uint8ArrayByteView, Value};
 use getrandom::getrandom;
 
 use super::{object, set};
@@ -530,8 +530,8 @@ fn entropy_failure(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use blitz::module::{VirtualModule, evaluate_entry_shared};
-  use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey};
+  use denko::module::{VirtualModule, evaluate_entry_shared};
+  use denko::value::{ObjectData, PropertyDescriptor, PropertyKey};
   use oxc_span::SourceType;
   use std::path::Path;
 
@@ -694,7 +694,7 @@ mod tests {
       loader
         .register_virtual_module(VirtualModule::javascript(
           "blitz-internal:host",
-          blitz::js!(module, "export const host = globalThis.__blitz_host_v1;"),
+          denko::js!(module, "export const host = globalThis.__blitz_host_v1;"),
           SourceType::mjs(),
           None,
         ))
@@ -720,7 +720,7 @@ mod tests {
       loader
         .register_virtual_module(VirtualModule::javascript(
           "node-crypto-facade-entry",
-          blitz::js!(module, r#"
+          denko::js!(module, r#"
             import crypto, { randomBytes, randomFill, randomFillSync, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
             const id = randomUUID();
             if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) throw new Error("invalid RFC 4122 v4 UUID");

@@ -24,7 +24,7 @@ jobs:
 
       - name: Run ES6 conformance baseline
         continue-on-error: true
-        run: cargo run --locked -p blitz-engine --bin test262 -- --manifest docs/test262/es6-manifest.txt --summary-json target/test262/es6-summary.json --workers 4 --batch-size 20 --subprocess-timeout 35 --quiet
+        run: cargo run --locked -p blitz-test262 --bin test262 -- --manifest docs/test262/es6-manifest.txt --summary-json target/test262/es6-summary.json --workers 4 --batch-size 20 --subprocess-timeout 35 --quiet
 
       - name: Verify conformance report
         run: test -s target/test262/es6-summary.json

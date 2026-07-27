@@ -7,10 +7,10 @@ use std::io::{self, Write};
 use std::rc::Rc;
 use std::time::Instant;
 
-use blitz::Vm;
-use blitz::gc;
-use blitz::inspect::{InspectOptions, inspect_with_options};
-use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use denko::Vm;
+use denko::gc;
+use denko::inspect::{InspectOptions, inspect_with_options};
+use denko::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 #[derive(Default)]
 struct ConsoleState {

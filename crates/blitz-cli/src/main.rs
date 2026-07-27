@@ -2,19 +2,18 @@
 //! CLI entry point for the full Blitz JavaScript runtime.
 //!
 //! This executable installs OS-facing host APIs such as `console` and
-//! `process` before evaluating user code. Use `blitz-engine` when testing the
+//! `process` before evaluating user code. Use `denko-engine` when testing the
 //! host-neutral ECMAScript engine directly.
 
 mod analysis;
 mod args;
 mod execution;
-mod repl;
 mod typecheck;
 
 use args::{Cli, CliCommand, ExecutionArgs};
 use clap::Parser;
 
-fn main() -> Result<(), blitz::errors::Error> {
+fn main() -> Result<(), denko::errors::Error> {
   // Parse before runtime setup so clap handles --help and --version immediately.
   let cli = Cli::parse();
   let node_compat = cli.node_compat.into();
@@ -36,9 +35,15 @@ fn main() -> Result<(), blitz::errors::Error> {
         args: run.args,
       }
     }
+    Some(CliCommand::Repl) => ExecutionArgs {
+      file: None,
+      test262_harness: false,
+      module: false,
+      args: Vec::new(),
+    },
     Some(CliCommand::Analyze(analyze)) => return analysis::run(analyze),
     None => ExecutionArgs {
-      file: cli.file,
+      file: if cli.repl { None } else { cli.file },
       test262_harness: cli.test262_harness,
       module: cli.module,
       args: cli.args,

@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use blitz::compiler;
-use blitz::parser::Parser;
-use blitz::runtime_utils;
-use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
-use blitz::vm::Vm;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use denko::compiler;
+use denko::parser::Parser;
+use denko::runtime_utils;
+use denko::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use denko::vm::Vm;
 
 /// Fixtures for cold-start benchmarking (executed once per benchmark).
 const COLD_START_FIXTURES: [&str; 4] = [
@@ -74,7 +74,7 @@ fn benchmark_globals() -> Rc<RefCell<ObjectData>> {
 
 /// Returns a source string for the unicode comment hotpath benchmark.
 fn unicode_comment_hotpath_source() -> String {
-  blitz::js!(
+  denko::js!(
     r#"
         var hex = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F"];
         for (var i = 0; i < 4096; i++) {
@@ -91,7 +91,7 @@ fn unicode_comment_hotpath_source() -> String {
 
 /// Returns a source string for the comment-only eval benchmark.
 fn comment_only_eval_source() -> String {
-  blitz::js!(
+  denko::js!(
     r#"
         for (var i = 0; i < 4096; i++) {
             eval("/* comment */");
@@ -107,7 +107,7 @@ fn hotpath_number_value() -> Value {
 }
 
 /// Compiles a benchmark fixture from the given path.
-fn compile_fixture(path: &Path) -> blitz::bytecode::Chunk {
+fn compile_fixture(path: &Path) -> denko::bytecode::Chunk {
   let source = std::fs::read_to_string(path).expect("benchmark fixture should be readable");
   let session = Parser::parse_source(&source).expect("benchmark fixture should parse as JS");
   compiler::compile_oxc(session.program(), &source).expect("benchmark fixture should compile")

@@ -4,10 +4,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use blitz::Vm;
-use blitz::errors::RuntimeError;
-use blitz::gc;
-use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+use denko::Vm;
+use denko::errors::RuntimeError;
+use denko::gc;
+use denko::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 
 use super::RuntimeOptions;
 
@@ -125,8 +125,8 @@ mod tests {
 
   use super::*;
   use crate::host::NodeCompatProfile;
-  use blitz::compiler;
-  use blitz::parser::Parser as JsParser;
+  use denko::compiler;
+  use denko::parser::Parser as JsParser;
 
   #[test]
   fn installs_process_metadata_for_scripts() {
@@ -154,7 +154,7 @@ mod tests {
       },
     );
 
-    let source = blitz::js!(
+    let source = denko::js!(
       r#"
       globalThis.hostResult = process.argv[2] + ":" + process.env.BLITZ_HOST_TEST;
       globalThis.hostCwdIsString = typeof process.cwd() === "string";

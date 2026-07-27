@@ -10,7 +10,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use blitz::{js, parser::Parser};
+//! use denko::{js, parser::Parser};
 //!
 //! let source = js!(typescript, "let x: number = 42;");
 //! let program = Parser::parse_source(source)?;

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use blitz::Vm;
+use denko::Vm;
 use tokio::sync::{mpsc, watch};
 
 use super::event_loop::{EventRegistry, EventSender, ResourceHandle, ResourceRegistry};
@@ -530,7 +530,7 @@ mod tests {
   use std::cell::RefCell;
   use std::rc::Rc;
 
-  use blitz::value::ObjectData;
+  use denko::value::ObjectData;
 
   use super::*;
 

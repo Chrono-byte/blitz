@@ -17,7 +17,7 @@
 //! # Usage
 //!
 //! ```
-//! use blitz::errors::{Error, ParserError};
+//! use denko::errors::{Error, ParserError};
 //!
 //! fn may_fail() -> Result<(), Error> {
 //!     Err(ParserError::from("Unexpected token"))?

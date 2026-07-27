@@ -379,7 +379,7 @@ impl<E> EventRegistry<E> {
   }
 
   /// Temporarily take the receiver for a host runtime's `'static` blocking
-  /// bridge, such as [`blitz::Vm::block_on`].
+  /// bridge, such as [`denko::Vm::block_on`].
   pub fn take_receiver(&mut self) -> Option<mpsc::Receiver<E>> {
     self.receiver.take()
   }

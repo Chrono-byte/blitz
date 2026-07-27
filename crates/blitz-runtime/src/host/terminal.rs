@@ -6,10 +6,10 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use blitz::errors::RuntimeError;
-use blitz::gc;
-use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
-use blitz::{HostRoot, Vm};
+use denko::errors::RuntimeError;
+use denko::gc;
+use denko::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use denko::{HostRoot, Vm};
 use rustyline::{DefaultEditor, ExternalPrinter};
 use tokio::sync::mpsc;
 
@@ -337,8 +337,8 @@ fn set(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use blitz::compiler;
-  use blitz::parser::Parser as JsParser;
+  use denko::compiler;
+  use denko::parser::Parser as JsParser;
 
   #[test]
   fn installs_buffered_terminal_api() {
@@ -378,7 +378,7 @@ mod tests {
     vm.realm().set_global("Blitz", blitz);
     let (events, _receiver) = mpsc::channel(1);
     let state = install(&mut vm, events);
-    let source = blitz::js!(
+    let source = denko::js!(
       r#"
       globalThis.sentLine = "";
       const prefix = "MSG ";
@@ -422,7 +422,7 @@ mod tests {
     vm.realm().set_global("Blitz", blitz);
     let (events, _receiver) = mpsc::channel(1);
     let state = install(&mut vm, events);
-    let source = blitz::js!(
+    let source = denko::js!(
       r#"
       globalThis.WebSocket = { OPEN: 1 };
       globalThis.sentLine = "";

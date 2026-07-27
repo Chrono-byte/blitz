@@ -6,7 +6,7 @@
 //! evaluates an application entry, including reachable `node_modules` ESM and
 //! TypeScript sources.
 
-use blitz::Vm;
+use denko::Vm;
 use std::path::Path;
 
 /// Construct, instantiate, and evaluate a hosted application module graph.
@@ -23,7 +23,7 @@ use std::path::Path;
 pub fn evaluate_entry(
   vm: &mut Vm,
   path: &Path,
-) -> Result<(), blitz::errors::Error> {
+) -> Result<(), denko::errors::Error> {
   let loader = vm.module_loader_handle();
   {
     let mut loader = loader.borrow_mut();
@@ -33,20 +33,20 @@ pub fn evaluate_entry(
         "./{}",
         path
           .file_name()
-          .ok_or_else(|| blitz::errors::RuntimeError::from("Module entry has no file name"))?
+          .ok_or_else(|| denko::errors::RuntimeError::from("Module entry has no file name"))?
           .to_string_lossy()
       ),
     )?;
     loader.instantiate_all()?;
   }
-  blitz::module::evaluate_entry_shared(&loader, path, vm, false)?;
+  denko::module::evaluate_entry_shared(&loader, path, vm, false)?;
   Ok(())
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+  use denko::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
   use std::cell::RefCell;
   use std::path::PathBuf;
   use std::rc::Rc;
@@ -150,7 +150,7 @@ mod tests {
     let entry = directory.join("entry.ts");
     std::fs::write(
       &entry,
-      blitz::js!(
+      denko::js!(
         module,
         "import process, { argv, cwd, platform } from 'node:process'; if (argv !== process.argv || cwd() !== process.cwd() || platform !== process.platform) throw new Error('node:process exports do not share process state');"
       ),
@@ -168,7 +168,7 @@ mod tests {
         .instantiate_all()
         .expect("instantiate node:process graph");
     }
-    blitz::module::evaluate_entry_shared(&loader, &entry, &mut vm, true)
+    denko::module::evaluate_entry_shared(&loader, &entry, &mut vm, true)
       .expect("typecheck and evaluate node:process entry");
 
     std::fs::remove_dir_all(directory).expect("remove node:process project");
@@ -180,7 +180,7 @@ mod tests {
     let entry = directory.join("entry.ts");
     std::fs::write(
       &entry,
-      blitz::js!(module, r#"
+      denko::js!(module, r#"
         import assert from "node:assert";
         import strictAssert from "node:assert/strict";
         import asyncHooks from "node:async_hooks";
@@ -247,7 +247,7 @@ mod tests {
         .instantiate_all()
         .expect("instantiate pure node graph");
     }
-    blitz::module::evaluate_entry_shared(&loader, &entry, &mut vm, true)
+    denko::module::evaluate_entry_shared(&loader, &entry, &mut vm, true)
       .expect("typecheck and evaluate pure node entry");
     std::fs::remove_dir_all(directory).expect("remove pure node project");
   }
@@ -258,7 +258,7 @@ mod tests {
     let entry = directory.join("entry.ts");
     std::fs::write(
       &entry,
-      blitz::js!(module, r#"
+      denko::js!(module, r#"
         import crypto, { randomUUID } from "node:crypto";
         import fs, { readFileSync } from "node:fs";
         import fsPromises, { readFile } from "node:fs/promises";
@@ -284,7 +284,7 @@ mod tests {
         .instantiate_all()
         .expect("instantiate tooling type graph");
     }
-    blitz::module::evaluate_entry_shared(&loader, &entry, &mut vm, true)
+    denko::module::evaluate_entry_shared(&loader, &entry, &mut vm, true)
       .expect("typecheck and evaluate tooling node declarations");
 
     std::fs::remove_dir_all(directory).expect("remove tooling type project");
@@ -296,7 +296,7 @@ mod tests {
     let entry = directory.join("entry.mjs");
     std::fs::write(
       &entry,
-      blitz::js!(module, r#"
+      denko::js!(module, r#"
         import EventEmitter, { getEventListeners, once } from "node:events";
         const emitter = new EventEmitter();
         let result = "";
@@ -325,7 +325,7 @@ mod tests {
     let directory = temporary_directory("node-fs");
     let entry = directory.join("entry.mjs");
     let data = directory.join("data.txt");
-    let source = blitz::js!(
+    let source = denko::js!(
       format(module),
       r#"
         import crypto, {{ randomUUID }} from "node:crypto";
@@ -358,7 +358,7 @@ mod tests {
     let entry = directory.join("entry.mjs");
     std::fs::write(
       &entry,
-      blitz::js!(module, r#"
+      denko::js!(module, r#"
         import EventEmitter from "node:events";
         import readline from "node:readline";
         import readlinePromises from "node:readline/promises";
@@ -392,7 +392,7 @@ mod tests {
     let entry = directory.join("entry.mjs");
     std::fs::write(
       &entry,
-      blitz::js!(module, r#"
+      denko::js!(module, r#"
         import domain from "node:domain";
         import punycode from "node:punycode";
         import sea from "node:sea";
@@ -425,7 +425,7 @@ mod tests {
   fn rejects_node_modules_outside_the_selected_profile() {
     let directory = temporary_directory("node-process-off");
     let entry = directory.join("entry.ts");
-    std::fs::write(&entry, blitz::js!(module, "import 'node:process';"))
+    std::fs::write(&entry, denko::js!(module, "import 'node:process';"))
       .expect("write disabled node entry");
 
     let (mut vm, _runtime) = runtime_vm(crate::host::NodeCompatProfile::Off);
@@ -439,7 +439,7 @@ mod tests {
   fn rejects_unknown_node_modules_with_the_requested_specifier() {
     let directory = temporary_directory("node-unknown");
     let entry = directory.join("entry.mjs");
-    std::fs::write(&entry, blitz::js!(module, "import 'node:future-module';"))
+    std::fs::write(&entry, denko::js!(module, "import 'node:future-module';"))
       .expect("write unknown node entry");
 
     for profile in [
@@ -510,7 +510,7 @@ mod tests {
     .expect("write package manifest");
     std::fs::write(
       package.join("index.ts"),
-      blitz::js!(
+      denko::js!(
         typescript,
         "import { base } from 'fixture-dependency'; export const answer: number = base + 1;"
       ),
@@ -523,13 +523,13 @@ mod tests {
     .expect("write dependency manifest");
     std::fs::write(
       dependency.join("index.js"),
-      blitz::js!(module, "export const base = 41;"),
+      denko::js!(module, "export const base = 41;"),
     )
     .expect("write dependency source");
     let entry = directory.join("entry.ts");
     std::fs::write(
       &entry,
-      blitz::js!(
+      denko::js!(
         module,
         "import { answer } from 'fixture-package'; globalThis.packageAnswer = answer;"
       ),
@@ -565,23 +565,23 @@ mod tests {
     .expect("write scoped package manifest");
     std::fs::write(
       package.join("node.js"),
-      blitz::js!(module, "export const selected = 'node';"),
+      denko::js!(module, "export const selected = 'node';"),
     )
     .expect("write node export");
     std::fs::write(
       package.join("import.js"),
-      blitz::js!(module, "export const selected = 'import';"),
+      denko::js!(module, "export const selected = 'import';"),
     )
     .expect("write import export");
     std::fs::write(
       package.join("default.js"),
-      blitz::js!(module, "export const selected = 'default';"),
+      denko::js!(module, "export const selected = 'default';"),
     )
     .expect("write default export");
     let entry = directory.join("entry.ts");
     std::fs::write(
       &entry,
-      blitz::js!(
+      denko::js!(
         module,
         "import { selected } from '@fixture/condition'; globalThis.selectedCondition = selected;"
       ),
@@ -611,14 +611,14 @@ mod tests {
     .expect("write package manifest");
     std::fs::write(
       package.join("index.js"),
-      blitz::js!(
+      denko::js!(
         module,
         "import 'missing-dependency'; export const loaded = true;"
       ),
     )
     .expect("write package source");
     let entry = directory.join("entry.ts");
-    std::fs::write(&entry, blitz::js!(module, "import 'fixture-package';")).expect("write entry");
+    std::fs::write(&entry, denko::js!(module, "import 'fixture-package';")).expect("write entry");
 
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     let mut vm = Vm::new(globals);
@@ -648,13 +648,13 @@ mod tests {
     .expect("write project tsconfig");
     std::fs::write(
       directory.join("src/lib/value.ts"),
-      blitz::js!(typescript, "export const mapped: number = 42;"),
+      denko::js!(typescript, "export const mapped: number = 42;"),
     )
     .expect("write mapped source");
     let entry = directory.join("src/entry.ts");
     std::fs::write(
       &entry,
-      blitz::js!(
+      denko::js!(
         module,
         "import { mapped } from '@lib/value'; globalThis.mappedAnswer = mapped;"
       ),

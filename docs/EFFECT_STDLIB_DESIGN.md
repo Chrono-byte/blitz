@@ -498,7 +498,7 @@ Keep these rules:
 - make generation deterministic, atomic, network-free, and absent from
   `build.rs` and runtime startup;
 - register one canonical private module identity graph in `blitz-runtime` while
-  keeping raw `blitz-engine` environments free of Effect and Blitz modules;
+  keeping raw `denko-engine` environments free of Effect and Blitz modules;
 - allocate canonical live slots before evaluation so cycles, re-exports,
   namespaces, and root/deep import identity remain correct;
 - validate format, bytecode, graph edges, descriptors, indices, binding IDs,

@@ -30,7 +30,12 @@ impl From<NodeCompatArg> for blitz_runtime::host::NodeCompatProfile {
 
 /// Command line arguments for the Blitz executable.
 #[derive(Parser, Debug)]
-#[command(name = "blitz", about = "Blitz", subcommand_precedence_over_arg = true)]
+#[command(
+  name = "blitz",
+  version,
+  about = "Blitz JavaScript and TypeScript runtime",
+  subcommand_precedence_over_arg = true
+)]
 pub(crate) struct Cli {
   /// Explicit toolchain or execution command.
   #[command(subcommand)]
@@ -44,9 +49,17 @@ pub(crate) struct Cli {
   #[arg(long, value_enum, default_value_t = NodeCompatArg::Core, global = true)]
   pub(crate) node_compat: NodeCompatArg,
 
-  /// Start the REPL even when a file is not provided.
-  #[arg(short, long, action)]
+  /// Start the hosted Blitz REPL instead of executing a positional file.
+  #[arg(long, action)]
   pub(crate) repl: bool,
+
+  /// Evaluate JavaScript or TypeScript source.
+  #[arg(short = 'e', long, value_name = "SOURCE", conflicts_with = "print")]
+  pub(crate) eval: Option<String>,
+
+  /// Evaluate source and print its completion value.
+  #[arg(short = 'p', long, value_name = "SOURCE", conflicts_with = "eval")]
+  pub(crate) print: Option<String>,
 
   /// Run the file with Test262 host globals (`print`, `$262`, etc.).
   #[arg(long, action)]
@@ -70,6 +83,8 @@ pub(crate) struct Cli {
 pub(crate) enum CliCommand {
   /// Run a JavaScript or TypeScript file.
   Run(RunArgs),
+  /// Start the hosted Blitz REPL.
+  Repl,
   /// Type-check a project or source files with Blitz's in-process checker.
   Check(CheckArgs),
   /// Print compiler-owned editor analysis as JSON.
@@ -148,6 +163,8 @@ pub(crate) struct AnalyzeArgs {
 #[derive(Debug)]
 pub(crate) struct ExecutionArgs {
   pub(crate) file: Option<PathBuf>,
+  pub(crate) eval: Option<String>,
+  pub(crate) print: bool,
   pub(crate) test262_harness: bool,
   pub(crate) module: bool,
   pub(crate) args: Vec<String>,
@@ -195,5 +212,24 @@ mod tests {
       assert_eq!(run.file, PathBuf::from("program.ts"));
       assert_eq!(run.args, ["one"]);
     }
+  }
+
+  #[test]
+  fn parses_explicit_repl_command() {
+    let cli = Cli::try_parse_from(["blitz", "repl"]).expect("parse");
+    assert!(matches!(cli.command, Some(CliCommand::Repl)));
+  }
+
+  #[test]
+  fn parses_eval_and_print_modes() {
+    let eval = Cli::try_parse_from(["blitz", "-e", "console.log('hello')"]).expect("parse eval");
+    assert_eq!(eval.eval.as_deref(), Some("console.log('hello')"));
+    assert!(eval.print.is_none());
+
+    let print = Cli::try_parse_from(["blitz", "--print", "1 + 2"]).expect("parse print");
+    assert_eq!(print.print.as_deref(), Some("1 + 2"));
+    assert!(print.eval.is_none());
+
+    assert!(Cli::try_parse_from(["blitz", "-e", "1", "-p", "2"]).is_err());
   }
 }

@@ -3,7 +3,7 @@ name = "blitz-test262"
 version.workspace = true
 edition.workspace = true
 license = "MPL-2.0"
-description = "Test262 conformance runner for the Blitz ECMAScript engine"
+description = "Test262 conformance runner for the Denko ECMAScript engine"
 readme = "README.md"
 
 [[bin]]
@@ -11,7 +11,7 @@ name = "test262"
 path = "src/main.rs"
 
 [dependencies]
-blitz.workspace = true
+denko.workspace = true
 clap.workspace = true
 futures.workspace = true
 oxc_span.workspace = true

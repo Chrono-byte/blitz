@@ -19,7 +19,7 @@ upstream changes are intentional upgrades rather than accidental drift.
 
 ## Boundaries
 
-1. `blitz-engine` remains host-neutral and implements only ECMAScript behavior.
+1. `denko-engine` remains host-neutral and implements only ECMAScript behavior.
 2. `blitz-runtime` owns `Blitz.*`, operating-system capabilities, resources,
    permissions, and event delivery.
 3. `blitz-cli` owns diagnostics and command-line presentation.

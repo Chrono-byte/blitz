@@ -1,9 +1,9 @@
 [package]
-name = "blitz-macros"
+name = "denko-macros"
 version.workspace = true
 edition.workspace = true
 license = "MPL-2.0"
-description = "Compile-time source validation macros for Blitz"
+description = "Compile-time source validation macros for Denko"
 
 [lib]
 proc-macro = true

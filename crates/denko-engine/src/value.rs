@@ -49,7 +49,7 @@
 //! # Example
 //!
 //! ```
-//! use blitz::value::Value;
+//! use denko::value::Value;
 //!
 //! let num = Value::Number(42.0);
 //! let s = Value::String("hello".to_string().into());

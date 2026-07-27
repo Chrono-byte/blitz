@@ -23,49 +23,49 @@ enum ServerRequest {
   },
 }
 
-pub(crate) fn run(args: AnalyzeArgs) -> Result<(), blitz::errors::Error> {
+pub(crate) fn run(args: AnalyzeArgs) -> Result<(), denko::errors::Error> {
   if args.server {
     run_server(args.strict)?;
     return Ok(());
   }
 
   let file = args.file.as_deref().ok_or_else(|| {
-    blitz::errors::RuntimeError::from("Analyze requires a file unless --server is used")
+    denko::errors::RuntimeError::from("Analyze requires a file unless --server is used")
   })?;
   let source = if file == Path::new("-") {
     let mut source = String::new();
     std::io::stdin()
       .read_to_string(&mut source)
       .map_err(|error| {
-        blitz::errors::RuntimeError::from(format!("Failed to read standard input: {error}"))
+        denko::errors::RuntimeError::from(format!("Failed to read standard input: {error}"))
       })?;
     source
   } else {
     std::fs::read_to_string(file).map_err(|error| {
-      blitz::errors::RuntimeError::from(format!("Failed to read {}: {error}", file.display()))
+      denko::errors::RuntimeError::from(format!("Failed to read {}: {error}", file.display()))
     })?
   };
   let path = args.path.as_deref().unwrap_or(file);
-  let result = blitz::analysis::analyze(&source, path, args.strict);
+  let result = denko::analysis::analyze(&source, path, args.strict);
   println!(
     "{}",
     serde_json::to_string(&result).map_err(|error| {
-      blitz::errors::RuntimeError::from(format!("Failed to encode analysis: {error}"))
+      denko::errors::RuntimeError::from(format!("Failed to encode analysis: {error}"))
     })?
   );
   Ok(())
 }
 
-fn run_server(strict: bool) -> Result<(), blitz::errors::RuntimeError> {
+fn run_server(strict: bool) -> Result<(), denko::errors::RuntimeError> {
   let stdin = std::io::stdin();
   let mut stdout = std::io::stdout().lock();
-  let mut project = blitz::analysis::AnalysisProject::with_module_declarations(
+  let mut project = denko::analysis::AnalysisProject::with_module_declarations(
     blitz_runtime::effect_assets::public_declaration_sources(),
   )
   .with_module_documentation(blitz_runtime::effect_assets::public_documentation());
   for line in stdin.lock().lines() {
     let line = line.map_err(|error| {
-      blitz::errors::RuntimeError::from(format!("Failed to read analysis request: {error}"))
+      denko::errors::RuntimeError::from(format!("Failed to read analysis request: {error}"))
     })?;
     if line.trim().is_empty() {
       continue;
@@ -92,13 +92,13 @@ fn run_server(strict: bool) -> Result<(), blitz::errors::RuntimeError> {
     };
     if let Some(response) = response {
       serde_json::to_writer(&mut stdout, &response).map_err(|error| {
-        blitz::errors::RuntimeError::from(format!("Failed to encode analysis response: {error}"))
+        denko::errors::RuntimeError::from(format!("Failed to encode analysis response: {error}"))
       })?;
       stdout.write_all(b"\n").map_err(|error| {
-        blitz::errors::RuntimeError::from(format!("Failed to write analysis response: {error}"))
+        denko::errors::RuntimeError::from(format!("Failed to write analysis response: {error}"))
       })?;
       stdout.flush().map_err(|error| {
-        blitz::errors::RuntimeError::from(format!("Failed to flush analysis response: {error}"))
+        denko::errors::RuntimeError::from(format!("Failed to flush analysis response: {error}"))
       })?;
     }
   }

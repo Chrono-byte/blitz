@@ -16,11 +16,11 @@
 //! Example
 //!
 //! ```
-//! use blitz::vm::Vm;
-//! use blitz::bytecode::Chunk;
+//! use denko::vm::Vm;
+//! use denko::bytecode::Chunk;
 //! use std::cell::RefCell;
 //! use std::rc::Rc;
-//! use blitz::value::ObjectData;
+//! use denko::value::ObjectData;
 //!
 //! let globals = Rc::new(RefCell::new(ObjectData::new()));
 //! let mut vm = Vm::new(globals);

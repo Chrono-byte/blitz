@@ -1,10 +1,10 @@
 # Blitz
 
 Blitz is an experimental JavaScript and TypeScript application runtime written
-in Rust. It has its own ECMAScript engine and provides Effect-native APIs for
-building applications.
+in Rust. It is powered by **Denko**, its host-neutral ECMAScript engine, and
+provides Effect-native APIs for building applications.
 
-Unlike runtimes built around V8 or JavaScriptCore, Blitz owns the full stack:
+Unlike runtimes built around V8 or JavaScriptCore, Blitz and Denko own the full stack:
 parsing, bytecode compilation, the VM, garbage collection, and host APIs.
 JavaScript remains a first-class language, while TypeScript can run directly
 and use Blitz's built-in checker.
@@ -130,9 +130,9 @@ need an npm install or a separate TypeScript build step.
 
 ## Project layout
 
-- `crates/blitz-engine` — parser, compiler, VM, garbage collector, and builtins
-- `crates/blitz-runtime` — host capabilities and application APIs
-- `crates/blitz-cli` — the `blitz` command, checker, analysis API, and REPL
+- `crates/denko-engine` — the Denko parser, compiler, VM, garbage collector, and builtins
+- `crates/blitz-runtime` — host capabilities, application APIs, and the Blitz REPL
+- `crates/blitz-cli` — the `blitz` command, checker, and analysis API
 - `crates/blitz-test262` — Test262 discovery, execution, and reporting
 - `crates/js-string` — JavaScript string implementation
 - `crates/regex-js` — JavaScript regular-expression support
@@ -145,7 +145,7 @@ The engine is host-neutral. It implements language behavior, while
 engine harness can run without those host APIs:
 
 ```sh
-cargo run -p blitz-engine --bin blitz-engine -- path/to/file.js
+cargo run -p denko-engine --bin denko -- path/to/file.js
 ```
 
 ## Conformance

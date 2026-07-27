@@ -11,7 +11,7 @@ The implementation must preserve raw-engine isolation and keep `Blitz.serve` ope
 
 Already present:
 
-- `blitz-engine::VirtualModuleRegistry` accepts source/bytecode, declarations, and content hashes.
+- `denko-engine::VirtualModuleRegistry` accepts source/bytecode, declarations, and content hashes.
 - `blitz-runtime::effect_assets` defines the pinned public Effect specifiers.
 - `blitz-runtime::host::event_loop` unifies HTTP, WebSocket, and terminal delivery and tracks resource liveness.
 - `blitz-runtime::app` and `blitz-runtime::rpc` provide a Rust-side description/protocol slice.
@@ -117,7 +117,7 @@ crates/blitz-runtime/assets/effect/3.16.7/
 
 ## Phase 2: finish virtual-module graph support
 
-Update `crates/blitz-engine/src/module.rs` before loading the generated graph:
+Update `crates/denko-engine/src/module.rs` before loading the generated graph:
 
 1. Add importer-aware virtual resolution.
 2. Resolve canonical private imports directly and relative virtual imports against the importing module's canonical specifier.
@@ -156,7 +156,7 @@ The installer should:
 6. Register `blitz:match` as a real re-export of `effect/Match`.
 7. Reject duplicate canonical specifiers.
 
-Call it from `install_runtime` before user module construction. Do not call it from the raw `blitz-engine` executable or Test262 raw-engine paths.
+Call it from `install_runtime` before user module construction. Do not call it from the raw `denko-engine` executable or Test262 raw-engine paths.
 
 ### Phase 3 acceptance
 
@@ -164,7 +164,7 @@ Programs run successfully with all supported root/deep imports, while raw-engine
 
 ## Phase 4: Effect scheduler host prerequisites
 
-Add host facilities in `blitz-runtime`, not `blitz-engine`:
+Add host facilities in `blitz-runtime`, not `denko-engine`:
 
 - `queueMicrotask` wired to the VM microtask queue.
 - `setTimeout` / `clearTimeout`.
@@ -315,7 +315,7 @@ Use the same scoped server resource and `/rpc` upgrade route. One connection sup
 
 ```sh
 cargo fmt --all -- --check
-cargo test -p blitz-engine -p blitz-runtime -p blitz-cli
+cargo test -p denko-engine -p blitz-runtime -p blitz-cli
 cargo clippy --workspace --all-targets
 pnpm --dir tools/effect-assets typecheck
 pnpm --dir tools/effect-assets test

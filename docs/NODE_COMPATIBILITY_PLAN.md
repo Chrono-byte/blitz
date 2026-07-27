@@ -7,7 +7,7 @@ The exhaustive Node 24 built-in inventory and per-module delivery order live in
 
 Allow ESM applications and selected npm packages to run under Blitz when they
 import an explicitly supported `node:*` module, without turning
-`blitz-engine` into a Node host or claiming complete Node.js compatibility.
+`denko-engine` into a Node host or claiming complete Node.js compatibility.
 
 Bare-package and `node_modules` resolution are already implemented. This plan
 uses that resolver and adds a runtime-owned compatibility layer, declarations,
@@ -49,17 +49,17 @@ module-loader behavior still block that milestone.
 
 The package resolver should be treated as landed rather than reimplemented:
 
-- `crates/blitz-engine/src/resolver.rs` uses `oxc_resolver` for runtime and
+- `crates/denko-engine/src/resolver.rs` uses `oxc_resolver` for runtime and
   declaration resolution. It supports nearest `node_modules`, package
   `exports`, TypeScript extensions, nearest/inherited `tsconfig.json`, and
   `paths` mappings.
-- `crates/blitz-engine/src/module.rs` checks registered virtual and prelinked
+- `crates/denko-engine/src/module.rs` checks registered virtual and prelinked
   modules before filesystem resolution, then delegates filesystem and bare
   specifiers to `resolve_specifier`.
 - `crates/blitz-runtime/src/modules.rs` is the hosted entry boundary and has
   executable coverage for a TypeScript package, a transitive package, a
   missing package, and inherited tsconfig paths.
-- `crates/blitz-engine/src/analysis.rs` uses the same resolver for source and
+- `crates/denko-engine/src/analysis.rs` uses the same resolver for source and
   declaration navigation.
 - `VirtualModuleRegistry` and prelinked public/private roots already provide
   canonical module identities, aliases, declarations, and private dependency
@@ -88,7 +88,7 @@ symlink policy, and the optional Node `import.meta.dirname`/`filename` fields.
 
 ## Architectural decisions
 
-1. **Keep the engine host-neutral.** `blitz-engine` continues to own generic
+1. **Keep the engine host-neutral.** `denko-engine` continues to own generic
    module records, virtual/prelinked graphs, and package resolution. It must
    not contain filesystem, process, socket, or Node-specific implementations.
 2. **Put compatibility in `blitz-runtime`.** Public `node:*` facades and their
@@ -321,7 +321,7 @@ Neither blocks the initial `node:*` ESM scope.
 1. **Manifest tests:** hashes, ABI methods, visibility, declarations, duplicate
    roots, and profile composition.
 2. **Engine tests:** generic virtual/prelinked identity and visibility only;
-   no Node behavior tests in `blitz-engine`.
+   no Node behavior tests in `denko-engine`.
 3. **Runtime differential fixtures:** execute the same fixture with the pinned
    Node binary and Blitz, serialize observable output, and compare.
 4. **Error tests:** constructor/name/message plus stable fields and codes where
@@ -353,7 +353,7 @@ A module is marked supported only when:
 ## Non-goals
 
 - Complete Node compatibility in the first release.
-- Moving host behavior into `blitz-engine`.
+- Moving host behavior into `denko-engine`.
 - Replacing the existing `oxc_resolver` package-resolution path.
 - Treating `@types/node` as proof of runtime compatibility.
 - Making `blitz:*` APIs adopt Node coercion, errors, or lifecycle semantics.

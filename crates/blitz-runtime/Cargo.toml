@@ -3,10 +3,10 @@ name = "blitz-runtime"
 version.workspace = true
 edition.workspace = true
 license = "MPL-2.0"
-description = "Application JavaScript/TypeScript runtime powered by the Blitz engine"
+description = "Application JavaScript/TypeScript runtime powered by Denko"
 
 [dependencies]
-blitz.workspace = true
+denko.workspace = true
 bytes.workspace = true
 crc32fast = "1.5.0"
 fastwebsockets.workspace = true

@@ -27,11 +27,11 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use blitz::errors::RuntimeError;
-use blitz::gc;
-use blitz::module::PrelinkedHostModule;
-use blitz::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
-use blitz::{HostRoot, Vm};
+use denko::errors::RuntimeError;
+use denko::gc;
+use denko::module::PrelinkedHostModule;
+use denko::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use denko::{HostRoot, Vm};
 use tokio::sync::mpsc;
 
 use crate::app_transport::{
@@ -466,7 +466,7 @@ impl std::fmt::Display for RuntimeInstallError {
 impl std::error::Error for RuntimeInstallError {}
 
 thread_local! {
-  static INSTALLED_GRAPHS: RefCell<Vec<Weak<RefCell<blitz::ModuleLoader>>>> =
+  static INSTALLED_GRAPHS: RefCell<Vec<Weak<RefCell<denko::ModuleLoader>>>> =
     const { RefCell::new(Vec::new()) };
 }
 
@@ -1655,10 +1655,10 @@ mod tests {
   use std::rc::Rc;
   use std::thread;
 
-  use blitz::compiler;
-  use blitz::parser::Parser as JsParser;
-  use blitz::value::{ObjectData, Value};
   use bytes::Bytes;
+  use denko::compiler;
+  use denko::parser::Parser as JsParser;
+  use denko::value::{ObjectData, Value};
   use fastwebsockets::{Frame, OpCode, Payload};
   use http_body_util::Empty;
   use hyper::Request;
@@ -1809,7 +1809,7 @@ mod tests {
         node_compat: NodeCompatProfile::Core,
       },
     );
-    let source = blitz::js!(
+    let source = denko::js!(
       r#"
       globalThis.timerResult = 0;
       globalThis.clockIsMonotonic = performance.now() >= 0;
@@ -1851,7 +1851,7 @@ mod tests {
         node_compat: NodeCompatProfile::Core,
       },
     );
-    let source = blitz::js!(
+    let source = denko::js!(
       r#"
       globalThis.serverFinished = false;
       globalThis.server = Blitz.serve(
@@ -1879,7 +1879,7 @@ mod tests {
     assert_eq!(vm.get_global("serverShape"), Some(Value::Bool(true)));
     assert!(runtime.is_live());
 
-    let source = blitz::js!(
+    let source = denko::js!(
       r#"
       server.unref();
       globalThis.unrefCalled = true;
@@ -1891,7 +1891,7 @@ mod tests {
     assert_eq!(vm.get_global("unrefCalled"), Some(Value::Bool(true)));
     assert!(!runtime.is_live());
 
-    let source = blitz::js!(
+    let source = denko::js!(
       r#"
       server.ref();
       globalThis.shutdownIdentity = server.shutdown() === server.finished;
@@ -1982,7 +1982,7 @@ mod tests {
         let entry = directory.join("entry.mjs");
         std::fs::write(
           &entry,
-          blitz::js!(
+          denko::js!(
             r#"
         import * as Effect from "effect/Effect";
         import * as Http from "blitz:http";
@@ -2007,7 +2007,7 @@ mod tests {
             .instantiate_all()
             .expect("instantiate Effect HTTP graph");
         }
-        blitz::module::evaluate_entry_shared(&loader, &entry, &mut vm, false)
+        denko::module::evaluate_entry_shared(&loader, &entry, &mut vm, false)
           .expect("evaluate Effect HTTP entry");
         assert_eq!(vm.get_global("Blitz"), None);
 
@@ -2059,7 +2059,7 @@ mod tests {
         node_compat: NodeCompatProfile::Core,
       },
     );
-    let source = blitz::js!(
+    let source = denko::js!(
       r#"
       async function callbackFunc(request, info) {
         const body = await request.text();
@@ -2134,7 +2134,7 @@ mod tests {
         node_compat: NodeCompatProfile::Core,
       },
     );
-    let source = blitz::js!(
+    let source = denko::js!(
       r#"
       function handler(request) {
         if (request.headers.get("upgrade") !== "websocket") {
@@ -2270,7 +2270,7 @@ mod tests {
         node_compat: NodeCompatProfile::Core,
       },
     );
-    let source = blitz::js!(
+    let source = denko::js!(
       r#"
       const server = Blitz.serve((request) => {
         const upgraded = Blitz.upgradeWebSocket(request);
@@ -2380,7 +2380,7 @@ mod tests {
             .instantiate_all()
             .expect("instantiate Effect IRC graph");
         }
-        blitz::module::evaluate_entry_shared(&loader, &entry, &mut vm, false)
+        denko::module::evaluate_entry_shared(&loader, &entry, &mut vm, false)
           .expect("evaluate Effect IRC server");
         assert_eq!(vm.get_global("Blitz"), None);
 

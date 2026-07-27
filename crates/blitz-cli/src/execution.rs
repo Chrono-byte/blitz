@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::args::ExecutionArgs;
-use crate::repl;
-use blitz::compiler;
-use blitz::parser::Parser as JsParser;
-use blitz::test262_support;
-use blitz::value::Value;
-use blitz::vm::Vm;
+use denko::compiler;
+use denko::parser::Parser as JsParser;
+use denko::test262_support;
+use denko::value::Value;
+use denko::vm::Vm;
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
@@ -16,7 +15,7 @@ use std::time::{Duration, Instant};
 pub(crate) fn run(
   execution: ExecutionArgs,
   node_compat: blitz_runtime::host::NodeCompatProfile,
-) -> Result<(), blitz::errors::Error> {
+) -> Result<(), denko::errors::Error> {
   let async_done_state: Rc<RefCell<Option<test262_support::AsyncCompletion>>> =
     Rc::new(RefCell::new(None));
   let globals = if execution.test262_harness {
@@ -25,7 +24,6 @@ pub(crate) fn run(
     standard_globals()
   };
 
-  let mut vm = Vm::new(globals);
   let mut runtime_argv = vec!["blitz".to_string()];
   if let Some(path) = &execution.file {
     runtime_argv.push(path.to_string_lossy().into_owned());
@@ -33,14 +31,16 @@ pub(crate) fn run(
   runtime_argv.extend(execution.args.iter().cloned());
   let mut runtime_options = blitz_runtime::host::RuntimeOptions::from_host(runtime_argv);
   runtime_options.node_compat = node_compat;
-  let mut runtime = blitz_runtime::host::install_runtime(&mut vm, runtime_options);
 
   let Some(path) = execution.file else {
-    return repl::run(&mut vm);
+    return blitz_runtime::repl::run(runtime_options);
   };
 
+  let mut vm = Vm::new(globals);
+  let mut runtime = blitz_runtime::host::install_runtime(&mut vm, runtime_options);
+
   let source = std::fs::read_to_string(&path).map_err(|error| {
-    blitz::errors::RuntimeError::from(format!("Failed to read {}: {error}", path.display()))
+    denko::errors::RuntimeError::from(format!("Failed to read {}: {error}", path.display()))
   })?;
   if should_load_as_module(&path, &source, execution.module) {
     blitz_runtime::modules::evaluate_entry(&mut vm, &path)?;
@@ -82,21 +82,21 @@ fn is_typescript_path(path: &Path) -> bool {
     .is_some_and(|extension| matches!(extension, "ts" | "tsx" | "mts" | "cts"))
 }
 
-fn standard_globals() -> Rc<RefCell<blitz::value::ObjectData>> {
-  let globals = Rc::new(RefCell::new(blitz::value::ObjectData::new()));
+fn standard_globals() -> Rc<RefCell<denko::value::ObjectData>> {
+  let globals = Rc::new(RefCell::new(denko::value::ObjectData::new()));
   let global_this = Value::Object(Rc::clone(&globals));
   globals.borrow_mut().properties.insert(
-    blitz::value::PropertyKey::String("globalThis".to_string().into()),
-    blitz::value::PropertyDescriptor::ordinary_data(global_this),
+    denko::value::PropertyKey::String("globalThis".to_string().into()),
+    denko::value::PropertyDescriptor::ordinary_data(global_this),
   );
   globals
 }
 
 fn test262_globals(
   async_done_state: &Rc<RefCell<Option<test262_support::AsyncCompletion>>>
-) -> Rc<RefCell<blitz::value::ObjectData>> {
+) -> Rc<RefCell<denko::value::ObjectData>> {
   let done_state = Rc::clone(async_done_state);
-  let print_native: blitz::value::NativeFn = Rc::new(move |vm, _this, args| {
+  let print_native: denko::value::NativeFn = Rc::new(move |vm, _this, args| {
     let value = args.first().cloned().unwrap_or(Value::Undefined);
     let rendered = match vm.to_string(&value) {
       Ok(string) => string.to_string_lossy(),
@@ -115,7 +115,7 @@ fn test262_globals(
 fn wait_for_test262_completion(
   vm: &mut Vm,
   async_done_state: &Rc<RefCell<Option<test262_support::AsyncCompletion>>>,
-) -> Result<(), blitz::errors::Error> {
+) -> Result<(), denko::errors::Error> {
   let start = Instant::now();
   let timeout = Duration::from_secs(30);
   loop {
@@ -129,7 +129,7 @@ fn wait_for_test262_completion(
         }
         test262_support::AsyncCompletion::Failure(message) => {
           return Err(
-            blitz::errors::RuntimeError::from(format!("async test failed: {message}")).into(),
+            denko::errors::RuntimeError::from(format!("async test failed: {message}")).into(),
           );
         }
       }
@@ -137,7 +137,7 @@ fn wait_for_test262_completion(
 
     if start.elapsed() >= timeout {
       return Err(
-        blitz::errors::RuntimeError::from(format!(
+        denko::errors::RuntimeError::from(format!(
           "async test timed out after {}s",
           timeout.as_secs()
         ))
@@ -155,7 +155,7 @@ mod tests {
   #[test]
   fn executes_basic_program() {
     let mut vm = Vm::new(standard_globals());
-    let source = blitz::js!("var answer = 1 + 2; answer;");
+    let source = denko::js!("var answer = 1 + 2; answer;");
     let session = JsParser::parse_source(source).expect("parse");
     let chunk = compiler::compile_oxc(session.program(), source).expect("compile");
     vm.run(chunk).expect("run");
@@ -167,7 +167,7 @@ mod tests {
 
   #[test]
   fn typescript_annotations_are_erased_for_execution() {
-    let source = blitz::js!(
+    let source = denko::js!(
       typescript,
       r#"
       interface Answer { value: number }

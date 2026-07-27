@@ -9,7 +9,7 @@ name = "effect-bytecode"
 path = "src/main.rs"
 
 [dependencies]
-blitz.workspace = true
+denko.workspace = true
 blitz-runtime.workspace = true
 clap.workspace = true
 serde.workspace = true

@@ -2,8 +2,8 @@
 //! Binary used to dump AST for debugging.
 #![allow(missing_docs)]
 
-use blitz::parser::Parser;
 use clap::Parser as ClapParser;
+use denko::parser::Parser;
 use std::fs;
 
 #[derive(ClapParser)]

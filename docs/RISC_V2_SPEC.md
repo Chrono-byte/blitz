@@ -68,5 +68,5 @@ The RISC-only backend is guarded by all of the following:
 3. Bytecode verification rejects malformed opcodes, operands, branches, slot
    indices, and metadata references before execution.
 4. Tracing, disassembly, profiling, and hotpatching use the shared decoder.
-5. `cargo test -p blitz-engine --lib` has no new failures and the agreed Test262 compatibility
+5. `cargo test -p denko-engine --lib` has no new failures and the agreed Test262 compatibility
    baseline has no regressions.

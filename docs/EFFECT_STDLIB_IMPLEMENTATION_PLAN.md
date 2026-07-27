@@ -393,7 +393,7 @@ transitional bytecode-only format, leave bundled stdlib modules source-backed,
 or derive graph metadata at runtime.
 
 If adding an export pulls unsupported syntax or host assumptions into the
-canonical graph, fix ECMAScript correctness in `blitz-engine` or host
+canonical graph, fix ECMAScript correctness in `denko-engine` or host
 prerequisites in `blitz-runtime`. Do not transform away language behavior to
 make a smoke test pass.
 
@@ -809,7 +809,7 @@ before merging a vertical slice:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets
-cargo test -p blitz-engine -p blitz-runtime -p blitz-cli
+cargo test -p denko-engine -p blitz-runtime -p blitz-cli
 pnpm --dir tools/effect-assets typecheck
 pnpm --dir tools/effect-assets test
 pnpm --dir tools/effect-assets verify

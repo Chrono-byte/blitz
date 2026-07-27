@@ -125,65 +125,20 @@ dependencies = [
 name = "blitz-cli"
 version = "0.1.2"
 dependencies = [
- "blitz-engine",
  "blitz-runtime",
  "clap",
- "rustyline",
+ "denko-engine",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "blitz-engine"
-version = "0.1.2"
-dependencies = [
- "blitz-macros",
- "clap",
- "crc32fast",
- "criterion",
- "fastrand",
- "indexmap",
- "js-string",
- "num-bigint 0.4.8",
- "num-traits",
- "ouroboros",
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_resolver",
- "oxc_semantic",
- "oxc_span",
- "oxc_str",
- "oxc_syntax",
- "postcard",
- "regex-js",
- "rustyline",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
-]
-
-[[package]]
-name = "blitz-macros"
-version = "0.1.2"
-dependencies = [
- "oxc_allocator",
- "oxc_parser",
- "oxc_span",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "walkdir",
 ]
 
 [[package]]
 name = "blitz-runtime"
 version = "0.1.2"
 dependencies = [
- "blitz-engine",
  "bytes",
  "crc32fast",
+ "denko-engine",
  "fastwebsockets",
  "getrandom",
  "http-body-util",
@@ -202,8 +157,8 @@ dependencies = [
 name = "blitz-test262"
 version = "0.1.2"
 dependencies = [
- "blitz-engine",
  "clap",
+ "denko-engine",
  "futures",
  "oxc_span",
  "serde",
@@ -510,6 +465,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "denko-engine"
+version = "0.1.2"
+dependencies = [
+ "clap",
+ "crc32fast",
+ "criterion",
+ "denko-macros",
+ "fastrand",
+ "indexmap",
+ "js-string",
+ "num-bigint 0.4.8",
+ "num-traits",
+ "ouroboros",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_resolver",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_str",
+ "oxc_syntax",
+ "postcard",
+ "regex-js",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "denko-macros"
+version = "0.1.2"
+dependencies = [
+ "oxc_allocator",
+ "oxc_parser",
+ "oxc_span",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "walkdir",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -551,9 +550,9 @@ checksum = "fd8e701084c37e7ef62d3f9e453b618130cbc0ef3573847785952a3ac3f746bf"
 name = "effect-bytecode"
 version = "0.1.2"
 dependencies = [
- "blitz-engine",
  "blitz-runtime",
  "clap",
+ "denko-engine",
  "oxc_span",
  "serde",
  "serde_json",

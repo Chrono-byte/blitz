@@ -119,7 +119,7 @@ pub fn public_documentation() -> Vec<(String, String, String)> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use blitz::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
+  use denko::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
   use std::cell::RefCell;
   use std::path::Path;
   use std::rc::Rc;
@@ -129,14 +129,14 @@ mod tests {
 
   fn run_effect_compatibility_entry(
     source: impl Into<String>,
-    assertion: impl FnOnce(&blitz::Vm) + Send + 'static,
+    assertion: impl FnOnce(&denko::Vm) + Send + 'static,
   ) {
     run_effect_compatibility_entry_inner(source, false, assertion);
   }
 
   fn run_effect_compatibility_entry_with_scheduler(
     source: impl Into<String>,
-    assertion: impl FnOnce(&blitz::Vm) + Send + 'static,
+    assertion: impl FnOnce(&denko::Vm) + Send + 'static,
   ) {
     run_effect_compatibility_entry_inner(source, true, assertion);
   }
@@ -144,7 +144,7 @@ mod tests {
   fn run_effect_compatibility_entry_inner(
     source: impl Into<String>,
     flush_scheduler_jobs: bool,
-    assertion: impl FnOnce(&blitz::Vm) + Send + 'static,
+    assertion: impl FnOnce(&denko::Vm) + Send + 'static,
   ) {
     let source = source.into();
     let test_id = NEXT_EFFECT_COMPATIBILITY_TEST_ID.fetch_add(1, Ordering::Relaxed);
@@ -157,14 +157,14 @@ mod tests {
           PropertyKey::String("globalThis".to_string().into()),
           PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
         );
-        let mut vm = blitz::Vm::new(globals);
+        let mut vm = denko::Vm::new(globals);
         let _runtime = crate::host::install_runtime(
           &mut vm,
           crate::host::RuntimeOptions::from_host(vec!["blitz-effect-compatibility".to_string()]),
         );
         assert_eq!(
           vm.module_loader_pipeline_snapshot(),
-          blitz::module::ModuleLoaderPipelineSnapshot::default(),
+          denko::module::ModuleLoaderPipelineSnapshot::default(),
           "installing bundled Effect roots must not use the source pipeline"
         );
         vm.collect_garbage_prototype();
@@ -187,7 +187,7 @@ mod tests {
             .instantiate_all()
             .expect("instantiate Effect compatibility graph");
         }
-        blitz::module::evaluate_entry_shared(&loader_handle, &entry, &mut vm, false)
+        denko::module::evaluate_entry_shared(&loader_handle, &entry, &mut vm, false)
           .expect("execute Effect compatibility graph");
         if flush_scheduler_jobs {
           vm.flush_microtasks()
@@ -197,7 +197,7 @@ mod tests {
 
         assert_eq!(
           vm.module_loader_pipeline_snapshot(),
-          blitz::module::ModuleLoaderPipelineSnapshot {
+          denko::module::ModuleLoaderPipelineSnapshot {
             source_parses: 1,
             import_extraction_parses: 1,
             source_linking_passes: 2,
@@ -439,14 +439,14 @@ mod tests {
           PropertyKey::String("globalThis".to_string().into()),
           PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
         );
-        let mut vm = blitz::Vm::new(globals);
+        let mut vm = denko::Vm::new(globals);
         let _runtime = crate::host::install_runtime(
           &mut vm,
           crate::host::RuntimeOptions::from_host(vec!["blitz-test".to_string()]),
         );
         assert_eq!(
           vm.module_loader_pipeline_snapshot(),
-          blitz::module::ModuleLoaderPipelineSnapshot::default(),
+          denko::module::ModuleLoaderPipelineSnapshot::default(),
           "runtime graph installation must not invoke source tooling"
         );
 
@@ -456,7 +456,7 @@ mod tests {
         let entry = directory.join("entry.mjs");
         std::fs::write(
           &entry,
-          blitz::js!(
+          denko::js!(
             module,
             r#"
         import * as Effect from 'effect/Effect';
@@ -480,14 +480,14 @@ mod tests {
             .instantiate_all()
             .expect("instantiate Effect graph");
         }
-        blitz::module::evaluate_entry_shared(&loader_handle, &entry, &mut vm, false)
+        denko::module::evaluate_entry_shared(&loader_handle, &entry, &mut vm, false)
           .expect("execute Effect graph");
         std::fs::remove_dir_all(&directory).expect("remove Effect smoke directory");
 
         assert_eq!(vm.get_global("effect_result"), Some(Value::Number(42.0)));
         assert_eq!(
           vm.module_loader_pipeline_snapshot(),
-          blitz::module::ModuleLoaderPipelineSnapshot {
+          denko::module::ModuleLoaderPipelineSnapshot {
             source_parses: 1,
             import_extraction_parses: 1,
             source_linking_passes: 2,
@@ -509,7 +509,7 @@ mod tests {
       PropertyKey::String("globalThis".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
-    let mut vm = blitz::Vm::new(globals);
+    let mut vm = denko::Vm::new(globals);
     let _runtime = crate::host::install_runtime(
       &mut vm,
       crate::host::RuntimeOptions::from_host(vec!["blitz-test".to_string()]),
@@ -523,7 +523,7 @@ mod tests {
     let entry_path = directory.join("entry.mjs");
     std::fs::write(
       &entry_path,
-      blitz::js!(
+      denko::js!(
         module,
         r#"
         import * as Effect from 'effect/Effect';
@@ -563,7 +563,7 @@ mod tests {
     };
 
     let entry_path = entry.borrow().path.clone();
-    blitz::module::evaluate_entry_shared(&loader_handle, &entry_path, &mut vm, true)
+    denko::module::evaluate_entry_shared(&loader_handle, &entry_path, &mut vm, true)
       .expect("typecheck and evaluate source entry");
     std::fs::remove_dir_all(&directory).expect("remove declaration test directory");
 
@@ -579,7 +579,7 @@ mod tests {
   #[test]
   fn runtime_cutover_exposes_facades_without_source_backed_bundled_records() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
-    let mut vm = blitz::Vm::new(Rc::clone(&globals));
+    let mut vm = denko::Vm::new(Rc::clone(&globals));
     let _runtime = crate::host::install_runtime(
       &mut vm,
       crate::host::RuntimeOptions::from_host(vec!["blitz-test".to_string()]),
@@ -590,7 +590,7 @@ mod tests {
     let entry = directory.join("entry.mjs");
     std::fs::write(
       &entry,
-      blitz::js!(
+      denko::js!(
         module,
         "import * as Facade from 'blitz:app'; globalThis.facade_type = typeof Facade;"
       ),
@@ -636,7 +636,7 @@ mod tests {
   #[test]
   fn private_runtime_modules_are_not_user_importable() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
-    let mut vm = blitz::Vm::new(globals);
+    let mut vm = denko::Vm::new(globals);
     let _runtime = crate::host::install_runtime(
       &mut vm,
       crate::host::RuntimeOptions::from_host(vec!["blitz-test".to_string()]),
@@ -652,7 +652,7 @@ mod tests {
   #[test]
   fn raw_engine_has_no_runtime_modules() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
-    let vm = blitz::Vm::new(globals);
+    let vm = denko::Vm::new(globals);
     let loader_handle = vm.module_loader_handle();
     let mut loader = loader_handle.borrow_mut();
     assert!(loader.virtual_modules.is_empty());
@@ -673,13 +673,13 @@ mod tests {
       .iter()
       .enumerate()
       .map(|(index, (specifier, _))| {
-        blitz::js!(
+        denko::js!(
           format(module),
           "import * as root{index} from '{specifier}';\nglobalThis.effect_public_root_count += typeof root{index} === 'object' ? 1 : 0;\n"
         )
       })
       .collect::<String>();
-    let source = blitz::js!(
+    let source = denko::js!(
       format(module),
       "globalThis.effect_public_root_count = 0;\n{imports}"
     );
@@ -695,7 +695,7 @@ mod tests {
   #[test]
   fn effect_root_and_fiber_await_preserve_identity() {
     run_effect_compatibility_entry(
-      blitz::js!(
+      denko::js!(
         module,
         r#"
         import * as Root from 'effect';
@@ -736,7 +736,7 @@ mod tests {
   #[test]
   fn ref_and_synchronous_error_boundaries_are_usable() {
     run_effect_compatibility_entry(
-      blitz::js!(
+      denko::js!(
         module,
         r#"
         import * as Root from 'effect';
@@ -804,7 +804,7 @@ mod tests {
   #[test]
   fn exit_and_cause_observation_preserve_failure_shape() {
     run_effect_compatibility_entry(
-      blitz::js!(
+      denko::js!(
         module,
         r#"
         import * as Effect from 'effect/Effect';
@@ -841,7 +841,7 @@ mod tests {
   #[test]
   fn context_tags_keep_key_identity_and_service_identity() {
     run_effect_compatibility_entry(
-      blitz::js!(
+      denko::js!(
         module,
         r#"
         import * as Effect from 'effect/Effect';
@@ -879,7 +879,7 @@ mod tests {
   #[test]
   fn layers_build_and_provide_context() {
     run_effect_compatibility_entry(
-      blitz::js!(
+      denko::js!(
         module,
         r#"
         import * as Effect from 'effect/Effect';
@@ -901,7 +901,7 @@ mod tests {
   #[test]
   fn scoped_acquire_release_receives_success_exit() {
     run_effect_compatibility_entry(
-      blitz::js!(
+      denko::js!(
         module,
         r#"
         import * as Effect from 'effect/Effect';
@@ -951,7 +951,7 @@ mod tests {
       NEXT_EFFECT_COMPATIBILITY_TEST_ID.fetch_add(1, Ordering::Relaxed)
     ));
     let missing = path.with_extension("missing");
-    let source = blitz::js!(
+    let source = denko::js!(
       format(module),
       r#"
         import * as Cause from 'effect/Cause';
@@ -991,7 +991,7 @@ mod tests {
   #[test]
   fn effect_terminal_operations_use_the_live_service() {
     run_effect_compatibility_entry(
-      blitz::js!(
+      denko::js!(
         module,
         r#"
         import * as Effect from 'effect/Effect';
@@ -1017,7 +1017,7 @@ mod tests {
   #[test]
   fn app_transport_is_lazy_typed_and_private() {
     run_effect_compatibility_entry(
-      blitz::js!(
+      denko::js!(
         module,
         r#"
         import * as Cause from 'effect/Cause';
@@ -1063,7 +1063,7 @@ mod tests {
   #[test]
   fn abort_controller_signal_is_single_shot_and_observable() {
     run_effect_compatibility_entry(
-      blitz::js!(
+      denko::js!(
         module,
         r#"
         const controller = new AbortController();
@@ -1104,7 +1104,7 @@ mod tests {
   #[test]
   fn synchronous_effect_async_resumes_without_host_timer() {
     run_effect_compatibility_entry(
-      blitz::js!(
+      denko::js!(
         module,
         r#"
         import * as Effect from 'effect/Effect';
@@ -1137,7 +1137,7 @@ mod tests {
   #[test]
   fn fiber_interrupt_cancellation_uses_supported_scheduler_path() {
     run_effect_compatibility_entry_with_scheduler(
-      blitz::js!(
+      denko::js!(
         module,
         r#"
         import * as Effect from 'effect/Effect';
@@ -1173,14 +1173,14 @@ mod tests {
       PropertyKey::String("globalThis".to_string().into()),
       PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
     );
-    let mut vm = blitz::Vm::new(globals);
+    let mut vm = denko::Vm::new(globals);
     let _runtime = crate::host::install_runtime(
       &mut vm,
       crate::host::RuntimeOptions::from_host(vec!["blitz-test".to_string()]),
     );
     assert_eq!(
       vm.module_loader_pipeline_snapshot(),
-      blitz::module::ModuleLoaderPipelineSnapshot::default()
+      denko::module::ModuleLoaderPipelineSnapshot::default()
     );
   }
 

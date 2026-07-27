@@ -11,7 +11,7 @@ SHA-256 digest:
 The reviewed run used:
 
 ```powershell
-cargo run -p blitz-engine --bin test262 -- --manifest docs/test262/es6-manifest.txt --summary-json target/test262/es6-summary.json --workers 4 --batch-size 20 --subprocess-timeout 35 --quiet
+cargo run -p blitz-test262 --bin test262 -- --manifest docs/test262/es6-manifest.txt --summary-json target/test262/es6-summary.json --workers 4 --batch-size 20 --subprocess-timeout 35 --quiet
 ```
 
 ## Outcomes
