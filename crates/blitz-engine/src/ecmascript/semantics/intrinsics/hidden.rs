@@ -77,6 +77,43 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
     })),
   );
   intrinsics.hidden_builtins.insert(
+    "copyDataProperties".to_string(),
+    Value::Builtin(Rc::new(|vm, args| {
+      let source = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
+      let mut excluded = Vec::with_capacity(args.len().saturating_sub(1));
+      for value in args.iter().skip(1) {
+        excluded.push(vm.to_property_key(value)?);
+      }
+
+      let mut result = ObjectData::new();
+      if let Some(prototype) = vm.realm().intrinsics.object_prototype.clone() {
+        result.set_prototype_value(prototype);
+      }
+      for key in vm.own_property_keys_value(&source)? {
+        if excluded.contains(&key) {
+          continue;
+        }
+        let Some(descriptor) = vm.get_own_property_value(&source, &key)? else {
+          continue;
+        };
+        let enumerable = match descriptor {
+          PropertyDescriptor::Data { enumerable, .. }
+          | PropertyDescriptor::Accessor { enumerable, .. } => enumerable,
+        };
+        if !enumerable {
+          continue;
+        }
+        let value = vm.get_property_host(&source, &key)?;
+        result
+          .properties
+          .insert(key, PropertyDescriptor::ordinary_data(value));
+      }
+      Ok(Value::Object(crate::gc::track_object(Rc::new(
+        RefCell::new(result),
+      ))))
+    })),
+  );
+  intrinsics.hidden_builtins.insert(
     "forInKeys".to_string(),
     Value::Builtin(Rc::new(|vm, args| {
       let target = args.first().cloned().unwrap_or(Value::Undefined);

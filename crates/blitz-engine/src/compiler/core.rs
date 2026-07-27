@@ -854,7 +854,9 @@ impl Compiler {
     &mut self,
     name: &str,
   ) {
-    if let Some(slot) = self.resolve_local(name) {
+    if self.with_depth > 0 {
+      self.emit_get_global_name(name);
+    } else if let Some(slot) = self.resolve_local(name) {
       self.emit(Op::LoadLocal, LINE);
       self.emit_byte(u8::try_from(slot).expect("slot fits in u8"), LINE);
     } else if let Some(upvalue) = self.resolve_upvalue(name) {

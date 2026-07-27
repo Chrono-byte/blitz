@@ -43,6 +43,28 @@ impl super::Compiler {
     }
   }
 
+  fn compile_object_rest_value(
+    &mut self,
+    excluded: &[Value],
+  ) -> Result<(), crate::errors::CompilerError> {
+    let source_slot = self.alloc_temp_local("object_rest_source");
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(self.slot_to_u8(source_slot)?, LINE);
+    self.emit_get_builtin_name("copyDataProperties");
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(source_slot)?, LINE);
+    for key in excluded {
+      self.emit_constant(key.clone(), LINE);
+    }
+    self.emit(Op::Call, LINE);
+    self.emit_byte(
+      u8::try_from(excluded.len() + 1)
+        .map_err(|_| crate::errors::CompilerError::from("too many object rest exclusions"))?,
+      LINE,
+    );
+    Ok(())
+  }
+
   /// Compile a variable declaration statement.
   ///
   /// Processes all declarators in the declaration, evaluating their initializers
@@ -68,6 +90,17 @@ impl super::Compiler {
         }
         if let Some(init) = &dec.init {
           self.compile_expr_oast(init)?;
+          if Self::is_anonymous_function_definition(init) {
+            let value_slot = self.alloc_temp_local("variable_initializer");
+            self.emit(Op::StoreLocal, LINE);
+            self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+            self.emit_get_builtin_name("setFunctionNameIfAnonymous");
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+            self.emit_constant(Value::String(name.to_string().into()), LINE);
+            self.emit(Op::Call, LINE);
+            self.emit_byte(2, LINE);
+          }
           // Inside `with`, a `var` initializer should resolve
           // through the scope chain at runtime so an object
           // property can shadow the hoisted binding.
@@ -101,6 +134,19 @@ impl super::Compiler {
 
       if let Some(init) = &dec.init {
         self.compile_expr_oast(init)?;
+        if let Some(name) = Self::binding_identifier_name(&dec.id)
+          && Self::is_anonymous_function_definition(init)
+        {
+          let value_slot = self.alloc_temp_local("variable_initializer");
+          self.emit(Op::StoreLocal, LINE);
+          self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+          self.emit_get_builtin_name("setFunctionNameIfAnonymous");
+          self.emit(Op::LoadLocal, LINE);
+          self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
+          self.emit_constant(Value::String(name.into()), LINE);
+          self.emit(Op::Call, LINE);
+          self.emit_byte(2, LINE);
+        }
       } else {
         self.emit(Op::Undefined, LINE);
       }
@@ -241,7 +287,9 @@ impl super::Compiler {
     {
       return Err(Self::imported_binding_assignment_error());
     }
-    if let Some(slot) = self.resolve_local(name) {
+    if self.with_depth > 0 {
+      self.emit_set_global_name(name);
+    } else if let Some(slot) = self.resolve_local(name) {
       self.emit(Op::StoreLocal, LINE);
       self.emit_byte(self.slot_to_u8(slot)?, LINE);
       if self.local_mirrors_global(slot) {
@@ -444,11 +492,14 @@ impl super::Compiler {
     &mut self,
     o: &oast::ObjectAssignmentTarget<'_>,
   ) -> Result<(), crate::errors::CompilerError> {
+    let mut excluded = Vec::with_capacity(o.properties.len());
     for prop in &o.properties {
       match prop {
         oast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(p) => {
+          let key = Value::String(p.binding.name.to_string().into());
+          excluded.push(key.clone());
           self.emit(Op::Copy, LINE);
-          self.emit_constant(Value::String(p.binding.name.to_string().into()), LINE);
+          self.emit_constant(key, LINE);
           self.emit(Op::GetProperty, LINE);
           if let Some(init) = &p.init {
             let temp_slot = self.alloc_temp_local("assign_prop_default");
@@ -485,6 +536,7 @@ impl super::Compiler {
           let key = Self::binding_property_key_to_value(&p.name).ok_or_else(|| {
             crate::errors::CompilerError::from("unsupported object assignment key")
           })?;
+          excluded.push(key.clone());
           self.emit(Op::Copy, LINE);
           self.emit_constant(key, LINE);
           self.emit(Op::GetProperty, LINE);
@@ -493,10 +545,11 @@ impl super::Compiler {
       }
     }
     if let Some(rest) = &o.rest {
-      self.emit(Op::Copy, LINE);
+      self.compile_object_rest_value(&excluded)?;
       self.compile_assignment_target_oast(&rest.target)?;
+    } else {
+      self.emit(Op::Discard, LINE);
     }
-    self.emit(Op::Discard, LINE);
     Ok(())
   }
 
@@ -631,19 +684,22 @@ impl super::Compiler {
         self.emit(Op::Exchange, LINE);
         self.emit(Op::Call, LINE);
         self.emit_byte(1, LINE);
+        let mut excluded = Vec::with_capacity(o.properties.len());
         for prop in &o.properties {
           let key = Self::binding_property_key_to_value(&prop.key)
             .ok_or_else(|| crate::errors::CompilerError::from("unsupported object binding key"))?;
+          excluded.push(key.clone());
           self.emit(Op::Copy, LINE);
           self.emit_constant(key, LINE);
           self.emit(Op::GetProperty, LINE);
           self.compile_binding_pattern_assignment_oast(&prop.value, kind)?;
         }
         if let Some(rest) = &o.rest {
-          self.emit(Op::Copy, LINE);
+          self.compile_object_rest_value(&excluded)?;
           self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
+        } else {
+          self.emit(Op::Discard, LINE);
         }
-        self.emit(Op::Discard, LINE);
       }
     }
     Ok(())

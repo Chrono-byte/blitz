@@ -866,15 +866,7 @@ impl super::Compiler {
               if is_imported {
                 return Err(Self::imported_binding_assignment_error());
               }
-              if let Some(slot) = self.resolve_local(name) {
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
-              } else if let Some(upvalue) = self.resolve_upvalue(name) {
-                self.emit(Op::GetUpvalue, LINE);
-                self.emit_byte(upvalue, LINE);
-              } else {
-                self.emit_get_global_name(name);
-              }
+              self.emit_get_binding(name);
               self.compile_expr_oast(&a.right)?;
               match a.operator {
                 oast::AssignmentOperator::Addition => self.emit(Op::Add, LINE),
@@ -892,20 +884,7 @@ impl super::Compiler {
                 _ => {}
               }
               self.emit(Op::Copy, LINE);
-              if let Some(slot) = self.resolve_local(name) {
-                self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                if self.local_mirrors_global(slot) {
-                  self.emit(Op::LoadLocal, LINE);
-                  self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                  self.emit_set_global_name(name);
-                }
-              } else if let Some(upvalue) = self.resolve_upvalue(name) {
-                self.emit(Op::SetUpvalue, LINE);
-                self.emit_byte(upvalue, LINE);
-              } else {
-                self.emit_set_global_name(name);
-              }
+              self.store_assignment_identifier(name)?;
             }
             oast::SimpleAssignmentTarget::StaticMemberExpression(m) => {
               if matches!(&m.object, OExpr::Super(_)) {
@@ -1312,64 +1291,21 @@ impl super::Compiler {
         match &u.argument {
           OTarget::AssignmentTargetIdentifier(id) => {
             let name = id.name.as_str();
-            if let Some(slot) = self.resolve_local(name) {
-              self.emit(Op::LoadLocal, LINE);
-              self.emit_byte(self.slot_to_u8(slot)?, LINE);
-              self.emit(Op::Neg, LINE);
-              self.emit(Op::Neg, LINE);
-              if !u.prefix {
-                self.emit(Op::Copy, LINE);
-              }
-              self.emit_constant(Value::Number(1.0), LINE);
-              match u.operator {
-                oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
-                oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
-              }
-              if u.prefix {
-                self.emit(Op::Copy, LINE);
-              }
-              self.emit(Op::StoreLocal, LINE);
-              self.emit_byte(self.slot_to_u8(slot)?, LINE);
-              if self.local_mirrors_global(slot) {
-                self.emit(Op::LoadLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                self.emit_set_global_name(name);
-              }
-            } else if let Some(upvalue) = self.resolve_upvalue(name) {
-              self.emit(Op::GetUpvalue, LINE);
-              self.emit_byte(upvalue, LINE);
-              self.emit(Op::Neg, LINE);
-              self.emit(Op::Neg, LINE);
-              if !u.prefix {
-                self.emit(Op::Copy, LINE);
-              }
-              self.emit_constant(Value::Number(1.0), LINE);
-              match u.operator {
-                oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
-                oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
-              }
-              if u.prefix {
-                self.emit(Op::Copy, LINE);
-              }
-              self.emit(Op::SetUpvalue, LINE);
-              self.emit_byte(upvalue, LINE);
-            } else {
-              self.emit_get_global_name(name);
-              self.emit(Op::Neg, LINE);
-              self.emit(Op::Neg, LINE);
-              if !u.prefix {
-                self.emit(Op::Copy, LINE);
-              }
-              self.emit_constant(Value::Number(1.0), LINE);
-              match u.operator {
-                oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
-                oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
-              }
-              if u.prefix {
-                self.emit(Op::Copy, LINE);
-              }
-              self.emit_set_global_name(name);
+            self.emit_get_binding(name);
+            self.emit(Op::Neg, LINE);
+            self.emit(Op::Neg, LINE);
+            if !u.prefix {
+              self.emit(Op::Copy, LINE);
             }
+            self.emit_constant(Value::Number(1.0), LINE);
+            match u.operator {
+              oast::UpdateOperator::Increment => self.emit(Op::Add, LINE),
+              oast::UpdateOperator::Decrement => self.emit(Op::Sub, LINE),
+            }
+            if u.prefix {
+              self.emit(Op::Copy, LINE);
+            }
+            self.store_assignment_identifier(name)?;
           }
           OTarget::StaticMemberExpression(m) => {
             let (object_slot, key_slot) = self.compile_static_member_reference(m)?;

@@ -115,10 +115,7 @@ impl Vm {
     if !Self::is_callable_value(&trap) {
       return Err(self.throw_type_error("Proxy get trap is not callable"));
     }
-    let key_value = match key {
-      PropertyKey::String(name) => Value::String(name.clone()),
-      PropertyKey::Symbol(id) => Value::Symbol(id.clone(), None),
-    };
+    let key_value = property_key_to_value(key);
     let trap_result = self.call_with_this(
       &trap,
       &handler,
@@ -340,6 +337,39 @@ impl Vm {
       }
     }
     Ok(Value::Undefined)
+  }
+
+  pub(super) fn set_primitive_property(
+    &mut self,
+    object: &Value,
+    key: &PropertyKey,
+    value: Value,
+    receiver: &Value,
+  ) -> Result<(), RuntimeError> {
+    let mut current = object.clone();
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+      if matches!(current, Value::Proxy(_)) {
+        let accepted = self.set_proxy_property(&current, key, value, receiver)?;
+        if !accepted && self.is_strict_mode() {
+          return Err(self.throw_type_error("Proxy set trap returned false"));
+        }
+        return Ok(());
+      }
+      if self
+        .get_own_property_value(&current, key)?
+        .is_some()
+      {
+        return self.set_property_with_receiver(&current, key, value, receiver);
+      }
+      current = self.get_prototype(&current);
+      if matches!(current, Value::Null) {
+        if self.is_strict_mode() {
+          return Err(self.throw_type_error("Cannot assign to property of primitive value"));
+        }
+        return Ok(());
+      }
+    }
+    Err(RuntimeError::from("Prototype chain too deep"))
   }
 
   pub(super) fn set_property_with_receiver(

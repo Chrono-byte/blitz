@@ -268,7 +268,28 @@ fn array_index_from_string(name: &js_string::JsString) -> Option<u32> {
 pub(crate) fn property_key_to_value(key: &PropertyKey) -> Value {
   match key {
     PropertyKey::String(name) => Value::String(name.clone()),
-    PropertyKey::Symbol(id) => Value::Symbol(id.clone(), None),
+    PropertyKey::Symbol(id) => {
+      let description = match id.as_u64() {
+        1 => Some("Symbol.toPrimitive"),
+        2 => Some("Symbol.iterator"),
+        3 => Some("Symbol.asyncIterator"),
+        4 => Some("Symbol.toStringTag"),
+        5 => Some("Symbol.species"),
+        6 => Some("Symbol.hasInstance"),
+        7 => Some("Symbol.isConcatSpreadable"),
+        8 => Some("Symbol.match"),
+        9 => Some("Symbol.matchAll"),
+        10 => Some("Symbol.replace"),
+        11 => Some("Symbol.search"),
+        12 => Some("Symbol.split"),
+        13 => Some("Symbol.unscopables"),
+        _ => None,
+      };
+      Value::Symbol(
+        id.clone(),
+        description.map(|description| description.to_string().into()),
+      )
+    }
   }
 }
 

@@ -636,10 +636,15 @@ impl Vm {
             registers[rd] = self.get_property_value_cached(instruction_ip, &object, &key)?;
           }
           Op::SetProperty => {
-            let object = registers[rd].clone();
+            let receiver = registers[rd].clone();
             let key = self.to_property_key(&registers[rs])?;
             let value = registers[(decode_aux8(word) & 0xF) as usize].clone();
-            self.set_property_tracked(&object, &key, value.clone())?;
+            if receiver.is_object() {
+              self.set_property_tracked(&receiver, &key, value.clone())?;
+            } else {
+              let object = self.to_object_value(receiver.clone())?;
+              self.set_primitive_property(&object, &key, value.clone(), &receiver)?;
+            }
             registers[rd] = value;
           }
           Op::DeleteProperty => {
