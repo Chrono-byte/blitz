@@ -38,7 +38,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio, exit};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -124,6 +124,17 @@ impl TestResult {
       TestResult::StackOverflow => "stack overflow".to_string(),
       TestResult::Panic(msg) => format!("panic: {}", msg),
     }
+  }
+}
+
+fn record_bucket_result(
+  stats: &mut BucketStats,
+  result: &TestResult,
+) {
+  match result {
+    TestResult::Pass => stats.pass += 1,
+    TestResult::Skip(_) => stats.skip += 1,
+    TestResult::Fail(_) | TestResult::StackOverflow | TestResult::Panic(_) => stats.fail += 1,
   }
 }
 
@@ -227,12 +238,10 @@ fn select_files_to_run(
       continue;
     }
     if !es_versions.is_empty() {
-      let Some(edition) = file_edition_label(&file) else {
-        continue;
-      };
+      let editions = file_edition_labels(&file);
       if !es_versions
         .iter()
-        .any(|allowed| allowed == &edition)
+        .any(|allowed| editions.iter().any(|edition| edition == allowed))
       {
         continue;
       }
@@ -460,8 +469,7 @@ fn run_test_in_thread(
   result
 }
 
-/// Returns the bucket keys for a test file, based on its path relative to the test root.
-/// Language tests are grouped by ECMAScript edition when we can infer it from frontmatter.
+/// Returns the section keys for a test file based on its path relative to the test root.
 fn bucket_keys(
   test_root: &Path,
   file: &Path,
@@ -469,29 +477,33 @@ fn bucket_keys(
   let rel = file.strip_prefix(test_root).unwrap_or(file);
   let parts: Vec<String> = rel
     .components()
-    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+    .map(|component| {
+      component
+        .as_os_str()
+        .to_string_lossy()
+        .into_owned()
+    })
     .collect();
   let dirs: Vec<String> = rel
     .parent()
-    .map(|p| {
-      p.components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+    .map(|parent| {
+      parent
+        .components()
+        .map(|component| {
+          component
+            .as_os_str()
+            .to_string_lossy()
+            .into_owned()
+        })
         .collect()
     })
     .unwrap_or_default();
 
-  let top = if parts
+  let top = dirs
     .first()
-    .is_some_and(|part| part == "language")
-  {
-    file_edition_label(file).unwrap_or_else(|| "language".to_string())
-  } else {
-    dirs
-      .first()
-      .cloned()
-      .or_else(|| parts.first().cloned())
-      .unwrap_or_else(|| "<root>".to_string())
-  };
+    .cloned()
+    .or_else(|| parts.first().cloned())
+    .unwrap_or_else(|| "<root>".to_string());
   let subsection = if dirs.len() >= 2 {
     format!("{}/{}", dirs[0], dirs[1])
   } else {
@@ -532,6 +544,42 @@ fn print_bucket_summary(
       stats.pass,
       stats.fail,
       stats.pass_pct()
+    );
+  }
+}
+
+/// Accumulates each edition's additions the same way as the default test262.fyi view.
+fn cumulative_fyi_editions(
+  additions: &HashMap<String, BucketStats>
+) -> Vec<(&'static str, BucketStats)> {
+  const ORDER: [&str; 14] = [
+    "ES5", "ES6", "ES2016", "ES2017", "ES2018", "ES2019", "ES2020", "ES2021", "ES2022", "ES2023",
+    "ES2024", "ES2025", "ES2026", "ESNext",
+  ];
+  let mut cumulative = BucketStats::default();
+  let mut editions = Vec::new();
+  for edition in ORDER {
+    let Some(stats) = additions.get(edition) else {
+      continue;
+    };
+    cumulative.pass += stats.pass;
+    cumulative.fail += stats.fail;
+    cumulative.skip += stats.skip;
+    editions.push((edition, cumulative));
+  }
+  editions
+}
+
+/// Prints cumulative scores using test262.fyi's passed associations / total associations formula.
+fn print_fyi_edition_summary(additions: &HashMap<String, BucketStats>) {
+  eprintln!("Editions (test262.fyi cumulative scoring):");
+  for (edition, stats) in cumulative_fyi_editions(additions) {
+    eprintln!(
+      "  {:<28} pass {:>6} total {:>6}  score {:>6.2}%",
+      edition,
+      stats.pass,
+      stats.total(),
+      calculate_percentage(stats.pass as i64, stats.total() as i64)
     );
   }
 }
@@ -1181,8 +1229,6 @@ struct Meta {
   flags: Option<Vec<String>>,
   /// The language features associated with the test.
   features: Option<Vec<String>>,
-  /// Sputnik-era ES5 identifier used by some older language tests.
-  es5id: Option<String>,
   /// The includes associated with the test.
   includes: Option<Vec<String>>,
   /// The negative metadata of the test.
@@ -1490,15 +1536,29 @@ fn edition_label(edition: u8) -> Option<&'static str> {
     14 => Some("ES2023"),
     15 => Some("ES2024"),
     16 => Some("ES2025"),
+    17 => Some("ES2026"),
     99 => Some("ESNext"),
     _ => None,
   }
 }
 
-/// Returns the edition number for a given feature.
+/// Returns the edition number used by test262.fyi for a feature.
+///
+/// Keep this synchronized with `test262-fyi/data/controller/generate.js`.
+/// The current table matches test262-fyi/data commit `beeff8b3d70e65dcdd00270fdb31ab12f041b049`.
 #[allow(clippy::too_many_lines)]
 fn feature_edition(feature: &str) -> Option<u8> {
   match feature {
+    // ES2026
+    "Array.fromAsync" => Some(17),
+    "Error.isError" => Some(17),
+    "Intl.Locale-info" => Some(17),
+    "iterator-sequencing" => Some(17),
+    "json-parse-with-source" => Some(17),
+    "Math.sumPrecise" => Some(17),
+    "uint8array-base64" => Some(17),
+    "upsert" => Some(17),
+
     // ES2025
     "Float16Array" => Some(16),
     "import-attributes" => Some(16),
@@ -1507,6 +1567,7 @@ fn feature_edition(feature: &str) -> Option<u8> {
     "json-modules" => Some(16),
     "promise-try" => Some(16),
     "RegExp.escape" => Some(16),
+    "regexp-duplicate-named-groups" => Some(16),
     "regexp-modifiers" => Some(16),
     "set-methods" => Some(16),
 
@@ -1692,48 +1753,54 @@ fn feature_edition(feature: &str) -> Option<u8> {
     "__setter__" => Some(8),
 
     // Experimental and proposal-stage features group under ESNext.
-    "Intl.Locale-info" => Some(99),
     "Intl.NumberFormat-v3" => Some(99),
     "legacy-regexp" => Some(99),
-    "Temporal" => Some(17),
     "ShadowRealm" => Some(99),
     "decorators" => Some(99),
-    "regexp-duplicate-named-groups" => Some(99),
-    "Array.fromAsync" => Some(99),
-    "explicit-resource-management" => Some(99),
     "source-phase-imports" => Some(99),
     "source-phase-imports-module-source" => Some(99),
-    "Atomics.pause" => Some(99),
     "import-defer" => Some(99),
-    "canonical-tz" => Some(99),
+    "export-defer" => Some(99),
+    "import-text" => Some(99),
+    "import-bytes" => Some(99),
+    "await-dictionary" => Some(99),
     "immutable-arraybuffer" => Some(99),
     "nonextensible-applies-to-private" => Some(99),
+    "iterator-chunking" => Some(99),
+    "iterator-includes" => Some(99),
+    "Iterator.prototype.join" => Some(99),
+    "error-stack-accessor" => Some(99),
+    "regexp-buffer-boundaries" => Some(99),
     "host-gc-required" => Some(99),
-    "Error.isError" => Some(99),
-    "iterator-sequencing" => Some(99),
-    "json-parse-with-source" => Some(99),
-    "Math.sumPrecise" => Some(99),
-    "uint8array-base64" => Some(99),
-    "upsert" => Some(99),
+    "Atomics.pause" => Some(99),
+    "canonical-tz" => Some(99),
+    "explicit-resource-management" => Some(99),
+    "joint-iteration" => Some(99),
+    "Temporal" => Some(99),
     _ => None,
   }
 }
 
-/// Returns the language feature group for a given set of features.
-fn language_feature_group(features: Option<&[String]>) -> Option<String> {
-  let mut best_edition: Option<u8> = None;
+/// Returns one edition label per feature, matching test262.fyi's aggregation.
+///
+/// Labels are intentionally not deduplicated: a test tagged with two features
+/// from the same edition contributes twice to that edition's totals.
+fn feature_edition_labels(features: Option<&[String]>) -> Vec<String> {
+  static FEATURE_CATALOG: OnceLock<HashSet<&'static str>> = OnceLock::new();
+  let catalog = FEATURE_CATALOG.get_or_init(|| {
+    include_str!("../../../test262/features.txt")
+      .lines()
+      .filter(|line| !line.is_empty() && !line.starts_with('#'))
+      .filter_map(|line| line.split('#').next().map(str::trim))
+      .collect()
+  });
 
-  for feature in features? {
-    let Some(edition) = feature_edition(feature) else {
-      continue;
-    };
-    best_edition = Some(match best_edition {
-      Some(current) => current.max(edition),
-      None => edition,
-    });
-  }
-
-  best_edition.and_then(|edition| edition_label(edition).map(str::to_string))
+  features
+    .unwrap_or_default()
+    .iter()
+    .filter(|feature| catalog.contains(feature.as_str()))
+    .filter_map(|feature| edition_label(feature_edition(feature).unwrap_or(99)).map(str::to_string))
+    .collect()
 }
 
 /// Returns the normalized ES version for a given input string.
@@ -1759,6 +1826,7 @@ fn normalize_es_version(input: &str) -> Option<String> {
       "2023" => "ES2023".to_string(),
       "2024" => "ES2024".to_string(),
       "2025" => "ES2025".to_string(),
+      "2026" => "ES2026".to_string(),
       _ => return None,
     }
   } else {
@@ -1776,6 +1844,7 @@ fn normalize_es_version(input: &str) -> Option<String> {
       "2023" => "ES2023".to_string(),
       "2024" => "ES2024".to_string(),
       "2025" => "ES2025".to_string(),
+      "2026" => "ES2026".to_string(),
       _ => return None,
     }
   };
@@ -1800,14 +1869,35 @@ fn normalize_es_versions(values: &[String]) -> Result<Vec<String>, String> {
   Ok(normalized)
 }
 
-/// Return the edition label for a given file, if it has one.
-fn file_edition_label(file: &Path) -> Option<String> {
-  let src = fs::read_to_string(file).ok()?;
-  let meta = parse_meta(&src)?;
-  if meta.es5id.is_some() {
-    return Some("ES5".to_string());
-  }
-  language_feature_group(meta.features.as_deref())
+/// Extracts the inline feature list recognized by test262.fyi.
+///
+/// This deliberately matches its generator rather than accepting every valid
+/// YAML representation. In particular, test262.fyi currently does not score
+/// multiline `features` lists.
+fn test262_fyi_features(source: &str) -> Vec<String> {
+  source
+    .lines()
+    .find_map(|line| {
+      line
+        .strip_prefix("features: [")
+        .and_then(|features| features.strip_suffix(']'))
+    })
+    .map(|features| {
+      features
+        .split(',')
+        .map(|feature| feature.trim().to_string())
+        .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Returns the feature-derived edition labels for a test file.
+fn file_edition_labels(file: &Path) -> Vec<String> {
+  let Ok(source) = fs::read_to_string(file) else {
+    return Vec::new();
+  };
+  let features = test262_fyi_features(&source);
+  feature_edition_labels(Some(&features))
 }
 
 /// Parse Test262 metadata YAML into `Meta`
@@ -1872,32 +1962,32 @@ fn is_async_done_marker(s: &str) -> Option<AsyncDoneMarker> {
 ///
 /// The key fix: uses `Rc::clone` (shared handle) instead of deep cloning
 /// globals, so mutations in evalScript are visible to the caller.
-fn builtin_eval_script(
-  globals: &Rc<RefCell<ObjectData>>,
+fn eval_script_in_vm(
+  vm: &mut Vm,
   args: &[Value],
 ) -> Result<Value, String> {
-  if args.is_empty() {
+  let Some(src) = args.iter().find_map(|value| match value {
+    Value::String(src) => Some(src.clone()),
+    _ => None,
+  }) else {
     return Ok(Value::Null);
-  }
-  let src = match &args[0] {
-    Value::String(s) => s.clone(),
-    _ => return Ok(Value::Null),
   };
-
-  // Parse / compile / run in the current realm's globals.
-  // Rc::clone gives us a shared handle — the new VM sees mutations from
-  // the calling VM and vice versa. This matches spec: evalScript runs
-  // in the SAME realm.
   let chunk = typecheck::with_strict_override(None, || {
     let src = src.as_str_lossy();
     let session = Parser::parse_source(src).map_err(|e| format!("evalScript parse: {}", e))?;
     let prog = session.program();
     compiler::compile_oxc(prog, src).map_err(|e| format!("evalScript compile: {}", e))
   })?;
-  let mut eval_vm = Vm::new(Rc::clone(globals));
-  eval_vm
-    .run(chunk)
+  vm.run(chunk)
     .map_err(|e| format!("evalScript runtime: {}", e))
+}
+
+fn builtin_eval_script(
+  globals: &Rc<RefCell<ObjectData>>,
+  args: &[Value],
+) -> Result<Value, String> {
+  let mut eval_vm = Vm::new(Rc::clone(globals));
+  eval_script_in_vm(&mut eval_vm, args)
 }
 
 /// Returns a new test globals object with the default global properties set.
@@ -2043,9 +2133,14 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
     PropertyKey::String("createRealm".to_string().into()),
     PropertyDescriptor::ordinary_data(host_builtin(Rc::new(|_vm, _args| {
       let realm_global = Rc::new(RefCell::new(ObjectData::new()));
+      realm_global.borrow_mut().properties.insert(
+        PropertyKey::String("globalThis".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&realm_global))),
+      );
 
-      runtime_utils::install_minimal_kernel_constructors(&realm_global);
-
+      // Construct the VM before exposing its globals so the installed globals
+      // and the realm's intrinsic table share the same object identities.
+      let realm_vm = Rc::new(RefCell::new(Vm::new(Rc::clone(&realm_global))));
       let new_262 = make_test262_object(&realm_global);
 
       realm_global.borrow_mut().properties.insert(
@@ -2056,9 +2151,19 @@ fn make_test262_object(globals: &Rc<RefCell<ObjectData>>) -> Value {
       if let Value::Object(obj) = &new_262 {
         obj.borrow_mut().properties.insert(
           PropertyKey::String("global".to_string().into()),
-          PropertyDescriptor::ordinary_data(Value::Object(realm_global)),
+          PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&realm_global))),
         );
       }
+
+      // Keep the VM alive so intrinsic mutations survive across indirect eval calls.
+      let eval_vm = Rc::clone(&realm_vm);
+      realm_global.borrow_mut().properties.insert(
+        PropertyKey::String("eval".to_string().into()),
+        PropertyDescriptor::ordinary_data(Value::Builtin(Rc::new(move |_vm, args| {
+          eval_script_in_vm(&mut eval_vm.borrow_mut(), args)
+            .map_err(blitz::errors::RuntimeError::from)
+        }))),
+      );
 
       Ok(new_262)
     }))),
@@ -3104,6 +3209,7 @@ fn main() {
   let mut failed: Vec<(PathBuf, String)> = Vec::new();
   let mut top_level: HashMap<String, BucketStats> = HashMap::new();
   let mut subsections: HashMap<String, BucketStats> = HashMap::new();
+  let mut editions: HashMap<String, BucketStats> = HashMap::new();
 
   // Bootstrap shared globals for the harness-only and scope-dump modes.
   // Normal tests create fresh globals per mode in `run_test_file`.
@@ -3229,48 +3335,26 @@ fn main() {
   let mut failed_cases = Vec::new();
   for (idx, f, result) in &test_results {
     let (top_key, subsection_key) = bucket_keys(&test_root, f);
+    record_bucket_result(top_level.entry(top_key).or_default(), result);
+    record_bucket_result(subsections.entry(subsection_key).or_default(), result);
+    for edition in file_edition_labels(f) {
+      record_bucket_result(editions.entry(edition).or_default(), result);
+    }
+
     match result {
-      TestResult::Pass => {
+      TestResult::Pass => ran += 1,
+      TestResult::Skip(_) => {}
+      TestResult::Fail(error) => {
         ran += 1;
-        top_level.entry(top_key).or_default().pass += 1;
-        subsections
-          .entry(subsection_key)
-          .or_default()
-          .pass += 1;
-      }
-      TestResult::Skip(_) => {
-        top_level.entry(top_key).or_default().skip += 1;
-        subsections
-          .entry(subsection_key)
-          .or_default()
-          .skip += 1;
-      }
-      TestResult::Fail(e) => {
-        ran += 1;
-        top_level.entry(top_key).or_default().fail += 1;
-        subsections
-          .entry(subsection_key)
-          .or_default()
-          .fail += 1;
-        failed_cases.push((*idx, f.clone(), e.clone()));
+        failed_cases.push((*idx, f.clone(), error.clone()));
       }
       TestResult::StackOverflow => {
         ran += 1;
-        top_level.entry(top_key).or_default().fail += 1;
-        subsections
-          .entry(subsection_key)
-          .or_default()
-          .fail += 1;
         failed_cases.push((*idx, f.clone(), "Stack overflow".into()));
       }
-      TestResult::Panic(msg) => {
+      TestResult::Panic(message) => {
         ran += 1;
-        top_level.entry(top_key).or_default().fail += 1;
-        subsections
-          .entry(subsection_key)
-          .or_default()
-          .fail += 1;
-        failed_cases.push((*idx, f.clone(), format!("Panic: {}", msg)));
+        failed_cases.push((*idx, f.clone(), format!("Panic: {message}")));
       }
     }
   }
@@ -3324,6 +3408,7 @@ fn main() {
       pass_pct
     );
     print_bucket_summary("Sections:", &top_level, 12, false);
+    print_fyi_edition_summary(&editions);
   }
 
   if let Some(report_path) = &opts.report_json {
@@ -3580,7 +3665,7 @@ mod tests {
   }
 
   #[test]
-  fn bucket_keys_groups_language_tests_by_edition() {
+  fn bucket_keys_keeps_language_as_a_section() {
     let root = temp_dir("bucket-language");
     let _guard = TempDirGuard(root.clone());
     let file = root.join("language/expressions/grouping.js");
@@ -3598,12 +3683,12 @@ const ok = 1;
 
     let (top, subsection) = bucket_keys(&root, &file);
 
-    assert_eq!(top, "ES2024");
+    assert_eq!(top, "language");
     assert_eq!(subsection, "language/expressions");
   }
 
   #[test]
-  fn bucket_keys_groups_es5_language_tests() {
+  fn bucket_keys_keeps_es5_language_tests_in_the_language_section() {
     let root = temp_dir("bucket-es5");
     let _guard = TempDirGuard(root.clone());
     let file = root.join("language/comments/sputnik.js");
@@ -3621,8 +3706,68 @@ var ok = 1;
 
     let (top, subsection) = bucket_keys(&root, &file);
 
-    assert_eq!(top, "ES5");
+    assert_eq!(top, "language");
     assert_eq!(subsection, "language/comments");
+  }
+
+  #[test]
+  fn fyi_grouping_counts_each_feature_association() {
+    let features = vec!["class".to_string(), "let".to_string(), "BigInt".to_string()];
+
+    assert_eq!(
+      feature_edition_labels(Some(&features)),
+      ["ES6", "ES6", "ES2020"]
+    );
+    assert!(feature_edition_labels(Some(&["not-in-features.txt".to_string()])).is_empty());
+  }
+
+  #[test]
+  fn fyi_edition_scores_are_cumulative() {
+    let additions = HashMap::from([
+      (
+        "ES5".to_string(),
+        BucketStats {
+          pass: 20,
+          fail: 3,
+          skip: 0,
+        },
+      ),
+      (
+        "ES6".to_string(),
+        BucketStats {
+          pass: 90,
+          fail: 5,
+          skip: 5,
+        },
+      ),
+      (
+        "ES2016".to_string(),
+        BucketStats {
+          pass: 7,
+          fail: 2,
+          skip: 1,
+        },
+      ),
+    ]);
+
+    let editions = cumulative_fyi_editions(&additions);
+    assert_eq!(editions[0].0, "ES5");
+    assert_eq!(editions[0].1.total(), 23);
+    assert_eq!(editions[1].0, "ES6");
+    assert_eq!(editions[1].1.pass, 110);
+    assert_eq!(editions[1].1.total(), 123);
+    assert_eq!(editions[2].0, "ES2016");
+    assert_eq!(editions[2].1.pass, 117);
+    assert_eq!(editions[2].1.total(), 133);
+  }
+
+  #[test]
+  fn fyi_grouping_only_reads_inline_feature_lists() {
+    assert_eq!(
+      test262_fyi_features("/*---\nfeatures: [class, let]\n---*/"),
+      ["class", "let"]
+    );
+    assert!(test262_fyi_features("/*---\nfeatures:\n  - class\n  - let\n---*/").is_empty());
   }
 
   #[test]
@@ -3630,6 +3775,7 @@ var ok = 1;
     assert_eq!(normalize_es_version("5"), Some("ES5".to_string()));
     assert_eq!(normalize_es_version("es6"), Some("ES6".to_string()));
     assert_eq!(normalize_es_version("2016"), Some("ES2016".to_string()));
+    assert_eq!(normalize_es_version("2026"), Some("ES2026".to_string()));
     assert_eq!(normalize_es_version("next"), Some("ESNext".to_string()));
   }
 
@@ -3652,7 +3798,7 @@ var ok = 1;
       &es5_file,
       blitz::js!(
         r#"/*---
-es5id: 7.4_A6
+features: [caller]
 ---*/
 var ok = 1;
 "#
