@@ -9,6 +9,7 @@
 use crate::bytecode::{BytecodeVersion, Chunk, Constant, Op, decode_risc_aux16};
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Current in-memory prelinked module graph format.
@@ -416,6 +417,7 @@ struct ChunkBudget {
   chunks: usize,
   source_bytes: usize,
   bytecode_bytes: usize,
+  sources: HashSet<*const String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -446,17 +448,22 @@ fn validate_chunk_tree(
   }
 
   budget.chunks = checked_add(budget.chunks, 1, "chunk count")?;
-  budget.source_bytes = checked_add(
-    budget.source_bytes,
-    chunk.source_text.len(),
-    "chunk source byte count",
-  )?;
+  let new_source = budget
+    .sources
+    .insert(Arc::as_ptr(&chunk.source_text));
+  if new_source {
+    budget.source_bytes = checked_add(
+      budget.source_bytes,
+      chunk.source_text.len(),
+      "chunk source byte count",
+    )?;
+    enforce_limit(
+      "total chunk source bytes",
+      budget.source_bytes,
+      MAX_TOTAL_SOURCE_BYTES,
+    )?;
+  }
   enforce_limit("chunk count", budget.chunks, MAX_CHUNKS)?;
-  enforce_limit(
-    "total chunk source bytes",
-    budget.source_bytes,
-    MAX_TOTAL_SOURCE_BYTES,
-  )?;
   let instruction_bytes = chunk
     .code
     .len()
@@ -469,11 +476,13 @@ fn validate_chunk_tree(
     .ok_or_else(|| invalid("line table size overflow"))?;
   budget.bytecode_bytes = checked_add(budget.bytecode_bytes, instruction_bytes, "bytecode size")?;
   budget.bytecode_bytes = checked_add(budget.bytecode_bytes, line_bytes, "bytecode size")?;
-  budget.bytecode_bytes = checked_add(
-    budget.bytecode_bytes,
-    chunk.source_text.len(),
-    "bytecode size",
-  )?;
+  if new_source {
+    budget.bytecode_bytes = checked_add(
+      budget.bytecode_bytes,
+      chunk.source_text.len(),
+      "bytecode size",
+    )?;
+  }
   for constant in &chunk.constants {
     let constant_bytes = match constant {
       Constant::String(value) => value.len(),

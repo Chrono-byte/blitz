@@ -2,9 +2,12 @@
 //! Deterministic wire encoding for host-neutral prelinked module graphs.
 //!
 //! This format is deliberately separate from [`crate::bytecode_bundle`]. It
-//! carries graph/linking metadata as well as the complete chunk tree, and its
-//! decoder bounds every length before allocating. Decoded graphs are passed
-//! through [`PrelinkedModuleGraph::validate`] before they are returned.
+//! carries graph/linking metadata as well as the complete chunk tree. Version
+//! 3 stores source text once per module instead of repeating it in every nested
+//! chunk. Its decoder bounds every length before allocating and retains read
+//! compatibility with version 2 bundles.
+//! Decoded graphs are passed through [`PrelinkedModuleGraph::validate`] before
+//! they are returned.
 
 use crate::bytecode::{
   BytecodeVersion, Chunk, Constant, FinallyHandler, FunctionProto, ICEntry, UpvalueSpec,
@@ -21,7 +24,9 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// Current version of the prelinked graph wire envelope.
-pub const PRELINKED_GRAPH_WIRE_VERSION: u16 = 2;
+pub const PRELINKED_GRAPH_WIRE_VERSION: u16 = 3;
+
+const SOURCE_TEXT_WIRE_VERSION: u16 = 2;
 
 const MAGIC: &[u8; 8] = b"BLITZPG\0";
 const HEADER_LEN: usize = MAGIC.len() + 2 + 8 + 4;
@@ -131,7 +136,10 @@ pub fn decode(bytes: &[u8]) -> Result<PrelinkedModuleGraph, PrelinkedGraphCodecE
     return Err(PrelinkedGraphCodecError::InvalidHeader);
   }
   let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-  if version != PRELINKED_GRAPH_WIRE_VERSION {
+  if !matches!(
+    version,
+    SOURCE_TEXT_WIRE_VERSION | PRELINKED_GRAPH_WIRE_VERSION
+  ) {
     return Err(PrelinkedGraphCodecError::UnsupportedVersion(version));
   }
   let payload_len = u64::from_le_bytes(
@@ -156,7 +164,7 @@ pub fn decode(bytes: &[u8]) -> Result<PrelinkedModuleGraph, PrelinkedGraphCodecE
     return Err(PrelinkedGraphCodecError::ChecksumMismatch);
   }
 
-  let mut reader = Reader::new(payload);
+  let mut reader = Reader::new(payload, version);
   let graph = decode_graph(&mut reader)?;
   reader.finish()?;
   graph.validate()?;
@@ -192,7 +200,8 @@ fn encode_module(
     writer.string(&import.local_name, StringKind::Name)?;
     writer.u32(import.binding_id);
   }
-  encode_chunk(writer, &module.chunk, 0)
+  writer.string(&module.chunk.source_text, StringKind::Source)?;
+  encode_chunk(writer, &module.chunk, &module.chunk.source_text, 0)
 }
 
 fn decode_graph(reader: &mut Reader<'_>) -> Result<PrelinkedModuleGraph, PrelinkedGraphCodecError> {
@@ -258,7 +267,12 @@ fn decode_module(reader: &mut Reader<'_>) -> Result<PrelinkedModule, PrelinkedGr
       binding_id: reader.u32()?,
     });
   }
-  let chunk = decode_chunk(reader, 0)?;
+  let module_source = if reader.wire_version == PRELINKED_GRAPH_WIRE_VERSION {
+    Some(Arc::new(reader.string(StringKind::Source)?))
+  } else {
+    None
+  };
+  let chunk = decode_chunk(reader, 0, module_source.as_ref())?;
   Ok(PrelinkedModule {
     specifier,
     module_index,
@@ -273,10 +287,14 @@ fn decode_module(reader: &mut Reader<'_>) -> Result<PrelinkedModule, PrelinkedGr
 fn encode_chunk(
   writer: &mut Writer,
   chunk: &Chunk,
+  module_source: &str,
   depth: usize,
 ) -> Result<(), PrelinkedGraphCodecError> {
   if depth > MAX_CHUNK_DEPTH {
     return Err(invalid("chunk nesting exceeds the supported depth"));
+  }
+  if chunk.source_text.as_str() != module_source {
+    return Err(invalid("all chunks in a module must share source text"));
   }
   writer.u8(chunk.version as u8);
   writer.vector_len(chunk.code.len(), MAX_VECTOR_ITEMS, "instruction count")?;
@@ -289,13 +307,12 @@ fn encode_chunk(
   }
   writer.vector_len(chunk.functions.len(), MAX_VECTOR_ITEMS, "function count")?;
   for function in &chunk.functions {
-    encode_function(writer, function, depth + 1)?;
+    encode_function(writer, function, module_source, depth + 1)?;
   }
   writer.vector_len(chunk.lines.len(), MAX_VECTOR_ITEMS, "line count")?;
   for line in &chunk.lines {
     writer.u32(*line);
   }
-  writer.string(&chunk.source_text, StringKind::Source)?;
   encode_optional_types(writer, &chunk.root_slot_types, 0)?;
   encode_optional_strings(writer, &chunk.root_slot_names)?;
   encode_bools(writer, &chunk.root_lexical_tdz)?;
@@ -322,6 +339,7 @@ fn encode_chunk(
 fn decode_chunk(
   reader: &mut Reader<'_>,
   depth: usize,
+  module_source: Option<&Arc<String>>,
 ) -> Result<Chunk, PrelinkedGraphCodecError> {
   if depth > MAX_CHUNK_DEPTH {
     return Err(invalid("chunk nesting exceeds the supported depth"));
@@ -352,7 +370,7 @@ fn decode_chunk(
   let function_count = reader.vector_len(MAX_VECTOR_ITEMS, "function count")?;
   let mut functions = Vec::with_capacity(function_count);
   for _ in 0..function_count {
-    functions.push(decode_function(reader, depth + 1)?);
+    functions.push(decode_function(reader, depth + 1, module_source)?);
   }
   let line_count = reader.vector_len(MAX_VECTOR_ITEMS, "line count")?;
   reader.add_bytecode_budget(
@@ -364,7 +382,11 @@ fn decode_chunk(
   for _ in 0..line_count {
     lines.push(reader.u32()?);
   }
-  let source_text = Arc::new(reader.string(StringKind::Source)?);
+  let source_text = if reader.wire_version == SOURCE_TEXT_WIRE_VERSION {
+    Arc::new(reader.string(StringKind::Source)?)
+  } else {
+    Arc::clone(module_source.ok_or_else(|| invalid("module source text is missing"))?)
+  };
   let root_slot_types = decode_optional_types(reader, 0)?;
   let root_slot_names = decode_optional_strings(reader)?;
   let root_lexical_tdz = decode_bools(reader)?;
@@ -407,6 +429,7 @@ fn decode_chunk(
 fn encode_function(
   writer: &mut Writer,
   function: &FunctionProto,
+  module_source: &str,
   depth: usize,
 ) -> Result<(), PrelinkedGraphCodecError> {
   writer.string(&function.name, StringKind::Name)?;
@@ -419,7 +442,7 @@ fn encode_function(
     u64::try_from(function.arity)
       .map_err(|_| invalid("function arity does not fit portable u64"))?,
   );
-  encode_chunk(writer, &function.chunk, depth)?;
+  encode_chunk(writer, &function.chunk, module_source, depth)?;
   encode_optional_types(writer, &function.slot_types, 0)?;
   encode_optional_strings(writer, &function.slot_names)?;
   encode_bools(writer, &function.lexical_tdz)?;
@@ -464,6 +487,7 @@ fn encode_function(
 fn decode_function(
   reader: &mut Reader<'_>,
   depth: usize,
+  module_source: Option<&Arc<String>>,
 ) -> Result<FunctionProto, PrelinkedGraphCodecError> {
   let name = reader.string(StringKind::Name)?;
   let span_start = reader.u32()?;
@@ -472,7 +496,7 @@ fn decode_function(
   if arity > MAX_FUNCTION_ARITY {
     return Err(limit("function arity", arity, MAX_FUNCTION_ARITY));
   }
-  let chunk = Arc::new(decode_chunk(reader, depth)?);
+  let chunk = Arc::new(decode_chunk(reader, depth, module_source)?);
   let slot_types = decode_optional_types(reader, 0)?;
   let slot_names = decode_optional_strings(reader)?;
   let lexical_tdz = decode_bools(reader)?;
@@ -1231,6 +1255,7 @@ impl Writer {
 struct Reader<'a> {
   bytes: &'a [u8],
   position: usize,
+  wire_version: u16,
   name_bytes: usize,
   source_bytes: usize,
   bytecode_bytes: usize,
@@ -1240,10 +1265,14 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-  fn new(bytes: &'a [u8]) -> Self {
+  fn new(
+    bytes: &'a [u8],
+    wire_version: u16,
+  ) -> Self {
     Self {
       bytes,
       position: 0,
+      wire_version,
       name_bytes: 0,
       source_bytes: 0,
       bytecode_bytes: 0,
@@ -1636,6 +1665,17 @@ mod tests {
     assert_eq!(encode(&decoded).expect("re-encode graph"), first);
     assert_eq!(decoded.modules.len(), 2);
     assert_eq!(decoded.modules[1].imports[0].binding_id, 0);
+    assert!(decoded.modules.iter().all(|module| {
+      module
+        .chunk
+        .functions
+        .iter()
+        .all(|function| Arc::ptr_eq(&module.chunk.source_text, &function.chunk.source_text))
+    }));
+    assert_eq!(
+      decoded.modules[1].chunk.source_text.as_str(),
+      "export const value = 1;"
+    );
     assert_eq!(
       decoded.modules[1].chunk.functions[0]
         .chunk
@@ -1649,6 +1689,16 @@ mod tests {
         .constants
         .len(),
       3
+    );
+  }
+
+  #[test]
+  fn rejects_mixed_sources_within_a_module() {
+    let mut graph = graph();
+    Arc::make_mut(&mut graph.modules[1].chunk.functions[0].chunk).source_text =
+      Arc::new("function nested() {}".into());
+    assert!(
+      matches!(encode(&graph), Err(PrelinkedGraphCodecError::InvalidData(message)) if message.contains("share source text"))
     );
   }
 
