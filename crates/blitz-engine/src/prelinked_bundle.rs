@@ -1499,7 +1499,7 @@ mod tests {
   fn graph() -> PrelinkedModuleGraph {
     let source = Arc::new(crate::js!(module, "export const value = 1;").to_string());
     let mut nested = Chunk::new(Arc::clone(&source));
-    nested.write_instr(Op::Undefined as u32, 1);
+    nested.write_instr(Op::PushHandler as u32, 1);
     nested.write_instr(Op::Return as u32, 1);
     nested.constants = vec![
       Constant::Number(f64::from_bits(0x7ff8_0000_0000_0042)),
@@ -1528,19 +1528,28 @@ mod tests {
     let mut root = Chunk::new(source);
     root.write_instr(encode_risc_aux16(Op::Undefined, 0, 1), 0);
     root.write_instr(encode_risc_aux16(Op::Return, 0, 1), 0);
+    root.root_slot_types = vec![None, None];
+    root.root_slot_names = vec![Some("root".into()), None];
+    root.root_lexical_tdz = vec![false, false];
+    root.root_slot_immutable = vec![false, false];
     root.functions.push(FunctionProto {
       name: "nested".into(),
       span: Span::new(0, 24),
       arity: 2,
       chunk: Arc::new(nested),
-      slot_types: vec![Some(Type::Literal(LiteralType::String("x".into())))],
-      slot_names: vec![Some("arg".into())],
-      lexical_tdz: vec![false],
-      slot_immutable: vec![true],
-      slot_sloppy_immutable_silent: vec![true],
+      slot_types: vec![
+        Some(Type::Literal(LiteralType::String("x".into()))),
+        None,
+        None,
+        None,
+      ],
+      slot_names: vec![Some("arg".into()), None, None, None],
+      lexical_tdz: vec![false, false, false, false],
+      slot_immutable: vec![true, false, false, false],
+      slot_sloppy_immutable_silent: vec![true, false, false, false],
       upvalues: vec![UpvalueSpec {
         is_local: true,
-        index: 5,
+        index: 1,
         mirror_global_name: Some("global".into()),
         immutable: true,
         sloppy_immutable_silent: true,
@@ -1548,8 +1557,8 @@ mod tests {
       has_rest: true,
       has_prototype_property: true,
       captures_this: true,
-      arguments_slot: Some(6),
-      self_binding_slot: Some(7),
+      arguments_slot: Some(0),
+      self_binding_slot: Some(1),
       has_simple_parameter_list: false,
       return_type: Some(Type::Union(vec![Type::Undefined, Type::Number])),
       is_strict: true,

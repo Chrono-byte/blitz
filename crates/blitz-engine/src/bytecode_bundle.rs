@@ -182,13 +182,7 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<NamedChunk>, BundleError> {
   decoder.decoded.resize(decoder.chunks.len(), None);
 
   for index in 0..decoder.chunks.len() {
-    let chunk = decoder.build_chunk(index, 0)?;
-    chunk
-      .verify()
-      .map_err(|reason| BundleError::InvalidChunk {
-        name: format!("chunk table entry {index}"),
-        reason,
-      })?;
+    decoder.build_chunk(index, 0)?;
   }
 
   wire
@@ -199,6 +193,12 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<NamedChunk>, BundleError> {
       let chunk = decoder.decoded[index]
         .as_ref()
         .ok_or_else(|| BundleError::InvalidData(format!("missing decoded chunk {index}")))?;
+      chunk
+        .verify()
+        .map_err(|reason| BundleError::InvalidChunk {
+          name: entry.name.clone(),
+          reason,
+        })?;
       Ok(NamedChunk {
         name: entry.name,
         chunk: chunk.as_ref().clone(),
@@ -1067,7 +1067,7 @@ mod tests {
   fn populated_bundle() -> Vec<NamedChunk> {
     let source = Arc::new(crate::js!("function nested() { return undefined; }").to_string());
     let mut nested = Chunk::new(Arc::clone(&source));
-    nested.write_instr(Op::Undefined as u32, 7);
+    nested.write_instr(Op::PushHandler as u32, 7);
     nested.write_instr(Op::Return as u32, 7);
     nested.constants = vec![
       Constant::Uninitialized,
@@ -1110,14 +1110,19 @@ mod tests {
       span: Span::new(0, 42),
       arity: 2,
       chunk: Arc::new(nested),
-      slot_types: vec![Some(Type::Literal(LiteralType::String("x".into())))],
-      slot_names: vec![Some("arg".into())],
-      lexical_tdz: vec![false],
-      slot_immutable: vec![true],
-      slot_sloppy_immutable_silent: vec![true],
+      slot_types: vec![
+        Some(Type::Literal(LiteralType::String("x".into()))),
+        None,
+        None,
+        None,
+      ],
+      slot_names: vec![Some("arg".into()), None, None, None],
+      lexical_tdz: vec![false, false, false, false],
+      slot_immutable: vec![true, false, false, false],
+      slot_sloppy_immutable_silent: vec![true, false, false, false],
       upvalues: vec![UpvalueSpec {
         is_local: true,
-        index: 5,
+        index: 1,
         mirror_global_name: Some("global".into()),
         immutable: true,
         sloppy_immutable_silent: true,
@@ -1125,8 +1130,8 @@ mod tests {
       has_rest: true,
       has_prototype_property: true,
       captures_this: true,
-      arguments_slot: Some(6),
-      self_binding_slot: Some(7),
+      arguments_slot: Some(0),
+      self_binding_slot: Some(1),
       has_simple_parameter_list: false,
       return_type: Some(Type::Union(vec![Type::Undefined, Type::Number])),
       is_strict: true,

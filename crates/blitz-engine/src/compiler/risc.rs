@@ -1239,9 +1239,9 @@ mod tests {
     let source = crate::js!("function value(x) { try { return x + 1; } finally {} } value(2);");
     let session = Parser::parse_source(source).expect("parse");
     let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+    chunk.verify().expect("verified RISC chunk tree");
     fn assert_risc(chunk: &Chunk) {
       assert_eq!(chunk.version, BytecodeVersion::RiscV2);
-      chunk.verify().expect("verified RISC chunk");
       for word in &chunk.code {
         BytecodeOp::from_byte((word & 0xff) as u8).expect("public RISC opcode");
         assert!(!matches!(word & 0xff, 50..=53));

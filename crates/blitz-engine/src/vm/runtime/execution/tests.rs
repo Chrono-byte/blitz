@@ -208,6 +208,26 @@ mod test {
   }
 
   #[test]
+  fn strict_tail_call_to_native_resumes_the_caller() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        "use strict";
+        function parse(value) {
+          return parseInt(value);
+        }
+        globalThis.parsed_tail_value = parse("3");
+        globalThis.after_native_tail_call = 4;
+      "#
+    ));
+
+    assert_eq!(vm.get_global("parsed_tail_value"), Some(Value::Number(3.0)));
+    assert_eq!(
+      vm.get_global("after_native_tail_call"),
+      Some(Value::Number(4.0))
+    );
+  }
+
+  #[test]
   fn ordinary_recursion_uses_vm_managed_register_frames() {
     let (vm, _) = run_script(crate::js!(
       r#"

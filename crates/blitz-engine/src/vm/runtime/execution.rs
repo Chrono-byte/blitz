@@ -110,6 +110,37 @@ impl Vm {
     }
   }
 
+  fn finish_risc_return(
+    &mut self,
+    registers: &mut [Value; 16],
+    spills: &mut Vec<Value>,
+    resume_register: &mut Option<usize>,
+    result: Value,
+  ) -> Result<Option<RiscRunOutcome>, RuntimeError> {
+    if let Some(caller_state) = self
+      .execution
+      .call_stack
+      .last_mut()
+      .and_then(|frame| frame.risc_state.take())
+    {
+      self.execute_return(result.clone())?;
+      registers.clone_from(&caller_state.registers);
+      registers[0] = result;
+      spills.clone_from(&caller_state.spills);
+      *resume_register = caller_state.resume_register;
+      return Ok(None);
+    }
+    if self.execution.call_stack.is_empty() {
+      let temp_root_base = self.roots.temporary.len();
+      self.roots.temporary.push(result.clone());
+      self.run_microtasks_if_needed()?;
+      let _ = self.collect_garbage_prototype();
+      self.roots.temporary.truncate(temp_root_base);
+      self.finish_opcode_profile_run("risc-return");
+    }
+    Ok(Some(RiscRunOutcome::Return(result)))
+  }
+
   pub(super) fn run_risc_state(
     &mut self,
     state: &mut RiscExecutionState,
@@ -774,7 +805,10 @@ impl Vm {
               switched_risc_context = true;
             } else {
               let result = self.call_value(&callee, &args)?;
-              return Ok(Some(RiscRunOutcome::Return(result)));
+              let outcome =
+                self.finish_risc_return(registers, spills, &mut state.resume_register, result)?;
+              switched_risc_context = outcome.is_none();
+              return Ok(outcome);
             }
           }
           Op::Construct => {
@@ -902,29 +936,10 @@ impl Vm {
               }
               self.execution.generator_return_frame_count = None;
             }
-            if let Some(caller_state) = self
-              .execution
-              .call_stack
-              .last_mut()
-              .and_then(|frame| frame.risc_state.take())
-            {
-              self.execute_return(result.clone())?;
-              registers.clone_from(&caller_state.registers);
-              registers[0] = result;
-              spills.clone_from(&caller_state.spills);
-              state.resume_register = caller_state.resume_register;
-              switched_risc_context = true;
-              return Ok(None);
-            }
-            if self.execution.call_stack.is_empty() {
-              let temp_root_base = self.roots.temporary.len();
-              self.roots.temporary.push(result.clone());
-              self.run_microtasks_if_needed()?;
-              let _ = self.collect_garbage_prototype();
-              self.roots.temporary.truncate(temp_root_base);
-              self.finish_opcode_profile_run("risc-return");
-            }
-            return Ok(Some(RiscRunOutcome::Return(result)));
+            let outcome =
+              self.finish_risc_return(registers, spills, &mut state.resume_register, result)?;
+            switched_risc_context = outcome.is_none();
+            return Ok(outcome);
           }
         }
         Ok(None)

@@ -420,6 +420,26 @@ impl Chunk {
 
   /// Validate structural invariants before a chunk is executed.
   pub fn verify(&self) -> Result<(), String> {
+    let root_slot_count = self.root_slot_types.len();
+    for (name, length) in [
+      ("root slot names", self.root_slot_names.len()),
+      ("root TDZ flags", self.root_lexical_tdz.len()),
+      ("root immutability flags", self.root_slot_immutable.len()),
+    ] {
+      if length != root_slot_count {
+        return Err(format!(
+          "{name} length {length} does not match root slot count {root_slot_count}"
+        ));
+      }
+    }
+    self.verify_with_layout(root_slot_count, 0)
+  }
+
+  fn verify_with_layout(
+    &self,
+    local_count: usize,
+    upvalue_count: usize,
+  ) -> Result<(), String> {
     if self.lines.len() != self.code.len() {
       return Err(format!(
         "line table length {} does not match instruction count {}",
@@ -427,16 +447,17 @@ impl Chunk {
         self.code.len()
       ));
     }
+    if self.risc_value_spill_count > self.risc_spill_count {
+      return Err(format!(
+        "RISC value spill count {} exceeds total spill count {}",
+        self.risc_value_spill_count, self.risc_spill_count
+      ));
+    }
+
     for ip in 0..self.code.len() {
       let instruction = self.decode_at(ip)?;
-      let branch_offset = match instruction.op {
-        Op::CompareJump => Some(decode_compare_jump(self.code[ip]).3 as i32),
-        Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpIfNullish => {
-          Some(decode_risc_cond_offset(self.code[ip]))
-        }
-        _ => instruction.branch_offset(),
-      };
-      if let Some(offset) = branch_offset {
+      let word = self.code[ip];
+      if let Some(offset) = instruction.branch_offset() {
         let target = ip as i64 + 1 + offset as i64;
         if !(0..self.code.len() as i64).contains(&target) {
           return Err(format!(
@@ -445,27 +466,153 @@ impl Chunk {
           ));
         }
       }
-      let pool_index = decode_risc_aux16(self.code[ip]);
+
+      let operand = decode_risc_aux16(word) as usize;
       match instruction.op {
-        Op::Const | Op::GetModuleExport | Op::SetModuleExport
-          if pool_index as usize >= self.constants.len() =>
-        {
+        Op::Const => self.verify_constant_index(ip, operand, false)?,
+        Op::GetGlobal | Op::TypeofGlobal | Op::SetGlobal | Op::GetBuiltin => {
+          self.verify_constant_index(ip, operand, true)?
+        }
+        Op::GetModuleExport | Op::SetModuleExport => {
+          self.verify_module_descriptor(ip, operand)?;
+        }
+        Op::MakeClosure if operand >= self.functions.len() => {
           return Err(format!(
-            "constant index {} at instruction {} is out of bounds",
-            pool_index, ip
+            "function index {operand} at instruction {ip} is out of bounds"
           ));
         }
-        Op::MakeClosure if pool_index as usize >= self.functions.len() => {
+        Op::LoadLocal | Op::StoreLocal | Op::CloneLocalCell | Op::ResetLocalCell
+          if operand >= local_count =>
+        {
           return Err(format!(
-            "function index {} at instruction {} is out of bounds",
-            pool_index, ip
+            "local slot {operand} at instruction {ip} is out of bounds"
+          ));
+        }
+        Op::GetUpvalue | Op::SetUpvalue if operand >= upvalue_count => {
+          return Err(format!(
+            "upvalue slot {operand} at instruction {ip} is out of bounds"
+          ));
+        }
+        Op::LoadSpill | Op::StoreSpill if operand >= self.risc_spill_count as usize => {
+          return Err(format!(
+            "spill slot {operand} at instruction {ip} is out of bounds"
+          ));
+        }
+        Op::Call | Op::TailCall | Op::Construct | Op::CallBuiltin => {
+          if decode_rd(word) != 0 || decode_rs(word) != 0 {
+            return Err(format!("call ABI registers at instruction {ip} must be r0"));
+          }
+          self.verify_operand_window(ip, operand.saturating_sub(6))?;
+        }
+        Op::BuildArray | Op::SuperConstruct => {
+          self.verify_operand_window(ip, operand)?;
+        }
+        Op::BuildObject => {
+          let required = operand
+            .checked_mul(2)
+            .ok_or_else(|| format!("object operand window at instruction {ip} overflows"))?;
+          self.verify_operand_window(ip, required)?;
+        }
+        Op::SetProperty | Op::SetSuperProperty | Op::Spread
+          if decode_aux8(word) > 15 || decode_aux8_2(word) != 0 =>
+        {
+          return Err(format!(
+            "extra register operand at instruction {ip} is malformed"
           ));
         }
         _ => {}
       }
     }
+
+    for (index, handler) in self.finally_handlers.iter().enumerate() {
+      if self.finally_handlers[..index]
+        .iter()
+        .any(|other| other.push_ip == handler.push_ip)
+      {
+        return Err(format!(
+          "finally handler push instruction {} is duplicated",
+          handler.push_ip
+        ));
+      }
+      if self
+        .code
+        .get(handler.push_ip)
+        .and_then(|word| Op::from_byte(opcode_from_instr(*word)))
+        != Some(Op::PushHandler)
+      {
+        return Err(format!(
+          "finally handler push instruction {} is invalid",
+          handler.push_ip
+        ));
+      }
+      if handler.finalizer_ip >= self.code.len() {
+        return Err(format!(
+          "finally handler target {} is out of bounds",
+          handler.finalizer_ip
+        ));
+      }
+      if handler.return_slot >= local_count || handler.did_return_slot >= local_count {
+        return Err("finally handler local slot is out of bounds".to_string());
+      }
+    }
+
     for function in &self.functions {
-      function.chunk.verify()?;
+      function.verify_metadata(local_count, upvalue_count)?;
+    }
+    Ok(())
+  }
+
+  fn verify_constant_index(
+    &self,
+    ip: usize,
+    index: usize,
+    require_string: bool,
+  ) -> Result<(), String> {
+    let constant = self
+      .constants
+      .get(index)
+      .ok_or_else(|| format!("constant index {index} at instruction {ip} is out of bounds"))?;
+    if require_string && !matches!(constant, Constant::String(_)) {
+      return Err(format!(
+        "constant index {index} at instruction {ip} must contain a string"
+      ));
+    }
+    Ok(())
+  }
+
+  fn verify_module_descriptor(
+    &self,
+    ip: usize,
+    index: usize,
+  ) -> Result<(), String> {
+    self.verify_constant_index(ip, index, true)?;
+    let Constant::String(descriptor) = &self.constants[index] else {
+      unreachable!("string constant verified above");
+    };
+    let descriptor = descriptor.to_string_lossy();
+    let Some((module, _name)) = descriptor.split_once('\0') else {
+      return Err(format!(
+        "module descriptor at constant index {index} is malformed"
+      ));
+    };
+    if module.parse::<usize>().is_err() {
+      return Err(format!(
+        "module descriptor at constant index {index} is malformed"
+      ));
+    }
+    Ok(())
+  }
+
+  fn verify_operand_window(
+    &self,
+    ip: usize,
+    required: usize,
+  ) -> Result<(), String> {
+    let available = usize::from(self.risc_spill_count - self.risc_value_spill_count);
+    if required > available {
+      return Err(format!(
+        "operand window of {required} values at instruction {ip} exceeds {available} slots"
+      ));
     }
     Ok(())
   }
@@ -852,6 +999,81 @@ pub fn payload_byte(
 }
 
 impl FunctionProto {
+  fn verify_metadata(
+    &self,
+    enclosing_local_count: usize,
+    enclosing_upvalue_count: usize,
+  ) -> Result<(), String> {
+    let slot_count = self.slot_types.len();
+    for (name, length) in [
+      ("slot names", self.slot_names.len()),
+      ("TDZ flags", self.lexical_tdz.len()),
+      ("immutability flags", self.slot_immutable.len()),
+      (
+        "sloppy immutability flags",
+        self.slot_sloppy_immutable_silent.len(),
+      ),
+    ] {
+      if length != slot_count {
+        return Err(format!(
+          "function {} {name} length {length} does not match slot count {slot_count}",
+          self.name
+        ));
+      }
+    }
+    let local_count = slot_count.max(self.arity);
+    for (name, slot) in [
+      ("arguments", self.arguments_slot),
+      ("self binding", self.self_binding_slot),
+    ] {
+      if slot.is_some_and(|slot| slot >= local_count) {
+        return Err(format!(
+          "function {} {name} slot is out of bounds",
+          self.name
+        ));
+      }
+    }
+    for (index, (&sloppy_silent, &immutable)) in self
+      .slot_sloppy_immutable_silent
+      .iter()
+      .zip(&self.slot_immutable)
+      .enumerate()
+    {
+      if sloppy_silent && !immutable {
+        return Err(format!(
+          "function {} slot {index} silently ignores writes but is mutable",
+          self.name
+        ));
+      }
+    }
+    for (index, upvalue) in self.upvalues.iter().enumerate() {
+      let limit = if upvalue.is_local {
+        enclosing_local_count
+      } else {
+        enclosing_upvalue_count
+      };
+      if upvalue.index as usize >= limit {
+        return Err(format!(
+          "function {} upvalue {index} references an out-of-bounds enclosing binding",
+          self.name
+        ));
+      }
+    }
+    if let Some(entry) = self
+      .ic_table
+      .iter()
+      .find(|entry| entry.ic_type > 2)
+    {
+      return Err(format!(
+        "function {} has invalid inline-cache type {}",
+        self.name, entry.ic_type
+      ));
+    }
+    self
+      .chunk
+      .verify_with_layout(local_count, self.upvalues.len())
+  }
+
   /// Return the exact source substring used to define this function, if tracked.
   pub fn source_text(&self) -> Option<&str> {
     let text = &self.chunk.source_text;
@@ -1088,7 +1310,7 @@ pub enum Op {
 }
 
 /// Total number of opcode variants.
-pub const OP_COUNT: usize = Op::BitNot as usize + 1;
+pub const OP_COUNT: usize = Op::GetAsyncIterator as usize + 1;
 
 impl Op {
   /// Converts a byte to an Op if valid, returns None otherwise
@@ -1325,6 +1547,7 @@ mod tests {
 
   #[test]
   fn op_round_trip() {
+    assert_eq!(OP_COUNT, Op::GetAsyncIterator as usize + 1);
     for i in 0u8..=Op::GetAsyncIterator as u8 {
       let Ok(op) = Op::try_from(i) else {
         assert!((50..=53).contains(&i), "unexpected opcode gap at {i}");
@@ -1365,6 +1588,78 @@ mod tests {
         .verify()
         .unwrap_err()
         .contains("out-of-bounds instruction")
+    );
+  }
+
+  #[test]
+  fn verifier_rejects_invalid_risc_operands_and_metadata() {
+    let mut invalid_global = Chunk::default();
+    invalid_global
+      .constants
+      .push(Constant::Number(1.0));
+    invalid_global.write_instr(encode_risc_aux16(Op::GetGlobal, 0, 0), 1);
+    assert!(
+      invalid_global
+        .verify()
+        .unwrap_err()
+        .contains("must contain a string")
+    );
+
+    let mut invalid_local = Chunk {
+      root_slot_types: vec![None],
+      root_slot_names: vec![Some("value".into())],
+      root_lexical_tdz: vec![false],
+      root_slot_immutable: vec![false],
+      ..Chunk::default()
+    };
+    invalid_local.write_instr(encode_risc_aux16(Op::LoadLocal, 0, 1), 1);
+    assert!(
+      invalid_local
+        .verify()
+        .unwrap_err()
+        .contains("local slot 1")
+    );
+
+    let mut invalid_spill = Chunk {
+      risc_spill_count: 1,
+      ..Chunk::default()
+    };
+    invalid_spill.write_instr(encode_risc_aux16(Op::LoadSpill, 0, 1), 1);
+    assert!(
+      invalid_spill
+        .verify()
+        .unwrap_err()
+        .contains("spill slot 1")
+    );
+
+    let mut invalid_window = Chunk {
+      risc_spill_count: 2,
+      risc_value_spill_count: 1,
+      ..Chunk::default()
+    };
+    invalid_window.write_instr(encode_risc_aux16(Op::BuildArray, 0, 2), 1);
+    assert!(
+      invalid_window
+        .verify()
+        .unwrap_err()
+        .contains("operand window")
+    );
+
+    let mut invalid_finally = Chunk::default();
+    invalid_finally.write_instr(Op::Undefined as u32, 1);
+    invalid_finally
+      .finally_handlers
+      .push(FinallyHandler {
+        push_ip: 0,
+        finalizer_ip: 0,
+        return_slot: 0,
+        did_return_slot: 0,
+      });
+    assert!(
+      invalid_finally
+        .verify()
+        .unwrap_err()
+        .contains("finally handler push")
     );
   }
 
