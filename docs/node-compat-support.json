@@ -4,8 +4,8 @@
   "coverageMetric": {
     "kind": "public-built-in-roots",
     "inventoryTotal": 58,
-    "supportedRoots": 36,
-    "percent": 62.07,
+    "supportedRoots": 37,
+    "percent": 63.79,
     "note": "A supported root has a registered, declared, tested initial compatibility slice; this percentage does not claim complete export-level Node API parity."
   },
   "profiles": {
@@ -18,6 +18,7 @@
       "node:constants",
       "node:diagnostics_channel",
       "node:events",
+      "node:http",
       "node:module",
       "node:os",
       "node:path",
@@ -49,6 +50,7 @@
       "node:events",
       "node:fs",
       "node:fs/promises",
+      "node:http",
       "node:module",
       "node:os",
       "node:path",
@@ -83,6 +85,7 @@
       "node:events",
       "node:fs",
       "node:fs/promises",
+      "node:http",
       "node:module",
       "node:os",
       "node:path",
@@ -326,11 +329,20 @@
     },
     {
       "specifier": "node:http",
-      "status": "planned-or-deferred",
-      "profiles": [],
-      "declaration": null,
-      "hostPrimitives": [],
-      "tests": []
+      "status": "supported-slice",
+      "profiles": [
+        "core",
+        "tooling",
+        "full"
+      ],
+      "declaration": "declarations/node-http.d.ts",
+      "hostPrimitives": [
+        "http"
+      ],
+      "tests": [
+        "modules::tests::node_http_serves_buffered_requests_with_node_response_methods"
+      ],
+      "notes": "Server slice with createServer, buffered IncomingMessage bodies, ServerResponse headers/status/write/end, lifecycle events, listen/close/address/ref/unref. Client request/get intentionally throw ERR_NOT_IMPLEMENTED."
     },
     {
       "specifier": "node:http2",

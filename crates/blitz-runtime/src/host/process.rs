@@ -151,6 +151,7 @@ mod tests {
           .expect("test listen address"),
         install_compatibility_globals: false,
         node_compat: NodeCompatProfile::Core,
+        conditions: Vec::new(),
       },
     );
 

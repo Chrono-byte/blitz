@@ -91,7 +91,7 @@ impl super::Compiler {
         if let Some(init) = &dec.init {
           self.compile_expr_oast(init)?;
           if Self::is_anonymous_function_definition(init) {
-            let value_slot = self.alloc_temp_local("variable_initializer");
+            let value_slot = self.alloc_reusable_temp_local("variable_initializer");
             self.emit(Op::StoreLocal, LINE);
             self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
             self.emit_get_builtin_name("setFunctionNameIfAnonymous");
@@ -137,7 +137,7 @@ impl super::Compiler {
         if let Some(name) = Self::binding_identifier_name(&dec.id)
           && Self::is_anonymous_function_definition(init)
         {
-          let value_slot = self.alloc_temp_local("variable_initializer");
+          let value_slot = self.alloc_reusable_temp_local("variable_initializer");
           self.emit(Op::StoreLocal, LINE);
           self.emit_byte(self.slot_to_u8(value_slot)?, LINE);
           self.emit_get_builtin_name("setFunctionNameIfAnonymous");

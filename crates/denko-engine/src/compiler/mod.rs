@@ -25,6 +25,7 @@
 //! - Constant folding
 
 use crate::bytecode::Chunk;
+use crate::value::Value;
 use emit::FrontendOp as Op;
 use oxc_ast::ast as oast;
 use std::collections::HashSet;
@@ -494,6 +495,15 @@ impl Compiler {
       .iter()
       .filter(|s| !matches!(s, oast::Statement::FunctionDeclaration(_)))
       .collect();
+
+    if repl_mode && stmts.is_empty() {
+      if let Some(directive) = program.directives.last() {
+        self.emit_constant(
+          Value::String(directive.expression.value.to_string().into()),
+          LINE,
+        );
+      }
+    }
 
     for (i, stmt) in stmts.iter().enumerate() {
       let is_last_expr_stmt = repl_mode

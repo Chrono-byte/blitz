@@ -596,6 +596,25 @@
       "host_primitives": []
     },
     {
+      "specifier": "node:http",
+      "visibility": "public",
+      "source": {
+        "path": "modules/facades/node-http.js",
+        "sha256": "7f3b3d53d65e3074dafdacde008b7acffa88da988d9db3c6e7336fef61932b3f"
+      },
+      "declaration": {
+        "path": "declarations/node-http.d.ts",
+        "sha256": "aca11794ae7a5e1c20adafe55024be5afad5351e1019557fab2b4c60b2fc6323"
+      },
+      "dependencies": [
+        "effect/Effect",
+        "node:events",
+        "node:buffer",
+        "blitz-internal:http"
+      ],
+      "host_primitives": []
+    },
+    {
       "specifier": "node:module",
       "visibility": "public",
       "source": {
@@ -1032,6 +1051,10 @@
       "sha256": "36440c4b874c4ea1649edd53784dd625f568ea2250cc56c539e681cdbdaac53b"
     },
     {
+      "path": "declarations/node-http.d.ts",
+      "sha256": "aca11794ae7a5e1c20adafe55024be5afad5351e1019557fab2b4c60b2fc6323"
+    },
+    {
       "path": "declarations/node-module.d.ts",
       "sha256": "9ae9c2f2d4137cca7386627080a723472f8d09a879fa155ea513ab575ed25fab"
     },
@@ -1129,7 +1152,7 @@
     },
     {
       "path": "embedded.rs",
-      "sha256": "b7135fbb716787c4c6d6482b3727b80041d59ae5f3634ac80a3c1ebbda8b4d88"
+      "sha256": "ef65e40109342f569dd622e5b56407beca1e91e199fd8b27746d832c1623d86b"
     },
     {
       "path": "modules/facades/blitz-app.js",
@@ -1238,6 +1261,10 @@
     {
       "path": "modules/facades/node-fs.js",
       "sha256": "2a94092d6ad5366217a7b45d73274dfd8fc7e35a59cf2087bb534adae63858e8"
+    },
+    {
+      "path": "modules/facades/node-http.js",
+      "sha256": "7f3b3d53d65e3074dafdacde008b7acffa88da988d9db3c6e7336fef61932b3f"
     },
     {
       "path": "modules/facades/node-module.js",

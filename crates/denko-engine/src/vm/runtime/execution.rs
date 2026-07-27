@@ -43,6 +43,23 @@ impl Vm {
     self.run_risc_root(chunk)
   }
 
+  /// Execute one interactive submission and retain its top-level bindings.
+  ///
+  /// Normal script execution receives a fresh top-level lexical environment.
+  /// A REPL instead behaves as one continuing session, so declarations from a
+  /// successful submission must remain visible to later submissions.
+  pub fn run_repl(
+    &mut self,
+    chunk: Chunk,
+  ) -> Result<Value, RuntimeError> {
+    chunk
+      .verify()
+      .map_err(|error| RuntimeError::from(format!("Invalid bytecode: {}", error)))?;
+    let result = self.run_risc_root(chunk)?;
+    self.persist_root_bindings();
+    Ok(result)
+  }
+
   fn run_risc_root(
     &mut self,
     chunk: Chunk,
@@ -1082,6 +1099,28 @@ impl Vm {
       error,
       thrown: nested_thrown,
     })
+  }
+
+  fn persist_root_bindings(&mut self) {
+    let Some(slots) = self.execution.active.slots.as_ref() else {
+      return;
+    };
+    let names = slots.names.clone();
+    let immutable = slots.immutable.clone();
+    let locals = self.execution.active.locals.clone();
+    let mut global_env = self.realm_state.global_env.borrow_mut();
+
+    for (index, name) in names.into_iter().enumerate() {
+      let (Some(name), Some(cell)) = (name, locals.get(index)) else {
+        continue;
+      };
+      let initialized = !matches!(*cell.borrow(), Value::Uninitialized);
+      if immutable.get(index).copied().unwrap_or(false) {
+        global_env.create_immutable_binding(name, Rc::clone(cell), initialized);
+      } else {
+        global_env.create_mutable_binding(name, Rc::clone(cell), initialized);
+      }
+    }
   }
 
   fn initialize_root_bindings(&mut self) {

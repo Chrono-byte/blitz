@@ -70,7 +70,7 @@ use crate::errors::BundlerError;
 use crate::gc;
 use crate::parser::ParserSession;
 use crate::prelinked::PrelinkedModuleGraph;
-use crate::resolver::resolve_specifier;
+use crate::resolver::resolve_specifier_with_conditions;
 use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Value};
 use crate::vm::Vm;
 
@@ -790,6 +790,8 @@ pub struct ModuleLoader {
   prelinked_public_by_specifier: HashMap<String, PrelinkedModuleLocation>,
   /// Reserved prelinked module-index lookup, including unconstructed modules.
   prelinked_by_index: HashMap<usize, PrelinkedModuleLocation>,
+  /// Additional package export conditions selected by the embedder.
+  condition_names: Vec<String>,
   /// Per-loader source pipeline counters shared with parallel compile workers.
   pipeline_counters: Arc<ModuleLoaderPipelineCounters>,
 }
@@ -811,7 +813,22 @@ impl ModuleLoader {
       prelinked_by_specifier: HashMap::new(),
       prelinked_public_by_specifier: HashMap::new(),
       prelinked_by_index: HashMap::new(),
+      condition_names: Vec::new(),
       pipeline_counters: Arc::new(ModuleLoaderPipelineCounters::default()),
     }
+  }
+
+  /// Configure additional package export conditions for subsequent source resolution.
+  pub fn set_condition_names(
+    &mut self,
+    condition_names: Vec<String>,
+  ) {
+    self.condition_names = condition_names;
+  }
+
+  /// Return the configured additional package export conditions.
+  #[must_use]
+  pub fn condition_names(&self) -> &[String] {
+    &self.condition_names
   }
 }

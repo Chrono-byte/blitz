@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::env;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use denko::value::{ObjectData, PropertyDescriptor, PropertyKey};
@@ -19,7 +20,10 @@ use crate::host::{RuntimeOptions, install_runtime};
 /// # Errors
 ///
 /// Returns an error if the line editor cannot be initialized.
-pub fn run(options: RuntimeOptions) -> Result<(), denko::errors::Error> {
+pub fn run(
+  options: RuntimeOptions,
+  preloads: &[PathBuf],
+) -> Result<(), denko::errors::Error> {
   let globals = Rc::new(RefCell::new(ObjectData::new()));
   globals.borrow_mut().properties.insert(
     PropertyKey::String("globalThis".to_string().into()),
@@ -27,6 +31,7 @@ pub fn run(options: RuntimeOptions) -> Result<(), denko::errors::Error> {
   );
   let mut vm = Vm::new(globals);
   let _runtime = install_runtime(&mut vm, options);
+  crate::modules::evaluate_preloads(&mut vm, preloads)?;
 
   run_loop(&mut vm)
 }
@@ -75,7 +80,8 @@ fn evaluate(
 ) -> Result<Value, denko::errors::Error> {
   let session = JsParser::parse_source(source)?;
   let chunk = compiler::compile_oxc_repl(session.program(), source)?;
-  vm.run(chunk).map_err(denko::errors::Error::from)
+  vm.run_repl(chunk)
+    .map_err(denko::errors::Error::from)
 }
 
 #[cfg(test)]
@@ -104,6 +110,22 @@ mod tests {
       matches!(result, Value::Number(number) if (number - 3.0).abs() < f64::EPSILON),
       "expected 3, got {result:?}"
     );
+  }
+
+  #[test]
+  fn session_persists_bindings_between_lines() {
+    let (mut vm, _runtime) = runtime_vm();
+    evaluate(&mut vm, denko::js!("let answer = 41")).expect("declare binding");
+    evaluate(&mut vm, denko::js!("answer += 1")).expect("mutate binding");
+    evaluate(
+      &mut vm,
+      denko::js!("const state = { answer }; function readAnswer() { return state.answer; }"),
+    )
+    .expect("declare object and closure");
+    let result =
+      evaluate(&mut vm, denko::js!("readAnswer()")).expect("read bindings from a later submission");
+
+    assert_eq!(result, Value::Number(42.0));
   }
 
   #[test]

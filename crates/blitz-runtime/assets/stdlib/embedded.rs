@@ -303,6 +303,16 @@ pub const EMBEDDED_BLITZ_STDLIB_MODULES: &[EmbeddedBlitzStdlibModule] = &[
     host_primitives: &[],
   },
   EmbeddedBlitzStdlibModule {
+    specifier: "node:http",
+    source: include_str!("modules/facades/node-http.js"),
+    declaration: Some(include_str!("declarations/node-http.d.ts")),
+    source_sha256: "7f3b3d53d65e3074dafdacde008b7acffa88da988d9db3c6e7336fef61932b3f",
+    declaration_sha256: Some("aca11794ae7a5e1c20adafe55024be5afad5351e1019557fab2b4c60b2fc6323"),
+    visibility: "public",
+    dependencies: &["effect/Effect", "node:events", "node:buffer", "blitz-internal:http"],
+    host_primitives: &[],
+  },
+  EmbeddedBlitzStdlibModule {
     specifier: "node:module",
     source: include_str!("modules/facades/node-module.js"),
     declaration: Some(include_str!("declarations/node-module.d.ts")),

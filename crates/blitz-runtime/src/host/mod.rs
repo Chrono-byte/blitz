@@ -77,6 +77,7 @@ impl NodeCompatProfile {
     "node:constants",
     "node:diagnostics_channel",
     "node:events",
+    "node:http",
     "node:module",
     "node:os",
     "node:path",
@@ -108,6 +109,7 @@ impl NodeCompatProfile {
     "node:events",
     "node:fs",
     "node:fs/promises",
+    "node:http",
     "node:module",
     "node:os",
     "node:path",
@@ -142,6 +144,7 @@ impl NodeCompatProfile {
     "node:events",
     "node:fs",
     "node:fs/promises",
+    "node:http",
     "node:module",
     "node:os",
     "node:path",
@@ -209,6 +212,8 @@ pub struct RuntimeOptions {
   pub install_compatibility_globals: bool,
   /// Select the allowlisted `node:*` compatibility surface.
   pub node_compat: NodeCompatProfile,
+  /// Additional package export conditions used by source module resolution.
+  pub conditions: Vec<String>,
 }
 
 impl RuntimeOptions {
@@ -242,6 +247,7 @@ impl RuntimeOptions {
       listen_addr: SocketAddr::new(host, port),
       install_compatibility_globals: false,
       node_compat: NodeCompatProfile::default(),
+      conditions: Vec::new(),
     }
   }
 }
@@ -584,6 +590,9 @@ pub fn try_install_runtime(
   ) {
     return Err(RuntimeInstallError::Registration(error.to_string()));
   }
+  loader_handle
+    .borrow_mut()
+    .set_condition_names(options.conditions.clone());
   let graph_registration = registration_started.elapsed();
   if timing_enabled {
     eprintln!(
@@ -1782,6 +1791,7 @@ mod tests {
           .expect("test listen address"),
         install_compatibility_globals: false,
         node_compat: NodeCompatProfile::Core,
+        conditions: Vec::new(),
       },
     );
     assert!(!runtime.is_live());
@@ -1807,6 +1817,7 @@ mod tests {
           .expect("test listen address"),
         install_compatibility_globals: false,
         node_compat: NodeCompatProfile::Core,
+        conditions: Vec::new(),
       },
     );
     let source = denko::js!(
@@ -1849,6 +1860,7 @@ mod tests {
           .expect("test listen address"),
         install_compatibility_globals: true,
         node_compat: NodeCompatProfile::Core,
+        conditions: Vec::new(),
       },
     );
     let source = denko::js!(
@@ -1927,6 +1939,7 @@ mod tests {
           .expect("test listen address"),
         install_compatibility_globals: true,
         node_compat: NodeCompatProfile::Core,
+        conditions: Vec::new(),
       },
     );
     let source = format!(
@@ -1975,6 +1988,7 @@ mod tests {
               .expect("test listen address"),
             install_compatibility_globals: false,
             node_compat: NodeCompatProfile::Core,
+            conditions: Vec::new(),
           },
         );
         let directory = env::temp_dir().join(format!("blitz-effect-http-{}", std::process::id()));
@@ -2057,6 +2071,7 @@ mod tests {
           .expect("test listen address"),
         install_compatibility_globals: true,
         node_compat: NodeCompatProfile::Core,
+        conditions: Vec::new(),
       },
     );
     let source = denko::js!(
@@ -2132,6 +2147,7 @@ mod tests {
           .expect("test listen address"),
         install_compatibility_globals: true,
         node_compat: NodeCompatProfile::Core,
+        conditions: Vec::new(),
       },
     );
     let source = denko::js!(
@@ -2268,6 +2284,7 @@ mod tests {
           .expect("test listen address"),
         install_compatibility_globals: true,
         node_compat: NodeCompatProfile::Core,
+        conditions: Vec::new(),
       },
     );
     let source = denko::js!(
@@ -2362,6 +2379,7 @@ mod tests {
               .expect("test listen address"),
             install_compatibility_globals: false,
             node_compat: NodeCompatProfile::Core,
+            conditions: Vec::new(),
           },
         );
         let source = include_str!("../../../../examples/irc-chat-v2/server.ts")

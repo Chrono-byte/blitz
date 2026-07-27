@@ -141,7 +141,8 @@ fn run_repl_source(
 ) -> Result<Value, denko::errors::Error> {
   let session = JsParser::parse_source(source)?;
   let chunk = compiler::compile_oxc_repl(session.program(), source)?;
-  vm.run(chunk).map_err(denko::errors::Error::from)
+  vm.run_repl(chunk)
+    .map_err(denko::errors::Error::from)
 }
 
 #[cfg(test)]

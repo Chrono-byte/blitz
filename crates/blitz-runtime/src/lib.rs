@@ -9,6 +9,7 @@ pub mod effect_assets;
 pub mod host;
 pub mod modules;
 pub mod net;
+pub mod project;
 pub mod repl;
 pub mod rpc;
 pub mod runtime_graph;

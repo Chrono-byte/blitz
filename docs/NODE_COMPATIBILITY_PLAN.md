@@ -20,8 +20,8 @@ parts of the process and module APIs.
 
 ## Implementation status
 
-The compatibility graph now registers 36 of Node 24.18.0's 58 public built-in
-roots (62.07% root coverage) with explicit declarations and tested initial
+The compatibility graph now registers 37 of Node 24.18.0's 58 public built-in
+roots (63.79% root coverage) with explicit declarations and tested initial
 slices. This is root-level coverage, not a claim of complete export-level API
 parity. The machine-readable inventory is
 [`node-compat-support.json`](node-compat-support.json).
@@ -36,14 +36,16 @@ parity. The machine-readable inventory is
 - canonical module records provide top-level `import.meta.url`; preserving the
   owning module context inside later callbacks remains open;
 - pure/process-local modules, an initial byte-backed `Buffer` slice, streams,
-  readline, direct-host filesystem, and a secure crypto-random slice are
-  prelinked and declaration-backed; and
+  readline, direct-host filesystem, a secure crypto-random slice, and a
+  callback-oriented `node:http` server slice are prelinked and
+  declaration-backed; and
 - runtime tests cover profile rejection, package conditions, strict
   typechecking, identity, filesystem operations, event/stream/readline
-  lifecycle, and permission-gated secure randomness.
+  lifecycle, HTTP request/response serving, and permission-gated secure
+  randomness.
 
-Vite is not yet supported: HTTP, sockets, watchers, compression, and remaining
-module-loader behavior still block that milestone.
+Vite is not yet supported: HTTP client behavior, sockets, watchers,
+compression, and remaining module-loader behavior still block that milestone.
 
 ## Current baseline
 

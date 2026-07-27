@@ -11,3 +11,14 @@ ECMAScript semantics belong in `denko-engine`.
 
 The reviewed Bun-to-Blitz command and flag mapping is maintained in
 [`docs/CLI_SURFACE.md`](../../docs/CLI_SURFACE.md).
+
+```sh
+blitz -e 'console.log("hello")'
+blitz -p 'const value: number = 21; value * 2'
+blitz -r ./setup.ts -r ./tracing.ts ./app.ts
+blitz repl --preload ./setup.ts
+blitz --cwd ./project --conditions development ./src/app.ts
+blitz --env-file .env.production ./src/app.ts
+blitz run start -- --port 3000
+blitz run --if-present optional-script
+```

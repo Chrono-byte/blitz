@@ -16,7 +16,20 @@ pub fn resolve_specifier(
   base: &Path,
   specifier: &str,
 ) -> Result<PathBuf, crate::errors::BundlerError> {
-  resolve_with_options(base, specifier, module_options())
+  resolve_specifier_with_conditions(base, specifier, &[])
+}
+
+/// Resolve a module specifier with additional package export conditions.
+///
+/// # Errors
+///
+/// Returns a `BundlerError` if the specifier cannot be resolved.
+pub fn resolve_specifier_with_conditions(
+  base: &Path,
+  specifier: &str,
+  conditions: &[String],
+) -> Result<PathBuf, crate::errors::BundlerError> {
+  resolve_with_options(base, specifier, module_options(conditions))
 }
 
 /// Resolve a module specifier to a TypeScript declaration file.
@@ -85,7 +98,16 @@ fn nearest_tsconfig(base: &Path) -> Option<PathBuf> {
   }
 }
 
-fn module_options() -> oxc_resolver::ResolveOptions {
+fn module_options(additional_conditions: &[String]) -> oxc_resolver::ResolveOptions {
+  let mut condition_names = additional_conditions.to_vec();
+  for condition in ["node", "import", "default"] {
+    if !condition_names
+      .iter()
+      .any(|existing| existing == condition)
+    {
+      condition_names.push(condition.to_string());
+    }
+  }
   oxc_resolver::ResolveOptions {
     // Keep JavaScript precedence while allowing TypeScript module graphs.
     extensions: vec![
@@ -97,7 +119,7 @@ fn module_options() -> oxc_resolver::ResolveOptions {
       ".cts".into(),
       ".tsx".into(),
     ],
-    condition_names: vec!["node".into(), "import".into(), "default".into()],
+    condition_names,
     tsconfig: Some(TsconfigDiscovery::Auto),
     // NODE_PATH is a deprecated CommonJS feature and is not part of the
     // TypeScript 6/7 or Node ESM project-resolution model.

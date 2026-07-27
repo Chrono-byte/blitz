@@ -9,7 +9,7 @@ should only advertise commands that work.
 | Bun command | Blitz command | Status | Owning layer |
 |---|---|---:|---|
 | `bun run <file>` | `blitz run <file>` or `blitz <file>` | Available | CLI orchestration, Blitz runtime execution |
-| `bun run <script>` | `blitz run <script>` | Planned | CLI and future package-script service |
+| `bun run <script>` | `blitz run <script>` | Available | CLI shell orchestration, runtime package model |
 | `bun repl` | `blitz repl` or `blitz` | Available | Hosted REPL in `blitz-runtime`, launched by CLI |
 | `bun test` | `blitz test` | Planned | Future user test runner; not the Test262 harness |
 | `bun x` | `blitz x` | Planned | Future package manager and process launcher |
@@ -37,18 +37,33 @@ Blitz-specific commands remain first-class:
 - `blitz check` — in-process TypeScript checking.
 - `blitz analyze` — machine-readable editor analysis.
 
+## Runtime project model
+
+`blitz-runtime` discovers the nearest `package.json` from the selected working
+directory and exposes typed metadata for package identity, module type, entry
+points, scripts, workspaces, executables, exports/imports, and dependency
+classes. The runtime currently uses this model to interpret `.js` entries in
+`"type": "module"` packages. Denko's module resolver applies CLI-provided
+export conditions while retaining the standard `node`, `import`, and `default`
+conditions.
+
+Package script execution uses this runtime-owned model, including ordered
+`pre<script>` and `post<script>` lifecycle hooks. The CLI owns shell process
+orchestration, argument forwarding, lifecycle environment variables, and
+`node_modules/.bin` path setup.
+
 ## Runtime flag map
 
 | Bun flag | Blitz direction | Priority |
 |---|---|---:|
-| `-e, --eval` | Evaluate hosted script source | High |
-| `-p, --print` | Evaluate and inspect the completion value | High |
-| `-r, --preload`; `--require`; `--import` | Preload modules before the entry point | High |
-| `--cwd` | Select resolution and process working directory | High |
-| `--env-file`; `--no-env-file` | Explicit environment loading policy | High |
+| `-e, --eval` | Evaluate hosted TypeScript or JavaScript source | Available |
+| `-p, --print` | Evaluate and inspect the completion value | Available |
+| `-r, --preload`; `--require`; `--import` | Preload modules before the entry point | Available |
+| `--cwd` | Select project discovery, resolution, and process working directory | Available |
+| `--env-file`; `--no-env-file` | Ordered explicit files or automatic Bun-style `.env` loading | Available |
 | `--watch`; `--hot`; `--no-clear-screen` | Restart/reload supervisor | Medium |
-| `--conditions` | Additional package export conditions | Medium |
-| `--if-present` | Package-script convenience | Medium |
+| `--conditions` | Additional package export conditions | Available |
+| `--if-present` | Exit successfully for a missing script or file target | Available |
 | `--install`; `--no-install`; `-i` | Package-manager integration | After install support |
 | `--inspect*` | Denko debugger integration | After debugger protocol support |
 | `--cpu-prof*`; `--heap-prof*` | Denko profiling integration | After profiler support |
@@ -64,14 +79,13 @@ and should remain global.
 
 ## Implementation order
 
-1. Finish the execution shell: explicit `repl`, `--eval`, `--print`, preload,
-   working-directory, environment-file, and package arguments.
-2. Add package.json script discovery so `blitz run <name>` is useful without
-   conflating missing source files with scripts silently.
-3. Build a user test runner independently from Test262 infrastructure.
-4. Add package installation and lockfile primitives, then expose the package
+1. Finish package argument edge cases. Working-directory selection,
+   environment files, export conditions, package scripts, explicit `repl`,
+   inline evaluation, printing, and ordered module preloads are available.
+2. Build a user test runner independently from Test262 infrastructure.
+3. Add package installation and lockfile primitives, then expose the package
    command family and `x`.
-5. Add bundling/build commands only after output format and module-resolution
+4. Add bundling/build commands only after output format and module-resolution
    contracts are stable.
 
 Command parsing and presentation belong to `blitz-cli`. Hosted execution and

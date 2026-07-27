@@ -49,6 +49,37 @@ pub(crate) struct Cli {
   #[arg(long, value_enum, default_value_t = NodeCompatArg::Core, global = true)]
   pub(crate) node_compat: NodeCompatArg,
 
+  /// Change the working directory before project discovery and execution.
+  #[arg(long, value_name = "DIRECTORY", global = true)]
+  pub(crate) cwd: Option<PathBuf>,
+
+  /// Load environment variables from a file. May be repeated.
+  #[arg(
+    long,
+    value_name = "FILE",
+    global = true,
+    conflicts_with = "no_env_file"
+  )]
+  pub(crate) env_file: Vec<PathBuf>,
+
+  /// Disable automatic `.env` file loading.
+  #[arg(long, global = true, conflicts_with = "env_file")]
+  pub(crate) no_env_file: bool,
+
+  /// Add package export conditions. Comma-separated values are accepted.
+  #[arg(long, value_name = "CONDITION", value_delimiter = ',', global = true)]
+  pub(crate) conditions: Vec<String>,
+
+  /// Preload a module before evaluating the entry point.
+  #[arg(
+    short = 'r',
+    long,
+    visible_aliases = ["require", "import"],
+    value_name = "MODULE",
+    global = true
+  )]
+  pub(crate) preload: Vec<PathBuf>,
+
   /// Start the hosted Blitz REPL instead of executing a positional file.
   #[arg(long, action)]
   pub(crate) repl: bool,
@@ -81,7 +112,7 @@ pub(crate) struct Cli {
 /// Explicit Blitz commands.
 #[derive(Subcommand, Debug)]
 pub(crate) enum CliCommand {
-  /// Run a JavaScript or TypeScript file.
+  /// Run a package script or JavaScript/TypeScript file.
   Run(RunArgs),
   /// Start the hosted Blitz REPL.
   Repl,
@@ -94,9 +125,13 @@ pub(crate) enum CliCommand {
 /// Arguments for explicit file execution.
 #[derive(Args, Debug)]
 pub(crate) struct RunArgs {
-  /// JavaScript or TypeScript file to execute.
-  #[arg(value_name = "FILE")]
+  /// Package script name or JavaScript/TypeScript file to execute.
+  #[arg(value_name = "TARGET")]
   pub(crate) file: PathBuf,
+
+  /// Exit successfully when neither a package script nor a source file exists.
+  #[arg(long, action)]
+  pub(crate) if_present: bool,
 
   /// Type-check the file before executing it.
   #[arg(long, action)]
@@ -163,6 +198,12 @@ pub(crate) struct AnalyzeArgs {
 #[derive(Debug)]
 pub(crate) struct ExecutionArgs {
   pub(crate) file: Option<PathBuf>,
+  pub(crate) preloads: Vec<PathBuf>,
+  pub(crate) env_files: Vec<PathBuf>,
+  pub(crate) automatic_env: bool,
+  pub(crate) conditions: Vec<String>,
+  pub(crate) explicit_run: bool,
+  pub(crate) if_present: bool,
   pub(crate) eval: Option<String>,
   pub(crate) print: bool,
   pub(crate) test262_harness: bool,
@@ -203,12 +244,21 @@ mod tests {
 
   #[test]
   fn parses_run_with_typecheck() {
-    let cli =
-      Cli::try_parse_from(["blitz", "run", "--check", "program.ts", "--", "one"]).expect("parse");
+    let cli = Cli::try_parse_from([
+      "blitz",
+      "run",
+      "--check",
+      "--if-present",
+      "program.ts",
+      "--",
+      "one",
+    ])
+    .expect("parse");
 
     assert!(matches!(cli.command, Some(CliCommand::Run(_))));
     if let Some(CliCommand::Run(run)) = cli.command {
       assert!(run.check);
+      assert!(run.if_present);
       assert_eq!(run.file, PathBuf::from("program.ts"));
       assert_eq!(run.args, ["one"]);
     }
@@ -231,5 +281,49 @@ mod tests {
     assert!(print.eval.is_none());
 
     assert!(Cli::try_parse_from(["blitz", "-e", "1", "-p", "2"]).is_err());
+  }
+
+  #[test]
+  fn parses_project_context_options() {
+    let cli = Cli::try_parse_from([
+      "blitz",
+      "--cwd",
+      "project",
+      "--env-file",
+      "base.env",
+      "--env-file",
+      "local.env",
+      "--conditions",
+      "development,custom",
+      "app.ts",
+    ])
+    .expect("parse project options");
+
+    assert_eq!(cli.cwd, Some(PathBuf::from("project")));
+    assert_eq!(
+      cli.env_file,
+      [PathBuf::from("base.env"), PathBuf::from("local.env")]
+    );
+    assert_eq!(cli.conditions, ["development", "custom"]);
+    assert!(Cli::try_parse_from(["blitz", "--env-file", ".env", "--no-env-file"]).is_err());
+  }
+
+  #[test]
+  fn parses_ordered_preloads_for_runtime_commands() {
+    let cli = Cli::try_parse_from([
+      "blitz",
+      "-r",
+      "setup.ts",
+      "--import",
+      "tracing.ts",
+      "run",
+      "app.ts",
+    ])
+    .expect("parse preloads");
+
+    assert_eq!(
+      cli.preload,
+      [PathBuf::from("setup.ts"), PathBuf::from("tracing.ts")]
+    );
   }
 }

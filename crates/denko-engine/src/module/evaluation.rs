@@ -28,7 +28,7 @@ impl ModuleLoader {
     {
       virtual_module_path(&module.canonical_specifier)
     } else {
-      let resolved = resolve_specifier(
+      let resolved = resolve_specifier_with_conditions(
         entry.parent().unwrap_or_else(|| Path::new(".")),
         &format!(
           "./{}",
@@ -37,6 +37,7 @@ impl ModuleLoader {
             .expect("entry must have a file name")
             .to_string_lossy()
         ),
+        &self.condition_names,
       )?;
       std::fs::canonicalize(&resolved).unwrap_or(resolved)
     };

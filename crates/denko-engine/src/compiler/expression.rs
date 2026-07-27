@@ -77,6 +77,18 @@ impl super::Compiler {
     self.add_local_with_mirror(format!("__{}_{}", prefix, self.locals.len()), None, false)
   }
 
+  pub(super) fn alloc_reusable_temp_local(
+    &mut self,
+    name: &str,
+  ) -> usize {
+    let name = format!("__reusable_{name}");
+    self
+      .locals
+      .iter()
+      .position(|local| local == &name)
+      .unwrap_or_else(|| self.add_local_with_mirror(name, None, false))
+  }
+
   pub(super) fn emit_super_property_get_static(
     &mut self,
     property: &str,

@@ -7,7 +7,7 @@
 //! TypeScript sources.
 
 use denko::Vm;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Construct, instantiate, and evaluate a hosted application module graph.
 ///
@@ -43,13 +43,38 @@ pub fn evaluate_entry(
   Ok(())
 }
 
+/// Evaluate hosted modules in order before an entry point or interactive session.
+///
+/// Each preload shares the application's VM and global object. Module-scoped
+/// bindings remain private, while explicit global mutations and registered host
+/// hooks remain visible to subsequently evaluated code.
+///
+/// # Errors
+///
+/// Returns the first preload's parser, compiler, resolver, linker, or runtime
+/// error with its path included in the diagnostic.
+pub fn evaluate_preloads(
+  vm: &mut Vm,
+  paths: &[PathBuf],
+) -> Result<(), denko::errors::Error> {
+  for path in paths {
+    evaluate_entry(vm, path).map_err(|error| {
+      denko::errors::RuntimeError::from(format!("Failed to preload {}: {error}", path.display()))
+    })?;
+  }
+  Ok(())
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
   use denko::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
   use std::cell::RefCell;
+  use std::io::{Read, Write};
+  use std::net::TcpStream;
   use std::path::PathBuf;
   use std::rc::Rc;
+  use std::thread;
 
   fn runtime_vm(profile: crate::host::NodeCompatProfile) -> (Vm, crate::host::RuntimeHandle) {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
@@ -92,6 +117,7 @@ mod tests {
       "node:constants",
       "node:diagnostics_channel",
       "node:events",
+      "node:http",
       "node:module",
       "node:os",
       "node:path",
@@ -626,6 +652,151 @@ mod tests {
 
     assert!(error.to_string().contains("missing-dependency"), "{error}");
     std::fs::remove_dir_all(directory).expect("remove temporary module project");
+  }
+
+  #[test]
+  fn node_http_serves_buffered_requests_with_node_response_methods() {
+    let directory = temporary_directory("node-http");
+    let entry = directory.join("entry.mjs");
+    std::fs::write(
+      &entry,
+      denko::js!(
+        module,
+        r#"
+        import { createServer } from "node:http";
+        globalThis.nodeHttpServer = createServer((request, response) => {
+          const chunks = [];
+          request.on("data", chunk => chunks.push(chunk.toString()));
+          request.on("end", () => {
+            response.statusCode = 201;
+            response.setHeader("x-blitz-node", "yes");
+            response.end(request.method + ":" + request.url + ":" + chunks.join(""));
+          });
+        });
+        nodeHttpServer.listen(0, "127.0.0.1");
+        "#
+      ),
+    )
+    .expect("write node:http entry");
+
+    let (mut vm, mut runtime) = runtime_vm(crate::host::NodeCompatProfile::Core);
+    evaluate_entry(&mut vm, &entry).expect("evaluate node:http server");
+    let address = runtime.local_addr().expect("node:http address");
+    let client = thread::spawn(move || {
+      let mut stream = TcpStream::connect(address).expect("connect node:http client");
+      stream
+        .write_all(
+          b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+        )
+        .expect("write node:http request");
+      let mut response = String::new();
+      stream
+        .read_to_string(&mut response)
+        .expect("read node:http response");
+      response
+    });
+
+    assert!(
+      runtime
+        .run_once(&mut vm)
+        .expect("dispatch node:http request")
+    );
+    let response = client.join().expect("join node:http client");
+    assert!(response.starts_with("HTTP/1.1 201"), "{response}");
+    assert!(
+      response
+        .to_ascii_lowercase()
+        .contains("x-blitz-node: yes"),
+      "{response}"
+    );
+    assert!(response.ends_with("POST:/echo:hello"), "{response}");
+    runtime
+      .shutdown(&mut vm)
+      .expect("close node:http server");
+    std::fs::remove_dir_all(directory).expect("remove node:http project");
+  }
+
+  #[test]
+  fn runtime_conditions_select_package_exports() {
+    let directory = temporary_directory("conditions");
+    let package = directory.join("node_modules/condition-package");
+    std::fs::create_dir_all(&package).expect("create package");
+    std::fs::write(
+      package.join("package.json"),
+      r#"{
+        "name": "condition-package",
+        "type": "module",
+        "exports": {
+          ".": {
+            "development": "./development.js",
+            "default": "./default.js"
+          }
+        }
+      }"#,
+    )
+    .expect("write package manifest");
+    std::fs::write(
+      package.join("development.js"),
+      denko::js!(module, "export const selected = 'development';"),
+    )
+    .expect("write conditional module");
+    std::fs::write(
+      package.join("default.js"),
+      denko::js!(module, "export const selected = 'default';"),
+    )
+    .expect("write default module");
+    let entry = directory.join("entry.mjs");
+    std::fs::write(
+      &entry,
+      denko::js!(
+        module,
+        "import { selected } from 'condition-package'; globalThis.selectedCondition = selected;"
+      ),
+    )
+    .expect("write entry");
+
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let mut options = crate::host::RuntimeOptions::from_host(vec!["blitz-test".to_string()]);
+    options.conditions = vec!["development".to_string()];
+    let _runtime = crate::host::install_runtime(&mut vm, options);
+    evaluate_entry(&mut vm, &entry).expect("evaluate conditional package");
+
+    assert_eq!(
+      vm.get_global("selectedCondition"),
+      Some(Value::String("development".into()))
+    );
+    std::fs::remove_dir_all(directory).expect("remove project");
+  }
+
+  #[test]
+  fn evaluates_preloads_in_order_in_the_application_realm() {
+    let directory = temporary_directory("preloads");
+    std::fs::create_dir_all(&directory).expect("create preload directory");
+    let first = directory.join("first.ts");
+    let second = directory.join("second.ts");
+    std::fs::write(
+      &first,
+      denko::js!(typescript, "globalThis.preloadOrder = ['first'];"),
+    )
+    .expect("write first preload");
+    std::fs::write(
+      &second,
+      denko::js!(
+        typescript,
+        "globalThis.preloadOrder.push('second'); globalThis.preloadResult = globalThis.preloadOrder.join(',');"
+      ),
+    )
+    .expect("write second preload");
+
+    let (mut vm, _runtime) = runtime_vm(crate::host::NodeCompatProfile::Core);
+    evaluate_preloads(&mut vm, &[first, second]).expect("evaluate preloads");
+
+    assert_eq!(
+      vm.get_global("preloadResult"),
+      Some(Value::String("first,second".into()))
+    );
+    std::fs::remove_dir_all(directory).expect("remove preload directory");
   }
 
   #[test]

@@ -493,7 +493,7 @@ impl RiscBuilder {
       let arg = instruction.operand_u8(0).unwrap_or_default();
 
       match instruction.op {
-        Op::Const | Op::GetGlobal | Op::TypeofGlobal => {
+        Op::Const | Op::GetGlobal | Op::TypeofGlobal | Op::GetBuiltin => {
           let destination = plan.get(instruction.output()?)?;
           let rd = destination_register(destination, 0);
           emit(
@@ -509,7 +509,7 @@ impl RiscBuilder {
           emit(&mut lowered, op_word(instruction.op) | encode_rd(rd), line);
           store_location(&mut lowered, destination, rd, line);
         }
-        Op::LoadLocal | Op::GetUpvalue | Op::MakeClosure | Op::GetBuiltin => {
+        Op::LoadLocal | Op::GetUpvalue | Op::MakeClosure => {
           let destination = plan.get(instruction.output()?)?;
           let rd = destination_register(destination, 0);
           emit(
@@ -1263,6 +1263,17 @@ mod tests {
       let chunk = compiler::compile(session.program(), session.source()).expect("compile");
       chunk.verify().expect("verified RISC chunk");
     }
+  }
+
+  #[test]
+  fn builtin_operands_preserve_u16_constant_indexes() {
+    let mut source = (0..260)
+      .map(|value| format!("{value};"))
+      .collect::<String>();
+    source.push_str("let { ...rest } = {};");
+    let session = Parser::parse_source(&source).expect("parse");
+    let chunk = compiler::compile(session.program(), session.source()).expect("compile");
+    chunk.verify().expect("verified RISC chunk");
   }
 
   #[test]

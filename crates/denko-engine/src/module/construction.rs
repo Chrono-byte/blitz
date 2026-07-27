@@ -109,7 +109,7 @@ impl ModuleLoader {
       )));
     }
 
-    let resolved = resolve_specifier(base, spec)?;
+    let resolved = resolve_specifier_with_conditions(base, spec, &self.condition_names)?;
     let resolved_canon = std::fs::canonicalize(&resolved).unwrap_or(resolved);
     let canonical = resolved_canon.to_string_lossy().into_owned();
     if let Some(existing) = self.records_by_specifier.get(&canonical) {
