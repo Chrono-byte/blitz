@@ -40,6 +40,7 @@
 //! ```
 
 use crate::typecheck::Type;
+use crate::value::tagged::TaggedValue;
 use crate::value::{SymbolId, Value};
 use js_string::JsString;
 use num_bigint::BigInt;
@@ -185,6 +186,23 @@ pub enum Constant {
 }
 
 impl Constant {
+  /// Return the compact representation for a non-heap constant.
+  ///
+  /// This is the constant-pool boundary used by the staged register/JIT
+  /// migration. Heap-backed literals continue through [`Self::to_value`] until
+  /// the VM-owned heap stores their payloads.
+  #[allow(dead_code, reason = "used by the staged compact-register migration")]
+  pub(crate) fn as_tagged_immediate(&self) -> Option<TaggedValue<'static>> {
+    match self {
+      Self::Uninitialized => Some(TaggedValue::UNINITIALIZED),
+      Self::Number(value) => Some(TaggedValue::number(*value)),
+      Self::Bool(value) => Some(TaggedValue::boolean(*value)),
+      Self::Undefined => Some(TaggedValue::UNDEFINED),
+      Self::Null => Some(TaggedValue::NULL),
+      Self::String(_) | Self::BigInt(_) | Self::Symbol(..) => None,
+    }
+  }
+
   /// Materialize this compiler-owned literal as a runtime value.
   pub fn to_value(&self) -> Value {
     match self {
@@ -1543,6 +1561,31 @@ mod tests {
   fn runtime_owned_values_are_rejected_as_constants() {
     let object = Value::Object(Rc::new(RefCell::new(ObjectData::new())));
     assert_eq!(Constant::try_from(object), Err(ConstantConversionError));
+  }
+
+  #[test]
+  fn constants_expose_compact_immediates_without_heap_allocation() {
+    let number = Constant::Number(-0.0)
+      .as_tagged_immediate()
+      .and_then(TaggedValue::as_number);
+    assert_eq!(number.map(f64::to_bits), Some((-0.0_f64).to_bits()));
+    assert_eq!(
+      Constant::Bool(true)
+        .as_tagged_immediate()
+        .and_then(TaggedValue::as_boolean),
+      Some(true)
+    );
+    assert_eq!(
+      Constant::Undefined
+        .as_tagged_immediate()
+        .map(TaggedValue::kind),
+      Some(crate::value::tagged::TaggedValueKind::Undefined)
+    );
+    assert!(
+      Constant::String("heap".into())
+        .as_tagged_immediate()
+        .is_none()
+    );
   }
 
   #[test]
