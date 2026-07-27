@@ -306,7 +306,7 @@ fn format_console_argument(
     | Value::Closure { .. }
     | Value::Builtin(_)
     | Value::BuiltinObject(..)
-    | Value::Promise(_) => inspect_console_value(value),
+    | Value::Promise(..) => inspect_console_value(value),
     _ => stringify(vm, value),
   }
 }

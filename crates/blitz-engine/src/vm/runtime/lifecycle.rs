@@ -7,7 +7,9 @@ use crate::gc;
 use crate::module::ModuleLoader;
 use crate::realm::Realm;
 use crate::runtime_utils::array_length_descriptor;
-use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Value};
+use crate::value::{
+  ArrayData, ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SharedValue, Value,
+};
 use crate::vm::Vm;
 use crate::vm::runtime::property::get_property;
 use crate::vm::state::*;
@@ -479,7 +481,7 @@ impl Vm {
           self.get_prototype(&proxy.target)
         }
       }
-      Value::Promise(_) => self.promise_prototype_value(),
+      Value::Promise(_, properties) => properties.borrow().get_prototype(),
       Value::String(_) => self
         .realm_state
         .realm
@@ -528,7 +530,7 @@ impl Vm {
 
   /// Resolve `Promise.prototype` from the realm's intrinsic table or from
   /// the current global constructor as a fallback.
-  pub(super) fn promise_prototype_value(&self) -> Value {
+  pub(crate) fn promise_prototype_value(&self) -> Value {
     if let Some(proto) = self
       .realm_state
       .realm
@@ -552,6 +554,24 @@ impl Vm {
     }
 
     Value::Null
+  }
+
+  /// Wrap promise state in an ordinary object using the supplied prototype.
+  pub(crate) fn promise_value_with_prototype(
+    &self,
+    state: Rc<RefCell<PromiseState>>,
+    prototype: Value,
+  ) -> Value {
+    let properties = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(prototype))));
+    Value::Promise(state, properties)
+  }
+
+  /// Wrap promise state in an object using this realm's Promise prototype.
+  pub(crate) fn promise_value(
+    &self,
+    state: Rc<RefCell<PromiseState>>,
+  ) -> Value {
+    self.promise_value_with_prototype(state, self.promise_prototype_value())
   }
 
   /// Create a new Array object with the given elements and correct prototype.

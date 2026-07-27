@@ -17,7 +17,7 @@ fn value_identity(value: &Value) -> Option<usize> {
     Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
       Some(Rc::as_ptr(props) as usize)
     }
-    Value::Promise(state) => Some(Rc::as_ptr(state) as usize),
+    Value::Promise(state, _) => Some(Rc::as_ptr(state) as usize),
     _ => None,
   }
 }
@@ -81,7 +81,7 @@ fn stringify_value(
       seen.remove(&identity);
       Some(format!("[{}]", parts.join(",")))
     }
-    Value::Object(_) | Value::Proxy(_) | Value::Promise(_) => {
+    Value::Object(_) | Value::Proxy(_) | Value::Promise(..) => {
       let identity = value_identity(value).expect("object-like value has identity");
       if !seen.insert(identity) {
         return Err(vm.throw_type_error("Converting circular structure to JSON"));

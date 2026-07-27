@@ -2661,7 +2661,7 @@ mod test {
   fn to_string_handles_promise_values() {
     let globals = test_globals();
     let mut vm = Vm::new(globals);
-    let promise = Value::Promise(Rc::new(RefCell::new(PromiseState::Pending {
+    let promise = vm.promise_value(Rc::new(RefCell::new(PromiseState::Pending {
       on_fulfilled: Vec::new(),
       on_rejected: Vec::new(),
     })));

@@ -218,7 +218,19 @@ pub(crate) fn create_promise_intrinsics(
         reject_pending_promise(vm, &promise, reason);
       }
 
-      Ok(Value::Promise(promise))
+      let new_target = vm
+        .current_new_target()
+        .unwrap_or_else(|| vm.this_value());
+      let prototype = vm.get_property_host(
+        &new_target,
+        &PropertyKey::String("prototype".to_string().into()),
+      )?;
+      let prototype = if prototype.is_object() {
+        prototype
+      } else {
+        vm.promise_prototype_value()
+      };
+      Ok(vm.promise_value_with_prototype(promise, prototype))
     })
   };
 
@@ -253,13 +265,13 @@ pub(crate) fn create_promise_intrinsics(
           Value::Undefined
         };
 
-        if let Value::Promise(promise_rc) = this {
+        if let Value::Promise(promise_rc, _) = this {
           let result_promise =
             crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
               on_fulfilled: Vec::new(),
               on_rejected: Vec::new(),
             })));
-          let result_promise_value = Value::Promise(Rc::clone(&result_promise));
+          let result_promise_value = vm.promise_value(Rc::clone(&result_promise));
 
           let mut state = promise_rc.borrow_mut();
           match &mut *state {
@@ -392,7 +404,7 @@ pub(crate) fn create_promise_intrinsics(
         let undefined = Value::Undefined;
         let this = args.first().unwrap_or(&undefined);
         let on_rejected = args.get(1).cloned().unwrap_or(Value::Undefined);
-        if let Value::Promise(_) = this {
+        if let Value::Promise(..) = this {
           let then_method =
             vm.get_property_host(this, &PropertyKey::String("then".to_string().into()))?;
           vm.call_value_with_this(&then_method, this, &[Value::Undefined, on_rejected])
@@ -415,7 +427,7 @@ pub(crate) fn create_promise_intrinsics(
         if !this_val.is_object() {
           return Err(vm.throw_type_error("Promise.resolve called on non-object"));
         }
-        if let Value::Promise(_) = value
+        if let Value::Promise(..) = value
           && promise_constructor_matches(vm, value, &this_val)?
         {
           return Ok(value.clone());
@@ -445,7 +457,7 @@ pub(crate) fn create_promise_intrinsics(
             .last_uncaught
             .take()
             .unwrap_or(Value::String(format!("{}", err).into()));
-          if let Value::Promise(promise_state) = &promise {
+          if let Value::Promise(promise_state, _) = &promise {
             reject_pending_promise(vm, promise_state, reason);
           }
         }
@@ -652,7 +664,7 @@ pub(crate) fn create_promise_intrinsics(
             .last_uncaught
             .take()
             .unwrap_or(Value::String(format!("{}", err).into()));
-          if let Value::Promise(promise_state) = &promise {
+          if let Value::Promise(promise_state, _) = &promise {
             reject_pending_promise(vm, promise_state, reject_reason);
           }
         }
@@ -660,6 +672,40 @@ pub(crate) fn create_promise_intrinsics(
       }),
       function_proto_map,
     )),
+  );
+
+  let with_resolvers_object_proto = Rc::clone(object_proto_map);
+  let with_resolvers_function_proto = Rc::clone(function_proto_map);
+  let with_resolvers = builtin_object(
+    Rc::new(move |vm, _args| {
+      let constructor = vm.this_value();
+      let capability = new_promise_capability(vm, &constructor, &with_resolvers_function_proto)?;
+      let mut result =
+        ObjectData::with_prototype(Value::Object(Rc::clone(&with_resolvers_object_proto)));
+      for (name, value) in [
+        ("promise", capability.promise),
+        ("resolve", capability.resolve),
+        ("reject", capability.reject),
+      ] {
+        result.properties.insert(
+          PKey::String(name.to_string().into()),
+          PropertyDescriptor::Data {
+            value,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          },
+        );
+      }
+      Ok(Value::Object(Rc::new(RefCell::new(result))))
+    }),
+    function_proto_map,
+  );
+  set_builtin_length(&with_resolvers, 0.0);
+  set_builtin_name(&with_resolvers, "withResolvers");
+  promise_ctor_map.borrow_mut().properties.insert(
+    PKey::String("withResolvers".to_string().into()),
+    PropertyDescriptor::builtin_data(with_resolvers),
   );
 
   (promise_proto_map, promise_ctor_map, promise_ctor_val)

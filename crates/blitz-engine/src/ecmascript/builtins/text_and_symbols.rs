@@ -76,7 +76,7 @@ fn string_constructor_to_string(
           | Value::Closure { .. }
           | Value::Builtin(_)
           | Value::BuiltinObject(_, _)
-          | Value::Promise(_)
+          | Value::Promise(..)
       ) {
         return Err(vm.throw_type_error("Cannot convert object to string"));
       }

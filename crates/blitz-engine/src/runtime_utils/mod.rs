@@ -165,7 +165,7 @@ pub(crate) fn strict_equal(
     (Value::Proxy(ax), Value::Proxy(bx)) => Rc::ptr_eq(ax, bx),
     (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
     (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
-    (Value::Promise(ap), Value::Promise(bp)) => Rc::ptr_eq(ap, bp),
+    (Value::Promise(ap, _), Value::Promise(bp, _)) => Rc::ptr_eq(ap, bp),
     (Value::Builtin(af), Value::Builtin(bf)) => Rc::ptr_eq(af, bf),
     _ => false,
   }
@@ -393,7 +393,7 @@ fn clone_value_across_realms(
       Value::String(s) => Ok(Value::String(s.clone())),
       Value::BigInt(bi) => Ok(Value::BigInt(bi.clone())),
       Value::Symbol(_, _) => Err("Cannot clone Symbol across realms".to_string()),
-      Value::Promise(_) => Err("Cannot clone Promise across realms".to_string()),
+      Value::Promise(..) => Err("Cannot clone Promise across realms".to_string()),
       Value::Proxy(_) => Err("Cannot clone Proxy across realms".to_string()),
       Value::Builtin(_) | Value::BuiltinObject(_, _) | Value::Closure { .. } => {
         Err("Cannot clone functions/closures across realms".to_string())

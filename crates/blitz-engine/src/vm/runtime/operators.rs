@@ -30,7 +30,7 @@ impl Vm {
       | Value::Array(..)
       | Value::Closure { .. }
       | Value::BuiltinObject(_, _)
-      | Value::Promise(_) => {}
+      | Value::Promise(..) => {}
       _ => return Ok(false),
     }
 
@@ -49,7 +49,7 @@ impl Vm {
       Value::Array(_, props) => props.borrow().get_prototype(),
       Value::Closure { props, .. } => props.borrow().get_prototype(),
       Value::BuiltinObject(_, props) => props.borrow().get_prototype(),
-      Value::Promise(_) => self.promise_prototype_value(),
+      Value::Promise(_, properties) => properties.borrow().get_prototype(),
       _ => Value::Null,
     };
     let mut seen: HashSet<usize> = HashSet::new();
@@ -88,7 +88,7 @@ impl Vm {
       | Value::Array(..)
       | Value::Closure { .. }
       | Value::BuiltinObject(_, _)
-      | Value::Promise(_) => proto.clone(),
+      | Value::Promise(..) => proto.clone(),
       _ => return Ok(false),
     };
 
@@ -97,7 +97,7 @@ impl Vm {
       Value::Array(_, props) => props.borrow().get_prototype(),
       Value::Closure { props, .. } => props.borrow().get_prototype(),
       Value::BuiltinObject(_, props) => props.borrow().get_prototype(),
-      Value::Promise(_) => self.promise_prototype_value(),
+      Value::Promise(_, properties) => properties.borrow().get_prototype(),
       _ => return Ok(false),
     };
 

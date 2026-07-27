@@ -142,7 +142,7 @@ fn resolve_promise_with_value_inner(
     return Ok(());
   }
 
-  if let Value::Promise(ref p_rc) = value {
+  if let Value::Promise(ref p_rc, _) = value {
     if Rc::ptr_eq(p_rc, result_promise) {
       *already_resolved.borrow_mut() = true;
       return Err(vm.throw_type_error("Chaining cycle detected"));
@@ -370,7 +370,7 @@ pub(crate) fn reject_pending_promise(
         };
         if still_unhandled {
           vm.call_unhandled_rejection(
-            Value::Promise(Rc::clone(&promise_ref)),
+            vm.promise_value(Rc::clone(&promise_ref)),
             stored_reason.clone(),
           );
         }
@@ -476,7 +476,7 @@ pub(crate) fn shadowrealm_import_value(
     on_fulfilled: Vec::new(),
     on_rejected: Vec::new(),
   })));
-  let promise_value = Value::Promise(Rc::clone(&promise));
+  let promise_value = vm.promise_value(Rc::clone(&promise));
 
   // The optional transfer list follows the export name in this builtin's
   // normalized argument array.
@@ -613,7 +613,7 @@ pub(crate) fn dynamic_import_value(
     on_fulfilled: Vec::new(),
     on_rejected: Vec::new(),
   })));
-  let promise_value = Value::Promise(Rc::clone(&promise));
+  let promise_value = vm.promise_value(Rc::clone(&promise));
 
   let specifier_str = match vm.to_string(specifier) {
     Ok(s) => s,

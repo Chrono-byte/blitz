@@ -835,8 +835,8 @@ pub enum Value {
   Builtin(BuiltinFn),
   /// Built-in function object with a property bag (e.g. `.prototype`).
   BuiltinObject(BuiltinFn, Rc<RefCell<ObjectData>>),
-  /// Promise value with internal state
-  Promise(Rc<RefCell<PromiseState>>),
+  /// Promise value with internal state and ordinary object data.
+  Promise(Rc<RefCell<PromiseState>>, Rc<RefCell<ObjectData>>),
 }
 
 /// Host-provided native function signature.
@@ -883,7 +883,7 @@ impl WeakKey {
       Value::Closure { props, .. } => Some(Self::Closure(Rc::downgrade(props))),
       Value::Builtin(value) => Some(Self::Builtin(Rc::downgrade(value))),
       Value::BuiltinObject(_, props) => Some(Self::BuiltinObject(Rc::downgrade(props))),
-      Value::Promise(value) => Some(Self::Promise(Rc::downgrade(value))),
+      Value::Promise(value, _) => Some(Self::Promise(Rc::downgrade(value))),
       Value::Symbol(id, _) => Some(Self::Symbol(Arc::downgrade(&id.0))),
       _ => None,
     }
@@ -903,7 +903,7 @@ impl WeakKey {
       (Self::BuiltinObject(key), Value::BuiltinObject(_, props)) => {
         key.ptr_eq(&Rc::downgrade(props))
       }
-      (Self::Promise(key), Value::Promise(value)) => key.ptr_eq(&Rc::downgrade(value)),
+      (Self::Promise(key), Value::Promise(value, _)) => key.ptr_eq(&Rc::downgrade(value)),
       (Self::Symbol(key), Value::Symbol(value, _)) => key
         .upgrade()
         .is_some_and(|key| *key == value.as_u64()),
@@ -990,7 +990,7 @@ impl Value {
         | Value::Closure { .. }
         | Value::Builtin(_)
         | Value::BuiltinObject(_, _)
-        | Value::Promise(_)
+        | Value::Promise(..)
     )
   }
 
@@ -1031,7 +1031,7 @@ impl Value {
       }
       Value::Closure { .. } => "function",
       Value::Builtin(_) | Value::BuiltinObject(_, _) => "function",
-      Value::Promise(_) => "object",
+      Value::Promise(..) => "object",
     }
   }
 
@@ -1059,7 +1059,7 @@ impl Value {
         }
       }
       Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _) => "Function",
-      Value::Promise(_) => "Promise",
+      Value::Promise(..) => "Promise",
     }
   }
 
@@ -1168,7 +1168,7 @@ impl std::fmt::Display for Value {
           write!(f, "[Native Function]")
         }
       }
-      Value::Promise(_) => write!(f, "[object Promise]"),
+      Value::Promise(..) => write!(f, "[object Promise]"),
     }
   }
 }
@@ -1202,7 +1202,7 @@ impl std::fmt::Debug for Value {
       Value::BuiltinObject(_, props) => {
         write!(f, "BuiltinObject(props={:p})", Rc::as_ptr(props))
       }
-      Value::Promise(state) => write!(f, "Promise({:p})", Rc::as_ptr(state)),
+      Value::Promise(state, _) => write!(f, "Promise({:p})", Rc::as_ptr(state)),
     }
   }
 }

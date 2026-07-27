@@ -296,7 +296,7 @@ pub(super) fn install(
             }
             Ok(())
           });
-          Ok(Value::Promise(result_promise))
+          Ok(vm.promise_value(result_promise))
         }),
         &function_proto_map,
       );

@@ -154,7 +154,7 @@ impl Inspector {
           |name| format!("[Function: {name}]"),
         )
       }
-      Value::Promise(state) => {
+      Value::Promise(state, _) => {
         let id = ContainerId::Promise(Rc::as_ptr(state) as usize);
         if !self.ancestors.insert(id) {
           return "[Circular]".to_string();

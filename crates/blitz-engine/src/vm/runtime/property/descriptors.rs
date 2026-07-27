@@ -250,7 +250,7 @@ impl Vm {
       Value::Object(data) => data,
       Value::Array(_, props) => props,
       Value::Closure { props, .. } => props,
-      Value::BuiltinObject(_, props) => props,
+      Value::BuiltinObject(_, props) | Value::Promise(_, props) => props,
       _ => return Ok(false),
     };
     let mut data = target.borrow_mut();

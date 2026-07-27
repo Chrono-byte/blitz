@@ -554,6 +554,69 @@ pub(crate) fn install_map_set_constructors(
     PropertyDescriptor::builtin_data(map_ctor_val.clone()),
   );
 
+  let map_group_by_proto = Rc::clone(&map_proto);
+  let map_group_by_data = map_data_key;
+  let map_group_by = method(
+    Rc::new(move |vm, args| {
+      let off = static_builtin_arg_offset(vm, args, "Map");
+      let items = args.get(off).cloned().unwrap_or(Value::Undefined);
+      let callback = args
+        .get(off + 1)
+        .cloned()
+        .unwrap_or(Value::Undefined);
+      if !crate::vm::Vm::is_callable_value(&callback) {
+        return Err(vm.throw_type_error("Map.groupBy callback is not callable"));
+      }
+
+      let groups = Rc::new(RefCell::new(Vec::<(Value, Vec<Value>)>::new()));
+      let index = Rc::new(RefCell::new(0usize));
+      let groups_for_iteration = Rc::clone(&groups);
+      let index_for_iteration = Rc::clone(&index);
+      consume_collection_iterable(vm, &items, move |vm, item| {
+        let current_index = *index_for_iteration.borrow();
+        let key = vm.call_value_with_this(
+          &callback,
+          &Value::Undefined,
+          &[item.clone(), Value::Number(usize_to_f64(current_index))],
+        )?;
+        *index_for_iteration.borrow_mut() = current_index.saturating_add(1);
+        let key = canonicalize_keyed_collection_value(key);
+        let mut groups = groups_for_iteration.borrow_mut();
+        if let Some((_, values)) = groups
+          .iter_mut()
+          .find(|(existing, _)| same_value_zero(existing, &key))
+        {
+          values.push(item);
+        } else {
+          groups.push((key, vec![item]));
+        }
+        Ok(())
+      })?;
+
+      let result = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
+        Value::Object(Rc::clone(&map_group_by_proto)),
+      ))));
+      let entries = groups
+        .borrow_mut()
+        .drain(..)
+        .map(|(key, values)| array_from_values(vec![key, array_from_values(values)]))
+        .collect();
+      debug_assert!(set_internal_slot(
+        &result,
+        map_group_by_data,
+        array_from_values(entries),
+      ));
+      Ok(result)
+    }),
+    function_proto_map,
+    "groupBy",
+    2.0,
+  );
+  map_ctor.borrow_mut().properties.insert(
+    PKey::String("groupBy".to_string().into()),
+    PropertyDescriptor::builtin_data(map_group_by),
+  );
+
   let map_data = map_data_key;
   let map_get = method(
     Rc::new(move |vm, args| {

@@ -12,7 +12,7 @@ pub(in crate::vm::runtime) fn list_own_keys_of_value(
   v: &Value
 ) -> Option<Vec<js_string::JsString>> {
   match v {
-    Value::Object(data) => Some(
+    Value::Object(data) | Value::Promise(_, data) => Some(
       data
         .borrow()
         .properties
@@ -54,7 +54,9 @@ pub(in crate::vm::runtime) fn object_identity(obj: &Value) -> Option<usize> {
     Value::Array(_, props) => Some(props.borrow().identity as usize),
     Value::Proxy(proxy) => Some(Rc::as_ptr(proxy) as usize),
     Value::Closure { props, .. } => Some(props.borrow().identity as usize),
-    Value::BuiltinObject(_, props) => Some(props.borrow().identity as usize),
+    Value::BuiltinObject(_, props) | Value::Promise(_, props) => {
+      Some(props.borrow().identity as usize)
+    }
     _ => None,
   }
 }
@@ -82,7 +84,7 @@ pub(in crate::vm::runtime) fn values_equal(
     (Value::Proxy(ap), Value::Proxy(bp)) => Rc::ptr_eq(ap, bp),
     (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
     (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
-    (Value::Promise(ap), Value::Promise(bp)) => Rc::ptr_eq(ap, bp),
+    (Value::Promise(ap, _), Value::Promise(bp, _)) => Rc::ptr_eq(ap, bp),
     (Value::Builtin(af), Value::Builtin(bf)) => Rc::ptr_eq(af, bf),
     _ => false,
   }
@@ -114,7 +116,7 @@ pub fn same_value(
     (Value::Proxy(ap), Value::Proxy(bp)) => Rc::ptr_eq(ap, bp),
     (Value::Closure { props: ap, .. }, Value::Closure { props: bp, .. }) => Rc::ptr_eq(ap, bp),
     (Value::BuiltinObject(_, ap), Value::BuiltinObject(_, bp)) => Rc::ptr_eq(ap, bp),
-    (Value::Promise(ap), Value::Promise(bp)) => Rc::ptr_eq(ap, bp),
+    (Value::Promise(ap, _), Value::Promise(bp, _)) => Rc::ptr_eq(ap, bp),
     _ => false,
   }
 }
@@ -222,7 +224,7 @@ pub(in crate::vm::runtime) fn get_property(
       }
       Ok(Value::Undefined)
     }
-    Value::BuiltinObject(_, props) => {
+    Value::BuiltinObject(_, props) | Value::Promise(_, props) => {
       let p = props.borrow();
       if let Some(desc) = p.properties.get(key) {
         return match desc {
@@ -385,7 +387,7 @@ pub(in crate::vm::runtime) fn set_property(
         .insert(key.clone(), PropertyDescriptor::ordinary_data(value));
       Ok(())
     }
-    Value::BuiltinObject(_, props) => {
+    Value::BuiltinObject(_, props) | Value::Promise(_, props) => {
       let mut p = props.borrow_mut();
       if let Some(desc) = p.properties.get_mut(key) {
         match desc {
@@ -430,7 +432,9 @@ impl Vm {
       Value::Object(m) => Some(m.borrow().identity as usize),
       Value::Array(_, props) => Some(props.borrow().identity as usize),
       Value::Closure { props, .. } => Some(props.borrow().identity as usize),
-      Value::BuiltinObject(_, props) => Some(props.borrow().identity as usize),
+      Value::BuiltinObject(_, props) | Value::Promise(_, props) => {
+        Some(props.borrow().identity as usize)
+      }
       _ => None,
     };
     if let Some(p) = ptr {

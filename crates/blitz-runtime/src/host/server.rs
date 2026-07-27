@@ -207,7 +207,7 @@ impl ServerState {
     if let Some(resource) = resource {
       resource.close();
     }
-    if matches!(finished, Value::Promise(_)) {
+    if matches!(finished, Value::Promise(..)) {
       vm.resolve_host_promise(finished, Value::Undefined)?;
     }
     Ok(())
@@ -247,7 +247,7 @@ impl ServerState {
         return Ok(());
       }
     };
-    if matches!(result, Value::Promise(_)) {
+    if matches!(result, Value::Promise(..)) {
       let promise_root = vm.create_host_root(result.clone());
       let pending = Rc::new(RefCell::new(Some(event)));
       let success_pending = Rc::clone(&pending);
@@ -1474,9 +1474,10 @@ fn extract_header_entries(
 }
 
 fn resolved_promise(value: Value) -> Value {
-  Value::Promise(gc::track_promise(Rc::new(RefCell::new(
-    PromiseState::Fulfilled(value),
-  ))))
+  Value::Promise(
+    gc::track_promise(Rc::new(RefCell::new(PromiseState::Fulfilled(value)))),
+    gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
+  )
 }
 
 fn json_promise(
@@ -1487,12 +1488,13 @@ fn json_promise(
     Ok(value) => resolved_promise(json_to_value(vm, value)),
     Err(error) => {
       let reason = Value::String(error.to_string().into());
-      Value::Promise(gc::track_promise(Rc::new(RefCell::new(
-        PromiseState::Rejected {
+      Value::Promise(
+        gc::track_promise(Rc::new(RefCell::new(PromiseState::Rejected {
           reason,
           handled: true,
-        },
-      ))))
+        }))),
+        gc::track_object(Rc::new(RefCell::new(ObjectData::new()))),
+      )
     }
   }
 }

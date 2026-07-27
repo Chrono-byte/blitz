@@ -242,7 +242,7 @@ impl Vm {
       | Value::Proxy(_)
       | Value::Closure { .. }
       | Value::BuiltinObject(_, _)
-      | Value::Promise(_) => Ok(v),
+      | Value::Promise(..) => Ok(v),
       Value::Undefined | Value::Null => {
         Err(self.throw_type_error("Cannot convert undefined or null to object"))
       }
@@ -327,7 +327,7 @@ impl Vm {
       | Value::Closure { .. }
       | Value::Builtin(_)
       | Value::BuiltinObject(_, _)
-      | Value::Promise(_) => {
+      | Value::Promise(..) => {
         let temp_root_base = self.roots.temporary.len();
         self.roots.temporary.push(v.clone());
         if crate::trace::enabled() {
@@ -373,7 +373,7 @@ impl Vm {
               | Value::Closure { .. }
               | Value::Builtin(_)
               | Value::BuiltinObject(_, _)
-              | Value::Promise(_)
+              | Value::Promise(..)
           ) {
             if crate::trace::enabled() {
               crate::trace::value_string("[trace] @@toPrimitive accepted primitive", &rv);
@@ -419,7 +419,7 @@ impl Vm {
                 | Value::Closure { .. }
                 | Value::Builtin(_)
                 | Value::BuiltinObject(_, _)
-                | Value::Promise(_)
+                | Value::Promise(..)
             ) {
               self.roots.temporary.truncate(temp_root_base);
               return Ok(rv);
@@ -452,7 +452,7 @@ impl Vm {
       Value::Symbol(_, _) => {
         Err(self.throw_type_error("Cannot convert a Symbol value to a string"))
       }
-      Value::Promise(_) => Ok("[object Promise]".into()),
+      Value::Promise(..) => Ok("[object Promise]".into()),
       _ => {
         let prim = self.to_primitive(v, Some("string"))?;
         self.to_string(&prim)

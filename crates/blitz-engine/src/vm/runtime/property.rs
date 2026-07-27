@@ -489,7 +489,7 @@ impl Vm {
         | Value::Array(..)
         | Value::Closure { .. }
         | Value::BuiltinObject(_, _)
-        | Value::Promise(_)
+        | Value::Promise(..)
         | Value::Proxy(_)
     ) {
       return Err(self.throw_type_error("Object.defineProperty called on non-object"));
@@ -988,8 +988,12 @@ impl Vm {
           return self.lookup_property_descriptor(&proto, key, depth + 1);
         }
       }
-      Value::Promise(_) => {
-        let proto = self.promise_prototype_value();
+      Value::Promise(_, properties) => {
+        let properties = properties.borrow();
+        if let Some(descriptor) = properties.properties.get(key) {
+          return Ok(Some((descriptor.clone(), obj.clone())));
+        }
+        let proto = properties.get_prototype();
         if !matches!(proto, Value::Null) {
           return self.lookup_property_descriptor(&proto, key, depth + 1);
         }
@@ -1178,7 +1182,8 @@ fn object_is_extensible(value: &Value) -> bool {
     Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
       props.borrow().extensible
     }
-    Value::Proxy(_) | Value::Builtin(_) | Value::Promise(_) => false,
+    Value::Proxy(_) | Value::Builtin(_) => false,
+    Value::Promise(_, properties) => properties.borrow().extensible,
     _ => false,
   }
 }
@@ -1192,7 +1197,8 @@ fn set_object_extensible(
     Value::Array(_, props) | Value::Closure { props, .. } | Value::BuiltinObject(_, props) => {
       props.borrow_mut().extensible = extensible;
     }
-    Value::Builtin(_) | Value::Promise(_) => return !extensible,
+    Value::Builtin(_) => return !extensible,
+    Value::Promise(_, properties) => properties.borrow_mut().extensible = extensible,
     _ => return false,
   }
   true

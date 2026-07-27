@@ -62,7 +62,7 @@ impl Vm {
   /// machinery as promises created by JavaScript.
   #[must_use]
   pub fn create_host_promise(&self) -> Value {
-    Value::Promise(crate::gc::track_promise(Rc::new(RefCell::new(
+    self.promise_value(crate::gc::track_promise(Rc::new(RefCell::new(
       PromiseState::Pending {
         on_fulfilled: Vec::new(),
         on_rejected: Vec::new(),
@@ -81,7 +81,7 @@ impl Vm {
     promise: &Value,
     value: Value,
   ) -> Result<(), crate::errors::RuntimeError> {
-    let Value::Promise(promise) = promise else {
+    let Value::Promise(promise, _) = promise else {
       return Err(crate::errors::RuntimeError::from(
         "host promise settlement requires a Promise",
       ));
@@ -194,7 +194,7 @@ impl Vm {
     &mut self,
     value: Value,
   ) -> Result<Value, crate::errors::RuntimeError> {
-    if let Value::Promise(promise) = &value
+    if let Value::Promise(promise, _) = &value
       && let PromiseState::Rejected { handled, .. } = &mut *promise.borrow_mut()
     {
       *handled = true;
@@ -381,7 +381,7 @@ impl Vm {
       }
     }
 
-    Ok(Value::Promise(promise))
+    Ok(self.promise_value(promise))
   }
 
   /// Run a blocking closure on the background runtime and wait for the result synchronously.
@@ -506,14 +506,14 @@ mod tests {
     let promise = vm.create_host_promise();
     assert!(matches!(
       &promise,
-      Value::Promise(state) if matches!(*state.borrow(), PromiseState::Pending { .. })
+      Value::Promise(state, _) if matches!(*state.borrow(), PromiseState::Pending { .. })
     ));
 
     vm.resolve_host_promise(&promise, Value::Number(42.0))
       .expect("resolve host promise");
     assert!(matches!(
       &promise,
-      Value::Promise(state)
+      Value::Promise(state, _)
         if matches!(&*state.borrow(), PromiseState::Fulfilled(Value::Number(42.0)))
     ));
   }

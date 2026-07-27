@@ -498,7 +498,15 @@ fn mark_value(
       marked_envs,
       marked_promises,
     ),
-    Value::Promise(state) => {
+    Value::Promise(state, properties) => {
+      mark_object(
+        properties,
+        marked_objects,
+        marked_arrays,
+        marked_proxies,
+        marked_envs,
+        marked_promises,
+      );
       let ptr = Rc::as_ptr(state) as usize;
       if !marked_promises.insert(ptr) {
         return;

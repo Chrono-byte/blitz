@@ -100,7 +100,7 @@ pub fn value_string(
     Value::Builtin(_) | Value::BuiltinObject(_, _) => {
       eprintln!("[trace] {} Builtin", label)
     }
-    Value::Promise(_) => {
+    Value::Promise(..) => {
       eprintln!("[trace] {} Promise", label)
     }
   }

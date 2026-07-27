@@ -85,7 +85,7 @@ impl Vm {
             PropertyDescriptor::builtin_data(ctor.clone()),
           );
         }
-        Value::BuiltinObject(_, props) => {
+        Value::BuiltinObject(_, props) | Value::Promise(_, props) => {
           props.borrow_mut().properties.insert(
             PropertyKey::String("constructor".to_string().into()),
             PropertyDescriptor::builtin_data(ctor.clone()),
@@ -247,7 +247,7 @@ impl Vm {
           | Value::Closure { .. }
           | Value::BuiltinObject(_, _)
           | Value::Proxy(_)
-          | Value::Promise(_) => {
+          | Value::Promise(..) => {
             drop(set_constructor_property(&result, callee));
             result
           }
@@ -270,7 +270,7 @@ impl Vm {
             | Value::Closure { .. }
             | Value::BuiltinObject(_, _)
             | Value::Proxy(_)
-            | Value::Promise(_)
+            | Value::Promise(..)
         ) {
           self.construction.recent_return_value = Some(result.clone());
         } else {
@@ -369,7 +369,7 @@ impl Vm {
           | Value::Closure { .. }
           | Value::BuiltinObject(_, _)
           | Value::Proxy(_)
-          | Value::Promise(_) => {
+          | Value::Promise(..) => {
             drop(set_constructor_property(&result, callee));
             result
           }
@@ -383,7 +383,7 @@ impl Vm {
             | Value::Closure { .. }
             | Value::BuiltinObject(_, _)
             | Value::Proxy(_)
-            | Value::Promise(_)
+            | Value::Promise(..)
         ) {
           self.construction.recent_return_value = Some(result.clone());
         } else {
@@ -404,7 +404,7 @@ impl Vm {
               | Value::Array(..)
               | Value::Closure { .. }
               | Value::BuiltinObject(_, _)
-              | Value::Promise(_)
+              | Value::Promise(..)
           ) {
             self.construction.recent_return_value = Some(value.clone());
           } else {
@@ -525,7 +525,7 @@ impl Vm {
               | Value::Closure { .. }
               | Value::BuiltinObject(_, _)
               | Value::Proxy(_)
-              | Value::Promise(_)
+              | Value::Promise(..)
           )
           .then(|| result.clone());
           Ok(result)
@@ -613,7 +613,7 @@ impl Vm {
               | Value::Array(..)
               | Value::Closure { .. }
               | Value::BuiltinObject(_, _)
-              | Value::Promise(_)
+              | Value::Promise(..)
           ) {
             self.construction.recent_return_value = Some(result.clone());
           } else {
@@ -652,7 +652,7 @@ impl Vm {
               | Value::Array(..)
               | Value::Closure { .. }
               | Value::BuiltinObject(_, _)
-              | Value::Promise(_)
+              | Value::Promise(..)
           ) {
             self.construction.recent_return_value = Some(result.clone());
           } else {
