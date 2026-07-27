@@ -9,7 +9,9 @@ use crate::environment::EnvironmentRecord;
 use crate::errors::RuntimeError;
 use crate::gc;
 use crate::runtime_utils::{array_from_values, number_exponentiate};
-use crate::value::{ObjectData, PromiseState, PropertyDescriptor, PropertyKey, SharedValue, Value};
+#[cfg(test)]
+use crate::value::PromiseState;
+use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SharedValue, Value};
 use crate::vm::runtime::property::{set_property, values_equal};
 use crate::vm::state::*;
 use js_string::JsStringBuilder;
@@ -845,6 +847,9 @@ impl Vm {
           Op::IteratorClose => {
             registers[rd] = self.iterator_close(registers[rd].clone())?;
           }
+          Op::GetAsyncIterator => {
+            registers[rd] = self.get_async_iterator(registers[rd].clone())?;
+          }
           Op::PushWithEnv => {
             let object = self.to_object_value(registers[rd].clone())?;
             self.execution.active.lexical_env =
@@ -886,39 +891,7 @@ impl Vm {
             }
           }
           Op::AwaitPromise => {
-            let awaited = registers[rd].clone();
-            registers[rd] = match awaited {
-              Value::Promise(promise) => loop {
-                let settled = {
-                  let promise = promise.borrow();
-                  match &*promise {
-                    PromiseState::Fulfilled(value) => Some(Ok(value.clone())),
-                    PromiseState::Rejected { reason, .. } => Some(Err(reason.clone())),
-                    PromiseState::Pending { .. } => None,
-                  }
-                };
-                match settled {
-                  Some(Ok(value)) => break value,
-                  Some(Err(reason)) => {
-                    self.throw_value(reason)?;
-                    return Err(RuntimeError::from("JS exception"));
-                  }
-                  None
-                    if !self.jobs.microtasks.is_empty()
-                      || !self.jobs.dynamic_imports.is_empty() =>
-                  {
-                    self.run_microtasks_if_needed()?;
-                    self.maybe_collect_garbage_prototype();
-                  }
-                  None => {
-                    return Err(RuntimeError::from(
-                      "Promise did not settle during synchronous await",
-                    ));
-                  }
-                }
-              },
-              other => other,
-            };
+            registers[rd] = self.await_value_or_throw(registers[rd].clone())?;
           }
           Op::Return => {
             let result = registers[rd].clone();

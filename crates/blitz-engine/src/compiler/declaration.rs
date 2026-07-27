@@ -732,17 +732,22 @@ impl Compiler {
           slot
         };
 
-        // iterable -> iterator via iterable[Symbol.iterator]()
+        // Acquire either the ordinary synchronous iterator record or the
+        // async iterator record (including async-from-sync fallback).
         self.compile_expr_oast(&f.right)?;
-        self.emit(Op::Copy, LINE);
-        self.emit_get_global_name("Symbol");
-        self.emit_constant(Value::String("iterator".to_string().into()), LINE);
-        self.emit(Op::GetProperty, LINE);
-        let symbol_iterator_slot = self.alloc_ic_slot()?;
-        self.emit_byte(symbol_iterator_slot, LINE);
-        self.emit(Op::GetProperty, LINE);
-        self.emit(Op::CallBuiltin, LINE);
-        self.emit_byte(0, LINE);
+        if f.r#await {
+          self.emit(Op::GetAsyncIterator, LINE);
+        } else {
+          self.emit(Op::Copy, LINE);
+          self.emit_get_global_name("Symbol");
+          self.emit_constant(Value::String("iterator".to_string().into()), LINE);
+          self.emit(Op::GetProperty, LINE);
+          let symbol_iterator_slot = self.alloc_ic_slot()?;
+          self.emit_byte(symbol_iterator_slot, LINE);
+          self.emit(Op::GetProperty, LINE);
+          self.emit(Op::CallBuiltin, LINE);
+          self.emit_byte(0, LINE);
+        }
 
         let iterator_slot =
           self.add_local_with_mirror(format!("__forof_iter_{}", self.locals.len()), None, false);

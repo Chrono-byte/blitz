@@ -1083,6 +1083,8 @@ pub enum Op {
   StoreSpill,
   /// rd = ~rs (bitwise NOT)
   BitNot,
+  /// GetAsyncIterator: acquire an async iterator record for rd.
+  GetAsyncIterator,
 }
 
 /// Total number of opcode variants.
@@ -1177,6 +1179,7 @@ impl Op {
       Op::LoadSpill => "LoadSpill",
       Op::StoreSpill => "StoreSpill",
       Op::BitNot => "BitNot",
+      Op::GetAsyncIterator => "GetAsyncIterator",
     }
   }
 
@@ -1289,6 +1292,7 @@ impl TryFrom<u8> for Op {
       76 => Ok(LoadSpill),
       77 => Ok(StoreSpill),
       78 => Ok(BitNot),
+      79 => Ok(GetAsyncIterator),
       _ => Err(()),
     }
   }
@@ -1321,7 +1325,7 @@ mod tests {
 
   #[test]
   fn op_round_trip() {
-    for i in 0u8..=Op::BitNot as u8 {
+    for i in 0u8..=Op::GetAsyncIterator as u8 {
       let Ok(op) = Op::try_from(i) else {
         assert!((50..=53).contains(&i), "unexpected opcode gap at {i}");
         continue;

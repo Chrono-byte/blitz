@@ -744,7 +744,7 @@ impl RiscBuilder {
           );
           store_location(&mut lowered, destination, rd, line);
         }
-        Op::DeleteIdentifier | Op::IteratorNext | Op::IteratorClose => {
+        Op::DeleteIdentifier | Op::IteratorNext | Op::IteratorClose | Op::GetAsyncIterator => {
           let destination = plan.get(instruction.output()?)?;
           let source = load_location(&mut lowered, plan.get(instruction.input(0)?)?, 0, line);
           let rd = destination_register(destination, source);
@@ -966,6 +966,7 @@ fn risc_executor_supports(op: Op) -> bool {
       | Op::PopHandler
       | Op::IteratorNext
       | Op::IteratorClose
+      | Op::GetAsyncIterator
       | Op::Return
       | Op::PushWithEnv
       | Op::PopEnv
@@ -1190,7 +1191,9 @@ fn operation_shape(
     | Op::GetSuperProperty => ValueShape::new(2, true),
 
     Op::SetProperty | Op::SetSuperProperty => ValueShape::new(3, true),
-    Op::DeleteIdentifier | Op::IteratorNext | Op::IteratorClose => ValueShape::new(1, true),
+    Op::DeleteIdentifier | Op::IteratorNext | Op::IteratorClose | Op::GetAsyncIterator => {
+      ValueShape::new(1, true)
+    }
     Op::BuildArray => ValueShape::new(arg, true),
     Op::BuildObject => ValueShape::new(arg.saturating_mul(2), true),
     Op::Call | Op::TailCall | Op::Construct => ValueShape::new(arg + 1, true),

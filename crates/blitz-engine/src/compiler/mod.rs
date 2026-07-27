@@ -1055,6 +1055,27 @@ mod test {
   }
 
   #[test]
+  fn compile_for_await_uses_async_iterator_acquisition() {
+    let src = crate::js!("async function f(xs) { for await (const x of xs) {} }");
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let program = session.program();
+    let chunk = compile(program, session.source()).expect("compile ok");
+
+    let ops: Vec<_> = chunk
+      .functions
+      .iter()
+      .flat_map(|function| function.chunk.code.iter())
+      .filter_map(|word| Op::from_byte((*word & 0xFF) as u8))
+      .collect();
+    assert!(
+      ops
+        .iter()
+        .any(|op| matches!(op, Op::GetAsyncIterator)),
+      "for-await must acquire an async iterator record"
+    );
+  }
+
+  #[test]
   fn for_of_over_array_executes() {
     let src = crate::js!("var sum = 0; for (var x of [1, 2, 3]) { sum = sum + x; } sum;");
     let session = crate::parser::Parser::parse_source(src).expect("parse ok");

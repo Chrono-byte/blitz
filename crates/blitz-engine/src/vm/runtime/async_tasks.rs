@@ -194,6 +194,11 @@ impl Vm {
     &mut self,
     value: Value,
   ) -> Result<Value, crate::errors::RuntimeError> {
+    if let Value::Promise(promise) = &value
+      && let PromiseState::Rejected { handled, .. } = &mut *promise.borrow_mut()
+    {
+      *handled = true;
+    }
     let promise = crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
       on_fulfilled: Vec::new(),
       on_rejected: Vec::new(),
@@ -225,6 +230,24 @@ impl Vm {
             "Promise did not settle during synchronous await",
           ));
         }
+      }
+    }
+  }
+
+  /// Await a value from bytecode semantics and turn promise rejection into a
+  /// language-level throw that can be handled by the active exception region.
+  pub(super) fn await_value_or_throw(
+    &mut self,
+    value: Value,
+  ) -> Result<Value, crate::errors::RuntimeError> {
+    match self.await_value(value) {
+      Ok(value) => Ok(value),
+      Err(error) => {
+        let Some(reason) = self.exceptions.last_uncaught.take() else {
+          return Err(error);
+        };
+        self.throw_value(reason)?;
+        Err(crate::errors::RuntimeError::from("JS exception"))
       }
     }
   }

@@ -7,6 +7,35 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 impl Vm {
+  /// Run a host-side spec operation behind a completion boundary.
+  ///
+  /// JavaScript calls made by the operation must not unwind into handlers
+  /// outside the abstract operation before the host algorithm has a chance to
+  /// apply steps such as IteratorClose or IfAbruptRejectPromise.
+  pub(crate) fn capture_completion<T>(
+    &mut self,
+    operation: impl FnOnce(&mut Self) -> Result<T, RuntimeError>,
+  ) -> Result<T, (RuntimeError, Option<Value>)> {
+    let saved_handlers = std::mem::take(&mut self.exceptions.handlers);
+    let saved_pending = self.exceptions.pending.take();
+    let saved_pending_frame_count = self.exceptions.pending_frame_count.take();
+    let saved_last_uncaught = self.exceptions.last_uncaught.take();
+
+    let result = operation(self);
+    let thrown = self
+      .exceptions
+      .pending
+      .take()
+      .or_else(|| self.exceptions.last_uncaught.take());
+
+    self.exceptions.handlers = saved_handlers;
+    self.exceptions.pending = saved_pending;
+    self.exceptions.pending_frame_count = saved_pending_frame_count;
+    self.exceptions.last_uncaught = saved_last_uncaught;
+
+    result.map_err(|error| (error, thrown))
+  }
+
   /// Unwind call frames to the nearest exception handler, or propagate the
   /// error if none exists.
   pub(super) fn unwind_to_handler(

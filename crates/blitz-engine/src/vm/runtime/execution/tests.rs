@@ -4950,4 +4950,128 @@ mod test {
     assert!(intrinsics.array_iterator_prototype.is_some());
     assert!(!intrinsics.typed_array_constructors.is_empty());
   }
+
+  #[test]
+  fn promise_all_streams_values_and_closes_after_resolve_throws() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let returnCount = 0;
+        const iterable = {
+          [Symbol.iterator]() {
+            return {
+              next() { return { value: null, done: false }; },
+              return() { returnCount += 1; }
+            };
+          }
+        };
+        Promise.resolve = function() { throw "resolve failed"; };
+        Promise.all(iterable);
+        globalThis.result = returnCount;
+      "#
+    ));
+
+    assert_eq!(vm.get_global("result"), Some(Value::Number(1.0)));
+  }
+
+  #[test]
+  fn promise_all_preserves_original_throw_when_iterator_return_is_not_callable() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let rejected;
+        function BadPromise(executor) {
+          executor(function() {}, function(reason) { rejected = reason; });
+        }
+        BadPromise.resolve = function() { throw "resolve failed"; };
+        const iterable = {
+          [Symbol.iterator]() {
+            return {
+              next() { return { done: false }; },
+              return: 0
+            };
+          }
+        };
+        Promise.all.call(BadPromise, iterable);
+        globalThis.result = rejected;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String("resolve failed".to_string().into()))
+    );
+  }
+
+  #[test]
+  fn for_await_closes_sync_iterator_when_yielded_promise_rejects() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let returnCount = 0;
+        let caught = false;
+        const syncIterable = {
+          [Symbol.iterator]() {
+            return {
+              next() {
+                return { value: Promise.reject("rejected"), done: false };
+              },
+              return() {
+                returnCount += 1;
+              }
+            };
+          }
+        };
+        async function run() {
+          try {
+            for await (const value of syncIterable) {}
+          } catch (error) {
+            caught = error === "rejected";
+          }
+        }
+        run();
+        globalThis.result = returnCount + "," + caught;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String("1,true".to_string().into()))
+    );
+  }
+
+  #[test]
+  fn for_await_uses_async_iterator_and_awaits_close_on_break() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let nextCount = 0;
+        let returnCount = 0;
+        let seen;
+        const asyncIterable = {
+          [Symbol.asyncIterator]() {
+            return {
+              next() {
+                nextCount += 1;
+                return Promise.resolve({ value: 42, done: false });
+              },
+              return() {
+                returnCount += 1;
+                return Promise.resolve({ value: undefined, done: true });
+              }
+            };
+          }
+        };
+        async function run() {
+          for await (const value of asyncIterable) {
+            seen = value;
+            break;
+          }
+        }
+        run();
+        globalThis.result = nextCount + "," + returnCount + "," + seen;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String("1,1,42".to_string().into()))
+    );
+  }
 }
