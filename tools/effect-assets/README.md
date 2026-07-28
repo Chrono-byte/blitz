@@ -45,6 +45,14 @@ or host-specific package imports are rejected rather than silently retained.
 JavaScript facades become runtime assets only when listed in
 `src/stdlib-manifest.ts`; declarations alone do not make a module public.
 
+### Initial `node:fs` append facade
+
+`node:fs` and `node:fs/promises` provide `appendFile` alongside the existing
+`writeFile` slice. It preserves Node's default append flag (`"a"`) and accepts
+the same supported UTF-8 and write-flag options. The synchronous, callback,
+and promise variants all use the existing permission-gated filesystem host
+primitive; callbacks and promises are delivered on the VM Promise-job boundary.
+
 ### Initial `node:async_hooks` facade
 
 `src/facades/node-async-hooks.js` and `declarations/node-async-hooks.d.ts`

@@ -55,11 +55,11 @@ const readOptions = options => {
   return validateEncoding(options.encoding);
 };
 
-const writeOptions = options => {
-  if (options === undefined || options === null) return "w";
+const writeOptions = (options, defaultFlag = "w") => {
+  if (options === undefined || options === null) return defaultFlag;
   if (typeof options === "string") {
     validateEncoding(options);
-    return "w";
+    return defaultFlag;
   }
   if (typeof options !== "object") {
     throw codedError("ERR_INVALID_ARG_TYPE", "The options argument must be a string or an object", TypeError);
@@ -71,7 +71,7 @@ const writeOptions = options => {
     throw codedError("ERR_NOT_IMPLEMENTED", "file modes are not implemented by Blitz");
   }
   validateEncoding(options.encoding);
-  const flag = options.flag === undefined ? "w" : options.flag;
+  const flag = options.flag === undefined ? defaultFlag : options.flag;
   if (typeof flag !== "string") {
     throw codedError("ERR_INVALID_ARG_TYPE", "The flag option must be a string", TypeError);
   }
@@ -217,6 +217,11 @@ export const writeFile = (path, data, options) => {
   return later(() => unwrap(HostFileSystem.writeFile(validatePath(path), data, flag)));
 };
 
+export const appendFile = (path, data, options) => {
+  const flag = writeOptions(options, "a");
+  return later(() => unwrap(HostFileSystem.writeFile(validatePath(path), data, flag)));
+};
+
 export const stat = (path, options) => {
   validateStatOptions(options);
   return later(() => new Stats(unwrap(HostFileSystem.stat(validatePath(path)))));
@@ -263,6 +268,7 @@ const fsPromises = {
   constants,
   readFile,
   writeFile,
+  appendFile,
   stat,
   mkdir,
   readdir,

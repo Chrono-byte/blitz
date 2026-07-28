@@ -1209,8 +1209,8 @@ mod tests {
         .register_virtual_module(VirtualModule::javascript(
           "node-fs-facade-entry",
           [
-            denko::js!(module, "import fs, { readFile as readFileCallback, readFileSync, writeFileSync, statSync, mkdirSync, readdirSync, renameSync, existsSync } from 'node:fs';\n"),
-            denko::js!(module, "import { readFile as readFilePromise, writeFile as writeFilePromise, stat, rm } from 'node:fs/promises';\n"),
+            denko::js!(module, "import fs, { appendFile, appendFileSync, readFile as readFileCallback, readFileSync, writeFileSync, statSync, mkdirSync, readdirSync, renameSync, existsSync } from 'node:fs';\n"),
+            denko::js!(module, "import { appendFile as appendFilePromise, readFile as readFilePromise, writeFile as writeFilePromise, stat, rm } from 'node:fs/promises';\n"),
             &format!(
               "const root = {};\n",
               serde_json::to_string(&directory.to_string_lossy().into_owned())
@@ -1220,21 +1220,27 @@ mod tests {
             denko::js!("const moved = root + '/moved.txt';\n"),
             "mkdirSync(root);\n",
             "writeFileSync(file, 'hello');\n",
-            "if (readFileSync(file, 'utf8') !== 'hello') throw new Error('sync text mismatch');\n",
+            "appendFileSync(file, ' sync');\n",
+            "if (readFileSync(file, 'utf8') !== 'hello sync') throw new Error('sync text mismatch');\n",
             "if (!(readFileSync(file) instanceof Uint8Array)) throw new Error('sync bytes mismatch');\n",
             "if (!existsSync(file) || !statSync(file).isFile()) throw new Error('sync stat mismatch');\n",
             "try { readFileSync(root + '/missing'); throw new Error('missing read did not throw'); } catch (error) { if (error.code !== 'ENOENT' || error.syscall !== 'open' || error.path !== root + '/missing' || error.errno >= 0) throw error; globalThis.nodeFsErrorPassed = true; }\n",
             "if (readdirSync(root).indexOf('value.txt') < 0) throw new Error('readdir mismatch');\n",
             denko::js!("const urlPath = { href: 'file://' + file };\n"),
-            "if (readFileSync(urlPath, 'utf8') !== 'hello') throw new Error('URL path mismatch');\n",
+            "if (readFileSync(urlPath, 'utf8') !== 'hello sync') throw new Error('URL path mismatch');\n",
             "renameSync(file, moved);\n",
             denko::js!("const promiseFile = root + '/promise.txt';\n"),
+            denko::js!("const callbackFile = root + '/callback.txt';\n"),
+            denko::js!("const appendPromiseFile = root + '/append-promise.txt';\n"),
             denko::js!("const removable = root + '/removable';\n"),
             "mkdirSync(removable);\n",
             "writeFilePromise(promiseFile, 'promise').then(() => readFilePromise(promiseFile, 'utf8')).then(value => { if (value !== 'promise') throw new Error('promise read/write mismatch'); globalThis.nodeFsPromiseReadWritePassed = true; });\n",
             "rm(removable, { recursive: true }).then(() => { globalThis.nodeFsPromiseRmPassed = true; });\n",
             "if (fs.constants.F_OK !== 0 || typeof fs.promises.readFile !== 'function') throw new Error('constants/promises mismatch');\n",
-            "readFileCallback(moved, 'utf8', (error, value) => { if (error || value !== 'hello') throw error || new Error('callback mismatch'); globalThis.nodeFsCallbackPassed = true; });\n",
+            "writeFileSync(callbackFile, 'hello');\n",
+            "appendFile(callbackFile, ' callback', error => { if (error) throw error; readFileCallback(callbackFile, 'utf8', (readError, value) => { if (readError || value !== 'hello callback') throw readError || new Error('callback mismatch'); globalThis.nodeFsCallbackPassed = true; }); });\n",
+            "writeFileSync(appendPromiseFile, 'hello');\n",
+            "appendFilePromise(appendPromiseFile, ' promise').then(() => readFilePromise(appendPromiseFile, 'utf8')).then(value => { if (value !== 'hello promise') throw new Error('promise append mismatch'); globalThis.nodeFsPromiseAppendPassed = true; });\n",
             "stat(moved).then(value => { if (!value.isFile()) throw new Error('promise stat mismatch'); globalThis.nodeFsPromisePassed = true; });\n",
           ]
           .concat(),
@@ -1270,6 +1276,10 @@ mod tests {
     );
     assert_eq!(
       vm.get_global("nodeFsPromiseRmPassed"),
+      Some(Value::Bool(true))
+    );
+    assert_eq!(
+      vm.get_global("nodeFsPromiseAppendPassed"),
       Some(Value::Bool(true))
     );
     fs::remove_dir_all(directory).expect("remove facade test directory");

@@ -59,11 +59,11 @@ const readOptions = options => {
   return validateEncoding(options.encoding);
 };
 
-const writeOptions = options => {
-  if (options === undefined || options === null) return "w";
+const writeOptions = (options, defaultFlag = "w") => {
+  if (options === undefined || options === null) return defaultFlag;
   if (typeof options === "string") {
     validateEncoding(options);
-    return "w";
+    return defaultFlag;
   }
   if (typeof options !== "object") {
     throw codedError("ERR_INVALID_ARG_TYPE", "The options argument must be a string or an object", TypeError);
@@ -75,7 +75,7 @@ const writeOptions = options => {
     throw codedError("ERR_NOT_IMPLEMENTED", "file modes are not implemented by Blitz");
   }
   validateEncoding(options.encoding);
-  const flag = options.flag === undefined ? "w" : options.flag;
+  const flag = options.flag === undefined ? defaultFlag : options.flag;
   if (typeof flag !== "string") {
     throw codedError("ERR_INVALID_ARG_TYPE", "The flag option must be a string", TypeError);
   }
@@ -228,6 +228,9 @@ export const readFileSync = (path, options) =>
 export const writeFileSync = (path, data, options) =>
   unwrap(HostFileSystem.writeFile(validatePath(path), data, writeOptions(options)));
 
+export const appendFileSync = (path, data, options) =>
+  unwrap(HostFileSystem.writeFile(validatePath(path), data, writeOptions(options, "a")));
+
 export const statSync = (path, options) => {
   validateStatOptions(options);
   return new Stats(unwrap(HostFileSystem.stat(validatePath(path))));
@@ -277,6 +280,15 @@ export const writeFile = (path, data, options, callback) => {
     throw codedError("ERR_INVALID_ARG_TYPE", "The callback argument must be a function", TypeError);
   }
   callbackify(actualCallback, () => writeFileSync(path, data, actualOptions));
+};
+
+export const appendFile = (path, data, options, callback) => {
+  const actualCallback = typeof options === "function" ? options : callback;
+  const actualOptions = typeof options === "function" ? undefined : options;
+  if (typeof actualCallback !== "function") {
+    throw codedError("ERR_INVALID_ARG_TYPE", "The callback argument must be a function", TypeError);
+  }
+  callbackify(actualCallback, () => appendFileSync(path, data, actualOptions));
 };
 
 export const stat = (path, options, callback) => {
@@ -351,6 +363,8 @@ const fs = {
   readFileSync,
   writeFile,
   writeFileSync,
+  appendFile,
+  appendFileSync,
   stat,
   statSync,
   mkdir,

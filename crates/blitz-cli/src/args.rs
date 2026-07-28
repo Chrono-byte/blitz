@@ -46,7 +46,7 @@ pub(crate) struct Cli {
   pub(crate) file: Option<PathBuf>,
 
   /// Select the Node.js compatibility profile: off, core, tooling, or full.
-  #[arg(long, value_enum, default_value_t = NodeCompatArg::Core, global = true)]
+  #[arg(long, value_enum, default_value_t = NodeCompatArg::Full, global = true)]
   pub(crate) node_compat: NodeCompatArg,
 
   /// Change the working directory before project discovery and execution.

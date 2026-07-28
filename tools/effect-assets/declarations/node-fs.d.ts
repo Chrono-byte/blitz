@@ -95,6 +95,7 @@ export declare const Dirent: { new (value: unknown): Dirent };
 
 export declare function readFileSync(path: PathLike, options?: ReadFileOptions | "utf8" | "utf-8" | null): Uint8Array | string;
 export declare function writeFileSync(path: PathLike, data: FileData, options?: WriteFileOptions | "utf8" | "utf-8" | null): void;
+export declare function appendFileSync(path: PathLike, data: FileData, options?: WriteFileOptions | "utf8" | "utf-8" | null): void;
 export declare function statSync(path: PathLike, options?: StatOptions): Stats;
 export declare function mkdirSync(path: PathLike, options?: MkdirOptions): void;
 export declare function readdirSync(path: PathLike, options?: ReaddirOptions | "utf8" | "utf-8" | null): string[] | Dirent[];
@@ -107,6 +108,8 @@ export declare function readFile(path: PathLike, callback: (error: NodeFsError |
 export declare function readFile(path: PathLike, options: ReadFileOptions | "utf8" | "utf-8" | null, callback: (error: NodeFsError | null, data: Uint8Array | string) => void): void;
 export declare function writeFile(path: PathLike, data: FileData, callback: (error: NodeFsError | null) => void): void;
 export declare function writeFile(path: PathLike, data: FileData, options: WriteFileOptions | "utf8" | "utf-8" | null, callback: (error: NodeFsError | null) => void): void;
+export declare function appendFile(path: PathLike, data: FileData, callback: (error: NodeFsError | null) => void): void;
+export declare function appendFile(path: PathLike, data: FileData, options: WriteFileOptions | "utf8" | "utf-8" | null, callback: (error: NodeFsError | null) => void): void;
 export declare function stat(path: PathLike, callback: (error: NodeFsError | null, stats: Stats) => void): void;
 export declare function stat(path: PathLike, options: StatOptions, callback: (error: NodeFsError | null, stats: Stats) => void): void;
 export declare function mkdir(path: PathLike, callback: (error: NodeFsError | null) => void): void;
@@ -122,6 +125,7 @@ export interface PromisesApi {
   readonly constants: Constants;
   readonly readFile: typeof import("node:fs/promises").readFile;
   readonly writeFile: typeof import("node:fs/promises").writeFile;
+  readonly appendFile: typeof import("node:fs/promises").appendFile;
   readonly stat: typeof import("node:fs/promises").stat;
   readonly mkdir: typeof import("node:fs/promises").mkdir;
   readonly readdir: typeof import("node:fs/promises").readdir;
@@ -141,6 +145,8 @@ declare const fs: {
   readonly readFileSync: typeof readFileSync;
   readonly writeFile: typeof writeFile;
   readonly writeFileSync: typeof writeFileSync;
+  readonly appendFile: typeof appendFile;
+  readonly appendFileSync: typeof appendFileSync;
   readonly stat: typeof stat;
   readonly statSync: typeof statSync;
   readonly mkdir: typeof mkdir;

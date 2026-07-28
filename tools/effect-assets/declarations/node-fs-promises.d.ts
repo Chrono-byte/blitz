@@ -93,6 +93,7 @@ export interface Constants {
 export declare const constants: Constants;
 export declare function readFile(path: PathLike, options?: ReadFileOptions | "utf8" | "utf-8" | null): Promise<Uint8Array | string>;
 export declare function writeFile(path: PathLike, data: FileData, options?: WriteFileOptions | "utf8" | "utf-8" | null): Promise<void>;
+export declare function appendFile(path: PathLike, data: FileData, options?: WriteFileOptions | "utf8" | "utf-8" | null): Promise<void>;
 export declare function stat(path: PathLike, options?: StatOptions): Promise<Stats>;
 export declare function mkdir(path: PathLike, options?: MkdirOptions): Promise<void>;
 export declare function readdir(path: PathLike, options?: ReaddirOptions | "utf8" | "utf-8" | null): Promise<string[] | Dirent[]>;
@@ -104,6 +105,7 @@ declare const fsPromises: {
   readonly constants: typeof constants;
   readonly readFile: typeof readFile;
   readonly writeFile: typeof writeFile;
+  readonly appendFile: typeof appendFile;
   readonly stat: typeof stat;
   readonly mkdir: typeof mkdir;
   readonly readdir: typeof readdir;

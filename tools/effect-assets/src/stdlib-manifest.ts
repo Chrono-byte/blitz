@@ -245,6 +245,13 @@ export const STDLIB_INPUTS = [
     hostPrimitives: [],
   },
   {
+    specifier: "node:http",
+    source: "facades/node-http.js",
+    declaration: "node-http.d.ts",
+    visibility: "public",
+    hostPrimitives: [],
+  },
+  {
     specifier: "node:module",
     source: "facades/node-module.js",
     declaration: "node-module.d.ts",
