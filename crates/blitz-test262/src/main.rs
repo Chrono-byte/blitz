@@ -1788,7 +1788,7 @@ fn feature_edition(feature: &str) -> Option<u8> {
 fn feature_edition_labels(features: Option<&[String]>) -> Vec<String> {
   static FEATURE_CATALOG: OnceLock<HashSet<&'static str>> = OnceLock::new();
   let catalog = FEATURE_CATALOG.get_or_init(|| {
-    include_str!("../../../test262/features.txt")
+    include_str!("../features.txt")
       .lines()
       .filter(|line| !line.is_empty() && !line.starts_with('#'))
       .filter_map(|line| line.split('#').next().map(str::trim))
