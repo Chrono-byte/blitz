@@ -8,6 +8,8 @@ use std::rc::Rc;
 
 use denko::value::{ObjectData, PropertyDescriptor, PropertyKey};
 use denko::{compiler, parser::Parser as JsParser, value::Value, vm::Vm};
+use oxc_ast::ast as oast;
+use oxc_span::SourceType;
 
 use crate::host::{RuntimeOptions, install_runtime};
 
@@ -78,10 +80,99 @@ fn evaluate(
   vm: &mut Vm,
   source: &str,
 ) -> Result<Value, denko::errors::Error> {
-  let session = JsParser::parse_source(source)?;
-  let chunk = compiler::compile_oxc_repl(session.program(), source)?;
+  let source_type = SourceType::ts().with_module(true);
+  let session = JsParser::parse_source_with_type(source, source_type)?;
+  let lowered = lower_static_imports(session.program(), source);
+  let session = JsParser::parse_source_with_type(&lowered, source_type)?;
+  let chunk = compiler::compile_oxc_repl(session.program(), &lowered)?;
   vm.run_repl(chunk)
     .map_err(denko::errors::Error::from)
+}
+
+// REPL submissions execute as persistent root chunks rather than module
+// records. Lower import declarations through the realm's normal dynamic-import
+// loader so package resolution, profile filtering, and module caching remain
+// shared with hosted execution.
+fn lower_static_imports(
+  program: &oast::Program<'_>,
+  source: &str,
+) -> String {
+  let mut replacements = Vec::new();
+
+  for statement in &program.body {
+    let oast::Statement::ImportDeclaration(import) = statement else {
+      continue;
+    };
+    replacements.push((
+      import.span.start as usize,
+      import.span.end as usize,
+      lower_static_import(import),
+    ));
+  }
+
+  if replacements.is_empty() {
+    return source.to_string();
+  }
+
+  let mut lowered = source.to_string();
+  for (start, end, replacement) in replacements.into_iter().rev() {
+    lowered.replace_range(start..end, &replacement);
+  }
+  lowered
+}
+
+fn lower_static_import(import: &oast::ImportDeclaration<'_>) -> String {
+  if import.import_kind == oast::ImportOrExportKind::Type {
+    return String::new();
+  }
+
+  let specifier = serde_json::to_string(import.source.value.as_str())
+    .expect("module specifiers are serializable strings");
+  let Some(imports) = import.specifiers.as_ref() else {
+    return format!("await import({specifier});");
+  };
+  if imports.is_empty() {
+    return format!("await import({specifier});");
+  }
+
+  let mut names = Vec::new();
+  let mut values = Vec::new();
+  for import in imports {
+    match import {
+      oast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
+        names.push(namespace.local.name.to_string());
+        values.push("module".to_string());
+      }
+      oast::ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
+        names.push(default.local.name.to_string());
+        values.push("module[\"default\"]".to_string());
+      }
+      oast::ImportDeclarationSpecifier::ImportSpecifier(named)
+        if named.import_kind == oast::ImportOrExportKind::Value =>
+      {
+        let imported = match &named.imported {
+          oast::ModuleExportName::IdentifierName(name) => name.name.as_str(),
+          oast::ModuleExportName::IdentifierReference(name) => name.name.as_str(),
+          oast::ModuleExportName::StringLiteral(name) => name.value.as_str(),
+        };
+        let imported =
+          serde_json::to_string(imported).expect("import names are serializable strings");
+        names.push(named.local.name.to_string());
+        values.push(format!("module[{imported}]"));
+      }
+      oast::ImportDeclarationSpecifier::ImportSpecifier(_) => {}
+    }
+  }
+
+  if names.is_empty() {
+    return String::new();
+  }
+
+  format!(
+    "const [{}] = ((module) => [{}])(await import({specifier}));",
+    names.join(", "),
+    values.join(", ")
+  )
 }
 
 #[cfg(test)]
@@ -126,6 +217,48 @@ mod tests {
       evaluate(&mut vm, denko::js!("readAnswer()")).expect("read bindings from a later submission");
 
     assert_eq!(result, Value::Number(42.0));
+  }
+
+  #[test]
+  fn session_accepts_typescript_and_top_level_await() {
+    let (mut vm, _runtime) = runtime_vm();
+    evaluate(
+      &mut vm,
+      denko::js!(
+        typescript,
+        "const pending: Promise<number> = Promise.resolve(42)"
+      ),
+    )
+    .expect("declare typed promise");
+    let result = evaluate(&mut vm, denko::js!(module, "await pending"))
+      .expect("await a value from an earlier submission");
+
+    assert_eq!(result, Value::Number(42.0));
+  }
+
+  #[test]
+  fn session_accepts_static_imports() {
+    let (mut vm, _runtime) = runtime_vm();
+    evaluate(
+      &mut vm,
+      denko::js!(module, "import * as Effect from 'effect/Effect'"),
+    )
+    .expect("import namespace");
+    evaluate(
+      &mut vm,
+      denko::js!(
+        module,
+        "import { succeed as succeedEffect } from 'effect/Effect'"
+      ),
+    )
+    .expect("import named binding");
+    let result = evaluate(
+      &mut vm,
+      denko::js!("typeof Effect.runSync === 'function' && succeedEffect(42)._tag === 'Success'"),
+    )
+    .expect("use imported bindings later");
+
+    assert_eq!(result, Value::Bool(true));
   }
 
   #[test]
