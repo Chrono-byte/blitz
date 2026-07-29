@@ -139,14 +139,23 @@ pub enum LiteralType {
   Boolean(bool),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Variance {
+  Unspecified,
+  In,
+  Out,
+  InOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TypeParameter {
   name: String,
   constraint: Option<Type>,
   default: Option<Type>,
+  variance: Variance,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TypeDefinition {
   parameters: Vec<TypeParameter>,
   body: Type,
@@ -502,6 +511,7 @@ fn qualify_type_definition(
           .default
           .as_ref()
           .map(|typ| qualify_type(specifier, local_types, &generic_names, typ)),
+        variance: parameter.variance,
       })
       .collect(),
     body: qualify_type(specifier, local_types, &generic_names, &definition.body),
@@ -795,27 +805,11 @@ impl TypeContext {
         .insert(declaration.specifier.clone(), module);
     }
 
-    // Public type names remain available to source annotations and namespace
-    // imports. Private helpers are reachable only through the internal names
-    // embedded in the exported definitions above.
-    let mut definitions = Vec::new();
-    for (specifier, module) in &self.modules {
-      definitions.extend(
-        module
-          .types
-          .iter()
-          .map(|(name, definition)| (name.clone(), specifier.clone(), definition.clone())),
-      );
-    }
-    definitions.sort_by(|left, right| {
-      left
-        .0
-        .cmp(&right.0)
-        .then_with(|| left.1.cmp(&right.1))
-    });
-    for (name, _, definition) in definitions {
-      self.named_types.entry(name).or_insert(definition);
-    }
+    // Exported module types remain scoped to their module. Injecting them into
+    // the global named-type table makes unrelated exports shadow generic
+    // parameters with the same spelling (for example `Exit.Success` and the
+    // `<Success>` parameter of `Effect.succeed`). Imports and namespace
+    // resolution below expose public types in the requesting source instead.
 
     // Resolve imports and re-exports to a fixed point. The bounded number of
     // passes is sufficient for the finite declaration graph and deterministic.
@@ -1502,6 +1496,109 @@ impl TypeContext {
     self.resolve_type_with_environment(typ, &TypeEnvironment::new(), 0)
   }
 
+  fn instantiate_type_parameters(
+    &self,
+    typ: &Type,
+    environment: &TypeEnvironment,
+  ) -> Type {
+    match typ {
+      Type::TypeReference { name, arguments } => {
+        if let Some(bound) = environment.get(name) {
+          return self.instantiate_type_parameters(bound, environment);
+        }
+        Type::TypeReference {
+          name: name.clone(),
+          arguments: arguments
+            .iter()
+            .map(|argument| self.instantiate_type_parameters(argument, environment))
+            .collect(),
+        }
+      }
+      Type::Array(element) => Type::Array(Box::new(
+        self.instantiate_type_parameters(element, environment),
+      )),
+      Type::Tuple(elements) => Type::Tuple(
+        elements
+          .iter()
+          .map(|element| self.instantiate_type_parameters(element, environment))
+          .collect(),
+      ),
+      Type::Rest(element) => Type::Rest(Box::new(
+        self.instantiate_type_parameters(element, environment),
+      )),
+      Type::Function(parameters, return_type) => Type::Function(
+        parameters
+          .iter()
+          .map(|parameter| self.instantiate_type_parameters(parameter, environment))
+          .collect(),
+        Box::new(self.instantiate_type_parameters(return_type, environment)),
+      ),
+      Type::Object(properties) => Type::Object(
+        properties
+          .iter()
+          .map(|(name, property)| {
+            (
+              name.clone(),
+              self.instantiate_type_parameters(property, environment),
+            )
+          })
+          .collect(),
+      ),
+      Type::Union(types) => Type::Union(
+        types
+          .iter()
+          .map(|typ| self.instantiate_type_parameters(typ, environment))
+          .collect(),
+      ),
+      Type::Intersection(types) => Type::Intersection(
+        types
+          .iter()
+          .map(|typ| self.instantiate_type_parameters(typ, environment))
+          .collect(),
+      ),
+      Type::Conditional {
+        check,
+        extends,
+        true_type,
+        false_type,
+        distributive_parameter,
+      } => Type::Conditional {
+        check: Box::new(self.instantiate_type_parameters(check, environment)),
+        extends: Box::new(self.instantiate_type_parameters(extends, environment)),
+        true_type: Box::new(self.instantiate_type_parameters(true_type, environment)),
+        false_type: Box::new(self.instantiate_type_parameters(false_type, environment)),
+        distributive_parameter: distributive_parameter.clone(),
+      },
+      Type::KeyOf(value) => Type::KeyOf(Box::new(
+        self.instantiate_type_parameters(value, environment),
+      )),
+      Type::IndexedAccess { object, index } => Type::IndexedAccess {
+        object: Box::new(self.instantiate_type_parameters(object, environment)),
+        index: Box::new(self.instantiate_type_parameters(index, environment)),
+      },
+      Type::Mapped {
+        parameter,
+        constraint,
+        value,
+      } => Type::Mapped {
+        parameter: parameter.clone(),
+        constraint: Box::new(self.instantiate_type_parameters(constraint, environment)),
+        value: Box::new(self.instantiate_type_parameters(value, environment)),
+      },
+      Type::TemplateLiteral {
+        quasis,
+        substitutions,
+      } => Type::TemplateLiteral {
+        quasis: quasis.clone(),
+        substitutions: substitutions
+          .iter()
+          .map(|substitution| self.instantiate_type_parameters(substitution, environment))
+          .collect(),
+      },
+      _ => typ.clone(),
+    }
+  }
+
   fn resolve_type_with_environment(
     &self,
     typ: &Type,
@@ -1833,7 +1930,71 @@ impl TypeContext {
     expected: &Type,
     actual: &Type,
   ) -> bool {
+    if let Some(assignable) = self.reference_assignability(expected, actual) {
+      return assignable;
+    }
     assignable(&self.resolve_type(expected), &self.resolve_type(actual))
+  }
+
+  fn reference_assignability(
+    &self,
+    expected: &Type,
+    actual: &Type,
+  ) -> Option<bool> {
+    let (
+      Type::TypeReference {
+        name: expected_name,
+        arguments: expected_arguments,
+      },
+      Type::TypeReference {
+        name: actual_name,
+        arguments: actual_arguments,
+      },
+    ) = (expected, actual)
+    else {
+      return None;
+    };
+    let expected_definition = self
+      .namespace_types
+      .get(expected_name)
+      .or_else(|| self.named_types.get(expected_name))?;
+    let actual_definition = self
+      .namespace_types
+      .get(actual_name)
+      .or_else(|| self.named_types.get(actual_name))?;
+    if expected_definition != actual_definition
+      || expected_definition
+        .parameters
+        .iter()
+        .any(|parameter| parameter.variance == Variance::Unspecified)
+    {
+      return None;
+    }
+    let argument = |arguments: &[Type], index: usize, parameter: &TypeParameter| {
+      arguments
+        .get(index)
+        .cloned()
+        .or_else(|| parameter.default.clone())
+        .unwrap_or(Type::Unknown)
+    };
+    Some(
+      expected_definition
+        .parameters
+        .iter()
+        .enumerate()
+        .all(|(index, parameter)| {
+          let expected = argument(expected_arguments, index, parameter);
+          let actual = argument(actual_arguments, index, parameter);
+          match parameter.variance {
+            Variance::Out => self.is_assignable(&expected, &actual),
+            Variance::In => self.is_assignable(&actual, &expected),
+            Variance::InOut => {
+              self.is_assignable(&expected, &actual) && self.is_assignable(&actual, &expected)
+            }
+            Variance::Unspecified => unreachable!("handled above"),
+          }
+        }),
+    )
   }
 
   fn check_variable_declaration(
@@ -2271,6 +2432,20 @@ impl TypeContext {
           .get(name)
           .or_else(|| self.named_types.get(name));
         if let Some(definition) = definition {
+          if !definition.parameters.is_empty()
+            && definition
+              .parameters
+              .iter()
+              .all(|parameter| parameter.variance != Variance::Unspecified)
+          {
+            return Type::TypeReference {
+              name: name.clone(),
+              arguments: arguments
+                .iter()
+                .map(|argument| self.generic_pattern(argument, environment, depth + 1))
+                .collect(),
+            };
+          }
           let mut definition_environment = environment.clone();
           for (index, parameter) in definition.parameters.iter().enumerate() {
             if let Some(argument) = arguments
@@ -2348,8 +2523,15 @@ impl TypeContext {
     callee: &Type,
     call: &oast::CallExpression<'_>,
   ) -> Result<Type, TypeCheckerError> {
+    let resolved_callee;
+    let callable = if matches!(callee, Type::TypeReference { .. }) {
+      resolved_callee = self.resolve_type(callee);
+      &resolved_callee
+    } else {
+      callee
+    };
     let mut candidates = Vec::new();
-    flatten_union_types(callee, &mut candidates);
+    flatten_union_types(callable, &mut candidates);
     let explicit_types = call
       .type_arguments
       .as_ref()
@@ -2428,7 +2610,7 @@ impl TypeContext {
             .ok_or_else(|| TypeCheckerError::from("Unsupported call argument"))?;
           arguments.push(
             if let Some(parameter) = call_parameter(&parameters, rest_index, index) {
-              let parameter = self.resolve_type_with_environment(parameter, &environment, 0);
+              let parameter = self.instantiate_type_parameters(parameter, &environment);
               self.type_of_expr_with_context(expression, rest_argument_type(&parameter))?
             } else {
               self.type_of_expr_oast(expression)?
@@ -2450,8 +2632,8 @@ impl TypeContext {
             let Some(parameter) = call_parameter(&parameters, rest_index, index) else {
               return false;
             };
-            let parameter = self.resolve_type_with_environment(parameter, &environment, 0);
-            let actual = self.resolve_type(argument);
+            let parameter = self.instantiate_type_parameters(parameter, &environment);
+            let actual = argument.clone();
             self.is_assignable(rest_argument_type(&parameter), &actual)
           });
         if !compatible {
@@ -2480,7 +2662,7 @@ impl TypeContext {
             });
           }
         }
-        let return_type = self.resolve_type_with_environment(&return_type, &environment, 0);
+        let return_type = self.instantiate_type_parameters(&return_type, &environment);
         let score = parameters.iter().map(type_specificity).sum();
         let key = parameters
           .iter()
@@ -2678,7 +2860,9 @@ impl TypeContext {
           return Ok(Type::Void);
         }
         match &callee_type {
-          Type::Function(..) | Type::Union(_) => self.call_type(&callee_type, c),
+          Type::Function(..) | Type::TypeReference { .. } | Type::Union(_) => {
+            self.call_type(&callee_type, c)
+          }
           Type::Any => Ok(Type::Any),
           Type::Unknown => Err(TypeCheckerError::from("Cannot call unknown")),
           _ => Err(TypeCheckerError::from(format!(
@@ -2974,6 +3158,12 @@ fn convert_type_parameters(
               .as_ref()
               .map(convert_ts_type)
               .transpose()?,
+            variance: match (parameter.r#in, parameter.out) {
+              (false, false) => Variance::Unspecified,
+              (true, false) => Variance::In,
+              (false, true) => Variance::Out,
+              (true, true) => Variance::InOut,
+            },
           })
         })
         .collect()
@@ -3277,7 +3467,7 @@ fn infer_type_parameter(
         name: actual_name,
         arguments: actual_arguments,
       } = actual
-        && name.rsplit('.').next() == actual_name.rsplit('.').next()
+        && type_reference_base_name(name) == type_reference_base_name(actual_name)
       {
         for (parameter, actual) in arguments.iter().zip(actual_arguments) {
           infer_type_parameter(parameter, actual, environment);
@@ -3312,6 +3502,10 @@ fn infer_type_parameter(
     }
     _ => {}
   }
+}
+
+fn type_reference_base_name(name: &str) -> &str {
+  name.rsplit(['.', ':']).next().unwrap_or(name)
 }
 
 fn resolve_indexed_access(

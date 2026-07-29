@@ -720,6 +720,36 @@ impl Vm {
     Ok(deleted)
   }
 
+  /// Host hook: create or replace an enumerable own data property.
+  ///
+  /// Returns whether the object's `[[DefineOwnProperty]]` operation accepted the descriptor.
+  pub fn create_data_property_host(
+    &mut self,
+    object: &Value,
+    key: PropertyKey,
+    value: Value,
+  ) -> Result<bool, RuntimeError> {
+    let accepted = self.define_own_property(
+      object,
+      key,
+      PartialDescriptor {
+        value: Some(value),
+        writable: Some(true),
+        enumerable: Some(true),
+        configurable: Some(true),
+        has_value: true,
+        has_writable: true,
+        has_enumerable: true,
+        has_configurable: true,
+        ..PartialDescriptor::default()
+      },
+    )?;
+    if accepted {
+      self.bump_object_generation(object);
+    }
+    Ok(accepted)
+  }
+
   /// Host hook: set a property value on a target object-like value.
   ///
   /// # Errors

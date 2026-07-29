@@ -16,6 +16,65 @@ fn check_source(
   check_with_declarations(session.program(), declarations)
 }
 
+fn curated_effect_declarations() -> Vec<VirtualDeclaration> {
+  [
+    "Cause", "Chunk", "Context", "Duration", "Effect", "Either", "Exit", "Fiber", "FiberId",
+    "Function", "HashSet", "Layer", "Match", "Option", "Ref", "Schedule", "Scope", "Stream",
+  ]
+  .into_iter()
+  .map(|module| {
+    let source = match module {
+      "Cause" => include_str!("../../../tools/effect-assets/declarations/effect/Cause.d.ts"),
+      "Chunk" => include_str!("../../../tools/effect-assets/declarations/effect/Chunk.d.ts"),
+      "Context" => include_str!("../../../tools/effect-assets/declarations/effect/Context.d.ts"),
+      "Duration" => include_str!("../../../tools/effect-assets/declarations/effect/Duration.d.ts"),
+      "Effect" => include_str!("../../../tools/effect-assets/declarations/effect/Effect.d.ts"),
+      "Either" => include_str!("../../../tools/effect-assets/declarations/effect/Either.d.ts"),
+      "Exit" => include_str!("../../../tools/effect-assets/declarations/effect/Exit.d.ts"),
+      "Fiber" => include_str!("../../../tools/effect-assets/declarations/effect/Fiber.d.ts"),
+      "FiberId" => include_str!("../../../tools/effect-assets/declarations/effect/FiberId.d.ts"),
+      "Function" => include_str!("../../../tools/effect-assets/declarations/effect/Function.d.ts"),
+      "HashSet" => include_str!("../../../tools/effect-assets/declarations/effect/HashSet.d.ts"),
+      "Layer" => include_str!("../../../tools/effect-assets/declarations/effect/Layer.d.ts"),
+      "Match" => include_str!("../../../tools/effect-assets/declarations/effect/Match.d.ts"),
+      "Option" => include_str!("../../../tools/effect-assets/declarations/effect/Option.d.ts"),
+      "Ref" => include_str!("../../../tools/effect-assets/declarations/effect/Ref.d.ts"),
+      "Schedule" => include_str!("../../../tools/effect-assets/declarations/effect/Schedule.d.ts"),
+      "Scope" => include_str!("../../../tools/effect-assets/declarations/effect/Scope.d.ts"),
+      "Stream" => include_str!("../../../tools/effect-assets/declarations/effect/Stream.d.ts"),
+      _ => unreachable!("curated Effect declaration"),
+    };
+    VirtualDeclaration {
+      specifier: format!("effect/{module}"),
+      source: source.to_string(),
+    }
+  })
+  .collect()
+}
+
+#[test]
+fn checked_in_effect_foundation_declarations_accept_the_positive_fixture() {
+  let result = check_source(
+    include_str!("../../../tools/effect-assets/fixtures/effect-foundation-blitz-positive.ts"),
+    "effect-foundation-blitz-positive.ts",
+    &curated_effect_declarations(),
+  );
+  assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn checked_in_effect_foundation_declarations_reject_the_negative_fixture() {
+  let result = check_source(
+    include_str!("../../../tools/effect-assets/fixtures/effect-foundation-blitz-negative.ts"),
+    "effect-foundation-blitz-negative.ts",
+    &curated_effect_declarations(),
+  );
+  assert!(
+    result.is_err(),
+    "negative Effect fixture unexpectedly passed"
+  );
+}
+
 fn check_fixture(name: &str) -> Result<(), denko::errors::TypeCheckerError> {
   let source = include_str!(concat!("fixtures/", "effect-foundation-positive.ts"));
   let source_type = Parser::source_type_for_path(Path::new(name), false);

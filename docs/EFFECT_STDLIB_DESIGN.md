@@ -294,22 +294,24 @@ export type Path = string | URL
 - `open` as a scoped resource
 - `stat`, `exists`, `realPath`, `copy`, `rename`, `remove`, `makeDirectory`
 - `readDirectory` as a `Stream<DirectoryEntry, FileSystemError, FileSystem>`
-- file watching as a scoped Stream
+- file watching as a self-scoped bounded Stream
 - atomic write helper with explicit durability options
 
 Paths accept `string | URL`; bytes use `Uint8Array`. Text methods require or
 default an explicit documented encoding. No API returns mixed string-or-bytes
 values based on an option.
 
-### `blitz:process`
+### `blitz:process` and `blitz:subprocess`
 
 - immutable process metadata and arguments through a replaceable `Process`
   service;
 - environment lookup returning `Option` or typed decoding effects;
-- exit status mutation as an Effect;
-- signal subscription as a scoped Stream;
-- child processes acquired in Scope, with stdout/stderr Streams and Effectful
-  stdin writes, wait, and kill operations.
+- VM-owned logical cwd and exit status mutation as Effects;
+- signal subscription as a self-scoped Stream;
+- pure immutable subprocess command descriptions with no implicit shell;
+- bounded `output` helpers that drain stdout and stderr concurrently;
+- child processes acquired in Scope, with single-owner stdout/stderr Streams
+  and Effectful stdin writes, wait, and kill operations.
 
 The Node-compatible global `process` remains available separately. New Blitz
 libraries do not read it at module initialization.
@@ -367,7 +369,7 @@ export declare const listen: <Error, Requirements, MapperRequirements = never>(
 
 export declare const request: (
   input: RequestInfo | URL,
-  init?: RequestInit,
+  options?: HttpRequestOptions,
 ) => Effect.Effect<
   Response,
   HttpClientError,
@@ -377,7 +379,7 @@ export declare const request: (
 export declare const withResponse: <Success, Error, Requirements>(
   input: RequestInfo | URL,
   use: (response: Response) => Effect.Effect<Success, Error, Requirements>,
-  init?: RequestInit,
+  options?: HttpRequestOptions,
 ) => Effect.Effect<
   Success,
   HttpClientError | Error,
@@ -407,15 +409,16 @@ export interface Connection {
 }
 
 export declare const connect: (
-  url: string | URL,
-  options?: ConnectOptions,
+  options: ConnectOptions,
 ) => Effect.Effect<Connection, WebSocketError, WebSocketClient | Scope.Scope>
 ```
 
-A server upgrade is represented by an explicit typed decision in the HTTP
-handler. Connections are scoped, sends observe bounded backpressure, and the
-message Stream has one owner unless explicitly broadcast through `PubSub`.
-The standard global `WebSocket` keeps browser-compatible event semantics.
+A server upgrade is represented by an opaque typed decision carrying a
+connection handler and consumed only by `blitz:http`; there is no public
+half-accepted state. Connections are scoped, sends observe bounded
+backpressure, and the message Stream has one owner unless explicitly broadcast
+through `PubSub`. The standard global `WebSocket` keeps browser-compatible
+event semantics.
 
 ### `blitz:crypto`
 

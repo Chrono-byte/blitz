@@ -4805,6 +4805,54 @@ mod test {
   }
 
   #[test]
+  fn json_parse_builds_values_and_applies_reviver_post_order() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const calls = [];
+        const parsed = JSON.parse(
+          '{"first":1,"drop":2,"items":[3,4],"first":5,"__proto__":{"safe":true},"lone":"\\ud800"}',
+          function(key, value) {
+            calls.push(key);
+            if (key === "drop" || key === "1") return undefined;
+            return typeof value === "number" ? value * 2 : value;
+          }
+        );
+        const contexts = [];
+        JSON.parse('[1.0,{"x":true}]', function(key, value, context) {
+          contexts.push(key + ":" + ("source" in context ? context.source : "none"));
+          return value;
+        });
+        let invalidIsSyntaxError = false;
+        try {
+          JSON.parse("[1,]");
+        } catch (error) {
+          invalidIsSyntaxError = error instanceof SyntaxError;
+        }
+        globalThis.result = [
+          parsed.first,
+          "drop" in parsed,
+          JSON.stringify(parsed.items),
+          Object.keys(parsed).join(","),
+          parsed.__proto__.safe,
+          parsed.lone.charCodeAt(0),
+          calls.join(","),
+          contexts.join(","),
+          invalidIsSyntaxError,
+          JSON.parse(123)
+        ].join("|");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "10|false|[6,null]|first,items,__proto__,lone|true|55296|first,drop,0,1,items,safe,__proto__,lone,|0:1.0,x:true,1:none,:none|true|123"
+          .into()
+      ))
+    );
+  }
+
+  #[test]
   fn vm_new_populates_intrinsics_table() {
     let globals = test_globals();
     let vm = Vm::new(globals);

@@ -1,0 +1,94 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: Inter, "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer base {
+  * { box-sizing: border-box; }
+  body { @apply m-0 min-w-80 bg-[#f8f9fa] font-sans antialiased; }
+  button, input, select, textarea { font: inherit; }
+  button:not(:disabled) { cursor: pointer; }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [contenteditable]:focus-visible {
+    @apply outline-2 outline-offset-2 outline-blue-600;
+  }
+}
+
+.app-header {
+  @apply flex h-[72px] items-center gap-3 border-b border-slate-200 bg-white px-4;
+}
+
+.brand-mark {
+  @apply grid size-10 shrink-0 place-items-center rounded-lg bg-blue-600 text-xl font-bold text-white shadow-sm;
+}
+
+.title-input {
+  @apply min-w-0 max-w-72 rounded border border-transparent bg-transparent px-1 text-lg font-medium text-slate-700 hover:border-slate-300 focus:border-blue-500;
+}
+
+.connection-dot { @apply size-2 rounded-full; }
+.connection-connected { @apply bg-emerald-500; }
+.connection-connecting { @apply animate-pulse bg-amber-400; }
+.connection-offline { @apply bg-rose-500; }
+.save-label { @apply text-xs text-slate-500; }
+
+.menu-row { @apply mt-1 flex items-center gap-1; }
+.menu-row button { @apply rounded px-2 py-1 text-sm text-slate-600 hover:bg-slate-100; }
+
+.presence-row { @apply ml-auto flex items-center; }
+.avatar {
+  @apply -ml-1.5 grid size-8 place-items-center rounded-full border-2 border-white text-xs font-semibold text-white shadow-sm first:ml-0;
+}
+.presence-label { @apply ml-2 hidden text-sm text-slate-500 sm:inline; }
+.share-button { @apply ml-3 rounded-full bg-blue-600 px-5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700; }
+
+.toolbar {
+  @apply sticky top-0 z-10 mx-4 mt-2 flex min-h-11 items-center gap-1 overflow-x-auto rounded-full border border-slate-200 bg-[#edf2fa] px-3 py-1.5 shadow-sm;
+}
+.toolbar-button { @apply min-w-8 rounded px-2 py-1.5 text-sm font-medium text-slate-700 hover:bg-white/80; }
+.toolbar-button-active { @apply bg-blue-200 text-blue-950; }
+.toolbar-divider { @apply mx-1 h-6 w-px shrink-0 bg-slate-300; }
+.toolbar-spacer { @apply flex-1; }
+.toolbar select { @apply rounded border-0 bg-transparent px-2 py-1.5 text-sm text-slate-700 hover:bg-white/80; }
+.mode-switch { @apply flex shrink-0 rounded-full bg-white/70 p-0.5 text-xs; }
+.mode-switch button { @apply rounded-full px-3 py-1.5 text-slate-600; }
+.mode-switch button.active { @apply bg-white font-medium text-blue-700 shadow-sm; }
+
+.notice {
+  @apply mx-auto mt-4 flex max-w-3xl items-center justify-between gap-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900;
+}
+.notice button { @apply font-medium underline; }
+
+.workspace { @apply overflow-auto px-4 py-8 sm:px-8; }
+.page-shell {
+  @apply mx-auto min-h-[calc(100vh-220px)] w-full max-w-[816px] bg-white shadow-[0_1px_4px_rgba(15,23,42,0.22)] ring-1 ring-slate-200;
+}
+.document-surface, .markdown-editor {
+  min-height: calc(100vh - 220px);
+  @apply w-full px-10 py-12 text-[16px] leading-7 text-slate-800 outline-none sm:px-20 sm:py-16;
+}
+.document-surface h1 { @apply mb-5 mt-0 text-4xl font-semibold leading-tight tracking-tight text-slate-900; }
+.document-surface h2 { @apply mb-3 mt-8 text-2xl font-semibold text-slate-900; }
+.document-surface h3 { @apply mb-2 mt-6 text-xl font-semibold text-slate-900; }
+.document-surface p { @apply my-3; }
+.document-surface ul { @apply my-4 list-disc pl-7; }
+.document-surface ol { @apply my-4 list-decimal pl-7; }
+.document-surface blockquote { @apply my-5 border-l-4 border-blue-300 bg-blue-50 py-1 pl-5 text-slate-600; }
+.document-surface code { @apply rounded bg-slate-100 px-1.5 py-0.5 font-mono text-sm text-rose-700; }
+.document-surface pre { @apply my-5 overflow-auto rounded-lg bg-slate-900 p-4 text-slate-100; }
+.document-surface pre code { @apply bg-transparent p-0 text-inherit; }
+.document-surface hr { @apply my-8 border-slate-200; }
+.document-surface p.is-editor-empty:first-child::before { content: "Start writing…"; @apply pointer-events-none float-left h-0 text-slate-400; }
+
+.markdown-editor {
+  @apply resize-none border-0 bg-slate-950 font-mono text-[14px] leading-6 text-slate-100;
+}
+.status-bar { @apply flex justify-end gap-5 border-t border-slate-200 bg-white px-6 py-2 text-xs text-slate-500; }
+
+@media (max-width: 640px) {
+  .menu-row { @apply hidden; }
+  .app-header { @apply h-16; }
+  .title-input { @apply max-w-40; }
+  .workspace { @apply px-0 py-4; }
+  .page-shell { @apply border-x-0 shadow-none; }
+}

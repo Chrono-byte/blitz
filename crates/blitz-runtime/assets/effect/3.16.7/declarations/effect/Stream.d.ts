@@ -1,5 +1,6 @@
 import type * as Chunk from "effect/Chunk";
 import type * as Effect from "effect/Effect";
+import type * as Exit from "effect/Exit";
 import type * as Scope from "effect/Scope";
 
 interface Pipeable<Self> {
@@ -10,7 +11,7 @@ interface Pipeable<Self> {
   };
 }
 
-export interface Stream<Success, Error = never, Requirements = never> extends Pipeable<Stream<Success, Error, Requirements>> {
+export interface Stream<out Success, out Error = never, out Requirements = never> extends Pipeable<Stream<Success, Error, Requirements>> {
   readonly _Success: (_: never) => Success;
   readonly _Error: (_: never) => Error;
   readonly _Requirements: (_: never) => Requirements;
@@ -28,12 +29,18 @@ export interface AsyncEmit<Success, Error> {
 }
 
 export declare const asyncScoped: <Success, Error = never, Requirements = never>(
-  register: (emit: AsyncEmit<Success, Error>) => Effect.Effect<unknown, Error, Requirements>,
+  register: (emit: AsyncEmit<Success, Error>) => Effect.Effect<unknown, Error, Requirements | Scope.Scope>,
   bufferSize?: number | "unbounded" | {
     readonly bufferSize?: number;
     readonly strategy?: "dropping" | "sliding" | "suspend";
   },
-) => Stream<Success, Error, Exclude<Requirements, Scope.Scope>>;
+) => Stream<Success, Error, Requirements>;
+export declare const acquireRelease: <Resource, Error, Requirements, FinalizerRequirements, FinalizerResult>(
+  acquire: Effect.Effect<Resource, Error, Requirements>,
+  release: (resource: Resource, exit: Exit.Exit<unknown, unknown>) => Effect.Effect<FinalizerResult, never, FinalizerRequirements>,
+) => Stream<Resource, Error, Requirements | FinalizerRequirements>;
+export declare const scoped: <Success, Error, Requirements>(effect: Effect.Effect<Success, Error, Requirements>) => Stream<Success, Error, Exclude<Requirements, Scope.Scope>>;
+export declare const scopedWith: <Success, Error, Requirements>(f: (scope: Scope.Scope) => Effect.Effect<Success, Error, Requirements>) => Stream<Success, Error, Requirements>;
 export declare const map: {
   <Success, Output>(f: (value: Success) => Output): <Error, Requirements>(stream: Stream<Success, Error, Requirements>) => Stream<Output, Error, Requirements>;
   <Success, Error, Requirements, Output>(stream: Stream<Success, Error, Requirements>, f: (value: Success) => Output): Stream<Output, Error, Requirements>;

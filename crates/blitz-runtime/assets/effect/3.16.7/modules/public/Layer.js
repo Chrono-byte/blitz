@@ -3,4 +3,5 @@ export { effect } from 'blitz-internal:effect/Layer__effect.js';
 export { empty } from 'blitz-internal:effect/Layer__empty.js';
 export { mergeAll } from 'blitz-internal:effect/Layer__mergeAll.js';
 export { provide } from 'blitz-internal:effect/Layer__provide.js';
+export { provideMerge } from 'blitz-internal:effect/Layer__provideMerge.js';
 export { succeed } from 'blitz-internal:effect/Layer__succeed.js';

@@ -5,6 +5,7 @@ import type * as Option from "effect/Option";
 
 export type Cause<Error> = Empty | Fail<Error> | Die | Interrupt | Sequential<Error> | Parallel<Error>;
 export interface UnknownException { readonly _tag: "UnknownException"; readonly error: unknown }
+export interface NoSuchElementException { readonly _tag: "NoSuchElementException" }
 export interface Empty { readonly _tag: "Empty" }
 export interface Fail<Error> { readonly _tag: "Fail"; readonly error: Error }
 export interface Die { readonly _tag: "Die"; readonly defect: unknown }

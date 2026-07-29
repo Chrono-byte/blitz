@@ -1,12 +1,12 @@
-export type Either<Right, Left = never> = Left<Left, Right> | Right<Left, Right>;
-export interface Left<Left, Right> { readonly _tag: "Left"; readonly left: Left }
-export interface Right<Left, Right> { readonly _tag: "Right"; readonly right: Right }
+export type Either<RightValue, LeftValue = never> = Left<LeftValue, RightValue> | Right<LeftValue, RightValue>;
+export interface Left<out LeftValue, out RightValue> { readonly _tag: "Left"; readonly left: LeftValue }
+export interface Right<out LeftValue, out RightValue> { readonly _tag: "Right"; readonly right: RightValue }
 
 export declare const left: <Left>(value: Left) => Either<never, Left>;
 export declare const right: <Right>(value: Right) => Either<Right>;
 export declare const isEither: (value: unknown) => value is Either<unknown, unknown>;
-export declare const isLeft: <Right, Left>(either: Either<Right, Left>) => either is Left<Left, Right>;
-export declare const isRight: <Right, Left>(either: Either<Right, Left>) => either is Right<Left, Right>;
+export declare const isLeft: <RightValue, LeftValue>(either: Either<RightValue, LeftValue>) => either is Left<LeftValue, RightValue>;
+export declare const isRight: <RightValue, LeftValue>(either: Either<RightValue, LeftValue>) => either is Right<LeftValue, RightValue>;
 export declare const map: {
   <Right, Output>(f: (value: Right) => Output): <Left>(either: Either<Right, Left>) => Either<Output, Left>;
   <Right, Left, Output>(either: Either<Right, Left>, f: (value: Right) => Output): Either<Output, Left>;

@@ -491,21 +491,23 @@ The module is pure. It performs no I/O and has no Effect requirement.
 
 ### Surface
 
-Provide `join`, explicit-base `resolve`, `normalize`, `relative`, `dirname`,
-`basename`, `extname`, `isAbsolute`, `parse`, `format`, separator, and delimiter.
-Export deterministic `posix` and `windows` namespaces. The common namespace may
-select the runtime platform, but explicit namespaces behave identically on all
-hosts.
-
-Do not let pure `resolve` read ambient cwd:
-
 ```ts
-resolve(base: string, ...segments: ReadonlyArray<string>): string
-```
+export interface ParsedPath {
+  readonly root: string
+  readonly directory: string
+  readonly base: string
+  readonly name: string
+  readonly extension: string
+}
 
-URL conversion is fallible:
+export interface FormatPath {
+  readonly root?: string
+  readonly directory?: string
+  readonly base?: string
+  readonly name?: string
+  readonly extension?: string
+}
 
-```ts
 export interface PathError {
   readonly _tag: "PathError"
   readonly operation: "fromFileUrl" | "toFileUrl"
@@ -519,9 +521,53 @@ export interface PathError {
   readonly message: string
 }
 
-fromFileUrl(url: URL): Either.Either<string, PathError>
-toFileUrl(path: string): Either.Either<URL, PathError>
+export interface PathApi {
+  readonly separator: "/" | "\\"
+  readonly delimiter: ":" | ";"
+  readonly join: (...segments: ReadonlyArray<string>) => string
+  readonly resolve: (
+    base: string,
+    ...segments: ReadonlyArray<string>
+  ) => string
+  readonly normalize: (path: string) => string
+  readonly relative: (from: string, to: string) => string
+  readonly dirname: (path: string) => string
+  readonly basename: (path: string, suffix?: string) => string
+  readonly extname: (path: string) => string
+  readonly isAbsolute: (path: string) => boolean
+  readonly parse: (path: string) => ParsedPath
+  readonly format: (path: FormatPath) => string
+  readonly fromFileUrl: (
+    url: URL,
+  ) => Either.Either<string, PathError>
+  readonly toFileUrl: (
+    path: string,
+  ) => Either.Either<URL, PathError>
+}
+
+export declare const separator: "/" | "\\"
+export declare const delimiter: ":" | ";"
+export declare const join: PathApi["join"]
+export declare const resolve: PathApi["resolve"]
+export declare const normalize: PathApi["normalize"]
+export declare const relative: PathApi["relative"]
+export declare const dirname: PathApi["dirname"]
+export declare const basename: PathApi["basename"]
+export declare const extname: PathApi["extname"]
+export declare const isAbsolute: PathApi["isAbsolute"]
+export declare const parse: PathApi["parse"]
+export declare const format: PathApi["format"]
+export declare const fromFileUrl: PathApi["fromFileUrl"]
+export declare const toFileUrl: PathApi["toFileUrl"]
+
+export declare const posix: PathApi
+export declare const windows: PathApi
 ```
+
+The common exports select the VM target platform once when the module is
+installed. They never consult ambient cwd or host filesystem state.
+`resolve(base, ...segments)` always takes an explicit base. The `posix` and
+`windows` namespaces behave identically on every host.
 
 Specify POSIX authorities, Windows drive letters, UNC paths, separators,
 trailing separators, empty inputs, dot segments, extensions, and non-ASCII
@@ -537,25 +583,264 @@ needed. Test table-driven behavior against the documented contract, not host
 
 ### Public model
 
-Use `Path = string | URL`, `Uint8Array` for bytes, and distinct binary/text
-methods. Export an immutable `FileSystem` service/tag, pipeable accessors,
-`layerLive`, and `layerMemory`.
+```ts
+export type Path = string | URL
+export type Durability = "none" | "data" | "full"
 
-Full operations:
+export interface ReadOptions {
+  readonly maxBytes?: number
+}
 
-- read/write binary and UTF-8 text;
-- bounded reads and explicit durability for writes;
-- stat/lstat, real path, copy, rename, remove, and directory creation;
-- scoped file handles with positional read/write, stat, sync, truncate, and
-  idempotent early close;
-- directory traversal as a finite Stream;
-- file watching as a scoped bounded Stream;
-- atomic replacement with explicit durability/replace policy.
+export interface WriteOptions {
+  readonly create?: "openExisting" | "create" | "createNew"
+  readonly content?: "replace" | "append"
+  readonly durability?: Durability
+}
 
-`FileSystemError` is a readonly tagged value with stable `reason`, `operation`,
-optional normalized path, and message. Reasons include not found, permission,
-already exists, invalid path, not/is directory, too many files, too large,
-invalid encoding, closed, unsupported, watch overflow, and I/O.
+export interface AtomicWriteOptions {
+  readonly replace?: "allow" | "forbid"
+  readonly durability?: Durability
+}
+
+export interface OpenOptions {
+  readonly access: "read" | "write" | "readWrite"
+  readonly create?: "openExisting" | "create" | "createNew"
+  readonly content?: "preserve" | "truncate" | "append"
+}
+
+export interface FileInfo {
+  readonly type:
+    | "file"
+    | "directory"
+    | "symbolicLink"
+    | "other"
+  readonly size: bigint
+  readonly modifiedAtMillis: Option.Option<number>
+  readonly accessedAtMillis: Option.Option<number>
+  readonly createdAtMillis: Option.Option<number>
+}
+
+export interface FileReadOptions {
+  readonly offset?: bigint
+  readonly maxBytes: number
+}
+
+export interface FileWriteOptions {
+  readonly offset?: bigint
+}
+
+export interface FileHandle {
+  readonly read: (
+    options: FileReadOptions,
+  ) => Effect.Effect<Uint8Array, FileSystemError>
+  readonly write: (
+    bytes: Uint8Array,
+    options?: FileWriteOptions,
+  ) => Effect.Effect<number, FileSystemError>
+  readonly stat: Effect.Effect<FileInfo, FileSystemError>
+  readonly sync: (
+    durability?: Exclude<Durability, "none">,
+  ) => Effect.Effect<void, FileSystemError>
+  readonly truncate: (
+    size: bigint,
+  ) => Effect.Effect<void, FileSystemError>
+  readonly close: Effect.Effect<void, FileSystemError>
+}
+
+export interface DirectoryEntry {
+  readonly name: string
+  readonly path: string
+  readonly type:
+    | "file"
+    | "directory"
+    | "symbolicLink"
+    | "other"
+}
+
+export interface ReadDirectoryOptions {
+  readonly depth?: "one" | "recursive"
+}
+
+export interface WatchOptions {
+  readonly depth?: "one" | "recursive"
+  readonly queueCapacity?: number
+}
+
+export interface FileCreated {
+  readonly _tag: "Created"
+  readonly path: string
+}
+
+export interface FileModified {
+  readonly _tag: "Modified"
+  readonly path: string
+}
+
+export interface FileRemoved {
+  readonly _tag: "Removed"
+  readonly path: string
+}
+
+export interface FileRenamed {
+  readonly _tag: "Renamed"
+  readonly from: string
+  readonly to: string
+}
+
+export type FileEvent =
+  | FileCreated
+  | FileModified
+  | FileRemoved
+  | FileRenamed
+
+export interface RemoveOptions {
+  readonly depth?: "one" | "recursive"
+  readonly missing?: "fail" | "ignore"
+}
+
+export interface MakeDirectoryOptions {
+  readonly parents?: "create" | "require"
+  readonly existing?: "fail" | "succeed"
+}
+
+export interface FileSystemError {
+  readonly _tag: "FileSystemError"
+  readonly operation:
+    | "read"
+    | "write"
+    | "open"
+    | "stat"
+    | "realPath"
+    | "copy"
+    | "rename"
+    | "remove"
+    | "makeDirectory"
+    | "readDirectory"
+    | "watch"
+    | "sync"
+    | "truncate"
+    | "close"
+  readonly reason:
+    | "NotFound"
+    | "PermissionDenied"
+    | "AlreadyExists"
+    | "InvalidPath"
+    | "NotDirectory"
+    | "IsDirectory"
+    | "TooManyOpenFiles"
+    | "FileTooLarge"
+    | "InvalidEncoding"
+    | "Closed"
+    | "Unsupported"
+    | "WatchOverflow"
+    | "Io"
+  readonly path?: string
+  readonly destination?: string
+  readonly message: string
+}
+
+export interface FileSystem {
+  readonly readFile: (
+    path: Path,
+    options?: ReadOptions,
+  ) => Effect.Effect<Uint8Array, FileSystemError>
+  readonly readTextFile: (
+    path: Path,
+    options?: ReadOptions,
+  ) => Effect.Effect<string, FileSystemError>
+  readonly writeFile: (
+    path: Path,
+    bytes: Uint8Array,
+    options?: WriteOptions,
+  ) => Effect.Effect<void, FileSystemError>
+  readonly writeTextFile: (
+    path: Path,
+    text: string,
+    options?: WriteOptions,
+  ) => Effect.Effect<void, FileSystemError>
+  readonly writeFileAtomic: (
+    path: Path,
+    bytes: Uint8Array,
+    options?: AtomicWriteOptions,
+  ) => Effect.Effect<void, FileSystemError>
+  readonly writeTextFileAtomic: (
+    path: Path,
+    text: string,
+    options?: AtomicWriteOptions,
+  ) => Effect.Effect<void, FileSystemError>
+  readonly open: (
+    path: Path,
+    options: OpenOptions,
+  ) => Effect.Effect<
+    FileHandle,
+    FileSystemError,
+    Scope.Scope
+  >
+  readonly stat: (
+    path: Path,
+  ) => Effect.Effect<FileInfo, FileSystemError>
+  readonly lstat: (
+    path: Path,
+  ) => Effect.Effect<FileInfo, FileSystemError>
+  readonly exists: (
+    path: Path,
+  ) => Effect.Effect<boolean, FileSystemError>
+  readonly realPath: (
+    path: Path,
+  ) => Effect.Effect<string, FileSystemError>
+  readonly copy: (
+    source: Path,
+    destination: Path,
+  ) => Effect.Effect<void, FileSystemError>
+  readonly rename: (
+    source: Path,
+    destination: Path,
+  ) => Effect.Effect<void, FileSystemError>
+  readonly remove: (
+    path: Path,
+    options?: RemoveOptions,
+  ) => Effect.Effect<void, FileSystemError>
+  readonly makeDirectory: (
+    path: Path,
+    options?: MakeDirectoryOptions,
+  ) => Effect.Effect<void, FileSystemError>
+  readonly readDirectory: (
+    path: Path,
+    options?: ReadDirectoryOptions,
+  ) => Stream.Stream<DirectoryEntry, FileSystemError>
+  readonly watch: (
+    path: Path,
+    options?: WatchOptions,
+  ) => Stream.Stream<FileEvent, FileSystemError>
+}
+
+export declare const FileSystem:
+  Context.Tag<FileSystem, FileSystem>
+
+export declare const layerLive: Layer.Layer<FileSystem>
+
+export interface MemoryFileSystemOptions {
+  readonly files?: Readonly<Record<string, Uint8Array | string>>
+  readonly directories?: ReadonlyArray<string>
+  readonly currentDirectory?: string
+}
+
+export declare const layerMemory: (
+  options?: MemoryFileSystemOptions,
+) => Layer.Layer<FileSystem>
+```
+
+The module exports a pipe-friendly accessor for every `FileSystem` method. Each
+accessor has the same success and error channels as the service method and adds
+`FileSystem` to its requirements; `open` additionally retains `Scope.Scope`.
+Keeping this mechanical rule avoids maintaining a second semantic surface in
+the design document.
+
+Binary and text operations are distinct. Text is strict UTF-8. Whole-file reads
+default to a 64 MiB maximum; callers must opt into a larger finite limit.
+`writeFileAtomic` and `writeTextFileAtomic` write a sibling temporary file,
+apply the requested durability, atomically replace the destination according
+to policy, and clean up the temporary file on every Exit.
 
 `exists` returns `false` only for `NotFound`; permission and other failures stay
 in the error channel.
@@ -565,9 +850,15 @@ composes `readFile` and strict decoding in JavaScript. Bounded allocation is
 enforced before and during reads. Returned and input bytes are defensively
 copied at trust boundaries.
 
+`readDirectory` and `watch` own acquisition and release inside Stream execution;
+neither exposes a separate `Scope` requirement. Watch overflow fails the Stream
+with `WatchOverflow`; no event is silently dropped.
+
 `layerMemory` snapshots inputs, uses Effect-owned state rather than a module
-global, copies every byte array, uses one documented portable path syntax, and
-performs no host calls.
+global, copies every byte array, uses POSIX paths on every host, and performs no
+host calls. Each factory call creates a distinct Layer identity and therefore a
+distinct filesystem; normal Layer memoization shares that instance within one
+application graph.
 
 Implement in slices: reads; handles; metadata; mutations/atomic writes;
 directory Streams; watchers. Each slice gets cancellation, finalization,
@@ -579,46 +870,568 @@ permissions, race, queue, temporary-directory, and memory-Layer tests.
 
 ### Current process
 
-`Process` exposes an immutable startup snapshot, Effectful cwd/environment
-access, typed environment decoding, exit-code mutation, controlled root exit,
-and scoped signal Streams. Environment absence is `Option.none`; permission or
-I/O failures remain typed errors. `exit` requests root interruption and permits
-finalizers; it never performs immediate host termination.
+`Process` describes the current Blitz process only. Child creation belongs to
+`blitz:subprocess`; neither module exposes the Node-compatible `process` object.
+
+```ts
+export interface ProcessSnapshot {
+  readonly processId: number
+  readonly executable: string
+  readonly arguments: ReadonlyArray<string>
+  readonly initialDirectory: string
+}
+
+export type Signal =
+  | "SIGINT"
+  | "SIGKILL"
+  | "SIGTERM"
+  | "SIGHUP"
+  | "SIGQUIT"
+  | "SIGUSR1"
+  | "SIGUSR2"
+
+export interface SignalEvent {
+  readonly signal: Signal
+}
+
+export interface ProcessError {
+  readonly _tag: "ProcessError"
+  readonly operation:
+    | "currentDirectory"
+    | "changeDirectory"
+    | "environment"
+    | "setExitCode"
+    | "exit"
+    | "signals"
+  readonly reason:
+    | "InvalidArgument"
+    | "PermissionDenied"
+    | "NotFound"
+    | "NotDirectory"
+    | "Unsupported"
+    | "Io"
+  readonly name?: string
+  readonly message: string
+}
+
+export interface Process {
+  readonly snapshot: ProcessSnapshot
+  readonly currentDirectory: Effect.Effect<string, ProcessError>
+  readonly changeDirectory: (
+    path: string,
+  ) => Effect.Effect<void, ProcessError>
+  readonly environment: (
+    name: string,
+  ) => Effect.Effect<Option.Option<string>, ProcessError>
+  readonly environmentAll: Effect.Effect<
+    Readonly<Record<string, string>>,
+    ProcessError
+  >
+  readonly setExitCode: (
+    code: number,
+  ) => Effect.Effect<void, ProcessError>
+  readonly exit: (
+    code?: number,
+  ) => Effect.Effect<never, ProcessError>
+  readonly signals: (
+    signals?: ReadonlyArray<Signal>,
+  ) => Stream.Stream<SignalEvent, ProcessError>
+}
+
+export declare const Process: Context.Tag<Process, Process>
+
+export declare const snapshot:
+  Effect.Effect<ProcessSnapshot, never, Process>
+
+export declare const currentDirectory:
+  Effect.Effect<string, ProcessError, Process>
+
+export declare const changeDirectory: (
+  path: string,
+) => Effect.Effect<void, ProcessError, Process>
+
+export declare const environment: (
+  name: string,
+) => Effect.Effect<Option.Option<string>, ProcessError, Process>
+
+export declare const environmentAll:
+  Effect.Effect<
+    Readonly<Record<string, string>>,
+    ProcessError,
+    Process
+  >
+
+export declare const setExitCode: (
+  code: number,
+) => Effect.Effect<void, ProcessError, Process>
+
+export declare const exit: (
+  code?: number,
+) => Effect.Effect<never, ProcessError, Process>
+
+export declare const signals: (
+  signals?: ReadonlyArray<Signal>,
+) => Stream.Stream<SignalEvent, ProcessError, Process>
+
+export declare const layerLive: Layer.Layer<Process>
+
+export declare const layerTest: (
+  options: {
+    readonly snapshot: ProcessSnapshot
+    readonly currentDirectory?: string
+    readonly environment?: Readonly<Record<string, string>>
+  },
+) => Layer.Layer<Process>
+```
+
+The live Layer copies startup metadata and environment into VM-owned state.
+Current directory and requested exit status also live in the VM; changing them
+never mutates an ambient OS process global. Host operations receive the logical
+working directory explicitly. Access remains Effectful because it is mutable,
+permission-gated, or resource-owning runtime state. Environment absence is
+`Option.none`; permission or I/O failures remain typed errors. Name and
+exit-code validation occurs when the Effect runs.
+
+Typed environment decoding composes with the pinned Effect `Config` and
+`Schema` modules instead of introducing a Blitz-specific decoder protocol. The
+live Config provider reads the same permission-filtered VM-owned environment
+snapshot. `exit` requests root interruption and permits finalizers; it never
+performs immediate host termination. A signal Stream acquires and releases its
+host subscription as part of Stream execution, so callers do not provide a
+separate `Scope`.
 
 The mutable Node-compatible global remains a separate compatibility adapter and
 is not read at module initialization by Blitz libraries.
 
 ### Subprocess
 
-Keep child creation in `blitz:subprocess`. Use immutable command/options records,
-no implicit shell, explicit stdio modes, optional bounded stdin/stdout/stderr,
-and a scoped `ChildProcess` resource.
+Keep child creation in `blitz:subprocess`. Follow Effect's useful separation
+between a pure immutable command description and an execution service, without
+copying its broad `PlatformError` or unbounded collection helpers.
+
+```ts
+export interface Command {
+  readonly _tag: "Command"
+  readonly executable: string
+  readonly arguments: ReadonlyArray<string>
+  readonly workingDirectory: Option.Option<string>
+  readonly environment: Readonly<Record<string, string>>
+  readonly environmentMode: "extend" | "replace"
+}
+
+export type StdinMode = "inherit" | "null" | "pipe"
+export type OutputMode = "inherit" | "null" | "pipe"
+
+export interface SpawnOptions {
+  readonly stdin: StdinMode
+  readonly stdout: OutputMode
+  readonly stderr: OutputMode
+  readonly queueCapacity?: number
+}
+
+export type Signal =
+  | "SIGINT"
+  | "SIGKILL"
+  | "SIGTERM"
+  | "SIGHUP"
+  | "SIGQUIT"
+  | "SIGUSR1"
+  | "SIGUSR2"
+
+export interface Exited {
+  readonly _tag: "Exited"
+  readonly code: number
+}
+
+export interface Signaled {
+  readonly _tag: "Signaled"
+  readonly signal: Signal
+}
+
+export type ExitStatus = Exited | Signaled
+
+export interface ChildInput {
+  readonly write: (
+    bytes: Uint8Array,
+  ) => Effect.Effect<void, SubprocessError>
+  readonly writeText: (
+    text: string,
+  ) => Effect.Effect<void, SubprocessError>
+  readonly end: Effect.Effect<void, SubprocessError>
+}
+
+export interface ChildProcess {
+  readonly processId: number
+  readonly standardInput: Option.Option<ChildInput>
+  readonly standardOutput:
+    Option.Option<Stream.Stream<Uint8Array, SubprocessError>>
+  readonly standardError:
+    Option.Option<Stream.Stream<Uint8Array, SubprocessError>>
+  readonly isRunning: Effect.Effect<boolean, SubprocessError>
+  readonly wait: Effect.Effect<ExitStatus, SubprocessError>
+  readonly kill: (
+    signal?: Signal,
+  ) => Effect.Effect<void, SubprocessError>
+  readonly close: Effect.Effect<void, SubprocessError>
+}
+
+export interface OutputOptions {
+  readonly input?: Uint8Array | string
+  readonly maxStandardOutputBytes?: number
+  readonly maxStandardErrorBytes?: number
+}
+
+export interface Output {
+  readonly status: ExitStatus
+  readonly standardOutput: Uint8Array
+  readonly standardError: Uint8Array
+}
+
+export interface TextOutputOptions extends OutputOptions {
+  readonly encoding?: "utf-8"
+}
+
+export interface TextOutput {
+  readonly status: ExitStatus
+  readonly standardOutput: string
+  readonly standardError: string
+}
+
+export interface SubprocessError {
+  readonly _tag: "SubprocessError"
+  readonly operation:
+    | "spawn"
+    | "write"
+    | "end"
+    | "wait"
+    | "kill"
+    | "close"
+    | "output"
+  readonly reason:
+    | "InvalidCommand"
+    | "InvalidOptions"
+    | "PermissionDenied"
+    | "NotFound"
+    | "NotExecutable"
+    | "WorkingDirectoryNotFound"
+    | "BrokenPipe"
+    | "OutputLimitExceeded"
+    | "Unsupported"
+    | "Closed"
+    | "Io"
+  readonly executable?: string
+  readonly stream?: "stdin" | "stdout" | "stderr"
+  readonly message: string
+}
+
+export interface Subprocess {
+  readonly spawn: (
+    command: Command,
+    options: SpawnOptions,
+  ) => Effect.Effect<
+    ChildProcess,
+    SubprocessError,
+    Scope.Scope
+  >
+  readonly output: (
+    command: Command,
+    options?: OutputOptions,
+  ) => Effect.Effect<Output, SubprocessError>
+  readonly outputText: (
+    command: Command,
+    options?: TextOutputOptions,
+  ) => Effect.Effect<TextOutput, SubprocessError>
+}
+
+export declare const Subprocess:
+  Context.Tag<Subprocess, Subprocess>
+
+export declare const command: (
+  executable: string,
+  ...arguments_: ReadonlyArray<string>
+) => Command
+
+export declare const workingDirectory: {
+  (path: string): (command: Command) => Command
+  (command: Command, path: string): Command
+}
+
+export declare const environment: {
+  (
+    variables: Readonly<Record<string, string>>,
+    options?: { readonly mode?: "extend" | "replace" },
+  ): (command: Command) => Command
+  (
+    command: Command,
+    variables: Readonly<Record<string, string>>,
+    options?: { readonly mode?: "extend" | "replace" },
+  ): Command
+}
+
+export declare const spawn: (
+  command: Command,
+  options: SpawnOptions,
+) => Effect.Effect<
+  ChildProcess,
+  SubprocessError,
+  Subprocess | Scope.Scope
+>
+
+export declare const output: (
+  command: Command,
+  options?: OutputOptions,
+) => Effect.Effect<Output, SubprocessError, Subprocess>
+
+export declare const outputText: (
+  command: Command,
+  options?: TextOutputOptions,
+) => Effect.Effect<TextOutput, SubprocessError, Subprocess>
+
+export declare const layerLive: Layer.Layer<Subprocess>
+
+export interface ScriptedCommand {
+  readonly command: Command
+  readonly standardOutput?: ReadonlyArray<Uint8Array>
+  readonly standardError?: ReadonlyArray<Uint8Array>
+  readonly status?: ExitStatus
+  readonly failure?: SubprocessError
+}
+
+export interface SubprocessInvocation {
+  readonly command: Command
+  readonly standardInput: Uint8Array
+}
+
+export interface TestSubprocessError {
+  readonly _tag: "TestSubprocessError"
+  readonly reason: "UnconsumedCommands"
+  readonly remaining: number
+  readonly message: string
+}
+
+export interface TestSubprocess {
+  readonly layer: Layer.Layer<Subprocess>
+  readonly invocations:
+    Effect.Effect<ReadonlyArray<SubprocessInvocation>>
+  readonly assertConsumed:
+    Effect.Effect<void, TestSubprocessError>
+}
+
+export declare const makeTest: (
+  script: ReadonlyArray<ScriptedCommand>,
+) => Effect.Effect<TestSubprocess>
+```
+
+`command`, `workingDirectory`, and `environment` are pure. They create frozen
+values, perform no service lookup, and defer validation and permission checks
+until execution. There is no shell mode in the initial API. If a later
+permission-gated shell API is justified, it uses a visibly separate
+constructor rather than a boolean option.
+
+`output` and `outputText` are the safe convenience boundary. They internally
+scope the child, concurrently drain stdout and stderr while waiting, enforce
+independent byte limits before and during allocation, and close stdin after
+the optional input is written. Each output limit defaults to 16 MiB. An output
+limit failure terminates and waits for the child before returning
+`OutputLimitExceeded`. `outputText` performs strict UTF-8 decoding after byte
+limits have been enforced.
+
+`spawn` is the advanced boundary. It requires all three stdio modes explicitly
+and returns a scoped resource. Piped handles are present only for the
+corresponding `"pipe"` mode. Each output Stream has one owner, is backed by a
+bounded queue, copies byte chunks at the host boundary, and unregisters its
+waiter when interrupted. Callers must consume both piped output Streams
+concurrently before awaiting a potentially pipe-blocked child.
+
+Do not add `effect/Sink` to the curated graph solely for subprocess stdin.
+`ChildInput` represents domain operations rather than cloning a concurrency
+primitive. Reconsider `Sink` once both subprocess and filesystem streaming
+writes can share it.
 
 - `spawn` requires `Scope`;
 - nonzero child exit is a successful `ExitStatus`;
 - `wait` interruption unregisters only that waiter;
-- default scope exit kills and waits;
+- scope exit kills and waits by default;
 - `kill`, stdin end, and close are idempotent;
 - output Streams are single-owner and bounded;
 - unsupported signals/platform behavior are typed;
 - command, cwd, environment, and inherited-resource permissions are checked at
   execution.
 
+`makeTest` creates a deterministic scripted Layer and an observation handle. A
+script matches the complete immutable `Command`, supplies chunked stdout/stderr
+and an `ExitStatus`, records stdin, and can inject failures at each operation.
+It uses Effect-owned state and never invokes the host. Unexpected commands fail
+the attempted subprocess operation as `InvalidCommand`; tests use
+`assertConsumed` to detect unused script entries. Script byte arrays are copied
+when the test service is constructed and again when emitted.
+
 Land process snapshot/environment first, then signals, then subprocess spawn and
-wait, pipes, and cleanup.
+wait, pipes and bounded `output`, and cleanup. Curate `effect/Sink` only in a
+later independently tested slice if shared streaming-write APIs justify it.
 
 ---
 
 ## 9. Implement `blitz:terminal` and logging integration
 
-`Terminal` is a replaceable service with Effectful capabilities, dimensions,
-ordered writes, input byte/text/key/line Streams, scoped raw mode, scoped
-alternate screen, and interruptible prompts.
+```ts
+export interface TerminalCapabilities {
+  readonly interactive: boolean
+  readonly colors: "none" | "ansi16" | "ansi256" | "trueColor"
+  readonly unicode: boolean
+}
+
+export interface TerminalDimensions {
+  readonly columns: number
+  readonly rows: number
+}
+
+export interface KeyEvent {
+  readonly key: string
+  readonly text: Option.Option<string>
+  readonly control: boolean
+  readonly alt: boolean
+  readonly shift: boolean
+  readonly repeat: boolean
+}
+
+export interface PromptOptions {
+  readonly message: string
+  readonly input?: "visible" | "hidden"
+  readonly defaultValue?: string
+}
+
+export interface TerminalError {
+  readonly _tag: "TerminalError"
+  readonly operation:
+    | "capabilities"
+    | "dimensions"
+    | "write"
+    | "flush"
+    | "input"
+    | "rawMode"
+    | "alternateScreen"
+    | "prompt"
+  readonly reason:
+    | "InvalidInput"
+    | "NotInteractive"
+    | "InputBusy"
+    | "PromptBusy"
+    | "Unsupported"
+    | "Closed"
+    | "Overflow"
+    | "Host"
+  readonly message: string
+}
+
+export interface Terminal {
+  readonly capabilities:
+    Effect.Effect<TerminalCapabilities, TerminalError>
+  readonly dimensions:
+    Effect.Effect<
+      Option.Option<TerminalDimensions>,
+      TerminalError
+    >
+  readonly write: (
+    text: string,
+  ) => Effect.Effect<void, TerminalError>
+  readonly writeLine: (
+    text?: string,
+  ) => Effect.Effect<void, TerminalError>
+  readonly flush: Effect.Effect<void, TerminalError>
+  readonly bytes:
+    Stream.Stream<Uint8Array, TerminalError>
+  readonly text:
+    Stream.Stream<string, TerminalError>
+  readonly keys:
+    Stream.Stream<KeyEvent, TerminalError>
+  readonly lines:
+    Stream.Stream<string, TerminalError>
+  readonly rawMode:
+    Effect.Effect<void, TerminalError, Scope.Scope>
+  readonly alternateScreen:
+    Effect.Effect<void, TerminalError, Scope.Scope>
+  readonly prompt: (
+    options: PromptOptions,
+  ) => Effect.Effect<string, TerminalError>
+}
+
+export declare const Terminal: Context.Tag<Terminal, Terminal>
+
+export declare const capabilities:
+  Effect.Effect<TerminalCapabilities, TerminalError, Terminal>
+
+export declare const dimensions:
+  Effect.Effect<
+    Option.Option<TerminalDimensions>,
+    TerminalError,
+    Terminal
+  >
+
+export declare const write: (
+  text: string,
+) => Effect.Effect<void, TerminalError, Terminal>
+
+export declare const writeLine: (
+  text?: string,
+) => Effect.Effect<void, TerminalError, Terminal>
+
+export declare const flush:
+  Effect.Effect<void, TerminalError, Terminal>
+
+export declare const bytes:
+  Stream.Stream<Uint8Array, TerminalError, Terminal>
+
+export declare const text:
+  Stream.Stream<string, TerminalError, Terminal>
+
+export declare const keys:
+  Stream.Stream<KeyEvent, TerminalError, Terminal>
+
+export declare const lines:
+  Stream.Stream<string, TerminalError, Terminal>
+
+export declare const rawMode:
+  Effect.Effect<
+    void,
+    TerminalError,
+    Terminal | Scope.Scope
+  >
+
+export declare const alternateScreen:
+  Effect.Effect<
+    void,
+    TerminalError,
+    Terminal | Scope.Scope
+  >
+
+export declare const prompt: (
+  options: PromptOptions,
+) => Effect.Effect<string, TerminalError, Terminal>
+
+export declare const layerLive: Layer.Layer<Terminal>
+
+export interface TestTerminal {
+  readonly layer: Layer.Layer<Terminal>
+  readonly output: Effect.Effect<ReadonlyArray<string>>
+}
+
+export declare const makeTest: (
+  input?: ReadonlyArray<string | KeyEvent | Uint8Array>,
+) => Effect.Effect<TestTerminal>
+```
 
 Output uses a bounded writer queue and acknowledges acceptance/flush according
-to documented policy. Input is pull-based or bounded; it never silently drops.
-Each low-level input Stream has one owner. Shared fan-out requires upstream
-`PubSub`. Concurrent prompts fail with a typed `PromptBusy` error.
+to documented policy. `write` completes when the queue accepts the complete
+string; `flush` completes only after all earlier output reaches the host. The
+queue suspends producers rather than dropping output.
+
+Input is pull-based or bounded; it never silently drops. Only one of `bytes`,
+`text`, `keys`, `lines`, or `prompt` may own terminal input at a time.
+Competing consumers fail with `InputBusy` or `PromptBusy`. Shared fan-out is an
+application concern implemented with upstream `PubSub`, not an implicit
+Terminal behavior. Each input Stream acquires and releases ownership inside
+Stream execution.
 
 Raw and alternate-screen acquisition restore the prior state on success,
 failure, defect, and interruption, including nested acquisitions. Prompt
@@ -632,6 +1445,10 @@ Do not create a competing logger framework. Supply live implementations for
 upstream `effect/Console` and `effect/Logger`; preserve annotations, spans, and
 structured causes. Add deterministic capture Layers for tests. The global
 `console` remains synchronous compatibility/REPL presentation.
+
+`makeTest` creates a fresh Layer with scripted input and Effect-owned captured
+output. Exhausted scripted input ends Streams normally and makes prompts fail
+with `Closed`; the test implementation never touches a host terminal.
 
 ---
 
@@ -663,6 +1480,54 @@ export interface HttpServerResource {
   readonly shutdown: Effect.Effect<void, never>
 }
 
+export interface HttpListenError {
+  readonly _tag: "HttpListenError"
+  readonly operation: "listen" | "shutdown"
+  readonly reason:
+    | "InvalidOptions"
+    | "PermissionDenied"
+    | "AddressInUse"
+    | "AddressUnavailable"
+    | "Unsupported"
+    | "Io"
+  readonly address?: string
+  readonly message: string
+}
+
+export interface HttpClientError {
+  readonly _tag: "HttpClientError"
+  readonly operation:
+    | "request"
+    | "sendBody"
+    | "receiveHeaders"
+    | "receiveBody"
+  readonly reason:
+    | "InvalidRequest"
+    | "PermissionDenied"
+    | "Dns"
+    | "Connect"
+    | "Tls"
+    | "Timeout"
+    | "Limit"
+    | "Disconnect"
+    | "Protocol"
+    | "Io"
+  readonly url?: string
+  readonly message: string
+}
+
+export interface HttpBodyError {
+  readonly _tag: "HttpBodyError"
+  readonly operation: "read" | "write" | "decode"
+  readonly reason:
+    | "Limit"
+    | "Disconnect"
+    | "InvalidEncoding"
+    | "Closed"
+    | "Transport"
+  readonly message: string
+}
+
 export type Handler<E = never, R = never> = (
   request: Request,
   context: RequestContext,
@@ -683,6 +1548,43 @@ export interface ServeOptions<E, R, MapperR = never> {
   readonly queueCapacity?: number
 }
 
+export interface HttpServer {
+  readonly serve: <E, R, MapperR = never>(
+    options: ServeOptions<E, R, MapperR>,
+  ) => Effect.Effect<never, HttpListenError, R | MapperR>
+  readonly listen: <E, R, MapperR = never>(
+    options: ServeOptions<E, R, MapperR>,
+  ) => Effect.Effect<
+    HttpServerResource,
+    HttpListenError,
+    R | MapperR | Scope.Scope
+  >
+}
+
+export interface HttpRequestOptions<BodyE = never, BodyR = never> {
+  readonly init?: Omit<RequestInit, "body">
+  readonly body?: Stream.Stream<Uint8Array, BodyE, BodyR>
+  readonly timeout?: Duration.DurationInput
+  readonly maxResponseBodyBytes?: number
+}
+
+export interface HttpClient {
+  readonly request: <BodyE = never, BodyR = never>(
+    input: RequestInfo | URL,
+    options?: HttpRequestOptions<BodyE, BodyR>,
+  ) => Effect.Effect<
+    Response,
+    HttpClientError | BodyE,
+    BodyR | Scope.Scope
+  >
+}
+
+export declare const HttpServer:
+  Context.Tag<HttpServer, HttpServer>
+
+export declare const HttpClient:
+  Context.Tag<HttpClient, HttpClient>
+
 export declare const serve: <E, R, MapperR = never>(
   options: ServeOptions<E, R, MapperR>,
 ) => Effect.Effect<never, HttpListenError, HttpServer | R | MapperR>
@@ -695,21 +1597,51 @@ export declare const listen: <E, R, MapperR = never>(
   HttpServer | R | MapperR | Scope.Scope
 >
 
-export declare const request: (
+export declare const request: <
+  BodyE = never,
+  BodyR = never,
+>(
   input: RequestInfo | URL,
-  init?: RequestInit,
-) => Effect.Effect<Response, HttpClientError, HttpClient | Scope.Scope>
+  options?: HttpRequestOptions<BodyE, BodyR>,
+) => Effect.Effect<
+  Response,
+  HttpClientError | BodyE,
+  HttpClient | BodyR | Scope.Scope
+>
 
-export declare const withResponse: <A, E, R>(
+export declare const withResponse: <
+  A,
+  E,
+  R,
+  BodyE = never,
+  BodyR = never,
+>(
   input: RequestInfo | URL,
   use: (response: Response) => Effect.Effect<A, E, R>,
-  init?: RequestInit,
-) => Effect.Effect<A, HttpClientError | E, HttpClient | R>
-```
+  options?: HttpRequestOptions<BodyE, BodyR>,
+) => Effect.Effect<
+  A,
+  HttpClientError | BodyE | E,
+  HttpClient | BodyR | R
+>
 
-`HttpListenError`, `HttpClientError`, and `HttpBodyError` are readonly tagged
-errors with stable reasons for invalid input, permissions, DNS/connect/TLS,
-timeout, limits/overflow, disconnect, protocol, bind, and I/O.
+export declare const responseBody: (
+  response: Response,
+) => Stream.Stream<Uint8Array, HttpBodyError>
+
+export declare const readBody: (
+  response: Response,
+  options?: { readonly maxBytes?: number },
+) => Effect.Effect<Uint8Array, HttpBodyError>
+
+export declare const readBodyText: (
+  response: Response,
+  options?: { readonly maxBytes?: number },
+) => Effect.Effect<string, HttpBodyError>
+
+export declare const layerServerLive: Layer.Layer<HttpServer>
+export declare const layerClientLive: Layer.Layer<HttpClient>
+```
 
 Expected errors use the mapper or a documented redacted 500 policy. Defects are
 logged and redacted. Disconnect, timeout, and shutdown interrupt the request
@@ -723,19 +1655,175 @@ Provide both:
 Each request owns a child Scope. Request and response bodies use bounded
 Streams/adapters. Client `request` requires `HttpClient | Scope.Scope` while a
 streaming body is live; `withResponse` is the safe convenience that scopes and
-closes it.
+closes it. Request body Stream failures remain in the request error channel and
+are not collapsed into `HttpClientError`.
+
+`responseBody` is the Effect-native view of the standard response body and has
+one owner. `readBody` and `readBodyText` default to 16 MiB limits; text decoding
+is strict UTF-8. The standard `Response` remains usable at compatibility
+boundaries without changing its Web semantics.
 
 ### WebSocket contracts
 
-Use discriminated text/binary messages, typed close options, a scoped
-`Connection`, single-owner message Stream, backpressured Effectful send, and
-idempotent close. A second message consumer fails. Explicit broadcast uses
-upstream `PubSub`.
+```ts
+export interface TextMessage {
+  readonly _tag: "Text"
+  readonly data: string
+}
+
+export interface BinaryMessage {
+  readonly _tag: "Binary"
+  readonly data: Uint8Array
+}
+
+export type Message = TextMessage | BinaryMessage
+
+export interface CloseOptions {
+  readonly code?: number
+  readonly reason?: string
+}
+
+export interface CloseEvent {
+  readonly code: number
+  readonly reason: string
+  readonly remote: boolean
+}
+
+export interface WebSocketError {
+  readonly _tag: "WebSocketError"
+  readonly operation:
+    | "connect"
+    | "upgrade"
+    | "send"
+    | "messages"
+    | "close"
+  readonly reason:
+    | "InvalidOptions"
+    | "PermissionDenied"
+    | "Dns"
+    | "Connect"
+    | "UpgradeRejected"
+    | "Protocol"
+    | "MessageTooLarge"
+    | "Overflow"
+    | "ConsumerBusy"
+    | "Closed"
+    | "Io"
+  readonly url?: string
+  readonly message: string
+}
+
+export interface Connection {
+  readonly protocol: Option.Option<string>
+  readonly messages:
+    Stream.Stream<Message, WebSocketError>
+  readonly send: (
+    message: Message,
+  ) => Effect.Effect<void, WebSocketError>
+  readonly closed:
+    Effect.Effect<CloseEvent, WebSocketError>
+  readonly close: (
+    options?: CloseOptions,
+  ) => Effect.Effect<void, WebSocketError>
+}
+
+export interface ConnectOptions {
+  readonly url: string | URL
+  readonly protocols?: ReadonlyArray<string>
+  readonly queueCapacity?: number
+  readonly maxMessageBytes?: number
+}
+
+export type ConnectionHandler<E = never, R = never> = (
+  connection: Connection,
+) => Effect.Effect<void, E, R>
+
+export interface UpgradeOptions<
+  E,
+  R,
+  MapperR = never,
+> {
+  readonly protocols?: ReadonlyArray<string>
+  readonly queueCapacity?: number
+  readonly maxMessageBytes?: number
+  readonly handler: ConnectionHandler<E, R>
+  readonly onHandlerError?: (
+    error: E,
+  ) => Effect.Effect<void, never, MapperR>
+}
+
+export interface WebSocketUpgrade {
+  readonly _tag: "WebSocketUpgrade"
+}
+
+export interface WebSocketClient {
+  readonly connect: (
+    options: ConnectOptions,
+  ) => Effect.Effect<
+    Connection,
+    WebSocketError,
+    Scope.Scope
+  >
+}
+
+export interface WebSocketServer {
+  readonly upgrade: <E, R, MapperR = never>(
+    request: Request,
+    options: UpgradeOptions<E, R, MapperR>,
+  ) => Effect.Effect<
+    WebSocketUpgrade,
+    WebSocketError,
+    R | MapperR
+  >
+}
+
+export declare const WebSocketClient:
+  Context.Tag<WebSocketClient, WebSocketClient>
+
+export declare const WebSocketServer:
+  Context.Tag<WebSocketServer, WebSocketServer>
+
+export declare const connect: (
+  options: ConnectOptions,
+) => Effect.Effect<
+  Connection,
+  WebSocketError,
+  WebSocketClient | Scope.Scope
+>
+
+export declare const upgrade: <E, R, MapperR = never>(
+  request: Request,
+  options: UpgradeOptions<E, R, MapperR>,
+) => Effect.Effect<
+  WebSocketUpgrade,
+  WebSocketError,
+  WebSocketServer | R | MapperR
+>
+
+export declare const layerClientLive:
+  Layer.Layer<WebSocketClient>
+
+export declare const layerServerLive:
+  Layer.Layer<WebSocketServer>
+```
+
+`WebSocketUpgrade` is an opaque decision consumed only by `blitz:http`; it is
+not a partially initialized connection and exposes no manual `accept`. The
+upgrade operation captures the connection handler and its provided Context.
+After the HTTP transport commits the handshake, it runs the handler in the
+request child Scope. Expected handler errors use `onHandlerError` or the
+documented redacted close policy; defects are logged and close with code 1011.
+
+Connections are scoped. The message Stream has one owner and a second consumer
+fails with `ConsumerBusy`. Explicit broadcast uses upstream `PubSub`.
 
 Inbound overflow follows a documented close/error policy; outbound send waits
 for capacity instead of `try_send`. Copy binary payloads at trust boundaries.
-HTTP upgrade is an explicit typed decision owned by the request Scope. Standard
-global WebSocket remains event/callback based.
+Inbound overflow closes with code 1009 and fails the Stream with `Overflow`.
+`send` completes only after the bounded outbound queue accepts the complete
+message. `close` is idempotent and waits for the close frame to be accepted;
+Scope finalization performs a bounded graceful close before aborting transport.
+The standard global WebSocket remains event/callback based.
 
 The current fully buffered `HttpRequestEvent.body`, oneshot response, and direct
 callback dispatch cannot satisfy this contract. First replace them with
@@ -754,29 +1842,271 @@ adapters over shared resources.
 Build RPC in JavaScript/TypeScript over Effect and Stream. Rust owns bounded wire
 validation and transport resources, not handlers or a second procedure model.
 
-Define generic:
+```ts
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | ReadonlyArray<JsonValue>
+  | { readonly [key: string]: JsonValue }
 
-- `Decoder<Input, DecodeError, DecodeRequirements>` from `unknown`;
-- `Encoder<Output, EncodeError, EncodeRequirements>` to JSON-safe values;
-- query/mutation procedures returning Effect;
-- subscription procedures returning Stream;
-- middleware that accumulates error and requirement channels;
-- `Router<Routes>` preserving route keys and procedure types;
-- caller projections for per-route input, output, domain error, and requirements.
+export interface Decoder<A, E = never, R = never> {
+  readonly decode: (
+    input: unknown,
+  ) => Effect.Effect<A, E, R>
+}
+
+export interface Encoder<A, E = never, R = never> {
+  readonly encode: (
+    value: A,
+  ) => Effect.Effect<JsonValue, E, R>
+}
+
+export interface ProcedureLike {
+  readonly _tag: "Procedure"
+  readonly kind: "query" | "mutation" | "subscription"
+}
+
+export declare const ProcedureTypeId: unique symbol
+
+export interface Procedure<
+  I,
+  O,
+  E,
+  R,
+  Kind extends ProcedureLike["kind"],
+> extends ProcedureLike {
+  readonly kind: Kind
+  readonly [ProcedureTypeId]: {
+    readonly _Input: (_: I) => void
+    readonly _Output: () => O
+    readonly _Error: () => E
+    readonly _Requirements: (_: R) => void
+  }
+}
+
+export type Query<I, O, E = never, R = never> =
+  Procedure<I, O, E, R, "query">
+
+export type Mutation<I, O, E = never, R = never> =
+  Procedure<I, O, E, R, "mutation">
+
+export type Subscription<I, O, E = never, R = never> =
+  Procedure<I, O, E, R, "subscription">
+
+export declare const query: <I, O, DecodeE, HandlerE, EncodeE, R>(
+  input: Decoder<I, DecodeE, R>,
+  handler: (input: I) => Effect.Effect<O, HandlerE, R>,
+  output: Encoder<O, EncodeE, R>,
+) => Query<I, O, DecodeE | HandlerE | EncodeE, R>
+
+export declare const mutation: <I, O, DecodeE, HandlerE, EncodeE, R>(
+  input: Decoder<I, DecodeE, R>,
+  handler: (input: I) => Effect.Effect<O, HandlerE, R>,
+  output: Encoder<O, EncodeE, R>,
+) => Mutation<I, O, DecodeE | HandlerE | EncodeE, R>
+
+export declare const subscription: <
+  I,
+  O,
+  DecodeE,
+  HandlerE,
+  EncodeE,
+  R,
+>(
+  input: Decoder<I, DecodeE, R>,
+  handler: (input: I) => Stream.Stream<O, HandlerE, R>,
+  output: Encoder<O, EncodeE, R>,
+) => Subscription<I, O, DecodeE | HandlerE | EncodeE, R>
+
+export interface Middleware<AddedE, AddedR> {
+  readonly apply: <I, O, E, R>(
+    handler: (
+      input: I,
+    ) => Effect.Effect<O, E, R>,
+  ) => (
+    input: I,
+  ) => Effect.Effect<O, E | AddedE, R | AddedR>
+}
+
+export declare const withMiddleware: <
+  AddedE,
+  AddedR,
+>(
+  middleware: Middleware<AddedE, AddedR>,
+) => <I, O, E, R, Kind extends ProcedureLike["kind"]>(
+  procedure: Procedure<I, O, E, R, Kind>,
+) => Procedure<I, O, E | AddedE, R | AddedR, Kind>
+
+export type Routes = Readonly<Record<string, ProcedureLike>>
+
+export interface Router<R extends Routes> {
+  readonly _tag: "Router"
+  readonly routes: R
+}
+
+export declare const router: <R extends Routes>(
+  routes: R,
+) => Router<R>
+
+export type ProcedureInput<P> =
+  P extends Procedure<infer I, unknown, unknown, unknown, ProcedureLike["kind"]>
+    ? I
+    : never
+
+export type ProcedureOutput<P> =
+  P extends Procedure<unknown, infer O, unknown, unknown, ProcedureLike["kind"]>
+    ? O
+    : never
+
+export type ProcedureError<P> =
+  P extends Procedure<unknown, unknown, infer E, unknown, ProcedureLike["kind"]>
+    ? E
+    : never
+
+export type ProcedureRequirements<P> =
+  P extends Procedure<unknown, unknown, unknown, infer R, ProcedureLike["kind"]>
+    ? R
+    : never
+
+export type RouterRequirements<R extends Routes> = {
+  readonly [K in keyof R]: ProcedureRequirements<R[K]>
+}[keyof R]
+
+export interface RpcClientError {
+  readonly _tag: "RpcClientError"
+  readonly reason:
+    | "InvalidInput"
+    | "Encode"
+    | "Transport"
+    | "Protocol"
+    | "Timeout"
+    | "Disconnect"
+    | "Limit"
+  readonly route?: string
+  readonly message: string
+}
+
+export interface RpcClient {
+  readonly unary: (
+    route: string,
+    input: JsonValue,
+  ) => Effect.Effect<JsonValue, RpcClientError>
+  readonly subscription: (
+    route: string,
+    input: JsonValue,
+  ) => Stream.Stream<JsonValue, RpcClientError>
+}
+
+export type Caller<R extends Routes> = {
+  readonly [K in keyof R]:
+    R[K] extends Subscription<
+      infer I,
+      infer O,
+      infer E,
+      unknown
+    >
+      ? (input: I) => Stream.Stream<O, RpcClientError | E, RpcClient>
+      : R[K] extends Procedure<
+          infer I,
+          infer O,
+          infer E,
+          unknown,
+          "query" | "mutation"
+        >
+        ? (input: I) => Effect.Effect<O, RpcClientError | E, RpcClient>
+        : never
+}
+
+export declare const caller: <R extends Routes>(
+  router: Router<R>,
+) => Caller<R>
+```
 
 Never collapse router requirements to `unknown`. Domain failures are readonly,
 tagged, and JSON-safe. Defects are logged and redacted. Batches, messages, and
 subscriptions are bounded. Disconnect interrupts the procedure child Scope.
+The public procedure values are frozen descriptions. Implementations may hide
+their handlers behind a private symbol; the structural fields above describe
+their type contract, not permission for Rust to execute them.
+
+Middleware for subscription handlers has the corresponding Stream-preserving
+shape and accumulates the same error and requirement unions. It never converts
+a Stream to an Effect or catches defects.
 
 ### Application model
 
-`App<Routes, Requirements, LayerError>` is an opaque frozen description. It does
-not publicly expose its Layer array. `App.provide(layer)` returns a new value,
-removes provided services, adds Layer inputs, and unions Layer errors.
-`App.serve(app, options)` is pipeable, builds Layers once in the root Scope, and
-delegates transport lifecycle to `blitz:http`. Every request/subscription has a
-child Scope. Shutdown stops ingress, interrupts children, waits for finalizers,
-and closes resources.
+```ts
+export interface App<
+  Rts extends Routes,
+  Requirements,
+  LayerError,
+> {
+  readonly _tag: "App"
+  readonly [AppTypeId]: {
+    readonly _Routes: () => Rts
+    readonly _Requirements: (_: Requirements) => void
+    readonly _LayerError: () => LayerError
+  }
+}
+
+export declare const AppTypeId: unique symbol
+
+export interface AppServeOptions {
+  readonly hostname?: string
+  readonly port?: number
+  readonly rpcPath?: string
+  readonly requestTimeout?: Duration.DurationInput
+  readonly maxMessageBytes?: number
+  readonly queueCapacity?: number
+}
+
+export interface AppServeError {
+  readonly _tag: "AppServeError"
+  readonly reason:
+    | "InvalidOptions"
+    | "Layer"
+    | "Listen"
+    | "Transport"
+  readonly message: string
+}
+
+export declare const make: <Rts extends Routes>(
+  input: { readonly rpc: Router<Rts> },
+) => App<Rts, RouterRequirements<Rts>, never>
+
+export declare const provide: <
+  Provided,
+  E2,
+  RIn,
+>(
+  layer: Layer.Layer<Provided, E2, RIn>,
+) => <Rts extends Routes, R, E>(
+  app: App<Rts, R, E>,
+) => App<Rts, Exclude<R, Provided> | RIn, E | E2>
+
+export declare const serve: <
+  Rts extends Routes,
+  R,
+  LayerE,
+>(
+  app: App<Rts, R, LayerE>,
+  options?: AppServeOptions,
+) => Effect.Effect<
+  never,
+  AppServeError | LayerE,
+  R | HttpServer | WebSocketServer
+>
+```
+
+`App` is an opaque frozen description. Its unique-symbol type witness preserves
+generic channels but is not a runtime layer or handler array. `provide` returns
+a new description, removes services supplied by the Layer, adds the Layer's
+inputs, and unions Layer errors. `serve` builds Layers once in the root Scope
+and delegates transport lifecycle to `blitz:http`. Every request/subscription
+has a child Scope. Shutdown stops ingress, interrupts children, waits for
+finalizers, and closes resources.
 
 Remove or move the competing public Rust `App`, `Layer`, `Router`, and procedure
 execution exports behind an explicitly host/internal or legacy namespace. Rust
@@ -791,6 +2121,370 @@ listener.
 
 Each capability below is a separate post-Phase-10 workstream, not one combined
 patch.
+
+The following baseline fixes their common public shapes. Each module declares
+its same-named `Context.Tag`, pipe-friendly accessors, `layerLive`, and a
+deterministic test Layer or test factory. The detailed subplans below define the
+remaining per-operation rules.
+
+```ts
+// blitz:crypto
+export type DigestAlgorithm = "SHA-256" | "SHA-384" | "SHA-512"
+export type AeadAlgorithm = "AES-256-GCM" | "CHACHA20-POLY1305"
+
+export interface SecretKey {
+  readonly _tag: "SecretKey"
+  readonly algorithm: AeadAlgorithm | "HMAC-SHA-256"
+  readonly exportPolicy: "allow" | "forbid"
+}
+
+export interface CryptoError {
+  readonly _tag: "CryptoError"
+  readonly operation:
+    | "randomBytes"
+    | "digest"
+    | "generateKey"
+    | "importKey"
+    | "exportKey"
+    | "mac"
+    | "deriveKey"
+    | "encrypt"
+    | "decrypt"
+  readonly reason:
+    | "InvalidInput"
+    | "PermissionDenied"
+    | "UnsupportedAlgorithm"
+    | "InvalidKey"
+    | "NotExportable"
+    | "AuthenticationFailed"
+    | "EntropyUnavailable"
+    | "Host"
+  readonly message: string
+}
+
+export interface Crypto {
+  readonly randomBytes: (
+    length: number,
+  ) => Effect.Effect<Uint8Array, CryptoError>
+  readonly digest: (
+    algorithm: DigestAlgorithm,
+    data: Uint8Array,
+  ) => Effect.Effect<Uint8Array, CryptoError>
+  readonly generateKey: (
+    algorithm: SecretKey["algorithm"],
+    options?: { readonly export?: "allow" | "forbid" },
+  ) => Effect.Effect<SecretKey, CryptoError, Scope.Scope>
+  readonly importKey: (
+    algorithm: SecretKey["algorithm"],
+    bytes: Uint8Array,
+    options?: { readonly export?: "allow" | "forbid" },
+  ) => Effect.Effect<SecretKey, CryptoError, Scope.Scope>
+  readonly exportKey: (
+    key: SecretKey,
+  ) => Effect.Effect<Uint8Array, CryptoError>
+  readonly mac: (
+    key: SecretKey,
+    data: Uint8Array,
+  ) => Effect.Effect<Uint8Array, CryptoError>
+  readonly deriveKey: (
+    input: SecretKey,
+    options: {
+      readonly salt: Uint8Array
+      readonly info?: Uint8Array
+      readonly outputAlgorithm: SecretKey["algorithm"]
+      readonly export?: "allow" | "forbid"
+    },
+  ) => Effect.Effect<SecretKey, CryptoError, Scope.Scope>
+  readonly encrypt: (
+    key: SecretKey,
+    plaintext: Uint8Array,
+    options: {
+      readonly nonce: Uint8Array
+      readonly additionalData?: Uint8Array
+    },
+  ) => Effect.Effect<Uint8Array, CryptoError>
+  readonly decrypt: (
+    key: SecretKey,
+    ciphertext: Uint8Array,
+    options: {
+      readonly nonce: Uint8Array
+      readonly additionalData?: Uint8Array
+    },
+  ) => Effect.Effect<Uint8Array, CryptoError>
+}
+
+// blitz:os
+export interface OsSnapshot {
+  readonly platform: "linux" | "darwin" | "windows" | "other"
+  readonly architecture: string
+  readonly endianness: "little" | "big"
+  readonly hostname: string
+  readonly cpuCount: number
+  readonly homeDirectory: Option.Option<string>
+  readonly temporaryDirectory: string
+}
+
+export interface TemporaryEntry {
+  readonly path: string
+  readonly type: "file" | "directory"
+  readonly close: Effect.Effect<void, OsError>
+}
+
+export interface OsError {
+  readonly _tag: "OsError"
+  readonly operation: "snapshot" | "temporaryFile" | "temporaryDirectory" | "close"
+  readonly reason:
+    | "InvalidInput"
+    | "PermissionDenied"
+    | "Unavailable"
+    | "Cleanup"
+    | "Io"
+  readonly message: string
+}
+
+export interface Os {
+  readonly snapshot: Effect.Effect<OsSnapshot, OsError>
+  readonly temporaryFile: (
+    options?: { readonly prefix?: string; readonly suffix?: string },
+  ) => Effect.Effect<TemporaryEntry, OsError, Scope.Scope>
+  readonly temporaryDirectory: (
+    options?: { readonly prefix?: string },
+  ) => Effect.Effect<TemporaryEntry, OsError, Scope.Scope>
+}
+
+// Shared by blitz:dns, blitz:tcp, blitz:udp, and blitz:tls.
+export interface IpAddress {
+  readonly hostname: string
+  readonly family: "ipv4" | "ipv6"
+}
+
+export interface SocketAddress extends IpAddress {
+  readonly port: number
+}
+
+export interface DnsRecord extends IpAddress {
+  readonly canonicalName: Option.Option<string>
+}
+
+export interface DnsError {
+  readonly _tag: "DnsError"
+  readonly operation: "lookup" | "reverse"
+  readonly reason:
+    | "InvalidHostname"
+    | "PermissionDenied"
+    | "NotFound"
+    | "Timeout"
+    | "Unsupported"
+    | "Io"
+  readonly hostname?: string
+  readonly message: string
+}
+
+export interface Dns {
+  readonly lookup: (
+    hostname: string,
+    options?: {
+      readonly family?: "any" | "ipv4" | "ipv6"
+      readonly order?: "system" | "ipv4First" | "ipv6First"
+      readonly timeout?: Duration.DurationInput
+    },
+  ) => Effect.Effect<ReadonlyArray<DnsRecord>, DnsError>
+  readonly reverse: (
+    address: IpAddress,
+  ) => Effect.Effect<ReadonlyArray<string>, DnsError>
+}
+
+export interface TcpError {
+  readonly _tag: "TcpError"
+  readonly operation: "connect" | "listen" | "accept" | "read" | "write" | "shutdown" | "close"
+  readonly reason:
+    | "InvalidAddress"
+    | "PermissionDenied"
+    | "Refused"
+    | "Timeout"
+    | "Overflow"
+    | "Disconnect"
+    | "Closed"
+    | "Unsupported"
+    | "Io"
+  readonly address?: SocketAddress
+  readonly message: string
+}
+
+export interface TcpConnection {
+  readonly localAddress: SocketAddress
+  readonly remoteAddress: SocketAddress
+  readonly bytes: Stream.Stream<Uint8Array, TcpError>
+  readonly write: (
+    bytes: Uint8Array,
+  ) => Effect.Effect<void, TcpError>
+  readonly shutdown: (
+    direction: "read" | "write" | "both",
+  ) => Effect.Effect<void, TcpError>
+  readonly close: Effect.Effect<void, TcpError>
+}
+
+export interface Tcp {
+  readonly connect: (
+    address: SocketAddress,
+    options?: { readonly timeout?: Duration.DurationInput },
+  ) => Effect.Effect<TcpConnection, TcpError, Scope.Scope>
+  readonly listen: (
+    address: SocketAddress,
+    options?: { readonly queueCapacity?: number },
+  ) => Stream.Stream<TcpConnection, TcpError>
+}
+
+export interface Datagram {
+  readonly peer: SocketAddress
+  readonly bytes: Uint8Array
+}
+
+export interface UdpError {
+  readonly _tag: "UdpError"
+  readonly operation: "bind" | "receive" | "send" | "multicast" | "close"
+  readonly reason:
+    | "InvalidAddress"
+    | "PermissionDenied"
+    | "MessageTooLarge"
+    | "Overflow"
+    | "Closed"
+    | "Unsupported"
+    | "Io"
+  readonly message: string
+}
+
+export interface UdpSocket {
+  readonly localAddress: SocketAddress
+  readonly datagrams: Stream.Stream<Datagram, UdpError>
+  readonly send: (
+    peer: SocketAddress,
+    bytes: Uint8Array,
+  ) => Effect.Effect<void, UdpError>
+  readonly close: Effect.Effect<void, UdpError>
+}
+
+export interface Udp {
+  readonly bind: (
+    address: SocketAddress,
+    options?: {
+      readonly queueCapacity?: number
+      readonly maxDatagramBytes?: number
+    },
+  ) => Effect.Effect<UdpSocket, UdpError, Scope.Scope>
+}
+
+export interface TlsError {
+  readonly _tag: "TlsError"
+  readonly operation: "connect" | "accept" | "read" | "write" | "close"
+  readonly reason:
+    | "InvalidOptions"
+    | "PermissionDenied"
+    | "Certificate"
+    | "Verification"
+    | "Handshake"
+    | "Protocol"
+    | "Timeout"
+    | "Disconnect"
+    | "Io"
+  readonly message: string
+}
+
+export interface TlsConnection {
+  readonly localAddress: SocketAddress
+  readonly remoteAddress: SocketAddress
+  readonly protocol: Option.Option<string>
+  readonly bytes: Stream.Stream<Uint8Array, TcpError | TlsError>
+  readonly write: (
+    bytes: Uint8Array,
+  ) => Effect.Effect<void, TcpError | TlsError>
+  readonly close: Effect.Effect<void, TcpError | TlsError>
+}
+
+export interface TlsPrivateKey {
+  readonly _tag: "TlsPrivateKey"
+}
+
+export interface Tls {
+  readonly connect: (
+    address: SocketAddress,
+    options: {
+      readonly serverName: string
+      readonly protocols?: ReadonlyArray<string>
+      readonly timeout?: Duration.DurationInput
+    },
+  ) => Effect.Effect<TlsConnection, TcpError | TlsError, Scope.Scope>
+  readonly accept: (
+    connection: TcpConnection,
+    options: {
+      readonly certificateChain: ReadonlyArray<Uint8Array>
+      readonly privateKey: TlsPrivateKey
+      readonly protocols?: ReadonlyArray<string>
+      readonly timeout?: Duration.DurationInput
+    },
+  ) => Effect.Effect<TlsConnection, TcpError | TlsError, Scope.Scope>
+}
+
+// blitz:worker
+export interface WorkerMessage {
+  readonly data: unknown
+}
+
+export interface WorkerError {
+  readonly _tag: "WorkerError"
+  readonly operation: "spawn" | "postMessage" | "messages" | "terminate"
+  readonly reason:
+    | "InvalidSpecifier"
+    | "PermissionDenied"
+    | "Clone"
+    | "Startup"
+    | "Overflow"
+    | "Closed"
+    | "Host"
+  readonly message: string
+}
+
+export interface Worker {
+  readonly messages: Stream.Stream<WorkerMessage, WorkerError>
+  readonly postMessage: (
+    value: unknown,
+  ) => Effect.Effect<void, WorkerError>
+  readonly terminate: Effect.Effect<void, WorkerError>
+}
+
+export interface WorkerRuntime {
+  readonly spawn: (
+    specifier: string | URL,
+    options?: {
+      readonly queueCapacity?: number
+      readonly permissions?: ReadonlyArray<string>
+    },
+  ) => Effect.Effect<Worker, WorkerError, Scope.Scope>
+}
+
+// blitz:test
+export interface RuntimeLeaks {
+  readonly operations: number
+  readonly resources: number
+  readonly roots: number
+}
+
+export interface TestRuntimeError {
+  readonly _tag: "TestRuntimeError"
+  readonly reason: "LeakedOperations" | "LeakedResources" | "LeakedRoots"
+  readonly leaks: RuntimeLeaks
+  readonly message: string
+}
+
+export interface TestRuntime {
+  readonly leaks: Effect.Effect<RuntimeLeaks>
+  readonly assertNoLeaks: Effect.Effect<void, TestRuntimeError>
+}
+
+export declare const withLeakCheck: <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+) => Effect.Effect<A, E | TestRuntimeError, R | TestRuntime>
+```
 
 #### `blitz:crypto`
 

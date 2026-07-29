@@ -1,3 +1,4 @@
+export { acquireRelease } from 'blitz-internal:effect/Stream__acquireRelease.js';
 export { asyncScoped } from 'blitz-internal:effect/Stream__asyncScoped.js';
 export { empty } from 'blitz-internal:effect/Stream__empty.js';
 export { fail } from 'blitz-internal:effect/Stream__fail.js';
@@ -6,4 +7,6 @@ export { make } from 'blitz-internal:effect/Stream__make.js';
 export { map } from 'blitz-internal:effect/Stream__map.js';
 export { runCollect } from 'blitz-internal:effect/Stream__runCollect.js';
 export { runForEach } from 'blitz-internal:effect/Stream__runForEach.js';
+export { scoped } from 'blitz-internal:effect/Stream__scoped.js';
+export { scopedWith } from 'blitz-internal:effect/Stream__scopedWith.js';
 export { unwrap } from 'blitz-internal:effect/Stream__unwrap.js';

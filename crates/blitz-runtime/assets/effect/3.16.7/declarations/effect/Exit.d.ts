@@ -1,21 +1,21 @@
 import type * as Cause from "effect/Cause";
 import type * as Option from "effect/Option";
 
-export type Exit<Success, Error = never> = Success<Success, Error> | Failure<Success, Error>;
-export interface Success<Success, Error> {
+export type Exit<SuccessValue, ErrorValue = never> = Success<SuccessValue, ErrorValue> | Failure<SuccessValue, ErrorValue>;
+export interface Success<out SuccessValue, out ErrorValue> {
   readonly _tag: "Success";
   readonly _op: "Success";
-  readonly value: Success;
+  readonly value: SuccessValue;
 }
-export interface Failure<Success, Error> {
+export interface Failure<out SuccessValue, out ErrorValue> {
   readonly _tag: "Failure";
   readonly _op: "Failure";
-  readonly cause: Cause.Cause<Error>;
+  readonly cause: Cause.Cause<ErrorValue>;
 }
 
 export declare const isExit: (value: unknown) => value is Exit<unknown, unknown>;
-export declare const isSuccess: <Success, Error>(exit: Exit<Success, Error>) => exit is Success<Success, Error>;
-export declare const isFailure: <Success, Error>(exit: Exit<Success, Error>) => exit is Failure<Success, Error>;
+export declare const isSuccess: <SuccessValue, ErrorValue>(exit: Exit<SuccessValue, ErrorValue>) => exit is Success<SuccessValue, ErrorValue>;
+export declare const isFailure: <SuccessValue, ErrorValue>(exit: Exit<SuccessValue, ErrorValue>) => exit is Failure<SuccessValue, ErrorValue>;
 export declare const isInterrupted: <Success, Error>(exit: Exit<Success, Error>) => boolean;
 export declare const succeed: <Success>(value: Success) => Exit<Success>;
 export declare const fail: <Error>(error: Error) => Exit<never, Error>;

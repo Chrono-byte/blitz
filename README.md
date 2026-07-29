@@ -120,6 +120,8 @@ in the [compatibility table](crates/blitz-runtime/compat/README.md).
 
 - [Helpdesk API](examples/helpdesk-api/README.md) — a TypeScript and Effect HTTP
   API with a small React frontend
+- [Collaborative docs](examples/collaborative-docs/README.md) — a realtime rich-text
+  and Markdown editor with a Blitz sync server
 - [IRC chat](examples/irc-chat-v2/README.md) — a WebSocket server with terminal
   clients
 - [Runtime examples](crates/blitz-runtime/examples/README.md) — small JavaScript

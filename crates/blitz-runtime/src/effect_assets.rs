@@ -899,6 +899,165 @@ mod tests {
   }
 
   #[test]
+  fn expanded_services_layers_and_scoped_streams_execute() {
+    run_effect_compatibility_entry(
+      denko::js!(
+        module,
+        r#"
+        import * as Cause from 'effect/Cause';
+        import * as Chunk from 'effect/Chunk';
+        import * as Context from 'effect/Context';
+        import * as Effect from 'effect/Effect';
+        import * as Exit from 'effect/Exit';
+        import * as Layer from 'effect/Layer';
+        import * as Stream from 'effect/Stream';
+
+        const Clock = Context.GenericTag('blitz/effect-compatibility/clock');
+        const Logger = Context.GenericTag('blitz/effect-compatibility/logger');
+        const Failing = Context.GenericTag('blitz/effect-compatibility/failing');
+        const clockLayer = Layer.succeed(Clock, { now: 17 });
+        const loggerLayer = Layer.effect(
+          Logger,
+          Effect.contextWith(context => {
+            const clock = Context.get(context, Clock);
+            return { read: () => clock.now };
+          })
+        );
+
+        let stage = 'layer-provide';
+        try {
+        const composedContext = Effect.runSync(
+          Effect.scoped(Layer.build(Layer.provide(loggerLayer, clockLayer)))
+        );
+        const logger = Context.get(composedContext, Logger);
+        stage = 'layer-provide-merge';
+        const mergedContext = Effect.runSync(
+          Effect.scoped(Layer.build(Layer.provideMerge(loggerLayer, clockLayer)))
+        );
+        const mergedClock = Context.get(mergedContext, Clock);
+        const mergedLogger = Context.get(mergedContext, Logger);
+        const failedLayer = Effect.runSyncExit(
+          Effect.scoped(Layer.build(Layer.effect(Failing, Effect.fail('layer-boom'))))
+        );
+        const failedLayerCause = Exit.isFailure(failedLayer)
+          ? Cause.failureOption(failedLayer.cause)
+          : { _tag: 'None' };
+
+        stage = 'service-access';
+        const optionalClock = Effect.runSync(Effect.serviceOption(Clock));
+        const requiredClock = Effect.runSync(
+          Effect.provideService(Effect.serviceOptional(Clock), Clock, { now: 23 })
+        );
+        const missingClock = Effect.runSyncExit(Effect.serviceOptional(Clock));
+        const missingFailure = Exit.isFailure(missingClock)
+          ? Cause.failureOption(missingClock.cause)
+          : { _tag: 'None' };
+        const readClock = Effect.serviceFunctionEffect(
+          Clock,
+          clock => () => Effect.succeed(clock.now)
+        );
+
+        stage = 'stream-scoped';
+        const collectedValues = Effect.runSync(
+          Stream.runCollect(Stream.make('collected'))
+        );
+        const scopedStream = Stream.scoped(Effect.succeed('scoped'));
+        stage = 'stream-scoped-with';
+        const scopedWithStream = Stream.scopedWith(() => Effect.succeed(31));
+        stage = 'stream-acquire-release';
+        const acquiredStream = Stream.acquireRelease(
+          Effect.succeed('acquired'),
+          () => Effect.void
+        );
+
+        globalThis.layer_provide_value = logger.read();
+        globalThis.layer_provide_merge_value =
+          mergedClock.now + mergedLogger.read();
+        globalThis.layer_failure_observed =
+          failedLayerCause._tag === 'Some' &&
+          failedLayerCause.value === 'layer-boom';
+        globalThis.service_option_none = optionalClock._tag === 'None';
+        globalThis.service_optional_value = requiredClock.now;
+        globalThis.service_optional_failure =
+          missingFailure._tag === 'Some' &&
+          missingFailure.value._tag === 'NoSuchElementException';
+        globalThis.service_function_value = Effect.runSync(
+          Effect.provideService(readClock(), Clock, { now: 29 })
+        );
+        stage = 'stream-observation';
+        globalThis.stream_collected_value = Chunk.toArray(collectedValues)[0];
+        globalThis.stream_scoped_constructed = scopedStream !== undefined;
+        globalThis.stream_acquire_release_constructed =
+          acquiredStream !== undefined;
+        globalThis.stream_scoped_with_constructed =
+          scopedWithStream !== undefined;
+        globalThis.expanded_failure_stage = '';
+        } catch (error) {
+          globalThis.expanded_failure_stage = stage;
+          globalThis.expanded_failure_message =
+            stage + ': ' + String(error) + '\n' + String(error && error.stack);
+        }
+      "#
+      ),
+      |vm| {
+        assert_eq!(
+          vm.get_global("expanded_failure_message"),
+          None,
+          "expanded Effect compatibility program failed"
+        );
+        assert_eq!(
+          vm.get_global("expanded_failure_stage"),
+          Some(Value::String(String::new().into()))
+        );
+        assert_eq!(
+          vm.get_global("layer_provide_value"),
+          Some(Value::Number(17.0))
+        );
+        assert_eq!(
+          vm.get_global("layer_provide_merge_value"),
+          Some(Value::Number(34.0))
+        );
+        assert_eq!(
+          vm.get_global("layer_failure_observed"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(
+          vm.get_global("service_option_none"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(
+          vm.get_global("service_optional_value"),
+          Some(Value::Number(23.0))
+        );
+        assert_eq!(
+          vm.get_global("service_optional_failure"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(
+          vm.get_global("service_function_value"),
+          Some(Value::Number(29.0))
+        );
+        assert_eq!(
+          vm.get_global("stream_collected_value"),
+          Some(Value::String("collected".to_string().into()))
+        );
+        assert_eq!(
+          vm.get_global("stream_scoped_constructed"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(
+          vm.get_global("stream_acquire_release_constructed"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(
+          vm.get_global("stream_scoped_with_constructed"),
+          Some(Value::Bool(true))
+        );
+      },
+    );
+  }
+
+  #[test]
   fn scoped_acquire_release_receives_success_exit() {
     run_effect_compatibility_entry(
       denko::js!(
@@ -1135,6 +1294,48 @@ mod tests {
   }
 
   #[test]
+  fn microtask_delayed_effect_async_resumes_exactly_once() {
+    run_effect_compatibility_entry_with_scheduler(
+      denko::js!(
+        module,
+        r#"
+        import * as Effect from 'effect/Effect';
+        let registrations = 0;
+        let resumes = 0;
+        const delayed = Effect.async((resume, signal) => {
+          registrations += 1;
+          Promise.resolve().then(() => {
+            resumes += 1;
+            resume(Effect.succeed(89));
+          });
+          globalThis.effect_async_delayed_signal = signal !== undefined;
+        });
+        globalThis.effect_async_delayed_value = 0;
+        Effect.runPromise(delayed).then(value => {
+          globalThis.effect_async_delayed_value = value;
+          globalThis.effect_async_delayed_once =
+            registrations === 1 && resumes === 1;
+        });
+      "#
+      ),
+      |vm| {
+        assert_eq!(
+          vm.get_global("effect_async_delayed_signal"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(
+          vm.get_global("effect_async_delayed_value"),
+          Some(Value::Number(89.0))
+        );
+        assert_eq!(
+          vm.get_global("effect_async_delayed_once"),
+          Some(Value::Bool(true))
+        );
+      },
+    );
+  }
+
+  #[test]
   fn fiber_interrupt_cancellation_uses_supported_scheduler_path() {
     run_effect_compatibility_entry_with_scheduler(
       denko::js!(
@@ -1144,10 +1345,10 @@ mod tests {
         import * as Exit from 'effect/Exit';
         import * as Fiber from 'effect/Fiber';
         import * as Cause from 'effect/Cause';
-        globalThis.fiber_cleanup_ran = false;
+        globalThis.fiber_cleanup_calls = 0;
         const suspended = Effect.async(() =>
           Effect.sync(() => {
-            globalThis.fiber_cleanup_ran = true;
+            globalThis.fiber_cleanup_calls += 1;
           })
         );
         const fiber = Effect.runFork(suspended);
@@ -1160,7 +1361,10 @@ mod tests {
       "#
       ),
       |vm| {
-        assert_eq!(vm.get_global("fiber_cleanup_ran"), Some(Value::Bool(true)));
+        assert_eq!(
+          vm.get_global("fiber_cleanup_calls"),
+          Some(Value::Number(1.0))
+        );
         assert_eq!(vm.get_global("fiber_cancelled"), Some(Value::Bool(true)));
       },
     );

@@ -9,6 +9,7 @@ pub(crate) mod errors;
 pub(crate) mod function;
 pub(crate) mod globals;
 pub(crate) mod json;
+mod json_parse;
 pub(crate) mod math;
 pub(crate) mod object;
 pub(crate) mod primitives;

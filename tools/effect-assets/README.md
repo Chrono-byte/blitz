@@ -117,3 +117,11 @@ After changing either manifest, regenerate and verify the final artifact:
 cargo run -p effect-bytecode -- generate
 cargo run -p effect-bytecode -- generate --check
 ```
+
+The Effect foundation declarations have paired strict-check fixtures:
+
+```sh
+pnpm run typecheck:effect
+../../target/debug/blitz check --strict fixtures/effect-foundation-blitz-positive.ts
+! ../../target/debug/blitz check --strict fixtures/effect-foundation-blitz-negative.ts
+```

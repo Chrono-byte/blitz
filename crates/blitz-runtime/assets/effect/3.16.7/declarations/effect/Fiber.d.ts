@@ -3,13 +3,13 @@ import type * as Exit from "effect/Exit";
 import type * as FiberId from "effect/FiberId";
 import type * as Option from "effect/Option";
 
-export interface Fiber<Success, Error = never> {
+export interface Fiber<out Success, out Error = never> extends Effect.Effect<Success, Error> {
   id(): FiberId.FiberId;
   readonly await: Effect.Effect<Exit.Exit<Success, Error>>;
   readonly poll: Effect.Effect<Option.Option<Exit.Exit<Success, Error>>>;
   readonly children: Effect.Effect<Array<RuntimeFiber<unknown, unknown>>>;
 }
-export interface RuntimeFiber<Success, Error = never> extends Fiber<Success, Error> {
+export interface RuntimeFiber<out Success, out Error = never> extends Fiber<Success, Error> {
   readonly status: Effect.Effect<unknown>;
 }
 

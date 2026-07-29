@@ -332,7 +332,7 @@
       "specifier": "blitz-internal:effect/dist/esm/Effect.js",
       "source": {
         "path": "modules/dist/esm/Effect.js",
-        "sha256": "3682c2693237a2189350cc48477e90f7d17039791cf553168e1cc988acb1d93f",
+        "sha256": "884e5cdc5b79ff0037f142a3ae930f2a4610dc82d76375b502729f867ee3b9cd",
         "sourceType": "module"
       }
     },
@@ -500,7 +500,7 @@
       "specifier": "blitz-internal:effect/dist/esm/internal/channel.js",
       "source": {
         "path": "modules/dist/esm/internal/channel.js",
-        "sha256": "2e844c766358d2c9e55c9815eebc396f02338e9b6945fe2931b197fc0742ef47",
+        "sha256": "20914bafc1cbf0bfdb2d2d4d4d272e3740057520d7d057651148ada9806c2682",
         "sourceType": "module"
       }
     },
@@ -652,7 +652,7 @@
       "specifier": "blitz-internal:effect/dist/esm/internal/core-effect.js",
       "source": {
         "path": "modules/dist/esm/internal/core-effect.js",
-        "sha256": "45dcc482e9a92a852802f6d1ef1af23435723f39ba6fb6534313e42083ec8ac9",
+        "sha256": "c5e6800d7ea1ffd7732d0a4c49399ca145e68f38a18db1387281e78575ed844f",
         "sourceType": "module"
       }
     },
@@ -660,7 +660,7 @@
       "specifier": "blitz-internal:effect/dist/esm/internal/core-stream.js",
       "source": {
         "path": "modules/dist/esm/internal/core-stream.js",
-        "sha256": "1f3d0ed594e849237c6d5b3b808146b074e7dec6fc328a079cfaf07554dbd529",
+        "sha256": "d5d8d73abd8df501183948af23eafdd19a3020a321fd8029d83808d8d6b03af3",
         "sourceType": "module"
       }
     },
@@ -916,7 +916,7 @@
       "specifier": "blitz-internal:effect/dist/esm/internal/layer.js",
       "source": {
         "path": "modules/dist/esm/internal/layer.js",
-        "sha256": "13f8ef2a0ba30111b106ce4a4bdf8bd0f7a701c142e5cb5a97ec8e70838b67a2",
+        "sha256": "7b91bc3b2a33b0dd81cbb17bbbb661c4913922239a65bb6c8b2dc6ae08c30a36",
         "sourceType": "module"
       }
     },
@@ -1268,7 +1268,7 @@
       "specifier": "blitz-internal:effect/dist/esm/internal/stream.js",
       "source": {
         "path": "modules/dist/esm/internal/stream.js",
-        "sha256": "6505f5fe5b8ac119c428dc71a7edcc58cc7fba3d38ed6f9fc2afa2fa102fcfcd",
+        "sha256": "0f0762ccaa0de0fb0640be8386a45f065cc4a2f19fc85ab2c23916ecb37d8e6a",
         "sourceType": "module"
       }
     },
@@ -1340,7 +1340,7 @@
       "specifier": "blitz-internal:effect/dist/esm/Layer.js",
       "source": {
         "path": "modules/dist/esm/Layer.js",
-        "sha256": "5a169c271130db7ca4289af9dd724d05f803fcabe212b8904c3c0db077eb2786",
+        "sha256": "030d51617947a3aa35cf8a2d50420ef2c590736f030f00f4d16cdef0e60c6855",
         "sourceType": "module"
       }
     },
@@ -1548,7 +1548,7 @@
       "specifier": "blitz-internal:effect/dist/esm/Stream.js",
       "source": {
         "path": "modules/dist/esm/Stream.js",
-        "sha256": "439fdaef0c893f368829317f1db898f7c45004956fd958f217a08e4f0ca87e0a",
+        "sha256": "37bac6c067e1f5999176fa0a0d4bbef863d69c520dc11f95b65cad85d25ffdf5",
         "sourceType": "module"
       }
     },
@@ -1933,6 +1933,22 @@
       "source": {
         "path": "modules/Effect__serviceFunctionEffect.js",
         "sha256": "f3269d3a9a2cba8d74ffe824adc20c8f520f9338cf480803ff5e7c7736d91598",
+        "sourceType": "module"
+      }
+    },
+    {
+      "specifier": "blitz-internal:effect/Effect__serviceOption.js",
+      "source": {
+        "path": "modules/Effect__serviceOption.js",
+        "sha256": "5f2e4d1f88cbe6842a303b025619aeab2199c20733e85752e4298bc6f75afc2c",
+        "sourceType": "module"
+      }
+    },
+    {
+      "specifier": "blitz-internal:effect/Effect__serviceOptional.js",
+      "source": {
+        "path": "modules/Effect__serviceOptional.js",
+        "sha256": "0397eb973b81cbf3a4fe88df14bd1f7622128bf0eab5e1b01124f3d0c9eebbe9",
         "sourceType": "module"
       }
     },
@@ -2449,6 +2465,14 @@
       }
     },
     {
+      "specifier": "blitz-internal:effect/Layer__provideMerge.js",
+      "source": {
+        "path": "modules/Layer__provideMerge.js",
+        "sha256": "12c1ee5dfb84a5c8c13f59aa2c67b773394e6b4cc42679d1927a76a8141d4ca0",
+        "sourceType": "module"
+      }
+    },
+    {
       "specifier": "blitz-internal:effect/Layer__succeed.js",
       "source": {
         "path": "modules/Layer__succeed.js",
@@ -2721,6 +2745,14 @@
       }
     },
     {
+      "specifier": "blitz-internal:effect/Stream__acquireRelease.js",
+      "source": {
+        "path": "modules/Stream__acquireRelease.js",
+        "sha256": "1f90a1d10cce89fe56925c86fc7846b78966a5476da47689a4bd032fa438bc18",
+        "sourceType": "module"
+      }
+    },
+    {
       "specifier": "blitz-internal:effect/Stream__asyncScoped.js",
       "source": {
         "path": "modules/Stream__asyncScoped.js",
@@ -2785,6 +2817,22 @@
       }
     },
     {
+      "specifier": "blitz-internal:effect/Stream__scoped.js",
+      "source": {
+        "path": "modules/Stream__scoped.js",
+        "sha256": "23561ccf6927bd8d62b0ba75324a6276dd0a1fe7347c59084c781fa58d1fca8b",
+        "sourceType": "module"
+      }
+    },
+    {
+      "specifier": "blitz-internal:effect/Stream__scopedWith.js",
+      "source": {
+        "path": "modules/Stream__scopedWith.js",
+        "sha256": "2a7b9380b7ae980e5e994917157ff3229655855a03cf58d0701a76db4993b9d4",
+        "sourceType": "module"
+      }
+    },
+    {
       "specifier": "blitz-internal:effect/Stream__unwrap.js",
       "source": {
         "path": "modules/Stream__unwrap.js",
@@ -2814,7 +2862,7 @@
       },
       "declaration": {
         "path": "declarations/effect/Cause.d.ts",
-        "sha256": "6126bddc2fed04873b70be5e01efb09a029af453243c10ea4a3907ec4bec91cc",
+        "sha256": "ebd5188598fcb7b6230588b3c127bcea8b554e170c70d86a66096c9c12f9e357",
         "sourceType": "declaration"
       }
     },
@@ -2840,7 +2888,7 @@
       },
       "declaration": {
         "path": "declarations/effect/Context.d.ts",
-        "sha256": "cce538cde57e7186253a6b04d722ec6edcbdd806c1014f18acd80edf7762720f",
+        "sha256": "587ddd392d16c0a52c18b19a89fc1ab78616b7b3d4d55eaae17b3f5e99688d54",
         "sourceType": "declaration"
       }
     },
@@ -2861,12 +2909,12 @@
       "specifier": "effect/Effect",
       "source": {
         "path": "modules/public/Effect.js",
-        "sha256": "566c767e9d7744645583b99024ee09f381946d0fd7a23856b0a6aeb683dcff9f",
+        "sha256": "3a3ae57755fe2e5429f5d63f100e9ec33e1f36b820b9ee8785a53044cf5db431",
         "sourceType": "module"
       },
       "declaration": {
         "path": "declarations/effect/Effect.d.ts",
-        "sha256": "385b0bac01461e2a973c4697063a1326bf260ded09e7d9b61075ccec85555d37",
+        "sha256": "903a16378bf911a90b47c60b3969f60cf508cada55aac9842b7357909df882a3",
         "sourceType": "declaration"
       }
     },
@@ -2879,7 +2927,7 @@
       },
       "declaration": {
         "path": "declarations/effect/Either.d.ts",
-        "sha256": "66dfff05899fe49d7b0a9b27f27517a9ffcd5f835abc9053c29142900adb4ab3",
+        "sha256": "2417e3faa808147c23f19f7468b687b91e65e2fb7c316594f40cf33596e133c6",
         "sourceType": "declaration"
       }
     },
@@ -2892,7 +2940,7 @@
       },
       "declaration": {
         "path": "declarations/effect/Exit.d.ts",
-        "sha256": "27e04e199933e4384be90c9ec2d95c7b8cc76618c8d267fc4f4ebc7db55ffec2",
+        "sha256": "a597f1b4e9e5d141f5b7b930bc2ac978fb95f2c0349325c95805927d36c670d6",
         "sourceType": "declaration"
       }
     },
@@ -2905,7 +2953,7 @@
       },
       "declaration": {
         "path": "declarations/effect/Fiber.d.ts",
-        "sha256": "7c7fa5ff7b02e24a1edc7ca906e776a9b9b3899277899a560a4e07f7eb94fbc9",
+        "sha256": "51c06b4456e58654e9b2d46251fdcb1581de7d24deae9724386536d5e345aa16",
         "sourceType": "declaration"
       }
     },
@@ -2952,12 +3000,12 @@
       "specifier": "effect/Layer",
       "source": {
         "path": "modules/public/Layer.js",
-        "sha256": "fd34b961405bea1f50f20573690e16a88617eccb4144a85c8749bf887e469325",
+        "sha256": "8c37e4051305e0b316f2ed676a7f0b83c8a86f46c8d9f1ffcedafa3016c8e1a8",
         "sourceType": "module"
       },
       "declaration": {
         "path": "declarations/effect/Layer.d.ts",
-        "sha256": "c74cc643933612a925fbe630b1268111c895ef980a24b26b6c7d53c800ab7b05",
+        "sha256": "18aeddbb842196795f51382b2a8c7f802873b26f0c07563fcdfc50ac2378fe71",
         "sourceType": "declaration"
       }
     },
@@ -3030,12 +3078,12 @@
       "specifier": "effect/Stream",
       "source": {
         "path": "modules/public/Stream.js",
-        "sha256": "74afbe5082540574446749efa36e59a83d76408457b71328e8664508702b2cd4",
+        "sha256": "f888d79a6d650e9710011f62613a8a85b58a6d97afefc0ef35c739b7ebcc7fff",
         "sourceType": "module"
       },
       "declaration": {
         "path": "declarations/effect/Stream.d.ts",
-        "sha256": "0ea219ccdbb898db8be1ef164591b757ad14afc2d5580c70b568fe97c4ca183d",
+        "sha256": "59cb0686377e6052cefd3e84d478fe2148197823eb30c507c88bececf9c99b41",
         "sourceType": "declaration"
       }
     }
@@ -3043,7 +3091,7 @@
   "files": [
     {
       "path": "declarations/effect/Cause.d.ts",
-      "sha256": "6126bddc2fed04873b70be5e01efb09a029af453243c10ea4a3907ec4bec91cc",
+      "sha256": "ebd5188598fcb7b6230588b3c127bcea8b554e170c70d86a66096c9c12f9e357",
       "sourceType": "declaration"
     },
     {
@@ -3053,7 +3101,7 @@
     },
     {
       "path": "declarations/effect/Context.d.ts",
-      "sha256": "cce538cde57e7186253a6b04d722ec6edcbdd806c1014f18acd80edf7762720f",
+      "sha256": "587ddd392d16c0a52c18b19a89fc1ab78616b7b3d4d55eaae17b3f5e99688d54",
       "sourceType": "declaration"
     },
     {
@@ -3063,22 +3111,22 @@
     },
     {
       "path": "declarations/effect/Effect.d.ts",
-      "sha256": "385b0bac01461e2a973c4697063a1326bf260ded09e7d9b61075ccec85555d37",
+      "sha256": "903a16378bf911a90b47c60b3969f60cf508cada55aac9842b7357909df882a3",
       "sourceType": "declaration"
     },
     {
       "path": "declarations/effect/Either.d.ts",
-      "sha256": "66dfff05899fe49d7b0a9b27f27517a9ffcd5f835abc9053c29142900adb4ab3",
+      "sha256": "2417e3faa808147c23f19f7468b687b91e65e2fb7c316594f40cf33596e133c6",
       "sourceType": "declaration"
     },
     {
       "path": "declarations/effect/Exit.d.ts",
-      "sha256": "27e04e199933e4384be90c9ec2d95c7b8cc76618c8d267fc4f4ebc7db55ffec2",
+      "sha256": "a597f1b4e9e5d141f5b7b930bc2ac978fb95f2c0349325c95805927d36c670d6",
       "sourceType": "declaration"
     },
     {
       "path": "declarations/effect/Fiber.d.ts",
-      "sha256": "7c7fa5ff7b02e24a1edc7ca906e776a9b9b3899277899a560a4e07f7eb94fbc9",
+      "sha256": "51c06b4456e58654e9b2d46251fdcb1581de7d24deae9724386536d5e345aa16",
       "sourceType": "declaration"
     },
     {
@@ -3103,7 +3151,7 @@
     },
     {
       "path": "declarations/effect/Layer.d.ts",
-      "sha256": "c74cc643933612a925fbe630b1268111c895ef980a24b26b6c7d53c800ab7b05",
+      "sha256": "18aeddbb842196795f51382b2a8c7f802873b26f0c07563fcdfc50ac2378fe71",
       "sourceType": "declaration"
     },
     {
@@ -3133,17 +3181,17 @@
     },
     {
       "path": "declarations/effect/Stream.d.ts",
-      "sha256": "0ea219ccdbb898db8be1ef164591b757ad14afc2d5580c70b568fe97c4ca183d",
+      "sha256": "59cb0686377e6052cefd3e84d478fe2148197823eb30c507c88bececf9c99b41",
       "sourceType": "declaration"
     },
     {
       "path": "documentation.json",
-      "sha256": "452e05c7a268ac47997f3ee3f4f2dd8dfc28aa779e41dfb77b6cf32d410145fc",
+      "sha256": "2698046266c353edd3168090d1a21533c9b179627ad3434806c8303e88f0e647",
       "sourceType": "metadata"
     },
     {
       "path": "embedded.rs",
-      "sha256": "a649ffe977c425489433bbd326f56a7357bfd5c1eeb78bd5e1cae50a41ac3c92",
+      "sha256": "5658505cf894b75010d70ce8bbd2fc9e276f35fc68bcd4b442d829e3618b2bf6",
       "sourceType": "rust"
     },
     {
@@ -3353,7 +3401,7 @@
     },
     {
       "path": "modules/dist/esm/Effect.js",
-      "sha256": "3682c2693237a2189350cc48477e90f7d17039791cf553168e1cc988acb1d93f",
+      "sha256": "884e5cdc5b79ff0037f142a3ae930f2a4610dc82d76375b502729f867ee3b9cd",
       "sourceType": "module"
     },
     {
@@ -3458,7 +3506,7 @@
     },
     {
       "path": "modules/dist/esm/internal/channel.js",
-      "sha256": "2e844c766358d2c9e55c9815eebc396f02338e9b6945fe2931b197fc0742ef47",
+      "sha256": "20914bafc1cbf0bfdb2d2d4d4d272e3740057520d7d057651148ada9806c2682",
       "sourceType": "module"
     },
     {
@@ -3553,12 +3601,12 @@
     },
     {
       "path": "modules/dist/esm/internal/core-effect.js",
-      "sha256": "45dcc482e9a92a852802f6d1ef1af23435723f39ba6fb6534313e42083ec8ac9",
+      "sha256": "c5e6800d7ea1ffd7732d0a4c49399ca145e68f38a18db1387281e78575ed844f",
       "sourceType": "module"
     },
     {
       "path": "modules/dist/esm/internal/core-stream.js",
-      "sha256": "1f3d0ed594e849237c6d5b3b808146b074e7dec6fc328a079cfaf07554dbd529",
+      "sha256": "d5d8d73abd8df501183948af23eafdd19a3020a321fd8029d83808d8d6b03af3",
       "sourceType": "module"
     },
     {
@@ -3718,7 +3766,7 @@
     },
     {
       "path": "modules/dist/esm/internal/layer.js",
-      "sha256": "13f8ef2a0ba30111b106ce4a4bdf8bd0f7a701c142e5cb5a97ec8e70838b67a2",
+      "sha256": "7b91bc3b2a33b0dd81cbb17bbbb661c4913922239a65bb6c8b2dc6ae08c30a36",
       "sourceType": "module"
     },
     {
@@ -3938,7 +3986,7 @@
     },
     {
       "path": "modules/dist/esm/internal/stream.js",
-      "sha256": "6505f5fe5b8ac119c428dc71a7edcc58cc7fba3d38ed6f9fc2afa2fa102fcfcd",
+      "sha256": "0f0762ccaa0de0fb0640be8386a45f065cc4a2f19fc85ab2c23916ecb37d8e6a",
       "sourceType": "module"
     },
     {
@@ -3983,7 +4031,7 @@
     },
     {
       "path": "modules/dist/esm/Layer.js",
-      "sha256": "5a169c271130db7ca4289af9dd724d05f803fcabe212b8904c3c0db077eb2786",
+      "sha256": "030d51617947a3aa35cf8a2d50420ef2c590736f030f00f4d16cdef0e60c6855",
       "sourceType": "module"
     },
     {
@@ -4113,7 +4161,7 @@
     },
     {
       "path": "modules/dist/esm/Stream.js",
-      "sha256": "439fdaef0c893f368829317f1db898f7c45004956fd958f217a08e4f0ca87e0a",
+      "sha256": "37bac6c067e1f5999176fa0a0d4bbef863d69c520dc11f95b65cad85d25ffdf5",
       "sourceType": "module"
     },
     {
@@ -4354,6 +4402,16 @@
     {
       "path": "modules/Effect__serviceFunctionEffect.js",
       "sha256": "f3269d3a9a2cba8d74ffe824adc20c8f520f9338cf480803ff5e7c7736d91598",
+      "sourceType": "module"
+    },
+    {
+      "path": "modules/Effect__serviceOption.js",
+      "sha256": "5f2e4d1f88cbe6842a303b025619aeab2199c20733e85752e4298bc6f75afc2c",
+      "sourceType": "module"
+    },
+    {
+      "path": "modules/Effect__serviceOptional.js",
+      "sha256": "0397eb973b81cbf3a4fe88df14bd1f7622128bf0eab5e1b01124f3d0c9eebbe9",
       "sourceType": "module"
     },
     {
@@ -4677,6 +4735,11 @@
       "sourceType": "module"
     },
     {
+      "path": "modules/Layer__provideMerge.js",
+      "sha256": "12c1ee5dfb84a5c8c13f59aa2c67b773394e6b4cc42679d1927a76a8141d4ca0",
+      "sourceType": "module"
+    },
+    {
       "path": "modules/Layer__succeed.js",
       "sha256": "3fda9ce114c8e11f66052fe7934578f07fd21e687aa127b25c5a09b4662c7fae",
       "sourceType": "module"
@@ -4798,7 +4861,7 @@
     },
     {
       "path": "modules/public/Effect.js",
-      "sha256": "566c767e9d7744645583b99024ee09f381946d0fd7a23856b0a6aeb683dcff9f",
+      "sha256": "3a3ae57755fe2e5429f5d63f100e9ec33e1f36b820b9ee8785a53044cf5db431",
       "sourceType": "module"
     },
     {
@@ -4838,7 +4901,7 @@
     },
     {
       "path": "modules/public/Layer.js",
-      "sha256": "fd34b961405bea1f50f20573690e16a88617eccb4144a85c8749bf887e469325",
+      "sha256": "8c37e4051305e0b316f2ed676a7f0b83c8a86f46c8d9f1ffcedafa3016c8e1a8",
       "sourceType": "module"
     },
     {
@@ -4868,7 +4931,7 @@
     },
     {
       "path": "modules/public/Stream.js",
-      "sha256": "74afbe5082540574446749efa36e59a83d76408457b71328e8664508702b2cd4",
+      "sha256": "f888d79a6d650e9710011f62613a8a85b58a6d97afefc0ef35c739b7ebcc7fff",
       "sourceType": "module"
     },
     {
@@ -4942,6 +5005,11 @@
       "sourceType": "module"
     },
     {
+      "path": "modules/Stream__acquireRelease.js",
+      "sha256": "1f90a1d10cce89fe56925c86fc7846b78966a5476da47689a4bd032fa438bc18",
+      "sourceType": "module"
+    },
+    {
       "path": "modules/Stream__asyncScoped.js",
       "sha256": "a145ebbe1827e59f1c25cb54b609fb9aa9e41b6f443444758b4c9050626d9c8e",
       "sourceType": "module"
@@ -4979,6 +5047,16 @@
     {
       "path": "modules/Stream__runForEach.js",
       "sha256": "dee2507ecc7dfb46e5f76e1a8a4b17c6335e792bf290b096c78963220b5da6c8",
+      "sourceType": "module"
+    },
+    {
+      "path": "modules/Stream__scoped.js",
+      "sha256": "23561ccf6927bd8d62b0ba75324a6276dd0a1fe7347c59084c781fa58d1fca8b",
+      "sourceType": "module"
+    },
+    {
+      "path": "modules/Stream__scopedWith.js",
+      "sha256": "2a7b9380b7ae980e5e994917157ff3229655855a03cf58d0701a76db4993b9d4",
       "sourceType": "module"
     },
     {

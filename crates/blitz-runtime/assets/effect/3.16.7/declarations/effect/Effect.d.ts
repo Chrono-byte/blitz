@@ -5,9 +5,10 @@ import type * as Exit from "effect/Exit";
 import type * as Fiber from "effect/Fiber";
 import type * as FiberId from "effect/FiberId";
 import type * as HashSet from "effect/HashSet";
+import type * as Option from "effect/Option";
 import type * as Scope from "effect/Scope";
 
-export interface Effect<Success, Error = never, Requirements = never> {
+export interface Effect<out Success, out Error = never, out Requirements = never> {
   readonly _Success: (_: never) => Success;
   readonly _Error: (_: never) => Error;
   readonly _Requirements: (_: never) => Requirements;
@@ -101,7 +102,20 @@ interface Cancel<Success, Error = never> {
 }
 export declare const runCallback: <Success, Error>(effect: Effect<Success, Error>, options?: RunCallbackOptions<Success, Error>) => Cancel<Success, Error>;
 
-export declare const all: <Success, Error, Requirements>(effects: Iterable<Effect<Success, Error, Requirements>>) => Effect<ReadonlyArray<Success>, Error, Requirements>;
+type SuccessOf<EffectValue> = EffectValue extends Effect<infer Success, infer _Error, infer _Requirements> ? Success : never;
+type ErrorOf<EffectValue> = EffectValue extends Effect<infer _Success, infer Error, infer _Requirements> ? Error : never;
+type RequirementsOf<EffectValue> = EffectValue extends Effect<infer _Success, infer _Error, infer Requirements> ? Requirements : never;
+type EffectCollection = Iterable<Effect<unknown, unknown, unknown>>;
+
+export declare const all: <const Effects extends EffectCollection>(effects: Effects) => Effect<
+  [Effects] extends [ReadonlyArray<infer Item>]
+    ? number extends Effects["length"]
+      ? Array<SuccessOf<Item>>
+      : { -readonly [Key in keyof Effects]: SuccessOf<Effects[Key]> }
+    : Array<SuccessOf<Effects extends Iterable<infer Item> ? Item : never>>,
+  ErrorOf<Effects extends Iterable<infer Item> ? Item : never>,
+  RequirementsOf<Effects extends Iterable<infer Item> ? Item : never>
+>;
 export declare const matchEffect: {
   <Error, Output, Error2, Requirements2, Success, Output2, Error3, Requirements3>(options: { readonly onFailure: (error: Error) => Effect<Output, Error2, Requirements2>; readonly onSuccess: (value: Success) => Effect<Output2, Error3, Requirements3> }): <Requirements>(self: Effect<Success, Error, Requirements>) => Effect<Output | Output2, Error2 | Error3, Requirements | Requirements2 | Requirements3>;
   <Success, Error, Requirements, Output, Error2, Requirements2, Output2, Error3, Requirements3>(effect: Effect<Success, Error, Requirements>, options: { readonly onFailure: (error: Error) => Effect<Output, Error2, Requirements2>; readonly onSuccess: (value: Success) => Effect<Output2, Error3, Requirements3> }): Effect<Output | Output2, Error2 | Error3, Requirements | Requirements2 | Requirements3>;
@@ -126,3 +140,5 @@ export declare const provideServiceEffect: {
 export declare const contextWith: <Requirements, Success>(f: (context: Context.Context<Requirements>) => Success) => Effect<Success, never, Requirements>;
 export declare const contextWithEffect: <ContextRequirements, Success, Error, Requirements>(f: (context: Context.Context<ContextRequirements>) => Effect<Success, Error, Requirements>) => Effect<Success, Error, ContextRequirements | Requirements>;
 export declare const serviceFunctionEffect: <Identifier, Service, Arguments extends ReadonlyArray<unknown>, Success, Error, Requirements>(tag: Context.Tag<Identifier, Service>, f: (service: Service) => (...arguments_: Arguments) => Effect<Success, Error, Requirements>) => (...arguments_: Arguments) => Effect<Success, Error, Requirements | Identifier>;
+export declare const serviceOption: <Identifier, Service>(tag: Context.Tag<Identifier, Service>) => Effect<Option.Option<Service>>;
+export declare const serviceOptional: <Identifier, Service>(tag: Context.Tag<Identifier, Service>) => Effect<Service, Cause.NoSuchElementException>;

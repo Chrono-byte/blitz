@@ -11,6 +11,12 @@ const manifest = JSON.parse(readFileSync(join(ASSETS, "manifest.json"), "utf8"))
 const entries = new Map(manifest.entries.map(entry => [entry.specifier, entry]));
 const assert = (condition: unknown, message: string) => { if (!condition) throw new Error(message); };
 const canonicalImports = (source: string) => [...source.matchAll(/(?:from|import)\s*["'](blitz-internal:effect\/[^"']+)["']/g)].map(match => match[1]);
+const requiredExports = new Map<string, readonly string[]>([
+  ["effect/Effect", ["acquireRelease", "serviceFunctionEffect", "serviceOption", "serviceOptional"]],
+  ["effect/Fiber", ["await", "interrupt", "join"]],
+  ["effect/Layer", ["mergeAll", "provide", "provideMerge"]],
+  ["effect/Stream", ["acquireRelease", "asyncScoped", "runCollect", "scoped", "scopedWith"]],
+]);
 
 assert(manifest.package.version === "3.16.7", "the generated package version must be exact");
 for (const specifier of supported) {
@@ -19,6 +25,16 @@ for (const specifier of supported) {
   const source = readFileSync(join(ASSETS, entry.source.path), "utf8");
   assert(source.includes("blitz-internal:effect/") || (specifier === "effect" && source.includes("effect/Effect")), `${specifier} is not a canonical alias`);
   assert(entry.declaration !== undefined, `${specifier} has no curated declaration`);
+  if (entry.declaration !== undefined) {
+    const declaration = readFileSync(join(ASSETS, entry.declaration.path), "utf8");
+    assert(!/\bany\b/.test(declaration), `${specifier} declaration must not fall back to any`);
+    for (const exportName of requiredExports.get(specifier) ?? []) {
+      assert(
+        source.includes(`{ ${exportName} }`) || source.includes(`{ ${exportName} as ${exportName} }`),
+        `${specifier} is missing runtime export ${exportName}`,
+      );
+    }
+  }
 }
 assert(entries.size > supported.length, "the supported aliases must point at generated internal modules");
 for (const entry of manifest.entries.filter(entry => entry.specifier.startsWith("blitz-internal:effect/"))) {

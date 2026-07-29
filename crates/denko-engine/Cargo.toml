@@ -47,6 +47,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+chumsky = "0.11.1"
 
 [dev-dependencies]
 criterion.workspace = true

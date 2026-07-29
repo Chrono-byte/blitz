@@ -33,6 +33,8 @@ export { runSync } from 'blitz-internal:effect/Effect__runSync.js';
 export { runSyncExit } from 'blitz-internal:effect/Effect__runSyncExit.js';
 export { scoped } from 'blitz-internal:effect/Effect__scoped.js';
 export { serviceFunctionEffect } from 'blitz-internal:effect/Effect__serviceFunctionEffect.js';
+export { serviceOption } from 'blitz-internal:effect/Effect__serviceOption.js';
+export { serviceOptional } from 'blitz-internal:effect/Effect__serviceOptional.js';
 export { sleep } from 'blitz-internal:effect/Effect__sleep.js';
 export { succeed } from 'blitz-internal:effect/Effect__succeed.js';
 export { suspend } from 'blitz-internal:effect/Effect__suspend.js';

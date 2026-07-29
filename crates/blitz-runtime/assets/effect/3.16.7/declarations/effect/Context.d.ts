@@ -8,7 +8,7 @@ interface Pipeable<Self> {
   };
 }
 
-export interface Tag<Id, Service> extends Pipeable<Tag<Id, Service>> {
+export interface Tag<in out Id, in out Service> extends Pipeable<Tag<Id, Service>> {
   readonly key: string;
   readonly _Service: (_: Service) => Service;
   readonly _Identifier: (_: Id) => Id;
@@ -16,7 +16,7 @@ export interface Tag<Id, Service> extends Pipeable<Tag<Id, Service>> {
   context(self: Service): Context<Id>;
 }
 
-export interface Context<Services> extends Pipeable<Context<Services>> {
+export interface Context<in Services> extends Pipeable<Context<Services>> {
   readonly _Services: (_: Services) => void;
 }
 
