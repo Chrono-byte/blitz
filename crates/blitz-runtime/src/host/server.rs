@@ -17,6 +17,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::watch;
 
 use crate::host::event_loop::{OperationId, OperationRegistry, ResourceHandle, ResourceRegistry};
+use crate::host::{host_constructor, host_function};
 use crate::net::http::{HttpRequestEvent, HttpResponse, HttpServer};
 use crate::net::websocket::{
   WebSocketCommand, WebSocketEvent, WebSocketServerOptions, connect_client,
@@ -598,14 +599,20 @@ pub(super) fn install(
   state.0.borrow_mut().websocket_prototype = Some(websocket_prototype.clone());
   if install_compatibility_globals {
     let blitz = object(vm.realm().object_prototype());
-    set(&blitz, "serve", Value::Builtin(serve_method(state.clone())));
+    set(
+      &blitz,
+      "serve",
+      host_function(vm, "serve", 1, serve_method(state.clone())),
+    );
     set(
       &blitz,
       "upgradeWebSocket",
-      Value::Builtin(upgrade_websocket_method(
-        state.clone(),
-        websocket_prototype.clone(),
-      )),
+      host_function(
+        vm,
+        "upgradeWebSocket",
+        1,
+        upgrade_websocket_method(state.clone(), websocket_prototype.clone()),
+      ),
     );
     vm.realm().set_global("Blitz", blitz);
   }
@@ -700,7 +707,11 @@ fn server_handle(
     shutdown_state.close(vm, generation, &shutdown_finished)?;
     Ok(shutdown_finished.clone())
   });
-  set(&handle, "shutdown", Value::Builtin(shutdown));
+  set(
+    &handle,
+    "shutdown",
+    host_function(vm, "shutdown", 0, shutdown),
+  );
 
   let reference_state = state.clone();
   let reference: BuiltinFn = Rc::new(move |_vm, _args| {
@@ -712,7 +723,7 @@ fn server_handle(
     }
     Ok(Value::Undefined)
   });
-  set(&handle, "ref", Value::Builtin(reference));
+  set(&handle, "ref", host_function(vm, "ref", 0, reference));
 
   let unreference: BuiltinFn = Rc::new(move |_vm, _args| {
     let inner = state.0.borrow();
@@ -723,7 +734,7 @@ fn server_handle(
     }
     Ok(Value::Undefined)
   });
-  set(&handle, "unref", Value::Builtin(unreference));
+  set(&handle, "unref", host_function(vm, "unref", 0, unreference));
   handle
 }
 
@@ -759,7 +770,7 @@ pub(super) fn upgrade_websocket_method(
       .to_string(&url)?
       .to_string_lossy()
       .replacen("http://", "ws://", 1);
-    let socket = websocket_object(state.clone(), id, &url, prototype.clone());
+    let socket = websocket_object(vm, state.clone(), id, &url, prototype.clone());
     let object_root = vm.create_host_root(socket.clone());
     state.0.borrow_mut().websockets.insert(
       id,
@@ -869,14 +880,15 @@ fn request_object(
   let body = String::from_utf8_lossy(&event.body).into_owned();
   let text: BuiltinFn =
     Rc::new(move |_vm, _args| Ok(resolved_promise(Value::String(body.clone().into()))));
-  set(&request, "text", Value::Builtin(text));
+  set(&request, "text", host_function(vm, "text", 0, text));
   let body = String::from_utf8_lossy(&event.body).into_owned();
   let json: BuiltinFn = Rc::new(move |vm, _args| Ok(json_promise(vm, &body)));
-  set(&request, "json", Value::Builtin(json));
+  set(&request, "json", host_function(vm, "json", 0, json));
   request
 }
 
 fn websocket_object(
+  vm: &Vm,
   state: ServerState,
   connection_id: u64,
   url: &str,
@@ -925,7 +937,7 @@ fn websocket_object(
     send_websocket_command(&send_state, connection_id, command)?;
     Ok(Value::Undefined)
   });
-  set(&socket, "send", Value::Builtin(send));
+  set(&socket, "send", host_function(vm, "send", 1, send));
 
   let close_state = state.clone();
   let close: BuiltinFn = Rc::new(move |vm, args| {
@@ -968,7 +980,7 @@ fn websocket_object(
     }
     Ok(Value::Undefined)
   });
-  set(&socket, "close", Value::Builtin(close));
+  set(&socket, "close", host_function(vm, "close", 0, close));
 
   let listener_state = state.clone();
   let add_listener: BuiltinFn = Rc::new(move |vm, args| {
@@ -998,7 +1010,11 @@ fn websocket_object(
     }
     Ok(Value::Undefined)
   });
-  set(&socket, "addEventListener", Value::Builtin(add_listener));
+  set(
+    &socket,
+    "addEventListener",
+    host_function(vm, "addEventListener", 2, add_listener),
+  );
 
   let listener_state = state;
   let remove_listener: BuiltinFn = Rc::new(move |vm, args| {
@@ -1037,7 +1053,7 @@ fn websocket_object(
   set(
     &socket,
     "removeEventListener",
-    Value::Builtin(remove_listener),
+    host_function(vm, "removeEventListener", 2, remove_listener),
   );
   socket
 }
@@ -1210,7 +1226,7 @@ fn headers_object(
         .map_or(Value::Null, |value| Value::String(value.clone().into())),
     )
   });
-  set(&headers, "get", Value::Builtin(get));
+  set(&headers, "get", host_function(vm, "get", 1, get));
 
   let has_values = Rc::clone(&values);
   let has: BuiltinFn = Rc::new(move |vm, args| {
@@ -1223,7 +1239,7 @@ fn headers_object(
       .to_ascii_lowercase();
     Ok(Value::Bool(has_values.borrow().contains_key(&name)))
   });
-  set(&headers, "has", Value::Builtin(has));
+  set(&headers, "has", host_function(vm, "has", 1, has));
 
   let set_values = Rc::clone(&values);
   let set_header: BuiltinFn = Rc::new(move |vm, args| {
@@ -1246,7 +1262,7 @@ fn headers_object(
     }
     Ok(Value::Undefined)
   });
-  set(&headers, "set", Value::Builtin(set_header));
+  set(&headers, "set", host_function(vm, "set", 2, set_header));
 
   let append_values = Rc::clone(&values);
   let append: BuiltinFn = Rc::new(move |vm, args| {
@@ -1275,7 +1291,7 @@ fn headers_object(
     }
     Ok(Value::Undefined)
   });
-  set(&headers, "append", Value::Builtin(append));
+  set(&headers, "append", host_function(vm, "append", 2, append));
 
   let delete_values = Rc::clone(&values);
   let delete: BuiltinFn = Rc::new(move |vm, args| {
@@ -1295,7 +1311,7 @@ fn headers_object(
     }
     Ok(Value::Undefined)
   });
-  set(&headers, "delete", Value::Builtin(delete));
+  set(&headers, "delete", host_function(vm, "delete", 1, delete));
 
   let for_each_values = values;
   let for_each: BuiltinFn = Rc::new(move |vm, args| {
@@ -1321,7 +1337,11 @@ fn headers_object(
     }
     Ok(Value::Undefined)
   });
-  set(&headers, "forEach", Value::Builtin(for_each));
+  set(
+    &headers,
+    "forEach",
+    host_function(vm, "forEach", 1, for_each),
+  );
   headers
 }
 
@@ -1433,6 +1453,7 @@ fn install_websocket_constructor(
       (connection_id, inner.websocket_events.clone())
     };
     let socket = websocket_object(
+      vm,
       constructor_state.clone(),
       connection_id,
       &url,
@@ -1464,9 +1485,10 @@ fn install_websocket_constructor(
     ));
     Ok(socket)
   });
-  let props = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
-    vm.realm().function_prototype(),
-  ))));
+  let value = host_constructor(vm, "WebSocket", 1, prototype, constructor);
+  let Value::BuiltinObject(_, props) = &value else {
+    unreachable!("host constructors are builtin objects");
+  };
   for (name, value) in [
     ("CONNECTING", 0.0),
     ("OPEN", 1.0),
@@ -1478,12 +1500,7 @@ fn install_websocket_constructor(
       PropertyDescriptor::ordinary_data(Value::Number(value)),
     );
   }
-  props.borrow_mut().properties.insert(
-    PropertyKey::String("prototype".to_string().into()),
-    PropertyDescriptor::ordinary_data(prototype),
-  );
-  vm.realm()
-    .set_global("WebSocket", Value::BuiltinObject(constructor, props));
+  vm.realm().set_global("WebSocket", value);
 }
 
 fn install_response_constructor(vm: &mut Vm) {
@@ -1545,25 +1562,18 @@ fn install_response_constructor(vm: &mut Vm) {
     set(&response, "bodyUsed", Value::Bool(false));
     let text: BuiltinFn =
       Rc::new(move |_vm, _args| Ok(resolved_promise(Value::String(body.clone().into()))));
-    set(&response, "text", Value::Builtin(text));
+    set(&response, "text", host_function(vm, "text", 0, text));
     let json_body =
       match vm.get_property_host(&response, &PropertyKey::String("body".to_string().into()))? {
         Value::String(body) => body,
         _ => String::new().into(),
       };
     let json: BuiltinFn = Rc::new(move |vm, _args| Ok(json_promise(vm, json_body.as_str_lossy())));
-    set(&response, "json", Value::Builtin(json));
+    set(&response, "json", host_function(vm, "json", 0, json));
     Ok(response)
   });
-  let props = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
-    vm.realm().function_prototype(),
-  ))));
-  props.borrow_mut().properties.insert(
-    PropertyKey::String("prototype".to_string().into()),
-    PropertyDescriptor::ordinary_data(prototype),
-  );
-  vm.realm()
-    .set_global("Response", Value::BuiltinObject(constructor, props));
+  let constructor = host_constructor(vm, "Response", 0, prototype, constructor);
+  vm.realm().set_global("Response", constructor);
 }
 
 fn install_headers_constructor(vm: &mut Vm) {
@@ -1575,15 +1585,8 @@ fn install_headers_constructor(vm: &mut Vm) {
     };
     Ok(headers_object(vm, &entries))
   });
-  let props = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
-    vm.realm().function_prototype(),
-  ))));
-  props.borrow_mut().properties.insert(
-    PropertyKey::String("prototype".to_string().into()),
-    PropertyDescriptor::ordinary_data(prototype),
-  );
-  vm.realm()
-    .set_global("Headers", Value::BuiltinObject(constructor, props));
+  let constructor = host_constructor(vm, "Headers", 0, prototype, constructor);
+  vm.realm().set_global("Headers", constructor);
 }
 
 fn extract_header_entries(

@@ -2,6 +2,7 @@
 name = "effect-bytecode"
 version.workspace = true
 edition.workspace = true
+publish = false
 description = "Deterministic Effect and Blitz runtime graph precompiler"
 
 [[bin]]

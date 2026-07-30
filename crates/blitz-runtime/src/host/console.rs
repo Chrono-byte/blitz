@@ -12,6 +12,8 @@ use denko::gc;
 use denko::inspect::{InspectOptions, inspect_with_options};
 use denko::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
+use super::host_function;
+
 #[derive(Default)]
 struct ConsoleState {
   counts: HashMap<String, u64>,
@@ -27,53 +29,71 @@ pub(super) fn install(vm: &mut Vm) {
 
   for name in ["log", "info", "debug", "dir", "dirxml", "table"] {
     set_method(
+      vm,
       &console,
       name,
       output_method(Rc::clone(&state), false, None),
     );
   }
   set_method(
+    vm,
     &console,
     "warn",
     output_method(Rc::clone(&state), true, None),
   );
   set_method(
+    vm,
     &console,
     "error",
     output_method(Rc::clone(&state), true, None),
   );
   set_method(
+    vm,
     &console,
     "trace",
     output_method(Rc::clone(&state), true, Some("Trace:")),
   );
-  set_method(&console, "assert", assert_method(Rc::clone(&state)));
-  set_method(&console, "count", count_method(Rc::clone(&state)));
+  set_method(vm, &console, "assert", assert_method(Rc::clone(&state)));
+  set_method(vm, &console, "count", count_method(Rc::clone(&state)));
   set_method(
+    vm,
     &console,
     "countReset",
     count_reset_method(Rc::clone(&state)),
   );
-  set_method(&console, "time", time_method(Rc::clone(&state)));
+  set_method(vm, &console, "time", time_method(Rc::clone(&state)));
   set_method(
+    vm,
     &console,
     "timeLog",
     time_log_method(Rc::clone(&state), false),
   );
   set_method(
+    vm,
     &console,
     "timeEnd",
     time_log_method(Rc::clone(&state), true),
   );
-  set_method(&console, "group", group_method(Rc::clone(&state)));
-  set_method(&console, "groupCollapsed", group_method(Rc::clone(&state)));
-  set_method(&console, "groupEnd", group_end_method(Rc::clone(&state)));
-  set_method(&console, "clear", clear_method());
+  set_method(vm, &console, "group", group_method(Rc::clone(&state)));
+  set_method(
+    vm,
+    &console,
+    "groupCollapsed",
+    group_method(Rc::clone(&state)),
+  );
+  set_method(
+    vm,
+    &console,
+    "groupEnd",
+    group_end_method(Rc::clone(&state)),
+  );
+  set_method(vm, &console, "clear", clear_method());
 
   vm.realm().set_global("console", console);
 }
 
 fn set_method(
+  vm: &Vm,
   console: &Value,
   name: &str,
   function: BuiltinFn,
@@ -83,7 +103,7 @@ fn set_method(
   };
   properties.borrow_mut().properties.insert(
     PropertyKey::String(name.to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Builtin(function)),
+    PropertyDescriptor::ordinary_data(host_function(vm, name, 0, function)),
   );
 }
 

@@ -9,7 +9,7 @@ use denko::errors::RuntimeError;
 use denko::gc;
 use denko::value::{ObjectData, PropertyDescriptor, PropertyKey, Value};
 
-use super::RuntimeOptions;
+use super::{RuntimeOptions, host_function};
 
 pub(super) fn install(
   vm: &mut Vm,
@@ -63,11 +63,16 @@ pub(super) fn install(
   set(
     &process,
     "cwd",
-    Value::Builtin(Rc::new(|_vm, _args| {
-      std::env::current_dir()
-        .map(|path| Value::String(path.to_string_lossy().into_owned().into()))
-        .map_err(|error| RuntimeError::from(format!("Failed to get current directory: {error}")))
-    })),
+    host_function(
+      vm,
+      "cwd",
+      0,
+      Rc::new(|_vm, _args| {
+        std::env::current_dir()
+          .map(|path| Value::String(path.to_string_lossy().into_owned().into()))
+          .map_err(|error| RuntimeError::from(format!("Failed to get current directory: {error}")))
+      }),
+    ),
   );
 
   vm.realm().set_global("process", process);

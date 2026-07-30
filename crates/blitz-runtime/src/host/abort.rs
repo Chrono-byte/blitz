@@ -13,6 +13,8 @@ use denko::errors::RuntimeError;
 use denko::gc;
 use denko::value::{ArrayData, BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
+use super::{host_constructor, host_function};
+
 const ABORTED: &str = "aborted";
 const REASON: &str = "reason";
 const SIGNAL: &str = "signal";
@@ -26,7 +28,7 @@ pub fn install(vm: &mut Vm) {
   let controller_prototype = object(object_prototype);
 
   install_signal_methods(vm, &signal_prototype);
-  install_controller_method(&controller_prototype);
+  install_controller_method(vm, &controller_prototype);
 
   let signal_constructor = make_signal_constructor(vm, signal_prototype);
   let controller_constructor =
@@ -47,9 +49,6 @@ fn make_signal_constructor(
   vm: &Vm,
   signal_prototype: Value,
 ) -> Value {
-  let constructor_properties = object(vm.realm().function_prototype());
-  let constructor_map = object_data(&constructor_properties);
-  let constructor_map_value = Value::Object(Rc::clone(&constructor_map));
   let prototype = signal_prototype.clone();
   let constructor_prototype = prototype.clone();
   let constructor: BuiltinFn = Rc::new(move |vm, args| {
@@ -64,14 +63,11 @@ fn make_signal_constructor(
       .unwrap_or_else(default_reason);
     Ok(make_signal(constructor_prototype.clone(), true, reason))
   });
-  let value = Value::BuiltinObject(constructor, Rc::clone(&constructor_map));
-  put(&constructor_map_value, "prototype", signal_prototype);
-  put(
-    &constructor_map_value,
-    "name",
-    Value::String("AbortSignal".to_string().into()),
-  );
-  put(&constructor_map_value, "length", Value::Number(0.0));
+  let value = host_constructor(vm, "AbortSignal", 0, signal_prototype, constructor);
+  let Value::BuiltinObject(_, constructor_map) = &value else {
+    unreachable!("host constructors are builtin objects");
+  };
+  let constructor_map_value = Value::Object(Rc::clone(constructor_map));
 
   let static_abort = Rc::new({
     move |vm: &mut Vm, args: &[Value]| {
@@ -86,7 +82,7 @@ fn make_signal_constructor(
   put(
     &constructor_map_value,
     "abort",
-    Value::Builtin(static_abort),
+    host_function(vm, "abort", 0, static_abort),
   );
   value
 }
@@ -96,9 +92,6 @@ fn make_controller_constructor(
   controller_prototype: Value,
   signal_constructor: Value,
 ) -> Value {
-  let constructor_properties = object(vm.realm().function_prototype());
-  let constructor_map = object_data(&constructor_properties);
-  let constructor_map_value = Value::Object(Rc::clone(&constructor_map));
   let signal_prototype = get_property(&signal_constructor, "prototype");
   let controller_instance_prototype = controller_prototype.clone();
   let constructor: BuiltinFn = Rc::new(move |vm, _args| {
@@ -112,19 +105,11 @@ fn make_controller_constructor(
     put(&controller, SIGNAL, signal);
     Ok(controller)
   });
-  let value = Value::BuiltinObject(constructor, Rc::clone(&constructor_map));
-  put(&constructor_map_value, "prototype", controller_prototype);
-  put(
-    &constructor_map_value,
-    "name",
-    Value::String("AbortController".to_string().into()),
-  );
-  put(&constructor_map_value, "length", Value::Number(0.0));
-  value
+  host_constructor(vm, "AbortController", 0, controller_prototype, constructor)
 }
 
 fn install_signal_methods(
-  _vm: &Vm,
+  vm: &Vm,
   prototype: &Value,
 ) {
   let proto = object_data(prototype);
@@ -132,34 +117,37 @@ fn install_signal_methods(
   put(
     &proto_value,
     "addEventListener",
-    Value::Builtin(Rc::new(add_event_listener)),
+    host_function(vm, "addEventListener", 2, Rc::new(add_event_listener)),
   );
   put(
     &proto_value,
     "removeEventListener",
-    Value::Builtin(Rc::new(remove_event_listener)),
+    host_function(vm, "removeEventListener", 2, Rc::new(remove_event_listener)),
   );
   put(
     &proto_value,
     "dispatchEvent",
-    Value::Builtin(Rc::new(dispatch_event)),
+    host_function(vm, "dispatchEvent", 1, Rc::new(dispatch_event)),
   );
   put(
     &proto_value,
     "throwIfAborted",
-    Value::Builtin(Rc::new(throw_if_aborted)),
+    host_function(vm, "throwIfAborted", 0, Rc::new(throw_if_aborted)),
   );
   put(&proto_value, "onabort", Value::Undefined);
   put(&proto_value, "constructor", prototype.clone());
 }
 
-fn install_controller_method(prototype: &Value) {
+fn install_controller_method(
+  vm: &Vm,
+  prototype: &Value,
+) {
   let proto = object_data(prototype);
   let proto_value = Value::Object(Rc::clone(&proto));
   put(
     &proto_value,
     "abort",
-    Value::Builtin(Rc::new(abort_controller)),
+    host_function(vm, "abort", 0, Rc::new(abort_controller)),
   );
 }
 

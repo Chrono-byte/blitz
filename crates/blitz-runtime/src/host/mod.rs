@@ -685,15 +685,17 @@ fn install_scheduler(
   install_global_function(
     vm,
     "setTimeout",
+    1,
     timer_set_method(state.clone(), TimerKind::Timeout),
   );
   install_global_function(
     vm,
     "setInterval",
+    1,
     timer_set_method(state.clone(), TimerKind::Interval),
   );
-  install_global_function(vm, "clearTimeout", timer_clear_method(state.clone()));
-  install_global_function(vm, "clearInterval", timer_clear_method(state.clone()));
+  install_global_function(vm, "clearTimeout", 1, timer_clear_method(state.clone()));
+  install_global_function(vm, "clearInterval", 1, timer_clear_method(state.clone()));
 
   let performance = object(vm.realm().object_prototype());
   let now_state = state.clone();
@@ -702,7 +704,7 @@ fn install_scheduler(
       now_state.scheduler.borrow().clock().now_millis(),
     ))
   });
-  set(&performance, "now", Value::Builtin(now));
+  set(&performance, "now", host_function(vm, "now", 0, now));
   vm.realm()
     .global()
     .borrow_mut()
@@ -722,6 +724,7 @@ fn install_scheduler(
 fn install_global_function(
   vm: &Vm,
   name: &str,
+  length: u32,
   function: BuiltinFn,
 ) {
   vm.realm()
@@ -731,7 +734,7 @@ fn install_global_function(
     .insert(
       PropertyKey::String(name.to_string().into()),
       PropertyDescriptor::Data {
-        value: Value::Builtin(function),
+        value: host_function(vm, name, length, function),
         writable: true,
         enumerable: false,
         configurable: true,
@@ -1567,6 +1570,50 @@ fn object(prototype: Value) -> Value {
   ))))
 }
 
+/// Build a public host callable with ordinary function metadata.
+///
+/// Bare `Value::Builtin` values are reserved for VM-internal callbacks whose
+/// properties are not observable by application code.
+pub(super) fn host_function(
+  vm: &Vm,
+  name: &str,
+  length: u32,
+  function: BuiltinFn,
+) -> Value {
+  let properties = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
+    vm.realm().function_prototype(),
+  ))));
+  {
+    let mut properties = properties.borrow_mut();
+    properties.properties.insert(
+      PropertyKey::String("name".to_string().into()),
+      PropertyDescriptor::builtin_metadata(Value::String(name.to_string().into())),
+    );
+    properties.properties.insert(
+      PropertyKey::String("length".to_string().into()),
+      PropertyDescriptor::builtin_metadata(Value::Number(f64::from(length))),
+    );
+  }
+  Value::BuiltinObject(function, properties)
+}
+
+pub(super) fn host_constructor(
+  vm: &Vm,
+  name: &str,
+  length: u32,
+  prototype: Value,
+  function: BuiltinFn,
+) -> Value {
+  let value = host_function(vm, name, length, function);
+  if let Value::BuiltinObject(_, properties) = &value {
+    properties.borrow_mut().properties.insert(
+      PropertyKey::String("prototype".to_string().into()),
+      PropertyDescriptor::ordinary_data(prototype),
+    );
+  }
+  value
+}
+
 fn set(
   target: &Value,
   name: &str,
@@ -1991,6 +2038,81 @@ mod tests {
         .properties
         .contains_key(&PropertyKey::String("__blitz_host_v1".to_string().into()))
     );
+  }
+
+  #[test]
+  fn public_host_callables_have_function_metadata() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let _runtime = install_runtime(
+      &mut vm,
+      RuntimeOptions {
+        argv: vec!["blitz-test".to_string()],
+        env: BTreeMap::new(),
+        exec_path: "blitz-test".to_string(),
+        listen_addr: "127.0.0.1:0"
+          .parse()
+          .expect("test listen address"),
+        install_compatibility_globals: true,
+        node_compat: NodeCompatProfile::Core,
+        conditions: Vec::new(),
+      },
+    );
+    let source = denko::js!(
+      r#"
+      const functions = [
+        [Response, "Response", 0],
+        [Headers, "Headers", 0],
+        [WebSocket, "WebSocket", 1],
+        [URL, "URL", 1],
+        [AbortSignal, "AbortSignal", 0],
+        [AbortSignal.abort, "abort", 0],
+        [AbortController, "AbortController", 0],
+        [AbortController.prototype.abort, "abort", 0],
+        [setTimeout, "setTimeout", 1],
+        [setInterval, "setInterval", 1],
+        [clearTimeout, "clearTimeout", 1],
+        [clearInterval, "clearInterval", 1],
+        [performance.now, "now", 0],
+        [process.cwd, "cwd", 0],
+        [Blitz.serve, "serve", 1],
+        [Blitz.upgradeWebSocket, "upgradeWebSocket", 1],
+        [Blitz.stdin.onLine, "onLine", 1],
+        [Blitz.stdin.onClose, "onClose", 1],
+        [Blitz.stdin.setPrompt, "setPrompt", 1],
+        [Blitz.stdin.close, "close", 0],
+        [Blitz.stdout.write, "write", 1],
+        [Blitz.stdout.writeLine, "writeLine", 1]
+      ];
+      const consoleNames = [
+        "log", "info", "debug", "dir", "dirxml", "table", "warn", "error",
+        "trace", "assert", "count", "countReset", "time", "timeLog",
+        "timeEnd", "group", "groupCollapsed", "groupEnd", "clear"
+      ];
+      globalThis.hostFunctionMetadataOk =
+        functions.every(([fn, name, length]) =>
+          fn.name === name &&
+          fn.length === length &&
+          Object.getPrototypeOf(fn) === Function.prototype
+        ) &&
+        consoleNames.every((name) =>
+          console[name].name === name &&
+          console[name].length === 0 &&
+          Object.getPrototypeOf(console[name]) === Function.prototype
+        );
+    "#
+    );
+    let session = JsParser::parse_source(source).expect("parse host metadata script");
+    let chunk = compiler::compile_oxc(session.program(), source).expect("compile metadata script");
+    vm.run(chunk)
+      .expect("evaluate host metadata script");
+
+    assert_eq!(
+      vm.get_global("hostFunctionMetadataOk"),
+      Some(Value::Bool(true))
+    );
+    let global = vm.get_global("global").expect("global alias");
+    assert!(!denko::inspect::inspect(&global).contains("[Native Function]"));
   }
 
   #[test]

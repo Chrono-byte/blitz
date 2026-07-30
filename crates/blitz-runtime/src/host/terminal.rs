@@ -13,6 +13,8 @@ use denko::{HostRoot, Vm};
 use rustyline::{DefaultEditor, ExternalPrinter};
 use tokio::sync::mpsc;
 
+use super::host_function;
+
 /// Owned input emitted by the dedicated line-editor thread.
 pub(super) enum TerminalEvent {
   Line(String),
@@ -180,7 +182,7 @@ pub(super) fn install(
     start_input(&line_state);
     Ok(Value::Undefined)
   });
-  set(&stdin, "onLine", Value::Builtin(on_line));
+  set(&stdin, "onLine", host_function(vm, "onLine", 1, on_line));
 
   let close_state = state.clone();
   let on_close: BuiltinFn = Rc::new(move |vm, args| {
@@ -196,7 +198,7 @@ pub(super) fn install(
     vm.set_host_root(close_state.0.borrow().close_callback, callback)?;
     Ok(Value::Undefined)
   });
-  set(&stdin, "onClose", Value::Builtin(on_close));
+  set(&stdin, "onClose", host_function(vm, "onClose", 1, on_close));
 
   let prompt_state = state.clone();
   let set_prompt: BuiltinFn = Rc::new(move |vm, args| {
@@ -212,14 +214,18 @@ pub(super) fn install(
     }
     Ok(Value::Undefined)
   });
-  set(&stdin, "setPrompt", Value::Builtin(set_prompt));
+  set(
+    &stdin,
+    "setPrompt",
+    host_function(vm, "setPrompt", 1, set_prompt),
+  );
 
   let stop_state = state.clone();
   let close: BuiltinFn = Rc::new(move |_vm, _args| {
     stop_state.0.borrow_mut().active = false;
     Ok(Value::Undefined)
   });
-  set(&stdin, "close", Value::Builtin(close));
+  set(&stdin, "close", host_function(vm, "close", 0, close));
 
   let output_state = state.clone();
   let write_line: BuiltinFn = Rc::new(move |vm, args| {
@@ -233,8 +239,16 @@ pub(super) fn install(
     print_external(&output_state, message);
     Ok(Value::Undefined)
   });
-  set(&stdout, "write", Value::Builtin(Rc::clone(&write_line)));
-  set(&stdout, "writeLine", Value::Builtin(write_line));
+  set(
+    &stdout,
+    "write",
+    host_function(vm, "write", 1, Rc::clone(&write_line)),
+  );
+  set(
+    &stdout,
+    "writeLine",
+    host_function(vm, "writeLine", 1, write_line),
+  );
 
   if let Some(blitz) = vm.realm().get_global("Blitz") {
     set(&blitz, "stdin", stdin);

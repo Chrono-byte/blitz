@@ -10,6 +10,8 @@ use denko::errors::RuntimeError;
 use denko::gc;
 use denko::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
 
+use super::host_constructor;
+
 pub(super) fn install(vm: &mut Vm) {
   let prototype = object(vm.realm().object_prototype());
   let instance_prototype = prototype.clone();
@@ -31,20 +33,8 @@ pub(super) fn install(vm: &mut Vm) {
 
     Ok(url_object(instance_prototype.clone(), &parsed))
   });
-  let constructor_properties = gc::track_object(Rc::new(RefCell::new(ObjectData::with_prototype(
-    vm.realm().function_prototype(),
-  ))));
-  constructor_properties
-    .borrow_mut()
-    .properties
-    .insert(
-      PropertyKey::String("prototype".to_string().into()),
-      PropertyDescriptor::ordinary_data(prototype),
-    );
-  vm.realm().set_global(
-    "URL",
-    Value::BuiltinObject(constructor, constructor_properties),
-  );
+  let constructor = host_constructor(vm, "URL", 1, prototype, constructor);
+  vm.realm().set_global("URL", constructor);
 }
 
 fn url_object(
