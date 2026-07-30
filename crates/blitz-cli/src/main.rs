@@ -73,10 +73,8 @@ fn main() -> Result<(), denko::errors::Error> {
       let inline = cli.eval.is_some() || cli.print.is_some();
       let mut args = cli.args;
       let file = if cli.repl || inline {
-        if inline {
-          if let Some(argument) = cli.file {
-            args.insert(0, argument.to_string_lossy().into_owned());
-          }
+        if inline && let Some(argument) = cli.file {
+          args.insert(0, argument.to_string_lossy().into_owned());
         }
         None
       } else {
