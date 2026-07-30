@@ -20,7 +20,7 @@ the implemented `blitz:match`, `blitz:fs`, `blitz:http`, `blitz:websocket`,
 adapter modules, including ordered dependencies, visibility, source and
 declaration hashes, pinned Effect/runtime/host ABIs, and host primitive
 requirements. It is input metadata for the committed prelinked runtime graph;
-the Rust `effect-bytecode` workspace tool owns that final binary.
+the Rust `blitz-precompiler` workspace tool owns that final binary.
 
 ## Commands
 
@@ -114,8 +114,8 @@ smoke coverage is in `scripts/test-node-roots.ts`.
 After changing either manifest, regenerate and verify the final artifact:
 
 ```sh
-cargo run -p effect-bytecode -- generate
-cargo run -p effect-bytecode -- generate --check
+cargo run -p blitz-precompiler -- generate
+cargo run -p blitz-precompiler -- generate --check
 ```
 
 The Effect foundation declarations have paired strict-check fixtures:

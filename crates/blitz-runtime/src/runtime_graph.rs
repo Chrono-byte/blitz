@@ -105,7 +105,7 @@ pub const RUNTIME_CONTROL_METHODS: &[&str] = &[
 
 const RUNTIME_GRAPH_ARTIFACT: &[u8] = include_bytes!(concat!(
   env!("CARGO_MANIFEST_DIR"),
-  "/assets/runtime/v1/runtime-graph.blitzpg"
+  "/assets/runtime/v1/runtime.blitzbundle"
 ));
 
 /// Normalize text manifest line endings before content-addressing them.
@@ -576,14 +576,14 @@ impl HostBridgeCapabilities {
 
 /// A versioned runtime artifact containing provenance and a prelinked graph.
 #[derive(Clone, Debug)]
-pub struct RuntimePrelinkedBundle {
+pub struct RuntimePrecompiledBundle {
   /// Runtime-owned provenance and module manifest.
   pub manifest: RuntimeGraphManifest,
   /// Host-neutral executable graph payload.
   pub graph: PrelinkedModuleGraph,
 }
 
-impl RuntimePrelinkedBundle {
+impl RuntimePrecompiledBundle {
   /// Construct a runtime envelope from its manifest and graph payload.
   #[must_use]
   pub const fn new(
@@ -656,7 +656,7 @@ impl RuntimePrelinkedBundle {
 #[derive(Clone, Debug)]
 pub struct RuntimeGraphInstallPlan {
   manifest: RuntimeGraphManifest,
-  bundle: Option<RuntimePrelinkedBundle>,
+  bundle: Option<RuntimePrecompiledBundle>,
 }
 
 impl RuntimeGraphInstallPlan {
@@ -674,7 +674,7 @@ impl RuntimeGraphInstallPlan {
 
   /// Validate a complete bundle before any engine registration mutation.
   pub fn prepare_bundle(
-    bundle: RuntimePrelinkedBundle,
+    bundle: RuntimePrecompiledBundle,
     host: &HostBridgeCapabilities,
   ) -> Result<Self, RuntimeGraphError> {
     bundle.validate_for_host(host)?;
@@ -705,7 +705,7 @@ impl RuntimeGraphInstallPlan {
 
   /// Borrow the validated complete bundle, when this plan was prepared from one.
   #[must_use]
-  pub const fn bundle(&self) -> Option<&RuntimePrelinkedBundle> {
+  pub const fn bundle(&self) -> Option<&RuntimePrecompiledBundle> {
     self.bundle.as_ref()
   }
 
@@ -720,7 +720,7 @@ impl RuntimeGraphInstallPlan {
   /// Invoke complete graph registration only after all policy checks pass.
   pub fn register_bundle_after_validation<T, E>(
     &self,
-    register: impl FnOnce(&RuntimePrelinkedBundle) -> Result<T, E>,
+    register: impl FnOnce(&RuntimePrecompiledBundle) -> Result<T, E>,
   ) -> Result<T, RuntimeGraphInstallError<E>> {
     let Some(bundle) = self.bundle.as_ref() else {
       return Err(RuntimeGraphInstallError::MissingBundle);
@@ -842,11 +842,11 @@ impl std::error::Error for RuntimeGraphError {}
 ///
 /// The cached error is converted back into a codec error for each caller so a
 /// malformed artifact cannot be retried with partially decoded state.
-pub fn embedded_runtime_bundle() -> Result<&'static RuntimePrelinkedBundle, RuntimeBundleCodecError>
-{
-  static BUNDLE: OnceLock<Result<Arc<RuntimePrelinkedBundle>, String>> = OnceLock::new();
+pub fn embedded_runtime_bundle()
+-> Result<&'static RuntimePrecompiledBundle, RuntimeBundleCodecError> {
+  static BUNDLE: OnceLock<Result<Arc<RuntimePrecompiledBundle>, String>> = OnceLock::new();
   let cached = BUNDLE.get_or_init(|| {
-    RuntimePrelinkedBundle::decode(RUNTIME_GRAPH_ARTIFACT)
+    RuntimePrecompiledBundle::decode(RUNTIME_GRAPH_ARTIFACT)
       .map(Arc::new)
       .map_err(|error| error.to_string())
   });
@@ -858,7 +858,7 @@ pub fn embedded_runtime_bundle() -> Result<&'static RuntimePrelinkedBundle, Runt
 
 /// Validate the committed graph against both manifests embedded by the runtime.
 pub fn validate_embedded_runtime_bundle()
--> Result<&'static RuntimePrelinkedBundle, RuntimeBundleCodecError> {
+-> Result<&'static RuntimePrecompiledBundle, RuntimeBundleCodecError> {
   let bundle = embedded_runtime_bundle()?;
   bundle
     .validate_pinned(
@@ -964,7 +964,7 @@ impl From<denko::PrelinkedGraphCodecError> for RuntimeBundleCodecError {
 
 /// Encode a complete runtime graph as a deterministic checksummed envelope.
 pub fn encode_runtime_prelinked_bundle(
-  bundle: &RuntimePrelinkedBundle
+  bundle: &RuntimePrecompiledBundle
 ) -> Result<Vec<u8>, RuntimeBundleCodecError> {
   bundle.validate()?;
   let graph_payload = denko::encode_prelinked_graph(&bundle.graph)?;
@@ -977,7 +977,7 @@ pub fn encode_runtime_prelinked_bundle(
 /// Encode a complete runtime bundle.
 #[must_use = "the encoded artifact must be retained"]
 pub fn encode_runtime_bundle(
-  bundle: &RuntimePrelinkedBundle
+  bundle: &RuntimePrecompiledBundle
 ) -> Result<Vec<u8>, RuntimeBundleCodecError> {
   encode_runtime_prelinked_bundle(bundle)
 }
@@ -985,7 +985,7 @@ pub fn encode_runtime_bundle(
 /// Decode and validate a complete runtime graph envelope.
 pub fn decode_runtime_prelinked_bundle(
   bytes: &[u8]
-) -> Result<RuntimePrelinkedBundle, RuntimeBundleCodecError> {
+) -> Result<RuntimePrecompiledBundle, RuntimeBundleCodecError> {
   if bytes.len() > MAX_RUNTIME_BUNDLE_BYTES {
     return Err(RuntimeBundleCodecError::TooLarge {
       actual: bytes.len(),
@@ -1033,7 +1033,7 @@ pub fn decode_runtime_prelinked_bundle(
   let graph_payload = reader.bytes_u64(MAX_RUNTIME_BUNDLE_BYTES, "graph payload")?;
   reader.finish()?;
   let graph = denko::decode_prelinked_graph(&graph_payload)?;
-  let bundle = RuntimePrelinkedBundle { manifest, graph };
+  let bundle = RuntimePrecompiledBundle { manifest, graph };
   bundle.validate()?;
   Ok(bundle)
 }
@@ -1041,7 +1041,7 @@ pub fn decode_runtime_prelinked_bundle(
 /// Decode a complete runtime bundle.
 pub fn decode_runtime_bundle(
   bytes: &[u8]
-) -> Result<RuntimePrelinkedBundle, RuntimeBundleCodecError> {
+) -> Result<RuntimePrecompiledBundle, RuntimeBundleCodecError> {
   decode_runtime_prelinked_bundle(bytes)
 }
 
@@ -1520,8 +1520,8 @@ mod tests {
     }
   }
 
-  fn codec_bundle() -> RuntimePrelinkedBundle {
-    RuntimePrelinkedBundle {
+  fn codec_bundle() -> RuntimePrecompiledBundle {
+    RuntimePrecompiledBundle {
       manifest: RuntimeGraphManifest {
         format_version: RUNTIME_GRAPH_FORMAT_VERSION,
         runtime_abi_version: RUNTIME_ABI_VERSION,
@@ -1609,7 +1609,7 @@ mod tests {
     let bundle = codec_bundle();
     let first = bundle.encode().expect("encode bundle");
     assert_eq!(first, bundle.encode().expect("encode bundle again"));
-    let decoded = RuntimePrelinkedBundle::decode(&first).expect("decode bundle");
+    let decoded = RuntimePrecompiledBundle::decode(&first).expect("decode bundle");
     assert_eq!(decoded.manifest, bundle.manifest);
     assert_eq!(decoded.graph.modules[0].source_sha256, [3; 32]);
     assert_eq!(
@@ -1629,15 +1629,15 @@ mod tests {
     let last = corrupt.len() - 1;
     corrupt[last] ^= 1;
     assert!(matches!(
-      RuntimePrelinkedBundle::decode(&corrupt),
+      RuntimePrecompiledBundle::decode(&corrupt),
       Err(RuntimeBundleCodecError::ChecksumMismatch)
     ));
-    assert!(RuntimePrelinkedBundle::decode(&encoded[..encoded.len() - 1]).is_err());
+    assert!(RuntimePrecompiledBundle::decode(&encoded[..encoded.len() - 1]).is_err());
 
     let mut version = encoded;
     version[8..10].copy_from_slice(&(RUNTIME_BUNDLE_WIRE_VERSION + 1).to_le_bytes());
     assert!(matches!(
-      RuntimePrelinkedBundle::decode(&version),
+      RuntimePrecompiledBundle::decode(&version),
       Err(RuntimeBundleCodecError::UnsupportedVersion(value))
         if value == RUNTIME_BUNDLE_WIRE_VERSION + 1
     ));
@@ -1657,7 +1657,7 @@ mod tests {
     writer.u32((MAX_RUNTIME_MANIFEST_MODULES as u32) + 1);
     let encoded = frame_runtime_payload(&writer.bytes_out).expect("frame bundle");
     assert!(matches!(
-      RuntimePrelinkedBundle::decode(&encoded),
+      RuntimePrecompiledBundle::decode(&encoded),
       Err(RuntimeBundleCodecError::LimitExceeded {
         kind: "manifest module count",
         ..

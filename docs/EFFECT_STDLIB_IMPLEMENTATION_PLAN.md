@@ -813,7 +813,7 @@ cargo test -p denko-engine -p blitz-runtime -p blitz-cli
 pnpm --dir tools/effect-assets typecheck
 pnpm --dir tools/effect-assets test
 pnpm --dir tools/effect-assets verify
-cargo run -p effect-bytecode -- generate --check
+cargo run -p blitz-precompiler -- generate --check
 ```
 
 Do not run a development server or a release build as a routine check.

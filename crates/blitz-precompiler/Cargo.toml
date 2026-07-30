@@ -1,12 +1,12 @@
 [package]
-name = "effect-bytecode"
+name = "blitz-precompiler"
 version.workspace = true
 edition.workspace = true
 publish = false
-description = "Deterministic Effect and Blitz runtime graph precompiler"
+description = "Deterministic precompiler for embedded Blitz runtime bundles"
 
 [[bin]]
-name = "effect-bytecode"
+name = "blitz-precompiler"
 path = "src/main.rs"
 
 [dependencies]

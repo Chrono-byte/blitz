@@ -10,7 +10,7 @@ runtime installation validates pinned manifests and host ABI before atomic
 registration.
 
 The transitional bytecode-only `effect.blitzbc` experiment has been removed.
-The final `runtime-graph.blitzpg` contains graph metadata and verified chunks;
+The final `runtime.blitzbundle` contains graph metadata and verified chunks;
 it is not a heap snapshot, so module initializers still execute at startup.
 Startup counters distinguish user source work and assert zero bundled parsing,
 import extraction, AST/ESTree linking, typechecking, and compilation.
@@ -91,7 +91,7 @@ provenance and host compatibility while `PrelinkedModuleGraph` remains generic.
 Conceptually:
 
 ```rust
-struct RuntimePrelinkedBundle {
+struct RuntimePrecompiledBundle {
   format_version: u16,
   runtime_abi_version: u16,
   host_bridge_abi_version: u16,
@@ -317,7 +317,7 @@ module-private closure state.
 
 ## Generator changes
 
-Create or evolve `tools/effect-bytecode` into the sole Rust runtime-graph
+Create or evolve `crates/blitz-precompiler` into the sole Rust runtime-graph
 precompiler. It should:
 
 1. read the pinned Effect manifest, generated ESM files, and Blitz stdlib

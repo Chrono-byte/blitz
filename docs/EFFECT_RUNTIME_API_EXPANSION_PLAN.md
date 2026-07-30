@@ -364,7 +364,7 @@ roots, globals, and the singleton marker. Add failure injection immediately
 after graph registration.
 
 The production installation path accepts only a complete
-`RuntimePrelinkedBundle`. Remove manifest-only `RuntimeGraphInstallPlan::prepare`
+`RuntimePrecompiledBundle`. Remove manifest-only `RuntimeGraphInstallPlan::prepare`
 from production use or mark it test-only. Before registration, hash every public
 declaration source and compare it with the manifest's `declaration_sha256` in
 addition to existing graph/source validation. Roll back all state on
@@ -2627,7 +2627,7 @@ pnpm --dir tools/effect-assets generate
 pnpm --dir tools/effect-assets typecheck
 pnpm --dir tools/effect-assets test
 pnpm --dir tools/effect-assets verify
-cargo run -p effect-bytecode -- generate --check
+cargo run -p blitz-precompiler -- generate --check
 git diff --check
 ```
 

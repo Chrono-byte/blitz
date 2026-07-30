@@ -142,6 +142,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "blitz-precompiler"
+version = "0.2.0"
+dependencies = [
+ "blitz-runtime",
+ "clap",
+ "denko-engine",
+ "oxc_span",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "blitz-runtime"
 version = "0.2.0"
 dependencies = [
@@ -571,19 +584,6 @@ name = "dragonbox_ecma"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd8e701084c37e7ef62d3f9e453b618130cbc0ef3573847785952a3ac3f746bf"
-
-[[package]]
-name = "effect-bytecode"
-version = "0.2.0"
-dependencies = [
- "blitz-runtime",
- "clap",
- "denko-engine",
- "oxc_span",
- "serde",
- "serde_json",
- "sha2",
-]
 
 [[package]]
 name = "either"

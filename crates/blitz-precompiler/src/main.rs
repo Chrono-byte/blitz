@@ -8,7 +8,7 @@
 use blitz_runtime::runtime_graph::{
   EFFECT_VERSION, HOST_BRIDGE_ABI_VERSION, HostPrimitiveRequirement, ModuleOrigin,
   ModuleVisibility, RUNTIME_ABI_VERSION, RUNTIME_GRAPH_FORMAT_VERSION, RuntimeGraphManifest,
-  RuntimeModuleManifest, RuntimePrelinkedBundle, canonical_manifest_bytes, manifest_sha256,
+  RuntimeModuleManifest, RuntimePrecompiledBundle, canonical_manifest_bytes, manifest_sha256,
 };
 use clap::{Args, Parser, Subcommand};
 use denko::bytecode::BytecodeVersion;
@@ -28,13 +28,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-const ARTIFACT_RELATIVE_PATH: &str = "crates/blitz-runtime/assets/runtime/v1/runtime-graph.blitzpg";
+const ARTIFACT_RELATIVE_PATH: &str = "crates/blitz-runtime/assets/runtime/v1/runtime.blitzbundle";
 const GENERATOR_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 #[derive(Parser)]
 #[command(
-  name = "effect-bytecode",
-  about = "Build the deterministic full runtime graph"
+  name = "blitz-precompiler",
+  about = "Build the deterministic precompiled Blitz runtime bundle"
 )]
 struct Cli {
   #[command(subcommand)]
@@ -157,7 +157,7 @@ impl Eq for BindingKey {}
 
 fn main() {
   let worker = std::thread::Builder::new()
-    .name("effect-bytecode-generator".to_string())
+    .name("blitz-precompiler".to_string())
     .stack_size(GENERATOR_STACK_SIZE)
     .spawn(run);
   let result = match worker {
@@ -168,7 +168,7 @@ fn main() {
     Err(error) => Err(format!("could not start generator thread: {error}")),
   };
   if let Err(error) = result {
-    eprintln!("effect-bytecode: {error}");
+    eprintln!("blitz-precompiler: {error}");
     std::process::exit(1);
   }
 }
@@ -192,7 +192,7 @@ fn generate(args: GenerateArgs) -> Result<(), String> {
       .map_err(|error| format!("cannot read {} for --check: {error}", output.display()))?;
     if existing != bytes {
       return Err(format!(
-        "{} is stale; run `cargo run -p effect-bytecode -- generate`",
+        "{} is stale; run `cargo run -p blitz-precompiler -- generate`",
         output.display()
       ));
     }
@@ -457,7 +457,7 @@ fn build_artifact(root: &Path) -> Result<Vec<u8>, String> {
   graph
     .validate()
     .map_err(|error| format!("generated graph validation failed: {error}"))?;
-  let bundle = RuntimePrelinkedBundle {
+  let bundle = RuntimePrecompiledBundle {
     manifest: runtime_manifest,
     graph,
   };
@@ -984,7 +984,7 @@ fn repository_root() -> PathBuf {
     .parent()
     .and_then(Path::parent)
     .map(Path::to_path_buf)
-    .expect("effect-bytecode is nested below the repository root")
+    .expect("blitz-precompiler is nested below the repository root")
 }
 
 fn absolutize(
