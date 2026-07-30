@@ -7,7 +7,6 @@ members = [
   "crates/blitz-test262",
   "crates/js-string",
   "crates/regex-js",
-  "crates/blitz-precompiler",
 ]
 resolver = "2"
 

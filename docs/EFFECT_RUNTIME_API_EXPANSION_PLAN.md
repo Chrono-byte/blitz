@@ -2627,7 +2627,7 @@ pnpm --dir tools/effect-assets generate
 pnpm --dir tools/effect-assets typecheck
 pnpm --dir tools/effect-assets test
 pnpm --dir tools/effect-assets verify
-cargo run -p blitz-precompiler -- generate --check
+cargo run -p blitz-cli -- precompile runtime --check
 git diff --check
 ```
 

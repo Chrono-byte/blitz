@@ -48,7 +48,7 @@ visibility, dependencies, hashes, and host primitive requirements.
 `BLITZ_MATCH_SUPPORTED_EXPORTS` identifies the initial curated Match declaration
 surface (`value`, `type`, `valueTags`, `typeTags`, and `exhaustive`).
 
-The checked Rust `blitz-precompiler` tool combines both verified manifests into
+The checked `blitz precompile runtime` command combines both verified manifests into
 `assets/runtime/v1/runtime.blitzbundle`. `install_runtime` decodes and caches
 that artifact, validates exact manifest hashes and runtime/host ABI, installs
 host primitives, and atomically registers graph plus public declarations. It

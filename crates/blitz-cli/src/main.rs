@@ -8,6 +8,7 @@
 mod analysis;
 mod args;
 mod execution;
+mod precompile;
 mod typecheck;
 
 use args::{Cli, CliCommand, ExecutionArgs};
@@ -69,6 +70,13 @@ fn main() -> Result<(), denko::errors::Error> {
       args: Vec::new(),
     },
     Some(CliCommand::Analyze(analyze)) => return analysis::run(analyze),
+    Some(CliCommand::Precompile(precompile)) => {
+      if let Err(error) = precompile::run(precompile, cli.conditions) {
+        eprintln!("blitz precompile: {error}");
+        std::process::exit(1);
+      }
+      return Ok(());
+    }
     None => {
       let inline = cli.eval.is_some() || cli.print.is_some();
       let mut args = cli.args;

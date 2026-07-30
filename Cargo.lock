@@ -137,17 +137,6 @@ dependencies = [
  "blitz-runtime",
  "clap",
  "denko-engine",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "blitz-precompiler"
-version = "0.2.0"
-dependencies = [
- "blitz-runtime",
- "clap",
- "denko-engine",
  "oxc_span",
  "serde",
  "serde_json",

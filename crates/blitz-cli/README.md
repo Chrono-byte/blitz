@@ -1,10 +1,9 @@
 # Blitz CLI
 
 `blitz-cli` owns the user-facing `blitz` executable and routes the `run`,
-`check`, and `analyze` commands. With no command or file, it launches the
-runtime-owned Blitz REPL. Package management, dependency resolution, bundling,
-and release workflows are future toolchain work, not implemented commands in
-this crate today.
+`check`, `analyze`, and `precompile` commands. With no command or file, it
+launches the runtime-owned Blitz REPL. Package management and release workflows
+remain future toolchain work.
 
 Runtime capabilities and the hosted REPL belong in `blitz-runtime`;
 ECMAScript semantics belong in `denko-engine`.
@@ -21,4 +20,14 @@ blitz --cwd ./project --conditions development ./src/app.ts
 blitz --env-file .env.production ./src/app.ts
 blitz run start -- --port 3000
 blitz run --if-present optional-script
+blitz precompile project ./src/main.ts --output ./dist/app.blitzbundle
+blitz precompile project ./src/main.ts --no-runtime
+blitz precompile runtime --check
 ```
+
+`precompile project` resolves the entry's complete static module closure,
+compiles and links it to Denko bytecode, and emits a deterministic prelinked
+bundle. By default the bundle includes Blitz's embedded Effect, stdlib, and
+Node-compatible graph so `effect/*`, `blitz:*`, and `node:*` imports work.
+`--no-runtime` emits a smaller host-neutral graph for projects using only
+filesystem and package modules.

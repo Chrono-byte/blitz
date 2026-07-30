@@ -403,12 +403,14 @@ pub(crate) fn install_map_set_constructors(
           .flatten();
         let Some(entry) = entry else {
           if next_index >= entries.borrow().len() {
-            debug_assert!(set_internal_slot(&iterator, map_done, Value::Bool(true)));
-            debug_assert!(set_internal_slot(
+            let did_set_done = set_internal_slot(&iterator, map_done, Value::Bool(true));
+            debug_assert!(did_set_done);
+            let did_set_index = set_internal_slot(
               &iterator,
               map_index,
               Value::Number(usize_to_f64(next_index)),
-            ));
+            );
+            debug_assert!(did_set_index);
             return Ok(iterator_result(vm, Value::Undefined, true));
           }
           next_index += 1;
@@ -424,11 +426,12 @@ pub(crate) fn install_map_set_constructors(
           _ => collection_entry_array(vm, key, entry_value),
         };
       };
-      debug_assert!(set_internal_slot(
+      let did_set_index = set_internal_slot(
         &iterator,
         map_index,
         Value::Number(usize_to_f64(next_index)),
-      ));
+      );
+      debug_assert!(did_set_index);
       Ok(iterator_result(vm, value, false))
     }),
     function_proto_map,
@@ -481,12 +484,14 @@ pub(crate) fn install_map_set_constructors(
         let item = values.borrow().get(next_index).cloned().flatten();
         let Some(item) = item else {
           if next_index >= values.borrow().len() {
-            debug_assert!(set_internal_slot(&iterator, set_done, Value::Bool(true)));
-            debug_assert!(set_internal_slot(
+            let did_set_done = set_internal_slot(&iterator, set_done, Value::Bool(true));
+            debug_assert!(did_set_done);
+            let did_set_index = set_internal_slot(
               &iterator,
               set_index,
               Value::Number(usize_to_f64(next_index)),
-            ));
+            );
+            debug_assert!(did_set_index);
             return Ok(iterator_result(vm, Value::Undefined, true));
           }
           next_index += 1;
@@ -499,11 +504,12 @@ pub(crate) fn install_map_set_constructors(
           item
         };
       };
-      debug_assert!(set_internal_slot(
+      let did_set_index = set_internal_slot(
         &iterator,
         set_index,
         Value::Number(usize_to_f64(next_index)),
-      ));
+      );
+      debug_assert!(did_set_index);
       Ok(iterator_result(vm, value, false))
     }),
     function_proto_map,
@@ -539,11 +545,9 @@ pub(crate) fn install_map_set_constructors(
     if !receiver.is_object() {
       return Err(vm.throw_type_error("Map receiver must be an object"));
     }
-    debug_assert!(set_internal_slot(
-      &receiver,
-      map_data_for_ctor,
-      array_from_values(Vec::new()),
-    ));
+    let did_initialize =
+      set_internal_slot(&receiver, map_data_for_ctor, array_from_values(Vec::new()));
+    debug_assert!(did_initialize);
     let iterable = args
       .get(static_builtin_arg_offset(vm, args, "Map"))
       .cloned()
@@ -630,11 +634,9 @@ pub(crate) fn install_map_set_constructors(
         .drain(..)
         .map(|(key, values)| array_from_values(vec![key, array_from_values(values)]))
         .collect();
-      debug_assert!(set_internal_slot(
-        &result,
-        map_group_by_data,
-        array_from_values(entries),
-      ));
+      let did_initialize =
+        set_internal_slot(&result, map_group_by_data, array_from_values(entries));
+      debug_assert!(did_initialize);
       Ok(result)
     }),
     function_proto_map,
@@ -1341,11 +1343,9 @@ pub(crate) fn install_map_set_constructors(
     if !receiver.is_object() {
       return Err(vm.throw_type_error("Set receiver must be an object"));
     }
-    debug_assert!(set_internal_slot(
-      &receiver,
-      set_data_for_ctor,
-      array_from_values(Vec::new()),
-    ));
+    let did_initialize =
+      set_internal_slot(&receiver, set_data_for_ctor, array_from_values(Vec::new()));
+    debug_assert!(did_initialize);
     let iterable = args
       .get(static_builtin_arg_offset(vm, args, "Set"))
       .cloned()

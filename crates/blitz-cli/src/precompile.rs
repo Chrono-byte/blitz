@@ -5,12 +5,14 @@
   clippy::missing_errors_doc
 )]
 
+use crate::args::{
+  PrecompileArgs, PrecompileCommand, PrecompileProjectArgs, PrecompileRuntimeArgs,
+};
 use blitz_runtime::runtime_graph::{
   EFFECT_VERSION, HOST_BRIDGE_ABI_VERSION, HostPrimitiveRequirement, ModuleOrigin,
   ModuleVisibility, RUNTIME_ABI_VERSION, RUNTIME_GRAPH_FORMAT_VERSION, RuntimeGraphManifest,
   RuntimeModuleManifest, RuntimePrecompiledBundle, canonical_manifest_bytes, manifest_sha256,
 };
-use clap::{Args, Parser, Subcommand};
 use denko::bytecode::BytecodeVersion;
 use denko::compiler::core::ModuleContext;
 use denko::module::{
@@ -30,31 +32,6 @@ use std::rc::Rc;
 
 const ARTIFACT_RELATIVE_PATH: &str = "crates/blitz-runtime/assets/runtime/v1/runtime.blitzbundle";
 const GENERATOR_STACK_SIZE: usize = 32 * 1024 * 1024;
-
-#[derive(Parser)]
-#[command(
-  name = "blitz-precompiler",
-  about = "Build the deterministic precompiled Blitz runtime bundle"
-)]
-struct Cli {
-  #[command(subcommand)]
-  command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-  Generate(GenerateArgs),
-}
-
-#[derive(Args)]
-struct GenerateArgs {
-  /// Regenerate in memory and compare with the committed artifact.
-  #[arg(long)]
-  check: bool,
-  /// Override the versioned artifact path.
-  #[arg(long)]
-  output: Option<PathBuf>,
-}
 
 #[derive(Clone, Debug, Deserialize)]
 struct HashReference {
@@ -132,6 +109,12 @@ struct InputModule {
   host_primitives: Vec<HostPrimitiveRequirement>,
 }
 
+struct GraphInput {
+  emitted_specifier: String,
+  source_sha256: [u8; 32],
+  declared_dependencies: Option<Vec<String>>,
+}
+
 #[derive(Clone, Copy)]
 struct BindingKey(*const RefCell<denko::Value>);
 
@@ -155,50 +138,118 @@ impl PartialEq for BindingKey {
 
 impl Eq for BindingKey {}
 
-fn main() {
+pub(crate) fn run(
+  args: PrecompileArgs,
+  conditions: Vec<String>,
+) -> Result<(), String> {
   let worker = std::thread::Builder::new()
-    .name("blitz-precompiler".to_string())
+    .name("blitz-precompile".to_string())
     .stack_size(GENERATOR_STACK_SIZE)
-    .spawn(run);
-  let result = match worker {
+    .spawn(move || match args.command {
+      PrecompileCommand::Runtime(args) => generate_runtime(args),
+      PrecompileCommand::Project(args) => generate_project(args, conditions),
+    });
+  match worker {
     Ok(worker) => match worker.join() {
       Ok(result) => result,
-      Err(_) => Err("generator thread panicked".to_string()),
+      Err(_) => Err("precompiler thread panicked".to_string()),
     },
-    Err(error) => Err(format!("could not start generator thread: {error}")),
-  };
-  if let Err(error) = result {
-    eprintln!("blitz-precompiler: {error}");
-    std::process::exit(1);
+    Err(error) => Err(format!("could not start precompiler thread: {error}")),
   }
 }
 
-fn run() -> Result<(), String> {
-  let cli = Cli::parse();
-  match cli.command {
-    Command::Generate(args) => generate(args),
-  }
-}
-
-fn generate(args: GenerateArgs) -> Result<(), String> {
+fn generate_runtime(args: PrecompileRuntimeArgs) -> Result<(), String> {
   let root = repository_root();
   let output = args.output.map_or_else(
     || root.join(ARTIFACT_RELATIVE_PATH),
     |path| absolutize(&root, path),
   );
   let bytes = build_artifact(&root)?;
-  if args.check {
-    let existing = fs::read(&output)
+  write_or_check(&output, &bytes, args.check, "blitz precompile runtime")
+}
+
+fn generate_project(
+  args: PrecompileProjectArgs,
+  conditions: Vec<String>,
+) -> Result<(), String> {
+  let entry = fs::canonicalize(&args.entry)
+    .map_err(|error| format!("resolve project entry {}: {error}", args.entry.display()))?;
+  if !entry.is_file() {
+    return Err(format!("project entry is not a file: {}", entry.display()));
+  }
+  let entry_directory = entry
+    .parent()
+    .ok_or_else(|| format!("project entry has no parent: {}", entry.display()))?;
+  let project = blitz_runtime::project::ProjectContext::discover(entry_directory)
+    .map_err(|error| error.to_string())?;
+  let package_name = args
+    .name
+    .or_else(|| {
+      project
+        .package
+        .as_ref()
+        .and_then(|package| package.name.clone())
+    })
+    .or_else(|| {
+      project
+        .root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+    })
+    .unwrap_or_else(|| "blitz-project".to_string());
+  let package_version = args
+    .version
+    .or_else(|| {
+      project
+        .package
+        .as_ref()
+        .and_then(|package| package.version.clone())
+    })
+    .unwrap_or_else(|| "0.0.0".to_string());
+  let output = args.output.map_or_else(
+    || entry.with_extension("blitzbundle"),
+    |path| {
+      if path.is_absolute() {
+        path
+      } else {
+        project.cwd.join(path)
+      }
+    },
+  );
+  let bytes = build_project_artifact(
+    &entry,
+    &project.root,
+    package_name,
+    package_version,
+    conditions,
+    !args.no_runtime,
+  )?;
+  write_or_check(
+    &output,
+    &bytes,
+    args.check,
+    &format!("blitz precompile project {}", args.entry.display()),
+  )
+}
+
+fn write_or_check(
+  output: &Path,
+  bytes: &[u8],
+  check: bool,
+  regenerate_command: &str,
+) -> Result<(), String> {
+  if check {
+    let existing = fs::read(output)
       .map_err(|error| format!("cannot read {} for --check: {error}", output.display()))?;
     if existing != bytes {
       return Err(format!(
-        "{} is stale; run `cargo run -p blitz-precompiler -- generate`",
-        output.display()
+        "{} is stale; run `{regenerate_command}`",
+        output.display(),
       ));
     }
     println!("checked {} ({} bytes)", output.display(), bytes.len());
   } else {
-    write_atomically(&output, &bytes)?;
+    write_atomically(output, bytes)?;
     println!("generated {} ({} bytes)", output.display(), bytes.len());
   }
   Ok(())
@@ -297,17 +348,199 @@ fn build_artifact(root: &Path) -> Result<Vec<u8>, String> {
     .into_iter()
     .map(|module| (module.specifier.clone(), module))
     .collect::<BTreeMap<_, _>>();
-  let records = sorted_records(&loader)?;
-  let index_by_specifier = records
+  let graph_inputs = input_by_specifier
     .iter()
+    .map(|(specifier, input)| {
+      (
+        specifier.clone(),
+        GraphInput {
+          emitted_specifier: specifier.clone(),
+          source_sha256: input.source_sha256,
+          declared_dependencies: input.declared_dependencies.clone(),
+        },
+      )
+    })
+    .collect::<BTreeMap<_, _>>();
+  let mut source_manifest_hasher = Sha256::new();
+  let canonical_effect_manifest = canonical_manifest_bytes(&effect_manifest_bytes);
+  let canonical_stdlib_manifest = canonical_manifest_bytes(&stdlib_manifest_bytes);
+  source_manifest_hasher.update((canonical_effect_manifest.len() as u64).to_le_bytes());
+  source_manifest_hasher.update(canonical_effect_manifest.as_ref());
+  source_manifest_hasher.update((canonical_stdlib_manifest.len() as u64).to_le_bytes());
+  source_manifest_hasher.update(canonical_stdlib_manifest.as_ref());
+  let (graph, records) = precompile_graph(
+    &loader,
+    &graph_inputs,
+    &public_roots,
+    "effect+blitz-stdlib".to_string(),
+    format!("effect-{EFFECT_VERSION}+runtime-1"),
+    source_manifest_hasher.finalize().into(),
+    None,
+  )?;
+  let runtime_manifest = runtime_manifest(
+    &records,
+    &input_by_specifier,
+    effect_manifest_hash,
+    stdlib_manifest_hash,
+    public_roots,
+  )?;
+  runtime_manifest
+    .validate()
+    .map_err(|error| format!("runtime envelope metadata is invalid: {error}"))?;
+  let bundle = RuntimePrecompiledBundle {
+    manifest: runtime_manifest,
+    graph,
+  };
+  bundle
+    .validate()
+    .map_err(|error| format!("generated runtime bundle validation failed: {error}"))?;
+  let first = bundle
+    .encode()
+    .map_err(|error| format!("encode generated runtime bundle: {error}"))?;
+  let second = bundle
+    .encode()
+    .map_err(|error| format!("encode generated runtime bundle twice: {error}"))?;
+  if first != second {
+    return Err("prelinked graph encoding is not deterministic in memory".into());
+  }
+  Ok(first)
+}
+
+fn build_project_artifact(
+  entry: &Path,
+  project_root: &Path,
+  package_name: String,
+  package_version: String,
+  conditions: Vec<String>,
+  include_runtime: bool,
+) -> Result<Vec<u8>, String> {
+  let mut loader = ModuleLoader::new();
+  loader.set_condition_names(conditions);
+  let base_graph = include_runtime
+    .then(|| {
+      blitz_runtime::runtime_graph::validate_embedded_runtime_bundle()
+        .map(|bundle| bundle.graph.clone())
+        .map_err(|error| format!("load embedded runtime bundle: {error}"))
+    })
+    .transpose()?;
+  if let Some(graph) = &base_graph {
+    loader
+      .register_prelinked_graph(graph.clone())
+      .map_err(|error| format!("register embedded runtime graph: {error}"))?;
+  }
+  let entry_directory = entry
+    .parent()
+    .ok_or_else(|| format!("project entry has no parent: {}", entry.display()))?;
+  let entry_request = format!(
+    "./{}",
+    entry
+      .file_name()
+      .ok_or_else(|| format!("project entry has no file name: {}", entry.display()))?
+      .to_string_lossy()
+  );
+  let entry_record = loader
+    .construct(entry_directory, &entry_request)
+    .map_err(|error| format!("construct project entry {}: {error}", entry.display()))?;
+  let entry_specifier = entry_record.borrow().specifier.clone();
+  loader
+    .instantiate_all()
+    .map_err(|error| format!("instantiate project graph: {error}"))?;
+
+  let mut graph_inputs = BTreeMap::new();
+  for record_view in sorted_source_records(&loader)? {
+    let record = record_view.record.borrow();
+    let relative = record.path.strip_prefix(project_root).map_err(|_| {
+      format!(
+        "project dependency {} is outside package root {}; move it under the project or precompile from a common package root",
+        record.path.display(),
+        project_root.display()
+      )
+    })?;
+    let emitted_specifier = format!("./{}", relative.to_string_lossy().replace('\\', "/"));
+    let ModuleRecordPayload::Source { session, .. } = &record.payload else {
+      return Err(format!(
+        "project module {} is not source-backed",
+        record.specifier
+      ));
+    };
+    let input = GraphInput {
+      emitted_specifier,
+      source_sha256: sha256(session.source().as_bytes()),
+      declared_dependencies: None,
+    };
+    if graph_inputs
+      .insert(record.specifier.clone(), input)
+      .is_some()
+    {
+      return Err(format!("duplicate project module {}", record.specifier));
+    }
+  }
+
+  let mut source_manifest_hasher = Sha256::new();
+  if let Some(base_graph) = &base_graph {
+    source_manifest_hasher.update(base_graph.source_manifest_hash);
+  }
+  let mut emitted_specifiers = BTreeSet::new();
+  for input in graph_inputs.values() {
+    if !emitted_specifiers.insert(input.emitted_specifier.as_str()) {
+      return Err(format!(
+        "duplicate portable project specifier {}",
+        input.emitted_specifier
+      ));
+    }
+    source_manifest_hasher.update((input.emitted_specifier.len() as u64).to_le_bytes());
+    source_manifest_hasher.update(input.emitted_specifier.as_bytes());
+    source_manifest_hasher.update(input.source_sha256);
+  }
+
+  let (graph, _) = precompile_graph(
+    &loader,
+    &graph_inputs,
+    &[entry_specifier],
+    package_name,
+    package_version,
+    source_manifest_hasher.finalize().into(),
+    base_graph.as_ref(),
+  )?;
+  let first = denko::encode_prelinked_graph(&graph)
+    .map_err(|error| format!("encode project bundle: {error}"))?;
+  let second = denko::encode_prelinked_graph(&graph)
+    .map_err(|error| format!("encode project bundle twice: {error}"))?;
+  if first != second {
+    return Err("project bundle encoding is not deterministic in memory".into());
+  }
+  Ok(first)
+}
+
+fn precompile_graph(
+  loader: &ModuleLoader,
+  inputs: &BTreeMap<String, GraphInput>,
+  public_roots: &[String],
+  package_name: String,
+  package_version: String,
+  source_manifest_hash: [u8; 32],
+  base_graph: Option<&PrelinkedModuleGraph>,
+) -> Result<(PrelinkedModuleGraph, Vec<RecordView>), String> {
+  let records = sorted_source_records(loader)?;
+  let mut index_by_specifier = loader
+    .map
+    .values()
     .map(|record| {
-      let record = record.record.borrow();
+      let record = record.borrow();
       (
         record.specifier.clone(),
         record.module_index.unwrap_or_default(),
       )
     })
     .collect::<HashMap<_, _>>();
+  if let Some(base_graph) = base_graph {
+    index_by_specifier.extend(base_graph.modules.iter().map(|module| {
+      (
+        module.specifier.clone(),
+        usize::try_from(module.module_index).unwrap_or_default(),
+      )
+    }));
+  }
   let public_root_indices = public_roots
     .iter()
     .map(|specifier| {
@@ -323,28 +556,59 @@ fn build_artifact(root: &Path) -> Result<Vec<u8>, String> {
     .collect::<Result<Vec<_>, _>>()?;
 
   let mut binding_ids = HashMap::new();
-  let mut next_binding_id = 0_u32;
+  let mut next_binding_id = base_graph.map_or(0, |graph| graph.binding_count);
+  if let Some(base_graph) = base_graph {
+    for record in loader.map.values() {
+      let record = record.borrow();
+      let Some(module_index) = record.module_index else {
+        continue;
+      };
+      let Ok(module_index) = u32::try_from(module_index) else {
+        continue;
+      };
+      let Some(module) = base_graph.module(module_index) else {
+        continue;
+      };
+      for export in &module.exports {
+        let slot = record
+          .exports
+          .get(&export.exported_name)
+          .ok_or_else(|| {
+            format!(
+              "embedded runtime export {} is absent from {}",
+              export.exported_name, record.specifier
+            )
+          })?;
+        binding_ids.insert(BindingKey(Rc::as_ptr(slot)), export.binding_id);
+      }
+    }
+  }
   for record in &records {
     let record = record.record.borrow();
     let mut exports = record.exports.iter().collect::<Vec<_>>();
     exports.sort_by(|left, right| left.0.cmp(right.0));
     for (_, slot) in exports {
       let key = BindingKey(Rc::as_ptr(slot));
-      binding_ids.entry(key).or_insert_with(|| {
-        let id = next_binding_id;
-        next_binding_id = next_binding_id.saturating_add(1);
-        id
-      });
+      if let std::collections::hash_map::Entry::Vacant(entry) = binding_ids.entry(key) {
+        entry.insert(next_binding_id);
+        next_binding_id = next_binding_id
+          .checked_add(1)
+          .ok_or_else(|| "project has too many live bindings".to_string())?;
+      }
     }
   }
 
-  let mut modules = Vec::with_capacity(records.len());
+  let mut modules = base_graph.map_or_else(Vec::new, |graph| graph.modules.clone());
+  modules.reserve(records.len());
   for record_view in &records {
     let record = record_view.record.borrow();
-    let input = input_by_specifier
-      .get(&record.specifier)
-      .ok_or_else(|| format!("unmanifested constructed module {}", record.specifier))?;
-    let dependencies = record_dependencies(&record, &index_by_specifier)?;
+    let input = inputs.get(&record.specifier).ok_or_else(|| {
+      format!(
+        "constructed module has no precompiler input: {}",
+        record.specifier
+      )
+    })?;
+    let dependencies = record_dependencies(&record, &index_by_specifier, loader.condition_names())?;
     if let Some(declared) = &input.declared_dependencies {
       let dependency_specifiers = dependencies
         .iter()
@@ -374,9 +638,6 @@ fn build_artifact(root: &Path) -> Result<Vec<u8>, String> {
       })
       .collect::<Result<Vec<_>, String>>()?;
 
-    // Namespace imports compile to the validated `(module_index, "*")`
-    // descriptor. The VM creates one live namespace object per module-table
-    // entry, so they deliberately do not consume scalar graph binding IDs.
     let mut imports = record
       .imports
       .iter()
@@ -409,7 +670,7 @@ fn build_artifact(root: &Path) -> Result<Vec<u8>, String> {
 
     let chunk = compile_record(&record)?;
     modules.push(PrelinkedModule {
-      specifier: record.specifier.clone(),
+      specifier: input.emitted_specifier.clone(),
       module_index: u32::try_from(record.module_index.unwrap_or_default())
         .map_err(|_| format!("module index for {} does not fit u32", record.specifier))?,
       source_sha256: input.source_sha256,
@@ -426,30 +687,12 @@ fn build_artifact(root: &Path) -> Result<Vec<u8>, String> {
     });
   }
 
-  let runtime_manifest = runtime_manifest(
-    &records,
-    &input_by_specifier,
-    effect_manifest_hash,
-    stdlib_manifest_hash,
-    public_roots,
-  )?;
-  runtime_manifest
-    .validate()
-    .map_err(|error| format!("runtime envelope metadata is invalid: {error}"))?;
-
-  let mut source_manifest_hasher = Sha256::new();
-  let canonical_effect_manifest = canonical_manifest_bytes(&effect_manifest_bytes);
-  let canonical_stdlib_manifest = canonical_manifest_bytes(&stdlib_manifest_bytes);
-  source_manifest_hasher.update((canonical_effect_manifest.len() as u64).to_le_bytes());
-  source_manifest_hasher.update(canonical_effect_manifest.as_ref());
-  source_manifest_hasher.update((canonical_stdlib_manifest.len() as u64).to_le_bytes());
-  source_manifest_hasher.update(canonical_stdlib_manifest.as_ref());
   let graph = PrelinkedModuleGraph {
     format_version: denko::prelinked::PRELINKED_MODULE_GRAPH_VERSION,
     engine_bytecode_version: BytecodeVersion::RiscV2,
-    package_name: "effect+blitz-stdlib".to_string(),
-    package_version: format!("effect-{EFFECT_VERSION}+runtime-1"),
-    source_manifest_hash: source_manifest_hasher.finalize().into(),
+    package_name,
+    package_version,
+    source_manifest_hash,
     modules,
     binding_count: next_binding_id,
     public_roots: public_root_indices,
@@ -457,33 +700,18 @@ fn build_artifact(root: &Path) -> Result<Vec<u8>, String> {
   graph
     .validate()
     .map_err(|error| format!("generated graph validation failed: {error}"))?;
-  let bundle = RuntimePrecompiledBundle {
-    manifest: runtime_manifest,
-    graph,
-  };
-  bundle
-    .validate()
-    .map_err(|error| format!("generated runtime bundle validation failed: {error}"))?;
-  let first = bundle
-    .encode()
-    .map_err(|error| format!("encode generated runtime bundle: {error}"))?;
-  let second = bundle
-    .encode()
-    .map_err(|error| format!("encode generated runtime bundle twice: {error}"))?;
-  if first != second {
-    return Err("prelinked graph encoding is not deterministic in memory".into());
-  }
-  Ok(first)
+  Ok((graph, records))
 }
 
 struct RecordView {
   record: Rc<RefCell<ModuleRecord>>,
 }
 
-fn sorted_records(loader: &ModuleLoader) -> Result<Vec<RecordView>, String> {
+fn sorted_source_records(loader: &ModuleLoader) -> Result<Vec<RecordView>, String> {
   let mut records = loader
     .map
     .values()
+    .filter(|record| matches!(record.borrow().payload, ModuleRecordPayload::Source { .. }))
     .cloned()
     .map(|record| RecordView { record })
     .collect::<Vec<_>>();
@@ -492,15 +720,6 @@ fn sorted_records(loader: &ModuleLoader) -> Result<Vec<RecordView>, String> {
     if record.record.borrow().module_index.is_none() {
       return Err(format!(
         "module {} has no assigned index",
-        record.record.borrow().specifier
-      ));
-    }
-    if !matches!(
-      record.record.borrow().payload,
-      ModuleRecordPayload::Source { .. }
-    ) {
-      return Err(format!(
-        "unexpected prelinked source record {} during generation",
         record.record.borrow().specifier
       ));
     }
@@ -530,6 +749,7 @@ fn compile_record(record: &ModuleRecord) -> Result<Chunk, String> {
 fn record_dependencies(
   record: &ModuleRecord,
   index_by_specifier: &HashMap<String, usize>,
+  conditions: &[String],
 ) -> Result<Vec<usize>, String> {
   let ModuleRecordPayload::Source { dependencies, .. } = &record.payload else {
     return Err(format!("{} is not source-backed", record.specifier));
@@ -539,12 +759,28 @@ fn record_dependencies(
     .iter()
     .filter(|specifier| seen.insert((*specifier).clone()))
     .map(|specifier| {
+      if let Some(index) = index_by_specifier.get(specifier).copied() {
+        return Ok(index);
+      }
+      let base = record
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+      let resolved = denko::resolve_specifier_with_conditions(base, specifier, conditions)
+        .map_err(|error| {
+          format!(
+            "resolve dependency {} -> {specifier}: {error}",
+            record.specifier
+          )
+        })?;
+      let resolved = fs::canonicalize(&resolved).unwrap_or(resolved);
+      let canonical = resolved.to_string_lossy().into_owned();
       index_by_specifier
-        .get(specifier)
+        .get(&canonical)
         .copied()
         .ok_or_else(|| {
           format!(
-            "closed graph violation: {} -> {specifier}",
+            "closed graph violation: {} -> {specifier} (resolved as {canonical})",
             record.specifier
           )
         })
@@ -575,7 +811,7 @@ fn runtime_manifest(
     let input = inputs
       .get(&record.specifier)
       .ok_or_else(|| format!("missing runtime metadata for {}", record.specifier))?;
-    let dependencies = record_dependencies(&record, &index_by_specifier)?
+    let dependencies = record_dependencies(&record, &index_by_specifier, &[])?
       .into_iter()
       .map(|index| records[index].record.borrow().specifier.clone())
       .collect();
@@ -984,7 +1220,7 @@ fn repository_root() -> PathBuf {
     .parent()
     .and_then(Path::parent)
     .map(Path::to_path_buf)
-    .expect("blitz-precompiler is nested below the repository root")
+    .expect("blitz-cli is nested below the repository root")
 }
 
 fn absolutize(
@@ -995,5 +1231,98 @@ fn absolutize(
     path
   } else {
     root.join(path)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  fn temporary_directory(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+      "blitz-precompile-{label}-{}-{}",
+      std::process::id(),
+      SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos()
+    ))
+  }
+
+  #[test]
+  fn project_bundle_is_portable_deterministic_and_registerable() {
+    let root = temporary_directory("project");
+    let source_root = root.join("src");
+    fs::create_dir_all(&source_root).expect("create source directory");
+    fs::write(
+      root.join("package.json"),
+      r#"{"name":"portable-project","version":"1.2.3","type":"module"}"#,
+    )
+    .expect("write package manifest");
+    fs::write(
+      source_root.join("value.ts"),
+      "export const value: number = 41;\n",
+    )
+    .expect("write dependency");
+    fs::write(
+      source_root.join("main.ts"),
+      "import { value } from './value.ts';\nexport const answer = value + 1;\n",
+    )
+    .expect("write entry");
+
+    let entry = fs::canonicalize(source_root.join("main.ts")).expect("canonical entry");
+    let project_root = fs::canonicalize(&root).expect("canonical project root");
+    let first = build_project_artifact(
+      &entry,
+      &project_root,
+      "portable-project".to_string(),
+      "1.2.3".to_string(),
+      Vec::new(),
+      false,
+    )
+    .expect("precompile project");
+    let second = build_project_artifact(
+      &entry,
+      &project_root,
+      "portable-project".to_string(),
+      "1.2.3".to_string(),
+      Vec::new(),
+      false,
+    )
+    .expect("precompile project again");
+    assert_eq!(first, second);
+
+    let graph = denko::decode_prelinked_graph(&first).expect("decode project bundle");
+    assert_eq!(graph.package_name, "portable-project");
+    assert_eq!(graph.package_version, "1.2.3");
+    assert_eq!(graph.modules.len(), 2);
+    assert!(
+      graph
+        .modules
+        .iter()
+        .any(|module| module.specifier == "./src/main.ts")
+    );
+    assert!(
+      graph
+        .modules
+        .iter()
+        .any(|module| module.specifier == "./src/value.ts")
+    );
+    assert!(graph.modules.iter().all(|module| {
+      !module
+        .specifier
+        .contains(root.to_string_lossy().as_ref())
+    }));
+
+    let mut loader = ModuleLoader::new();
+    loader
+      .register_prelinked_graph(graph)
+      .expect("register project bundle");
+    loader
+      .construct(Path::new("."), "./src/main.ts")
+      .expect("construct bundled entry");
+
+    fs::remove_dir_all(root).expect("remove temporary project");
   }
 }

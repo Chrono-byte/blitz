@@ -120,6 +120,8 @@ pub(crate) enum CliCommand {
   Check(CheckArgs),
   /// Print compiler-owned editor analysis as JSON.
   Analyze(AnalyzeArgs),
+  /// Precompile deterministic Blitz artifacts.
+  Precompile(PrecompileArgs),
 }
 
 /// Arguments for explicit file execution.
@@ -194,6 +196,63 @@ pub(crate) struct AnalyzeArgs {
   pub(crate) strict: bool,
 }
 
+/// Arguments for artifact precompilation.
+#[derive(Args, Debug)]
+pub(crate) struct PrecompileArgs {
+  /// Artifact to precompile.
+  #[command(subcommand)]
+  pub(crate) command: PrecompileCommand,
+}
+
+/// Precompiled artifact targets.
+#[derive(Subcommand, Debug)]
+pub(crate) enum PrecompileCommand {
+  /// Build the embedded Blitz runtime bundle.
+  Runtime(PrecompileRuntimeArgs),
+  /// Build a portable prelinked bundle from a module-project entry point.
+  Project(PrecompileProjectArgs),
+}
+
+/// Arguments for runtime-bundle precompilation.
+#[derive(Args, Debug)]
+pub(crate) struct PrecompileRuntimeArgs {
+  /// Regenerate in memory and compare with the committed artifact.
+  #[arg(long)]
+  pub(crate) check: bool,
+
+  /// Override the versioned artifact path.
+  #[arg(long)]
+  pub(crate) output: Option<PathBuf>,
+}
+
+/// Arguments for module-project precompilation.
+#[derive(Args, Debug)]
+pub(crate) struct PrecompileProjectArgs {
+  /// Module entry point whose complete static dependency graph is bundled.
+  #[arg(value_name = "ENTRY")]
+  pub(crate) entry: PathBuf,
+
+  /// Output bundle path. Defaults to ENTRY with a `.blitzbundle` extension.
+  #[arg(short, long, value_name = "FILE")]
+  pub(crate) output: Option<PathBuf>,
+
+  /// Override the bundle name discovered from package.json.
+  #[arg(long, value_name = "NAME")]
+  pub(crate) name: Option<String>,
+
+  /// Override the bundle version discovered from package.json.
+  #[arg(long, value_name = "VERSION")]
+  pub(crate) version: Option<String>,
+
+  /// Regenerate in memory and compare with the output bundle.
+  #[arg(long)]
+  pub(crate) check: bool,
+
+  /// Exclude Blitz's embedded Effect, stdlib, and Node-compatible modules.
+  #[arg(long)]
+  pub(crate) no_runtime: bool,
+}
+
 /// Normalized execution options shared by legacy and explicit invocations.
 #[derive(Debug)]
 pub(crate) struct ExecutionArgs {
@@ -222,7 +281,7 @@ mod tests {
     assert!(cli.command.is_none());
     assert_eq!(cli.file, Some(PathBuf::from("program.js")));
     assert_eq!(cli.args, ["one"]);
-    assert_eq!(cli.node_compat, NodeCompatArg::Core);
+    assert_eq!(cli.node_compat, NodeCompatArg::Full);
   }
 
   #[test]
@@ -268,6 +327,58 @@ mod tests {
   fn parses_explicit_repl_command() {
     let cli = Cli::try_parse_from(["blitz", "repl"]).expect("parse");
     assert!(matches!(cli.command, Some(CliCommand::Repl)));
+  }
+
+  #[test]
+  fn parses_runtime_precompilation() {
+    let cli = Cli::try_parse_from([
+      "blitz",
+      "precompile",
+      "runtime",
+      "--check",
+      "--output",
+      "runtime.blitzbundle",
+    ])
+    .expect("parse");
+
+    let Some(CliCommand::Precompile(precompile)) = cli.command else {
+      panic!("expected precompile command");
+    };
+    let PrecompileCommand::Runtime(runtime) = precompile.command else {
+      panic!("expected runtime target");
+    };
+    assert!(runtime.check);
+    assert_eq!(runtime.output, Some(PathBuf::from("runtime.blitzbundle")));
+  }
+
+  #[test]
+  fn parses_project_precompilation() {
+    let cli = Cli::try_parse_from([
+      "blitz",
+      "precompile",
+      "project",
+      "src/main.ts",
+      "--output",
+      "dist/app.blitzbundle",
+      "--name",
+      "example",
+      "--version",
+      "1.2.3",
+    ])
+    .expect("parse");
+
+    let Some(CliCommand::Precompile(precompile)) = cli.command else {
+      panic!("expected precompile command");
+    };
+    let PrecompileCommand::Project(project) = precompile.command else {
+      panic!("expected project target");
+    };
+    assert_eq!(project.entry, PathBuf::from("src/main.ts"));
+    assert_eq!(project.output, Some(PathBuf::from("dist/app.blitzbundle")));
+    assert_eq!(project.name.as_deref(), Some("example"));
+    assert_eq!(project.version.as_deref(), Some("1.2.3"));
+    assert!(!project.check);
+    assert!(!project.no_runtime);
   }
 
   #[test]

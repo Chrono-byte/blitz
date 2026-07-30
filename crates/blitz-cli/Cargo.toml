@@ -16,6 +16,8 @@ blitz-runtime.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+oxc_span.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

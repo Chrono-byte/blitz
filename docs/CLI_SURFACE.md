@@ -26,7 +26,7 @@ should only advertise commands that work.
 | `bun pm ...` | `blitz pm ...` | Planned | Lockfile/cache/bin/pack utilities |
 | `bun info` | `blitz info` | Planned | Future registry client |
 | `bun why` | `blitz why` | Planned | Future dependency graph tooling |
-| `bun build` | `blitz build` | Planned | Future bundler/compiler frontend |
+| `bun build` | `blitz precompile project <entry>` | Partial | Deterministic static module-graph precompilation; packaging and build transforms remain future work |
 | `bun init` | `blitz init` | Planned | Project scaffolding |
 | `bun create` | `blitz create` | Deferred | Template acquisition requires package tooling |
 | `bun upgrade` | `blitz upgrade` | Distribution-dependent | Release installer, not runtime semantics |
@@ -36,6 +36,8 @@ Blitz-specific commands remain first-class:
 
 - `blitz check` — in-process TypeScript checking.
 - `blitz analyze` — machine-readable editor analysis.
+- `blitz precompile project` — deterministic project module bundles.
+- `blitz precompile runtime` — regenerate or verify the embedded runtime bundle.
 
 ## Runtime project model
 
@@ -85,8 +87,8 @@ and should remain global.
 2. Build a user test runner independently from Test262 infrastructure.
 3. Add package installation and lockfile primitives, then expose the package
    command family and `x`.
-4. Add bundling/build commands only after output format and module-resolution
-   contracts are stable.
+4. Extend project precompilation with additional packaging and build transforms
+   only after their output contracts are stable.
 
 Command parsing and presentation belong to `blitz-cli`. Hosted execution and
 REPL capabilities belong to `blitz-runtime`. ECMAScript behavior and debugger

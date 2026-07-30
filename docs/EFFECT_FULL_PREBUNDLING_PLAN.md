@@ -317,8 +317,8 @@ module-private closure state.
 
 ## Generator changes
 
-Create or evolve `crates/blitz-precompiler` into the sole Rust runtime-graph
-precompiler. It should:
+Keep `blitz precompile runtime` as the sole Rust runtime-graph precompiler. It
+should:
 
 1. read the pinned Effect manifest, generated ESM files, and Blitz stdlib
    manifest;
