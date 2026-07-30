@@ -496,13 +496,14 @@ impl Compiler {
       .filter(|s| !matches!(s, oast::Statement::FunctionDeclaration(_)))
       .collect();
 
-    if repl_mode && stmts.is_empty() {
-      if let Some(directive) = program.directives.last() {
-        self.emit_constant(
-          Value::String(directive.expression.value.to_string().into()),
-          LINE,
-        );
-      }
+    if repl_mode
+      && stmts.is_empty()
+      && let Some(directive) = program.directives.last()
+    {
+      self.emit_constant(
+        Value::String(directive.expression.value.to_string().into()),
+        LINE,
+      );
     }
 
     for (i, stmt) in stmts.iter().enumerate() {

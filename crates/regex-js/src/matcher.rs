@@ -1,9 +1,55 @@
 // SPDX-License-Identifier: MPL-2.0
 use std::ops::Range;
+use std::{error, fmt};
 
 use crate::ast::{Assertion, CharacterClass, ClassTerm, Node};
 use crate::canonical::{range_contains, symbols_equal};
 use crate::{Flags, Input, Regex};
+
+const MAX_MATCH_STEPS: usize = 1_000_000;
+const MAX_MATCH_DEPTH: usize = 2_048;
+
+/// A regular-expression match exceeded a host-safety resource limit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MatchError;
+
+impl fmt::Display for MatchError {
+  fn fmt(
+    &self,
+    formatter: &mut fmt::Formatter<'_>,
+  ) -> fmt::Result {
+    formatter.write_str("regular-expression match resource limit exceeded")
+  }
+}
+
+impl error::Error for MatchError {}
+
+struct MatchContext {
+  remaining_steps: usize,
+  depth: usize,
+}
+
+impl MatchContext {
+  const fn new() -> Self {
+    Self {
+      remaining_steps: MAX_MATCH_STEPS,
+      depth: 0,
+    }
+  }
+
+  fn enter(&mut self) -> Result<(), MatchError> {
+    if self.remaining_steps == 0 || self.depth >= MAX_MATCH_DEPTH {
+      return Err(MatchError);
+    }
+    self.remaining_steps -= 1;
+    self.depth += 1;
+    Ok(())
+  }
+
+  fn exit(&mut self) {
+    self.depth -= 1;
+  }
+}
 
 /// The UTF-16 span of one capture.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -62,10 +108,11 @@ pub(crate) fn find(
   regex: &Regex,
   input: &Input,
   start: usize,
-) -> Option<Match> {
+) -> Result<Option<Match>, MatchError> {
   if start > input.len() {
-    return None;
+    return Ok(None);
   }
+  let mut context = MatchContext::new();
   let initial = start;
   let mut candidate = start;
   loop {
@@ -73,64 +120,78 @@ pub(crate) fn find(
       offset: candidate,
       captures: vec![None; regex.capture_count + 1],
     };
-    if let Some(mut matched) = match_node(&regex.body, state, input, regex.flags)
-      .into_iter()
-      .next()
+    if let Some(mut matched) =
+      match_node_with_context(&regex.body, state, input, regex.flags, &mut context)?
+        .into_iter()
+        .next()
     {
       matched.captures[0] = Some(candidate..matched.offset);
-      return Some(Match {
+      return Ok(Some(Match {
         captures: matched
           .captures
           .into_iter()
           .map(|range| range.map(|range| Capture { range }))
           .collect(),
-      });
+      }));
     }
     if regex.flags.sticky() || candidate == input.len() {
-      return None;
+      return Ok(None);
     }
     candidate = input.advance_string_index(candidate, regex.flags.unicode());
     if candidate <= initial || candidate > input.len() {
-      return None;
+      return Ok(None);
     }
   }
 }
 
-fn match_node(
+fn match_node_with_context(
   node: &Node,
   state: State,
   input: &Input,
   flags: Flags,
-) -> Vec<State> {
-  match node {
-    Node::Empty => vec![state],
-    Node::Literal(expected) => match_symbol(state, input, flags, |actual| {
+  context: &mut MatchContext,
+) -> Result<Vec<State>, MatchError> {
+  context.enter()?;
+  let result = match node {
+    Node::Empty => Ok(vec![state]),
+    Node::Literal(expected) => Ok(match_symbol(state, input, flags, |actual| {
       symbols_equal(*expected, actual, flags)
-    }),
-    Node::Dot => match_symbol(state, input, flags, |actual| {
+    })),
+    Node::Dot => Ok(match_symbol(state, input, flags, |actual| {
       flags.dot_all() || !is_line_terminator(actual)
-    }),
-    Node::Class(class) => match_symbol(state, input, flags, |actual| {
+    })),
+    Node::Class(class) => Ok(match_symbol(state, input, flags, |actual| {
       class_matches(class, actual, flags)
-    }),
-    Node::Assertion(assertion) => match_assertion(assertion, state, input, flags),
-    Node::Backreference(index) => match_backreference(*index, state, input, flags),
-    Node::Sequence(nodes) => match_sequence(nodes, state, input, flags),
-    Node::Alternative(alternatives) => alternatives
-      .iter()
-      .flat_map(|alternative| match_node(alternative, state.clone(), input, flags))
-      .collect(),
+    })),
+    Node::Assertion(assertion) => match_assertion(assertion, state, input, flags, context),
+    Node::Backreference(index) => Ok(match_backreference(*index, state, input, flags)),
+    Node::Sequence(nodes) => match_sequence(nodes, state, input, flags, context),
+    Node::Alternative(alternatives) => {
+      let mut matches = Vec::new();
+      for alternative in alternatives {
+        matches.extend(match_node_with_context(
+          alternative,
+          state.clone(),
+          input,
+          flags,
+          context,
+        )?);
+      }
+      Ok(matches)
+    }
     Node::Group { index, body } => {
       let start = state.offset;
-      match_node(body, state, input, flags)
-        .into_iter()
-        .map(|mut matched| {
-          if let Some(index) = index {
-            matched.captures[*index] = Some(start..matched.offset);
-          }
-          matched
-        })
-        .collect()
+      Ok(
+        match_node_with_context(body, state, input, flags, context)?
+          .into_iter()
+          .map(|mut matched| {
+            if let Some(index) = index {
+              matched.captures[*index] = Some(start..matched.offset);
+            }
+            matched
+          })
+          .collect(),
+      )
     }
     Node::Quantifier {
       body,
@@ -153,10 +214,13 @@ fn match_node(
         flags,
         &capture_indices,
         &mut matches,
-      );
-      matches
+        context,
+      )?;
+      Ok(matches)
     }
-  }
+  };
+  context.exit();
+  result
 }
 
 fn match_sequence(
@@ -164,18 +228,20 @@ fn match_sequence(
   state: State,
   input: &Input,
   flags: Flags,
-) -> Vec<State> {
+  context: &mut MatchContext,
+) -> Result<Vec<State>, MatchError> {
   let mut states = vec![state];
   for node in nodes {
-    states = states
-      .into_iter()
-      .flat_map(|state| match_node(node, state, input, flags))
-      .collect();
+    let mut next_states = Vec::new();
+    for state in states {
+      next_states.extend(match_node_with_context(node, state, input, flags, context)?);
+    }
+    states = next_states;
     if states.is_empty() {
       break;
     }
   }
-  states
+  Ok(states)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -190,7 +256,9 @@ fn repeat(
   flags: Flags,
   capture_indices: &[usize],
   output: &mut Vec<State>,
-) {
+  context: &mut MatchContext,
+) -> Result<(), MatchError> {
+  context.enter()?;
   if !greedy && count >= min {
     output.push(state.clone());
   }
@@ -199,7 +267,7 @@ fn repeat(
     for index in capture_indices {
       iteration_state.captures[*index] = None;
     }
-    for next in match_node(body, iteration_state, input, flags) {
+    for next in match_node_with_context(body, iteration_state, input, flags, context)? {
       let progressed = next.offset != state.offset;
       let next_max = if progressed || count + 1 < min {
         max
@@ -217,12 +285,15 @@ fn repeat(
         flags,
         capture_indices,
         output,
-      );
+        context,
+      )?;
     }
   }
   if greedy && count >= min {
     output.push(state);
   }
+  context.exit();
+  Ok(())
 }
 
 fn match_symbol(
@@ -247,7 +318,8 @@ fn match_assertion(
   state: State,
   input: &Input,
   flags: Flags,
-) -> Vec<State> {
+  context: &mut MatchContext,
+) -> Result<Vec<State>, MatchError> {
   let satisfied = match assertion {
     Assertion::Start => {
       state.offset == 0
@@ -270,25 +342,27 @@ fn match_assertion(
       (before != after) == *expected
     }
     Assertion::Lookahead { positive, body } => {
-      let matched = match_node(body, state.clone(), input, flags)
+      let matched = match_node_with_context(body, state.clone(), input, flags, context)?
         .into_iter()
         .next();
       if *positive {
-        return matched
-          .map(|mut matched| {
-            matched.offset = state.offset;
-            vec![matched]
-          })
-          .unwrap_or_default();
+        return Ok(
+          matched
+            .map(|mut matched| {
+              matched.offset = state.offset;
+              vec![matched]
+            })
+            .unwrap_or_default(),
+        );
       }
-      return if matched.is_none() {
+      return Ok(if matched.is_none() {
         vec![state]
       } else {
         Vec::new()
-      };
+      });
     }
   };
-  if satisfied { vec![state] } else { Vec::new() }
+  Ok(if satisfied { vec![state] } else { Vec::new() })
 }
 
 fn match_backreference(

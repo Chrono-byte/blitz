@@ -14,7 +14,7 @@
 //!   preserving their observable job ordering.
 use crate::bytecode::FunctionProto;
 use crate::runtime_utils::{reject_pending_promise, resolve_promise_with_value};
-use crate::value::{PromiseState, SharedValue, Value};
+use crate::value::{ObjectData, PromiseState, SharedValue, Value};
 use crate::vm::state::*;
 use std::cell::RefCell;
 use std::future::Future;
@@ -22,6 +22,52 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 impl Vm {
+  /// Keep a weakly referenced object alive until the current job completes.
+  pub(crate) fn keep_alive(
+    &mut self,
+    value: Value,
+  ) {
+    self.roots.kept_alive.push(value);
+  }
+
+  /// Schedule cleanup for a FinalizationRegistry whose target became unreachable.
+  pub(crate) fn queue_finalization_cleanup(
+    &mut self,
+    registry: Rc<RefCell<ObjectData>>,
+  ) {
+    let registry_value = Value::Object(registry);
+    self.queue_microtask(move |vm| {
+      let Value::Object(registry) = &registry_value else {
+        return Ok(());
+      };
+      let (cleanup, holdings) = {
+        let mut registry = registry.borrow_mut();
+        registry.finalization_cleanup_scheduled = false;
+        let cleanup = registry.finalization_cleanup_callback.clone();
+        let Some(cells) = registry.finalization_registry_cells.as_mut() else {
+          return Ok(());
+        };
+        let mut holdings = Vec::new();
+        cells.retain(|cell| {
+          if cell.active {
+            true
+          } else {
+            holdings.push(cell.holdings.clone());
+            false
+          }
+        });
+        (cleanup, holdings)
+      };
+      let Some(cleanup) = cleanup else {
+        return Ok(());
+      };
+      for holding in holdings {
+        vm.call_value_with_this(&cleanup, &Value::Undefined, &[holding])?;
+      }
+      Ok(())
+    });
+  }
+
   /// Queue a microtask to be executed after the current call stack completes.
   pub(crate) fn queue_microtask<F>(
     &mut self,
@@ -115,6 +161,7 @@ impl Vm {
       let caller_handlers = std::mem::take(&mut self.exceptions.handlers);
       let result = job(self);
       self.exceptions.handlers = caller_handlers;
+      self.roots.kept_alive.clear();
       self.maybe_collect_garbage_prototype();
       if let Err(err) = result {
         let exc_val = Value::String(format!("{}", err).into());
@@ -146,6 +193,7 @@ impl Vm {
       let caller_handlers = std::mem::take(&mut self.exceptions.handlers);
       let result = job(self);
       self.exceptions.handlers = caller_handlers;
+      self.roots.kept_alive.clear();
       self.maybe_collect_garbage_prototype();
       if let Err(err) = result {
         // Record the last uncaught exception so callers or host hooks

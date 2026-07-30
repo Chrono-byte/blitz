@@ -282,26 +282,14 @@ impl Vm {
       Value::BuiltinObject(_, props) => {
         let bound_target = props
           .borrow()
-          .properties
-          .get(&PropertyKey::String(
-            "[[BoundTargetFunction]]".to_string().into(),
-          ))
-          .and_then(|desc| match desc {
-            PropertyDescriptor::Data { value, .. } => Some(value.clone()),
-            _ => None,
-          });
+          .internal_slot("[[BoundTargetFunction]]")
+          .cloned();
         if let Some(target) = bound_target {
           let bound_args = props
             .borrow()
-            .properties
-            .get(&PropertyKey::String(
-              "[[BoundArguments]]".to_string().into(),
-            ))
-            .and_then(|desc| match desc {
-              PropertyDescriptor::Data {
-                value: Value::Array(arr, _),
-                ..
-              } => Some(
+            .internal_slot("[[BoundArguments]]")
+            .and_then(|value| match value {
+              Value::Array(arr, _) => Some(
                 arr
                   .borrow()
                   .iter()

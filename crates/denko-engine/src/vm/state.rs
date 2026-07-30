@@ -255,6 +255,8 @@ pub(super) struct ProfilingState {
 
 pub(super) struct RootState {
   pub(super) temporary: Vec<Value>,
+  /// Objects returned from WeakRef.prototype.deref until the current job ends.
+  pub(super) kept_alive: Vec<Value>,
   pub(super) host: Rc<RefCell<HostRootStore>>,
 }
 

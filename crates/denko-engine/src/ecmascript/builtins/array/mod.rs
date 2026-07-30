@@ -3,7 +3,7 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::rc::Rc;
 
@@ -200,21 +200,76 @@ pub(super) fn create_data_property_or_throw(
   Ok(())
 }
 
-pub(super) fn is_array_value(value: &Value) -> bool {
+pub(super) fn delete_property_or_throw(
+  vm: &mut Vm,
+  target: &Value,
+  key: &PropertyKey,
+) -> Result<(), RuntimeError> {
+  if vm.delete_property_host(target, key)? {
+    Ok(())
+  } else {
+    Err(vm.throw_type_error("Cannot delete array element"))
+  }
+}
+
+pub(super) fn is_array_value(
+  vm: &mut Vm,
+  value: &Value,
+) -> Result<bool, RuntimeError> {
   match value {
-    Value::Array(..) => true,
+    Value::Array(..) => Ok(true),
     Value::Proxy(proxy) => {
       let target = {
         let proxy = proxy.borrow();
         if proxy.is_revoked() {
-          return false;
+          return Err(vm.throw_type_error("Cannot inspect a revoked Proxy"));
         }
         proxy.target.clone()
       };
-      is_array_value(&target)
+      is_array_value(vm, &target)
     }
-    _ => false,
+    _ => Ok(false),
   }
+}
+
+/// Implements the `ArraySpeciesCreate` constructor selection shared by
+/// array-producing prototype methods.
+pub(super) fn array_species_create(
+  vm: &mut Vm,
+  receiver: &Value,
+  length: usize,
+) -> Result<Value, RuntimeError> {
+  let default_constructor = vm.get_global("Array").unwrap_or(Value::Undefined);
+  let constructor = if is_array_value(vm, receiver)? {
+    vm.get_property_host(receiver, &PropertyKey::String("constructor".into()))?
+  } else {
+    Value::Undefined
+  };
+  let constructor = match constructor {
+    Value::Undefined => default_constructor,
+    value
+      if !matches!(
+        value,
+        Value::Object(..)
+          | Value::Array(..)
+          | Value::Closure { .. }
+          | Value::BuiltinObject(_, _)
+          | Value::Proxy(_)
+      ) =>
+    {
+      return Err(vm.throw_type_error("Array constructor property is not an object"));
+    }
+    value => {
+      let species =
+        vm.get_property_host(&value, &PropertyKey::Symbol(SymbolId::well_known_species()))?;
+      match species {
+        Value::Undefined | Value::Null => default_constructor,
+        value if value.is_constructable() => value,
+        _ => return Err(vm.throw_type_error("constructor[Symbol.species] is not a constructor")),
+      }
+    }
+  };
+  vm.construct_value(&constructor, &[Value::Number(usize_to_f64(length))])
 }
 
 mod constructor;

@@ -5,6 +5,8 @@ use crate::ast::{Assertion, CharacterClass, ClassTerm, Node};
 use crate::{Error, ErrorKind, Flags};
 use js_string::{JsString, JsStringBuilder};
 
+const MAX_GROUP_DEPTH: usize = 256;
+
 pub(crate) struct ParsedPattern {
   pub(crate) body: Node,
   pub(crate) capture_count: usize,
@@ -26,6 +28,7 @@ struct Parser {
   total_capture_count: usize,
   capture_names: Vec<Option<JsString>>,
   named_indices: HashMap<JsString, usize>,
+  group_depth: usize,
 }
 
 impl Parser {
@@ -43,6 +46,7 @@ impl Parser {
       total_capture_count: scan.count,
       capture_names: scan.names,
       named_indices: scan.named_indices,
+      group_depth: 0,
     })
   }
 
@@ -118,6 +122,19 @@ impl Parser {
   }
 
   fn parse_group(&mut self) -> Result<Node, Error> {
+    if self.group_depth >= MAX_GROUP_DEPTH {
+      return Err(self.error(
+        ErrorKind::UnexpectedToken,
+        "regular-expression group nesting limit exceeded",
+      ));
+    }
+    self.group_depth += 1;
+    let result = self.parse_group_inner();
+    self.group_depth -= 1;
+    result
+  }
+
+  fn parse_group_inner(&mut self) -> Result<Node, Error> {
     let mut capture = true;
     let mut assertion = None;
     let mut group_name = None;

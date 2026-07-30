@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 use crate::ecmascript::semantics::byte_views::{
-  byte_view_index_from_key, byte_view_index_info, byte_view_index_value, encode_byte,
+  byte_view_index_from_key, byte_view_index_info, byte_view_index_value, write_byte_view_index,
 };
 use crate::ecmascript::semantics::properties::{
   own_property_descriptor, own_property_keys, property_key_to_value,
@@ -40,6 +40,11 @@ impl Vm {
     obj: &Value,
     key: &PropertyKey,
   ) -> Result<Value, RuntimeError> {
+    // Namespace export descriptors are live snapshots. Caching one would
+    // retain a stale binding value after the exporting module updates it.
+    if is_module_namespace_object(obj) {
+      return self.get_property_value(obj, key);
+    }
     let receiver_identity = match obj {
       // Dense array elements and `length` are mutated by native array
       // methods as well as ordinary property writes. Until those mutations
@@ -225,6 +230,9 @@ impl Vm {
     if matches!(target, Value::Proxy(_)) {
       return self.set_proxy_property(target, key, value, receiver);
     }
+    if is_module_namespace_object(target) {
+      return Ok(false);
+    }
 
     if let Some((desc, _holder)) = self.lookup_property_descriptor(target, key, 0)? {
       match desc {
@@ -390,6 +398,12 @@ impl Vm {
       let accepted = self.set_proxy_property(obj, key, value, receiver)?;
       if !accepted && self.is_strict_mode() {
         return Err(self.throw_type_error("Proxy set trap returned false"));
+      }
+      return Ok(());
+    }
+    if is_module_namespace_object(obj) {
+      if self.is_strict_mode() {
+        return Err(self.throw_type_error("Cannot assign to a module namespace property"));
       }
       return Ok(());
     }
@@ -577,6 +591,15 @@ impl Vm {
     key: &PropertyKey,
   ) -> Result<bool, RuntimeError> {
     let deleted_res: Result<bool, RuntimeError> = match obj {
+      Value::Object(data)
+        if matches!(key, PropertyKey::String(name) if data
+          .borrow()
+          .module_namespace_exports
+          .as_ref()
+          .is_some_and(|exports| exports.contains_key(name))) =>
+      {
+        Ok(false)
+      }
       Value::Proxy(proxy) => {
         let (target, handler) = proxy_target_and_handler(self, proxy, "deleteProperty")?;
         let trap = self.get_property_value(
@@ -763,7 +786,13 @@ impl Vm {
   ) -> Result<Value, RuntimeError> {
     let prop = self.to_property_key(key)?;
     let result = value.clone();
-    self.set_property_tracked(obj, &prop, value)?;
+    // Host-side specification algorithms use Set(..., Throw = true). Do not
+    // inherit the strictness of the user script that happened to call them.
+    let saved_strict = self.execution.active.strict;
+    self.execution.active.strict = true;
+    let set_result = self.set_property_tracked(obj, &prop, value);
+    self.execution.active.strict = saved_strict;
+    set_result?;
     Ok(result)
   }
 
@@ -958,6 +987,20 @@ impl Vm {
     match obj {
       Value::Object(data) => {
         let d = data.borrow();
+        if let Some(exports) = &d.module_namespace_exports
+          && let PropertyKey::String(name) = key
+          && let Some(binding) = exports.get(name)
+        {
+          return Ok(Some((
+            PropertyDescriptor::Data {
+              value: binding.borrow().clone(),
+              writable: true,
+              enumerable: true,
+              configurable: false,
+            },
+            obj.clone(),
+          )));
+        }
         if let Some(desc) = d.properties.get(key) {
           return Ok(Some((desc.clone(), obj.clone())));
         }
@@ -1088,18 +1131,17 @@ impl Vm {
       }
       return Ok(());
     }
+    if is_module_namespace_object(obj) {
+      if self.is_strict_mode() {
+        return Err(self.throw_type_error("Cannot assign to a module namespace property"));
+      }
+      return Ok(());
+    }
     if let Some(index) = byte_view_index_from_key(key)
       && let Some(info) = byte_view_index_info(obj)
     {
       if index < info.length {
-        let byte = encode_byte(self, &info.kind, &value)?;
-        if let Some(slot) = info
-          .data
-          .borrow_mut()
-          .get_mut(info.byte_offset + index)
-        {
-          *slot = Some(Value::Number(f64::from(byte)));
-        }
+        write_byte_view_index(self, &info, index, &value)?;
         self.bump_object_generation(obj);
       }
       return Ok(());
@@ -1204,6 +1246,10 @@ fn remove_key(
   };
   keys.swap_remove(index);
   true
+}
+
+fn is_module_namespace_object(value: &Value) -> bool {
+  matches!(value, Value::Object(data) if data.borrow().module_namespace_exports.is_some())
 }
 
 fn object_is_extensible(value: &Value) -> bool {

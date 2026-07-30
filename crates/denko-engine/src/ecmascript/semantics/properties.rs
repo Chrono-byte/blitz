@@ -31,7 +31,19 @@ pub(crate) fn own_property_descriptor(
           configurable: true,
         });
       }
-      data.borrow().properties.get(key).cloned()
+      let data_ref = data.borrow();
+      if let Some(exports) = &data_ref.module_namespace_exports
+        && let PropertyKey::String(name) = key
+        && let Some(binding) = exports.get(name)
+      {
+        return Some(PropertyDescriptor::Data {
+          value: binding.borrow().clone(),
+          writable: true,
+          enumerable: true,
+          configurable: false,
+        });
+      }
+      data_ref.properties.get(key).cloned()
     }
     Value::Proxy(proxy) => {
       let proxy = proxy.borrow();
@@ -110,10 +122,7 @@ pub(crate) fn this_boolean_value(
   match value {
     Value::Bool(b) => Ok(*b),
     Value::Object(obj) => {
-      if let Some(PropertyDescriptor::Data { value, .. }) = obj.borrow().properties.get(
-        &PropertyKey::String("[[PrimitiveValue]]".to_string().into()),
-      ) && let Value::Bool(b) = value
-      {
+      if let Some(Value::Bool(b)) = obj.borrow().internal_slot("[[BooleanData]]") {
         return Ok(*b);
       }
       Err(vm.throw_type_error("Boolean method called on incompatible receiver"))
@@ -197,12 +206,19 @@ pub(crate) fn own_property_keys(obj: &Value) -> Vec<PropertyKey> {
   let mut keys = Vec::new();
   match obj {
     Value::Object(data) => {
-      if let Some(details) = byte_view_details(&Value::Object(Rc::clone(data))) {
+      let byte_view = byte_view_details(&Value::Object(Rc::clone(data)));
+      let data_ref = data.borrow();
+      if let Some(exports) = &data_ref.module_namespace_exports {
+        keys.extend(exports.keys().cloned().map(PropertyKey::String));
+        keys.extend(data_ref.properties.keys().cloned());
+        return keys;
+      }
+      if let Some(details) = byte_view {
         for index in 0..details.length {
           keys.push(PropertyKey::String(usize_to_decimal_string(index).into()));
         }
       }
-      keys.extend(data.borrow().properties.keys().cloned());
+      keys.extend(data_ref.properties.keys().cloned());
     }
     Value::Proxy(proxy) => {
       let proxy = proxy.borrow();

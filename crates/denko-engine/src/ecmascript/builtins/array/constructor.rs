@@ -70,13 +70,17 @@ pub(super) fn install(
     PKey::String("isArray".to_string().into()),
     PropertyDescriptor::builtin_data({
       let builtin = builtin_object(
-        Rc::new(|_vm, args| {
-          Ok(Value::Bool(
-            matches!(args.get(1), Some(v) if is_array_value(v)),
-          ))
+        Rc::new(|vm, args| {
+          let off = static_builtin_arg_offset(vm, args, "Array.isArray");
+          let result = match args.get(off) {
+            Some(value) => is_array_value(vm, value)?,
+            None => false,
+          };
+          Ok(Value::Bool(result))
         }),
         function_proto_map,
       );
+      set_builtin_name(&builtin, "isArray");
       set_builtin_length(&builtin, 1.0);
       builtin
     }),
@@ -89,20 +93,40 @@ pub(super) fn install(
       let builtin = builtin_object(
         Rc::new(move |vm, args| {
           let off = static_builtin_arg_offset(vm, args, "Array");
-          let elems: Vec<Option<Value>> = args.iter().skip(off).cloned().map(Some).collect();
-          let arr_rc = Rc::new(RefCell::new(ArrayData::from(elems)));
-          let props = Rc::new(RefCell::new(ObjectData::new()));
-          props
-            .borrow_mut()
-            .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_of)));
-          props.borrow_mut().properties.insert(
-            PKey::String("length".to_string().into()),
-            array_length_descriptor(arr_rc.borrow().len()),
-          );
-          Ok(Value::Array(arr_rc, props))
+          let length = args.len().saturating_sub(off);
+          let constructor = vm.this_value();
+          let result = if constructor.is_constructable() {
+            vm.construct_value(&constructor, &[Value::Number(usize_to_f64(length))])?
+          } else {
+            let arr = Rc::new(RefCell::new(ArrayData::from(vec![None; length])));
+            let props = Rc::new(RefCell::new(ObjectData::new()));
+            props
+              .borrow_mut()
+              .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_of)));
+            props.borrow_mut().properties.insert(
+              PKey::String("length".to_string().into()),
+              array_length_descriptor(length),
+            );
+            Value::Array(arr, props)
+          };
+          for (index, value) in args.iter().skip(off).cloned().enumerate() {
+            create_data_property_or_throw(
+              vm,
+              &result,
+              &Value::String(index.to_string().into()),
+              value,
+            )?;
+          }
+          vm.set_property_host(
+            &result,
+            &Value::String("length".to_string().into()),
+            Value::Number(usize_to_f64(length)),
+          )?;
+          Ok(result)
         }),
         &function_proto_map,
       );
+      set_builtin_name(&builtin, "of");
       set_builtin_length(&builtin, 0.0);
       builtin
     }),
@@ -300,6 +324,7 @@ pub(super) fn install(
         }),
         &function_proto_map,
       );
+      set_builtin_name(&builtin, "fromAsync");
       set_builtin_length(&builtin, 1.0);
       builtin
     }),
@@ -431,23 +456,21 @@ pub(super) fn install(
     PKey::String("join".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(|vm, args| {
-        let undefined = Value::Undefined;
-        let receiver = args.first().unwrap_or(&undefined);
+        let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
         let sep = match args.get(1) {
           Some(Value::Undefined) | None => JsString::from(","),
           Some(v) => vm.to_string(v)?,
         };
-        let Value::Array(arr, _) = receiver else {
-          return Ok(Value::String(String::new().into()));
-        };
+        let len = array_like_length(vm, &receiver)?;
         let mut out = JsStringBuilder::new();
-        for (idx, item) in arr.borrow().iter().enumerate() {
-          if idx > 0 {
+        for index in 0..len {
+          if index > 0 {
             out.push_string(&sep);
           }
+          let item = vm.get_property_host(&receiver, &PKey::String(index.to_string().into()))?;
           match item {
-            Some(Value::Undefined) | Some(Value::Null) | None => {}
-            Some(v) => out.push_string(&vm.to_string(v)?),
+            Value::Undefined | Value::Null => {}
+            value => out.push_string(&vm.to_string(&value)?),
           }
         }
         Ok(Value::String(out.finish()))
@@ -455,6 +478,14 @@ pub(super) fn install(
       function_proto_map,
     )),
   );
+  if let Some(PropertyDescriptor::Data { value, .. }) = array_proto_map
+    .borrow()
+    .properties
+    .get(&PKey::String("join".into()))
+  {
+    set_builtin_name(value, "join");
+    set_builtin_length(value, 1.0);
+  }
 
   array_ctor_val
 }

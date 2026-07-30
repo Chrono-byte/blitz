@@ -9,11 +9,9 @@ mod typed_array;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use num_traits::ToPrimitive;
-
 use crate::Vm;
 use crate::ecmascript::semantics::{
-  array_buffer_backing, byte_view_details, encode_byte, is_array_buffer, is_byte_offset_aligned,
+  array_buffer_backing, byte_view_details, is_array_buffer, is_byte_offset_aligned,
   new_array_buffer, new_byte_view, usize_to_decimal_string, usize_to_f64,
 };
 use crate::errors::RuntimeError;
@@ -21,7 +19,7 @@ use crate::runtime_utils::{static_builtin_arg_offset, to_index, to_length};
 use crate::value::{ArrayData, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 
 pub(crate) use array_buffer::install_array_buffer;
-pub(crate) use data_view::install_data_view;
+pub(crate) use data_view::{install_data_view, is_data_view};
 pub(crate) use shared_array_buffer::install_shared_array_buffer;
 pub(crate) use typed_array::install_typed_arrays;
 
@@ -128,13 +126,6 @@ fn new_typed_array_view(
   byte_offset: usize,
 ) -> Value {
   new_byte_view(prototype, buffer, data, kind, length, byte_offset)
-}
-
-fn new_byte_buffer(
-  prototype: &Rc<RefCell<ObjectData>>,
-  length: usize,
-) -> (Value, Rc<RefCell<ArrayData>>) {
-  new_array_buffer(Value::Object(Rc::clone(prototype)), length, false)
 }
 
 fn typed_array_relative_index(

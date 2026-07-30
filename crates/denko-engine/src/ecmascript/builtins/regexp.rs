@@ -34,7 +34,18 @@ fn regexp_matcher(
     .ok_or_else(|| vm.throw_type_error("RegExp object has no [[RegExpMatcher]]"))
 }
 
-fn is_regexp(
+fn regexp_find(
+  vm: &mut Vm,
+  matcher: &regex_js::Regex,
+  input: &js_string::JsString,
+  start: usize,
+) -> Result<Option<regex_js::Match>, RuntimeError> {
+  matcher
+    .try_find(input, start)
+    .map_err(|error| vm.throw_range_error(&error.to_string()))
+}
+
+pub(crate) fn is_regexp(
   vm: &mut Vm,
   value: &Value,
 ) -> Result<bool, RuntimeError> {
@@ -73,7 +84,7 @@ fn regexp_builtin_exec(
     0
   };
 
-  let Some(matched) = matcher.find(&subject_utf16, start) else {
+  let Some(matched) = regexp_find(vm, &matcher, &subject_utf16, start)? else {
     if global || sticky {
       drop(vm.set_property_host(
         this,
@@ -492,7 +503,7 @@ fn regexp_builtin_split(
   let mut output = Vec::new();
 
   if size == 0 {
-    return if matcher.find(&subject, 0).is_some() {
+    return if regexp_find(vm, &matcher, &subject, 0)?.is_some() {
       Ok(array_from_values(output))
     } else {
       Ok(array_from_values(vec![Value::String(subject)]))
@@ -503,7 +514,7 @@ fn regexp_builtin_split(
   let mut previous_end = 0;
   let mut position = 0;
   while position < size {
-    let Some(matched) = matcher.find(&subject, position) else {
+    let Some(matched) = regexp_find(vm, &matcher, &subject, position)? else {
       break;
     };
     let range = matched.range();
@@ -641,6 +652,167 @@ fn regexp_split(
   regexp_builtin_split(vm, &this, subject, limit)
 }
 
+fn regexp_match_all(
+  vm: &mut Vm,
+  args: &[Value],
+) -> Result<Value, RuntimeError> {
+  const MATCHER: &str = "[[RegExpStringIteratorMatcher]]";
+  const STRING: &str = "[[RegExpStringIteratorString]]";
+  const GLOBAL: &str = "[[RegExpStringIteratorGlobal]]";
+  const UNICODE: &str = "[[RegExpStringIteratorUnicode]]";
+  const DONE: &str = "[[RegExpStringIteratorDone]]";
+
+  let this = args.first().cloned().unwrap_or(Value::Undefined);
+  if !this.is_object() {
+    return Err(vm.throw_type_error("RegExp.prototype[Symbol.matchAll] requires an object"));
+  }
+  let subject = vm.to_string(args.get(1).unwrap_or(&Value::Undefined))?;
+  let flags = vm.get_property_host(&this, &PropertyKey::String("flags".into()))?;
+  let flags = vm.to_string(&flags)?;
+  let constructor = vm.get_property_host(&this, &PropertyKey::String("constructor".into()))?;
+  let default_constructor = vm
+    .get_global("RegExp")
+    .ok_or_else(|| vm.throw_type_error("RegExp constructor is unavailable"))?;
+  let species = if matches!(constructor, Value::Undefined) {
+    default_constructor
+  } else {
+    if !constructor.is_object() {
+      return Err(vm.throw_type_error("RegExp constructor property is not an object"));
+    }
+    let species = vm.get_property_host(
+      &constructor,
+      &PropertyKey::Symbol(SymbolId::well_known_species()),
+    )?;
+    if matches!(species, Value::Undefined | Value::Null) {
+      default_constructor
+    } else {
+      species
+    }
+  };
+  if !species.is_constructable() {
+    return Err(vm.throw_type_error("RegExp species is not a constructor"));
+  }
+  let matcher = vm.construct_value(&species, &[this.clone(), Value::String(flags.clone())])?;
+  let last_index = vm.get_property_host(&this, &PropertyKey::String("lastIndex".into()))?;
+  let last_index = to_length(vm, &last_index)?;
+  drop(vm.set_property_host(
+    &matcher,
+    &Value::String("lastIndex".into()),
+    Value::Number(usize_to_f64(last_index)),
+  )?);
+  let global = flags
+    .code_units()
+    .any(|unit| unit == u16::from(b'g'));
+  let unicode = flags
+    .code_units()
+    .any(|unit| unit == u16::from(b'u') || unit == u16::from(b'v'));
+
+  let mut iterator = ObjectData::with_prototype(vm.realm().object_prototype());
+  iterator.set_internal_slot(MATCHER, matcher);
+  iterator.set_internal_slot(STRING, Value::String(subject));
+  iterator.set_internal_slot(GLOBAL, Value::Bool(global));
+  iterator.set_internal_slot(UNICODE, Value::Bool(unicode));
+  iterator.set_internal_slot(DONE, Value::Bool(false));
+  let iterator = Value::Object(Rc::new(RefCell::new(iterator)));
+  let next = Value::Builtin(Rc::new(move |vm, args| {
+    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+    let Value::Object(data) = &receiver else {
+      return Err(
+        vm.throw_type_error("RegExp String Iterator next called on incompatible receiver"),
+      );
+    };
+    let (matcher, subject, global, unicode, done) = {
+      let data = data.borrow();
+      let matcher = data.internal_slot(MATCHER).cloned();
+      let subject = data.internal_slot(STRING).cloned();
+      let global = data.internal_slot(GLOBAL).cloned();
+      let unicode = data.internal_slot(UNICODE).cloned();
+      let done = data.internal_slot(DONE).cloned();
+      (matcher, subject, global, unicode, done)
+    };
+    let (
+      Some(matcher),
+      Some(Value::String(subject)),
+      Some(Value::Bool(global)),
+      Some(Value::Bool(unicode)),
+      Some(Value::Bool(done)),
+    ) = (matcher, subject, global, unicode, done)
+    else {
+      return Err(
+        vm.throw_type_error("RegExp String Iterator next called on incompatible receiver"),
+      );
+    };
+    if done {
+      return Ok(iterator_result(vm, Value::Undefined, true));
+    }
+    let result = regexp_exec(vm, &matcher, &subject)?;
+    if matches!(result, Value::Null) {
+      data
+        .borrow_mut()
+        .set_internal_slot(DONE, Value::Bool(true));
+      return Ok(iterator_result(vm, Value::Undefined, true));
+    }
+    if !global {
+      data
+        .borrow_mut()
+        .set_internal_slot(DONE, Value::Bool(true));
+    } else {
+      let matched = vm.get_property_host(&result, &PropertyKey::String("0".into()))?;
+      if vm.to_string(&matched)?.is_empty() {
+        let last_index =
+          vm.get_property_host(&matcher, &PropertyKey::String("lastIndex".into()))?;
+        let last_index = to_length(vm, &last_index)?;
+        let next_index = subject.advance_string_index(last_index, unicode);
+        drop(vm.set_property_host(
+          &matcher,
+          &Value::String("lastIndex".into()),
+          Value::Number(usize_to_f64(next_index)),
+        )?);
+      }
+    }
+    Ok(iterator_result(vm, result, false))
+  }));
+  if let Value::Object(data) = &iterator {
+    data.borrow_mut().properties.insert(
+      PropertyKey::String("next".into()),
+      PropertyDescriptor::builtin_data(next),
+    );
+    data.borrow_mut().properties.insert(
+      PropertyKey::Symbol(SymbolId::well_known_iterator()),
+      PropertyDescriptor::builtin_data(Value::Builtin(Rc::new(|_vm, args| {
+        Ok(args.first().cloned().unwrap_or(Value::Undefined))
+      }))),
+    );
+    data.borrow_mut().properties.insert(
+      PropertyKey::Symbol(SymbolId::well_known_to_string_tag()),
+      PropertyDescriptor::Data {
+        value: Value::String("RegExp String Iterator".into()),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      },
+    );
+  }
+  Ok(iterator)
+}
+
+fn iterator_result(
+  vm: &Vm,
+  value: Value,
+  done: bool,
+) -> Value {
+  let mut result = ObjectData::with_prototype(vm.realm().object_prototype());
+  result.properties.insert(
+    PropertyKey::String("value".into()),
+    PropertyDescriptor::ordinary_data(value),
+  );
+  result.properties.insert(
+    PropertyKey::String("done".into()),
+    PropertyDescriptor::ordinary_data(Value::Bool(done)),
+  );
+  Value::Object(Rc::new(RefCell::new(result)))
+}
+
 fn accessor(
   target: &Rc<RefCell<ObjectData>>,
   key: PropertyKey,
@@ -711,13 +883,15 @@ pub(crate) fn create_regexp_intrinsics(
         return Ok(pattern_arg);
       }
     }
-    let (pattern, flags) = if matches!(flags_arg, Value::Undefined) && pattern_is_regexp {
+    let (pattern, flags) = if pattern_is_regexp {
       let source = vm.get_property_host(&pattern_arg, &PKey::String("source".into()))?;
-      let flags = vm.get_property_host(&pattern_arg, &PKey::String("flags".into()))?;
-      match (source, flags) {
-        (Value::String(source), Value::String(flags)) => (source, flags),
-        _ => (vm.to_string(&pattern_arg)?, js_string::JsString::empty()),
-      }
+      let pattern = vm.to_string(&source)?;
+      let flags = if matches!(flags_arg, Value::Undefined) {
+        vm.get_property_host(&pattern_arg, &PKey::String("flags".into()))?
+      } else {
+        flags_arg
+      };
+      (pattern, vm.to_string(&flags)?)
     } else {
       let pattern = match pattern_arg {
         Value::Undefined => js_string::JsString::from("(?:)"),
@@ -769,6 +943,19 @@ pub(crate) fn create_regexp_intrinsics(
   let constructor = Value::BuiltinObject(constructor_function, constructor_properties);
   set_builtin_name(&constructor, "RegExp");
   set_builtin_length(&constructor, 2.0);
+  let species_getter = builtin_object(
+    Rc::new(|_vm, args| Ok(args.first().cloned().unwrap_or(Value::Undefined))),
+    function_prototype,
+  );
+  set_builtin_name(&species_getter, "get [Symbol.species]");
+  set_builtin_length(&species_getter, 0.0);
+  if let Value::BuiltinObject(_, properties) = &constructor {
+    accessor(
+      properties,
+      PKey::Symbol(SymbolId::well_known_species()),
+      species_getter,
+    );
+  }
   prototype.borrow_mut().properties.insert(
     PKey::String("constructor".to_string().into()),
     PropertyDescriptor::builtin_data(constructor.clone()),
@@ -856,6 +1043,12 @@ pub(crate) fn create_regexp_intrinsics(
     "[Symbol.match]",
     1,
     regexp_match,
+  );
+  methods.named_method(
+    PKey::Symbol(SymbolId::well_known_match_all()),
+    "[Symbol.matchAll]",
+    1,
+    regexp_match_all,
   );
   methods.named_method(
     PKey::Symbol(SymbolId::well_known_search()),

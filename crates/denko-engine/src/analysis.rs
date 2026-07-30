@@ -2609,6 +2609,29 @@ mod tests {
   }
 
   #[test]
+  fn resolves_es2023_intrinsic_surface_declarations() {
+    let source = crate::js!(
+      typescript,
+      "Promise.allSettled([]); Reflect.ownKeys({}); BigInt(1);"
+    );
+    let result = analyze(source, Path::new("editor.ts"), false);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    for name in ["Promise", "Reflect", "BigInt"] {
+      let start = source
+        .find(name)
+        .expect("builtin name appears in source");
+      assert!(
+        result
+          .definitions
+          .iter()
+          .any(|definition| definition.start == start
+            && definition.target_virtual.as_deref() == Some(BUILTIN_LIB_ID)),
+        "{name} did not resolve to the built-in declaration"
+      );
+    }
+  }
+
+  #[test]
   fn treats_unloaded_editor_imports_as_external_bindings() {
     let result = analyze(
       crate::js!(

@@ -3,7 +3,7 @@
 use crate::errors::RuntimeError;
 use crate::value::{PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
-use crate::vm::runtime::property::{get_property, object_identity, values_equal};
+use crate::vm::runtime::property::{object_identity, values_equal};
 use std::collections::HashSet;
 
 impl Vm {
@@ -12,48 +12,51 @@ impl Vm {
     value: &Value,
     constructor: &Value,
   ) -> Result<bool, RuntimeError> {
-    // Per spec: if constructor has @@hasInstance, call it.
     let has_instance_key = PropertyKey::Symbol(SymbolId::well_known_has_instance());
-    if let Ok(method) = get_property(constructor, &has_instance_key, 0)
-      && matches!(
-        method,
-        Value::Closure { .. } | Value::Builtin(_) | Value::BuiltinObject(_, _)
-      )
-    {
+    let method = self.get_property_host(constructor, &has_instance_key)?;
+    if !matches!(method, Value::Undefined | Value::Null) {
+      if !method.is_callable() {
+        return Err(self.throw_type_error("Symbol.hasInstance property is not callable"));
+      }
       let result = self.call_with_this(&method, constructor, std::slice::from_ref(value))?;
       return Ok(result.is_truthy());
     }
+    if !constructor.is_callable() {
+      return Err(self.throw_type_error("Right-hand side of instanceof is not callable"));
+    }
+    self.ordinary_has_instance(constructor, value)
+  }
 
-    // Only objects have prototype chains.
-    match value {
-      Value::Object(_)
-      | Value::Array(..)
-      | Value::Closure { .. }
-      | Value::BuiltinObject(_, _)
-      | Value::Promise(..) => {}
-      _ => return Ok(false),
+  /// ECMAScript `OrdinaryHasInstance`, also exposed by
+  /// `Function.prototype[Symbol.hasInstance]`.
+  pub(crate) fn ordinary_has_instance(
+    &mut self,
+    constructor: &Value,
+    value: &Value,
+  ) -> Result<bool, RuntimeError> {
+    if !constructor.is_callable() {
+      return Ok(false);
+    }
+    if let Value::BuiltinObject(_, properties) = constructor
+      && let Some(bound_target) = properties
+        .borrow()
+        .internal_slot("[[BoundTargetFunction]]")
+        .cloned()
+    {
+      return self.instance_of(value, &bound_target);
+    }
+    if !value.is_object() {
+      return Ok(false);
     }
 
-    // Get constructor.prototype
     let proto_key = PropertyKey::String("prototype".to_string().into());
-    let ctor_proto = get_property(constructor, &proto_key, 0)?;
-    // prototype must be an object
-    match ctor_proto {
-      Value::Object(_) | Value::Array(..) | Value::Closure { .. } | Value::BuiltinObject(_, _) => {}
-      _ => return Ok(false),
+    let ctor_proto = self.get_property_host(constructor, &proto_key)?;
+    if !ctor_proto.is_object() {
+      return Err(self.throw_type_error("Function has non-object prototype in instanceof check"));
     }
 
-    // Walk value's prototype chain
-    let mut current = match value {
-      Value::Object(d) => d.borrow().get_prototype(),
-      Value::Array(_, props) => props.borrow().get_prototype(),
-      Value::Closure { props, .. } => props.borrow().get_prototype(),
-      Value::BuiltinObject(_, props) => props.borrow().get_prototype(),
-      Value::Promise(_, properties) => properties.borrow().get_prototype(),
-      _ => Value::Null,
-    };
+    let mut current = self.get_prototype_of_value(value)?;
     let mut seen: HashSet<usize> = HashSet::new();
-
     while !matches!(current, Value::Null) {
       if values_equal(&current, &ctor_proto) {
         return Ok(true);
@@ -64,16 +67,8 @@ impl Vm {
       if !seen.insert(identity) {
         return Ok(false);
       }
-      // advance
-      current = match &current {
-        Value::Object(d) => d.borrow().get_prototype(),
-        Value::Array(_, props) => props.borrow().get_prototype(),
-        Value::Closure { props, .. } => props.borrow().get_prototype(),
-        Value::BuiltinObject(_, props) => props.borrow().get_prototype(),
-        _ => Value::Null,
-      };
+      current = self.get_prototype_of_value(&current)?;
     }
-
     Ok(false)
   }
 

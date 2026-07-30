@@ -49,7 +49,7 @@ fn curated_effect_declarations() -> Vec<VirtualDeclaration> {
       source: source.to_string(),
     }
   })
-  .collect()
+  .collect::<Vec<_>>()
 }
 
 #[test]
@@ -155,6 +155,27 @@ fn run_main_rejects_open_requirements() {
     },
   ];
   assert!(check_with_declarations(session.program(), &declarations).is_err());
+}
+
+#[test]
+fn runtime_declaration_provides_only_live_service_identifiers() {
+  let source = denko::js!(
+    typescript,
+    r#"
+      import type * as Effect from "effect/Effect";
+      import * as Runtime from "blitz:runtime";
+      const open = null as unknown as Effect.Effect<number, never, "blitz:fs/FileSystem">;
+      const closed: Effect.Effect<number, Runtime.RuntimeInitError> = Runtime.provideLive(open);
+      Runtime.runMain(closed);
+    "#
+  );
+  let mut declarations = curated_effect_declarations();
+  declarations.push(VirtualDeclaration {
+    specifier: "blitz:runtime".to_string(),
+    source: include_str!("../../../tools/effect-assets/declarations/blitz-runtime.d.ts")
+      .to_string(),
+  });
+  assert!(check_source(source, "runtime-live.ts", &declarations).is_ok());
 }
 
 #[test]

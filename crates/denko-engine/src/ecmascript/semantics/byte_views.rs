@@ -8,6 +8,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 
 use crate::runtime_utils::canonical_index_key;
@@ -33,6 +34,7 @@ pub(crate) struct ByteViewDetails {
   pub(crate) kind: String,
   pub(crate) length: usize,
   pub(crate) byte_offset: usize,
+  pub(crate) bytes_per_element: usize,
   pub(crate) prototype: Value,
 }
 
@@ -41,6 +43,7 @@ pub(crate) struct ByteViewIndexInfo {
   pub(crate) kind: String,
   pub(crate) byte_offset: usize,
   pub(crate) length: usize,
+  pub(crate) bytes_per_element: usize,
 }
 
 fn internal_slot(
@@ -115,6 +118,7 @@ pub(crate) fn new_byte_view(
   length: usize,
   byte_offset: usize,
 ) -> Value {
+  let bytes_per_element = typed_array_bytes_per_element(kind).expect("known typed array kind");
   let mut object = ObjectData::with_prototype(prototype);
   object.set_internal_slot(
     TYPED_ARRAY_DATA_SLOT,
@@ -124,9 +128,15 @@ pub(crate) fn new_byte_view(
     TYPED_ARRAY_KIND_SLOT,
     Value::String(kind.to_string().into()),
   );
-  object.set_internal_slot(TYPED_ARRAY_BYTES_PER_ELEMENT_SLOT, Value::Number(1.0));
+  object.set_internal_slot(
+    TYPED_ARRAY_BYTES_PER_ELEMENT_SLOT,
+    Value::Number(bytes_per_element as f64),
+  );
   object.set_internal_slot(TYPED_ARRAY_LENGTH_SLOT, Value::Number(length as f64));
-  object.set_internal_slot(TYPED_ARRAY_BYTE_LENGTH_SLOT, Value::Number(length as f64));
+  object.set_internal_slot(
+    TYPED_ARRAY_BYTE_LENGTH_SLOT,
+    Value::Number((length * bytes_per_element) as f64),
+  );
   object.set_internal_slot(
     TYPED_ARRAY_BYTE_OFFSET_SLOT,
     Value::Number(byte_offset as f64),
@@ -135,7 +145,10 @@ pub(crate) fn new_byte_view(
 
   for (name, value) in [
     ("length", Value::Number(length as f64)),
-    ("byteLength", Value::Number(length as f64)),
+    (
+      "byteLength",
+      Value::Number((length * bytes_per_element) as f64),
+    ),
     ("byteOffset", Value::Number(byte_offset as f64)),
     ("buffer", buffer),
   ] {
@@ -152,14 +165,7 @@ pub(crate) fn byte_view_details(value: &Value) -> Option<ByteViewDetails> {
     return None;
   };
   let kind = match internal_slot(object, TYPED_ARRAY_KIND_SLOT)? {
-    Value::String(kind)
-      if matches!(
-        kind.as_str_lossy(),
-        "Uint8Array" | "Int8Array" | "Uint8ClampedArray"
-      ) =>
-    {
-      kind
-    }
+    Value::String(kind) if typed_array_bytes_per_element(kind.as_str_lossy()).is_some() => kind,
     _ => return None,
   };
   let buffer = internal_slot(object, TYPED_ARRAY_BUFFER_SLOT)?;
@@ -177,6 +183,13 @@ pub(crate) fn byte_view_details(value: &Value) -> Option<ByteViewDetails> {
     Value::Number(offset) => offset.to_usize()?,
     _ => return None,
   };
+  let bytes_per_element = match internal_slot(object, TYPED_ARRAY_BYTES_PER_ELEMENT_SLOT)? {
+    Value::Number(bytes) => bytes.to_usize()?,
+    _ => return None,
+  };
+  if bytes_per_element != typed_array_bytes_per_element(kind.as_str_lossy())? {
+    return None;
+  }
   Some(ByteViewDetails {
     object: Rc::clone(object),
     buffer,
@@ -184,6 +197,7 @@ pub(crate) fn byte_view_details(value: &Value) -> Option<ByteViewDetails> {
     kind: kind.to_string(),
     length,
     byte_offset,
+    bytes_per_element,
     prototype: object.borrow().get_prototype(),
   })
 }
@@ -218,6 +232,7 @@ pub(crate) fn byte_view_index_info(value: &Value) -> Option<ByteViewIndexInfo> {
     kind: details.kind,
     byte_offset: details.byte_offset,
     length: details.length,
+    bytes_per_element: details.bytes_per_element,
   })
 }
 
@@ -229,28 +244,120 @@ pub(crate) fn byte_view_index_value(
   if index >= info.length {
     return None;
   }
-  let byte = info
-    .data
-    .borrow()
-    .get(info.byte_offset.checked_add(index)?)
-    .and_then(|slot| slot.as_ref())
-    .and_then(|value| match value {
-      Value::Number(number) => number.to_u8(),
-      _ => None,
+  let start = info
+    .byte_offset
+    .checked_add(index.checked_mul(info.bytes_per_element)?)?;
+  let data = info.data.borrow();
+  let bytes = (0..info.bytes_per_element)
+    .map(|offset| {
+      data
+        .get(start + offset)
+        .and_then(|slot| slot.as_ref())
+        .and_then(|value| match value {
+          Value::Number(number) => number.to_u8(),
+          _ => None,
+        })
+        .unwrap_or(0)
     })
-    .unwrap_or(0);
-  Some(decode_byte(&info.kind, byte))
+    .collect::<Vec<_>>();
+  decode_typed_element(&info.kind, &bytes)
 }
 
-pub(crate) fn decode_byte(
-  kind: &str,
-  byte: u8,
-) -> Value {
-  if kind == "Int8Array" && byte >= 128 {
-    Value::Number(f64::from(byte) - 256.0)
-  } else {
-    Value::Number(f64::from(byte))
+pub(crate) fn write_byte_view_index(
+  vm: &mut Vm,
+  info: &ByteViewIndexInfo,
+  index: usize,
+  value: &Value,
+) -> Result<(), RuntimeError> {
+  if index >= info.length {
+    return Ok(());
   }
+  let bytes = encode_typed_element(vm, &info.kind, value)?;
+  let start = info.byte_offset + index * info.bytes_per_element;
+  let mut data = info.data.borrow_mut();
+  for (offset, byte) in bytes.into_iter().enumerate() {
+    if let Some(slot) = data.get_mut(start + offset) {
+      *slot = Some(Value::Number(f64::from(byte)));
+    }
+  }
+  Ok(())
+}
+
+pub(crate) fn typed_array_bytes_per_element(kind: &str) -> Option<usize> {
+  match kind {
+    "Uint8Array" | "Int8Array" | "Uint8ClampedArray" => Some(1),
+    "Uint16Array" | "Int16Array" => Some(2),
+    "Uint32Array" | "Int32Array" | "Float32Array" => Some(4),
+    "Float64Array" | "BigInt64Array" | "BigUint64Array" => Some(8),
+    _ => None,
+  }
+}
+
+pub(crate) fn decode_typed_element(
+  kind: &str,
+  bytes: &[u8],
+) -> Option<Value> {
+  let value = match kind {
+    "Uint8Array" => Value::Number(f64::from(*bytes.first()?)),
+    "Int8Array" => Value::Number(f64::from(*bytes.first()? as i8)),
+    "Uint8ClampedArray" => Value::Number(f64::from(*bytes.first()?)),
+    "Uint16Array" => Value::Number(f64::from(u16::from_le_bytes(bytes.try_into().ok()?))),
+    "Int16Array" => Value::Number(f64::from(i16::from_le_bytes(bytes.try_into().ok()?))),
+    "Uint32Array" => Value::Number(f64::from(u32::from_le_bytes(bytes.try_into().ok()?))),
+    "Int32Array" => Value::Number(f64::from(i32::from_le_bytes(bytes.try_into().ok()?))),
+    "Float32Array" => Value::Number(f64::from(f32::from_le_bytes(bytes.try_into().ok()?))),
+    "Float64Array" => Value::Number(f64::from_le_bytes(bytes.try_into().ok()?)),
+    "BigInt64Array" => Value::BigInt(BigInt::from(i64::from_le_bytes(bytes.try_into().ok()?))),
+    "BigUint64Array" => Value::BigInt(BigInt::from(u64::from_le_bytes(bytes.try_into().ok()?))),
+    _ => return None,
+  };
+  Some(value)
+}
+
+pub(crate) fn encode_typed_element(
+  vm: &mut Vm,
+  kind: &str,
+  value: &Value,
+) -> Result<Vec<u8>, RuntimeError> {
+  if matches!(kind, "BigInt64Array" | "BigUint64Array") {
+    let Value::BigInt(value) = value else {
+      return Err(vm.throw_type_error("Cannot convert Number to BigInt typed array element"));
+    };
+    let modulus = BigInt::from(1u8) << 64;
+    let mut bits: BigInt = value % &modulus;
+    if bits.sign() == Sign::Minus {
+      bits += &modulus;
+    }
+    let bits = bits
+      .to_u64()
+      .expect("BigInt modulo 2^64 is representable");
+    return Ok(match kind {
+      "BigInt64Array" | "BigUint64Array" => bits.to_le_bytes().to_vec(),
+      _ => unreachable!(),
+    });
+  }
+  let number = vm.to_number_value(value)?;
+  let bytes = match kind {
+    "Uint8Array" => vec![number.trunc().rem_euclid(256.0) as u8],
+    "Int8Array" => vec![number.trunc().rem_euclid(256.0) as u8],
+    "Uint8ClampedArray" => vec![encode_byte(vm, kind, value)?],
+    "Uint16Array" => (number.trunc().rem_euclid(65_536.0) as u16)
+      .to_le_bytes()
+      .to_vec(),
+    "Int16Array" => (number.trunc().rem_euclid(65_536.0) as u16)
+      .to_le_bytes()
+      .to_vec(),
+    "Uint32Array" => (number.trunc().rem_euclid(4_294_967_296.0) as u32)
+      .to_le_bytes()
+      .to_vec(),
+    "Int32Array" => (number.trunc().rem_euclid(4_294_967_296.0) as u32)
+      .to_le_bytes()
+      .to_vec(),
+    "Float32Array" => (number as f32).to_le_bytes().to_vec(),
+    "Float64Array" => number.to_le_bytes().to_vec(),
+    _ => return Err(vm.throw_type_error("Unknown typed array kind")),
+  };
+  Ok(bytes)
 }
 
 pub(crate) fn encode_byte(

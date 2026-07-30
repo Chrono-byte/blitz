@@ -11,6 +11,7 @@ use std::rc::{Rc, Weak};
 
 use crate::value::{
   ArrayData, ObjectData, PromiseState, PropertyDescriptor, ProxyData, SharedValue, Value, WeakKey,
+  WeakValue,
 };
 
 /// Result of a prototype GC collection cycle.
@@ -70,6 +71,20 @@ thread_local! {
     static HEAP: RefCell<HeapRegistry> = RefCell::new(HeapRegistry::default());
     static ALLOCATION_PRESSURE: Cell<usize> = const { Cell::new(0) };
     static LIVE_VMS: Cell<usize> = const { Cell::new(0) };
+    static PENDING_FINALIZATION_CLEANUPS: RefCell<Vec<Weak<RefCell<ObjectData>>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Take registries that acquired unreachable targets during the preceding collection.
+pub(crate) fn take_pending_finalization_cleanups() -> Vec<Rc<RefCell<ObjectData>>> {
+  PENDING_FINALIZATION_CLEANUPS.with(|pending| {
+    let mut seen = HashSet::new();
+    pending
+      .borrow_mut()
+      .drain(..)
+      .filter_map(|registry| registry.upgrade())
+      .filter(|registry| seen.insert(Rc::as_ptr(registry) as usize))
+      .collect()
+  })
 }
 
 /// Registers a VM that can own roots in the thread-local prototype heap.
@@ -262,6 +277,12 @@ pub fn collect_with_env_roots(
           &mut marked_promises,
         );
         prune_dead_ephemerons(
+          &marked_objects,
+          &marked_arrays,
+          &marked_proxies,
+          &marked_promises,
+        );
+        process_weak_references(
           &marked_objects,
           &marked_arrays,
           &marked_proxies,
@@ -592,6 +613,28 @@ fn mark_object(
       marked_promises,
     );
   }
+  if let Some(callback) = &obj_ref.finalization_cleanup_callback {
+    mark_value(
+      callback,
+      marked_objects,
+      marked_arrays,
+      marked_proxies,
+      marked_envs,
+      marked_promises,
+    );
+  }
+  if let Some(cells) = &obj_ref.finalization_registry_cells {
+    for cell in cells {
+      mark_value(
+        &cell.holdings,
+        marked_objects,
+        marked_arrays,
+        marked_proxies,
+        marked_envs,
+        marked_promises,
+      );
+    }
+  }
   for desc in obj_ref.properties.values() {
     match desc {
       PropertyDescriptor::Data { value, .. } => mark_value(
@@ -662,6 +705,104 @@ fn weak_key_is_marked(
     // Bare native functions are not allocations managed by this collector.
     WeakKey::Builtin(value) => value.strong_count() > 0,
     WeakKey::Symbol(value) => value.strong_count() > 0,
+  }
+}
+
+fn weak_value_is_marked(
+  value: &WeakValue,
+  marked_objects: &HashSet<usize>,
+  marked_arrays: &HashSet<usize>,
+  marked_proxies: &HashSet<usize>,
+  marked_promises: &HashSet<usize>,
+) -> bool {
+  match value {
+    WeakValue::Primitive(_) => false,
+    WeakValue::Object(value) => value
+      .upgrade()
+      .is_some_and(|value| marked_objects.contains(&(Rc::as_ptr(&value) as usize))),
+    WeakValue::Array(data, props) => {
+      data
+        .upgrade()
+        .is_some_and(|value| marked_arrays.contains(&(Rc::as_ptr(&value) as usize)))
+        && props
+          .upgrade()
+          .is_some_and(|value| marked_objects.contains(&(Rc::as_ptr(&value) as usize)))
+    }
+    WeakValue::Proxy(value) => value
+      .upgrade()
+      .is_some_and(|value| marked_proxies.contains(&(Rc::as_ptr(&value) as usize))),
+    WeakValue::Closure(_, _, _, properties) | WeakValue::BuiltinObject(_, properties) => properties
+      .upgrade()
+      .is_some_and(|value| marked_objects.contains(&(Rc::as_ptr(&value) as usize))),
+    WeakValue::Builtin(value) => value.strong_count() > 0,
+    WeakValue::Promise(value, properties) => {
+      value
+        .upgrade()
+        .is_some_and(|value| marked_promises.contains(&(Rc::as_ptr(&value) as usize)))
+        && properties
+          .upgrade()
+          .is_some_and(|value| marked_objects.contains(&(Rc::as_ptr(&value) as usize)))
+    }
+  }
+}
+
+fn process_weak_references(
+  marked_objects: &HashSet<usize>,
+  marked_arrays: &HashSet<usize>,
+  marked_proxies: &HashSet<usize>,
+  marked_promises: &HashSet<usize>,
+) {
+  let registries = HEAP.with(|heap| {
+    heap
+      .borrow()
+      .objects
+      .iter()
+      .filter_map(Weak::upgrade)
+      .filter(|object| marked_objects.contains(&(Rc::as_ptr(object) as usize)))
+      .collect::<Vec<_>>()
+  });
+  for object in registries {
+    let object_ref = Rc::clone(&object);
+    let mut object = object.borrow_mut();
+    if object
+      .weak_ref_target
+      .as_ref()
+      .is_some_and(|target| {
+        !weak_value_is_marked(
+          target,
+          marked_objects,
+          marked_arrays,
+          marked_proxies,
+          marked_promises,
+        )
+      })
+    {
+      object.weak_ref_target = None;
+    }
+    let Some(cells) = object.finalization_registry_cells.as_mut() else {
+      continue;
+    };
+    let mut has_new_cleanup = false;
+    for cell in cells.iter_mut().filter(|cell| cell.active) {
+      if !weak_value_is_marked(
+        &cell.target,
+        marked_objects,
+        marked_arrays,
+        marked_proxies,
+        marked_promises,
+      ) {
+        cell.active = false;
+        has_new_cleanup = true;
+      }
+    }
+    if has_new_cleanup && !object.finalization_cleanup_scheduled {
+      object.finalization_cleanup_scheduled = true;
+      PENDING_FINALIZATION_CLEANUPS.with(|pending| {
+        pending
+          .borrow_mut()
+          .push(Rc::downgrade(&object_ref));
+      });
+    }
   }
 }
 
@@ -751,6 +892,17 @@ fn prune_dead_ephemerons(
           )
         });
       }
+      if let Some(entries) = object.weak_set_entries.as_mut() {
+        entries.retain(|key| {
+          weak_key_is_marked(
+            key,
+            marked_objects,
+            marked_arrays,
+            marked_proxies,
+            marked_promises,
+          )
+        });
+      }
     }
   });
 }
@@ -814,7 +966,12 @@ fn clear_object(obj: &Rc<RefCell<ObjectData>>) {
   let mut obj = obj.borrow_mut();
   obj.properties.clear();
   obj.internal_slots.clear();
+  obj.weak_ref_target = None;
+  obj.finalization_registry_cells = None;
+  obj.finalization_cleanup_callback = None;
+  obj.finalization_cleanup_scheduled = false;
   obj.weak_map_entries = None;
+  obj.weak_set_entries = None;
   obj.strong_prototype = None;
   obj.weak_prototype = None;
   obj.captured_lexical_env = None;

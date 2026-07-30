@@ -151,7 +151,7 @@ fn revive_property(
 ) -> Result<Value, RuntimeError> {
   let value = vm.get_property_host(holder, &name)?;
   let record = record.filter(|record| crate::same_value(&value, &record.value));
-  let keys = if is_array_value(&value) {
+  let keys = if is_array_value(vm, &value)? {
     let length = vm.get_property_host(&value, &PropertyKey::String("length".into()))?;
     let length = to_length(vm, &length)?;
     (0..length)
@@ -214,86 +214,255 @@ fn parse_value(
   )
 }
 
-fn stringify_value(
-  vm: &mut Vm,
-  value: &Value,
-  seen: &mut HashSet<usize>,
-) -> Result<Option<String>, RuntimeError> {
-  let result = match value {
-    Value::Uninitialized
-    | Value::Undefined
-    | Value::Builtin(_)
-    | Value::BuiltinObject(_, _)
-    | Value::Closure { .. } => None,
-    Value::Null => Some("null".to_owned()),
-    Value::Bool(value) => Some(if *value { "true" } else { "false" }.to_owned()),
-    Value::Number(value) => Some(if value.is_finite() {
-      js_number_to_string(*value)
-    } else {
-      "null".to_owned()
-    }),
-    Value::String(value) => Some({
-      let mut output = String::with_capacity(value.len() + 2);
-      output.push('"');
-      for unit in value.code_units() {
-        match unit {
-          0x0022 => output.push_str("\\\""),
-          0x005C => output.push_str("\\\\"),
-          0x000A => output.push_str("\\n"),
-          0x000D => output.push_str("\\r"),
-          0x0009 => output.push_str("\\t"),
-          0x0008 => output.push_str("\\b"),
-          0x000C => output.push_str("\\f"),
-          0x0020..=0x007E => {
-            output.push(char::from_u32(u32::from(unit)).expect("ASCII is a Unicode scalar"))
-          }
-          unit => output.push_str(&format!("\\u{unit:04x}")),
-        }
+fn quote_json_string(value: &js_string::JsString) -> String {
+  let mut output = String::with_capacity(value.len() + 2);
+  output.push('"');
+  for unit in value.code_units() {
+    match unit {
+      0x0022 => output.push_str("\\\""),
+      0x005C => output.push_str("\\\\"),
+      0x000A => output.push_str("\\n"),
+      0x000D => output.push_str("\\r"),
+      0x0009 => output.push_str("\\t"),
+      0x0008 => output.push_str("\\b"),
+      0x000C => output.push_str("\\f"),
+      0x0020..=0x007E => {
+        output.push(char::from_u32(u32::from(unit)).expect("ASCII is a Unicode scalar"));
       }
-      output.push('"');
-      output
-    }),
-    Value::BigInt(_) => return Err(vm.throw_type_error("Do not know how to serialize a BigInt")),
-    Value::Symbol(_, _) => None,
-    Value::Array(elements, _) => {
-      let identity = value_identity(value).expect("array has identity");
-      if !seen.insert(identity) {
-        return Err(vm.throw_type_error("Converting circular structure to JSON"));
-      }
-      let length = elements.borrow().len();
-      let mut parts = Vec::with_capacity(length);
-      for index in 0..length {
-        let item = vm.get_property_host(value, &PropertyKey::String(index.to_string().into()))?;
-        match stringify_value(vm, &item, seen)? {
-          Some(json) => parts.push(json),
-          None => parts.push("null".to_owned()),
-        }
-      }
-      seen.remove(&identity);
-      Some(format!("[{}]", parts.join(",")))
+      unit => output.push_str(&format!("\\u{unit:04x}")),
     }
-    Value::Object(_) | Value::Proxy(_) | Value::Promise(..) => {
-      let identity = value_identity(value).expect("object-like value has identity");
-      if !seen.insert(identity) {
-        return Err(vm.throw_type_error("Converting circular structure to JSON"));
-      }
-      let mut parts = Vec::new();
-      for key in vm.own_enumerable_keys_value(value)? {
-        let PropertyKey::String(name) = key else {
-          continue;
-        };
-        let key =
-          stringify_value(vm, &Value::String(name.clone()), seen)?.expect("strings stringify");
-        let property = vm.get_property_host(value, &PropertyKey::String(name))?;
-        if let Some(serialized) = stringify_value(vm, &property, seen)? {
-          parts.push(format!("{key}:{serialized}"));
-        }
-      }
-      seen.remove(&identity);
-      Some(format!("{{{}}}", parts.join(",")))
-    }
+  }
+  output.push('"');
+  output
+}
+
+fn boxed_primitive(value: &Value) -> Option<Value> {
+  let data = match value {
+    Value::Object(data)
+    | Value::Array(_, data)
+    | Value::Closure { props: data, .. }
+    | Value::BuiltinObject(_, data) => data,
+    _ => return None,
   };
-  Ok(result)
+  if let Some(value) = data
+    .borrow()
+    .internal_slot("[[BooleanData]]")
+    .cloned()
+  {
+    return Some(value);
+  }
+  let descriptor = data
+    .borrow()
+    .properties
+    .get(&PropertyKey::String("[[PrimitiveValue]]".into()))
+    .cloned()?;
+  let PropertyDescriptor::Data { value, .. } = descriptor else {
+    return None;
+  };
+  matches!(
+    value,
+    Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::BigInt(_)
+  )
+  .then_some(value)
+}
+
+struct StringifyState {
+  replacer: Option<Value>,
+  property_list: Option<Vec<js_string::JsString>>,
+  gap: String,
+  indent: String,
+  stack: HashSet<usize>,
+}
+
+impl StringifyState {
+  fn serialize_property(
+    &mut self,
+    vm: &mut Vm,
+    holder: &Value,
+    key: &js_string::JsString,
+  ) -> Result<Option<String>, RuntimeError> {
+    let mut value = vm.get_property_host(holder, &PropertyKey::String(key.clone()))?;
+    if value.is_object() || matches!(value, Value::BigInt(_)) {
+      let to_json =
+        vm.get_property_host(&value, &PropertyKey::String("toJSON".to_string().into()))?;
+      if Vm::is_callable_value(&to_json) {
+        value = vm.call_value_with_this(&to_json, &value, &[Value::String(key.clone())])?;
+      }
+    }
+    if let Some(replacer) = self.replacer.clone() {
+      value = vm.call_value_with_this(&replacer, holder, &[Value::String(key.clone()), value])?;
+    }
+    if let Some(primitive) = boxed_primitive(&value) {
+      value = primitive;
+    }
+    if Vm::is_callable_value(&value) {
+      return Ok(None);
+    }
+    self.serialize_value(vm, &value)
+  }
+
+  fn serialize_value(
+    &mut self,
+    vm: &mut Vm,
+    value: &Value,
+  ) -> Result<Option<String>, RuntimeError> {
+    let is_array = is_array_value(vm, value)?;
+    let result = match value {
+      Value::Uninitialized
+      | Value::Undefined
+      | Value::Builtin(_)
+      | Value::BuiltinObject(_, _)
+      | Value::Closure { .. } => None,
+      Value::Null => Some("null".to_owned()),
+      Value::Bool(value) => Some(if *value { "true" } else { "false" }.to_owned()),
+      Value::Number(value) => Some(if value.is_finite() {
+        js_number_to_string(*value)
+      } else {
+        "null".to_owned()
+      }),
+      Value::String(value) => Some(quote_json_string(value)),
+      Value::BigInt(_) => return Err(vm.throw_type_error("Do not know how to serialize a BigInt")),
+      Value::Symbol(_, _) => None,
+      value if is_array => {
+        let identity = value_identity(value).expect("array has identity");
+        if !self.stack.insert(identity) {
+          return Err(vm.throw_type_error("Converting circular structure to JSON"));
+        }
+        let previous_indent = self.indent.clone();
+        self.indent.push_str(&self.gap);
+        let length = vm.get_property_host(value, &PropertyKey::String("length".into()))?;
+        let length = to_length(vm, &length)?;
+        let mut parts = Vec::with_capacity(length);
+        for index in 0..length {
+          match self.serialize_property(vm, value, &index.to_string().into())? {
+            Some(json) => parts.push(json),
+            None => parts.push("null".to_owned()),
+          }
+        }
+        let result = if parts.is_empty() {
+          "[]".to_owned()
+        } else if self.gap.is_empty() {
+          format!("[{}]", parts.join(","))
+        } else {
+          format!(
+            "[\n{}{}\n{}]",
+            self.indent,
+            parts.join(&format!(",\n{}", self.indent)),
+            previous_indent
+          )
+        };
+        self.stack.remove(&identity);
+        self.indent = previous_indent;
+        Some(result)
+      }
+      Value::Object(_) | Value::Proxy(_) | Value::Promise(..) => {
+        let identity = value_identity(value).expect("object-like value has identity");
+        if !self.stack.insert(identity) {
+          return Err(vm.throw_type_error("Converting circular structure to JSON"));
+        }
+        let previous_indent = self.indent.clone();
+        self.indent.push_str(&self.gap);
+        let mut parts = Vec::new();
+        let keys = if let Some(property_list) = &self.property_list {
+          property_list.clone()
+        } else {
+          vm.own_enumerable_keys_value(value)?
+            .into_iter()
+            .filter_map(|key| match key {
+              PropertyKey::String(name) => Some(name),
+              PropertyKey::Symbol(_) => None,
+            })
+            .collect()
+        };
+        for name in keys {
+          if let Some(serialized) = self.serialize_property(vm, value, &name)? {
+            let separator = if self.gap.is_empty() { ":" } else { ": " };
+            parts.push(format!(
+              "{}{separator}{serialized}",
+              quote_json_string(&name)
+            ));
+          }
+        }
+        let result = if parts.is_empty() {
+          "{}".to_owned()
+        } else if self.gap.is_empty() {
+          format!("{{{}}}", parts.join(","))
+        } else {
+          format!(
+            "{{\n{}{}\n{}}}",
+            self.indent,
+            parts.join(&format!(",\n{}", self.indent)),
+            previous_indent
+          )
+        };
+        self.stack.remove(&identity);
+        self.indent = previous_indent;
+        Some(result)
+      }
+      Value::Array(..) => unreachable!("arrays handled by IsArray"),
+    };
+    Ok(result)
+  }
+}
+
+fn replacer_property_list(
+  vm: &mut Vm,
+  replacer: &Value,
+) -> Result<Option<Vec<js_string::JsString>>, RuntimeError> {
+  if !is_array_value(vm, replacer)? {
+    return Ok(None);
+  }
+  let length = vm.get_property_host(replacer, &PropertyKey::String("length".into()))?;
+  let length = to_length(vm, &length)?;
+  let mut list = Vec::new();
+  for index in 0..length {
+    let mut item =
+      vm.get_property_host(replacer, &PropertyKey::String(index.to_string().into()))?;
+    if let Some(primitive) = boxed_primitive(&item) {
+      item = primitive;
+    }
+    let key = match item {
+      Value::String(value) => Some(value),
+      Value::Number(value) => Some(js_number_to_string(value).into()),
+      _ => None,
+    };
+    if let Some(key) = key
+      && !list.contains(&key)
+    {
+      list.push(key);
+    }
+  }
+  Ok(Some(list))
+}
+
+fn stringify_gap(
+  _vm: &mut Vm,
+  mut space: Value,
+) -> Result<String, RuntimeError> {
+  if let Some(primitive) = boxed_primitive(&space) {
+    space = primitive;
+  }
+  match space {
+    Value::Number(number) => {
+      let width = if number.is_nan() || number <= 0.0 {
+        0
+      } else {
+        number.floor().min(10.0) as usize
+      };
+      Ok(" ".repeat(width))
+    }
+    Value::String(value) => Ok(
+      value
+        .slice(0..value.len().min(10))
+        .expect("space slice is in bounds")
+        .to_string(),
+    ),
+    Value::Object(_) => {
+      // A forged primitive slot is not a boxed String/Number.
+      Ok(String::new())
+    }
+    _ => Ok(String::new()),
+  }
 }
 
 /// Creates the JSON namespace object.
@@ -306,7 +475,7 @@ pub(crate) fn create_json_object(
   ))));
   let parse = builtin_object(
     Rc::new(|vm, args| {
-      let offset = usize::from(args.len() > 1);
+      let offset = usize::from(vm.builtin_this_arg_prepended());
       let text = args
         .get(offset)
         .cloned()
@@ -328,14 +497,36 @@ pub(crate) fn create_json_object(
 
   let stringify = builtin_object(
     Rc::new(|vm, args| {
-      let offset = usize::from(args.len() > 1);
+      let offset = usize::from(vm.builtin_this_arg_prepended());
       let value = args
         .get(offset)
         .cloned()
         .unwrap_or(Value::Undefined);
-      let mut seen = HashSet::new();
+      let replacer = args
+        .get(offset + 1)
+        .cloned()
+        .unwrap_or(Value::Undefined);
+      let space = args
+        .get(offset + 2)
+        .cloned()
+        .unwrap_or(Value::Undefined);
+      let property_list = replacer_property_list(vm, &replacer)?;
+      let mut state = StringifyState {
+        replacer: Vm::is_callable_value(&replacer).then_some(replacer),
+        property_list,
+        gap: stringify_gap(vm, space)?,
+        indent: String::new(),
+        stack: HashSet::new(),
+      };
+      let mut root = ObjectData::with_prototype(vm.realm().object_prototype());
+      root.properties.insert(
+        PropertyKey::String("".into()),
+        PropertyDescriptor::ordinary_data(value),
+      );
+      let root = Value::Object(gc::track_object(Rc::new(RefCell::new(root))));
       Ok(
-        stringify_value(vm, &value, &mut seen)?
+        state
+          .serialize_property(vm, &root, &"".into())?
           .map_or(Value::Undefined, |output| Value::String(output.into())),
       )
     }),

@@ -642,8 +642,23 @@ pub struct ObjectData {
   pub weak_prototype: Option<WeakObject>,
   /// VM-internal slots that are never exposed through ECMAScript property operations.
   pub(crate) internal_slots: IndexMap<&'static str, Value>,
+  /// Live export bindings for a module namespace exotic object. The map is
+  /// populated in code-unit sorted export-name order and is deliberately kept
+  /// outside `properties`: namespace exports have specialized internal
+  /// methods rather than ordinary mutable data properties.
+  pub(crate) module_namespace_exports: Option<IndexMap<JsString, SharedValue>>,
   /// Ephemeron entries for objects with a `[[WeakMapData]]` internal slot.
   pub(crate) weak_map_entries: Option<Vec<WeakMapEntry>>,
+  /// Weak keys for objects with a `[[WeakSetData]]` internal slot.
+  pub(crate) weak_set_entries: Option<Vec<WeakKey>>,
+  /// Target for objects with a `[[WeakRefTarget]]` internal slot.
+  pub(crate) weak_ref_target: Option<WeakValue>,
+  /// Registered cells for objects with a `[[FinalizationRegistryCells]]` internal slot.
+  pub(crate) finalization_registry_cells: Option<Vec<FinalizationRegistryCell>>,
+  /// Cleanup callback for a FinalizationRegistry object.
+  pub(crate) finalization_cleanup_callback: Option<Value>,
+  /// Whether a cleanup job has been requested for this registry.
+  pub(crate) finalization_cleanup_scheduled: bool,
   /// Compiled matcher for objects with a `[[RegExpMatcher]]` internal slot.
   pub(crate) regexp_matcher: Option<regex_js::Regex>,
   /// Lexical environment captured by function objects, if any.
@@ -672,7 +687,13 @@ impl ObjectData {
       strong_prototype: None,
       weak_prototype: None,
       internal_slots: IndexMap::new(),
+      module_namespace_exports: None,
       weak_map_entries: None,
+      weak_set_entries: None,
+      weak_ref_target: None,
+      finalization_registry_cells: None,
+      finalization_cleanup_callback: None,
+      finalization_cleanup_scheduled: false,
       regexp_matcher: None,
       captured_lexical_env: None,
       extensible: true,
@@ -694,7 +715,13 @@ impl ObjectData {
       strong_prototype: None,
       weak_prototype: Some(WeakObject::new(prototype)),
       internal_slots: IndexMap::new(),
+      module_namespace_exports: None,
       weak_map_entries: None,
+      weak_set_entries: None,
+      weak_ref_target: None,
+      finalization_registry_cells: None,
+      finalization_cleanup_callback: None,
+      finalization_cleanup_scheduled: false,
       regexp_matcher: None,
       captured_lexical_env: None,
       extensible: true,
@@ -859,6 +886,109 @@ pub type BuiltinFn =
 
 type WeakBuiltinFn =
   Weak<dyn Fn(&mut crate::vm::Vm, &[Value]) -> Result<Value, crate::errors::RuntimeError>>;
+
+/// A non-marking, lossless weak carrier for a runtime value. It is separate
+/// from `WeakKey`: identity keys deliberately omit the components required to
+/// reconstruct callable, array, and promise values.
+#[derive(Clone)]
+pub(crate) enum WeakValue {
+  Primitive(Value),
+  Object(Weak<RefCell<ObjectData>>),
+  Array(Weak<RefCell<ArrayData>>, Weak<RefCell<ObjectData>>),
+  Proxy(Weak<RefCell<ProxyData>>),
+  Closure(
+    Weak<FunctionProto>,
+    Weak<RefCell<Vec<SharedValue>>>,
+    Option<Box<WeakValue>>,
+    Weak<RefCell<ObjectData>>,
+  ),
+  Builtin(WeakBuiltinFn),
+  BuiltinObject(WeakBuiltinFn, Weak<RefCell<ObjectData>>),
+  Promise(Weak<RefCell<PromiseState>>, Weak<RefCell<ObjectData>>),
+}
+
+impl std::fmt::Debug for WeakValue {
+  fn fmt(
+    &self,
+    formatter: &mut std::fmt::Formatter<'_>,
+  ) -> std::fmt::Result {
+    let name = match self {
+      Self::Primitive(_) => "Primitive",
+      Self::Object(_) => "Object",
+      Self::Array(_, _) => "Array",
+      Self::Proxy(_) => "Proxy",
+      Self::Closure(_, _, _, _) => "Closure",
+      Self::Builtin(_) => "Builtin",
+      Self::BuiltinObject(_, _) => "BuiltinObject",
+      Self::Promise(_, _) => "Promise",
+    };
+    formatter
+      .debug_tuple("WeakValue")
+      .field(&name)
+      .finish()
+  }
+}
+
+/// One registration held by a FinalizationRegistry.
+#[derive(Clone, Debug)]
+pub(crate) struct FinalizationRegistryCell {
+  pub(crate) target: WeakValue,
+  pub(crate) holdings: Value,
+  pub(crate) unregister_token: Option<WeakKey>,
+  pub(crate) active: bool,
+}
+
+impl WeakValue {
+  pub(crate) fn new(value: &Value) -> Self {
+    match value {
+      Value::Object(value) => Self::Object(Rc::downgrade(value)),
+      Value::Array(data, props) => Self::Array(Rc::downgrade(data), Rc::downgrade(props)),
+      Value::Proxy(value) => Self::Proxy(Rc::downgrade(value)),
+      Value::Closure {
+        proto,
+        env,
+        lexical_this,
+        props,
+      } => Self::Closure(
+        Rc::downgrade(proto),
+        Rc::downgrade(env),
+        lexical_this
+          .as_ref()
+          .map(|value| Box::new(Self::new(value))),
+        Rc::downgrade(props),
+      ),
+      Value::Builtin(value) => Self::Builtin(Rc::downgrade(value)),
+      Value::BuiltinObject(value, props) => {
+        Self::BuiltinObject(Rc::downgrade(value), Rc::downgrade(props))
+      }
+      Value::Promise(state, props) => Self::Promise(Rc::downgrade(state), Rc::downgrade(props)),
+      value => Self::Primitive(value.clone()),
+    }
+  }
+
+  pub(crate) fn upgrade(&self) -> Option<Value> {
+    match self {
+      Self::Primitive(value) => Some(value.clone()),
+      Self::Object(value) => value.upgrade().map(Value::Object),
+      Self::Array(data, props) => Some(Value::Array(data.upgrade()?, props.upgrade()?)),
+      Self::Proxy(value) => value.upgrade().map(Value::Proxy),
+      Self::Closure(proto, env, lexical_this, props) => Some(Value::Closure {
+        proto: proto.upgrade()?,
+        env: env.upgrade()?,
+        lexical_this: match lexical_this {
+          Some(value) => Some(Box::new(value.upgrade()?)),
+          None => None,
+        },
+        props: props.upgrade()?,
+      }),
+      Self::Builtin(value) => value.upgrade().map(Value::Builtin),
+      Self::BuiltinObject(value, props) => {
+        Some(Value::BuiltinObject(value.upgrade()?, props.upgrade()?))
+      }
+      Self::Promise(state, props) => Some(Value::Promise(state.upgrade()?, props.upgrade()?)),
+    }
+  }
+}
 
 /// A garbage-collector-aware weak reference to any ECMAScript object identity.
 #[derive(Clone)]
@@ -1075,9 +1205,7 @@ impl Value {
         {
           return true;
         }
-        if let Some(PropertyDescriptor::Data { value, .. }) = props_ref.properties.get(
-          &PropertyKey::String("[[BoundTargetFunction]]".to_string().into()),
-        ) {
+        if let Some(value) = props_ref.internal_slot("[[BoundTargetFunction]]") {
           return value.is_constructable();
         }
         false

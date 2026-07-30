@@ -661,17 +661,39 @@ impl RiscBuilder {
         }
         Op::Call | Op::TailCall | Op::Construct => {
           let count = arg as usize;
+          let overflow = count.saturating_sub(6);
+          stage_window_at(
+            &mut lowered,
+            &plan,
+            instruction.inputs.as_slice(),
+            overflow,
+            line,
+          )?;
           stage_window(
             &mut lowered,
             &plan,
             &instruction.inputs.as_slice()[1 + count.min(6)..],
             line,
           )?;
-          move_location_to_register(&mut lowered, plan.get(instruction.input(0)?)?, 0, line);
+          let window_base = plan
+            .value_spill_count
+            .checked_add(
+              u16::try_from(overflow)
+                .map_err(|_| CompilerError::from("RISC call window exceeds u16"))?,
+            )
+            .ok_or_else(|| CompilerError::from("RISC call window exceeds u16"))?;
+          move_location_to_register(&mut lowered, ValueLocation::Spill(window_base), 0, line);
           for index in 0..count.min(6) {
             move_location_to_register(
               &mut lowered,
-              plan.get(instruction.input(1 + index)?)?,
+              ValueLocation::Spill(
+                window_base
+                  .checked_add(
+                    u16::try_from(1 + index)
+                      .map_err(|_| CompilerError::from("RISC call input exceeds u16"))?,
+                  )
+                  .ok_or_else(|| CompilerError::from("RISC call input exceeds u16"))?,
+              ),
               2 + index as u8,
               line,
             );
@@ -685,18 +707,40 @@ impl RiscBuilder {
         }
         Op::CallBuiltin => {
           let count = arg as usize;
+          let overflow = count.saturating_sub(6);
+          stage_window_at(
+            &mut lowered,
+            &plan,
+            instruction.inputs.as_slice(),
+            overflow,
+            line,
+          )?;
           stage_window(
             &mut lowered,
             &plan,
             &instruction.inputs.as_slice()[2 + count.min(6)..],
             line,
           )?;
-          move_location_to_register(&mut lowered, plan.get(instruction.input(0)?)?, 1, line);
-          move_location_to_register(&mut lowered, plan.get(instruction.input(1)?)?, 0, line);
+          let window_base = plan
+            .value_spill_count
+            .checked_add(
+              u16::try_from(overflow)
+                .map_err(|_| CompilerError::from("RISC method call window exceeds u16"))?,
+            )
+            .ok_or_else(|| CompilerError::from("RISC method call window exceeds u16"))?;
+          move_location_to_register(&mut lowered, ValueLocation::Spill(window_base), 1, line);
+          move_location_to_register(&mut lowered, ValueLocation::Spill(window_base + 1), 0, line);
           for index in 0..count.min(6) {
             move_location_to_register(
               &mut lowered,
-              plan.get(instruction.input(2 + index)?)?,
+              ValueLocation::Spill(
+                window_base
+                  .checked_add(
+                    u16::try_from(2 + index)
+                      .map_err(|_| CompilerError::from("RISC method call input exceeds u16"))?,
+                  )
+                  .ok_or_else(|| CompilerError::from("RISC method call input exceeds u16"))?,
+              ),
               2 + index as u8,
               line,
             );
@@ -1068,12 +1112,47 @@ fn stage_window(
   inputs: &[ValueId],
   line: u32,
 ) -> Result<(), CompilerError> {
+  stage_window_at(chunk, plan, inputs, 0, line)
+}
+
+fn stage_window_at(
+  chunk: &mut Chunk,
+  plan: &LocationPlan,
+  inputs: &[ValueId],
+  window_offset: usize,
+  line: u32,
+) -> Result<(), CompilerError> {
+  // Capture register-homed values before loading any spills into scratch
+  // registers. Calls are a parallel operand shuffle: moving one operand first
+  // must not overwrite another operand that still occupies that register.
   for (index, value) in inputs.iter().copied().enumerate() {
-    let source = load_location(chunk, plan.get(value)?, 0, line);
+    let ValueLocation::Register(source) = plan.get(value)? else {
+      continue;
+    };
     let spill = plan
       .value_spill_count
       .checked_add(
-        u16::try_from(index).map_err(|_| CompilerError::from("RISC operand window exceeds u16"))?,
+        u16::try_from(window_offset.saturating_add(index))
+          .map_err(|_| CompilerError::from("RISC operand window exceeds u16"))?,
+      )
+      .ok_or_else(|| CompilerError::from("RISC operand spill index exceeds u16"))?;
+    emit(
+      chunk,
+      encode_risc_aux16(Op::StoreSpill, source, spill),
+      line,
+    );
+  }
+  for (index, value) in inputs.iter().copied().enumerate() {
+    let location = plan.get(value)?;
+    if matches!(location, ValueLocation::Register(_)) {
+      continue;
+    }
+    let source = load_location(chunk, location, 0, line);
+    let spill = plan
+      .value_spill_count
+      .checked_add(
+        u16::try_from(window_offset.saturating_add(index))
+          .map_err(|_| CompilerError::from("RISC operand window exceeds u16"))?,
       )
       .ok_or_else(|| CompilerError::from("RISC operand spill index exceeds u16"))?;
     emit(
@@ -1091,7 +1170,12 @@ fn risc_window_size(
 ) -> usize {
   let count = (payload & 0xFF) as usize;
   match op {
-    Op::Call | Op::TailCall | Op::Construct | Op::CallBuiltin => count.saturating_sub(6),
+    Op::Call | Op::TailCall | Op::Construct => count
+      .saturating_add(1)
+      .saturating_add(count.saturating_sub(6)),
+    Op::CallBuiltin => count
+      .saturating_add(2)
+      .saturating_add(count.saturating_sub(6)),
     Op::BuildArray => count,
     Op::BuildObject => count.saturating_mul(2),
     Op::SuperConstruct => count,

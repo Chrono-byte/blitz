@@ -1885,7 +1885,13 @@ impl super::Compiler {
             })?;
           } else {
             self.compile_expr_oast(&m.object)?;
-            self.emit(Op::Copy, LINE);
+            let receiver_slot = self.alloc_temp_local("call_receiver");
+            self.emit(Op::StoreLocal, LINE);
+            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
             self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
             self.emit(Op::GetProperty, LINE);
             let slot = self.alloc_ic_slot()?;
@@ -1909,8 +1915,19 @@ impl super::Compiler {
             })?;
           } else {
             self.compile_expr_oast(&m.object)?;
-            self.emit(Op::Copy, LINE);
             self.compile_expr_oast(&m.expression)?;
+            let key_slot = self.alloc_temp_local("call_key");
+            self.emit(Op::StoreLocal, LINE);
+            self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+            let receiver_slot = self.alloc_temp_local("call_receiver");
+            self.emit(Op::StoreLocal, LINE);
+            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
             self.emit(Op::GetProperty, LINE);
           }
 
@@ -1932,7 +1949,13 @@ impl super::Compiler {
             })?;
           } else {
             self.compile_expr_oast(&m.object)?;
-            self.emit(Op::Copy, LINE);
+            let receiver_slot = self.alloc_temp_local("call_receiver");
+            self.emit(Op::StoreLocal, LINE);
+            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
             let key = self.ensure_private_name_constant(&m.field.name);
             self.emit_constant(key, LINE);
             self.emit(Op::GetProperty, LINE);

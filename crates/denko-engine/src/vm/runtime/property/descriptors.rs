@@ -140,6 +140,36 @@ impl Vm {
       }
       return Ok(true);
     }
+    if let Value::Object(data) = obj {
+      let export_value = {
+        let data = data.borrow();
+        match (&data.module_namespace_exports, &key) {
+          (Some(exports), PropertyKey::String(name)) => exports
+            .get(name)
+            .map(|binding| binding.borrow().clone()),
+          _ => None,
+        }
+      };
+      if let Some(export_value) = export_value {
+        // Module namespace exports are non-configurable, enumerable, writable
+        // data descriptors whose value stays connected to the export binding.
+        // Only a descriptor compatible with that current live value succeeds.
+        if desc.has_get
+          || desc.has_set
+          || desc.configurable == Some(true)
+          || desc.enumerable == Some(false)
+          || desc.writable == Some(false)
+          || desc.has_value
+            && desc
+              .value
+              .as_ref()
+              .is_some_and(|value| !same_value(value, &export_value))
+        {
+          return Ok(false);
+        }
+        return Ok(true);
+      }
+    }
     if let Value::Array(arr, props) = obj
       && matches!(key, PropertyKey::String(ref name) if name == "length")
     {

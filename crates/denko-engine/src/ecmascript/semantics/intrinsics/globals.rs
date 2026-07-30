@@ -32,6 +32,12 @@ pub(crate) struct GlobalIntrinsicValues<'a> {
   pub map_ctor_val: &'a Value,
   /// The WeakMap constructor value.
   pub weak_map_ctor_val: &'a Value,
+  /// The WeakSet constructor value.
+  pub weak_set_ctor_val: &'a Value,
+  /// The WeakRef constructor value.
+  pub weak_ref_ctor_val: &'a Value,
+  /// The FinalizationRegistry constructor value.
+  pub finalization_registry_ctor_val: &'a Value,
   /// The Set constructor value.
   pub set_ctor_val: &'a Value,
   /// The ArrayBuffer constructor value.
@@ -177,6 +183,12 @@ pub(crate) fn install_global_bindings(
     ("ShadowRealm", values.shadowrealm_ctor_val),
     ("Map", values.map_ctor_val),
     ("WeakMap", values.weak_map_ctor_val),
+    ("WeakSet", values.weak_set_ctor_val),
+    ("WeakRef", values.weak_ref_ctor_val),
+    (
+      "FinalizationRegistry",
+      values.finalization_registry_ctor_val,
+    ),
     ("Set", values.set_ctor_val),
   ] {
     g.properties.insert(
@@ -195,6 +207,12 @@ pub(crate) fn install_global_bindings(
   set_builtin_name(values.aggregate_error_ctor_val, "AggregateError");
   set_builtin_name(values.map_ctor_val, "Map");
   set_builtin_name(values.weak_map_ctor_val, "WeakMap");
+  set_builtin_name(values.weak_set_ctor_val, "WeakSet");
+  set_builtin_name(values.weak_ref_ctor_val, "WeakRef");
+  set_builtin_name(
+    values.finalization_registry_ctor_val,
+    "FinalizationRegistry",
+  );
   set_builtin_name(values.set_ctor_val, "Set");
 
   g.properties.insert(
@@ -206,66 +224,6 @@ pub(crate) fn install_global_bindings(
     PropertyDescriptor::builtin_data(Value::Object(Rc::clone(values.json_obj))),
   );
 
-  let make_placeholder_ctor = |name: &'static str, returns_target_on_construct: bool| -> Value {
-    let proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-      Rc::clone(object_proto_map),
-    ))));
-    let ctor_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
-      Rc::clone(function_proto_map),
-    ))));
-    ctor_map.borrow_mut().properties.insert(
-      PKey::String("prototype".to_string().into()),
-      PropertyDescriptor::builtin_prototype(Value::Object(Rc::clone(&proto_map))),
-    );
-    let name_owned = name.to_string();
-    let ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-      if vm.current_new_target().is_some() {
-        if returns_target_on_construct && name_owned == "Proxy" {
-          return Ok(args.get(1).cloned().unwrap_or(Value::Undefined));
-        }
-        return Ok(args.first().cloned().unwrap_or(Value::Undefined));
-      }
-      if returns_target_on_construct && name_owned == "Proxy" {
-        return Ok(args.first().cloned().unwrap_or(Value::Undefined));
-      }
-      Ok(Value::Undefined)
-    });
-    let ctor_val = Value::BuiltinObject(ctor_fn, Rc::clone(&ctor_map));
-    ctor_map.borrow_mut().properties.insert(
-      PKey::String("name".to_string().into()),
-      PropertyDescriptor::Data {
-        value: Value::String(name.to_string().into()),
-        writable: false,
-        enumerable: false,
-        configurable: true,
-      },
-    );
-    proto_map.borrow_mut().properties.insert(
-      PKey::String("constructor".to_string().into()),
-      PropertyDescriptor::builtin_data(ctor_val.clone()),
-    );
-    ctor_val
-  };
-
-  let weakref_ctor_val = make_placeholder_ctor("WeakRef", false);
-  let finalization_registry_ctor_val = make_placeholder_ctor("FinalizationRegistry", false);
-  let temporal_namespace = Value::Object(Rc::new(RefCell::new(ObjectData::with_prototype(
-    Value::Object(Rc::clone(object_proto_map)),
-  ))));
-  g.properties.insert(
-    PKey::String("WeakRef".to_string().into()),
-    PropertyDescriptor::builtin_data(weakref_ctor_val),
-  );
-  g.properties.insert(
-    PKey::String("FinalizationRegistry".to_string().into()),
-    PropertyDescriptor::builtin_data(finalization_registry_ctor_val),
-  );
-  g.properties.insert(
-    PKey::String("Temporal".to_string().into()),
-    PropertyDescriptor::builtin_data(temporal_namespace),
-  );
-
-  let weakset_ctor_val = make_placeholder_ctor("WeakSet", false);
   let proxy_object_proto = Rc::clone(object_proto_map);
   let proxy_function_proto = Rc::clone(function_proto_map);
   let proxy_proto_map = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
@@ -347,10 +305,6 @@ pub(crate) fn install_global_bindings(
       set_builtin_length(&builtin, 2.0);
       builtin
     }),
-  );
-  g.properties.insert(
-    PKey::String("WeakSet".to_string().into()),
-    PropertyDescriptor::builtin_data(weakset_ctor_val),
   );
   g.properties.insert(
     PKey::String("Proxy".to_string().into()),

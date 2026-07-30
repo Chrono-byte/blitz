@@ -17,3 +17,4 @@ pub(crate) mod promise;
 pub(crate) mod reflect;
 pub(crate) mod regexp;
 pub(crate) mod text_and_symbols;
+pub(crate) mod weak_references;

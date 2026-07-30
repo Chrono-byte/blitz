@@ -72,6 +72,12 @@ pub struct Intrinsics {
   pub map_constructor: Option<Value>,
   /// WeakMap constructor for this realm.
   pub weak_map_constructor: Option<Value>,
+  /// WeakSet constructor for this realm.
+  pub weak_set_constructor: Option<Value>,
+  /// WeakRef constructor for this realm.
+  pub weak_ref_constructor: Option<Value>,
+  /// FinalizationRegistry constructor for this realm.
+  pub finalization_registry_constructor: Option<Value>,
   /// Set constructor for this realm.
   pub set_constructor: Option<Value>,
   /// ArrayBuffer constructor for this realm.
@@ -114,6 +120,12 @@ pub struct Intrinsics {
   pub weak_map_prototype: Option<Value>,
   /// Set prototype for this realm.
   pub set_prototype: Option<Value>,
+  /// WeakSet prototype for this realm.
+  pub weak_set_prototype: Option<Value>,
+  /// WeakRef prototype for this realm.
+  pub weak_ref_prototype: Option<Value>,
+  /// FinalizationRegistry prototype for this realm.
+  pub finalization_registry_prototype: Option<Value>,
   /// TypedArray prototype for this realm.
   pub typed_array_prototype: Option<Value>,
   /// ArrayBuffer prototype for this realm.
@@ -338,6 +350,7 @@ impl Realm {
       "RegExp" => self.intrinsics.regexp_constructor.as_ref(),
       "Map" => self.intrinsics.map_constructor.as_ref(),
       "WeakMap" => self.intrinsics.weak_map_constructor.as_ref(),
+      "WeakSet" => self.intrinsics.weak_set_constructor.as_ref(),
       "Set" => self.intrinsics.set_constructor.as_ref(),
       "ArrayBuffer" => self.intrinsics.arraybuffer_constructor.as_ref(),
       "SharedArrayBuffer" => self
@@ -380,6 +393,7 @@ impl Realm {
       "Map" => self.intrinsics.map_prototype.as_ref(),
       "WeakMap" => self.intrinsics.weak_map_prototype.as_ref(),
       "Set" => self.intrinsics.set_prototype.as_ref(),
+      "WeakSet" => self.intrinsics.weak_set_prototype.as_ref(),
       "TypedArray" => self.intrinsics.typed_array_prototype.as_ref(),
       "Boolean" => self.intrinsics.boolean_prototype.as_ref(),
       "Number" => self.intrinsics.number_prototype.as_ref(),

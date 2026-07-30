@@ -10,14 +10,16 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
   use PropertyKey as PKey;
 
   // Array.prototype.filter
-  let array_proto_for_filter = Rc::clone(array_proto_map);
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("filter".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
-      Rc::new(move |vm, args| {
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      Rc::new(|vm, args| {
+        let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
         let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+        if !Vm::is_callable_value(&callback) {
+          return Err(vm.throw_type_error("Array.prototype.filter callback is not callable"));
+        }
 
         let len = array_like_length(vm, &receiver)?;
         let mut out: Vec<Option<Value>> = Vec::new();
@@ -42,16 +44,16 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
           }
         }
 
-        let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
-        let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
-        props
-          .borrow_mut()
-          .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_filter)));
-        props.borrow_mut().properties.insert(
-          PKey::String("length".to_string().into()),
-          PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
-        );
-        Ok(Value::Array(arr_rc, props))
+        let result = array_species_create(vm, &receiver, 0)?;
+        for (index, value) in out.into_iter().flatten().enumerate() {
+          create_data_property_or_throw(
+            vm,
+            &result,
+            &Value::String(index.to_string().into()),
+            value,
+          )?;
+        }
+        Ok(result)
       }),
       function_proto_map,
     )),
@@ -61,29 +63,29 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     PKey::String("find".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
         let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+        if !Vm::is_callable_value(&callback) {
+          return Err(vm.throw_type_error("Array.prototype.find callback is not callable"));
+        }
 
         let len = array_like_length(vm, &receiver)?;
 
         for i in 0..len {
           let key = PKey::String(i.to_string().into());
-          let has_prop = vm.has_property_host(&receiver, &key)?;
-          if has_prop {
-            let item = vm.get_property_host(&receiver, &key)?;
-            let found = vm.call_value_with_this(
-              &callback,
-              &this_arg,
-              &[
-                item.clone(),
-                Value::Number(usize_to_f64(i)),
-                receiver.clone(),
-              ],
-            )?;
-            if found.is_truthy() {
-              return Ok(item);
-            }
+          let item = vm.get_property_host(&receiver, &key)?;
+          let found = vm.call_value_with_this(
+            &callback,
+            &this_arg,
+            &[
+              item.clone(),
+              Value::Number(usize_to_f64(i)),
+              receiver.clone(),
+            ],
+          )?;
+          if found.is_truthy() {
+            return Ok(item);
           }
         }
         Ok(Value::Undefined)
@@ -189,25 +191,7 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     PKey::String("slice".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new({
-        let array_proto_for_slice = Rc::clone(array_proto_map);
         move |vm, args| {
-          fn is_array_value(value: &Value) -> bool {
-            match value {
-              Value::Array(..) => true,
-              Value::Proxy(proxy) => {
-                let target = {
-                  let proxy = proxy.borrow();
-                  if proxy.is_revoked() {
-                    return false;
-                  }
-                  proxy.target.clone()
-                };
-                is_array_value(&target)
-              }
-              _ => false,
-            }
-          }
-
           let receiver = args.first().cloned().unwrap_or(Value::Undefined);
           let len = array_like_length(vm, &receiver)?;
           let start_raw = vm.to_number_value(args.get(1).unwrap_or(&Value::Number(0.0)))?;
@@ -242,68 +226,7 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
           if slice_len > u32::MAX as usize {
             return Err(vm.throw_range_error("Invalid array length"));
           }
-          let array_ctor = vm.get_global("Array").unwrap_or(Value::Undefined);
-          let species_ctor = if is_array_value(&receiver) {
-            let ctor =
-              vm.get_property_host(&receiver, &PKey::String("constructor".to_string().into()))?;
-            match ctor {
-              Value::Undefined | Value::Null => array_ctor,
-              v if !matches!(
-                v,
-                Value::Object(..)
-                  | Value::Array(..)
-                  | Value::Closure { .. }
-                  | Value::BuiltinObject(_, _)
-                  | Value::Proxy(_)
-              ) =>
-              {
-                return Err(vm.throw_type_error("constructor property is not an object"));
-              }
-              ctor_obj => {
-                let species =
-                  vm.get_property_host(&ctor_obj, &PKey::Symbol(SymbolId::well_known_species()))?;
-                match species {
-                  Value::Undefined | Value::Null => array_ctor,
-                  _ if !species.is_constructable() => {
-                    return Err(
-                      vm.throw_type_error("constructor[Symbol.species] is not a constructor"),
-                    );
-                  }
-                  _ => species,
-                }
-              }
-            }
-          } else {
-            array_ctor
-          };
-          let result =
-            vm.construct_value(&species_ctor, &[Value::Number(usize_to_f64(slice_len))])?;
-          if let Ok(proto) =
-            vm.get_property_host(&species_ctor, &PKey::String("prototype".to_string().into()))
-            && matches!(
-              proto,
-              Value::Object(..)
-                | Value::Array(..)
-                | Value::Closure { .. }
-                | Value::BuiltinObject(_, _)
-            )
-          {
-            match &result {
-              Value::Object(data) => {
-                data.borrow_mut().set_prototype_value(proto);
-              }
-              Value::Array(_, props) => {
-                props.borrow_mut().set_prototype_value(proto);
-              }
-              Value::Closure { props, .. } => {
-                props.borrow_mut().set_prototype_value(proto);
-              }
-              Value::BuiltinObject(_, props) => {
-                props.borrow_mut().set_prototype_value(proto);
-              }
-              _ => {}
-            }
-          };
+          let result = array_species_create(vm, &receiver, slice_len)?;
           for i in start..end {
             let key = PKey::String(i.to_string().into());
             let out_key = Value::String((i - start).to_string().into());
@@ -311,8 +234,7 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
               let item = vm.get_property_host(&receiver, &key)?;
               vm.set_property_host(&result, &out_key, item)?;
             } else {
-              let _ =
-                vm.delete_property_host(&result, &PKey::String((i - start).to_string().into()))?;
+              delete_property_or_throw(vm, &result, &PKey::String((i - start).to_string().into()))?;
             }
           }
           vm.set_property_host(
@@ -320,11 +242,6 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
             &Value::String("length".to_string().into()),
             Value::Number(usize_to_f64(slice_len)),
           )?;
-          if let Value::Array(_, props) = &result {
-            props
-              .borrow_mut()
-              .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_slice)));
-          }
           Ok(result)
         }
       }),
@@ -336,8 +253,11 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     PKey::String("reduce".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
+        if !Vm::is_callable_value(&callback) {
+          return Err(vm.throw_type_error("Array.prototype.reduce callback is not callable"));
+        }
 
         let len = array_like_length(vm, &receiver)?;
 
@@ -387,64 +307,83 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     )),
   );
   // Array.prototype.flat
-  let array_proto_for_flat = Rc::clone(array_proto_map);
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("flat".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
-      Rc::new(move |vm, args| {
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-        let depth = if let Some(d) = args.get(1) {
-          if matches!(d, Value::Undefined) {
-            1
-          } else {
-            to_length(vm, d)?
+      Rc::new(|vm, args| {
+        fn is_array(
+          vm: &mut Vm,
+          value: &Value,
+        ) -> Result<bool, RuntimeError> {
+          match value {
+            Value::Array(..) => Ok(true),
+            Value::Proxy(proxy) => {
+              let target = {
+                let proxy = proxy.borrow();
+                if proxy.is_revoked() {
+                  return Err(vm.throw_type_error("Cannot inspect a revoked Proxy"));
+                }
+                proxy.target.clone()
+              };
+              is_array(vm, &target)
+            }
+            _ => Ok(false),
           }
-        } else {
-          1
+        }
+
+        fn flatten_into(
+          vm: &mut Vm,
+          source: &Value,
+          length: usize,
+          depth: f64,
+          output: &mut Vec<Option<Value>>,
+        ) -> Result<(), RuntimeError> {
+          for index in 0..length {
+            let key = PKey::String(index.to_string().into());
+            if !vm.has_property_host(source, &key)? {
+              continue;
+            }
+            let element = vm.get_property_host(source, &key)?;
+            if depth > 0.0 && is_array(vm, &element)? {
+              let element_length = array_like_length(vm, &element)?;
+              flatten_into(vm, &element, element_length, depth - 1.0, output)?;
+            } else {
+              if output.len() >= 9_007_199_254_740_991usize {
+                return Err(vm.throw_type_error("Array.prototype.flat result is too large"));
+              }
+              output.push(Some(element));
+            }
+          }
+          Ok(())
+        }
+
+        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let depth = match args.get(1) {
+          None | Some(Value::Undefined) => 1.0,
+          Some(value) => {
+            let number = vm.to_number_value(value)?;
+            if number.is_nan() || number <= 0.0 {
+              0.0
+            } else {
+              number.trunc()
+            }
+          }
         };
 
         let len = array_like_length(vm, &receiver)?;
         let mut out: Vec<Option<Value>> = Vec::new();
+        flatten_into(vm, &receiver, len, depth, &mut out)?;
 
-        for i in 0..len {
-          let key = PKey::String(i.to_string().into());
-          let has_prop = vm.has_property_host(&receiver, &key)?;
-          if has_prop {
-            let item = vm.get_property_host(&receiver, &key)?;
-            if depth > 0 {
-              // Check if item is an array
-              if matches!(item, Value::Array(_, _)) {
-                let item_len_val =
-                  vm.get_property_host(&item, &PKey::String("length".to_string().into()))?;
-                let item_len = to_length(vm, &item_len_val)?;
-                for j in 0..item_len {
-                  let j_key = PKey::String(j.to_string().into());
-                  let has_j = vm.has_property_host(&item, &j_key)?;
-                  if has_j {
-                    let sub_item = vm.get_property_host(&item, &j_key)?;
-                    // Recursive flat for depth > 1 would need more work
-                    out.push(Some(sub_item));
-                  }
-                }
-              } else {
-                out.push(Some(item));
-              }
-            } else {
-              out.push(Some(item));
-            }
-          }
+        let result = array_species_create(vm, &receiver, 0)?;
+        for (index, value) in out.into_iter().flatten().enumerate() {
+          create_data_property_or_throw(
+            vm,
+            &result,
+            &Value::String(index.to_string().into()),
+            value,
+          )?;
         }
-
-        let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
-        let props: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(ObjectData::new()));
-        props
-          .borrow_mut()
-          .set_prototype_value(Value::Object(Rc::clone(&array_proto_for_flat)));
-        props.borrow_mut().properties.insert(
-          PKey::String("length".to_string().into()),
-          PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
-        );
-        Ok(Value::Array(arr_rc, props))
+        Ok(result)
       }),
       function_proto_map,
     )),
@@ -468,13 +407,6 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
         } else {
           len
         };
-        if let Value::Array(arr, _) = &receiver
-          && arr
-            .borrow_mut()
-            .copy_within_dense_numbers(to, from, final_)
-        {
-          return Ok(receiver);
-        }
         let count = final_
           .saturating_sub(from)
           .min(len.saturating_sub(to));
@@ -493,7 +425,7 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
           if let Some(value) = slot {
             vm.set_property_host(&receiver, &key_value, value)?;
           } else {
-            let _ = vm.delete_property_host(&receiver, &key)?;
+            delete_property_or_throw(vm, &receiver, &key)?;
           }
         }
         Ok(receiver)
@@ -505,9 +437,12 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     PKey::String("every".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
         let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+        if !Vm::is_callable_value(&callback) {
+          return Err(vm.throw_type_error("Array.prototype.every callback is not callable"));
+        }
         let len = array_like_length(vm, &receiver)?;
         for i in 0..len {
           let key = PKey::String(i.to_string().into());
@@ -544,14 +479,6 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
         } else {
           len
         };
-        if let Value::Array(arr, _) = &receiver
-          && let Value::Number(n) = &fill_value
-          && arr
-            .borrow_mut()
-            .fill_dense_numbers(start, end, *n)
-        {
-          return Ok(receiver);
-        }
         for i in start..end {
           let key = Value::String(i.to_string().into());
           vm.set_property_host(&receiver, &key, fill_value.clone())?;
@@ -565,26 +492,27 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     PKey::String("findIndex".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
         let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+        if !Vm::is_callable_value(&callback) {
+          return Err(vm.throw_type_error("Array.prototype.findIndex callback is not callable"));
+        }
         let len = array_like_length(vm, &receiver)?;
         for i in 0..len {
           let key = PKey::String(i.to_string().into());
-          if vm.has_property_host(&receiver, &key)? {
-            let item = vm.get_property_host(&receiver, &key)?;
-            let found = vm.call_value_with_this(
-              &callback,
-              &this_arg,
-              &[
-                item.clone(),
-                Value::Number(usize_to_f64(i)),
-                receiver.clone(),
-              ],
-            )?;
-            if found.is_truthy() {
-              return Ok(Value::Number(usize_to_f64(i)));
-            }
+          let item = vm.get_property_host(&receiver, &key)?;
+          let found = vm.call_value_with_this(
+            &callback,
+            &this_arg,
+            &[
+              item.clone(),
+              Value::Number(usize_to_f64(i)),
+              receiver.clone(),
+            ],
+          )?;
+          if found.is_truthy() {
+            return Ok(Value::Number(usize_to_f64(i)));
           }
         }
         Ok(Value::Number(-1.0))
@@ -673,44 +601,67 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
   array_proto_map.borrow_mut().properties.insert(
     PKey::String("flatMap".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
-      Rc::new({
-        let array_proto_map = Rc::clone(array_proto_map);
-        move |vm, args| {
-          let receiver = args.first().cloned().unwrap_or(Value::Undefined);
-          let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
-          let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
-          let len = array_like_length(vm, &receiver)?;
-          let mut out: Vec<Option<Value>> = Vec::new();
-          for i in 0..len {
-            let key = PKey::String(i.to_string().into());
-            if vm.has_property_host(&receiver, &key)? {
-              let item = vm.get_property_host(&receiver, &key)?;
-              let mapped = vm.call_value_with_this(
-                &callback,
-                &this_arg,
-                &[item, Value::Number(usize_to_f64(i)), receiver.clone()],
-              )?;
-              match mapped {
-                Value::Array(arr, _) => {
-                  for value in arr.borrow().iter().flatten() {
-                    out.push(Some(value.clone()));
-                  }
+      Rc::new(|vm, args| {
+        fn is_array(
+          vm: &mut Vm,
+          value: &Value,
+        ) -> Result<bool, RuntimeError> {
+          match value {
+            Value::Array(..) => Ok(true),
+            Value::Proxy(proxy) => {
+              let target = {
+                let proxy = proxy.borrow();
+                if proxy.is_revoked() {
+                  return Err(vm.throw_type_error("Cannot inspect a revoked Proxy"));
                 }
-                other => out.push(Some(other)),
+                proxy.target.clone()
+              };
+              is_array(vm, &target)
+            }
+            _ => Ok(false),
+          }
+        }
+
+        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
+        if !callback.is_callable() {
+          return Err(vm.throw_type_error("Array.prototype.flatMap callback is not callable"));
+        }
+        let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+        let len = array_like_length(vm, &receiver)?;
+        let mut out: Vec<Option<Value>> = Vec::new();
+        for i in 0..len {
+          let key = PKey::String(i.to_string().into());
+          if vm.has_property_host(&receiver, &key)? {
+            let item = vm.get_property_host(&receiver, &key)?;
+            let mapped = vm.call_value_with_this(
+              &callback,
+              &this_arg,
+              &[item, Value::Number(usize_to_f64(i)), receiver.clone()],
+            )?;
+            if is_array(vm, &mapped)? {
+              let mapped_len = array_like_length(vm, &mapped)?;
+              for mapped_index in 0..mapped_len {
+                let mapped_key = PKey::String(mapped_index.to_string().into());
+                if vm.has_property_host(&mapped, &mapped_key)? {
+                  out.push(Some(vm.get_property_host(&mapped, &mapped_key)?));
+                }
               }
+            } else {
+              out.push(Some(mapped));
             }
           }
-          let arr_rc = Rc::new(RefCell::new(ArrayData::from(out)));
-          let props = Rc::new(RefCell::new(ObjectData::new()));
-          props
-            .borrow_mut()
-            .set_prototype_value(Value::Object(Rc::clone(&array_proto_map)));
-          props.borrow_mut().properties.insert(
-            PKey::String("length".to_string().into()),
-            PropertyDescriptor::ordinary_data(Value::Number(usize_to_f64(arr_rc.borrow().len()))),
-          );
-          Ok(Value::Array(arr_rc, props))
         }
+        let result = array_species_create(vm, &receiver, 0)?;
+        for (index, value) in out.into_iter().flatten().enumerate() {
+          create_data_property_or_throw(
+            vm,
+            &result,
+            &Value::String(index.to_string().into()),
+            value,
+          )?;
+        }
+        Ok(result)
       }),
       function_proto_map,
     )),
@@ -722,10 +673,12 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
         let receiver = args.first().cloned().unwrap_or(Value::Undefined);
         let len = array_like_length(vm, &receiver)?;
         if len == 0 {
+          vm.set_property_host(
+            &receiver,
+            &Value::String("length".into()),
+            Value::Number(0.0),
+          )?;
           return Ok(Value::Undefined);
-        }
-        if !array_length_is_writable(&receiver) {
-          return Err(vm.throw_type_error("Array length is not writable"));
         }
         let index = len - 1;
         let key = PKey::String(index.to_string().into());
@@ -734,7 +687,7 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
         } else {
           Value::Undefined
         };
-        let _ = vm.delete_property_host(&receiver, &key)?;
+        delete_property_or_throw(vm, &receiver, &key)?;
         vm.set_property_host(
           &receiver,
           &Value::String("length".to_string().into()),
@@ -749,8 +702,11 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     PKey::String("reduceRight".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
+        if !Vm::is_callable_value(&callback) {
+          return Err(vm.throw_type_error("Array.prototype.reduceRight callback is not callable"));
+        }
         let len = array_like_length(vm, &receiver)?;
         let mut i = len;
         let mut accumulator = if args.len() > 2 {
@@ -838,31 +794,11 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
                 vm.set_property_host(&receiver, &upper_key_value, low)?;
               }
               (Some(low), None) => {
-                let _ = vm.delete_property_host(&receiver, &lower_key)?;
-                if let Value::Array(arr, props) = &receiver {
-                  // Keep the dense store consistent with a length mutation
-                  // observed while reading the opposite property.
-                  if lower < arr.borrow().len() {
-                    arr.borrow_mut()[lower] = None;
-                  }
-                  props
-                    .borrow_mut()
-                    .properties
-                    .shift_remove(&lower_key);
-                }
+                delete_property_or_throw(vm, &receiver, &lower_key)?;
                 vm.set_property_host(&receiver, &upper_key_value, low)?;
               }
               (None, Some(high)) => {
-                let _ = vm.delete_property_host(&receiver, &upper_key)?;
-                if let Value::Array(arr, props) = &receiver {
-                  if upper < arr.borrow().len() {
-                    arr.borrow_mut()[upper] = None;
-                  }
-                  props
-                    .borrow_mut()
-                    .properties
-                    .shift_remove(&upper_key);
-                }
+                delete_property_or_throw(vm, &receiver, &upper_key)?;
                 vm.set_property_host(&receiver, &lower_key_value, high)?;
               }
               (None, None) => {}
@@ -881,9 +817,12 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
     PKey::String("some".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new(move |vm, args| {
-        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let receiver = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;
         let callback = args.get(1).cloned().unwrap_or(Value::Undefined);
         let this_arg = args.get(2).cloned().unwrap_or(Value::Undefined);
+        if !Vm::is_callable_value(&callback) {
+          return Err(vm.throw_type_error("Array.prototype.some callback is not callable"));
+        }
         let len = array_like_length(vm, &receiver)?;
         for i in 0..len {
           let key = PKey::String(i.to_string().into());
@@ -940,4 +879,40 @@ pub(in crate::ecmascript::builtins::array) fn install_after_iterator(
       function_proto_map,
     )),
   );
+
+  for (name, length) in [
+    ("filter", 1.0),
+    ("find", 1.0),
+    ("at", 1.0),
+    ("includes", 1.0),
+    ("indexOf", 1.0),
+    ("slice", 2.0),
+    ("reduce", 1.0),
+    ("copyWithin", 2.0),
+    ("every", 1.0),
+    ("fill", 1.0),
+    ("findIndex", 1.0),
+    ("findLast", 1.0),
+    ("findLastIndex", 1.0),
+    ("flat", 1.0),
+    ("flatMap", 1.0),
+    ("pop", 0.0),
+    ("reduceRight", 1.0),
+    ("reverse", 0.0),
+    ("some", 1.0),
+    ("toLocaleString", 0.0),
+  ] {
+    let builtin = array_proto_map
+      .borrow()
+      .properties
+      .get(&PKey::String(name.into()))
+      .and_then(|descriptor| match descriptor {
+        PropertyDescriptor::Data { value, .. } => Some(value.clone()),
+        _ => None,
+      });
+    if let Some(builtin) = builtin {
+      set_builtin_name(&builtin, name);
+      set_builtin_length(&builtin, length);
+    }
+  }
 }

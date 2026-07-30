@@ -9,8 +9,8 @@ use crate::compiler;
 use crate::ecmascript::semantics::builtin_object;
 use crate::ecmascript::semantics::create_list_from_array_like;
 use crate::parser::Parser;
-use crate::runtime_utils::syntax_error;
-use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, Value};
+use crate::runtime_utils::{set_builtin_length, set_builtin_name, syntax_error};
+use crate::value::{BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SymbolId, Value};
 use crate::vm::Vm;
 
 fn function_call(
@@ -48,9 +48,7 @@ fn function_to_string(
   let source = if Vm::is_callable_value(&this) {
     vm.function_to_string(&this)?
   } else {
-    // Be forgiving for harness message formatting. Test262's assert helpers
-    // stringify a few function-like prototype objects.
-    format!("[object {}]", this.object_tag())
+    return Err(vm.throw_type_error("Function.prototype.toString called on incompatible receiver"));
   };
   Ok(Value::String(source.into()))
 }
@@ -129,6 +127,20 @@ pub(crate) fn create_function_intrinsics(
     PKey::String("constructor".to_string().into()),
     PropertyDescriptor::builtin_data(constructor.clone()),
   );
+  let has_instance = builtin_object(
+    Rc::new(|vm, args| {
+      let this = args.first().cloned().unwrap_or(Value::Undefined);
+      let value = args.get(1).cloned().unwrap_or(Value::Undefined);
+      Ok(Value::Bool(vm.ordinary_has_instance(&this, &value)?))
+    }),
+    function_prototype,
+  );
+  set_builtin_name(&has_instance, "[Symbol.hasInstance]");
+  set_builtin_length(&has_instance, 1.0);
+  function_prototype.borrow_mut().properties.insert(
+    PKey::Symbol(SymbolId::well_known_has_instance()),
+    PropertyDescriptor::immutable_data(has_instance),
+  );
   function_prototype.borrow_mut().properties.insert(
     PKey::String("call".to_string().into()),
     PropertyDescriptor::builtin_data(function_call),
@@ -142,10 +154,13 @@ pub(crate) fn create_function_intrinsics(
     PropertyDescriptor::builtin_data(builtin_object(
       Rc::new({
         let function_prototype = Rc::clone(function_prototype);
-        move |_vm, args| {
+        move |vm, args| {
           let target = args.first().cloned().unwrap_or(Value::Undefined);
           let bound_this = args.get(1).cloned().unwrap_or(Value::Undefined);
           let bound_args: Vec<Value> = args.iter().skip(2).cloned().collect();
+          if !Vm::is_callable_value(&target) {
+            return Err(vm.throw_type_error("Function.prototype.bind called on non-callable"));
+          }
           if crate::trace::enabled() {
             eprintln!(
               "[trace] bind create target={:?} bound_this={:?} bound_args={:?}",
@@ -153,7 +168,7 @@ pub(crate) fn create_function_intrinsics(
             );
           }
           let bound_target = target.clone();
-          let bound_this_arg = bound_this.clone();
+          let bound_this_arg = bound_this;
           let prefix_args = bound_args.clone();
           let bound_fn = builtin_object(
             Rc::new(move |vm, call_args| {
@@ -173,20 +188,27 @@ pub(crate) fn create_function_intrinsics(
             }),
             &function_prototype,
           );
+          let target_length = vm.get_property_host(&target, &PKey::String("length".into()))?;
+          let bound_length = match target_length {
+            Value::Number(length) if length.is_finite() && length > 0.0 => {
+              (length.floor() - bound_args.len() as f64).max(0.0)
+            }
+            Value::Number(length) if length.is_sign_positive() && length.is_infinite() => length,
+            _ => 0.0,
+          };
+          let target_name = vm.get_property_host(&target, &PKey::String("name".into()))?;
+          let target_name = match target_name {
+            Value::String(name) => name.as_str_lossy().to_owned(),
+            _ => String::new(),
+          };
+          set_builtin_length(&bound_fn, bound_length);
+          set_builtin_name(&bound_fn, &format!("bound {target_name}"));
           if let Value::BuiltinObject(_, props) = &bound_fn {
-            props.borrow_mut().properties.insert(
-              PKey::String("[[BoundTargetFunction]]".to_string().into()),
-              PropertyDescriptor::ordinary_data(target),
-            );
-            props.borrow_mut().properties.insert(
-              PKey::String("[[BoundThis]]".to_string().into()),
-              PropertyDescriptor::ordinary_data(bound_this),
-            );
-            props.borrow_mut().properties.insert(
-              PKey::String("[[BoundArguments]]".to_string().into()),
-              PropertyDescriptor::ordinary_data(crate::runtime_utils::array_from_values(
-                bound_args,
-              )),
+            let mut props = props.borrow_mut();
+            props.set_internal_slot("[[BoundTargetFunction]]", target);
+            props.set_internal_slot(
+              "[[BoundArguments]]",
+              crate::runtime_utils::array_from_values(bound_args),
             );
           }
           Ok(bound_fn)

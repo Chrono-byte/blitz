@@ -81,6 +81,7 @@ impl Vm {
     self.execution.active.closure_env = None;
     self.execution.pending_closure_env = None;
     self.roots.temporary.clear();
+    self.roots.kept_alive.clear();
     self.execution.active.lexical_env = Rc::clone(&self.realm_state.global_env);
     self.execution.active.yield_star = None;
     self.execution.generator_return_frame_count = None;
@@ -150,9 +151,11 @@ impl Vm {
     if self.execution.call_stack.is_empty() {
       let temp_root_base = self.roots.temporary.len();
       self.roots.temporary.push(result.clone());
+      self.roots.kept_alive.clear();
       self.run_microtasks_if_needed()?;
       let _ = self.collect_garbage_prototype();
       self.roots.temporary.truncate(temp_root_base);
+      self.roots.kept_alive.clear();
       self.finish_opcode_profile_run("risc-return");
     }
     Ok(Some(RiscRunOutcome::Return(result)))
@@ -481,7 +484,10 @@ impl Vm {
           Op::GetThis => registers[rd] = self.get_this(),
           Op::GetNewTarget => registers[rd] = self.get_new_target(),
           Op::Neg => {
-            registers[rd] = Value::Number(-self.to_number_value(&registers[rs])?);
+            registers[rd] = match registers[rs].clone() {
+              Value::BigInt(value) => Value::BigInt(-value),
+              value => Value::Number(-self.to_number_value(&value)?),
+            };
           }
           Op::Not => registers[rd] = Value::Bool(!registers[rs].is_truthy()),
           Op::BitNot => {
@@ -722,9 +728,41 @@ impl Vm {
           Op::Spread => {
             let callee = registers[rd].clone();
             let values = registers[rs].clone();
-            let mask = registers[(decode_aux8(word) & 0xF) as usize].clone();
+            let mut mask = registers[(decode_aux8(word) & 0xF) as usize].clone();
+            let receiver = match &mask {
+              Value::Array(mask_values, _) => {
+                let marker = mask_values.borrow().first().cloned().flatten();
+                match marker {
+                  Some(Value::Array(marker_values, _)) => {
+                    let marker_values = marker_values.borrow();
+                    let receiver = marker_values.first().cloned().flatten();
+                    let spread = marker_values.get(1).cloned().flatten();
+                    drop(marker_values);
+                    if let (Some(receiver), Some(spread)) = (receiver, spread) {
+                      let mut normalized = mask_values.borrow().to_vec();
+                      normalized[0] = Some(spread);
+                      mask = array_from_values(
+                        normalized
+                          .into_iter()
+                          .map(|value| value.unwrap_or(Value::Undefined))
+                          .collect(),
+                      );
+                      Some(receiver)
+                    } else {
+                      None
+                    }
+                  }
+                  _ => None,
+                }
+              }
+              _ => None,
+            };
             let arguments = self.flatten_spread_values(values, mask)?;
-            registers[rd] = self.call_value(&callee, &arguments)?;
+            registers[rd] = if let Some(receiver) = receiver {
+              self.call_with_this(&callee, &receiver, &arguments)?
+            } else {
+              self.call_value(&callee, &arguments)?
+            };
           }
           Op::Call | Op::TailCall | Op::CallBuiltin => {
             let count = decode_risc_aux16(word) as usize;
@@ -733,11 +771,13 @@ impl Vm {
               .collect();
             let overflow = count.saturating_sub(6);
             let base = self.execution.active.chunk.risc_value_spill_count as usize;
-            args.extend_from_slice(
-              spills
-                .get(base..base + overflow)
-                .ok_or_else(|| RuntimeError::from("RISC call operand window out of bounds"))?,
-            );
+            if overflow > 0 {
+              args.extend_from_slice(
+                spills
+                  .get(base..base + overflow)
+                  .ok_or_else(|| RuntimeError::from("RISC call operand window out of bounds"))?,
+              );
+            }
             let callee = registers[0].clone();
             if op != Op::TailCall
               && let Value::Closure { proto, env, .. } = &callee
@@ -840,11 +880,11 @@ impl Vm {
               .collect();
             let overflow = count.saturating_sub(6);
             let base = self.execution.active.chunk.risc_value_spill_count as usize;
-            args.extend_from_slice(
-              spills
-                .get(base..base + overflow)
-                .ok_or_else(|| RuntimeError::from("RISC construct operand window out of bounds"))?,
-            );
+            if overflow > 0 {
+              args.extend_from_slice(spills.get(base..base + overflow).ok_or_else(|| {
+                RuntimeError::from("RISC construct operand window out of bounds")
+              })?);
+            }
             let callee = registers[0].clone();
             registers[0] = self.construct_value(&callee, &args)?;
           }

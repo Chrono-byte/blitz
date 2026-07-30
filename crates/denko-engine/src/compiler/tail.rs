@@ -103,7 +103,49 @@ impl super::Compiler {
     }
 
     let arg_count = self.checked_arg_count(c.arguments.len())?;
-    self.compile_expr_oast(&c.callee)?;
+    let receiver_slot = match &c.callee {
+      oast::Expression::StaticMemberExpression(member)
+        if !c.optional
+          && !member.optional
+          && !matches!(&member.object, oast::Expression::Super(_)) =>
+      {
+        self.compile_expr_oast(&member.object)?;
+        let receiver = self.alloc_temp_local("spread_call_receiver");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver)?, LINE);
+        self.emit_constant(Value::String(member.property.name.to_string().into()), LINE);
+        self.emit(Op::GetProperty, LINE);
+        let slot = self.alloc_ic_slot()?;
+        self.emit_byte(slot, LINE);
+        Some(receiver)
+      }
+      oast::Expression::ComputedMemberExpression(member)
+        if !c.optional
+          && !member.optional
+          && !matches!(&member.object, oast::Expression::Super(_)) =>
+      {
+        self.compile_expr_oast(&member.object)?;
+        self.compile_expr_oast(&member.expression)?;
+        let key = self.alloc_temp_local("spread_call_key");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(key)?, LINE);
+        let receiver = self.alloc_temp_local("spread_call_receiver");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(key)?, LINE);
+        self.emit(Op::GetProperty, LINE);
+        Some(receiver)
+      }
+      _ => {
+        self.compile_expr_oast(&c.callee)?;
+        None
+      }
+    };
 
     let mut spread_flags = Vec::with_capacity(c.arguments.len());
     for arg in &c.arguments {
@@ -127,8 +169,21 @@ impl super::Compiler {
 
     self.emit(Op::BuildArray, LINE);
     self.emit_byte(arg_count, LINE);
-    for is_spread in spread_flags {
-      self.emit(if is_spread { Op::True } else { Op::False }, LINE);
+    for (index, is_spread) in spread_flags.into_iter().enumerate() {
+      if index == 0
+        && let Some(receiver) = receiver_slot
+      {
+        // A two-element entry in the first mask slot is an internal marker
+        // carrying the receiver and the actual spread flag. This preserves
+        // the existing Spread bytecode ABI for direct calls.
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver)?, LINE);
+        self.emit(if is_spread { Op::True } else { Op::False }, LINE);
+        self.emit(Op::BuildArray, LINE);
+        self.emit_byte(2, LINE);
+      } else {
+        self.emit(if is_spread { Op::True } else { Op::False }, LINE);
+      }
     }
     self.emit(Op::BuildArray, LINE);
     self.emit_byte(arg_count, LINE);
@@ -202,7 +257,13 @@ impl super::Compiler {
         })?;
       } else {
         self.compile_expr_oast(&m.object)?;
-        self.emit(Op::Copy, LINE);
+        let receiver_slot = self.alloc_temp_local("call_receiver");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
         self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
         self.emit(Op::GetProperty, LINE);
         let slot = self.alloc_ic_slot()?;
@@ -226,8 +287,19 @@ impl super::Compiler {
         })?;
       } else {
         self.compile_expr_oast(&m.object)?;
-        self.emit(Op::Copy, LINE);
         self.compile_expr_oast(&m.expression)?;
+        let key_slot = self.alloc_temp_local("call_key");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
+        let receiver_slot = self.alloc_temp_local("call_receiver");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(key_slot)?, LINE);
         self.emit(Op::GetProperty, LINE);
       }
 
@@ -249,7 +321,13 @@ impl super::Compiler {
         })?;
       } else {
         self.compile_expr_oast(&m.object)?;
-        self.emit(Op::Copy, LINE);
+        let receiver_slot = self.alloc_temp_local("call_receiver");
+        self.emit(Op::StoreLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(receiver_slot)?, LINE);
         let key = self.ensure_private_name_constant(&m.field.name);
         self.emit_constant(key, LINE);
         self.emit(Op::GetProperty, LINE);

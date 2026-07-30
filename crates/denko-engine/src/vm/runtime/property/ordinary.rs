@@ -12,17 +12,27 @@ pub(in crate::vm::runtime) fn list_own_keys_of_value(
   v: &Value
 ) -> Option<Vec<js_string::JsString>> {
   match v {
-    Value::Object(data) | Value::Promise(_, data) => Some(
-      data
-        .borrow()
-        .properties
-        .keys()
-        .filter_map(|k| match k {
-          PropertyKey::String(s) => Some(s.clone()),
-          PropertyKey::Symbol(_) => None,
-        })
-        .collect(),
-    ),
+    Value::Object(data) | Value::Promise(_, data) => {
+      let data = data.borrow();
+      Some(
+        data
+          .module_namespace_exports
+          .as_ref()
+          .map_or_else(
+            || {
+              data
+                .properties
+                .keys()
+                .filter_map(|key| match key {
+                  PropertyKey::String(name) => Some(name.clone()),
+                  PropertyKey::Symbol(_) => None,
+                })
+                .collect()
+            },
+            |exports| exports.keys().cloned().collect(),
+          ),
+      )
+    }
     Value::Closure { props, .. } => Some(
       props
         .borrow()

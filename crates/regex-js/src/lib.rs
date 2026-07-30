@@ -15,7 +15,7 @@ mod parser;
 pub use error::{Error, ErrorKind};
 pub use flags::Flags;
 pub use js_string::JsString as Input;
-pub use matcher::{Capture, Match};
+pub use matcher::{Capture, Match, MatchError};
 
 use ast::Node;
 use js_string::{JsString, JsStringBuilder};
@@ -120,6 +120,18 @@ impl Regex {
     input: &Input,
     start: usize,
   ) -> Option<Match> {
+    self.try_find(input, start).ok().flatten()
+  }
+
+  /// Find the first match while reporting resource-limit exhaustion.
+  ///
+  /// Hosts should use this method so an exhausted matcher cannot be
+  /// misreported as a successful non-match.
+  pub fn try_find(
+    &self,
+    input: &Input,
+    start: usize,
+  ) -> Result<Option<Match>, MatchError> {
     matcher::find(self, input, start)
   }
 
@@ -252,6 +264,19 @@ mod tests {
     assert!(Regex::new("(", "").is_err());
     assert!(Regex::new("[z-a]", "").is_err());
     assert!(Regex::new("a{2,1}", "").is_err());
+  }
+
+  #[test]
+  fn rejects_excessive_group_nesting() {
+    let pattern = format!("{}a{}", "(".repeat(300), ")".repeat(300));
+    assert!(Regex::new(&pattern, "").is_err());
+  }
+
+  #[test]
+  fn reports_excessive_match_work() {
+    let expression = regex("(a+)+$", "");
+    let subject = Input::new(&format!("{}!", "a".repeat(24)));
+    assert_eq!(expression.try_find(&subject, 0), Err(MatchError));
   }
 
   #[test]

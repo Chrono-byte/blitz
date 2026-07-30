@@ -2,10 +2,10 @@
 
 use crate::gc;
 use crate::module::ModuleLoader;
-use crate::value::{
-  BuiltinFn, ObjectData, PropertyDescriptor, PropertyKey, SharedValue, SymbolId, Value,
-};
+use crate::value::{ObjectData, PropertyDescriptor, PropertyKey, SharedValue, SymbolId, Value};
 use crate::vm::Vm;
+use indexmap::IndexMap;
+use js_string::JsString;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -227,30 +227,27 @@ impl Vm {
 
 /// Build a module namespace object from exported bindings.
 ///
-/// Creates an object with all exported names as properties, excluding the "*" wildcard export.
+/// Creates an object with a dedicated live export map, excluding the "*"
+/// wildcard export. Namespace export properties are materialized by the
+/// module-namespace exotic internal methods rather than stored as ordinary
+/// descriptors.
 pub(crate) fn build_module_namespace_object(exports: &HashMap<String, SharedValue>) -> Value {
   let namespace = gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
-  let mut names: Vec<String> = exports
+  let mut names: Vec<JsString> = exports
     .keys()
     .filter(|name| name.as_str() != "*")
-    .cloned()
+    .map(|name| JsString::from(name.as_str()))
     .collect();
   names.sort();
+
+  let mut namespace_exports = IndexMap::new();
   for name in names {
-    let Some(slot) = exports.get(&name).cloned() else {
+    let Some(slot) = exports.get(name.as_str_lossy()).cloned() else {
       continue;
     };
-    let getter: BuiltinFn = Rc::new(move |_vm, _args| Ok(slot.borrow().clone()));
-    namespace.borrow_mut().properties.insert(
-      PropertyKey::String(name.into()),
-      PropertyDescriptor::Accessor {
-        get: Some(Value::Builtin(getter)),
-        set: None,
-        enumerable: true,
-        configurable: false,
-      },
-    );
+    namespace_exports.insert(name, slot);
   }
+  namespace.borrow_mut().module_namespace_exports = Some(namespace_exports);
   namespace.borrow_mut().properties.insert(
     PropertyKey::Symbol(SymbolId::well_known_to_string_tag()),
     PropertyDescriptor::Data {

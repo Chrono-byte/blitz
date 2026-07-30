@@ -273,20 +273,7 @@ impl Vm {
       Value::Symbol(id, desc) => {
         // Wrap Symbol in an object.
         let mut data = ObjectData::new();
-        data.properties.insert(
-          PropertyKey::String("[[PrimitiveValue]]".to_string().into()),
-          PropertyDescriptor::ordinary_data(Value::Symbol(id, desc.clone())),
-        );
-        data.properties.insert(
-          PropertyKey::String("__isSymbol".to_string().into()),
-          PropertyDescriptor::ordinary_data(Value::Bool(true)),
-        );
-        if let Some(d) = &desc {
-          data.properties.insert(
-            PropertyKey::String("description".to_string().into()),
-            PropertyDescriptor::ordinary_data(Value::String(d.clone())),
-          );
-        }
+        data.set_internal_slot("[[SymbolData]]", Value::Symbol(id, desc));
         // Try to find Symbol.prototype
         if let Some(proto) = self
           .realm_state

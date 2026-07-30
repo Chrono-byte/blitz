@@ -112,10 +112,11 @@ impl Vm {
       if let Some(binding_object) = binding_object {
         let key = PropertyKey::String(name.to_string().into());
         let found = self.has_property_host(&binding_object, &key)?;
-        if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
-          if self.has_property_host(&binding_object, &key)? {
-            return Ok(Some(self.get_property_host(&binding_object, &key)?));
-          }
+        if found
+          && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
+          && self.has_property_host(&binding_object, &key)?
+        {
+          return Ok(Some(self.get_property_host(&binding_object, &key)?));
         }
       }
       env = outer;
@@ -244,15 +245,12 @@ impl Vm {
         let name_str = name.to_string();
         let key = PropertyKey::String(name_str.clone().into());
         let found = self.has_property_host(&binding_object, &key)?;
-        if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
-          if self.has_property_host(&binding_object, &key)? {
-            drop(self.set_property_host(
-              &binding_object,
-              &Value::String(name_str.into()),
-              value,
-            )?);
-            return Ok(true);
-          }
+        if found
+          && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
+          && self.has_property_host(&binding_object, &key)?
+        {
+          drop(self.set_property_host(&binding_object, &Value::String(name_str.into()), value)?);
+          return Ok(true);
         }
       }
       env = outer;
@@ -279,16 +277,13 @@ impl Vm {
         let name_str = name.to_string();
         let key = PropertyKey::String(name_str.clone().into());
         let found = self.has_property_host(&binding_object, &key)?;
-        if found && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?) {
-          if self.has_property_host(&binding_object, &key)? {
-            drop(self.set_property_host(
-              &binding_object,
-              &Value::String(name_str.into()),
-              value,
-            )?);
-            self.bump_object_generation(&binding_object);
-            return Ok(true);
-          }
+        if found
+          && (!with_environment || !self.is_unscopable_binding(&binding_object, name)?)
+          && self.has_property_host(&binding_object, &key)?
+        {
+          drop(self.set_property_host(&binding_object, &Value::String(name_str.into()), value)?);
+          self.bump_object_generation(&binding_object);
+          return Ok(true);
         }
       }
       env = outer;

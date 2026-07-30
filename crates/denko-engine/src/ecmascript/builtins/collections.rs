@@ -91,16 +91,43 @@ fn require_weak_map_state(
   Ok(Rc::clone(data))
 }
 
-fn weak_map_key(
+fn require_weak_set_state(
+  vm: &mut crate::vm::Vm,
+  receiver: &Value,
+  name: &str,
+) -> Result<Rc<RefCell<ObjectData>>, crate::errors::RuntimeError> {
+  let Some(data) = direct_object_data(receiver) else {
+    return Err(vm.throw_type_error(&format!(
+      "Method WeakSet.prototype.{name} called on incompatible receiver"
+    )));
+  };
+  if data.borrow().weak_set_entries.is_none() {
+    return Err(vm.throw_type_error(&format!(
+      "Method WeakSet.prototype.{name} called on incompatible receiver"
+    )));
+  }
+  Ok(Rc::clone(data))
+}
+
+fn weak_collection_key(
   vm: &mut crate::vm::Vm,
   value: &Value,
+  collection: &str,
 ) -> Result<WeakKey, crate::errors::RuntimeError> {
   if let Value::Symbol(id, _) = value
     && crate::ecmascript::builtins::text_and_symbols::is_registered_symbol(id)
   {
-    return Err(vm.throw_type_error("Invalid value used as weak map key"));
+    return Err(vm.throw_type_error(&format!("Invalid value used as weak {collection} key")));
   }
-  WeakKey::new(value).ok_or_else(|| vm.throw_type_error("Invalid value used as weak map key"))
+  WeakKey::new(value)
+    .ok_or_else(|| vm.throw_type_error(&format!("Invalid value used as weak {collection} key")))
+}
+
+fn weak_map_key(
+  vm: &mut crate::vm::Vm,
+  value: &Value,
+) -> Result<WeakKey, crate::errors::RuntimeError> {
+  weak_collection_key(vm, value, "map")
 }
 
 fn method(
@@ -229,7 +256,7 @@ fn close_collection_iterator(
 
 /// Consumes a synchronous ECMAScript iterable, closing its iterator if value
 /// processing completes abruptly.
-fn consume_collection_iterable(
+pub(crate) fn consume_collection_iterable(
   vm: &mut crate::vm::Vm,
   iterable: &Value,
   mut consume: impl FnMut(&mut crate::vm::Vm, Value) -> Result<(), crate::errors::RuntimeError>,
@@ -294,9 +321,11 @@ pub(crate) struct CollectionIntrinsics {
   pub(crate) map_constructor: Value,
   pub(crate) weak_map_constructor: Value,
   pub(crate) set_constructor: Value,
+  pub(crate) weak_set_constructor: Value,
   pub(crate) map_prototype: Value,
   pub(crate) weak_map_prototype: Value,
   pub(crate) set_prototype: Value,
+  pub(crate) weak_set_prototype: Value,
   pub(crate) iterator_prototype: Value,
   pub(crate) map_iterator_prototype: Value,
   pub(crate) set_iterator_prototype: Value,
@@ -1176,6 +1205,127 @@ pub(crate) fn install_map_set_constructors(
     },
   );
 
+  let weak_set_proto = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+    Rc::clone(object_proto_map),
+  ))));
+  let weak_set_ctor = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
+    Rc::clone(function_proto_map),
+  ))));
+  let weak_set_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
+    if vm.current_new_target().is_none() {
+      return Err(vm.throw_type_error("Constructor WeakSet requires 'new'"));
+    }
+    let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+    let Some(data) = direct_object_data(&receiver) else {
+      return Err(vm.throw_type_error("WeakSet receiver must be an object"));
+    };
+    data.borrow_mut().weak_set_entries = Some(Vec::new());
+    let iterable = args
+      .get(static_builtin_arg_offset(vm, args, "WeakSet"))
+      .cloned()
+      .unwrap_or(Value::Undefined);
+    if matches!(iterable, Value::Undefined | Value::Null) {
+      return Ok(receiver);
+    }
+    let receiver_root = vm.create_host_root(receiver.clone());
+    let result = (|| {
+      let adder = vm.get_property_host(&receiver, &PKey::String("add".to_string().into()))?;
+      if !crate::vm::Vm::is_callable_value(&adder) {
+        return Err(vm.throw_type_error("WeakSet.prototype.add is not callable"));
+      }
+      consume_collection_iterable(vm, &iterable, |vm, value| {
+        drop(vm.call_value_with_this(&adder, &receiver, &[value])?);
+        Ok(())
+      })
+    })();
+    vm.release_host_root(receiver_root)
+      .expect("WeakSet constructor receiver root");
+    result?;
+    Ok(receiver)
+  });
+  let weak_set_ctor_val =
+    Value::BuiltinObject(Rc::clone(&weak_set_ctor_fn), Rc::clone(&weak_set_ctor));
+  set_builtin_name(&weak_set_ctor_val, "WeakSet");
+  set_builtin_length(&weak_set_ctor_val, 0.0);
+  weak_set_ctor.borrow_mut().properties.insert(
+    PKey::String("prototype".to_string().into()),
+    PropertyDescriptor::Data {
+      value: Value::Object(Rc::clone(&weak_set_proto)),
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    },
+  );
+  weak_set_proto.borrow_mut().properties.insert(
+    PKey::String("constructor".to_string().into()),
+    PropertyDescriptor::builtin_data(weak_set_ctor_val.clone()),
+  );
+  for (name, operation) in [("delete", 0_u8), ("has", 1)] {
+    let function = method(
+      Rc::new(move |vm, args| {
+        let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+        let data = require_weak_set_state(vm, &receiver, name)?;
+        let key = args.get(1).cloned().unwrap_or(Value::Undefined);
+        let mut data = data.borrow_mut();
+        let entries = data
+          .weak_set_entries
+          .as_mut()
+          .expect("validated WeakSet data");
+        if operation == 1 {
+          return Ok(Value::Bool(entries.iter().any(|entry| entry.matches(&key))));
+        }
+        let Some(index) = entries
+          .iter()
+          .position(|entry| entry.matches(&key))
+        else {
+          return Ok(Value::Bool(false));
+        };
+        entries.swap_remove(index);
+        Ok(Value::Bool(true))
+      }),
+      function_proto_map,
+      name,
+      1.0,
+    );
+    weak_set_proto.borrow_mut().properties.insert(
+      PKey::String(name.to_string().into()),
+      PropertyDescriptor::builtin_data(function),
+    );
+  }
+  let weak_set_add = method(
+    Rc::new(move |vm, args| {
+      let receiver = args.first().cloned().unwrap_or(Value::Undefined);
+      let data = require_weak_set_state(vm, &receiver, "add")?;
+      let key = args.get(1).cloned().unwrap_or(Value::Undefined);
+      let weak_key = weak_collection_key(vm, &key, "set")?;
+      let mut data = data.borrow_mut();
+      let entries = data
+        .weak_set_entries
+        .as_mut()
+        .expect("validated WeakSet data");
+      if !entries.iter().any(|entry| entry.matches(&key)) {
+        entries.push(weak_key);
+      }
+      Ok(receiver)
+    }),
+    function_proto_map,
+    "add",
+    1.0,
+  );
+  weak_set_proto.borrow_mut().properties.insert(
+    PKey::String("add".to_string().into()),
+    PropertyDescriptor::builtin_data(weak_set_add),
+  );
+  weak_set_proto.borrow_mut().properties.insert(
+    PKey::Symbol(SymbolId::well_known_to_string_tag()),
+    PropertyDescriptor::Data {
+      value: Value::String("WeakSet".to_string().into()),
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    },
+  );
+
   let set_proto = Rc::new(RefCell::new(ObjectData::with_prototype(Value::Object(
     Rc::clone(object_proto_map),
   ))));
@@ -1488,9 +1638,11 @@ pub(crate) fn install_map_set_constructors(
     map_constructor: map_ctor_val,
     weak_map_constructor: weak_map_ctor_val,
     set_constructor: set_ctor_val,
+    weak_set_constructor: weak_set_ctor_val,
     map_prototype: Value::Object(map_proto),
     weak_map_prototype: Value::Object(weak_map_proto),
     set_prototype: Value::Object(set_proto),
+    weak_set_prototype: Value::Object(weak_set_proto),
     iterator_prototype: Value::Object(iterator_proto),
     map_iterator_prototype: Value::Object(map_iterator_proto),
     set_iterator_prototype: Value::Object(set_iterator_proto),

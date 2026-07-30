@@ -82,6 +82,22 @@ pub(crate) fn install_object_intrinsics(
         return Ok(Value::String(format!("[object {tag}]").into()));
       }
       if let Value::Object(obj) = &this
+        && obj
+          .borrow()
+          .internal_slot("[[BooleanData]]")
+          .is_some()
+      {
+        return Ok(Value::String("[object Boolean]".into()));
+      }
+      if let Value::Object(obj) = &this
+        && obj
+          .borrow()
+          .internal_slot("[[SymbolData]]")
+          .is_some()
+      {
+        return Ok(Value::String("[object Symbol]".into()));
+      }
+      if let Value::Object(obj) = &this
         && let Some(PropertyDescriptor::Data { value, .. }) = obj
           .borrow()
           .properties

@@ -11,9 +11,6 @@
 //! adjusted to follow the spec precisely.
 //!
 //! Known divergences (summary):
-//! - Module namespace objects are ordinary non-extensible objects with sorted
-//!   accessors backed by live export slots, rather than the spec-defined exotic
-//!   namespace object kind. See `ModuleLoader` in `crate::module` for details.
 //! - Dynamic `import()` performs graph loading and evaluation synchronously,
 //!   then queues Promise settlement on the dynamic-import job queue. Import
 //!   options are evaluated but otherwise ignored.
@@ -24,9 +21,8 @@
 //! - Microtask/job queue draining is host-specific: thrown errors are recorded
 //!   and reported through the host hook while the current implementation
 //!   continues draining the remaining jobs.
-//! - Some Array prototype methods are simplified and differ from spec. For
-//!   example, `Array.prototype.flat` flattens nested arrays by one level even
-//!   when a greater depth is requested.
+//! - Some mutation-heavy Array prototype methods still have incomplete
+//!   failure ordering for exotic receivers and non-writable array lengths.
 //! - Ordinary objects and arrays use ECMAScript own-key ordering, but several
 //!   exotic object kinds still share ordinary storage instead of defining
 //!   their own complete internal-method behavior.
@@ -34,8 +30,8 @@
 //!   VM can optionally enforce compile-time slot types at runtime; this is
 //!   not part of ECMA-262.
 //!
-//! Where behaviour is observable by user code (module namespace live bindings,
-//! promise/microtask ordering, array semantics, property key order), the
+//! Where behaviour is observable by user code (promise/microtask ordering,
+//! array semantics, property key order), the
 //! implementation is considered non-compliant with ECMA-262 and should be
 //! updated if strict conformance is required. See the project notes and
 //! module-level comments in `crate::module`, `crate::vm::runtime::async_tasks`,

@@ -125,6 +125,77 @@ fn close_and_reject(
   reject_capability(vm, capability, reason)
 }
 
+fn promise_species_constructor(
+  vm: &mut Vm,
+  promise: &Value,
+) -> Result<Value, RuntimeError> {
+  let default_constructor = vm
+    .realm()
+    .intrinsics
+    .promise_constructor
+    .clone()
+    .ok_or_else(|| vm.throw_type_error("Promise constructor is unavailable"))?;
+  let constructor = vm.get_property_host(
+    promise,
+    &PropertyKey::String("constructor".to_string().into()),
+  )?;
+  if matches!(constructor, Value::Undefined) {
+    return Ok(default_constructor);
+  }
+  if !constructor.is_object() {
+    return Err(vm.throw_type_error("Promise constructor property is not an object"));
+  }
+  let species = vm.get_property_host(
+    &constructor,
+    &PropertyKey::Symbol(SymbolId::well_known_species()),
+  )?;
+  if matches!(species, Value::Undefined | Value::Null) {
+    return Ok(default_constructor);
+  }
+  if !species.is_constructable() {
+    return Err(vm.throw_type_error("Promise constructor[Symbol.species] is not a constructor"));
+  }
+  Ok(species)
+}
+
+fn settled_result_object(
+  object_prototype: &Rc<RefCell<ObjectData>>,
+  status: &str,
+  key: &str,
+  value: Value,
+) -> Value {
+  let mut result = ObjectData::with_prototype(Value::Object(Rc::clone(object_prototype)));
+  for (key, value) in [
+    ("status", Value::String(status.to_string().into())),
+    (key, value),
+  ] {
+    result.properties.insert(
+      PropertyKey::String(key.to_string().into()),
+      PropertyDescriptor::Data {
+        value,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      },
+    );
+  }
+  Value::Object(Rc::new(RefCell::new(result)))
+}
+
+fn aggregate_error(
+  vm: &mut Vm,
+  errors: Vec<Option<Value>>,
+) -> Result<Value, RuntimeError> {
+  let constructor = vm
+    .realm()
+    .intrinsics
+    .aggregate_error_constructor
+    .clone()
+    .ok_or_else(|| vm.throw_type_error("AggregateError constructor is unavailable"))?;
+  let errors = vm.new_array(errors);
+  vm.construct_value(&constructor, &[errors])
+}
+
 /// 27.2 Promise Objects
 #[allow(clippy::too_many_lines)]
 pub(crate) fn create_promise_intrinsics(
@@ -246,10 +317,11 @@ pub(crate) fn create_promise_intrinsics(
     PKey::String("constructor".to_string().into()),
     PropertyDescriptor::builtin_data(promise_ctor_val.clone()),
   );
+  let promise_then_function_proto = Rc::clone(function_proto_map);
   promise_proto_map.borrow_mut().properties.insert(
     PKey::String("then".to_string().into()),
     PropertyDescriptor::builtin_data(builtin_object(
-      Rc::new(|vm, args| {
+      Rc::new(move |vm, args| {
         let undefined = Value::Undefined;
         let this = args.first().unwrap_or(&undefined);
         let on_fulfilled = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -266,12 +338,8 @@ pub(crate) fn create_promise_intrinsics(
         };
 
         if let Value::Promise(promise_rc, _) = this {
-          let result_promise =
-            crate::gc::track_promise(Rc::new(RefCell::new(PromiseState::Pending {
-              on_fulfilled: Vec::new(),
-              on_rejected: Vec::new(),
-            })));
-          let result_promise_value = vm.promise_value(Rc::clone(&result_promise));
+          let constructor = promise_species_constructor(vm, this)?;
+          let capability = new_promise_capability(vm, &constructor, &promise_then_function_proto)?;
 
           let mut state = promise_rc.borrow_mut();
           match &mut *state {
@@ -280,48 +348,54 @@ pub(crate) fn create_promise_intrinsics(
               on_rejected: existing_rejected,
             } => {
               let user_on_fulfilled = on_fulfilled;
-              let res_p_f = Rc::clone(&result_promise);
+              let resolve = capability.resolve.clone();
+              let reject = capability.reject.clone();
               let on_fulfilled_fn = Value::Builtin(Rc::new(move |vm, args| {
                 let off = if args.len() > 1 { 1 } else { 0 };
                 let value = args.get(off).cloned().unwrap_or(Value::Undefined);
                 if matches!(user_on_fulfilled, Value::Undefined) {
-                  resolve_promise_with_value(vm, &res_p_f, value)?;
+                  vm.call_value_with_this(&resolve, &Value::Undefined, &[value])?;
                   return Ok(Value::Undefined);
                 }
                 vm.exceptions.last_uncaught = None;
                 match vm.call_value_with_this(&user_on_fulfilled, &Value::Undefined, &[value]) {
-                  Ok(out) => resolve_promise_with_value(vm, &res_p_f, out)?,
+                  Ok(out) => {
+                    vm.call_value_with_this(&resolve, &Value::Undefined, &[out])?;
+                  }
                   Err(err) => {
                     let reason = vm
                       .exceptions
                       .last_uncaught
                       .take()
                       .unwrap_or(Value::String(format!("{}", err).into()));
-                    reject_pending_promise(vm, &res_p_f, reason);
+                    vm.call_value_with_this(&reject, &Value::Undefined, &[reason])?;
                   }
                 }
                 Ok(Value::Undefined)
               }));
 
               let user_on_rejected = on_rejected;
-              let res_p_r = result_promise;
+              let reject = capability.reject.clone();
+              let resolve = capability.resolve.clone();
               let on_rejected_fn = Value::Builtin(Rc::new(move |vm, args| {
                 let off = if args.len() > 1 { 1 } else { 0 };
                 let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
                 if matches!(user_on_rejected, Value::Undefined) {
-                  reject_pending_promise(vm, &res_p_r, reason);
+                  vm.call_value_with_this(&reject, &Value::Undefined, &[reason])?;
                   return Ok(Value::Undefined);
                 }
                 vm.exceptions.last_uncaught = None;
                 match vm.call_value_with_this(&user_on_rejected, &Value::Undefined, &[reason]) {
-                  Ok(out) => resolve_promise_with_value(vm, &res_p_r, out)?,
+                  Ok(out) => {
+                    vm.call_value_with_this(&resolve, &Value::Undefined, &[out])?;
+                  }
                   Err(err) => {
                     let reject_reason = vm
                       .exceptions
                       .last_uncaught
                       .take()
                       .unwrap_or(Value::String(format!("{}", err).into()));
-                    reject_pending_promise(vm, &res_p_r, reject_reason);
+                    vm.call_value_with_this(&reject, &Value::Undefined, &[reject_reason])?;
                   }
                 }
                 Ok(Value::Undefined)
@@ -333,10 +407,15 @@ pub(crate) fn create_promise_intrinsics(
             PromiseState::Fulfilled(value) => {
               let value = value.clone();
               let user_on_fulfilled = on_fulfilled;
-              let res_p_f = result_promise;
+              let resolve = capability.resolve.clone();
+              let reject = capability.reject.clone();
               vm.queue_microtask(move |vm| {
                 if matches!(user_on_fulfilled, Value::Undefined) {
-                  resolve_promise_with_value(vm, &res_p_f, value.clone())?;
+                  vm.call_value_with_this(
+                    &resolve,
+                    &Value::Undefined,
+                    std::slice::from_ref(&value),
+                  )?;
                 } else {
                   vm.exceptions.last_uncaught = None;
                   match vm.call_value_with_this(
@@ -344,14 +423,16 @@ pub(crate) fn create_promise_intrinsics(
                     &Value::Undefined,
                     std::slice::from_ref(&value),
                   ) {
-                    Ok(out) => resolve_promise_with_value(vm, &res_p_f, out)?,
+                    Ok(out) => {
+                      vm.call_value_with_this(&resolve, &Value::Undefined, &[out])?;
+                    }
                     Err(err) => {
                       let reason = vm
                         .exceptions
                         .last_uncaught
                         .take()
                         .unwrap_or(Value::String(format!("{}", err).into()));
-                      reject_pending_promise(vm, &res_p_f, reason);
+                      vm.call_value_with_this(&reject, &Value::Undefined, &[reason])?;
                     }
                   }
                 }
@@ -362,10 +443,15 @@ pub(crate) fn create_promise_intrinsics(
               *handled = true;
               let reason = reason.clone();
               let user_on_rejected = on_rejected;
-              let res_p_r = result_promise;
+              let resolve = capability.resolve.clone();
+              let reject = capability.reject.clone();
               vm.queue_microtask(move |vm| {
                 if matches!(user_on_rejected, Value::Undefined) {
-                  reject_pending_promise(vm, &res_p_r, reason.clone());
+                  vm.call_value_with_this(
+                    &reject,
+                    &Value::Undefined,
+                    std::slice::from_ref(&reason),
+                  )?;
                 } else {
                   vm.exceptions.last_uncaught = None;
                   match vm.call_value_with_this(
@@ -373,14 +459,16 @@ pub(crate) fn create_promise_intrinsics(
                     &Value::Undefined,
                     std::slice::from_ref(&reason),
                   ) {
-                    Ok(out) => resolve_promise_with_value(vm, &res_p_r, out)?,
+                    Ok(out) => {
+                      vm.call_value_with_this(&resolve, &Value::Undefined, &[out])?;
+                    }
                     Err(err) => {
                       let reject_reason = vm
                         .exceptions
                         .last_uncaught
                         .take()
                         .unwrap_or(Value::String(format!("{}", err).into()));
-                      reject_pending_promise(vm, &res_p_r, reject_reason);
+                      vm.call_value_with_this(&reject, &Value::Undefined, &[reject_reason])?;
                     }
                   }
                 }
@@ -389,7 +477,7 @@ pub(crate) fn create_promise_intrinsics(
             }
           }
 
-          Ok(result_promise_value)
+          Ok(capability.promise)
         } else {
           Err(vm.throw_type_error("Promise.prototype.then called on non-promise"))
         }
@@ -414,6 +502,82 @@ pub(crate) fn create_promise_intrinsics(
       }),
       function_proto_map,
     )),
+  );
+  let promise_finally_function_proto = Rc::clone(function_proto_map);
+  let promise_finally = builtin_object(
+    Rc::new(move |vm, args| {
+      let undefined = Value::Undefined;
+      let this = args.first().unwrap_or(&undefined);
+      let on_finally = args.get(1).cloned().unwrap_or(Value::Undefined);
+      if !matches!(this, Value::Promise(..)) {
+        return Err(vm.throw_type_error("Promise.prototype.finally called on non-promise"));
+      }
+
+      let constructor = promise_species_constructor(vm, this)?;
+      let then = vm.get_property_host(this, &PKey::String("then".to_string().into()))?;
+      if !Vm::is_callable_value(&on_finally) {
+        return vm.call_value_with_this(&then, this, &[on_finally.clone(), on_finally]);
+      }
+
+      let on_finally_for_fulfilled = on_finally.clone();
+      let constructor_for_fulfilled = constructor.clone();
+      let function_proto_for_fulfilled = Rc::clone(&promise_finally_function_proto);
+      let then_finally = builtin_object(
+        Rc::new(move |vm, args| {
+          let off = if args.len() > 1 { 1 } else { 0 };
+          let value = args.get(off).cloned().unwrap_or(Value::Undefined);
+          let result =
+            vm.call_value_with_this(&on_finally_for_fulfilled, &Value::Undefined, &[])?;
+          let resolve = vm.get_property_host(
+            &constructor_for_fulfilled,
+            &PKey::String("resolve".to_string().into()),
+          )?;
+          let promise = vm.call_value_with_this(&resolve, &constructor_for_fulfilled, &[result])?;
+          let then = vm.get_property_host(&promise, &PKey::String("then".to_string().into()))?;
+          let value_thunk = builtin_object(
+            Rc::new(move |_vm, _args| Ok(value.clone())),
+            &function_proto_for_fulfilled,
+          );
+          vm.call_value_with_this(&then, &promise, &[value_thunk])
+        }),
+        &promise_finally_function_proto,
+      );
+      set_builtin_length(&then_finally, 1.0);
+      set_builtin_name(&then_finally, "");
+
+      let on_finally_for_rejected = on_finally;
+      let constructor_for_rejected = constructor;
+      let function_proto_for_rejected = Rc::clone(&promise_finally_function_proto);
+      let catch_finally = builtin_object(
+        Rc::new(move |vm, args| {
+          let off = if args.len() > 1 { 1 } else { 0 };
+          let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
+          let result = vm.call_value_with_this(&on_finally_for_rejected, &Value::Undefined, &[])?;
+          let resolve = vm.get_property_host(
+            &constructor_for_rejected,
+            &PKey::String("resolve".to_string().into()),
+          )?;
+          let promise = vm.call_value_with_this(&resolve, &constructor_for_rejected, &[result])?;
+          let then = vm.get_property_host(&promise, &PKey::String("then".to_string().into()))?;
+          let thrower = builtin_object(
+            Rc::new(move |vm, _args| Err(vm.throw_exception(reason.clone()))),
+            &function_proto_for_rejected,
+          );
+          vm.call_value_with_this(&then, &promise, &[thrower])
+        }),
+        &promise_finally_function_proto,
+      );
+      set_builtin_length(&catch_finally, 1.0);
+      set_builtin_name(&catch_finally, "");
+      vm.call_value_with_this(&then, this, &[then_finally, catch_finally])
+    }),
+    function_proto_map,
+  );
+  set_builtin_length(&promise_finally, 1.0);
+  set_builtin_name(&promise_finally, "finally");
+  promise_proto_map.borrow_mut().properties.insert(
+    PKey::String("finally".to_string().into()),
+    PropertyDescriptor::builtin_data(promise_finally),
   );
 
   promise_ctor_map.borrow_mut().properties.insert(
@@ -626,6 +790,407 @@ pub(crate) fn create_promise_intrinsics(
   promise_ctor_map.borrow_mut().properties.insert(
     PKey::String("all".to_string().into()),
     PropertyDescriptor::builtin_data(promise_all),
+  );
+
+  let promise_race_function_proto = Rc::clone(function_proto_map);
+  let promise_race = builtin_object(
+    Rc::new(move |vm, args| {
+      let off = static_builtin_arg_offset(vm, args, "Promise");
+      let undefined = Value::Undefined;
+      let iterable = args.get(off).unwrap_or(&undefined);
+      let this_val = vm.this_value();
+      if !this_val.is_object() {
+        return Err(vm.throw_type_error("Promise.race called on non-object"));
+      }
+      let capability = new_promise_capability(vm, &this_val, &promise_race_function_proto)?;
+      let promise_resolve = match vm.capture_completion(|vm| {
+        get_method(vm, &this_val, &PKey::String("resolve".to_string().into()))
+      }) {
+        Ok(Some(resolve)) => resolve,
+        Ok(None) => {
+          let (error, thrown) =
+            type_error_completion(vm, "Promise constructor resolve is not callable");
+          return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+        }
+        Err((error, thrown)) => {
+          return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+        }
+      };
+      let iterator_method = match vm.capture_completion(|vm| {
+        get_method(vm, iterable, &PKey::Symbol(SymbolId::well_known_iterator()))
+      }) {
+        Ok(Some(method)) => method,
+        Ok(None) => {
+          let (error, thrown) = type_error_completion(vm, "Promise.race argument is not iterable");
+          return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+        }
+        Err((error, thrown)) => {
+          return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+        }
+      };
+      let (iterator, next) =
+        match vm.capture_completion(|vm| get_iterator_record(vm, iterable, &iterator_method)) {
+          Ok(record) => record,
+          Err((error, thrown)) => {
+            return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+          }
+        };
+
+      loop {
+        let next_value = match vm.capture_completion(|vm| iterator_step(vm, &iterator, &next)) {
+          Ok(Some(value)) => value,
+          Ok(None) => return Ok(capability.promise),
+          Err((error, thrown)) => {
+            return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+          }
+        };
+        let next_promise = match vm.capture_completion(|vm| {
+          vm.call_value_with_this(&promise_resolve, &this_val, &[next_value])
+        }) {
+          Ok(promise) => promise,
+          Err((error, thrown)) => {
+            return close_and_reject(vm, &capability, &iterator, abrupt_reason(&error, thrown));
+          }
+        };
+        let then = match vm.capture_completion(|vm| {
+          vm.get_property_host(&next_promise, &PKey::String("then".to_string().into()))
+        }) {
+          Ok(then) => then,
+          Err((error, thrown)) => {
+            return close_and_reject(vm, &capability, &iterator, abrupt_reason(&error, thrown));
+          }
+        };
+        if let Err((error, thrown)) = vm.capture_completion(|vm| {
+          vm.call_value_with_this(
+            &then,
+            &next_promise,
+            &[capability.resolve.clone(), capability.reject.clone()],
+          )
+        }) {
+          return close_and_reject(vm, &capability, &iterator, abrupt_reason(&error, thrown));
+        }
+      }
+    }),
+    function_proto_map,
+  );
+  set_builtin_length(&promise_race, 1.0);
+  set_builtin_name(&promise_race, "race");
+  promise_ctor_map.borrow_mut().properties.insert(
+    PKey::String("race".to_string().into()),
+    PropertyDescriptor::builtin_data(promise_race),
+  );
+
+  let promise_all_settled_function_proto = Rc::clone(function_proto_map);
+  let promise_all_settled_object_proto = Rc::clone(object_proto_map);
+  let promise_all_settled = builtin_object(
+    Rc::new(move |vm, args| {
+      let off = static_builtin_arg_offset(vm, args, "Promise");
+      let undefined = Value::Undefined;
+      let iterable = args.get(off).unwrap_or(&undefined);
+      let this_val = vm.this_value();
+      if !this_val.is_object() {
+        return Err(vm.throw_type_error("Promise.allSettled called on non-object"));
+      }
+      let capability = new_promise_capability(vm, &this_val, &promise_all_settled_function_proto)?;
+      let promise_resolve = match vm.capture_completion(|vm| {
+        get_method(vm, &this_val, &PKey::String("resolve".to_string().into()))
+      }) {
+        Ok(Some(resolve)) => resolve,
+        Ok(None) => {
+          let (error, thrown) =
+            type_error_completion(vm, "Promise constructor resolve is not callable");
+          return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+        }
+        Err((error, thrown)) => {
+          return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+        }
+      };
+      let iterator_method = match vm.capture_completion(|vm| {
+        get_method(vm, iterable, &PKey::Symbol(SymbolId::well_known_iterator()))
+      }) {
+        Ok(Some(method)) => method,
+        Ok(None) => {
+          let (error, thrown) =
+            type_error_completion(vm, "Promise.allSettled argument is not iterable");
+          return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+        }
+        Err((error, thrown)) => {
+          return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+        }
+      };
+      let (iterator, next) =
+        match vm.capture_completion(|vm| get_iterator_record(vm, iterable, &iterator_method)) {
+          Ok(record) => record,
+          Err((error, thrown)) => {
+            return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+          }
+        };
+      let values: Rc<RefCell<Vec<Option<Value>>>> = Rc::new(RefCell::new(Vec::new()));
+      let remaining = Rc::new(RefCell::new(1usize));
+
+      loop {
+        let next_value = match vm.capture_completion(|vm| iterator_step(vm, &iterator, &next)) {
+          Ok(Some(value)) => value,
+          Ok(None) => {
+            let mut remaining_ref = remaining.borrow_mut();
+            *remaining_ref = remaining_ref.saturating_sub(1);
+            if *remaining_ref == 0 {
+              let array = vm.new_array(values.borrow().clone());
+              if let Err((error, thrown)) = vm.capture_completion(|vm| {
+                vm.call_value_with_this(&capability.resolve, &Value::Undefined, &[array])
+              }) {
+                return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+              }
+            }
+            return Ok(capability.promise);
+          }
+          Err((error, thrown)) => {
+            return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+          }
+        };
+        let index = values.borrow().len();
+        if index >= 9_007_199_254_740_991usize {
+          let (error, thrown) = vm
+            .capture_completion(|vm| {
+              Err::<(), _>(
+                vm.throw_range_error("Promise.allSettled input contains too many elements"),
+              )
+            })
+            .expect_err("throw_range_error always returns an abrupt completion");
+          return close_and_reject(vm, &capability, &iterator, abrupt_reason(&error, thrown));
+        }
+        values.borrow_mut().push(None);
+        *remaining.borrow_mut() += 1;
+        let next_promise = match vm.capture_completion(|vm| {
+          vm.call_value_with_this(&promise_resolve, &this_val, &[next_value])
+        }) {
+          Ok(promise) => promise,
+          Err((error, thrown)) => {
+            return close_and_reject(vm, &capability, &iterator, abrupt_reason(&error, thrown));
+          }
+        };
+        let then = match vm.capture_completion(|vm| {
+          vm.get_property_host(&next_promise, &PKey::String("then".to_string().into()))
+        }) {
+          Ok(then) => then,
+          Err((error, thrown)) => {
+            return close_and_reject(vm, &capability, &iterator, abrupt_reason(&error, thrown));
+          }
+        };
+        let already_called = Rc::new(RefCell::new(false));
+        let values_for_fulfilled = Rc::clone(&values);
+        let remaining_for_fulfilled = Rc::clone(&remaining);
+        let resolve_for_fulfilled = capability.resolve.clone();
+        let already_called_for_fulfilled = Rc::clone(&already_called);
+        let object_proto_for_fulfilled = Rc::clone(&promise_all_settled_object_proto);
+        let on_fulfilled = builtin_object(
+          Rc::new(move |vm, args| {
+            if *already_called_for_fulfilled.borrow() {
+              return Ok(Value::Undefined);
+            }
+            *already_called_for_fulfilled.borrow_mut() = true;
+            let off = if args.len() > 1 { 1 } else { 0 };
+            let value = args.get(off).cloned().unwrap_or(Value::Undefined);
+            values_for_fulfilled.borrow_mut()[index] = Some(settled_result_object(
+              &object_proto_for_fulfilled,
+              "fulfilled",
+              "value",
+              value,
+            ));
+            let mut remaining_ref = remaining_for_fulfilled.borrow_mut();
+            *remaining_ref = remaining_ref.saturating_sub(1);
+            if *remaining_ref == 0 {
+              let array = vm.new_array(values_for_fulfilled.borrow().clone());
+              vm.call_value_with_this(&resolve_for_fulfilled, &Value::Undefined, &[array])?;
+            }
+            Ok(Value::Undefined)
+          }),
+          &promise_all_settled_function_proto,
+        );
+        let values_for_rejected = Rc::clone(&values);
+        let remaining_for_rejected = Rc::clone(&remaining);
+        let resolve_for_rejected = capability.resolve.clone();
+        let object_proto_for_rejected = Rc::clone(&promise_all_settled_object_proto);
+        let on_rejected = builtin_object(
+          Rc::new(move |vm, args| {
+            if *already_called.borrow() {
+              return Ok(Value::Undefined);
+            }
+            *already_called.borrow_mut() = true;
+            let off = if args.len() > 1 { 1 } else { 0 };
+            let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
+            values_for_rejected.borrow_mut()[index] = Some(settled_result_object(
+              &object_proto_for_rejected,
+              "rejected",
+              "reason",
+              reason,
+            ));
+            let mut remaining_ref = remaining_for_rejected.borrow_mut();
+            *remaining_ref = remaining_ref.saturating_sub(1);
+            if *remaining_ref == 0 {
+              let array = vm.new_array(values_for_rejected.borrow().clone());
+              vm.call_value_with_this(&resolve_for_rejected, &Value::Undefined, &[array])?;
+            }
+            Ok(Value::Undefined)
+          }),
+          &promise_all_settled_function_proto,
+        );
+        if let Err((error, thrown)) = vm.capture_completion(|vm| {
+          vm.call_value_with_this(&then, &next_promise, &[on_fulfilled, on_rejected])
+        }) {
+          return close_and_reject(vm, &capability, &iterator, abrupt_reason(&error, thrown));
+        }
+      }
+    }),
+    function_proto_map,
+  );
+  set_builtin_length(&promise_all_settled, 1.0);
+  set_builtin_name(&promise_all_settled, "allSettled");
+  promise_ctor_map.borrow_mut().properties.insert(
+    PKey::String("allSettled".to_string().into()),
+    PropertyDescriptor::builtin_data(promise_all_settled),
+  );
+
+  let promise_any_function_proto = Rc::clone(function_proto_map);
+  let promise_any = builtin_object(
+    Rc::new(move |vm, args| {
+      let off = static_builtin_arg_offset(vm, args, "Promise");
+      let undefined = Value::Undefined;
+      let iterable = args.get(off).unwrap_or(&undefined);
+      let this_val = vm.this_value();
+      if !this_val.is_object() {
+        return Err(vm.throw_type_error("Promise.any called on non-object"));
+      }
+      let capability = new_promise_capability(vm, &this_val, &promise_any_function_proto)?;
+      let promise_resolve = match vm.capture_completion(|vm| {
+        get_method(vm, &this_val, &PKey::String("resolve".to_string().into()))
+      }) {
+        Ok(Some(resolve)) => resolve,
+        Ok(None) => {
+          let (error, thrown) =
+            type_error_completion(vm, "Promise constructor resolve is not callable");
+          return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+        }
+        Err((error, thrown)) => {
+          return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+        }
+      };
+      let iterator_method = match vm.capture_completion(|vm| {
+        get_method(vm, iterable, &PKey::Symbol(SymbolId::well_known_iterator()))
+      }) {
+        Ok(Some(method)) => method,
+        Ok(None) => {
+          let (error, thrown) = type_error_completion(vm, "Promise.any argument is not iterable");
+          return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+        }
+        Err((error, thrown)) => {
+          return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+        }
+      };
+      let (iterator, next) =
+        match vm.capture_completion(|vm| get_iterator_record(vm, iterable, &iterator_method)) {
+          Ok(record) => record,
+          Err((error, thrown)) => {
+            return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+          }
+        };
+      let errors: Rc<RefCell<Vec<Option<Value>>>> = Rc::new(RefCell::new(Vec::new()));
+      let remaining = Rc::new(RefCell::new(1usize));
+
+      loop {
+        let next_value = match vm.capture_completion(|vm| iterator_step(vm, &iterator, &next)) {
+          Ok(Some(value)) => value,
+          Ok(None) => {
+            let is_last = {
+              let mut remaining_ref = remaining.borrow_mut();
+              *remaining_ref = remaining_ref.saturating_sub(1);
+              *remaining_ref == 0
+            };
+            if is_last {
+              let reason =
+                match vm.capture_completion(|vm| aggregate_error(vm, errors.borrow().clone())) {
+                  Ok(error) => error,
+                  Err((error, thrown)) => abrupt_reason(&error, thrown),
+                };
+              return reject_capability(vm, &capability, reason);
+            }
+            return Ok(capability.promise);
+          }
+          Err((error, thrown)) => {
+            return reject_capability(vm, &capability, abrupt_reason(&error, thrown));
+          }
+        };
+        let index = errors.borrow().len();
+        if index >= 9_007_199_254_740_991usize {
+          let (error, thrown) = vm
+            .capture_completion(|vm| {
+              Err::<(), _>(vm.throw_range_error("Promise.any input contains too many elements"))
+            })
+            .expect_err("throw_range_error always returns an abrupt completion");
+          return close_and_reject(vm, &capability, &iterator, abrupt_reason(&error, thrown));
+        }
+        errors.borrow_mut().push(None);
+        *remaining.borrow_mut() += 1;
+        let next_promise = match vm.capture_completion(|vm| {
+          vm.call_value_with_this(&promise_resolve, &this_val, &[next_value])
+        }) {
+          Ok(promise) => promise,
+          Err((error, thrown)) => {
+            return close_and_reject(vm, &capability, &iterator, abrupt_reason(&error, thrown));
+          }
+        };
+        let then = match vm.capture_completion(|vm| {
+          vm.get_property_host(&next_promise, &PKey::String("then".to_string().into()))
+        }) {
+          Ok(then) => then,
+          Err((error, thrown)) => {
+            return close_and_reject(vm, &capability, &iterator, abrupt_reason(&error, thrown));
+          }
+        };
+        let errors_for_rejected = Rc::clone(&errors);
+        let remaining_for_rejected = Rc::clone(&remaining);
+        let reject_for_rejected = capability.reject.clone();
+        let already_called = Rc::new(RefCell::new(false));
+        let on_rejected = builtin_object(
+          Rc::new(move |vm, args| {
+            if *already_called.borrow() {
+              return Ok(Value::Undefined);
+            }
+            *already_called.borrow_mut() = true;
+            let off = if args.len() > 1 { 1 } else { 0 };
+            let reason = args.get(off).cloned().unwrap_or(Value::Undefined);
+            errors_for_rejected.borrow_mut()[index] = Some(reason);
+            let is_last = {
+              let mut remaining_ref = remaining_for_rejected.borrow_mut();
+              *remaining_ref = remaining_ref.saturating_sub(1);
+              *remaining_ref == 0
+            };
+            if is_last {
+              let aggregate = aggregate_error(vm, errors_for_rejected.borrow().clone())?;
+              vm.call_value_with_this(&reject_for_rejected, &Value::Undefined, &[aggregate])?;
+            }
+            Ok(Value::Undefined)
+          }),
+          &promise_any_function_proto,
+        );
+        if let Err((error, thrown)) = vm.capture_completion(|vm| {
+          vm.call_value_with_this(
+            &then,
+            &next_promise,
+            &[capability.resolve.clone(), on_rejected],
+          )
+        }) {
+          return close_and_reject(vm, &capability, &iterator, abrupt_reason(&error, thrown));
+        }
+      }
+    }),
+    function_proto_map,
+  );
+  set_builtin_length(&promise_any, 1.0);
+  set_builtin_name(&promise_any, "any");
+  promise_ctor_map.borrow_mut().properties.insert(
+    PKey::String("any".to_string().into()),
+    PropertyDescriptor::builtin_data(promise_any),
   );
 
   promise_ctor_map.borrow_mut().properties.insert(

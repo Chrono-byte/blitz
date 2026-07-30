@@ -6,23 +6,10 @@
 //! `ModuleLoader` supports source, virtual, and prelinked module graphs. It
 //! preserves live bindings across direct imports, indirect exports, star
 //! exports, namespace exports, and cycles, including ambiguous-star detection.
-//! The remaining differences from ECMA-262 are primarily in the representation
-//! of namespace objects, host scheduling for dynamic import, and the algorithms
-//! used to link and evaluate source graphs.
+//! The remaining differences from ECMA-262 are primarily in host scheduling for
+//! dynamic import and the algorithms used to link and evaluate source graphs.
 //!
-//! 1) Module namespace objects
-//! - Current behaviour: namespace imports (`import * as ns from 'mod'`) share
-//!   one non-extensible object whose sorted accessor properties read live
-//!   export slots. Export properties are enumerable and non-configurable, and
-//!   the object exposes the `Module` toString tag.
-//! - Spec behaviour: module namespace objects are exotic objects with
-//!   specialized `[[GetOwnProperty]]`, `[[DefineOwnProperty]]`, `[[Set]]`,
-//!   `[[Delete]]`, and `[[OwnPropertyKeys]]` behavior.
-//! - Impact: live values, sorted keys, and namespace identity are preserved,
-//!   while descriptor representation and operations that depend on the exotic
-//!   internal methods can still differ from ECMA-262.
-//!
-//! 2) Dynamic import timing and async behaviour
+//! 1) Dynamic import timing and async behaviour
 //! - Current behaviour: `import()` synchronously constructs, instantiates, and
 //!   evaluates the requested graph in a child VM, then queues fulfillment or
 //!   rejection on the VM's dynamic-import job queue. Import options are
@@ -34,7 +21,7 @@
 //!   effects happen before the queued settlement job. Host-hook timing, import
 //!   attributes, and some Promise ordering remain observably different.
 //!
-//! 3) Linking/instantiation simplifications
+//! 2) Linking/instantiation simplifications
 //! - Current behaviour: source records are linked by scanning serialized ESTree
 //!   to allocate slots and collect import/export metadata. `resolve_export`
 //!   handles direct, indirect, and star exports, cycles, shared origin slots,
@@ -48,8 +35,6 @@
 //!   source linking still depends on an ESTree serialization pass.
 //!
 //! Recommendations:
-//! - Represent module namespaces as a dedicated exotic object kind while
-//!   retaining the existing live export slots and shared identity.
 //! - Move dynamic-import loading and evaluation behind the host job boundary
 //!   and implement import attributes and host-hook error propagation.
 //! - Replace serialized-ESTree linking and DFS evaluation with spec-oriented

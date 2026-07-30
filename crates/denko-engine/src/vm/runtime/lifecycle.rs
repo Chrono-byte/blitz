@@ -132,6 +132,7 @@ impl Vm {
       },
       roots: RootState {
         temporary: Vec::new(),
+        kept_alive: Vec::new(),
         host: Rc::new(RefCell::new(HostRootStore::new())),
       },
       _gc_registration: gc_registration,
@@ -221,6 +222,7 @@ impl Vm {
       },
       roots: RootState {
         temporary: Vec::new(),
+        kept_alive: Vec::new(),
         host: Rc::clone(&self.roots.host),
       },
       _gc_registration: gc_registration,
@@ -601,7 +603,7 @@ impl Vm {
   }
 
   /// Run the prototype mark/sweep collector and return mark statistics.
-  pub fn collect_garbage_prototype(&self) -> gc::GcStats {
+  pub fn collect_garbage_prototype(&mut self) -> gc::GcStats {
     // The current prototype GC cannot inspect captures held inside queued
     // host-side microtask/import-job closures. Collecting while those queues
     // are non-empty can reclaim still-live JS values reachable only through
@@ -684,6 +686,7 @@ impl Vm {
       );
     }
     roots.extend(self.roots.temporary.iter().cloned());
+    roots.extend(self.roots.kept_alive.iter().cloned());
     roots.extend(
       self
         .roots
@@ -883,6 +886,15 @@ impl Vm {
       .realm_state
       .realm
       .intrinsics
+      .weak_set_constructor
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
       .number_constructor
       .clone()
     {
@@ -982,6 +994,15 @@ impl Vm {
       .realm_state
       .realm
       .intrinsics
+      .weak_set_prototype
+      .clone()
+    {
+      roots.push(value);
+    }
+    if let Some(value) = self
+      .realm_state
+      .realm
+      .intrinsics
       .boolean_prototype
       .clone()
     {
@@ -1024,6 +1045,9 @@ impl Vm {
       roots.push(value);
     }
     let stats = gc::collect_with_env_roots(&roots, &env_roots);
+    for registry in gc::take_pending_finalization_cleanups() {
+      self.queue_finalization_cleanup(registry);
+    }
     if Self::gc_trace_enabled() {
       let after = gc::heap_snapshot();
       if let Some(before) = before {

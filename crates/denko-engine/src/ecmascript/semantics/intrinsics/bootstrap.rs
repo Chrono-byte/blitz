@@ -71,8 +71,19 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
 
   let collection_intrinsics =
     builtins::collections::install_map_set_constructors(&object_proto_map, &function_proto_map);
+  let weak_reference_intrinsics = builtins::weak_references::create_weak_reference_intrinsics(
+    &object_proto_map,
+    &function_proto_map,
+  );
   let map_ctor_val = collection_intrinsics.map_constructor.clone();
   let weak_map_ctor_val = collection_intrinsics.weak_map_constructor.clone();
+  let weak_set_ctor_val = collection_intrinsics.weak_set_constructor.clone();
+  let weak_ref_ctor_val = weak_reference_intrinsics
+    .weak_ref_constructor
+    .clone();
+  let finalization_registry_ctor_val = weak_reference_intrinsics
+    .finalization_registry_constructor
+    .clone();
   let set_ctor_val = collection_intrinsics.set_constructor.clone();
   let iterator_proto = collection_intrinsics.iterator_prototype.clone();
   let map_iterator_proto = collection_intrinsics
@@ -130,6 +141,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
       aggregate_error_ctor_val: &aggregate_error_ctor_val,
       map_ctor_val: &map_ctor_val,
       weak_map_ctor_val: &weak_map_ctor_val,
+      weak_set_ctor_val: &weak_set_ctor_val,
+      weak_ref_ctor_val: &weak_ref_ctor_val,
+      finalization_registry_ctor_val: &finalization_registry_ctor_val,
       set_ctor_val: &set_ctor_val,
       arraybuffer_ctor_val: &arraybuffer_ctor_val,
       sharedarraybuffer_ctor_val: &sharedarraybuffer_ctor_val,
@@ -196,6 +210,9 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     regexp_constructor: Some(regexp_ctor_val),
     map_constructor: Some(map_ctor_val),
     weak_map_constructor: Some(weak_map_ctor_val),
+    weak_set_constructor: Some(weak_set_ctor_val),
+    weak_ref_constructor: Some(weak_ref_ctor_val),
+    finalization_registry_constructor: Some(finalization_registry_ctor_val),
     set_constructor: Some(set_ctor_val),
     arraybuffer_constructor: Some(arraybuffer_ctor_val),
     shared_array_buffer_constructor: Some(sharedarraybuffer_ctor_val),
@@ -216,6 +233,11 @@ pub(crate) fn install_minimal_kernel_constructors(globals: &Rc<RefCell<ObjectDat
     map_prototype: Some(collection_intrinsics.map_prototype),
     weak_map_prototype: Some(collection_intrinsics.weak_map_prototype),
     set_prototype: Some(collection_intrinsics.set_prototype),
+    weak_set_prototype: Some(collection_intrinsics.weak_set_prototype),
+    weak_ref_prototype: Some(weak_reference_intrinsics.weak_ref_prototype),
+    finalization_registry_prototype: Some(
+      weak_reference_intrinsics.finalization_registry_prototype,
+    ),
     typed_array_prototype: Some(Value::Object(typedarray_proto_map)),
     arraybuffer_prototype: Some(Value::Object(arraybuffer_proto_map)),
     shared_array_buffer_prototype: Some(Value::Object(sharedarraybuffer_proto_map)),
@@ -284,6 +306,7 @@ mod tests {
       ("RegExp", intrinsics.regexp_constructor.as_ref()),
       ("Map", intrinsics.map_constructor.as_ref()),
       ("WeakMap", intrinsics.weak_map_constructor.as_ref()),
+      ("WeakSet", intrinsics.weak_set_constructor.as_ref()),
       ("Set", intrinsics.set_constructor.as_ref()),
       ("ArrayBuffer", intrinsics.arraybuffer_constructor.as_ref()),
       ("DataView", intrinsics.data_view_constructor.as_ref()),
@@ -331,6 +354,11 @@ mod tests {
         "WeakMap",
         intrinsics.weak_map_constructor.as_ref(),
         intrinsics.weak_map_prototype.as_ref(),
+      ),
+      (
+        "WeakSet",
+        intrinsics.weak_set_constructor.as_ref(),
+        intrinsics.weak_set_prototype.as_ref(),
       ),
     ] {
       let constructor = constructor.unwrap_or_else(|| panic!("missing {name} constructor"));

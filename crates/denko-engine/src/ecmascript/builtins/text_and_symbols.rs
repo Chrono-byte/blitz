@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use js_string::{JsString, JsStringBuilder};
 use num_traits::ToPrimitive;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::runtime_utils::{
   array_from_values, builtin_object, require_object_coercible, set_builtin_length,
@@ -47,6 +48,65 @@ fn utf16_encode_code_point(cp: u32) -> JsString {
   let mut builder = JsStringBuilder::new();
   let _ = builder.push_code_point(cp);
   builder.finish()
+}
+
+/// Normalize valid Unicode subsequences while keeping isolated UTF-16
+/// surrogates as exact code units. Rust strings cannot represent those
+/// surrogates, but ECMAScript strings can.
+fn normalize_string(
+  value: &JsString,
+  form: &str,
+) -> JsString {
+  fn normalize_segment(
+    segment: &[u16],
+    form: &str,
+    output: &mut JsStringBuilder,
+  ) {
+    if segment.is_empty() {
+      return;
+    }
+    let segment = String::from_utf16(segment)
+      .expect("normalization segments contain only valid Unicode scalar values");
+    match form {
+      "NFC" => {
+        for character in segment.nfc() {
+          let _ = output.push_code_point(character.into());
+        }
+      }
+      "NFD" => {
+        for character in segment.nfd() {
+          let _ = output.push_code_point(character.into());
+        }
+      }
+      "NFKC" => {
+        for character in segment.nfkc() {
+          let _ = output.push_code_point(character.into());
+        }
+      }
+      "NFKD" => {
+        for character in segment.nfkd() {
+          let _ = output.push_code_point(character.into());
+        }
+      }
+      _ => unreachable!("String.prototype.normalize validates its form"),
+    }
+  }
+
+  let mut output = JsStringBuilder::with_capacity(value.len());
+  let mut segment_start = 0;
+  let mut index = 0;
+  while let Some(point) = value.code_point_at(index, true) {
+    if char::from_u32(point.value()).is_none() {
+      normalize_segment(&value.as_slice()[segment_start..index], form, &mut output);
+      output.push_code_unit(point.value() as u16);
+      index += point.width();
+      segment_start = index;
+    } else {
+      index += point.width();
+    }
+  }
+  normalize_segment(&value.as_slice()[segment_start..], form, &mut output);
+  output.finish()
 }
 
 fn string_constructor_to_string(
@@ -107,10 +167,9 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   let boolean_proto_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
     ObjectData::with_prototype(Value::Object(Rc::clone(object_proto_map))),
   ));
-  boolean_proto_map.borrow_mut().properties.insert(
-    PKey::String("[[PrimitiveValue]]".to_string().into()),
-    PropertyDescriptor::ordinary_data(Value::Bool(false)),
-  );
+  boolean_proto_map
+    .borrow_mut()
+    .set_internal_slot("[[BooleanData]]", Value::Bool(false));
   let boolean_ctor_map: Rc<RefCell<ObjectData>> = Rc::new(RefCell::new(
     ObjectData::with_prototype(Value::Object(Rc::clone(function_proto_map))),
   ));
@@ -128,11 +187,10 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     ObjectData::with_prototype(Value::Object(Rc::clone(object_proto_map))),
   ));
   let symbol_ctor_fn: BuiltinFn = Rc::new(move |vm, args| {
-    let value_idx = if vm.current_new_target().is_some() || args.len() > 1 {
-      1
-    } else {
-      0
-    };
+    if vm.current_new_target().is_some() {
+      return Err(vm.throw_type_error("Symbol is not a constructor"));
+    }
+    let value_idx = 0;
     let desc = match args.get(value_idx) {
       Some(Value::Undefined) | None => None,
       Some(Value::String(s)) => Some(s.clone()),
@@ -212,13 +270,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         })),
         Value::Object(obj) => {
           let borrowed = obj.borrow();
-          if let Some(PropertyDescriptor::Data {
-            value: Value::Symbol(_, desc),
-            ..
-          }) = borrowed
-            .properties
-            .get(&PKey::String("[[PrimitiveValue]]".to_string().into()))
-          {
+          if let Some(Value::Symbol(_, desc)) = borrowed.internal_slot("[[SymbolData]]") {
             Ok(Value::String(match desc {
               Some(d) => format!("Symbol({})", d).into(),
               None => "Symbol()".to_string().into(),
@@ -246,13 +298,7 @@ pub(crate) fn install_string_boolean_symbol_builtins(
         Value::Symbol(_, _) => Ok(this.clone()),
         Value::Object(obj) => {
           let borrowed = obj.borrow();
-          if let Some(PropertyDescriptor::Data {
-            value: Value::Symbol(id, desc),
-            ..
-          }) = borrowed
-            .properties
-            .get(&PKey::String("[[PrimitiveValue]]".to_string().into()))
-          {
+          if let Some(Value::Symbol(id, desc)) = borrowed.internal_slot("[[SymbolData]]") {
             return Ok(Value::Symbol(id.clone(), desc.clone()));
           }
           Err(vm.throw_type_error("Symbol.prototype.valueOf called on incompatible receiver"))
@@ -267,6 +313,47 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   symbol_proto_map.borrow_mut().properties.insert(
     PKey::String("valueOf".to_string().into()),
     PropertyDescriptor::builtin_data(symbol_value_of),
+  );
+  let symbol_description = builtin_object(
+    Rc::new(|vm, args| {
+      let this = args.first().unwrap_or(&Value::Undefined);
+      match this {
+        Value::Symbol(_, description) => Ok(
+          description
+            .clone()
+            .map_or(Value::Undefined, Value::String),
+        ),
+        Value::Object(object) => object
+          .borrow()
+          .internal_slot("[[SymbolData]]")
+          .and_then(|value| match value {
+            Value::Symbol(_, description) => Some(
+              description
+                .clone()
+                .map_or(Value::Undefined, Value::String),
+            ),
+            _ => None,
+          })
+          .ok_or_else(|| {
+            vm.throw_type_error("Symbol.prototype.description called on incompatible receiver")
+          }),
+        _ => {
+          Err(vm.throw_type_error("Symbol.prototype.description called on incompatible receiver"))
+        }
+      }
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&symbol_description, "get description");
+  set_builtin_length(&symbol_description, 0.0);
+  symbol_proto_map.borrow_mut().properties.insert(
+    PKey::String("description".to_string().into()),
+    PropertyDescriptor::Accessor {
+      get: Some(symbol_description),
+      set: None,
+      enumerable: false,
+      configurable: true,
+    },
   );
   for (name, sym) in [
     (
@@ -655,6 +742,51 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     PropertyDescriptor::builtin_data(string_index_of),
   );
 
+  let string_last_index_of = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().unwrap_or(&Value::Undefined);
+      require_object_coercible(vm, receiver)?;
+      let haystack = vm.to_string(receiver)?;
+      let needle = vm.to_string(args.get(1).unwrap_or(&Value::Undefined))?;
+      let length = haystack.len();
+      let position = match args.get(2) {
+        None => length,
+        Some(value) => {
+          let number = vm.to_number_value(value)?;
+          if number.is_nan() || number <= 0.0 {
+            0
+          } else if number.is_infinite() || number >= usize_to_f64(length) {
+            length
+          } else {
+            number.trunc().to_usize().unwrap_or(length)
+          }
+        }
+      };
+      if needle.is_empty() {
+        return Ok(Value::Number(usize_to_f64(position)));
+      }
+      for index in (0..=position).rev() {
+        let end = index.saturating_add(needle.len());
+        if end <= length
+          && haystack
+            .slice(index..end)
+            .expect("lastIndexOf bounds were checked")
+            == needle
+        {
+          return Ok(Value::Number(usize_to_f64(index)));
+        }
+      }
+      Ok(Value::Number(-1.0))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_last_index_of, "lastIndexOf");
+  set_builtin_length(&string_last_index_of, 1.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("lastIndexOf".to_string().into()),
+    PropertyDescriptor::builtin_data(string_last_index_of),
+  );
+
   let string_starts_with = builtin_object(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;
@@ -703,6 +835,301 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     PropertyDescriptor::builtin_data(string_starts_with),
   );
 
+  for (name, ends_with) in [("includes", false), ("endsWith", true)] {
+    let method = builtin_object(
+      Rc::new(move |vm, args| {
+        let receiver = args.first().unwrap_or(&Value::Undefined);
+        require_object_coercible(vm, receiver)?;
+        let string = vm.to_string(receiver)?;
+        let search_value = args.get(1).unwrap_or(&Value::Undefined);
+        if crate::ecmascript::builtins::regexp::is_regexp(vm, search_value)? {
+          return Err(vm.throw_type_error(&format!(
+            "First argument to String.prototype.{name} must not be a RegExp"
+          )));
+        }
+        let search = vm.to_string(search_value)?;
+        let number = match args.get(2) {
+          Some(value) => vm.to_number_value(value)?,
+          None if ends_with => string.len().to_f64().unwrap_or(f64::INFINITY),
+          None => 0.0,
+        };
+        let position = if number.is_nan() || number <= 0.0 {
+          0
+        } else if number == f64::INFINITY {
+          string.len()
+        } else {
+          number
+            .trunc()
+            .to_usize()
+            .unwrap_or(string.len())
+            .min(string.len())
+        };
+        if ends_with {
+          if search.len() > position {
+            return Ok(Value::Bool(false));
+          }
+          let start = position - search.len();
+          return Ok(Value::Bool(
+            string
+              .slice(start..position)
+              .expect("endsWith bounds are valid")
+              == search,
+          ));
+        }
+        Ok(Value::Bool(string.find(&search, position).is_some()))
+      }),
+      function_proto_map,
+    );
+    set_builtin_name(&method, name);
+    set_builtin_length(&method, 1.0);
+    string_proto_map.borrow_mut().properties.insert(
+      PKey::String(name.into()),
+      PropertyDescriptor::builtin_data(method),
+    );
+  }
+
+  let string_char_at = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().unwrap_or(&Value::Undefined);
+      require_object_coercible(vm, receiver)?;
+      let string = vm.to_string(receiver)?;
+      let number = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+      let index = if number.is_nan() {
+        Some(0)
+      } else if number < 0.0 || !number.is_finite() {
+        None
+      } else {
+        number.trunc().to_usize()
+      };
+      Ok(
+        index
+          .and_then(|index| string.code_unit_at(index))
+          .map_or_else(
+            || Value::String(JsString::empty()),
+            |unit| Value::String(JsString::from_utf16(vec![unit])),
+          ),
+      )
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_char_at, "charAt");
+  set_builtin_length(&string_char_at, 1.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("charAt".into()),
+    PropertyDescriptor::builtin_data(string_char_at),
+  );
+
+  let string_at = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().unwrap_or(&Value::Undefined);
+      require_object_coercible(vm, receiver)?;
+      let string = vm.to_string(receiver)?;
+      let number = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+      if number.is_infinite() {
+        return Ok(Value::Undefined);
+      }
+      let relative = if number.is_nan() {
+        0
+      } else {
+        number.trunc() as isize
+      };
+      let index = if relative < 0 {
+        string.len().to_isize().unwrap_or(isize::MAX) + relative
+      } else {
+        relative
+      };
+      let Ok(index) = usize::try_from(index) else {
+        return Ok(Value::Undefined);
+      };
+      Ok(
+        string
+          .code_unit_at(index)
+          .map_or(Value::Undefined, |unit| {
+            Value::String(JsString::from_utf16(vec![unit]))
+          }),
+      )
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_at, "at");
+  set_builtin_length(&string_at, 1.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("at".into()),
+    PropertyDescriptor::builtin_data(string_at),
+  );
+
+  let string_concat = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().unwrap_or(&Value::Undefined);
+      require_object_coercible(vm, receiver)?;
+      let mut output = JsStringBuilder::new();
+      output.push_string(&vm.to_string(receiver)?);
+      for value in args.iter().skip(1) {
+        output.push_string(&vm.to_string(value)?);
+      }
+      Ok(Value::String(output.finish()))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_concat, "concat");
+  set_builtin_length(&string_concat, 1.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("concat".into()),
+    PropertyDescriptor::builtin_data(string_concat),
+  );
+
+  let string_normalize = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().unwrap_or(&Value::Undefined);
+      require_object_coercible(vm, receiver)?;
+      let string = vm.to_string(receiver)?;
+      let form = match args.get(1) {
+        None | Some(Value::Undefined) => JsString::from("NFC"),
+        Some(value) => vm.to_string(value)?,
+      };
+      match form.as_slice() {
+        [0x004E, 0x0046, 0x0043]
+        | [0x004E, 0x0046, 0x0044]
+        | [0x004E, 0x0046, 0x004B, 0x0043]
+        | [0x004E, 0x0046, 0x004B, 0x0044] => {
+          let form = form.as_str_lossy();
+          Ok(Value::String(normalize_string(&string, form)))
+        }
+        _ => Err(vm.throw_range_error("The normalization form must be NFC, NFD, NFKC, or NFKD")),
+      }
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_normalize, "normalize");
+  set_builtin_length(&string_normalize, 0.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("normalize".into()),
+    PropertyDescriptor::builtin_data(string_normalize),
+  );
+
+  let string_substring = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().unwrap_or(&Value::Undefined);
+      require_object_coercible(vm, receiver)?;
+      let string = vm.to_string(receiver)?;
+      let clamp = |number: f64, length: usize| {
+        if number.is_nan() || number <= 0.0 {
+          0
+        } else if number == f64::INFINITY {
+          length
+        } else {
+          number
+            .trunc()
+            .to_usize()
+            .unwrap_or(length)
+            .min(length)
+        }
+      };
+      let start = clamp(
+        vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?,
+        string.len(),
+      );
+      let end = match args.get(2) {
+        None | Some(Value::Undefined) => string.len(),
+        Some(value) => clamp(vm.to_number_value(value)?, string.len()),
+      };
+      let (from, to) = if start <= end {
+        (start, end)
+      } else {
+        (end, start)
+      };
+      Ok(Value::String(
+        string
+          .slice(from..to)
+          .expect("substring bounds were clamped"),
+      ))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_substring, "substring");
+  set_builtin_length(&string_substring, 2.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("substring".into()),
+    PropertyDescriptor::builtin_data(string_substring),
+  );
+
+  let string_repeat = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().unwrap_or(&Value::Undefined);
+      require_object_coercible(vm, receiver)?;
+      let string = vm.to_string(receiver)?;
+      let number = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+      if number < 0.0 || number == f64::INFINITY {
+        return Err(vm.throw_range_error("Invalid count value"));
+      }
+      let count = if number.is_nan() {
+        0
+      } else {
+        number.trunc().to_usize().unwrap_or(usize::MAX)
+      };
+      string
+        .len()
+        .checked_mul(count)
+        .ok_or_else(|| vm.throw_range_error("Invalid string length"))?;
+      let mut output = JsStringBuilder::new();
+      for _ in 0..count {
+        output.push_string(&string);
+      }
+      Ok(Value::String(output.finish()))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_repeat, "repeat");
+  set_builtin_length(&string_repeat, 1.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("repeat".into()),
+    PropertyDescriptor::builtin_data(string_repeat),
+  );
+
+  for (name, at_start) in [("padStart", true), ("padEnd", false)] {
+    let pad = builtin_object(
+      Rc::new(move |vm, args| {
+        let receiver = args.first().unwrap_or(&Value::Undefined);
+        require_object_coercible(vm, receiver)?;
+        let string = vm.to_string(receiver)?;
+        let target = to_length(vm, args.get(1).unwrap_or(&Value::Undefined))?;
+        if target <= string.len() {
+          return Ok(Value::String(string));
+        }
+        let filler = match args.get(2) {
+          None | Some(Value::Undefined) => JsString::from(" "),
+          Some(value) => vm.to_string(value)?,
+        };
+        if filler.is_empty() {
+          return Ok(Value::String(string));
+        }
+        let fill_length = target - string.len();
+        let mut builder = JsStringBuilder::new();
+        let mut built_length = 0;
+        while built_length < fill_length {
+          builder.push_string(&filler);
+          built_length += filler.len();
+        }
+        let fill = builder
+          .finish()
+          .slice(0..fill_length)
+          .expect("padding was built to the target length");
+        Ok(Value::String(if at_start {
+          fill.concat(&string)
+        } else {
+          string.concat(&fill)
+        }))
+      }),
+      function_proto_map,
+    );
+    set_builtin_name(&pad, name);
+    set_builtin_length(&pad, 1.0);
+    string_proto_map.borrow_mut().properties.insert(
+      PKey::String(name.into()),
+      PropertyDescriptor::builtin_data(pad),
+    );
+  }
+
   let string_char_code_at = builtin_object(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;
@@ -732,6 +1159,41 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   string_proto_map.borrow_mut().properties.insert(
     PKey::String("charCodeAt".to_string().into()),
     PropertyDescriptor::builtin_data(string_char_code_at),
+  );
+
+  let string_code_point_at = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().unwrap_or(&Value::Undefined);
+      require_object_coercible(vm, receiver)?;
+      let string = vm.to_string(receiver)?;
+      let number = vm.to_number_value(args.get(1).unwrap_or(&Value::Undefined))?;
+      if number.is_infinite() || number < 0.0 {
+        return Ok(Value::Undefined);
+      }
+      let index = if number.is_nan() {
+        0
+      } else {
+        number.trunc().to_usize().unwrap_or(usize::MAX)
+      };
+      let Some(first) = string.code_unit_at(index) else {
+        return Ok(Value::Undefined);
+      };
+      if (0xD800..=0xDBFF).contains(&first)
+        && let Some(second) = string.code_unit_at(index + 1)
+        && (0xDC00..=0xDFFF).contains(&second)
+      {
+        let point = 0x10000 + ((u32::from(first) - 0xD800) << 10) + (u32::from(second) - 0xDC00);
+        return Ok(Value::Number(f64::from(point)));
+      }
+      Ok(Value::Number(f64::from(first)))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_code_point_at, "codePointAt");
+  set_builtin_length(&string_code_point_at, 1.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("codePointAt".into()),
+    PropertyDescriptor::builtin_data(string_code_point_at),
   );
 
   let string_slice = builtin_object(
@@ -862,6 +1324,56 @@ pub(crate) fn install_string_boolean_symbol_builtins(
   };
   install_case_conversion("toLowerCase", false);
   install_case_conversion("toUpperCase", true);
+  // ECMA-402 `Intl` is not available in this engine, so the permitted
+  // non-Intl fallback is the default Unicode case conversion and ignores
+  // locale arguments.
+  install_case_conversion("toLocaleLowerCase", false);
+  install_case_conversion("toLocaleUpperCase", true);
+
+  // Without ECMA-402, locale-sensitive collation is implementation-defined.
+  // Keep the fallback exact over UTF-16 code units rather than lossy UTF-8.
+  let string_locale_compare = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().unwrap_or(&Value::Undefined);
+      require_object_coercible(vm, receiver)?;
+      let string = vm.to_string(receiver)?;
+      let that = vm.to_string(args.get(1).unwrap_or(&Value::Undefined))?;
+      Ok(Value::Number(match string.cmp(&that) {
+        std::cmp::Ordering::Less => -1.0,
+        std::cmp::Ordering::Equal => 0.0,
+        std::cmp::Ordering::Greater => 1.0,
+      }))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_locale_compare, "localeCompare");
+  set_builtin_length(&string_locale_compare, 1.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("localeCompare".into()),
+    PropertyDescriptor::builtin_data(string_locale_compare),
+  );
+
+  for (name, to_well_formed) in [("isWellFormed", false), ("toWellFormed", true)] {
+    let method = builtin_object(
+      Rc::new(move |vm, args| {
+        let receiver = args.first().unwrap_or(&Value::Undefined);
+        require_object_coercible(vm, receiver)?;
+        let string = vm.to_string(receiver)?;
+        if to_well_formed {
+          Ok(Value::String(string.to_well_formed()))
+        } else {
+          Ok(Value::Bool(string.is_well_formed()))
+        }
+      }),
+      function_proto_map,
+    );
+    set_builtin_name(&method, name);
+    set_builtin_length(&method, 0.0);
+    string_proto_map.borrow_mut().properties.insert(
+      PKey::String(name.into()),
+      PropertyDescriptor::builtin_data(method),
+    );
+  }
 
   let install_regexp_dispatch = |name: &str, symbol: SymbolId| {
     let method = builtin_object(
@@ -962,6 +1474,147 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     PropertyDescriptor::builtin_data(string_replace),
   );
 
+  let string_replace_all = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().unwrap_or(&Value::Undefined);
+      require_object_coercible(vm, receiver)?;
+      let search = args.get(1).cloned().unwrap_or(Value::Undefined);
+      let replacement = args.get(2).cloned().unwrap_or(Value::Undefined);
+      if crate::ecmascript::builtins::regexp::is_regexp(vm, &search)? {
+        let flags = vm.get_property_host(&search, &PKey::String("flags".into()))?;
+        let flags = vm.to_string(&flags)?;
+        if !flags
+          .code_units()
+          .any(|unit| unit == u16::from(b'g'))
+        {
+          return Err(
+            vm.throw_type_error("String.prototype.replaceAll called with a non-global RegExp"),
+          );
+        }
+      }
+      if !matches!(search, Value::Null | Value::Undefined) {
+        let replacer =
+          vm.get_property_host(&search, &PKey::Symbol(SymbolId::well_known_replace()))?;
+        if !matches!(replacer, Value::Undefined | Value::Null) {
+          if !Vm::is_callable_value(&replacer) {
+            return Err(vm.throw_type_error("Symbol.replace method is not callable"));
+          }
+          return vm.call_value_with_this(&replacer, &search, &[receiver.clone(), replacement]);
+        }
+      }
+      let subject = vm.to_string(receiver)?;
+      let search = vm.to_string(&search)?;
+      let functional = Vm::is_callable_value(&replacement);
+      let replacement_string = if functional {
+        None
+      } else {
+        Some(vm.to_string(&replacement)?)
+      };
+      let mut output = JsStringBuilder::new();
+      let mut end_of_previous = 0;
+      let mut search_position = 0;
+      let advance = search.len().max(1);
+      while let Some(position) = subject.find(&search, search_position) {
+        output.push_string(
+          &subject
+            .slice(end_of_previous..position)
+            .expect("replaceAll prefix is within the subject"),
+        );
+        let replacement_value = if functional {
+          let result = vm.call_value_with_this(
+            &replacement,
+            &Value::Undefined,
+            &[
+              Value::String(search.clone()),
+              Value::Number(usize_to_f64(position)),
+              Value::String(subject.clone()),
+            ],
+          )?;
+          vm.to_string(&result)?
+        } else {
+          super::super::semantics::get_substitution(
+            &search,
+            &subject,
+            position,
+            position + search.len(),
+            &[],
+            None,
+            replacement_string
+              .as_ref()
+              .expect("non-functional replacement was converted"),
+          )
+        };
+        output.push_string(&replacement_value);
+        end_of_previous = position + search.len();
+        search_position = position + advance;
+        if search_position > subject.len() {
+          break;
+        }
+      }
+      output.push_string(
+        &subject
+          .slice(end_of_previous..subject.len())
+          .expect("replaceAll tail is within the subject"),
+      );
+      Ok(Value::String(output.finish()))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_replace_all, "replaceAll");
+  set_builtin_length(&string_replace_all, 2.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("replaceAll".into()),
+    PropertyDescriptor::builtin_data(string_replace_all),
+  );
+
+  let string_match_all = builtin_object(
+    Rc::new(|vm, args| {
+      let receiver = args.first().unwrap_or(&Value::Undefined);
+      require_object_coercible(vm, receiver)?;
+      let regexp = args.get(1).cloned().unwrap_or(Value::Undefined);
+      if crate::ecmascript::builtins::regexp::is_regexp(vm, &regexp)? {
+        let flags = vm.get_property_host(&regexp, &PKey::String("flags".into()))?;
+        let flags = vm.to_string(&flags)?;
+        if !flags
+          .code_units()
+          .any(|unit| unit == u16::from(b'g'))
+        {
+          return Err(
+            vm.throw_type_error("String.prototype.matchAll called with a non-global RegExp"),
+          );
+        }
+      }
+      if !matches!(regexp, Value::Null | Value::Undefined) {
+        let matcher =
+          vm.get_property_host(&regexp, &PKey::Symbol(SymbolId::well_known_match_all()))?;
+        if !matches!(matcher, Value::Undefined | Value::Null) {
+          if !Vm::is_callable_value(&matcher) {
+            return Err(vm.throw_type_error("Symbol.matchAll method is not callable"));
+          }
+          return vm.call_value_with_this(&matcher, &regexp, std::slice::from_ref(receiver));
+        }
+      }
+      let constructor = vm
+        .get_global("RegExp")
+        .unwrap_or(Value::Undefined);
+      let created = vm.call_value_with_this(
+        &constructor,
+        &Value::Undefined,
+        &[regexp, Value::String("g".into())],
+      )?;
+      let matcher =
+        vm.get_property_host(&created, &PKey::Symbol(SymbolId::well_known_match_all()))?;
+      vm.call_value_with_this(&matcher, &created, std::slice::from_ref(receiver))
+    }),
+    function_proto_map,
+  );
+  set_builtin_name(&string_match_all, "matchAll");
+  set_builtin_length(&string_match_all, 1.0);
+  string_proto_map.borrow_mut().properties.insert(
+    PKey::String("matchAll".into()),
+    PropertyDescriptor::builtin_data(string_match_all),
+  );
+
   let string_split = builtin_object(
     Rc::new(|vm, args| {
       let undefined = Value::Undefined;
@@ -1051,10 +1704,9 @@ pub(crate) fn install_string_boolean_symbol_builtins(
     if vm.current_new_target().is_some()
       && let Value::Object(obj) = &receiver
     {
-      obj.borrow_mut().properties.insert(
-        PKey::String("[[PrimitiveValue]]".to_string().into()),
-        PropertyDescriptor::ordinary_data(prim),
-      );
+      obj
+        .borrow_mut()
+        .set_internal_slot("[[BooleanData]]", prim);
       return Ok(receiver);
     }
     Ok(prim)

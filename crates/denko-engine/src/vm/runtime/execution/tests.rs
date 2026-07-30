@@ -71,6 +71,35 @@ mod test {
   }
 
   #[test]
+  fn data_view_reads_and_writes_endian_numeric_and_bigint_values() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const buffer = new ArrayBuffer(24);
+        const view = new DataView(buffer, 2, 20);
+        view.setUint16(0, 0x1234);
+        view.setUint32(2, 0x01020304, true);
+        view.setFloat32(6, 1.5, true);
+        view.setBigInt64(10, -2n, true);
+        let bounds = false;
+        try { view.getUint32(18); } catch (error) { bounds = error instanceof RangeError; }
+        globalThis.data_view_result = [
+          view.buffer === buffer, view.byteOffset, view.byteLength,
+          view.getUint16(0), view.getUint32(2, true), view.getFloat32(6, true),
+          view.getBigInt64(10, true).toString(), bounds,
+          ArrayBuffer.isView(view), ArrayBuffer.isView(new Uint8Array(buffer)),
+          new Uint8Array(buffer).slice(2, 4)[0]
+        ].join("|");
+      "#
+    ));
+    assert_eq!(
+      vm.get_global("data_view_result"),
+      Some(Value::String(
+        "true|2|20|4660|16909060|1.5|-2|true|true|true|18".into()
+      ))
+    );
+  }
+
+  #[test]
   fn byte_view_branding_cannot_be_spoofed_by_properties() {
     let (vm, _) = run_script(crate::js!(
       r#"
@@ -564,6 +593,52 @@ mod test {
   }
 
   #[test]
+  fn string_es2023_methods_preserve_utf16_and_validate_normalization() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const lone = String.fromCharCode(0xD800);
+        const repaired = lone.toWellFormed();
+        let invalidNormalizationForm = false;
+        try { "x".normalize("invalid"); } catch (error) {
+          invalidNormalizationForm = error instanceof RangeError;
+        }
+
+        globalThis.result = [
+          "abc".charAt(),
+          "abc".charAt(1.9),
+          "abc".charAt(-1),
+          "abc".charAt(Infinity),
+          "ababa".lastIndexOf("ba"),
+          "ababa".lastIndexOf("ba", 2),
+          "ababa".lastIndexOf("", Infinity),
+          "\u00F1".normalize("NFD").charCodeAt(0),
+          "\u00F1".normalize("NFD").charCodeAt(1),
+          "\u212B".normalize(),
+          invalidNormalizationForm,
+          "\u0130".toLocaleLowerCase("tr"),
+          "straße".toLocaleUpperCase("de"),
+          "a".localeCompare("b") < 0,
+          "a".localeCompare("a") === 0,
+          String.prototype.localeCompare.call(7, 8) < 0,
+          lone.isWellFormed(),
+          repaired.isWellFormed(),
+          repaired.charCodeAt(0),
+          lone.normalize().charCodeAt(0)
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "a,b,,,3,1,5,110,771,Å,true,i̇,STRASSE,true,true,true,false,true,65533,55296"
+          .to_string()
+          .into()
+      ))
+    );
+  }
+
+  #[test]
   fn regexp_uses_utf16_indices_captures_and_last_index() {
     let (vm, _) = run_script(crate::js!(
       r#"
@@ -1050,9 +1125,15 @@ mod test {
       function sum(a, b, c, d, e, f, g, h) {
         return a + b + c + d + e + f + g + h;
       }
+      function Pack(a, b, c, d, e, f, g, h) {
+        this.value = a + b + c + d + e + f + g + h;
+      }
       var array = [1, 2, 3];
       var object = { value: 4, other: 5 };
+      object.sum = sum;
       var result = sum(array[0], array[1], array[2], object.value, object.other, 6, 7, 8);
+      var methodResult = object.sum(1, 2, 3, 4, 5, 6, 7, 8);
+      var constructResult = new Pack(1, 2, 3, 4, 5, 6, 7, 8).value;
     "#
     );
     let session = Parser::parse_source(source).expect("parse");
@@ -1066,6 +1147,14 @@ mod test {
       risc_vm.get_global("result"),
       Some(Value::Number(36.0_f64))
     ));
+    assert_eq!(
+      risc_vm.get_global("methodResult"),
+      Some(Value::Number(36.0))
+    );
+    assert_eq!(
+      risc_vm.get_global("constructResult"),
+      Some(Value::Number(36.0))
+    );
   }
 
   #[test]
@@ -1224,7 +1313,7 @@ mod test {
 
   #[test]
   fn prototype_gc_defers_while_multiple_vms_are_alive() {
-    let vm = Vm::new(test_globals());
+    let mut vm = Vm::new(test_globals());
     let mut sibling = Vm::new(test_globals());
     let protected = crate::gc::track_object(Rc::new(RefCell::new(ObjectData::new())));
     protected.borrow_mut().properties.insert(
@@ -3122,6 +3211,56 @@ mod test {
   }
 
   #[test]
+  fn weak_set_supports_weak_keys_iteration_and_branding() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const first = {};
+        const second = function() {};
+        const symbol = Symbol("key");
+        const set = new WeakSet([first, second, symbol]);
+        const chained = set.add(first);
+        let primitiveRejected = false;
+        let registeredSymbolRejected = false;
+        let callRejected = false;
+        let brandRejected = false;
+        try { set.add(1); } catch (error) {
+          primitiveRejected = error instanceof TypeError;
+        }
+        try { set.add(Symbol.for("registered")); } catch (error) {
+          registeredSymbolRejected = error instanceof TypeError;
+        }
+        try { WeakSet(); } catch (error) {
+          callRejected = error instanceof TypeError;
+        }
+        try { WeakSet.prototype.has.call(new Set(), first); } catch (error) {
+          brandRejected = error instanceof TypeError;
+        }
+        const hasFirst = set.has(first);
+        const hasSecond = set.has(second);
+        const hasSymbol = set.has(symbol);
+        const deletedSecond = set.delete(second);
+        const noSecond = !set.has(second);
+        const deletedSecondAgain = !set.delete(second);
+        const tag = Object.prototype.toString.call(set);
+        globalThis.weak_set_result = [
+          hasFirst, hasSecond, hasSymbol, chained === set,
+          set.has(1), deletedSecond, noSecond, deletedSecondAgain,
+          primitiveRejected, registeredSymbolRejected, callRejected, brandRejected,
+          new WeakSet(null) instanceof WeakSet,
+          tag
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("weak_set_result"),
+      Some(Value::String(
+        "true,true,true,true,false,true,true,true,true,true,true,true,true,[object WeakSet]".into()
+      ))
+    );
+  }
+
+  #[test]
   fn weak_map_entries_follow_ephemeron_reachability() {
     let (mut vm, _) = run_script(crate::js!(
       r#"
@@ -3178,6 +3317,117 @@ mod test {
         .as_ref()
         .expect("reachable WeakMap data")
         .is_empty()
+    );
+  }
+
+  #[test]
+  fn weak_set_entries_do_not_retain_unreachable_keys() {
+    let (mut vm, _) = run_script(crate::js!(
+      r#"
+        globalThis.weak_set_for_gc = new WeakSet();
+        globalThis.weak_set_key_for_gc = {};
+        weak_set_for_gc.add(weak_set_key_for_gc);
+      "#
+    ));
+    let weak_set = vm
+      .get_global("weak_set_for_gc")
+      .expect("WeakSet global");
+    let Value::Object(data) = weak_set else {
+      panic!("WeakSet must be an ordinary object");
+    };
+    assert_eq!(
+      data
+        .borrow()
+        .weak_set_entries
+        .as_ref()
+        .expect("WeakSet data")
+        .len(),
+      1
+    );
+
+    let source = crate::js!("globalThis.weak_set_key_for_gc = null;");
+    let session = Parser::parse_source(source).expect("parse WeakSet key release");
+    let chunk =
+      compiler::compile_oxc(session.program(), session.source()).expect("compile WeakSet release");
+    vm.run(chunk).expect("release WeakSet key");
+    vm.collect_garbage_prototype();
+
+    assert!(
+      data
+        .borrow()
+        .weak_set_entries
+        .as_ref()
+        .expect("reachable WeakSet data")
+        .is_empty()
+    );
+  }
+
+  #[test]
+  fn weak_ref_and_finalization_registry_expose_brands_and_cleanup_unreachable_targets() {
+    let (mut vm, _) = run_script(crate::js!(
+      r#"
+        globalThis.weak_ref_target = {};
+        const reference = new WeakRef(globalThis.weak_ref_target);
+        const registry = new FinalizationRegistry(function(holding) {
+          globalThis.finalizationHolding = holding;
+        });
+        const token = {};
+        registry.register(globalThis.weak_ref_target, "collected", token);
+        const removable = {};
+        registry.register(removable, "removed", removable);
+        let weakRefCallRejected = false;
+        let weakRefTargetRejected = false;
+        let weakRefBrandRejected = false;
+        let registryCallRejected = false;
+        let registryBrandRejected = false;
+        try { WeakRef({}); } catch (error) { weakRefCallRejected = error instanceof TypeError; }
+        try { new WeakRef(1); } catch (error) { weakRefTargetRejected = error instanceof TypeError; }
+        try { WeakRef.prototype.deref.call({}); } catch (error) { weakRefBrandRejected = error instanceof TypeError; }
+        try { FinalizationRegistry(function() {}); } catch (error) { registryCallRejected = error instanceof TypeError; }
+        try { FinalizationRegistry.prototype.register.call({}, globalThis.weak_ref_target, "x"); } catch (error) { registryBrandRejected = error instanceof TypeError; }
+        globalThis.weak_reference_surface = [
+          reference.deref() === globalThis.weak_ref_target,
+          registry.unregister(removable), !registry.unregister(removable),
+          weakRefCallRejected, weakRefTargetRejected, weakRefBrandRejected,
+          registryCallRejected, registryBrandRejected,
+          Object.prototype.toString.call(reference),
+          Object.prototype.toString.call(registry),
+          WeakRef.length, FinalizationRegistry.length,
+          WeakRef.prototype.deref.length, FinalizationRegistry.prototype.register.length,
+          FinalizationRegistry.prototype.unregister.length
+        ].join("|");
+        globalThis.weak_ref_reference = reference;
+        globalThis.weak_ref_registry = registry;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("weak_reference_surface"),
+      Some(Value::String(
+        "true|true|true|true|true|true|true|true|[object WeakRef]|[object FinalizationRegistry]|1|1|0|2|1".into()
+      ))
+    );
+
+    let source = crate::js!("globalThis.weak_ref_target = null;");
+    let session = Parser::parse_source(source).expect("parse WeakRef target release");
+    let chunk = compiler::compile_oxc(session.program(), session.source())
+      .expect("compile WeakRef target release");
+    vm.run(chunk).expect("release WeakRef target");
+    vm.collect_garbage_prototype();
+
+    let reference = vm
+      .get_global("weak_ref_reference")
+      .expect("WeakRef remains rooted");
+    let Value::Object(reference) = reference else {
+      panic!("WeakRef is an object");
+    };
+    assert!(reference.borrow().weak_ref_target.is_none());
+
+    vm.flush_microtasks()
+      .expect("run finalization cleanup");
+    assert_eq!(
+      vm.get_global("finalizationHolding"),
+      Some(Value::String("collected".into()))
     );
   }
 
@@ -4726,7 +4976,6 @@ mod test {
       "WeakRef",
       "FinalizationRegistry",
       "ShadowRealm",
-      "Temporal",
       "ArrayBuffer",
       "SharedArrayBuffer",
       "DataView",
@@ -4802,6 +5051,174 @@ mod test {
       }
       other => panic!("expected serialized descriptor string, got {:?}", other),
     }
+  }
+
+  #[test]
+  fn json_stringify_applies_to_json_replacer_and_spacing() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const calls = [];
+        const value = {
+          keep: 1,
+          rename: { toJSON(key) { calls.push("toJSON:" + key); return 2; } },
+          omit: 3,
+          nested: { x: true }
+        };
+        const text = JSON.stringify(value, function(key, current) {
+          calls.push("replacer:" + key);
+          if (key === "omit") return undefined;
+          return key === "keep" ? current + 1 : current;
+        }, 2);
+        const filtered = JSON.stringify({ a: 1, b: 2, 1: 3 }, ["b", 1, "b"]);
+        const shared = {};
+        const repeated = JSON.stringify([shared, shared]);
+        const boxed = JSON.stringify([new Number(4), new String("x"), new Boolean(false)]);
+        let circular = false;
+        const cycle = {};
+        cycle.self = cycle;
+        try { JSON.stringify(cycle); } catch (error) {
+          circular = error instanceof TypeError;
+        }
+        globalThis.json_stringify_result = [
+          text,
+          calls.join(","),
+          filtered,
+          repeated,
+          boxed,
+          circular,
+          JSON.stringify() === undefined
+        ].join("|");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("json_stringify_result"),
+      Some(Value::String(
+        "{\n  \"keep\": 2,\n  \"rename\": 2,\n  \"nested\": {\n    \"x\": true\n  }\n}|replacer:,replacer:keep,toJSON:rename,replacer:rename,replacer:omit,replacer:nested,replacer:x|{\"b\":2,\"1\":3}|[{},{}]|[4,\"x\",false]|true|true".into()
+      ))
+    );
+  }
+
+  #[test]
+  fn array_mutators_follow_generic_property_ordering() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const shifted = Object.create({ 1: "inherited" });
+        shifted[0] = "first";
+        shifted.length = 3;
+        const first = Array.prototype.shift.call(shifted);
+
+        const unshifted = Object.create({ 0: "prototype" });
+        unshifted.length = 1;
+        const unshiftLength = Array.prototype.unshift.call(unshifted, "new");
+
+        const protectedLast = { 0: "fixed", length: 1 };
+        Object.defineProperty(protectedLast, "0", { configurable: false });
+        let popThrew = false;
+        try { Array.prototype.pop.call(protectedLast); } catch (error) {
+          popThrew = error instanceof TypeError;
+        }
+
+        globalThis.array_mutator_ordering = [
+          first,
+          shifted[0],
+          Object.hasOwn(shifted, "0"),
+          Object.hasOwn(shifted, "1"),
+          shifted[1],
+          shifted.length,
+          unshiftLength,
+          unshifted[0],
+          unshifted[1],
+          popThrew,
+          protectedLast.length
+        ].join("|");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("array_mutator_ordering"),
+      Some(Value::String(
+        "first|inherited|true|false|inherited|2|2|new|prototype|true|1".into()
+      ))
+    );
+  }
+
+  #[test]
+  fn string_p0_methods_cover_utf16_padding_replacement_and_match_all() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const iterator = "a1a2".matchAll(/a(\d)/g);
+        const first = iterator.next();
+        const second = iterator.next();
+        const done = iterator.next();
+        let replaceAllRejected = false;
+        let matchAllRejected = false;
+        try { "aa".replaceAll(/a/, "b"); } catch (error) {
+          replaceAllRejected = error instanceof TypeError;
+        }
+        try { "aa".matchAll(/a/); } catch (error) {
+          matchAllRejected = error instanceof TypeError;
+        }
+        globalThis.string_p0_result = [
+          "abcdef".includes("cd"),
+          "abcdef".endsWith("cd", 4),
+          "abc".at(-1),
+          "a".concat("b", 3),
+          "abc".substring(2, 0),
+          "ab".repeat(3),
+          "7".padStart(3, "0"),
+          "7".padEnd(3, "0"),
+          "\ud83d\ude00".codePointAt(0),
+          "aba".replaceAll("a", "x"),
+          "ab".replaceAll("", "-"),
+          first.value[0], first.value[1], first.value.index,
+          second.value[0], second.value[1], second.value.index,
+          done.done,
+          replaceAllRejected,
+          matchAllRejected
+        ].join("|");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("string_p0_result"),
+      Some(Value::String(
+        "true|true|c|ab3|ab|ababab|007|700|128512|xbx|-a-b-|a1|1|0|a2|2|2|true|true|true".into()
+      ))
+    );
+  }
+
+  #[test]
+  fn errors_coerce_messages_install_cause_and_collect_aggregate_errors() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const cause = {};
+        const error = new Error(42, { cause });
+        const aggregate = new AggregateError([1, 2], 99, { cause });
+        const type = new TypeError({ toString() { return "typed"; } }, { cause });
+        const called = Error(7, { cause });
+        const calledAggregate = AggregateError([3], "called", { cause });
+        const generic = Error.prototype.toString.call({ name: "", message: "only" });
+        globalThis.error_contract_result = [
+          error.message, error.cause === cause, error.toString(),
+          aggregate.message, aggregate.errors.join(","), aggregate.cause === cause,
+          aggregate.toString(), type.message, type.cause === cause, type.toString(),
+          called.message, called.cause === cause,
+          calledAggregate.errors[0], calledAggregate.cause === cause,
+          generic,
+          Object.keys(error).join(","),
+          Object.keys(aggregate).join(",")
+        ].join("|");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("error_contract_result"),
+      Some(Value::String(
+        "42|true|Error: 42|99|1,2|true|AggregateError: 99|typed|true|TypeError: typed|7|true|3|true|only||"
+          .into()
+      ))
+    );
   }
 
   #[test]
@@ -4914,6 +5331,91 @@ mod test {
   }
 
   #[test]
+  fn promise_es2023_combinators_and_finally_preserve_values_and_reasons() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const trace = [];
+        Promise.allSettled([Promise.resolve(1), Promise.reject("no")])
+          .then((settled) => {
+            trace.push(
+              settled[0].status,
+              settled[0].value,
+              settled[1].status,
+              settled[1].reason
+            );
+            return Promise.any([Promise.reject("first"), Promise.reject("second")]);
+          })
+          .then(
+            () => trace.push("unexpected"),
+            (error) => {
+              trace.push(
+                error instanceof AggregateError,
+                error.errors.length,
+                error.errors[0],
+                error.errors[1]
+              );
+              return Promise.race([Promise.resolve("winner")]);
+            }
+          )
+          .then((winner) => {
+            trace.push(winner);
+            return Promise.resolve("kept")
+              .finally(() => trace.push("finally"))
+              .then((value) => trace.push(value));
+          })
+          .then(() => {
+            globalThis.promise_es2023_result = trace.join("|");
+          });
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("promise_es2023_result"),
+      Some(Value::String(
+        "fulfilled|1|rejected|no|true|2|first|second|winner|finally|kept"
+          .to_string()
+          .into()
+      ))
+    );
+  }
+
+  #[test]
+  fn promise_finally_uses_species_and_any_rejects_empty_inputs() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        function Species(executor) {
+          executor(function() {}, function() {});
+        }
+        const source = Promise.resolve("value");
+        source.constructor = { [Symbol.species]: Species };
+        const chained = source.then(() => "ignored");
+        const finalized = source.finally(() => {});
+        const trace = [chained instanceof Species, finalized instanceof Species];
+        Promise.any([]).then(
+          () => trace.push("unexpected"),
+          (error) => trace.push(error instanceof AggregateError, error.errors.length)
+        );
+        Promise.reject("original")
+          .finally(() => { throw "replacement"; })
+          .then(
+            () => trace.push("unexpected"),
+            (reason) => trace.push(reason)
+          )
+          .then(() => {
+            globalThis.promise_species_result = trace.join("|");
+          });
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("promise_species_result"),
+      Some(Value::String(
+        "true|true|true|0|replacement".to_string().into()
+      ))
+    );
+  }
+
+  #[test]
   fn for_await_closes_sync_iterator_when_yielded_promise_rejects() {
     let (vm, _) = run_script(crate::js!(
       r#"
@@ -4984,6 +5486,303 @@ mod test {
     assert_eq!(
       vm.get_global("result"),
       Some(Value::String("1,1,42".to_string().into()))
+    );
+  }
+
+  #[test]
+  fn math_and_number_numeric_builtins_follow_ecmascript_number_edges() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const mathSurface = [
+          Math.acos(1) === 0, Math.acosh(1) === 0,
+          Math.asin(0) === 0, Math.asinh(0) === 0,
+          Math.atan(0) === 0, Math.atanh(0) === 0, Math.atan2(0, 1) === 0,
+          Math.cbrt(27) === 3, Math.ceil(0.1) === 1, Math.cos(0) === 1,
+          Math.cosh(0) === 1, Math.exp(0) === 1, Math.expm1(0) === 0,
+          Math.floor(0.9) === 0, Math.log(1) === 0, Math.log10(10) === 1,
+          Math.log1p(0) === 0, Math.log2(8) === 3, Math.sin(0) === 0,
+          Math.sinh(0) === 0, Math.sqrt(9) === 3, Math.tan(0) === 0,
+          Math.tanh(0) === 0, Math.trunc(-0.9) === 0,
+          Math.clz32(1) === 31, Math.fround(1.337) !== 1.337, Math.hypot(3, 4) === 5
+        ].join(":");
+        let receiverRejected = false;
+        let digitsRejected = false;
+        try { Number.prototype.toFixed.call("12"); } catch (error) {
+          receiverRejected = error instanceof TypeError;
+        }
+        try { (1).toFixed(101); } catch (error) {
+          digitsRejected = error instanceof RangeError;
+        }
+        globalThis.result = [
+          mathSurface,
+          1 / Math.round(-0.1), 1 / Math.min(0, -0), 1 / Math.max(-0, 0),
+          Number.EPSILON > 0, Number.parseInt("0x10"), Number.parseFloat("1.5x"),
+          (12.34).toFixed(1), (12).toExponential(2), (12.34).toPrecision(3),
+          (12.34).toLocaleString(), (12.34).toExponential(undefined),
+          (12.34).toPrecision(undefined), (-0).toFixed(2), (1.25).toFixed(1),
+          receiverRejected, digitsRejected
+        ].join(",");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        format!(
+          "{},-Infinity,-Infinity,Infinity,true,16,1.5,12.3,1.20e+1,12.3,12.34,1.234e+1,12.34,0.00,1.3,true,true",
+          std::iter::repeat_n("true", 27).collect::<Vec<_>>().join(":")
+        )
+        .into()
+      ))
+    );
+  }
+
+  #[test]
+  fn array_callback_methods_are_generic_validate_callbacks_and_observe_holes() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const generic = { 0: "a", length: 2 };
+        const marker = {};
+        let genericCalls = "";
+        Array.prototype.forEach.call(generic, function(value, index, source) {
+          genericCalls += value + index + (this === marker) + (source === generic);
+        }, marker);
+
+        let holeValue = "";
+        let holeIndex = -1;
+        [,].find(function(value, index) {
+          holeValue = String(value);
+          holeIndex = index;
+          return true;
+        });
+        const holeFindIndex = [,].findIndex(function(value) { return value === undefined; });
+
+        Array.prototype[0] = "inherited";
+        const mapped = [, "own"].map(function(value) { return value + "!"; });
+        delete Array.prototype[0];
+
+        let callbackRejected = false;
+        try { [].every(1); } catch (error) { callbackRejected = error instanceof TypeError; }
+
+        function C(length) { this.createdWith = length; }
+        const made = Array.of.call(C, "x", "y");
+        const joined = Array.prototype.join.call({ 0: "x", length: 2 });
+        const pushed = { length: 1 };
+        const pushedLength = Array.prototype.push.call(pushed, "a", "b");
+        function Species(length) { this.initialLength = length; }
+        const speciesSource = [1, 2];
+        speciesSource.constructor = { [Symbol.species]: Species };
+        const speciesMapped = speciesSource.map(function(value) { return value * 2; });
+        const speciesFlat = speciesSource.flatMap(function(value) { return [value]; });
+        const unboundIsArray = Array.isArray;
+        globalThis.result = [
+          genericCalls, holeValue, holeIndex, holeFindIndex, mapped.join(","),
+          callbackRejected, made instanceof C, made.createdWith, made.length,
+          made[0], made[1], joined, pushedLength, pushed[1], pushed[2], pushed.length,
+          speciesMapped instanceof Species, speciesMapped.initialLength, speciesMapped[0],
+          speciesMapped[1], speciesFlat instanceof Species, speciesFlat.initialLength,
+          speciesFlat[0], speciesFlat[1],
+          unboundIsArray([]), Array.of.name, Array.of.length
+        ].join("|");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "a0truetrue|undefined|0|0|inherited!,own!|true|true|2|2|x|y|x,|3|a|b|3|true|2|2|4|true|0|1|2|true|of|0".into()
+      ))
+    );
+  }
+
+  #[test]
+  fn function_symbol_boolean_and_regexp_intrinsics_follow_core_contracts() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        function Base() {}
+        function Pair(first, second, third) {}
+        const instance = new Base();
+        const hasInstance = Function.prototype[Symbol.hasInstance];
+        const boundPair = Pair.bind(null, 1);
+        Base["[[BoundTargetFunction]]"] = Pair;
+        let speciesCalls = 0;
+        function RegExpSpecies(pattern, flags) {
+          speciesCalls++;
+          return new RegExp(pattern, flags);
+        }
+        const speciesRegex = /a/g;
+        speciesRegex.constructor = { [Symbol.species]: RegExpSpecies };
+        const speciesMatch = speciesRegex[Symbol.matchAll]("a").next().value[0];
+        let functionToStringRejected = false;
+        let bindRejected = false;
+        let symbolConstructorRejected = false;
+        let symbolBrandRejected = false;
+        let booleanBrandRejected = false;
+        try { Function.prototype.toString.call({}); } catch (error) {
+          functionToStringRejected = error instanceof TypeError;
+        }
+        try { Function.prototype.bind.call({}); } catch (error) {
+          bindRejected = error instanceof TypeError;
+        }
+        try { new Symbol(); } catch (error) {
+          symbolConstructorRejected = error instanceof TypeError;
+        }
+        try { Symbol.prototype.valueOf.call({ "[[SymbolData]]": Symbol() }); } catch (error) {
+          symbolBrandRejected = error instanceof TypeError;
+        }
+        try { Boolean.prototype.valueOf.call({ "[[PrimitiveValue]]": true }); } catch (error) {
+          booleanBrandRejected = error instanceof TypeError;
+        }
+        const description = Object.getOwnPropertyDescriptor(Symbol.prototype, "description");
+        const species = Object.getOwnPropertyDescriptor(RegExp, Symbol.species);
+        globalThis.result = [
+          hasInstance.call(Base, instance),
+          hasInstance.call({}, instance),
+          hasInstance.call(Base, new Pair()), Object.hasOwn(boundPair, "[[BoundTargetFunction]]"),
+          boundPair.name, boundPair.length, new boundPair(2, 3) instanceof Pair,
+          functionToStringRejected, bindRejected,
+          Symbol("detail").description, Symbol().description === undefined,
+          Object(Symbol("boxed")).description, symbolConstructorRejected, symbolBrandRejected,
+          Object.prototype.toString.call(Object(Symbol("boxed"))),
+          Object.hasOwn(Object(Symbol("boxed")), "[[PrimitiveValue]]"),
+          description.enumerable, description.configurable, typeof description.get,
+          Boolean.prototype.valueOf.call(new Boolean(true)), booleanBrandRejected,
+          Object.prototype.toString.call(new Boolean(false)),
+          Object.hasOwn(new Boolean(true), "[[PrimitiveValue]]"),
+          RegExp[Symbol.species] === RegExp,
+          species.enumerable, species.configurable, typeof species.get,
+          /a/dgimsuy.flags, /a/dgimsuy.hasIndices, /a/dgimsuy.dotAll,
+          speciesCalls, speciesMatch, new RegExp(/a/g, "i").flags
+        ].join("|");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "true|false|false|false|bound Pair|2|true|true|true|detail|true|boxed|true|true|[object Symbol]|false|false|true|function|true|true|[object Boolean]|false|true|false|true|function|dgimsuy|true|true|1|a|i".into()
+      ))
+    );
+  }
+
+  #[test]
+  fn spread_method_calls_preserve_the_receiver() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        function target(a, b) { return this.prefix + a + b; }
+        const receiver = { prefix: "ok:" };
+        const direct = target.call(receiver, ..."ab");
+        const wrapper = (fn, thisArg, ...args) => fn.bind(thisArg, ...args);
+        const bound = wrapper(target, receiver, "a");
+        globalThis.spread_method_result = direct + "|" + bound("b");
+      "#
+    ));
+    assert_eq!(
+      vm.get_global("spread_method_result"),
+      Some(Value::String("ok:ab|ok:ab".into()))
+    );
+  }
+
+  #[test]
+  fn typed_arrays_use_element_width_backing_and_share_the_full_method_surface() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        const values = new Uint16Array([1, 2, 3]);
+        values.fill(9, 1, 2);
+        values.copyWithin(1, 0, 2);
+        const view = values.subarray(1);
+        view[0] = 7;
+        const copied = values.slice(0, 2);
+        const from = Uint16Array.from([2, 3], function(value) { return value * 2; });
+        const of = Uint16Array.of(4, 5);
+        const mapped = values.map(function(value) { return value + 1; });
+        const filtered = values.filter(function(value) { return value > 1; });
+        const every = values.every(function(value) { return value > 0; });
+        const found = values.find(function(value) { return value === 7; });
+        const foundIndex = values.findIndex(function(value) { return value === 7; });
+        const last = values.findLast(function(value) { return value > 0; });
+        const reduced = values.reduce(function(total, value) { return total + value; }, 0);
+        values.reverse();
+        values.sort();
+        const reversedCopy = values.toReversed();
+        const replacedCopy = values.with(0, 8);
+        const sortedCopy = reversedCopy.toSorted();
+        const float = new Float32Array([1.5]);
+        globalThis.result = [
+          values.join(","), copied.join(","), from.join(","), of.join(","),
+          mapped instanceof Uint16Array, mapped.join(","), filtered.join(","), every,
+          found, foundIndex, last, reduced, values.includes(7), values.indexOf(7),
+          values.lastIndexOf(7), values.at(-1), values.toString(), values.toLocaleString(),
+          reversedCopy.join(","), replacedCopy.join(","), sortedCopy.join(","),
+          float[0], values.byteLength, view.byteOffset
+        ].join("|");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "1,7,9|1,7|4,6|4,5|true|2,8,10|7,9|true|7|1|9|17|true|1|1|9|1,7,9|1,7,9|9,7,1|8,7,9|1,7,9|1.5|6|2".into()
+      ))
+    );
+  }
+
+  #[test]
+  fn typed_array_from_prefers_iterators_closes_them_and_observes_species() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let nextCount = 0;
+        const iterable = {};
+        iterable[Symbol.iterator] = function() {
+          return {
+            next: function() {
+              nextCount += 1;
+              return nextCount <= 2
+                ? { value: nextCount, done: false }
+                : { done: true };
+            }
+          };
+        };
+        const fromIterable = Uint16Array.from(iterable, function(value, index) {
+          return value + index;
+        });
+
+        let closeCount = 0;
+        const abrupt = {};
+        abrupt[Symbol.iterator] = function() {
+          return {
+            next: function() { return { value: 1, done: false }; },
+            return: function() { closeCount += 1; return {}; }
+          };
+        };
+        try {
+          Uint16Array.from(abrupt, function() { throw "stop"; });
+        } catch (error) {}
+
+        const source = new Uint16Array([1, 2]);
+        source.constructor = { [Symbol.species]: Float32Array };
+        const speciesResult = source.map(function(value) { return value + 0.5; });
+        const defaultSpeciesSource = new Uint16Array([3]);
+        defaultSpeciesSource.constructor = {};
+        const defaultSpeciesResult = defaultSpeciesSource.map(function(value) { return value; });
+
+        const signed = new BigInt64Array([18446744073709551615n, -18446744073709551617n]);
+        const unsigned = new BigUint64Array([-1n, 18446744073709551617n]);
+        globalThis.result = [
+          fromIterable.join(","), nextCount, closeCount,
+          Uint16Array[Symbol.species] === Uint16Array,
+          speciesResult instanceof Float32Array, speciesResult.join(","),
+          defaultSpeciesResult instanceof Uint16Array,
+          signed.join(","), unsigned.join(",")
+        ].join("|");
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("result"),
+      Some(Value::String(
+        "1,3|3|1|true|true|1.5,2.5|true|-1,-1|18446744073709551615,1".into()
+      ))
     );
   }
 }

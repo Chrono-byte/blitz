@@ -364,6 +364,113 @@ fn source_namespace_reexports_preserve_namespace_identity_and_liveness() {
 }
 
 #[test]
+fn module_namespace_objects_use_exotic_live_binding_semantics() {
+  let mut loader = ModuleLoader::new();
+  loader
+    .register_virtual_module(VirtualModule::javascript(
+      "namespace-exotic/base.js",
+      crate::js!(
+        module,
+        "export let value = 1; export const alpha = 3; export const zeta = 4;"
+      ),
+      SourceType::mjs(),
+      None,
+    ))
+    .expect("base registration succeeds");
+  loader
+    .register_virtual_module(VirtualModule::javascript(
+      "namespace-exotic/entry.js",
+      crate::js!(
+        module,
+        r#"
+          import * as ns from './base.js';
+          const before = Object.getOwnPropertyDescriptor(ns, "value");
+          const compatible = Reflect.defineProperty(ns, "value", {
+            value: 1, writable: true, enumerable: true, configurable: false
+          });
+          const incompatible = Reflect.defineProperty(ns, "value", { value: 2 });
+          const added = Reflect.defineProperty(ns, "extra", { value: 1 });
+          let assignmentRejected = false;
+          try { ns.value = 10; } catch (error) { assignmentRejected = error instanceof TypeError; }
+          const after = Object.getOwnPropertyDescriptor(ns, "value");
+          globalThis.namespaceExotic = [
+            Object.getPrototypeOf(ns) === null,
+            Object.keys(ns).join(","),
+            Reflect.ownKeys(ns).length,
+            before.value, before.writable, before.enumerable, before.configurable,
+            compatible, incompatible, added,
+            Reflect.set(ns, "value", 9),
+            Reflect.deleteProperty(ns, "value"),
+            Object.isExtensible(ns),
+            ns[Symbol.toStringTag],
+            Object.prototype.toString.call(ns),
+            assignmentRejected, ns.value, after.value
+          ].join("|");
+        "#
+      ),
+      SourceType::mjs(),
+      None,
+    ))
+    .expect("entry registration succeeds");
+
+  let entry = loader
+    .construct(Path::new("."), "namespace-exotic/entry.js")
+    .expect("entry constructs");
+  loader
+    .instantiate_all()
+    .expect("namespace graph instantiates");
+  let globals = Rc::new(RefCell::new(ObjectData::new()));
+  let mut vm = Vm::new(globals);
+  let entry_path = entry.borrow().path.clone();
+  loader
+    .evaluate_entry(&entry_path, &mut vm, false)
+    .expect("namespace graph evaluates");
+
+  assert_eq!(
+    vm.get_global("namespaceExotic"),
+    Some(Value::String(
+      "true|alpha,value,zeta|4|1|true|true|false|true|false|false|false|false|false|Module|[object Module]|true|1|1".into()
+    ))
+  );
+}
+
+#[test]
+fn module_namespace_export_descriptors_track_live_binding_cells() {
+  let binding = Rc::new(RefCell::new(Value::Number(1.0)));
+  let exports = HashMap::from([("value".to_string(), Rc::clone(&binding))]);
+  let namespace = crate::vm::runtime::modules::build_module_namespace_object(&exports);
+  let globals = Rc::new(RefCell::new(ObjectData::new()));
+  let mut vm = Vm::new(globals);
+  let key = crate::value::PropertyKey::String("value".into());
+
+  assert!(matches!(
+    vm.get_own_property_value(&namespace, &key),
+    Ok(Some(PropertyDescriptor::Data {
+      value: Value::Number(1.0),
+      writable: true,
+      enumerable: true,
+      configurable: false,
+    }))
+  ));
+
+  *binding.borrow_mut() = Value::Number(2.0);
+  assert_eq!(
+    vm.get_property_host(&namespace, &key)
+      .expect("namespace export is readable"),
+    Value::Number(2.0)
+  );
+  assert!(matches!(
+    vm.get_own_property_value(&namespace, &key),
+    Ok(Some(PropertyDescriptor::Data {
+      value: Value::Number(2.0),
+      writable: true,
+      enumerable: true,
+      configurable: false,
+    }))
+  ));
+}
+
+#[test]
 fn virtual_dependency_errors_are_not_dropped() {
   let mut loader = ModuleLoader::new();
   loader
