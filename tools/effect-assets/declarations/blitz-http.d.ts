@@ -61,7 +61,7 @@ export interface ServeOptions<Error, Requirements, MapperRequirements = never> {
   readonly queueCapacity?: number;
 }
 
-export interface HttpServer {
+export interface HttpServerService {
   readonly listen: <Error, Requirements, MapperRequirements = never>(
     options: ServeOptions<Error, Requirements, MapperRequirements>,
   ) => Effect.Effect<
@@ -78,7 +78,9 @@ export interface HttpServer {
   >;
 }
 
-export declare const HttpServer: Context.Tag<HttpServer, HttpServer>;
+export type HttpServer = "blitz:http/HttpServer";
+
+export declare const HttpServer: Context.Tag<HttpServer, HttpServerService>;
 
 export declare const layerLive: Layer.Layer<HttpServer>;
 

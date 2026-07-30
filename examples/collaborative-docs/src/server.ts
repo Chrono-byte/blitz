@@ -350,4 +350,4 @@ const program = Ref.make<State>({
   ),
 );
 
-Runtime.runMain(program);
+Runtime.runMain(Runtime.provideLive(program));

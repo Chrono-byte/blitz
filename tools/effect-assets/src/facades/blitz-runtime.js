@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as RuntimeHost from "blitz-internal:runtime";
 import { layerLive as fileSystemLayer } from "blitz:fs";
 import { layerLive as httpLayer } from "blitz:http";
 import { layerLive as terminalLayer } from "blitz:terminal";
@@ -20,8 +21,6 @@ export const provideLive = (program) => Effect.scoped(
     context => Effect.provide(program, context)
   )
 );
-
-let rootStarted = false;
 
 const processValue = () => {
   const value = globalThis.process;
@@ -62,10 +61,20 @@ const reportDefault = (cause) => {
 };
 
 export const runMain = (program, options = {}) => {
-  if (rootStarted) {
-    throw new Error("blitz:runtime runMain already has a root");
+  const rootId = RuntimeHost.reserveRoot();
+  let root;
+  try {
+    root = Effect.runFork(program);
+    RuntimeHost.attachRoot(rootId, () => {
+      Effect.runSync(Fiber.interruptFork(root));
+    });
+  } catch (error) {
+    if (root !== undefined) {
+      Effect.runSync(Fiber.interruptFork(root));
+    }
+    RuntimeHost.failRoot(rootId);
+    throw error;
   }
-  rootStarted = true;
 
   let signalStatus;
   let completed = false;
@@ -74,7 +83,6 @@ export const runMain = (program, options = {}) => {
     reportFailure = reportDefault;
   }
 
-  const root = Effect.runFork(provideLive(program));
   const removeSignalHandlers = options.disableSignalHandlers === true
     ? () => undefined
     : installSignalHandlers(status => {
@@ -82,23 +90,30 @@ export const runMain = (program, options = {}) => {
           return;
         }
         signalStatus = status;
-        Fiber.interruptFork(root);
+        RuntimeHost.interruptRoot(status);
       });
 
-  Effect.runCallback(Fiber.await(root), {
+  Effect.runCallback(Fiber.join(root), {
     onExit: exit => {
       completed = true;
       removeSignalHandlers();
       if (Exit.isInterrupted(exit)) {
-        setExitStatus(signalStatus === undefined ? 1 : signalStatus);
+        const status = signalStatus === undefined ? 1 : signalStatus;
+        setExitStatus(status);
+        RuntimeHost.completeRoot(rootId, status);
         return;
       }
       if (Exit.isFailure(exit)) {
         setExitStatus(1);
-        reportFailure(exit.cause);
+        try {
+          reportFailure(exit.cause);
+        } finally {
+          RuntimeHost.completeRoot(rootId, 1);
+        }
         return;
       }
       setExitStatus(0);
+      RuntimeHost.completeRoot(rootId, 0);
     }
   });
 };

@@ -24,26 +24,28 @@ export interface TerminalService {
   readonly close: () => Effect.Effect<void, TerminalError>;
 }
 
-export declare const Terminal: Context.Tag<TerminalService, TerminalService>;
+export type Terminal = "blitz:terminal/Terminal";
 
-export declare const layerLive: Layer.Layer<TerminalService>;
+export declare const Terminal: Context.Tag<Terminal, TerminalService>;
+
+export declare const layerLive: Layer.Layer<Terminal>;
 
 export declare const write: (
   text: string,
-) => Effect.Effect<void, TerminalError, TerminalService>;
+) => Effect.Effect<void, TerminalError, Terminal>;
 
 export declare const writeLine: (
   text: string,
-) => Effect.Effect<void, TerminalError, TerminalService>;
+) => Effect.Effect<void, TerminalError, Terminal>;
 
 export declare const setPrompt: (
   prompt: string,
-) => Effect.Effect<void, TerminalError, TerminalService>;
+) => Effect.Effect<void, TerminalError, Terminal>;
 
-export declare const lines: Stream.Stream<string, TerminalError, TerminalService>;
+export declare const lines: Stream.Stream<string, TerminalError, Terminal>;
 
 export declare const close: () => Effect.Effect<
   void,
   TerminalError,
-  TerminalService
+  Terminal
 >;

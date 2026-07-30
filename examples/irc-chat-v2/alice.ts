@@ -72,4 +72,4 @@ const program = Effect.scoped(
   ),
 );
 
-Runtime.runMain(program);
+Runtime.runMain(Runtime.provideLive(program));

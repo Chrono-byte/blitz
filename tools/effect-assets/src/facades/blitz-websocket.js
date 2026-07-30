@@ -144,11 +144,17 @@ const service = Object.freeze({
   }))),
 });
 
-export const WebSocket = Context.GenericTag("blitz:websocket");
+export const WebSocket = Context.GenericTag("blitz:websocket/WebSocket");
 
-export const connect = service.connect;
+export const connect = Effect.serviceFunctionEffect(
+  WebSocket,
+  (current) => current.connect,
+);
 
-export const upgrade = service.upgrade;
+export const upgrade = Effect.serviceFunctionEffect(
+  WebSocket,
+  (current) => current.upgrade,
+);
 
 export const layerLive = Layer.succeed(WebSocket, service);
 export const layer = layerLive;

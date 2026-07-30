@@ -34,6 +34,8 @@ pub const HTTP_PRIMITIVE: &str = "http";
 pub const TERMINAL_PRIMITIVE: &str = "terminal";
 /// Stable name of the Effect-native WebSocket host primitive.
 pub const WEB_SOCKET_PRIMITIVE: &str = "websocket";
+/// Stable name of the Effect root-control host primitive.
+pub const RUNTIME_CONTROL_PRIMITIVE: &str = "runtime-control";
 /// Package name used by a graph containing Effect and Blitz stdlib modules.
 pub const RUNTIME_GRAPH_PACKAGE_NAME: &str = "effect+blitz-stdlib";
 /// Package version used by the pinned combined runtime graph.
@@ -91,6 +93,14 @@ pub const WEB_SOCKET_METHODS: &[&str] = &[
   "close",
   "subscribe",
   "cancel",
+];
+/// Methods required by the Effect root-control adapter.
+pub const RUNTIME_CONTROL_METHODS: &[&str] = &[
+  "reserveRoot",
+  "attachRoot",
+  "interruptRoot",
+  "completeRoot",
+  "failRoot",
 ];
 
 const RUNTIME_GRAPH_ARTIFACT: &[u8] = include_bytes!(concat!(

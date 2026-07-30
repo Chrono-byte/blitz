@@ -125,6 +125,17 @@ export const STDLIB_INPUTS = [
     }],
   },
   {
+    specifier: "blitz-internal:runtime",
+    source: "facades/blitz-internal-runtime.js",
+    declaration: undefined,
+    visibility: "private",
+    hostPrimitives: [{
+      name: "runtime-control",
+      abiVersion: 1,
+      methods: ["reserveRoot", "attachRoot", "interruptRoot", "completeRoot", "failRoot"],
+    }],
+  },
+  {
     specifier: "blitz:runtime",
     source: "facades/blitz-runtime.js",
     declaration: "blitz-runtime.d.ts",

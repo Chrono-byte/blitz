@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::watch;
 
-use crate::host::event_loop::{ResourceHandle, ResourceRegistry};
+use crate::host::event_loop::{OperationId, OperationRegistry, ResourceHandle, ResourceRegistry};
 use crate::net::http::{HttpRequestEvent, HttpResponse, HttpServer};
 use crate::net::websocket::{
   WebSocketCommand, WebSocketEvent, WebSocketServerOptions, connect_client,
@@ -98,10 +98,23 @@ impl WebSocketState {
 
 struct WebSocketResource {
   object: Value,
+  object_root: HostRoot,
   state: WebSocketState,
   commands: Option<mpsc::Sender<WebSocketCommand>>,
   shutdown: Option<watch::Sender<bool>>,
-  listeners: BTreeMap<String, Vec<Value>>,
+  listeners: BTreeMap<String, Vec<WebSocketListener>>,
+}
+
+struct WebSocketListener {
+  callback: Value,
+  root: HostRoot,
+}
+
+struct PendingHttpOperation {
+  event: HttpRequestEvent,
+  websocket_id: Option<u64>,
+  promise_root: HostRoot,
+  cancel_root: Option<HostRoot>,
 }
 
 struct ServerInner {
@@ -117,6 +130,7 @@ struct ServerInner {
   generation: u64,
   current_websocket_id: Option<u64>,
   pending_websocket_ids: BTreeSet<u64>,
+  pending_http: OperationRegistry<PendingHttpOperation>,
   websockets: BTreeMap<u64, WebSocketResource>,
   next_client_id: u64,
   websocket_prototype: Option<Value>,
@@ -185,7 +199,7 @@ impl ServerState {
     generation: u64,
     finished: &Value,
   ) -> Result<(), RuntimeError> {
-    let (server, resource, handler) = {
+    let (server, resource, handler, pending_http) = {
       let mut inner = self.0.borrow_mut();
       if inner.generation != generation {
         return Ok(());
@@ -195,8 +209,22 @@ impl ServerState {
         inner.server.take(),
         inner.server_resource.take(),
         inner.handler.take(),
+        inner.pending_http.cancel_all(),
       )
     };
+    for pending in pending_http {
+      if let Some(cancel_root) = pending.cancel_root {
+        if let Some(cancel) = vm.host_root(cancel_root) {
+          vm.call_value_with_this(&cancel, &Value::Undefined, &[])?;
+        }
+        vm.release_host_root(cancel_root)?;
+      }
+      vm.release_host_root(pending.promise_root)?;
+      self.finish_request(pending.websocket_id);
+      pending
+        .event
+        .respond(HttpResponse::text(503, "server shutting down"));
+    }
     if let Some(handler) = handler {
       vm.release_host_root(handler)?;
     }
@@ -249,8 +277,28 @@ impl ServerState {
     };
     if matches!(result, Value::Promise(..)) {
       let promise_root = vm.create_host_root(result.clone());
-      let pending = Rc::new(RefCell::new(Some(event)));
-      let success_pending = Rc::clone(&pending);
+      let cancel_root = vm
+        .get_property_host(
+          &result,
+          &PropertyKey::String("__blitz_cancel".to_string().into()),
+        )
+        .ok()
+        .filter(Value::is_callable)
+        .map(|cancel| vm.create_host_root(cancel));
+      let operation = {
+        let mut inner = self.0.borrow_mut();
+        let operation = inner.pending_http.register(
+          "http-handler",
+          PendingHttpOperation {
+            event,
+            websocket_id,
+            promise_root,
+            cancel_root,
+          },
+        );
+        let _started = inner.pending_http.start(operation);
+        operation
+      };
       let success_state = self.clone();
       let on_success: BuiltinFn = Rc::new(move |vm, args| {
         let value = args
@@ -258,26 +306,17 @@ impl ServerState {
           .or_else(|| args.first())
           .cloned()
           .unwrap_or(Value::Undefined);
-        if let Some(event) = success_pending.borrow_mut().take() {
-          success_state.complete_request(vm, event, websocket_id, &value);
-        }
-        vm.release_host_root(promise_root)?;
+        success_state.complete_pending_request(vm, operation, &value)?;
         Ok(Value::Undefined)
       });
       let failure_state = self.clone();
-      let failure_root = promise_root;
       let on_failure: BuiltinFn = Rc::new(move |vm, args| {
         let reason = args
           .get(1)
           .or_else(|| args.first())
           .cloned()
           .unwrap_or(Value::Undefined);
-        eprintln!("HTTP handler promise rejected: {reason}");
-        if let Some(event) = pending.borrow_mut().take() {
-          failure_state.finish_request(websocket_id);
-          event.respond(HttpResponse::text(500, "Internal Server Error"));
-        }
-        vm.release_host_root(failure_root)?;
+        failure_state.fail_pending_request(vm, operation, &reason)?;
         Ok(Value::Undefined)
       });
       let attach_result = (|| {
@@ -290,15 +329,77 @@ impl ServerState {
         )
       })();
       if let Err(error) = attach_result {
-        if vm.host_root(promise_root).is_some() {
-          vm.release_host_root(promise_root)?;
-        }
+        self.abort_pending_request(vm, operation)?;
         return Err(error);
       }
       self.0.borrow_mut().current_websocket_id = None;
       return Ok(());
     }
     self.complete_request(vm, event, websocket_id, &result);
+    Ok(())
+  }
+
+  fn take_pending_request(
+    &self,
+    operation: OperationId,
+  ) -> Option<PendingHttpOperation> {
+    self
+      .0
+      .borrow_mut()
+      .pending_http
+      .complete(operation)
+  }
+
+  fn complete_pending_request(
+    &self,
+    vm: &mut Vm,
+    operation: OperationId,
+    result: &Value,
+  ) -> Result<(), RuntimeError> {
+    let Some(pending) = self.take_pending_request(operation) else {
+      return Ok(());
+    };
+    release_pending_roots(vm, &pending)?;
+    self.complete_request(vm, pending.event, pending.websocket_id, result);
+    Ok(())
+  }
+
+  fn fail_pending_request(
+    &self,
+    vm: &mut Vm,
+    operation: OperationId,
+    reason: &Value,
+  ) -> Result<(), RuntimeError> {
+    let Some(pending) = self.take_pending_request(operation) else {
+      return Ok(());
+    };
+    eprintln!("HTTP handler promise rejected: {reason}");
+    release_pending_roots(vm, &pending)?;
+    self.finish_request(pending.websocket_id);
+    pending
+      .event
+      .respond(HttpResponse::text(500, "Internal Server Error"));
+    Ok(())
+  }
+
+  fn abort_pending_request(
+    &self,
+    vm: &mut Vm,
+    operation: OperationId,
+  ) -> Result<(), RuntimeError> {
+    let Some(pending) = self.take_pending_request(operation) else {
+      return Ok(());
+    };
+    if let Some(cancel) = pending.cancel_root
+      && let Some(cancel) = vm.host_root(cancel)
+    {
+      vm.call_value_with_this(&cancel, &Value::Undefined, &[])?;
+    }
+    release_pending_roots(vm, &pending)?;
+    self.finish_request(pending.websocket_id);
+    pending
+      .event
+      .respond(HttpResponse::text(500, "Internal Server Error"));
     Ok(())
   }
 
@@ -419,11 +520,14 @@ impl ServerState {
         set(&close, "reason", Value::String(reason.into()));
         set(&close, "wasClean", Value::Bool(code.is_some()));
         dispatch_socket_event(vm, &self.0, connection_id, &socket, "close", close)?;
-        self
+        if let Some(resource) = self
           .0
           .borrow_mut()
           .websockets
-          .remove(&connection_id);
+          .remove(&connection_id)
+        {
+          release_websocket_roots(vm, resource)?;
+        }
       }
       WebSocketEvent::Error {
         connection_id,
@@ -453,6 +557,17 @@ impl ServerState {
   }
 }
 
+fn release_pending_roots(
+  vm: &mut Vm,
+  pending: &PendingHttpOperation,
+) -> Result<(), RuntimeError> {
+  vm.release_host_root(pending.promise_root)?;
+  if let Some(cancel) = pending.cancel_root {
+    vm.release_host_root(cancel)?;
+  }
+  Ok(())
+}
+
 pub(super) fn install(
   vm: &mut Vm,
   listen_addr: SocketAddr,
@@ -474,6 +589,7 @@ pub(super) fn install(
     generation: 0,
     current_websocket_id: None,
     pending_websocket_ids: BTreeSet::new(),
+    pending_http: OperationRegistry::new(),
     websockets: BTreeMap::new(),
     next_client_id: 1_u64 << 53,
     websocket_prototype: None,
@@ -644,10 +760,12 @@ pub(super) fn upgrade_websocket_method(
       .to_string_lossy()
       .replacen("http://", "ws://", 1);
     let socket = websocket_object(state.clone(), id, &url, prototype.clone());
+    let object_root = vm.create_host_root(socket.clone());
     state.0.borrow_mut().websockets.insert(
       id,
       WebSocketResource {
         object: socket.clone(),
+        object_root,
         state: WebSocketState::default(),
         commands: None,
         shutdown: None,
@@ -871,11 +989,12 @@ fn websocket_object(
       .websockets
       .get_mut(&connection_id)
     {
+      let root = vm.create_host_root(callback.clone());
       resource
         .listeners
         .entry(event_type)
         .or_default()
-        .push(callback);
+        .push(WebSocketListener { callback, root });
     }
     Ok(Value::Undefined)
   });
@@ -890,14 +1009,28 @@ fn websocket_object(
       return Ok(Value::Undefined);
     };
     let event_type = vm.to_string(event_type)?.to_string_lossy();
-    if let Some(listeners) = listener_state
-      .0
-      .borrow_mut()
-      .websockets
-      .get_mut(&connection_id)
-      .and_then(|resource| resource.listeners.get_mut(&event_type))
-    {
-      listeners.retain(|listener| listener != callback);
+    let removed = {
+      let mut inner = listener_state.0.borrow_mut();
+      let Some(listeners) = inner
+        .websockets
+        .get_mut(&connection_id)
+        .and_then(|resource| resource.listeners.get_mut(&event_type))
+      else {
+        return Ok(Value::Undefined);
+      };
+      let mut removed = Vec::new();
+      listeners.retain(|listener| {
+        if listener.callback == *callback {
+          removed.push(listener.root);
+          false
+        } else {
+          true
+        }
+      });
+      removed
+    };
+    for root in removed {
+      vm.release_host_root(root)?;
     }
     Ok(Value::Undefined)
   });
@@ -974,6 +1107,17 @@ fn set_socket_state(resource: &WebSocketResource) {
   );
 }
 
+fn release_websocket_roots(
+  vm: &mut Vm,
+  resource: WebSocketResource,
+) -> Result<(), RuntimeError> {
+  vm.release_host_root(resource.object_root)?;
+  for listener in resource.listeners.into_values().flatten() {
+    vm.release_host_root(listener.root)?;
+  }
+  Ok(())
+}
+
 const fn is_valid_websocket_close_code(code: u16) -> bool {
   matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999)
 }
@@ -997,7 +1141,12 @@ fn dispatch_socket_event(
     .websockets
     .get(&connection_id)
     .and_then(|resource| resource.listeners.get(event_type))
-    .cloned()
+    .map(|listeners| {
+      listeners
+        .iter()
+        .map(|listener| listener.callback.clone())
+        .collect::<Vec<_>>()
+    })
     .unwrap_or_default();
   for listener in listeners {
     vm.call_value_with_this(&listener, socket, std::slice::from_ref(&event))?;
@@ -1289,6 +1438,7 @@ fn install_websocket_constructor(
       &url,
       instance_prototype.clone(),
     );
+    let object_root = vm.create_host_root(socket.clone());
     let (shutdown, shutdown_rx) = watch::channel(false);
     constructor_state
       .0
@@ -1298,6 +1448,7 @@ fn install_websocket_constructor(
         connection_id,
         WebSocketResource {
           object: socket.clone(),
+          object_root,
           state: WebSocketState::default(),
           commands: None,
           shutdown: Some(shutdown),

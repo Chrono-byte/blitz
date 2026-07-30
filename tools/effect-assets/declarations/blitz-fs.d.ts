@@ -27,7 +27,7 @@ export interface FileSystemError {
   readonly message: string;
 }
 
-export interface FileSystem {
+export interface FileSystemService {
   readonly readFile: (
     path: Path,
   ) => Effect.Effect<Uint8Array, FileSystemError>;
@@ -44,7 +44,9 @@ export interface FileSystem {
   ) => Effect.Effect<void, FileSystemError>;
 }
 
-export declare const FileSystem: Context.Tag<FileSystem, FileSystem>;
+export type FileSystem = "blitz:fs/FileSystem";
+
+export declare const FileSystem: Context.Tag<FileSystem, FileSystemService>;
 
 export declare const readFile: (
   path: Path,

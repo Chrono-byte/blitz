@@ -14,6 +14,7 @@ mod fs;
 mod node_crypto;
 mod node_fs;
 mod process;
+mod root;
 pub mod scheduler;
 mod server;
 mod terminal;
@@ -43,10 +44,12 @@ use crate::runtime_graph::{
   APP_TRANSPORT_METHODS, APP_TRANSPORT_PRIMITIVE, FILE_SYSTEM_METHODS, FILE_SYSTEM_PRIMITIVE,
   HOST_BRIDGE_ABI_VERSION, HTTP_METHODS, HTTP_PRIMITIVE, HostBridgeCapabilities,
   NODE_CRYPTO_RANDOM_ABI_VERSION, NODE_CRYPTO_RANDOM_METHODS, NODE_CRYPTO_RANDOM_PRIMITIVE,
-  NODE_FILE_SYSTEM_METHODS, NODE_FILE_SYSTEM_PRIMITIVE, RuntimeGraphError, TERMINAL_METHODS,
-  TERMINAL_PRIMITIVE, WEB_SOCKET_METHODS, WEB_SOCKET_PRIMITIVE,
+  NODE_FILE_SYSTEM_METHODS, NODE_FILE_SYSTEM_PRIMITIVE, RUNTIME_CONTROL_METHODS,
+  RUNTIME_CONTROL_PRIMITIVE, RuntimeGraphError, TERMINAL_METHODS, TERMINAL_PRIMITIVE,
+  WEB_SOCKET_METHODS, WEB_SOCKET_PRIMITIVE,
 };
 use event_loop::{EventRegistry, EventSender, ResourceHandle, ResourceRegistry};
+use root::{RootId, RootSupervisor};
 use scheduler::{TimerId, TimerKind, TimerScheduler, WakeupEvent};
 use terminal::TerminalEvent;
 
@@ -256,6 +259,7 @@ impl RuntimeOptions {
 pub struct RuntimeHandle {
   server: server::ServerState,
   events: EventRegistry<RuntimeEvent>,
+  root: RootSupervisor,
   scheduler: SchedulerHostState,
   terminal: terminal::TerminalState,
 }
@@ -433,8 +437,30 @@ impl RuntimeHandle {
     &mut self,
     vm: &mut Vm,
   ) -> Result<(), RuntimeError> {
+    let _interrupted = self.root.request_interrupt(vm, 1)?;
     let _finished = self.server.close_current(vm)?;
     Ok(())
+  }
+
+  /// Request interruption of the active Effect root.
+  ///
+  /// Returns `false` when no running root can accept the request.
+  ///
+  /// # Errors
+  ///
+  /// Returns a runtime error when the root's interruption callback throws.
+  pub fn interrupt_root(
+    &self,
+    vm: &mut Vm,
+    status: i32,
+  ) -> Result<bool, RuntimeError> {
+    self.root.request_interrupt(vm, status)
+  }
+
+  /// Return the exit status recorded after the Effect root settles.
+  #[must_use]
+  pub fn exit_status(&self) -> Option<i32> {
+    self.root.exit_status()
   }
 }
 
@@ -527,6 +553,7 @@ pub fn try_install_runtime(
   let events = EventRegistry::new(64).expect("runtime event capacity is non-zero");
   let server_slot = Rc::new(RefCell::new(None));
   let terminal_slot = Rc::new(RefCell::new(None));
+  let root = RootSupervisor::new(events.resources());
   let node_file_system_allowed = options
     .node_compat
     .allowed_modules()
@@ -544,6 +571,7 @@ pub fn try_install_runtime(
       resources: events.resources(),
       server: Rc::clone(&server_slot),
       terminal: Rc::clone(&terminal_slot),
+      root: root.clone(),
       node_file_system_allowed,
       crypto_random_allowed,
     },
@@ -634,6 +662,7 @@ pub fn try_install_runtime(
   Ok(RuntimeHandle {
     server,
     events,
+    root,
     scheduler,
     terminal,
   })
@@ -787,6 +816,116 @@ fn timer_clear_method(state: SchedulerHostState) -> BuiltinFn {
     state.clear(vm, TimerId::from_value(value))?;
     Ok(Value::Undefined)
   })
+}
+
+fn runtime_primitive(
+  vm: &Vm,
+  root: RootSupervisor,
+) -> Value {
+  let primitive = object(vm.realm().object_prototype());
+
+  let reserve_root = root.clone();
+  let reserve: BuiltinFn = Rc::new(move |vm, _args| {
+    let result = object(vm.realm().object_prototype());
+    match reserve_root.reserve() {
+      Ok(id) => {
+        set(&result, "ok", Value::Bool(true));
+        set(&result, "value", root_id_value(vm, id));
+      }
+      Err(error) => {
+        set(&result, "ok", Value::Bool(false));
+        set(&result, "message", Value::String(error.to_string().into()));
+      }
+    }
+    Ok(result)
+  });
+  set(&primitive, "reserveRoot", Value::Builtin(reserve));
+
+  let attach_root = root.clone();
+  let attach: BuiltinFn = Rc::new(move |vm, args| {
+    let id = root_id_from_value(vm, args.get(1))?;
+    let interrupt = args.get(2).cloned().unwrap_or(Value::Undefined);
+    attach_root.attach(vm, id, interrupt)?;
+    Ok(Value::Undefined)
+  });
+  set(&primitive, "attachRoot", Value::Builtin(attach));
+
+  let interrupt_root = root.clone();
+  let interrupt: BuiltinFn = Rc::new(move |vm, args| {
+    let status = integer_status(vm, args.get(1), 1)?;
+    let interrupted = interrupt_root.request_interrupt(vm, status)?;
+    Ok(Value::Bool(interrupted))
+  });
+  set(&primitive, "interruptRoot", Value::Builtin(interrupt));
+
+  let complete_root = root.clone();
+  let complete: BuiltinFn = Rc::new(move |vm, args| {
+    let id = root_id_from_value(vm, args.get(1))?;
+    let status = integer_status(vm, args.get(2), 1)?;
+    let completed = complete_root.complete(vm, id, status)?;
+    Ok(Value::Bool(completed))
+  });
+  set(&primitive, "completeRoot", Value::Builtin(complete));
+
+  let fail: BuiltinFn = Rc::new(move |vm, args| {
+    let id = root_id_from_value(vm, args.get(1))?;
+    root.fail_reservation(vm, id)?;
+    Ok(Value::Undefined)
+  });
+  set(&primitive, "failRoot", Value::Builtin(fail));
+
+  if let Value::Object(object) = &primitive {
+    object.borrow_mut().extensible = false;
+  }
+  primitive
+}
+
+fn root_id_value(
+  vm: &Vm,
+  id: RootId,
+) -> Value {
+  let value = object(vm.realm().object_prototype());
+  set(&value, "generation", Value::Number(id.generation() as f64));
+  if let Value::Object(object) = &value {
+    object.borrow_mut().extensible = false;
+  }
+  value
+}
+
+fn root_id_from_value(
+  vm: &mut Vm,
+  value: Option<&Value>,
+) -> Result<RootId, RuntimeError> {
+  let value = value.ok_or_else(|| RuntimeError::from("runtime root identifier is required"))?;
+  let generation =
+    vm.get_property_host(value, &PropertyKey::String("generation".to_string().into()))?;
+  let generation = vm.to_number_value(&generation)?;
+  if !generation.is_finite() || generation < 0.0 || generation.fract() != 0.0 {
+    return Err(RuntimeError::from("runtime root identifier is invalid"));
+  }
+  let generation = generation
+    .to_string()
+    .parse::<u64>()
+    .map_err(|_| RuntimeError::from("runtime root identifier is invalid"))?;
+  Ok(RootId::from_generation(generation))
+}
+
+fn integer_status(
+  vm: &mut Vm,
+  value: Option<&Value>,
+  default: i32,
+) -> Result<i32, RuntimeError> {
+  let Some(value) = value else {
+    return Ok(default);
+  };
+  let status = vm.to_number_value(value)?;
+  if !status.is_finite() || status.fract() != 0.0 {
+    return Err(RuntimeError::from("runtime exit status must be an integer"));
+  }
+  status
+    .to_string()
+    .parse::<i32>()
+    .map_err(|_| RuntimeError::from("runtime exit status is outside the supported range"))
 }
 
 fn http_primitive(
@@ -1051,12 +1190,12 @@ fn websocket_primitive(
   let subscribe: BuiltinFn = Rc::new(|vm, args| {
     let socket = args.get(1).cloned().unwrap_or(Value::Undefined);
     let on_event = args.get(2).cloned().unwrap_or(Value::Undefined);
+    let callback_root = vm.create_host_root(on_event);
     for (property, event_type) in [
       ("onmessage", "message"),
       ("onclose", "close"),
       ("onerror", "error"),
     ] {
-      let callback = on_event.clone();
       let event_type = event_type.to_string();
       let listener: BuiltinFn = Rc::new(move |vm, args| {
         let source = args.get(1).cloned().unwrap_or(Value::Undefined);
@@ -1077,7 +1216,9 @@ fn websocket_primitive(
             set(&event, "error", source);
           }
         }
-        vm.call_value_with_this(&callback, &Value::Undefined, &[event])?;
+        if let Some(callback) = vm.host_root(callback_root) {
+          vm.call_value_with_this(&callback, &Value::Undefined, &[event])?;
+        }
         Ok(Value::Undefined)
       });
       set_socket_handler(vm, &socket, property, Value::Builtin(listener))?;
@@ -1087,6 +1228,9 @@ fn websocket_primitive(
     let cancel: BuiltinFn = Rc::new(move |vm, _args| {
       for property in ["onmessage", "onclose", "onerror"] {
         set_socket_handler(vm, &cancel_socket, property, Value::Undefined)?;
+      }
+      if vm.host_root(callback_root).is_some() {
+        vm.release_host_root(callback_root)?;
       }
       Ok(Value::Undefined)
     });
@@ -1306,6 +1450,7 @@ struct HostBridgeInputs {
   resources: ResourceRegistry,
   server: Rc<RefCell<Option<server::ServerState>>>,
   terminal: Rc<RefCell<Option<terminal::TerminalState>>>,
+  root: RootSupervisor,
   node_file_system_allowed: bool,
   crypto_random_allowed: bool,
 }
@@ -1320,6 +1465,7 @@ fn create_host_bridge(
     resources,
     server,
     terminal,
+    root,
     node_file_system_allowed,
     crypto_random_allowed,
   } = inputs;
@@ -1365,6 +1511,7 @@ fn create_host_bridge(
     node_crypto::install(vm, crypto_random_allowed),
   );
   set(&bridge, "http", http_primitive(vm, Rc::clone(&server)));
+  set(&bridge, "runtime", runtime_primitive(vm, root));
   set(&bridge, "webSocket", websocket_primitive(vm, server));
   set(&bridge, "terminal", terminal_primitive(vm, terminal));
   if let Value::Object(object) = &bridge {
@@ -1405,6 +1552,11 @@ fn create_host_bridge(
       WEB_SOCKET_PRIMITIVE,
       HOST_BRIDGE_ABI_VERSION,
       WEB_SOCKET_METHODS.iter().copied(),
+    )
+    .with_primitive(
+      RUNTIME_CONTROL_PRIMITIVE,
+      HOST_BRIDGE_ABI_VERSION,
+      RUNTIME_CONTROL_METHODS.iter().copied(),
     );
   (bridge, capabilities)
 }
@@ -1750,6 +1902,71 @@ mod tests {
   }
 
   #[test]
+  fn effect_root_is_single_owned_interruptible_and_finalized() {
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    let mut vm = Vm::new(globals);
+    let runtime = install_runtime(
+      &mut vm,
+      RuntimeOptions::from_host(vec!["blitz-test".to_string()]),
+    );
+    let directory = env::temp_dir().join(format!("blitz-effect-root-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("create Effect root directory");
+    let entry = directory.join("entry.mjs");
+    std::fs::write(
+      &entry,
+      denko::js!(
+        r#"
+        import * as Effect from "effect/Effect";
+        import * as Runtime from "blitz:runtime";
+
+        globalThis.rootFinalized = false;
+        globalThis.secondRootStarted = false;
+        globalThis.secondRootRejected = false;
+        Runtime.runMain(
+          Effect.ensuring(
+            Effect.never,
+            Effect.sync(() => { rootFinalized = true; })
+          ),
+          { disableSignalHandlers: true }
+        );
+        try {
+          Runtime.runMain(Effect.sync(() => { secondRootStarted = true; }));
+        } catch {
+          secondRootRejected = true;
+        }
+      "#
+      ),
+    )
+    .expect("write Effect root entry");
+    let loader = vm.module_loader_handle();
+    {
+      let mut loader = loader.borrow_mut();
+      loader
+        .construct(&directory, "./entry.mjs")
+        .expect("construct Effect root graph");
+      loader
+        .instantiate_all()
+        .expect("instantiate Effect root graph");
+    }
+    denko::module::evaluate_entry_shared(&loader, &entry, &mut vm, false)
+      .expect("evaluate Effect root entry");
+
+    assert!(runtime.is_live());
+    assert_eq!(vm.get_global("secondRootRejected"), Some(Value::Bool(true)));
+    assert_eq!(vm.get_global("secondRootStarted"), Some(Value::Bool(false)));
+    assert!(
+      runtime
+        .interrupt_root(&mut vm, 130)
+        .expect("interrupt Effect root")
+    );
+    vm.flush_microtasks().expect("settle Effect root");
+    assert_eq!(vm.get_global("rootFinalized"), Some(Value::Bool(true)));
+    assert_eq!(runtime.exit_status(), Some(130));
+    assert!(!runtime.is_live());
+    std::fs::remove_dir_all(directory).expect("remove Effect root directory");
+  }
+
+  #[test]
   fn second_runtime_installation_is_rejected_before_side_effects() {
     let globals = Rc::new(RefCell::new(ObjectData::new()));
     let mut vm = Vm::new(globals);
@@ -1999,14 +2216,32 @@ mod tests {
           denko::js!(
             r#"
         import * as Effect from "effect/Effect";
+        import * as Cause from "effect/Cause";
         import * as Http from "blitz:http";
         import * as Runtime from "blitz:runtime";
 
-        Runtime.runMain(Http.serve({
+        globalThis.effectHttpHandlerCancelled = false;
+        Runtime.runMain(Runtime.provideLive(Http.serve({
           hostname: "127.0.0.1",
           port: 0,
-          handler: () => Effect.succeed(new Response("effect-http"))
-        }));
+          handler: (request) => request.url === "http://localhost/slow"
+            ? Effect.ensuring(
+                Effect.never,
+                Effect.sync(() => { effectHttpHandlerCancelled = true; })
+              )
+            : Effect.sleep("1 millis").pipe(
+                Effect.as(new Response("effect-http"))
+              )
+        })), {
+          reportFailure: (cause) => {
+            const failure = Cause.failureOption(cause);
+            if (failure._tag === "Some") {
+              globalThis.effectHttpFailureTag = failure.value?._tag;
+              globalThis.effectHttpFailureReason = failure.value?.reason;
+              globalThis.effectHttpFailureMessage = failure.value?.message;
+            }
+          }
+        });
       "#
           ),
         )
@@ -2025,9 +2260,14 @@ mod tests {
           .expect("evaluate Effect HTTP entry");
         assert_eq!(vm.get_global("Blitz"), None);
 
-        let address = runtime
-          .local_addr()
-          .expect("Effect HTTP listener address");
+        let address = runtime.local_addr().unwrap_or_else(|| {
+          panic!(
+            "Effect HTTP listener address: tag={:?} reason={:?} message={:?}",
+            vm.get_global("effectHttpFailureTag"),
+            vm.get_global("effectHttpFailureReason"),
+            vm.get_global("effectHttpFailureMessage"),
+          )
+        });
         let client = thread::spawn(move || {
           let mut stream = TcpStream::connect(address).expect("connect Effect HTTP client");
           stream
@@ -2044,11 +2284,44 @@ mod tests {
             .run_once(&mut vm)
             .expect("dispatch Effect HTTP request")
         );
+        assert!(
+          runtime
+            .run_once(&mut vm)
+            .expect("dispatch asynchronous Effect HTTP handler")
+        );
         let response = client.join().expect("Effect HTTP client thread");
         assert!(response.ends_with("effect-http"), "{response}");
+
+        let slow_client = thread::spawn(move || {
+          let mut stream = TcpStream::connect(address).expect("connect slow Effect HTTP client");
+          stream
+            .write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .expect("write slow Effect HTTP request");
+          let mut response = String::new();
+          stream
+            .read_to_string(&mut response)
+            .expect("read cancelled Effect HTTP response");
+          response
+        });
+        assert!(
+          runtime
+            .run_once(&mut vm)
+            .expect("dispatch pending Effect HTTP handler")
+        );
         runtime
           .shutdown(&mut vm)
           .expect("shutdown Effect HTTP server");
+        vm.flush_microtasks()
+          .expect("settle cancelled Effect HTTP handler");
+        let slow_response = slow_client
+          .join()
+          .expect("slow Effect HTTP client thread");
+        assert!(slow_response.starts_with("HTTP/1.1 503"), "{slow_response}");
+        assert_eq!(
+          vm.get_global("effectHttpHandlerCancelled"),
+          Some(Value::Bool(true))
+        );
+        assert_eq!(runtime.exit_status(), Some(1));
         std::fs::remove_dir_all(directory).expect("remove Effect HTTP directory");
       })
       .expect("spawn Effect HTTP host thread")

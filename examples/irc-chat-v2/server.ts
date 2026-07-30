@@ -337,4 +337,4 @@ const serverProgram = Ref.make(new Map<WebSocket.Connection, Client>()).pipe(
   }),
 );
 
-Runtime.runMain(serverProgram);
+Runtime.runMain(Runtime.provideLive(serverProgram));

@@ -85,20 +85,22 @@ export interface WebSocketService {
   ) => Effect.Effect<WebSocketUpgrade, WebSocketError>;
 }
 
-export declare const WebSocket: Context.Tag<WebSocketService, WebSocketService>;
+export type WebSocket = "blitz:websocket/WebSocket";
+
+export declare const WebSocket: Context.Tag<WebSocket, WebSocketService>;
 
 export declare const connect: (
   options: ConnectOptions,
 ) => Effect.Effect<
   Connection,
   WebSocketError,
-  Scope.Scope
+  WebSocket | Scope.Scope
 >;
 
 export declare const upgrade: (
   request: Request,
   options?: UpgradeOptions,
-) => Effect.Effect<WebSocketUpgrade, WebSocketError>;
+) => Effect.Effect<WebSocketUpgrade, WebSocketError, WebSocket>;
 
-export declare const layerLive: Layer.Layer<WebSocketService>;
-export declare const layer: Layer.Layer<WebSocketService>;
+export declare const layerLive: Layer.Layer<WebSocket>;
+export declare const layer: Layer.Layer<WebSocket>;

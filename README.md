@@ -95,7 +95,7 @@ const program = FileSystem.readTextFile("./config.json").pipe(
   Effect.tap((config) => Effect.sync(() => console.log(config))),
 );
 
-Runtime.runMain(program);
+Runtime.runMain(Runtime.provideLive(program));
 ```
 
 Public services currently include `blitz:fs`, `blitz:http`,
