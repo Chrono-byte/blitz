@@ -14,13 +14,20 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{Duration, timeout};
 
 use super::websocket::{WebSocketEvent, WebSocketServerOptions, run_upgrade};
 
 /// Default maximum buffered request body: 1 MiB.
 pub const DEFAULT_MAX_REQUEST_BODY: usize = 1024 * 1024;
+/// Default maximum number of concurrently active HTTP connections.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
+/// Maximum time spent receiving one request body.
+pub const DEFAULT_REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum time a runtime handler may retain a request.
+pub const DEFAULT_HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An HTTP request transferred to the VM thread.
 #[derive(Debug)]
@@ -122,6 +129,16 @@ pub struct HttpServer {
   task: JoinHandle<()>,
 }
 
+#[derive(Clone)]
+struct ServerContext {
+  local_addr: SocketAddr,
+  requests: mpsc::Sender<HttpRequestEvent>,
+  websocket_events: mpsc::Sender<WebSocketEvent>,
+  websocket_options: WebSocketServerOptions,
+  websocket_shutdown: watch::Receiver<bool>,
+  next_websocket_id: Arc<AtomicU64>,
+}
+
 impl HttpServer {
   /// Bind and begin serving HTTP/1.1 requests.
   ///
@@ -142,6 +159,7 @@ impl HttpServer {
       requests,
       websocket_events,
       websocket_options,
+      local_addr,
       shutdown_rx,
     ));
     Ok(Self {
@@ -169,10 +187,19 @@ async fn accept_loop(
   requests: mpsc::Sender<HttpRequestEvent>,
   websocket_events: mpsc::Sender<WebSocketEvent>,
   websocket_options: WebSocketServerOptions,
+  local_addr: SocketAddr,
   mut shutdown: watch::Receiver<bool>,
 ) {
   let mut connections = JoinSet::new();
-  let next_websocket_id = Arc::new(AtomicU64::new(1));
+  let connection_limit = Arc::new(Semaphore::new(DEFAULT_MAX_CONNECTIONS));
+  let context = ServerContext {
+    local_addr,
+    requests,
+    websocket_events,
+    websocket_options,
+    websocket_shutdown: shutdown.clone(),
+    next_websocket_id: Arc::new(AtomicU64::new(1)),
+  };
   loop {
     tokio::select! {
       changed = shutdown.changed() => {
@@ -182,19 +209,15 @@ async fn accept_loop(
       }
       accepted = listener.accept() => match accepted {
         Ok((stream, peer)) => {
-          let requests = requests.clone();
-          let websocket_events = websocket_events.clone();
-          let websocket_options = websocket_options.clone();
-          let websocket_shutdown = shutdown.clone();
-          let next_websocket_id = Arc::clone(&next_websocket_id);
+          let Ok(permit) = Arc::clone(&connection_limit).try_acquire_owned() else {
+            drop(stream);
+            continue;
+          };
           connections.spawn(serve_connection(
             stream,
             peer,
-            requests,
-            websocket_events,
-            websocket_options,
-            websocket_shutdown,
-            next_websocket_id,
+            context.clone(),
+            permit,
           ));
         }
         Err(_) => break,
@@ -209,24 +232,13 @@ async fn accept_loop(
 async fn serve_connection(
   stream: TcpStream,
   remote_addr: SocketAddr,
-  requests: mpsc::Sender<HttpRequestEvent>,
-  websocket_events: mpsc::Sender<WebSocketEvent>,
-  websocket_options: WebSocketServerOptions,
-  websocket_shutdown: watch::Receiver<bool>,
-  next_websocket_id: Arc<AtomicU64>,
+  context: ServerContext,
+  _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
-  let service = service_fn(move |request| {
-    handle_request(
-      request,
-      remote_addr,
-      requests.clone(),
-      websocket_events.clone(),
-      websocket_options.clone(),
-      websocket_shutdown.clone(),
-      Arc::clone(&next_websocket_id),
-    )
-  });
-  let connection = hyper::server::conn::http1::Builder::new()
+  let service = service_fn(move |request| handle_request(request, remote_addr, context.clone()));
+  let mut builder = hyper::server::conn::http1::Builder::new();
+  builder.max_headers(100).max_buf_size(64 * 1024);
+  let connection = builder
     .serve_connection(TokioIo::new(stream), service)
     .with_upgrades();
   let _result = connection.await;
@@ -235,18 +247,16 @@ async fn serve_connection(
 async fn handle_request(
   request: Request<Incoming>,
   remote_addr: SocketAddr,
-  requests: mpsc::Sender<HttpRequestEvent>,
-  websocket_events: mpsc::Sender<WebSocketEvent>,
-  websocket_options: WebSocketServerOptions,
-  websocket_shutdown: watch::Receiver<bool>,
-  next_websocket_id: Arc<AtomicU64>,
+  context: ServerContext,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
   let mut request = request;
   let upgrade = if fastwebsockets::upgrade::is_upgrade_request(&request) {
     fastwebsockets::upgrade::upgrade(&mut request)
       .ok()
       .map(|(response, upgrade)| PendingWebSocketUpgrade {
-        connection_id: next_websocket_id.fetch_add(1, Ordering::Relaxed),
+        connection_id: context
+          .next_websocket_id
+          .fetch_add(1, Ordering::Relaxed),
         response,
         upgrade,
       })
@@ -256,11 +266,10 @@ async fn handle_request(
   let method = request.method().as_str().to_string();
   let path = request.uri().path().to_string();
   let query = request.uri().query().map(str::to_string);
-  let authority = request
-    .headers()
-    .get(hyper::header::HOST)
-    .and_then(|value| value.to_str().ok())
-    .unwrap_or("localhost");
+  let authority = match trusted_authority(&request, context.local_addr) {
+    Some(authority) => authority,
+    None => return Ok(response(HttpResponse::text(400, "invalid Host header"))),
+  };
   let query_suffix = query
     .as_ref()
     .map_or_else(String::new, |query| format!("?{query}"));
@@ -275,9 +284,15 @@ async fn handle_request(
         .map(|value| (name.as_str().to_string(), value.to_string()))
     })
     .collect();
-  let body = match collect_body(request.into_body()).await {
-    Ok(body) => body,
-    Err(error_response) => return Ok(response(error_response)),
+  let body = match timeout(
+    DEFAULT_REQUEST_BODY_TIMEOUT,
+    collect_body(request.into_body()),
+  )
+  .await
+  {
+    Ok(Ok(body)) => body,
+    Ok(Err(error_response)) => return Ok(response(error_response)),
+    Err(_) => return Ok(response(HttpResponse::text(408, "request body timed out"))),
   };
 
   let (response_tx, response_rx) = oneshot::channel();
@@ -292,26 +307,61 @@ async fn handle_request(
     upgrade,
     response: response_tx,
   };
-  if requests.send(event).await.is_err() {
-    return Ok(response(HttpResponse::text(503, "runtime unavailable")));
-  }
-  let result = response_rx.await.unwrap_or_else(|_| {
-    HttpCompletion::Response(HttpResponse::text(500, "handler did not return a response"))
-  });
+  let result = match timeout(DEFAULT_HANDLER_TIMEOUT, async {
+    context
+      .requests
+      .send(event)
+      .await
+      .map_err(|_| HttpResponse::text(503, "runtime unavailable"))?;
+    response_rx
+      .await
+      .map_err(|_| HttpResponse::text(500, "handler did not return a response"))
+  })
+  .await
+  {
+    Ok(Ok(result)) => result,
+    Ok(Err(error)) => return Ok(response(error)),
+    Err(_) => return Ok(response(HttpResponse::text(504, "handler timed out"))),
+  };
   match result {
     HttpCompletion::Response(result) => Ok(response(result)),
     HttpCompletion::WebSocket(pending) => {
       tokio::spawn(run_upgrade(
         pending.connection_id,
         pending.upgrade,
-        websocket_events,
-        websocket_options,
-        websocket_shutdown,
+        context.websocket_events,
+        context.websocket_options,
+        context.websocket_shutdown,
       ));
       let (parts, _body) = pending.response.into_parts();
       Ok(Response::from_parts(parts, Full::new(Bytes::new())))
     }
   }
+}
+
+fn trusted_authority(
+  request: &Request<Incoming>,
+  local_addr: SocketAddr,
+) -> Option<String> {
+  let authority = request
+    .headers()
+    .get(hyper::header::HOST)?
+    .to_str()
+    .ok()?
+    .parse::<hyper::http::uri::Authority>()
+    .ok()?;
+  if authority
+    .port_u16()
+    .is_some_and(|port| port != local_addr.port())
+  {
+    return None;
+  }
+  let host = authority.host();
+  let trusted = host
+    .parse::<std::net::IpAddr>()
+    .is_ok_and(|address| address == local_addr.ip() || address.is_loopback())
+    || (local_addr.ip().is_loopback() && host.eq_ignore_ascii_case("localhost"));
+  trusted.then(|| authority.to_string())
 }
 
 async fn collect_body(mut body: Incoming) -> Result<Vec<u8>, HttpResponse> {

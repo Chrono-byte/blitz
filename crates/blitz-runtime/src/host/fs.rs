@@ -14,6 +14,8 @@ use url::Url;
 
 use super::{effect_fail, effect_succeed, effect_suspend, object, set};
 
+const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
+
 pub(super) fn install(vm: &Vm) -> Value {
   let primitive = object(vm.realm().object_prototype());
   set(&primitive, "readFile", Value::Builtin(read(false)));
@@ -165,39 +167,21 @@ fn path_value(
 }
 
 fn bytes_value(
-  vm: &mut Vm,
+  vm: &Vm,
   value: &Value,
 ) -> Result<Vec<u8>, String> {
-  let length = vm
-    .get_property_host(value, &PropertyKey::String("length".to_string().into()))
-    .map_err(|error| error.to_string())?;
-  let Value::Number(length) = length else {
+  let Some(view) = vm.uint8_array_byte_view(value) else {
     return Err("writeFile requires a Uint8Array".to_string());
   };
-  if !length.is_finite() || length < 0.0 || length.fract() != 0.0 {
-    return Err("writeFile received an invalid byte length".to_string());
+  let length = view.len();
+  if length > MAX_FILE_BYTES {
+    return Err(format!(
+      "writeFile data exceeds the {MAX_FILE_BYTES} byte limit"
+    ));
   }
-  let length = length
-    .to_string()
-    .parse::<usize>()
-    .map_err(|_| "writeFile byte length is too large".to_string())?;
-  let mut bytes = Vec::with_capacity(length);
-  for index in 0..length {
-    let item = vm
-      .get_property_host(value, &PropertyKey::String(index.to_string().into()))
-      .map_err(|error| error.to_string())?;
-    let Value::Number(item) = item else {
-      return Err("writeFile requires numeric bytes".to_string());
-    };
-    if !item.is_finite() || item.fract() != 0.0 || !(0.0..=255.0).contains(&item) {
-      return Err("writeFile bytes must be integers between 0 and 255".to_string());
-    }
-    bytes.push(
-      item
-        .to_string()
-        .parse::<u8>()
-        .map_err(|_| "writeFile byte is outside the supported range".to_string())?,
-    );
+  let mut bytes = vec![0; length];
+  if !view.read_into(0, &mut bytes) {
+    return Err("writeFile received a detached or invalid Uint8Array".to_string());
   }
   Ok(bytes)
 }

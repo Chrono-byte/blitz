@@ -541,47 +541,18 @@ fn bytes_value(
     }
     return Ok(value.as_str_lossy().as_bytes().to_vec());
   }
-  let length = match vm.get_property_host(value, &PropertyKey::String("length".to_string().into()))
-  {
-    Ok(Value::Number(length)) if length.is_finite() && length >= 0.0 && length.fract() == 0.0 => {
-      match length.to_string().parse::<usize>() {
-        Ok(length) => length,
-        Err(_) => {
-          return Err(failure(
-            vm,
-            "ERR_INVALID_ARG_VALUE",
-            None,
-            Some("writeFile"),
-            None,
-            None,
-            "The byte array is too large".to_string(),
-          ));
-        }
-      }
-    }
-    Ok(_) => {
-      return Err(failure(
-        vm,
-        "ERR_INVALID_ARG_TYPE",
-        None,
-        Some("writeFile"),
-        None,
-        None,
-        "The data argument must be a string or a Uint8Array".to_string(),
-      ));
-    }
-    Err(error) => {
-      return Err(failure(
-        vm,
-        "ERR_INVALID_ARG_TYPE",
-        None,
-        Some("writeFile"),
-        None,
-        None,
-        error.to_string(),
-      ));
-    }
+  let Some(view) = vm.uint8_array_byte_view(value) else {
+    return Err(failure(
+      vm,
+      "ERR_INVALID_ARG_TYPE",
+      None,
+      Some("writeFile"),
+      None,
+      None,
+      "The data argument must be a string or a Uint8Array".to_string(),
+    ));
   };
+  let length = view.len();
   if length > MAX_FILE_BYTES {
     return Err(failure(
       vm,
@@ -593,52 +564,17 @@ fn bytes_value(
       format!("Data exceeds the Blitz node:fs limit of {MAX_FILE_BYTES} bytes"),
     ));
   }
-  let mut bytes = Vec::with_capacity(length);
-  for index in 0..length {
-    let item = match vm.get_property_host(value, &PropertyKey::String(index.to_string().into())) {
-      Ok(Value::Number(item))
-        if item.is_finite() && item.fract() == 0.0 && (0.0..=255.0).contains(&item) =>
-      {
-        item
-      }
-      Ok(_) => {
-        return Err(failure(
-          vm,
-          "ERR_INVALID_ARG_TYPE",
-          None,
-          Some("writeFile"),
-          None,
-          None,
-          "The data argument must contain byte values".to_string(),
-        ));
-      }
-      Err(error) => {
-        return Err(failure(
-          vm,
-          "ERR_INVALID_ARG_TYPE",
-          None,
-          Some("writeFile"),
-          None,
-          None,
-          error.to_string(),
-        ));
-      }
-    };
-    let byte = match item.to_string().parse::<u8>() {
-      Ok(byte) => byte,
-      Err(_) => {
-        return Err(failure(
-          vm,
-          "ERR_INVALID_ARG_VALUE",
-          None,
-          Some("writeFile"),
-          None,
-          None,
-          "The data argument contains an invalid byte".to_string(),
-        ));
-      }
-    };
-    bytes.push(byte);
+  let mut bytes = vec![0; length];
+  if !view.read_into(0, &mut bytes) {
+    return Err(failure(
+      vm,
+      "ERR_INVALID_ARG_VALUE",
+      None,
+      Some("writeFile"),
+      None,
+      None,
+      "The Uint8Array is detached or invalid".to_string(),
+    ));
   }
   Ok(bytes)
 }

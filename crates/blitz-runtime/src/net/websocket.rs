@@ -23,8 +23,9 @@ use hyper::upgrade::Upgraded;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{Duration, timeout};
 
 use std::future::Future;
 
@@ -32,6 +33,10 @@ use std::future::Future;
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 /// Default capacity of each connection's outbound command queue.
 pub const DEFAULT_COMMAND_CAPACITY: usize = 64;
+/// Default maximum time a WebSocket may remain idle.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Default maximum number of concurrently active WebSocket handshakes.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 
 struct SpawnExecutor;
 
@@ -187,6 +192,7 @@ async fn accept_loop(
 ) {
   let next_id = Arc::new(AtomicU64::new(1));
   let active = Arc::new(ActiveConnections::default());
+  let connection_limit = Arc::new(Semaphore::new(DEFAULT_MAX_CONNECTIONS));
   let mut connections = JoinSet::new();
 
   loop {
@@ -199,12 +205,17 @@ async fn accept_loop(
       accepted = listener.accept() => {
         match accepted {
           Ok((stream, _peer)) => {
+            let Ok(permit) = Arc::clone(&connection_limit).try_acquire_owned() else {
+              drop(stream);
+              continue;
+            };
             let events = events.clone();
             let options = options.clone();
             let shutdown = shutdown.clone();
             let next_id = Arc::clone(&next_id);
             let active = Arc::clone(&active);
             connections.spawn(async move {
+              let _permit = permit;
               serve_http_connection(stream, events, options, shutdown, next_id, active).await;
             });
           }
@@ -315,6 +326,7 @@ async fn run_connection<S>(
   }
 
   let mut socket = socket;
+  socket.set_max_message_size(options.max_message_size);
   let mut fragments = MessageFragments::default();
   let mut close_emitted = false;
   loop {
@@ -358,9 +370,9 @@ async fn run_connection<S>(
           break;
         }
       }
-      frame = socket.read_frame() => {
+      frame = timeout(DEFAULT_IDLE_TIMEOUT, socket.read_frame()) => {
         match frame {
-          Ok(frame) => {
+          Ok(Ok(frame)) => {
             if handle_frame(
               &events,
               connection_id,
@@ -372,8 +384,14 @@ async fn run_connection<S>(
               break;
             }
           }
-          Err(error) => {
+          Ok(Err(error)) => {
             emit_error(&events, connection_id, &error).await;
+            break;
+          }
+          Err(_) => {
+            let _result = socket.write_frame(close_frame(1001, "idle timeout")).await;
+            emit_close(&events, connection_id, Some(1001), "idle timeout").await;
+            close_emitted = true;
             break;
           }
         }

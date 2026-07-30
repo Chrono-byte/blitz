@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -202,11 +202,14 @@ async function definitionTargetDocument(
 async function materializeVirtualDocument(
   virtualDocument: CompilerVirtualDocument,
 ): Promise<TextDocument | null> {
-  const directory = join(tmpdir(), "blitz-language-server");
-  const targetPath = join(directory, basename(virtualDocument.id));
   try {
-    await mkdir(directory, { recursive: true });
-    await writeFile(targetPath, virtualDocument.text, "utf8");
+    const directory = await mkdtemp(join(tmpdir(), "blitz-language-server-"));
+    const targetPath = join(directory, basename(virtualDocument.id));
+    await writeFile(targetPath, virtualDocument.text, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
     return TextDocument.create(
       pathToFileURL(targetPath).href,
       "typescript",

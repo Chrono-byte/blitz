@@ -131,7 +131,7 @@ fn run_package_script(
       eprintln!("$ {} {displayed_arguments}", script.command);
     }
 
-    let mut command = package_shell_command(script, arguments);
+    let mut command = package_shell_command(script, arguments, &path);
     command
       .current_dir(&project.root)
       .envs(environment)
@@ -167,6 +167,7 @@ fn run_package_script(
 fn package_shell_command(
   script: &blitz_runtime::project::PackageScriptCommand,
   arguments: &[String],
+  _path: &std::ffi::OsStr,
 ) -> Command {
   let mut command = Command::new("/bin/sh");
   if script.forwards_arguments {
@@ -185,17 +186,117 @@ fn package_shell_command(
 fn package_shell_command(
   script: &blitz_runtime::project::PackageScriptCommand,
   arguments: &[String],
+  path: &std::ffi::OsStr,
 ) -> Command {
+  use std::os::windows::process::CommandExt;
+
   let mut command = Command::new("cmd.exe");
   let mut source = script.command.clone();
   if script.forwards_arguments {
+    let double_escape = command_targets_batch_file(&script.command, path);
     for argument in arguments {
       source.push(' ');
-      source.push_str(&format_shell_argument(argument));
+      source.push_str(&format_cmd_argument(argument, double_escape));
     }
   }
-  command.args(["/d", "/s", "/c", &source]);
+  command.raw_arg(format!("/d /v:off /s /c \"{source}\""));
   command
+}
+
+#[cfg(windows)]
+fn command_targets_batch_file(
+  source: &str,
+  path: &std::ffi::OsStr,
+) -> bool {
+  let mut quoted = false;
+  let initial = source
+    .chars()
+    .take_while(|character| {
+      if matches!(character, '"' | '\'') {
+        quoted = !quoted;
+      }
+      quoted || !character.is_whitespace()
+    })
+    .collect::<String>();
+  let initial = initial.trim_matches(['"', '\'']);
+  let initial_path = Path::new(initial);
+  if initial_path
+    .extension()
+    .and_then(|extension| extension.to_str())
+    .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "cmd" | "bat"))
+  {
+    return true;
+  }
+  std::env::split_paths(path).any(|directory| {
+    ["cmd", "bat"].iter().any(|extension| {
+      directory
+        .join(initial)
+        .with_extension(extension)
+        .is_file()
+    })
+  })
+}
+
+#[cfg(windows)]
+fn format_cmd_argument(
+  argument: &str,
+  double_escape: bool,
+) -> String {
+  if argument.is_empty() {
+    return "\"\"".to_string();
+  }
+  let mut result = if argument
+    .chars()
+    .any(|character| matches!(character, ' ' | '\t' | '\n' | '\u{000B}' | '"'))
+  {
+    let mut escaped = String::from("\"");
+    let mut characters = argument.chars().peekable();
+    while characters.peek().is_some() {
+      let mut slashes = 0;
+      while characters.peek() == Some(&'\\') {
+        characters.next();
+        slashes += 1;
+      }
+      match characters.next() {
+        None => escaped.push_str(&"\\".repeat(slashes * 2)),
+        Some('"') => {
+          escaped.push_str(&"\\".repeat(slashes * 2 + 1));
+          escaped.push('"');
+        }
+        Some(character) => {
+          escaped.push_str(&"\\".repeat(slashes));
+          escaped.push(character);
+        }
+      }
+    }
+    escaped.push('"');
+    escaped
+  } else {
+    argument.to_string()
+  };
+  result = escape_cmd_metacharacters(&result);
+  if double_escape {
+    result = escape_cmd_metacharacters(&result);
+  }
+  result
+}
+
+#[cfg(windows)]
+fn escape_cmd_metacharacters(value: &str) -> String {
+  value
+    .chars()
+    .flat_map(|character| {
+      if matches!(
+        character,
+        ' ' | '!' | '%' | '^' | '&' | '(' | ')' | '<' | '>' | '|' | '"'
+      ) {
+        [Some('^'), Some(character)]
+      } else {
+        [Some(character), None]
+      }
+    })
+    .flatten()
+    .collect()
 }
 
 fn format_shell_argument(argument: &str) -> String {
