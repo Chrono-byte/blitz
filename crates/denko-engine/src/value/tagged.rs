@@ -25,8 +25,13 @@ const TAG_NULL: u64 = 0x7FFA_0000_0000_0000;
 const TAG_BOOLEAN: u64 = 0x7FFB_0000_0000_0000;
 const TAG_UNINITIALIZED: u64 = 0x7FFC_0000_0000_0000;
 const TAG_HEAP: u64 = 0x7FFD_0000_0000_0000;
-const FIRST_RESERVED_TAG: u64 = 0x7FFE_0000_0000_0000;
-const LAST_RESERVED_TAG: u64 = 0x7FFF_0000_0000_0000;
+// The hole/empty sentinel consumes one tag so array storage can distinguish
+// an absent element from every JavaScript value without an `Option` wrapper.
+const TAG_HOLE: u64 = 0x7FFE_0000_0000_0000;
+// Keep the final NaN-box tag unavailable for future internal sentinels until
+// their payload and rooting rules have been specified.
+const FIRST_RESERVED_TAG: u64 = 0x7FFF_0000_0000_0000;
+const LAST_RESERVED_TAG: u64 = FIRST_RESERVED_TAG;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub(crate) enum TaggedValueError {
@@ -45,6 +50,9 @@ pub(crate) enum TaggedValueError {
   #[error("runtime value of kind {kind} is not an immediate")]
   HeapAllocationRequired { kind: &'static str },
 
+  #[error("internal hole/empty sentinel is not a runtime value")]
+  HoleNotRuntimeValue,
+
   #[error("heap {kind:?} index {index} requires its owning VM heap")]
   HeapResolutionRequired { kind: HeapKind, index: u32 },
 }
@@ -54,13 +62,17 @@ pub(crate) enum TaggedValueError {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum HeapKind {
   String = 1,
-  BigInt,
-  Symbol,
-  Object,
-  Array,
-  Closure,
-  Proxy,
-  Promise,
+  BigInt = 2,
+  Symbol = 3,
+  Shape = 4,
+  PropertyValues = 5,
+  Object = 6,
+  Array = 7,
+  Environment = 8,
+  Closure = 9,
+  Builtin = 10,
+  Proxy = 11,
+  Promise = 12,
 }
 
 impl TryFrom<u8> for HeapKind {
@@ -71,11 +83,15 @@ impl TryFrom<u8> for HeapKind {
       1 => Ok(Self::String),
       2 => Ok(Self::BigInt),
       3 => Ok(Self::Symbol),
-      4 => Ok(Self::Object),
-      5 => Ok(Self::Array),
-      6 => Ok(Self::Closure),
-      7 => Ok(Self::Proxy),
-      8 => Ok(Self::Promise),
+      4 => Ok(Self::Shape),
+      5 => Ok(Self::PropertyValues),
+      6 => Ok(Self::Object),
+      7 => Ok(Self::Array),
+      8 => Ok(Self::Environment),
+      9 => Ok(Self::Closure),
+      10 => Ok(Self::Builtin),
+      11 => Ok(Self::Proxy),
+      12 => Ok(Self::Promise),
       kind => Err(TaggedValueError::UnknownHeapKind { kind }),
     }
   }
@@ -164,6 +180,7 @@ pub(crate) enum TaggedValueKind {
   Null,
   Boolean,
   Uninitialized,
+  Hole,
   Heap,
 }
 
@@ -176,6 +193,10 @@ impl<'gc> TaggedValue<'gc> {
   pub(crate) const UNDEFINED: Self = Self(TAG_UNDEFINED, PhantomData);
   pub(crate) const NULL: Self = Self(TAG_NULL, PhantomData);
   pub(crate) const UNINITIALIZED: Self = Self(TAG_UNINITIALIZED, PhantomData);
+  /// Internal empty array slot. This is deliberately not `undefined`.
+  pub(crate) const HOLE: Self = Self(TAG_HOLE, PhantomData);
+  /// Alias used by storage code that calls absent slots "empty".
+  pub(crate) const EMPTY: Self = Self(TAG_HOLE, PhantomData);
 
   pub(crate) fn number(value: f64) -> Self {
     Self(
@@ -202,6 +223,7 @@ impl<'gc> TaggedValue<'gc> {
       TAG_NULL => TaggedValueKind::Null,
       TAG_BOOLEAN => TaggedValueKind::Boolean,
       TAG_UNINITIALIZED => TaggedValueKind::Uninitialized,
+      TAG_HOLE => TaggedValueKind::Hole,
       TAG_HEAP => TaggedValueKind::Heap,
       _ => TaggedValueKind::Number,
     }
@@ -217,6 +239,10 @@ impl<'gc> TaggedValue<'gc> {
     } else {
       None
     }
+  }
+
+  pub(crate) const fn is_hole(self) -> bool {
+    self.0 == TAG_HOLE
   }
 
   pub(crate) fn as_heap(self) -> Option<HeapHandle<'gc>> {
@@ -274,14 +300,20 @@ impl TaggedValue<'static> {
         tag: (tag >> 48) as u16,
         payload,
       }),
+      TAG_HOLE if payload != 0 => Err(TaggedValueError::InvalidTagPayload {
+        tag: (tag >> 48) as u16,
+        payload,
+      }),
       TAG_HEAP => {
         HeapHandle::from_payload(payload)?;
         Ok(Self(bits, PhantomData))
       }
-      FIRST_RESERVED_TAG | LAST_RESERVED_TAG => Err(TaggedValueError::ReservedTag {
+      FIRST_RESERVED_TAG..=LAST_RESERVED_TAG => Err(TaggedValueError::ReservedTag {
         tag: (tag >> 48) as u16,
       }),
-      TAG_UNDEFINED | TAG_NULL | TAG_BOOLEAN | TAG_UNINITIALIZED => Ok(Self(bits, PhantomData)),
+      TAG_UNDEFINED | TAG_NULL | TAG_BOOLEAN | TAG_UNINITIALIZED | TAG_HOLE => {
+        Ok(Self(bits, PhantomData))
+      }
       _ if is_nan_bits(bits) && bits != CANONICAL_NUMBER_NAN => {
         Err(TaggedValueError::NonCanonicalNaN { bits })
       }
@@ -317,6 +349,7 @@ impl TryFrom<TaggedValue<'_>> for Value {
       TaggedValueKind::Null => Ok(Self::Null),
       TaggedValueKind::Boolean => Ok(Self::Bool(value.as_boolean().unwrap_or(false))),
       TaggedValueKind::Uninitialized => Ok(Self::Uninitialized),
+      TaggedValueKind::Hole => Err(TaggedValueError::HoleNotRuntimeValue),
       TaggedValueKind::Heap => {
         let handle = value
           .as_heap()
@@ -353,6 +386,7 @@ impl fmt::Debug for TaggedValue<'_> {
         .field(&self.as_boolean().unwrap_or(false))
         .finish(),
       TaggedValueKind::Uninitialized => formatter.write_str("Uninitialized"),
+      TaggedValueKind::Hole => formatter.write_str("Hole"),
       TaggedValueKind::Heap => formatter
         .debug_tuple("Heap")
         .field(&self.as_heap())
@@ -406,11 +440,43 @@ mod tests {
   }
 
   #[test]
-  fn heap_kind_and_index_round_trip_and_bind_to_epoch() {
-    let unbound = HeapHandle::new(HeapKind::Array, u32::MAX);
-    let encoded = TaggedValue::heap(unbound);
-    assert_eq!(encoded.as_heap(), Some(unbound));
+  fn every_heap_kind_and_index_round_trip() {
+    let kinds = [
+      HeapKind::String,
+      HeapKind::BigInt,
+      HeapKind::Symbol,
+      HeapKind::Shape,
+      HeapKind::PropertyValues,
+      HeapKind::Object,
+      HeapKind::Array,
+      HeapKind::Environment,
+      HeapKind::Closure,
+      HeapKind::Builtin,
+      HeapKind::Proxy,
+      HeapKind::Promise,
+    ];
 
+    for kind in kinds {
+      for index in [0, 1, u32::MAX] {
+        let handle = HeapHandle::new(kind, index);
+        let encoded = TaggedValue::heap(handle);
+        assert_eq!(encoded.kind(), TaggedValueKind::Heap);
+        assert_eq!(encoded.as_heap(), Some(handle));
+        assert_eq!(
+          encoded.to_bits(),
+          TAG_HEAP | ((kind as u64) << HEAP_KIND_SHIFT) | index as u64
+        );
+        assert_eq!(
+          TaggedValue::try_from_bits(encoded.to_bits()),
+          Ok(encoded.unbind())
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn heap_handles_bind_to_epoch_without_changing_encoding() {
+    let encoded = TaggedValue::heap(HeapHandle::new(HeapKind::Array, u32::MAX));
     let mut context = GcContext::new();
     let gc = context.scope();
     let bound = encoded.bind(gc.nogc());
@@ -421,18 +487,38 @@ mod tests {
   }
 
   #[test]
-  fn raw_bits_reject_invalid_tags_heap_kinds_and_nans() {
-    assert!(matches!(
-      TaggedValue::try_from_bits(TAG_BOOLEAN | 2),
-      Err(TaggedValueError::InvalidTagPayload { .. })
-    ));
+  fn raw_bits_reject_invalid_payloads_and_noncanonical_nans() {
+    for bits in [
+      TAG_UNDEFINED | 1,
+      TAG_NULL | 1,
+      TAG_BOOLEAN | 2,
+      TAG_UNINITIALIZED | 1,
+      TAG_HOLE | 1,
+    ] {
+      assert!(matches!(
+        TaggedValue::try_from_bits(bits),
+        Err(TaggedValueError::InvalidTagPayload { .. })
+      ));
+    }
     assert_eq!(
       TaggedValue::try_from_bits(TAG_HEAP),
       Err(TaggedValueError::UnknownHeapKind { kind: 0 })
     );
+    assert_eq!(
+      TaggedValue::try_from_bits(TAG_HEAP | (13_u64 << HEAP_KIND_SHIFT)),
+      Err(TaggedValueError::UnknownHeapKind { kind: 13 })
+    );
     assert!(matches!(
       TaggedValue::try_from_bits(TAG_HEAP | HEAP_UNUSED_MASK),
       Err(TaggedValueError::InvalidTagPayload { .. })
+    ));
+    assert!(matches!(
+      TaggedValue::try_from_bits(FIRST_RESERVED_TAG),
+      Err(TaggedValueError::ReservedTag { .. })
+    ));
+    assert!(matches!(
+      TaggedValue::try_from_bits(LAST_RESERVED_TAG | 1),
+      Err(TaggedValueError::ReservedTag { .. })
     ));
     assert!(matches!(
       TaggedValue::try_from_bits(0x7FF8_0000_0000_0042),
@@ -441,6 +527,22 @@ mod tests {
     assert_eq!(
       TaggedValue::try_from_bits(CANONICAL_NUMBER_NAN),
       Ok(TaggedValue::number(f64::NAN))
+    );
+  }
+
+  #[test]
+  fn hole_is_a_strict_distinct_sentinel() {
+    assert_eq!(TaggedValue::HOLE, TaggedValue::EMPTY);
+    assert_eq!(TaggedValue::HOLE.kind(), TaggedValueKind::Hole);
+    assert!(TaggedValue::HOLE.is_hole());
+    assert!(!TaggedValue::UNDEFINED.is_hole());
+    assert!(!TaggedValue::UNINITIALIZED.is_hole());
+    assert_ne!(TaggedValue::HOLE, TaggedValue::UNDEFINED);
+    assert_ne!(TaggedValue::HOLE, TaggedValue::UNINITIALIZED);
+    assert_eq!(TaggedValue::try_from_bits(TAG_HOLE), Ok(TaggedValue::HOLE));
+    assert_eq!(
+      Value::try_from(TaggedValue::HOLE),
+      Err(TaggedValueError::HoleNotRuntimeValue)
     );
   }
 

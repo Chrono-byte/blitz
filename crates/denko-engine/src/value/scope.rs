@@ -98,9 +98,24 @@ pub(crate) struct NoGcScope<'gc, 'scope> {
   _scope: PhantomData<&'scope ScopeToken>,
 }
 
+/// Values in either root table are deliberately stored with the GC lifetime
+/// erased. This is a storage boundary, not permission to dereference a value:
+/// callers must obtain a fresh [`NoGcScope`] after every possible safepoint.
 #[derive(Default)]
 struct RootState {
   slots: Vec<Option<TaggedValue<'static>>>,
+  free: Vec<u32>,
+}
+
+#[derive(Default)]
+struct GlobalRootSlot {
+  value: Option<TaggedValue<'static>>,
+  generation: u32,
+}
+
+#[derive(Default)]
+struct GlobalRootState {
+  slots: Vec<GlobalRootSlot>,
   free: Vec<u32>,
 }
 
@@ -131,10 +146,10 @@ impl RootSet {
     Self::default()
   }
 
-  pub(crate) fn root<'scope>(
+  pub(crate) fn root<'gc, 'scope>(
     &'scope self,
-    value: TaggedValue<'_>,
-    _gc: NoGcScope<'_, 'scope>,
+    value: TaggedValue<'gc>,
+    _gc: NoGcScope<'gc, 'scope>,
   ) -> Result<ScopedValue<'scope>, RootError> {
     let mut state = self.state.borrow_mut();
     let index = if let Some(index) = state.free.pop() {
@@ -159,12 +174,194 @@ impl RootSet {
   }
 
   /// Rewrite all rooted heap references after arena compaction.
+  ///
+  /// The collector must call this while no bound value is being used. Root
+  /// entries are unbound again by the next call to [`ScopedValue::get`].
   pub(crate) fn rewrite_heap_handles(
     &self,
     mut rewrite: impl FnMut(HeapHandle<'static>) -> HeapHandle<'static>,
+    _gc: GcScope<'_, '_>,
   ) {
     for value in self.state.borrow_mut().slots.iter_mut().flatten() {
       value.rewrite_heap_handle(&mut rewrite);
+    }
+  }
+}
+
+/// A copyable, persistent identity for one slot in a [`GlobalRootSet`].
+///
+/// Unlike [`ScopedValue`], this handle does not release itself when dropped.
+/// Hosts and the VM must call [`GlobalRootSet::release`] explicitly. The
+/// generation prevents a handle retained by a host from becoming valid again
+/// when its slot is reused.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct GlobalRoot {
+  index: u32,
+  generation: u32,
+}
+
+impl GlobalRoot {
+  pub(crate) const fn index(self) -> u32 {
+    self.index
+  }
+
+  pub(crate) const fn generation(self) -> u32 {
+    self.generation
+  }
+
+  pub(crate) fn get<'gc>(
+    self,
+    roots: &GlobalRootSet,
+    gc: NoGcScope<'gc, '_>,
+  ) -> Result<TaggedValue<'gc>, RootError> {
+    roots.get(self, gc)
+  }
+
+  pub(crate) fn release(
+    self,
+    roots: &GlobalRootSet,
+  ) -> Result<(), RootError> {
+    roots.release(self)
+  }
+}
+
+const _: () = assert!(size_of::<GlobalRoot>() == 2 * size_of::<u32>());
+const _: () = assert!(align_of::<GlobalRoot>() == align_of::<u32>());
+
+/// Persistent roots owned by a VM, realm, module, or host integration.
+///
+/// A [`GlobalRoot`] is only an identity; it never grants access to the stored
+/// value by itself. [`GlobalRootSet::get`] requires a fresh [`NoGcScope`], so a
+/// value obtained before a safepoint cannot be reused after it. Values remain
+/// explicitly unbound while stored, allowing the collector to rewrite them.
+/// Rewriting and release do not themselves run collection. The collector must
+/// rewrite this set at its relocation safepoint before execution resumes.
+#[derive(Default)]
+pub(crate) struct GlobalRootSet {
+  state: RefCell<GlobalRootState>,
+}
+
+impl fmt::Debug for GlobalRootSet {
+  fn fmt(
+    &self,
+    formatter: &mut fmt::Formatter<'_>,
+  ) -> fmt::Result {
+    formatter
+      .debug_struct("GlobalRootSet")
+      .field("len", &self.len())
+      .finish()
+  }
+}
+
+impl GlobalRootSet {
+  pub(crate) fn new() -> Self {
+    Self::default()
+  }
+
+  /// Store an unbound value and return a handle that remains valid until
+  /// [`Self::release`] is called. Rooting is a no-GC operation, but accepting a
+  /// [`NoGcScope`] makes the storage boundary explicit at every call site.
+  pub(crate) fn root<'gc>(
+    &self,
+    value: TaggedValue<'gc>,
+    _gc: NoGcScope<'gc, '_>,
+  ) -> Result<GlobalRoot, RootError> {
+    let mut state = self.state.borrow_mut();
+    if let Some(index) = state.free.pop() {
+      let slot = state
+        .slots
+        .get_mut(index as usize)
+        .expect("global root free-list entry must name a slot");
+      debug_assert!(slot.value.is_none());
+      slot.value = Some(value.unbind());
+      return Ok(GlobalRoot {
+        index,
+        generation: slot.generation,
+      });
+    }
+
+    let index = u32::try_from(state.slots.len()).map_err(|_| RootError::GlobalCapacityExhausted)?;
+    state.slots.push(GlobalRootSlot {
+      value: Some(value.unbind()),
+      generation: 0,
+    });
+    Ok(GlobalRoot {
+      index,
+      generation: 0,
+    })
+  }
+
+  /// Recover and rebind a persistent value for the current no-GC epoch.
+  pub(crate) fn get<'gc>(
+    &self,
+    root: GlobalRoot,
+    gc: NoGcScope<'gc, '_>,
+  ) -> Result<TaggedValue<'gc>, RootError> {
+    let state = self.state.borrow();
+    let slot = state
+      .slots
+      .get(root.index as usize)
+      .filter(|slot| slot.value.is_some() && slot.generation == root.generation)
+      .ok_or(RootError::StaleGlobalRoot {
+        index: root.index,
+        generation: root.generation,
+      })?;
+    Ok(
+      slot
+        .value
+        .expect("global root slot was checked to contain a value")
+        .bind(gc),
+    )
+  }
+
+  /// Explicitly release a persistent root. Releasing twice, or releasing a
+  /// handle after its slot has been reused, is rejected as a stale-handle use.
+  pub(crate) fn release(
+    &self,
+    root: GlobalRoot,
+  ) -> Result<(), RootError> {
+    let mut state = self.state.borrow_mut();
+    let slot = state
+      .slots
+      .get_mut(root.index as usize)
+      .filter(|slot| slot.value.is_some() && slot.generation == root.generation)
+      .ok_or(RootError::StaleGlobalRoot {
+        index: root.index,
+        generation: root.generation,
+      })?;
+
+    slot.value = None;
+    // A slot at the terminal generation is quarantined rather than wrapped.
+    // Wrapping would make an arbitrarily old host handle valid again (the ABA
+    // problem), while quarantining preserves stale-handle detection forever.
+    if slot.generation != u32::MAX {
+      slot.generation += 1;
+      state.free.push(root.index);
+    }
+    Ok(())
+  }
+
+  pub(crate) fn len(&self) -> usize {
+    self
+      .state
+      .borrow()
+      .slots
+      .iter()
+      .filter(|slot| slot.value.is_some())
+      .count()
+  }
+
+  /// Rewrite every stored heap reference after arena compaction.
+  pub(crate) fn rewrite_heap_handles(
+    &self,
+    mut rewrite: impl FnMut(HeapHandle<'static>) -> HeapHandle<'static>,
+    _gc: GcScope<'_, '_>,
+  ) {
+    for slot in self.state.borrow_mut().slots.iter_mut() {
+      if let Some(value) = slot.value.as_mut() {
+        value.rewrite_heap_handle(&mut rewrite);
+      }
     }
   }
 }
@@ -174,8 +371,14 @@ pub(crate) enum RootError {
   #[error("scoped root set exhausted its 32-bit index")]
   CapacityExhausted,
 
+  #[error("global root set exhausted its 32-bit index")]
+  GlobalCapacityExhausted,
+
   #[error("scoped root {index} has already been released")]
   Released { index: u32 },
+
+  #[error("global root {index} generation {generation} is stale")]
+  StaleGlobalRoot { index: u32, generation: u32 },
 }
 
 use thiserror::Error;
@@ -247,10 +450,7 @@ mod tests {
       .root(value, gc.nogc())
       .unwrap_or_else(|error| panic!("{error}"));
 
-    {
-      let _safepoint = gc.reborrow();
-      roots.rewrite_heap_handles(|handle| HeapHandle::new(handle.kind(), 3));
-    }
+    roots.rewrite_heap_handles(|handle| HeapHandle::new(handle.kind(), 3), gc.reborrow());
 
     let rebound = rooted
       .get(gc.nogc())
@@ -259,5 +459,98 @@ mod tests {
     assert_eq!(roots.len(), 1);
     drop(rooted);
     assert_eq!(roots.len(), 0);
+  }
+
+  #[test]
+  fn global_roots_survive_relocation_and_rebind() {
+    let roots = GlobalRootSet::new();
+    let mut context = GcContext::new();
+    let mut gc = context.scope();
+    let value = TaggedValue::heap(HeapHandle::new(HeapKind::Array, 7)).bind(gc.nogc());
+    let root = roots
+      .root(value, gc.nogc())
+      .unwrap_or_else(|error| panic!("{error}"));
+
+    roots.rewrite_heap_handles(|handle| HeapHandle::new(handle.kind(), 3), gc.reborrow());
+
+    let rebound = root
+      .get(&roots, gc.nogc())
+      .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(rebound.as_heap().map(HeapHandle::index), Some(3));
+    assert_eq!(roots.len(), 1);
+  }
+
+  #[test]
+  fn global_root_release_reuse_rejects_stale_handles() {
+    let roots = GlobalRootSet::new();
+    let mut context = GcContext::new();
+    let gc = context.scope();
+    let first = roots
+      .root(TaggedValue::UNDEFINED, gc.nogc())
+      .unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(roots.release(first), Ok(()));
+    assert_eq!(
+      roots.release(first),
+      Err(RootError::StaleGlobalRoot {
+        index: first.index(),
+        generation: first.generation(),
+      })
+    );
+
+    let replacement = roots
+      .root(TaggedValue::NULL, gc.nogc())
+      .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(replacement.index(), first.index());
+    assert_ne!(replacement.generation(), first.generation());
+    assert_eq!(
+      roots.get(first, gc.nogc()),
+      Err(RootError::StaleGlobalRoot {
+        index: first.index(),
+        generation: first.generation(),
+      })
+    );
+    assert_eq!(roots.get(replacement, gc.nogc()), Ok(TaggedValue::NULL));
+    assert_eq!(
+      roots.release(first),
+      Err(RootError::StaleGlobalRoot {
+        index: first.index(),
+        generation: first.generation(),
+      })
+    );
+    assert_eq!(roots.len(), 1);
+  }
+
+  #[test]
+  fn scoped_and_global_roots_have_independent_lifetimes_and_storage() {
+    let scoped_roots = RootSet::new();
+    let global_roots = GlobalRootSet::new();
+    let mut context = GcContext::new();
+    let gc = context.scope();
+    let scoped = scoped_roots
+      .root(TaggedValue::boolean(true), gc.nogc())
+      .unwrap_or_else(|error| panic!("{error}"));
+    let global = global_roots
+      .root(TaggedValue::boolean(false), gc.nogc())
+      .unwrap_or_else(|error| panic!("{error}"));
+
+    assert_eq!(scoped.get(gc.nogc()), Ok(TaggedValue::boolean(true)));
+    assert_eq!(
+      global_roots.get(global, gc.nogc()),
+      Ok(TaggedValue::boolean(false))
+    );
+    assert_eq!(scoped_roots.len(), 1);
+    assert_eq!(global_roots.len(), 1);
+
+    drop(scoped);
+    assert_eq!(scoped_roots.len(), 0);
+    assert_eq!(
+      global_roots.get(global, gc.nogc()),
+      Ok(TaggedValue::boolean(false))
+    );
+    global_roots
+      .release(global)
+      .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(global_roots.len(), 0);
   }
 }

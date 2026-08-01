@@ -8,7 +8,7 @@
 
 #![allow(dead_code, reason = "introduced ahead of the staged Value migration")]
 
-use super::scope::{GcToken, NoGcScope};
+use super::scope::{GcScope, GcToken, NoGcScope};
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
@@ -229,11 +229,16 @@ impl<T> HeapArena<T> {
 impl<T: HeapMarkAndSweep> HeapArena<T> {
   /// Trace within this arena, compact it, and update every retained edge.
   ///
+  /// The [`GcScope`] argument makes relocation an explicit safepoint: obtaining
+  /// it requires an exclusive reborrow, so an epoch-bound handle cannot remain
+  /// usable across this call. Roots and heap storage must be unbound first.
+  ///
   /// A complete VM heap collector performs the same operation across all typed
   /// arenas with per-kind work queues and compaction maps.
   pub(crate) fn collect(
     &mut self,
     roots: impl IntoIterator<Item = HeapIndex<'static, T>>,
+    _gc: GcScope<'_, '_>,
   ) -> Result<(HeapCollectionStats, Compaction), HeapError> {
     let mut marked = vec![false; self.values.len()];
     let mut worklist: Vec<_> = roots.into_iter().collect();
@@ -371,7 +376,7 @@ mod tests {
   #[test]
   fn collection_compacts_and_rewrites_heap_internal_edges() {
     let mut context = GcContext::new();
-    let gc = context.scope();
+    let mut gc = context.scope();
     let nogc = gc.nogc();
     let mut arena = HeapArena::new();
     let garbage = arena
@@ -393,8 +398,9 @@ mod tests {
     assert_eq!(child.index(), 1);
     assert_eq!(root.index(), 2);
 
+    let root = root.unbind();
     let (stats, compaction) = arena
-      .collect([root.unbind()])
+      .collect([root], gc.reborrow())
       .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(
       stats,
@@ -405,10 +411,8 @@ mod tests {
       }
     );
 
-    let mut relocated_root = root.unbind();
+    let mut relocated_root = root;
     compaction.shift(&mut relocated_root);
-    let mut context = GcContext::new();
-    let gc = context.scope();
     let nogc = gc.nogc();
     let relocated_root = relocated_root.bind(nogc);
     let root_record = arena

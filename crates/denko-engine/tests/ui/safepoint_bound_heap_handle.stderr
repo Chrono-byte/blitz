@@ -1,0 +1,10 @@
+error[E0502]: cannot borrow `gc` as mutable because it is also borrowed as immutable
+  --> tests/ui/safepoint_bound_heap_handle.rs:17:20
+   |
+15 |   let handle = arena.allocate((), gc.nogc()).unwrap();
+   |                                   -- immutable borrow occurs here
+16 |
+17 |   let _safepoint = gc.reborrow();
+   |                    ^^^^^^^^^^^^^ mutable borrow occurs here
+18 |   let _ = arena.get(handle, gc.nogc());
+   |                     ------ immutable borrow later used here

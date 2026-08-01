@@ -52,6 +52,7 @@ unicode-normalization = "0.1.25"
 
 [dev-dependencies]
 criterion.workspace = true
+trybuild = "1.0.118"
 
 [lints]
 workspace = true
