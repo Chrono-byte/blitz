@@ -16,6 +16,11 @@ use std::collections::HashSet;
 
 const LINE: u32 = 1;
 
+enum PreparedPropertyKey {
+  Constant(Value),
+  Local(usize),
+}
+
 impl super::Compiler {
   fn binding_identifier_name(pattern: &oast::BindingPattern<'_>) -> Option<String> {
     match pattern {
@@ -43,9 +48,46 @@ impl super::Compiler {
     }
   }
 
+  fn emit_prepared_property_key(
+    &mut self,
+    key: &PreparedPropertyKey,
+  ) -> Result<(), crate::errors::CompilerError> {
+    match key {
+      PreparedPropertyKey::Constant(value) => self.emit_constant(value.clone(), LINE),
+      PreparedPropertyKey::Local(slot) => {
+        self.emit(Op::LoadLocal, LINE);
+        self.emit_byte(self.slot_to_u8(*slot)?, LINE);
+      }
+    }
+    Ok(())
+  }
+
+  fn compile_destructuring_property_key(
+    &mut self,
+    key: &oast::PropertyKey<'_>,
+  ) -> Result<PreparedPropertyKey, crate::errors::CompilerError> {
+    if let Some(value) = Self::binding_property_key_to_value(key) {
+      self.emit_constant(value.clone(), LINE);
+      return Ok(PreparedPropertyKey::Constant(value));
+    }
+    let expression = key.as_expression().ok_or_else(|| {
+      crate::errors::CompilerError::from("unsupported destructuring property key")
+    })?;
+    self.emit_get_builtin_name("toPropertyKey");
+    self.compile_expr_oast(expression)?;
+    self.emit(Op::Call, LINE);
+    self.emit_byte(1, LINE);
+    let slot = self.alloc_temp_local("destructuring_property_key");
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(self.slot_to_u8(slot)?, LINE);
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(slot)?, LINE);
+    Ok(PreparedPropertyKey::Local(slot))
+  }
+
   fn compile_object_rest_value(
     &mut self,
-    excluded: &[Value],
+    excluded: &[PreparedPropertyKey],
   ) -> Result<(), crate::errors::CompilerError> {
     let source_slot = self.alloc_temp_local("object_rest_source");
     self.emit(Op::StoreLocal, LINE);
@@ -54,7 +96,7 @@ impl super::Compiler {
     self.emit(Op::LoadLocal, LINE);
     self.emit_byte(self.slot_to_u8(source_slot)?, LINE);
     for key in excluded {
-      self.emit_constant(key.clone(), LINE);
+      self.emit_prepared_property_key(key)?;
     }
     self.emit(Op::Call, LINE);
     self.emit_byte(
@@ -497,7 +539,7 @@ impl super::Compiler {
       match prop {
         oast::AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(p) => {
           let key = Value::String(p.binding.name.to_string().into());
-          excluded.push(key.clone());
+          excluded.push(PreparedPropertyKey::Constant(key.clone()));
           self.emit(Op::Copy, LINE);
           self.emit_constant(key, LINE);
           self.emit(Op::GetProperty, LINE);
@@ -533,14 +575,11 @@ impl super::Compiler {
           self.store_assignment_identifier(p.binding.name.as_str())?;
         }
         oast::AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
-          let key = Self::binding_property_key_to_value(&p.name).ok_or_else(|| {
-            crate::errors::CompilerError::from("unsupported object assignment key")
-          })?;
-          excluded.push(key.clone());
           self.emit(Op::Copy, LINE);
-          self.emit_constant(key, LINE);
+          let key = self.compile_destructuring_property_key(&p.name)?;
           self.emit(Op::GetProperty, LINE);
           self.compile_assignment_target_maybe_default_oast(&p.binding)?;
+          excluded.push(key);
         }
       }
     }
@@ -686,13 +725,11 @@ impl super::Compiler {
         self.emit_byte(1, LINE);
         let mut excluded = Vec::with_capacity(o.properties.len());
         for prop in &o.properties {
-          let key = Self::binding_property_key_to_value(&prop.key)
-            .ok_or_else(|| crate::errors::CompilerError::from("unsupported object binding key"))?;
-          excluded.push(key.clone());
           self.emit(Op::Copy, LINE);
-          self.emit_constant(key, LINE);
+          let key = self.compile_destructuring_property_key(&prop.key)?;
           self.emit(Op::GetProperty, LINE);
           self.compile_binding_pattern_assignment_oast(&prop.value, kind)?;
+          excluded.push(key);
         }
         if let Some(rest) = &o.rest {
           self.compile_object_rest_value(&excluded)?;

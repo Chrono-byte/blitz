@@ -768,6 +768,23 @@ impl super::Compiler {
         self.emit_get_binding(name);
       }
       OExpr::AssignmentExpression(a) => {
+        if matches!(a.operator, oast::AssignmentOperator::Assign) {
+          match &a.left {
+            oast::AssignmentTarget::ArrayAssignmentTarget(target) => {
+              self.compile_expr_oast(&a.right)?;
+              self.emit(Op::Copy, LINE);
+              self.compile_array_assignment_target(target)?;
+              return Ok(());
+            }
+            oast::AssignmentTarget::ObjectAssignmentTarget(target) => {
+              self.compile_expr_oast(&a.right)?;
+              self.emit(Op::Copy, LINE);
+              self.compile_object_assignment_target(target)?;
+              return Ok(());
+            }
+            _ => {}
+          }
+        }
         let target = a
           .left
           .as_simple_assignment_target()

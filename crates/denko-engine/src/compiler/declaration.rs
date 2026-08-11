@@ -586,50 +586,71 @@ impl Compiler {
         if let Some(init) = &f.init {
           match init {
             OForInit::VariableDeclaration(v) => {
-              for dec in &v.declarations {
-                if let Some(init) = &dec.init {
-                  self.compile_expr_oast(init)?;
-                } else {
-                  self.emit(Op::Undefined, LINE);
-                }
-                let name = match &dec.id {
-                  OPat::BindingIdentifier(i) => i.name.to_string(),
-                  _ => {
-                    return Err(crate::errors::CompilerError::from(
-                      "unsupported var pattern",
-                    ));
+              if v
+                .declarations
+                .iter()
+                .all(|declaration| matches!(declaration.id, OPat::BindingIdentifier(_)))
+              {
+                for declaration in &v.declarations {
+                  if let Some(initializer) = &declaration.init {
+                    self.compile_expr_oast(initializer)?;
+                  } else {
+                    self.emit(Op::Undefined, LINE);
                   }
-                };
-                let mirror_global =
-                  self.is_root && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
-                let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
-                  self
-                    .resolve_local(&name)
-                    .unwrap_or_else(|| self.add_var_local(name.clone(), None, mirror_global))
-                } else {
-                  self.add_local_with_mirror(name.clone(), None, mirror_global)
-                };
-                if !matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
-                  self.mark_local_tdz(slot);
-                  self.add_lexical_binding(&name);
+                  let OPat::BindingIdentifier(identifier) = &declaration.id else {
+                    unreachable!("simple for declarations were checked above");
+                  };
+                  let name = identifier.name.to_string();
+                  let mirror_global =
+                    self.is_root && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
+                  let slot = if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+                    self
+                      .resolve_local(&name)
+                      .unwrap_or_else(|| self.add_var_local(name.clone(), None, mirror_global))
+                  } else {
+                    self.add_local_with_mirror(name.clone(), None, mirror_global)
+                  };
+                  if !matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
+                    self.mark_local_tdz(slot);
+                    self.add_lexical_binding(&name);
+                  }
+                  if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
+                    self.mark_local_immutable(slot);
+                  }
+                  if matches!(
+                    v.kind,
+                    oxc_ast::ast::VariableDeclarationKind::Let
+                      | oxc_ast::ast::VariableDeclarationKind::Const
+                  ) {
+                    per_iteration_slots.push(slot);
+                  }
+                  if mirror_global {
+                    self.emit(Op::Copy, LINE);
+                  }
+                  self.emit(Op::StoreLocal, LINE);
+                  self.emit_byte(self.slot_to_u8(slot)?, LINE);
+                  if mirror_global {
+                    self.emit_set_global_name(&name);
+                  }
                 }
-                if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
-                  self.mark_local_immutable(slot);
-                }
+              } else {
+                self.compile_variable_declaration_oast(v)?;
                 if matches!(
                   v.kind,
                   oxc_ast::ast::VariableDeclarationKind::Let
                     | oxc_ast::ast::VariableDeclarationKind::Const
                 ) {
-                  per_iteration_slots.push(slot);
-                }
-                if mirror_global {
-                  self.emit(Op::Copy, LINE);
-                }
-                self.emit(Op::StoreLocal, LINE);
-                self.emit_byte(self.slot_to_u8(slot)?, LINE);
-                if mirror_global {
-                  self.emit_set_global_name(&name);
+                  let mut names = HashSet::new();
+                  for declaration in &v.declarations {
+                    self.add_var_names_from_binding(&declaration.id, &mut names);
+                  }
+                  let mut names: Vec<_> = names.into_iter().collect();
+                  names.sort();
+                  for name in names {
+                    if let Some(slot) = self.resolve_local(&name) {
+                      per_iteration_slots.push(slot);
+                    }
+                  }
                 }
               }
             }

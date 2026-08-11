@@ -77,6 +77,14 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
     })),
   );
   intrinsics.hidden_builtins.insert(
+    "toPropertyKey".to_string(),
+    Value::Builtin(Rc::new(|vm, args| {
+      let value = args.first().cloned().unwrap_or(Value::Undefined);
+      let key = vm.to_property_key(&value)?;
+      Ok(crate::ecmascript::semantics::property_key_to_value(&key))
+    })),
+  );
+  intrinsics.hidden_builtins.insert(
     "copyDataProperties".to_string(),
     Value::Builtin(Rc::new(|vm, args| {
       let source = vm.to_object_value(args.first().cloned().unwrap_or(Value::Undefined))?;

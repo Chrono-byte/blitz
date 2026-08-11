@@ -1072,6 +1072,68 @@ mod test {
   }
 
   #[test]
+  fn destructuring_assignment_preserves_completion_value() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let first;
+        let second;
+        const source = [1, { value: 2 }];
+        const completion = ([first, { value: second }] = source);
+        globalThis.destructuring_assignment_result =
+          completion === source && first === 1 && second === 2;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("destructuring_assignment_result"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn destructuring_patterns_work_in_classic_for_initializers() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let total = 0;
+        for (let [index, step] = [0, 2]; index < 3; index = index + 1) {
+          total = total + step;
+        }
+        globalThis.classic_for_destructuring_result = total;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("classic_for_destructuring_result"),
+      Some(Value::Number(6.0))
+    );
+  }
+
+  #[test]
+  fn computed_destructuring_keys_are_coerced_once_and_excluded_from_rest() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        let evaluations = 0;
+        function key() {
+          evaluations = evaluations + 1;
+          return "selected";
+        }
+        const { [key()]: selected, ...rest } = { selected: 1, retained: 2 };
+        let assigned;
+        let assignedRest;
+        ({ [key()]: assigned, ...assignedRest } = { selected: 3, retained: 4 });
+        globalThis.computed_destructuring_result =
+          evaluations === 2 && selected === 1 && rest.retained === 2 && !("selected" in rest) &&
+          assigned === 3 && assignedRest.retained === 4 && !("selected" in assignedRest);
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("computed_destructuring_result"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
   fn risc_core_execution_handles_control_flow() {
     let source = crate::js!(
       r#"
