@@ -29,6 +29,125 @@ impl Compiler {
     }
   }
 
+  fn emit_handler_pops_to(
+    &mut self,
+    depth: usize,
+  ) {
+    for _ in depth..self.handler_depth {
+      self.emit(Op::PopHandler, LINE);
+    }
+  }
+
+  fn nearest_finally_index(&self) -> Option<usize> {
+    self
+      .finally_patches
+      .iter()
+      .enumerate()
+      .rev()
+      .find_map(|(index, state)| (!state.in_finalizer).then_some(index))
+  }
+
+  fn emit_control_via_finally(
+    &mut self,
+    is_continue: bool,
+    loop_index: usize,
+    label_index: Option<usize>,
+  ) -> Result<bool, crate::errors::CompilerError> {
+    let Some(index) = self.nearest_finally_index() else {
+      return Ok(false);
+    };
+    let flag_slot = self.alloc_temp_local(if is_continue {
+      "finally_continue"
+    } else {
+      "finally_break"
+    });
+    self.emit(Op::True, LINE);
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(self.slot_to_u8(flag_slot)?, LINE);
+    let target_depth = if label_index.is_some() {
+      loop_index
+    } else {
+      loop_index + 1
+    };
+    self.emit_iterator_closes_above(target_depth)?;
+    self.emit_handler_pops_to(self.finally_patches[index].handler_depth);
+    self.emit_with_env_pops();
+    self.emit(Op::Jump, LINE);
+    let patch_pos = self.current_ip();
+    self.emit_byte(0, LINE);
+    self.emit_byte(0, LINE);
+    let crossed: Vec<usize> = self.finally_patches[..=index]
+      .iter()
+      .enumerate()
+      .rev()
+      .filter(|(_, state)| !state.in_finalizer && target_depth <= state.loop_depth)
+      .map(|(state_index, _)| state_index)
+      .collect();
+    let state = self
+      .finally_patches
+      .get_mut(index)
+      .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
+    state.entry_jumps.push(patch_pos);
+    for (position, state_index) in crossed.iter().enumerate() {
+      self.finally_patches[*state_index]
+        .control_actions
+        .push(crate::compiler::core::FinallyControlAction {
+          flag_slot,
+          is_continue,
+          loop_index,
+          label_index,
+          next_finally: crossed.get(position + 1).copied(),
+        });
+    }
+    Ok(true)
+  }
+
+  fn emit_control_dispatch(
+    &mut self,
+    index: usize,
+  ) -> Result<(), crate::errors::CompilerError> {
+    let actions = self
+      .finally_patches
+      .get(index)
+      .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?
+      .control_actions
+      .clone();
+    for action in actions {
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(action.flag_slot)?, LINE);
+      self.emit(Op::JumpIfFalse, LINE);
+      let skip = self.current_ip();
+      self.emit_byte(0, LINE);
+      self.emit_byte(0, LINE);
+      self.emit(Op::Jump, LINE);
+      let patch_pos = self.current_ip();
+      self.emit_byte(0, LINE);
+      self.emit_byte(0, LINE);
+      if let Some(next_finally) = action.next_finally {
+        self.emit_handler_pops_to(self.finally_patches[next_finally].handler_depth);
+        self.finally_patches[next_finally]
+          .entry_jumps
+          .push(patch_pos);
+      } else if action.is_continue {
+        if let Some(label_index) = action.label_index {
+          self.label_patches[label_index]
+            .continue_patches
+            .push(patch_pos);
+        } else {
+          self.continue_patches[action.loop_index].push(patch_pos);
+        }
+      } else if let Some(label_index) = action.label_index {
+        self.label_patches[label_index]
+          .break_patches
+          .push(patch_pos);
+      } else {
+        self.break_patches[action.loop_index].push(patch_pos);
+      }
+      self.patch_jump(skip);
+    }
+    Ok(())
+  }
+
   fn emit_iterator_closes_above(
     &mut self,
     target_loop_depth: usize,
@@ -366,10 +485,18 @@ impl Compiler {
       OStmt::SwitchStatement(s) => {
         // Evaluate discriminant once and store in a local slot.
         self.compile_expr_oast(&s.discriminant)?;
-        let discr_name = format!("__switch_discriminant_{}", self.locals.len());
-        let discr_slot = self.add_local_with_mirror(discr_name, None, false);
+        let discr_name = format!("\0switch_discriminant_{}", self.locals.len());
+        let discr_slot =
+          self.add_local_in_scope(self.current_function_scope_index(), discr_name, None, false);
         self.emit(Op::StoreLocal, LINE);
         self.emit_byte(self.slot_to_u8(discr_slot)?, LINE);
+
+        // Case clauses share one lexical environment, instantiated before any
+        // case selector or consequent is evaluated.
+        self.enter_block_scope();
+        for case in &s.cases {
+          self.pre_declare_variables_oast_stmts(&case.consequent);
+        }
 
         // `break` inside a switch should jump to switch end.
         self.break_patches.push(Vec::new());
@@ -433,6 +560,7 @@ impl Compiler {
             self.patch_jump_to_target(patch_pos, switch_end);
           }
         }
+        self.exit_scope();
       }
       OStmt::WhileStatement(w) => {
         self.loop_depth += 1;
@@ -578,6 +706,9 @@ impl Compiler {
       }
       OStmt::ForStatement(f) => {
         use oxc_ast::ast::ForStatementInit as OForInit;
+        // The initializer's lexical declarations belong to a scope enclosing
+        // the test, update, and body, but not code after the loop.
+        self.enter_block_scope();
         self.loop_depth += 1;
         self.continue_patches.push(Vec::new());
         self.break_patches.push(Vec::new());
@@ -737,8 +868,10 @@ impl Compiler {
           self.patch_jump_list(break_patches, loop_end);
         }
         self.loop_depth = self.loop_depth.saturating_sub(1);
+        self.exit_scope();
       }
       OStmt::ForOfStatement(f) => {
+        self.enter_block_scope();
         self.loop_depth += 1;
         self.continue_patches.push(Vec::new());
         self.break_patches.push(Vec::new());
@@ -768,8 +901,12 @@ impl Compiler {
           self.emit_byte(0, LINE);
         }
 
-        let iterator_slot =
-          self.add_local_with_mirror(format!("__forof_iter_{}", self.locals.len()), None, false);
+        let iterator_slot = self.add_local_in_scope(
+          self.current_function_scope_index(),
+          format!("\0forof_iter_{}", self.locals.len()),
+          None,
+          false,
+        );
         self.emit(Op::StoreLocal, LINE);
         self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
 
@@ -957,8 +1094,10 @@ impl Compiler {
           self.emit_byte(self.slot_to_u8(loop_completion_slot)?, LINE);
         }
         self.loop_depth = self.loop_depth.saturating_sub(1);
+        self.exit_scope();
       }
       OStmt::ForInStatement(f) => {
+        self.enter_block_scope();
         self.loop_depth += 1;
         self.continue_patches.push(Vec::new());
         self.break_patches.push(Vec::new());
@@ -992,14 +1131,22 @@ impl Compiler {
         self.emit(Op::Call, LINE);
         self.emit_byte(1, LINE);
 
-        let keys_slot =
-          self.add_local_with_mirror(format!("__forin_keys_{}", self.locals.len()), None, false);
+        let keys_slot = self.add_local_in_scope(
+          self.current_function_scope_index(),
+          format!("\0forin_keys_{}", self.locals.len()),
+          None,
+          false,
+        );
         self.emit(Op::StoreLocal, LINE);
         self.emit_byte(self.slot_to_u8(keys_slot)?, LINE);
 
         self.emit_constant(Value::Number(0.0), LINE);
-        let index_slot =
-          self.add_local_with_mirror(format!("__forin_i_{}", self.locals.len()), None, false);
+        let index_slot = self.add_local_in_scope(
+          self.current_function_scope_index(),
+          format!("\0forin_i_{}", self.locals.len()),
+          None,
+          false,
+        );
         self.emit(Op::StoreLocal, LINE);
         self.emit_byte(self.slot_to_u8(index_slot)?, LINE);
 
@@ -1142,16 +1289,17 @@ impl Compiler {
           self.patch_jump_list(break_patches, loop_end);
         }
         self.loop_depth = self.loop_depth.saturating_sub(1);
+        self.exit_scope();
       }
       OStmt::ReturnStatement(r) => {
-        let return_target = self.finally_patches.last().and_then(|state| {
-          if state.in_finalizer {
-            None
-          } else {
-            Some((state.return_slot, state.did_return_slot))
-          }
+        let return_target = self.nearest_finally_index().map(|index| {
+          (
+            index,
+            self.finally_patches[index].return_slot,
+            self.finally_patches[index].did_return_slot,
+          )
         });
-        if let Some((return_slot, did_return_slot)) = return_target {
+        if let Some((finally_index, return_slot, did_return_slot)) = return_target {
           if let Some(arg) = &r.argument {
             self.compile_expr_oast(arg)?;
           } else {
@@ -1159,6 +1307,7 @@ impl Compiler {
           }
           self.emit(Op::StoreLocal, LINE);
           self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+          self.emit_handler_pops_to(self.finally_patches[finally_index].handler_depth);
           self.emit_with_env_pops();
           self.emit(Op::True, LINE);
           self.emit(Op::StoreLocal, LINE);
@@ -1167,8 +1316,13 @@ impl Compiler {
           let patch_pos = self.current_ip();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
-          if let Some(state) = self.finally_patches.last_mut() {
-            state.return_jumps.push(patch_pos);
+          if let Some(index) = self.nearest_finally_index() {
+            let state = &mut self.finally_patches[index];
+            if state.in_catch {
+              state.catch_return_jumps.push(patch_pos);
+            } else {
+              state.return_jumps.push(patch_pos);
+            }
           }
           return Ok(());
         }
@@ -1212,6 +1366,9 @@ impl Compiler {
             ));
           }
           let target_loop_depth = self.label_patches[idx].owner_loop_depth;
+          if self.emit_control_via_finally(true, target_loop_depth, Some(idx))? {
+            return Ok(());
+          }
           self.emit_iterator_closes_above(target_loop_depth)?;
           self.emit_with_env_pops();
           self.emit(Op::Jump, LINE);
@@ -1226,6 +1383,10 @@ impl Compiler {
             return Err(crate::errors::CompilerError::from(
               "SyntaxError: 'continue' used outside of a loop",
             ));
+          }
+          let loop_index = self.continue_patches.len() - 1;
+          if self.emit_control_via_finally(true, loop_index, None)? {
+            return Ok(());
           }
           self.emit_with_env_pops();
           self.emit(Op::Jump, LINE);
@@ -1251,6 +1412,9 @@ impl Compiler {
               ))
             })?;
           let target_loop_depth = self.label_patches[idx].owner_loop_depth;
+          if self.emit_control_via_finally(false, target_loop_depth, Some(idx))? {
+            return Ok(());
+          }
           self.emit_iterator_closes_above(target_loop_depth)?;
           self.emit_with_env_pops();
           self.emit(Op::Jump, LINE);
@@ -1265,6 +1429,10 @@ impl Compiler {
             return Err(crate::errors::CompilerError::from(
               "SyntaxError: 'break' used outside of a loop",
             ));
+          }
+          let loop_index = self.break_patches.len() - 1;
+          if self.emit_control_via_finally(false, loop_index, None)? {
+            return Ok(());
           }
           self.emit_with_env_pops();
           self.emit(Op::Jump, LINE);
@@ -1295,12 +1463,12 @@ impl Compiler {
         let finalizer = t.finalizer.as_ref();
         if finalizer.is_some() {
           let return_slot = self.add_local_with_mirror(
-            format!("__finally_return_{}", self.locals.len()),
+            format!("\0finally_return_{}", self.locals.len()),
             None,
             false,
           );
           let did_return_slot = self.add_local_with_mirror(
-            format!("__finally_did_return_{}", self.locals.len() + 1),
+            format!("\0finally_did_return_{}", self.locals.len() + 1),
             None,
             false,
           );
@@ -1316,7 +1484,13 @@ impl Compiler {
               return_slot,
               did_return_slot,
               return_jumps: Vec::new(),
+              catch_return_jumps: Vec::new(),
+              entry_jumps: Vec::new(),
+              control_actions: Vec::new(),
+              handler_depth: self.handler_depth,
+              loop_depth: self.loop_depth,
               in_finalizer: false,
+              in_catch: false,
             });
         }
         let finally_idx = finalizer
@@ -1356,7 +1530,10 @@ impl Compiler {
             self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
           }
           self.exit_scope();
-          let (did_return_slot, return_slot, return_jumps) = {
+          let outer_finally_idx = self.finally_patches[..finally_idx]
+            .iter()
+            .rposition(|state| !state.in_finalizer);
+          let (did_return_slot, return_slot, return_jumps, entry_jumps) = {
             let state = self
               .finally_patches
               .get_mut(finally_idx)
@@ -1366,9 +1543,10 @@ impl Compiler {
               state.did_return_slot,
               state.return_slot,
               std::mem::take(&mut state.return_jumps),
+              std::mem::take(&mut state.entry_jumps),
             )
           };
-          for patch_pos in return_jumps {
+          for patch_pos in return_jumps.into_iter().chain(entry_jumps) {
             self.patch_jump_to_target(patch_pos, body_start);
           }
           self
@@ -1386,18 +1564,39 @@ impl Compiler {
           let skip_return = self.current_ip();
           self.emit_byte(0, LINE);
           self.emit_byte(0, LINE);
-          self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
-          if !self.iterator_close_stack.is_empty() {
-            let pending_return_slot = self.alloc_temp_local("finally_return_value");
-            self.emit(Op::StoreLocal, LINE);
-            self.emit_byte(self.slot_to_u8(pending_return_slot)?, LINE);
-            self.emit_iterator_closes_above(0)?;
+          if let Some(outer_idx) = outer_finally_idx {
+            let outer_return_slot = self.finally_patches[outer_idx].return_slot;
+            let outer_did_return_slot = self.finally_patches[outer_idx].did_return_slot;
             self.emit(Op::LoadLocal, LINE);
-            self.emit_byte(self.slot_to_u8(pending_return_slot)?, LINE);
+            self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+            self.emit(Op::StoreLocal, LINE);
+            self.emit_byte(self.slot_to_u8(outer_return_slot)?, LINE);
+            self.emit(Op::True, LINE);
+            self.emit(Op::StoreLocal, LINE);
+            self.emit_byte(self.slot_to_u8(outer_did_return_slot)?, LINE);
+            self.emit_handler_pops_to(self.finally_patches[outer_idx].handler_depth);
+            self.emit(Op::Jump, LINE);
+            let outer_jump = self.current_ip();
+            self.emit_byte(0, LINE);
+            self.emit_byte(0, LINE);
+            self.finally_patches[outer_idx]
+              .entry_jumps
+              .push(outer_jump);
+          } else {
+            self.emit(Op::LoadLocal, LINE);
+            self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+            if !self.iterator_close_stack.is_empty() {
+              let pending_return_slot = self.alloc_temp_local("finally_return_value");
+              self.emit(Op::StoreLocal, LINE);
+              self.emit_byte(self.slot_to_u8(pending_return_slot)?, LINE);
+              self.emit_iterator_closes_above(0)?;
+              self.emit(Op::LoadLocal, LINE);
+              self.emit_byte(self.slot_to_u8(pending_return_slot)?, LINE);
+            }
+            self.emit(Op::Return, LINE);
           }
-          self.emit(Op::Return, LINE);
           self.patch_jump(skip_return);
+          self.emit_control_dispatch(finally_idx)?;
         }
         self.emit(Op::Jump, LINE);
         let end_jump = self.current_ip();
@@ -1407,13 +1606,29 @@ impl Compiler {
         // Exception path starts here.
         self.patch_jump(handler_jump);
 
+        let mut catch_handler_jump = None;
         match handler {
           Some(handler) => {
+            if let Some(finally_idx) = finally_idx {
+              self.finally_patches[finally_idx].in_catch = true;
+            }
+            if finalizer.is_some() {
+              self.emit(Op::PushHandler, LINE);
+              catch_handler_jump = Some(self.current_ip());
+              self.emit_byte(0, LINE);
+              self.emit_byte(0, LINE);
+              self.handler_depth += 1;
+            }
             if let Some(param) = &handler.param {
               let name = match &param.pattern {
                 OPat::BindingIdentifier(i) => i.name.to_string(),
-                _ => "__catch_pattern".to_string(),
+                _ => "\0catch_pattern".to_string(),
               };
+              if let Some(error) =
+                Self::strict_binding_pattern_name_error(self.strict_context, &param.pattern)
+              {
+                return Err(error);
+              }
               self.enter_block_scope_with_vars(&handler.body.body);
               if !matches!(param.pattern, OPat::BindingIdentifier(_)) {
                 let mut binding_names = HashSet::new();
@@ -1449,6 +1664,13 @@ impl Compiler {
               self.exit_scope();
             }
 
+            if finalizer.is_some() {
+              self.handler_depth = self.handler_depth.saturating_sub(1);
+              self.emit(Op::PopHandler, LINE);
+            }
+            if let Some(finally_idx) = finally_idx {
+              self.finally_patches[finally_idx].in_catch = false;
+            }
             if let Some(fin) = finalizer {
               let finally_idx = finally_idx
                 .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
@@ -1459,16 +1681,84 @@ impl Compiler {
                   .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
                 state.in_finalizer = true;
               }
+              let catch_finalizer_start = self.current_ip();
               self.enter_block_scope_with_vars(&fin.body);
               for stmt in &fin.body {
                 self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
               }
               self.exit_scope();
-              let state = self
-                .finally_patches
-                .get_mut(finally_idx)
-                .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
-              state.in_finalizer = false;
+              let (did_return_slot, return_slot, catch_return_jumps) = {
+                let state = self
+                  .finally_patches
+                  .get_mut(finally_idx)
+                  .ok_or_else(|| crate::errors::CompilerError::from("finally state missing"))?;
+                state.in_finalizer = false;
+                (
+                  state.did_return_slot,
+                  state.return_slot,
+                  std::mem::take(&mut state.catch_return_jumps),
+                )
+              };
+              for patch_pos in catch_return_jumps {
+                self.patch_jump_to_target(patch_pos, catch_finalizer_start);
+              }
+              self.emit(Op::LoadLocal, LINE);
+              self.emit_byte(self.slot_to_u8(did_return_slot)?, LINE);
+              self.emit(Op::JumpIfFalse, LINE);
+              let skip_return = self.current_ip();
+              self.emit_byte(0, LINE);
+              self.emit_byte(0, LINE);
+              let outer_finally_idx = self.finally_patches[..finally_idx]
+                .iter()
+                .rposition(|state| !state.in_finalizer);
+              if let Some(outer_idx) = outer_finally_idx {
+                let outer_return_slot = self.finally_patches[outer_idx].return_slot;
+                let outer_did_return_slot = self.finally_patches[outer_idx].did_return_slot;
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+                self.emit(Op::StoreLocal, LINE);
+                self.emit_byte(self.slot_to_u8(outer_return_slot)?, LINE);
+                self.emit(Op::True, LINE);
+                self.emit(Op::StoreLocal, LINE);
+                self.emit_byte(self.slot_to_u8(outer_did_return_slot)?, LINE);
+                self.emit_handler_pops_to(self.finally_patches[outer_idx].handler_depth);
+                self.emit(Op::Jump, LINE);
+                let outer_jump = self.current_ip();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                self.finally_patches[outer_idx]
+                  .entry_jumps
+                  .push(outer_jump);
+              } else {
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(return_slot)?, LINE);
+                self.emit(Op::Return, LINE);
+              }
+              self.patch_jump(skip_return);
+              self.emit_control_dispatch(finally_idx)?;
+
+              if let Some(catch_handler_jump) = catch_handler_jump {
+                let thrown_slot =
+                  self.add_local_with_mirror("\0catch_finally_thrown".to_string(), None, false);
+                self.emit(Op::Jump, LINE);
+                let skip_abrupt_finalizer = self.current_ip();
+                self.emit_byte(0, LINE);
+                self.emit_byte(0, LINE);
+                self.patch_jump(catch_handler_jump);
+                self.emit(Op::StoreLocal, LINE);
+                self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+                self.finally_patches[finally_idx].in_finalizer = true;
+                self.enter_block_scope_with_vars(&fin.body);
+                for stmt in &fin.body {
+                  self.compile_statement_oast_with_mode(stmt, false, Some(try_completion_slot))?;
+                }
+                self.exit_scope();
+                self.finally_patches[finally_idx].in_finalizer = false;
+                self.emit(Op::LoadLocal, LINE);
+                self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+                self.emit(Op::Throw, LINE);
+                self.patch_jump(skip_abrupt_finalizer);
+              }
             }
           }
           None => {
@@ -1479,7 +1769,7 @@ impl Compiler {
               ));
             }
             self.enter_block_scope();
-            let slot = self.add_local_with_mirror("__finally_thrown".to_string(), None, false);
+            let slot = self.add_local_with_mirror("\0finally_thrown".to_string(), None, false);
             self.emit(Op::StoreLocal, LINE);
             self.emit_byte(self.slot_to_u8(slot)?, LINE);
             if let Some(fin) = finalizer {
@@ -2260,7 +2550,7 @@ impl Compiler {
 
     let has_simple_parameter_list = Self::has_simple_parameter_list(func);
     if !has_simple_parameter_list {
-      if body_has_use_strict && !func.generator {
+      if body_has_use_strict {
         return Err(crate::errors::CompilerError::from(
           "SyntaxError: non-simple parameter list in strict mode",
         ));
@@ -2356,28 +2646,29 @@ impl Compiler {
     } else {
       for _ in &func.params.items {
         raw_param_slots.push(inner.add_local_with_mirror(
-          format!("__param_raw_{}", raw_param_slots.len()),
+          format!("\0param_raw_{}", raw_param_slots.len()),
           None,
           false,
         ));
       }
       if func.params.rest.is_some() {
         raw_param_slots.push(inner.add_local_with_mirror(
-          "__param_raw_rest".to_string(),
+          "\0param_raw_rest".to_string(),
           None,
           false,
         ));
       }
-      for p in &func.params.items {
-        if let oast::BindingPattern::BindingIdentifier(i) = &p.pattern {
-          let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
-          inner.mark_local_tdz(slot);
-        }
+      let mut parameter_names = HashSet::new();
+      for parameter in &func.params.items {
+        Self::collect_binding_names(&parameter.pattern, &mut parameter_names);
       }
-      if let Some(rest) = &func.params.rest
-        && let oast::BindingPattern::BindingIdentifier(i) = &rest.rest.argument
-      {
-        let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
+      if let Some(rest) = &func.params.rest {
+        Self::collect_binding_names(&rest.rest.argument, &mut parameter_names);
+      }
+      let mut parameter_names: Vec<_> = parameter_names.into_iter().collect();
+      parameter_names.sort();
+      for parameter_name in parameter_names {
+        let slot = inner.add_local_with_mirror(parameter_name, None, false);
         inner.mark_local_tdz(slot);
       }
     }
@@ -2395,17 +2686,19 @@ impl Compiler {
     }
     let arguments_slot = inner.add_local_with_mirror("arguments".to_string(), None, false);
 
-    // Pre-declare nested functions inside this function body.
-    if let Some(body) = &func.body {
-      inner.pre_declare_variables_oast_stmts(&body.statements);
-      inner.pre_declare_functions_oast_stmts(&body.statements);
-      inner.emit_hoisted_function_decls_oast_stmts(&body.statements)?;
-    }
-
+    // Non-simple parameter initializers run in a parameter environment where
+    // declarations from the function body are not yet visible.
     if has_simple_parameter_list {
       inner.emit_parameter_initializers_from_current_slots(&func.params)?;
     } else {
       inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
+    }
+
+    // Instantiate body declarations only after parameter initialization.
+    if let Some(body) = &func.body {
+      inner.pre_declare_variables_oast_stmts(&body.statements);
+      inner.pre_declare_functions_oast_stmts(&body.statements);
+      inner.emit_hoisted_function_decls_oast_stmts(&body.statements)?;
     }
     if func.generator {
       inner.emit(Op::GeneratorInitDone, LINE);
@@ -2434,8 +2727,8 @@ impl Compiler {
     chunk.allow_super = inner.allow_super;
     let has_rest = func.params.rest.is_some();
     let has_simple_parameter_list = Self::has_simple_parameter_list(func);
+    let slot_names = inner.environment_slot_names();
     let slot_types = inner.local_types;
-    let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
     let lexical_tdz = inner.local_tdz;
     let has_prototype_property = !func.r#async;
     let is_constructor = !func.r#async && !func.generator;
@@ -2622,35 +2915,40 @@ impl Compiler {
     } else {
       for _ in &func.params.items {
         raw_param_slots.push(inner.add_local_with_mirror(
-          format!("__param_raw_{}", raw_param_slots.len()),
+          format!("\0param_raw_{}", raw_param_slots.len()),
           None,
           false,
         ));
       }
       if func.params.rest.is_some() {
         raw_param_slots.push(inner.add_local_with_mirror(
-          "__param_raw_rest".to_string(),
+          "\0param_raw_rest".to_string(),
           None,
           false,
         ));
       }
-      for p in &func.params.items {
-        if let oast::BindingPattern::BindingIdentifier(i) = &p.pattern {
-          let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
-          inner.mark_local_tdz(slot);
-        }
+      let mut parameter_names = HashSet::new();
+      for parameter in &func.params.items {
+        Self::collect_binding_names(&parameter.pattern, &mut parameter_names);
       }
-      if let Some(rest) = &func.params.rest
-        && let oast::BindingPattern::BindingIdentifier(i) = &rest.rest.argument
-      {
-        let slot = inner.add_local_with_mirror(i.name.to_string(), None, false);
+      if let Some(rest) = &func.params.rest {
+        Self::collect_binding_names(&rest.rest.argument, &mut parameter_names);
+      }
+      let mut parameter_names: Vec<_> = parameter_names.into_iter().collect();
+      parameter_names.sort();
+      for parameter_name in parameter_names {
+        let slot = inner.add_local_with_mirror(parameter_name, None, false);
         inner.mark_local_tdz(slot);
       }
     }
-    // Pre-declare nested functions inside this function body.
+    if !has_simple_parameter_list {
+      inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
+    }
+
+    // Arrow body declarations are likewise outside the non-simple parameter
+    // environment.
     inner.pre_declare_variables_oast_stmts(&func.body.statements);
     inner.pre_declare_functions_oast_stmts(&func.body.statements);
-
     inner.emit_hoisted_function_decls_oast_stmts(&func.body.statements)?;
 
     if has_simple_parameter_list {
@@ -2682,31 +2980,28 @@ impl Compiler {
         inner.emit(Op::Undefined, LINE);
         inner.emit(Op::Return, LINE);
       }
-    } else {
-      inner.emit_parameter_initializers_from_raw_slots(&func.params, &raw_param_slots)?;
-      if func.expression && func.body.statements.len() == 1 {
-        if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
-          inner.compile_expr_oast_tail(&expr_stmt.expression)?;
-          inner.emit(Op::Return, LINE);
-        } else {
-          for stmt in &func.body.statements {
-            if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-              inner.compile_statement_oast(stmt)?;
-            }
-          }
-          inner.emit(Op::Undefined, LINE);
-          inner.emit(Op::Return, LINE);
-        }
+    } else if func.expression && func.body.statements.len() == 1 {
+      if let oast::Statement::ExpressionStatement(expr_stmt) = &func.body.statements[0] {
+        inner.compile_expr_oast_tail(&expr_stmt.expression)?;
+        inner.emit(Op::Return, LINE);
       } else {
         for stmt in &func.body.statements {
-          if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
-            continue;
+          if !matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+            inner.compile_statement_oast(stmt)?;
           }
-          inner.compile_statement_oast(stmt)?;
         }
         inner.emit(Op::Undefined, LINE);
         inner.emit(Op::Return, LINE);
       }
+    } else {
+      for stmt in &func.body.statements {
+        if matches!(stmt, oast::Statement::FunctionDeclaration(_)) {
+          continue;
+        }
+        inner.compile_statement_oast(stmt)?;
+      }
+      inner.emit(Op::Undefined, LINE);
+      inner.emit(Op::Return, LINE);
     }
 
     let mut chunk = super::risc::RiscBuilder::finish(
@@ -2716,8 +3011,8 @@ impl Compiler {
     chunk.allow_new_target = inner.allow_new_target;
     chunk.allow_super = inner.allow_super;
     let has_rest = func.params.rest.is_some();
+    let slot_names = inner.environment_slot_names();
     let slot_types = inner.local_types;
-    let slot_names: Vec<Option<String>> = inner.locals.into_iter().map(Some).collect();
     let lexical_tdz = inner.local_tdz;
     Ok((
       FunctionProto {

@@ -516,7 +516,7 @@ impl Compiler {
     self.emit(Op::Return, LINE);
     if self.is_root {
       self.chunk.root_slot_types = self.local_types.clone();
-      self.chunk.root_slot_names = self.locals.iter().cloned().map(Some).collect();
+      self.chunk.root_slot_names = self.environment_slot_names();
       self.chunk.root_lexical_tdz = self.local_tdz.clone();
       self.chunk.root_slot_immutable = self.local_immutable.clone();
       self.chunk.root_strict = self.strict_context;
@@ -537,6 +537,7 @@ mod test {
 
   use crate::bytecode::{decode_compare_jump, decode_rd, decode_rs};
   use crate::compiler::compile;
+  use crate::runtime_utils;
   use crate::{Chunk, ModuleContext, ObjectData, Op, Value, Vm, compile_oxc_with_ctx};
 
   #[cfg(test)]
@@ -1131,6 +1132,154 @@ mod test {
       "unexpected hits value: {:?}",
       vm.get_global("hits")
     );
+  }
+
+  fn run_compiled(src: &str) -> Vm {
+    let session = crate::parser::Parser::parse_source(src).expect("parse ok");
+    let chunk = compile(session.program(), session.source()).expect("compile ok");
+    let globals = Rc::new(RefCell::new(ObjectData::new()));
+    globals.borrow_mut().properties.insert(
+      crate::value::PropertyKey::String("globalThis".to_string().into()),
+      crate::value::PropertyDescriptor::ordinary_data(Value::Object(Rc::clone(&globals))),
+    );
+    runtime_utils::install_minimal_kernel_constructors(&globals);
+    let mut vm = Vm::new(globals);
+    vm.run(chunk).expect("run ok");
+    vm
+  }
+
+  #[test]
+  fn object_literal_evaluates_mixed_properties_in_source_order() {
+    let vm = run_compiled(
+      r#"
+        let order = "";
+        function mark(label, value) { order += label; return value; }
+        const source = { get copied() { order += "g"; return 1; } };
+        const result = {
+          first: mark("a", 1),
+          get accessor() { return 2; },
+          [mark("k", "computed")]: mark("v", 3),
+          ...mark("s", source),
+          last: mark("z", 4)
+        };
+        globalThis.object_order = order;
+        globalThis.object_result = result.first + result.computed + result.copied + result.last;
+        globalThis.object_accessor = Object.getOwnPropertyDescriptor(result, "accessor").get !== undefined;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("object_order"),
+      Some(Value::String("akvsgz".into()))
+    );
+    assert_eq!(vm.get_global("object_result"), Some(Value::Number(9.0)));
+    assert_eq!(vm.get_global("object_accessor"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn template_interpolations_use_to_string_and_unary_plus_rejects_bigint() {
+    let vm = run_compiled(
+      r#"
+        const template_result = `${1n}:${true}:${null}:${undefined}`;
+        let unary_plus_threw = false;
+        try { +1n; } catch (error) { unary_plus_threw = error instanceof TypeError; }
+        globalThis.template_result = template_result;
+        globalThis.unary_plus_threw = unary_plus_threw;
+      "#,
+    );
+
+    assert_eq!(
+      vm.get_global("template_result"),
+      Some(Value::String("1:true:null:undefined".into()))
+    );
+    assert_eq!(vm.get_global("unary_plus_threw"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn optional_calls_return_undefined_and_call_present_values() {
+    let vm = run_compiled(
+      r#"
+        let calls = 0;
+        function present() { calls += 1; return 7; }
+        let absent;
+        const direct = present?.();
+        const missing = absent?.();
+        const receiver = { value: 9, method() { return this.value; } };
+        const member = receiver?.method();
+        globalThis.optional_direct = direct;
+        globalThis.optional_missing = missing;
+        globalThis.optional_member = member;
+        globalThis.optional_calls = calls;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("optional_direct"), Some(Value::Number(7.0)));
+    assert_eq!(vm.get_global("optional_missing"), Some(Value::Undefined));
+    assert_eq!(vm.get_global("optional_member"), Some(Value::Number(9.0)));
+    assert_eq!(vm.get_global("optional_calls"), Some(Value::Number(1.0)));
+  }
+
+  #[test]
+  fn lexical_scopes_parameters_and_compiler_temporaries_are_not_leaked() {
+    let vm = run_compiled(
+      r#"
+        let outer = 1;
+        let block_tdz = false;
+        try { { outer; let outer = 2; } } catch (_) { block_tdz = true; }
+        function blockScope() { { let hidden = 1; } return typeof hidden; }
+        for (let loopName = 0; loopName < 1; loopName++) {}
+        switch (1) { case 1: break; }
+        var parameterOuter = 42;
+        function parameterScope(value = parameterOuter) {
+          var parameterOuter = 1;
+          return value;
+        }
+        let laterParameterTdz = false;
+        try {
+          function later(value = nested, { nested }) { return value; }
+          later(undefined, { nested: 7 });
+        } catch (_) { laterParameterTdz = true; }
+        globalThis.block_tdz = block_tdz;
+        globalThis.block_scope = blockScope();
+        globalThis.loop_scope = typeof loopName;
+        globalThis.temporary_scope = typeof __switch_discriminant_0;
+        globalThis.parameter_scope = parameterScope();
+        globalThis.later_parameter_tdz = laterParameterTdz;
+      "#,
+    );
+
+    assert_eq!(vm.get_global("block_tdz"), Some(Value::Bool(true)));
+    assert_eq!(
+      vm.get_global("block_scope"),
+      Some(Value::String("undefined".into()))
+    );
+    assert_eq!(
+      vm.get_global("loop_scope"),
+      Some(Value::String("undefined".into()))
+    );
+    assert_eq!(
+      vm.get_global("temporary_scope"),
+      Some(Value::String("undefined".into()))
+    );
+    assert_eq!(vm.get_global("parameter_scope"), Some(Value::Number(42.0)));
+    assert_eq!(
+      vm.get_global("later_parameter_tdz"),
+      Some(Value::Bool(true))
+    );
+  }
+
+  #[test]
+  fn strict_early_errors_cover_generator_parameters_and_catch_bindings() {
+    for source in [
+      r#"function* invalid(value = 1) { "use strict"; }"#,
+      r#""use strict"; try { throw 1; } catch (eval) {}"#,
+    ] {
+      let session = crate::parser::Parser::parse_source(source).expect("parse ok");
+      assert!(
+        compile(session.program(), session.source()).is_err(),
+        "{source}"
+      );
+    }
   }
 
   #[test]

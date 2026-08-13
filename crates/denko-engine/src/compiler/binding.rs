@@ -210,10 +210,12 @@ impl super::Compiler {
     if self.scopes[scope_index]
       .lexical_bindings
       .contains(name)
+      && let Some(slot) = self.scopes[scope_index]
+        .bindings
+        .get(name)
+        .copied()
     {
-      return Err(crate::errors::CompilerError::from(format!(
-        "SyntaxError: redeclaration of lexical binding `{name}`"
-      )));
+      return Ok(slot);
     }
     let slot = self.add_local_with_mirror(name.to_string(), None, false);
     self.mark_local_tdz(slot);
@@ -402,6 +404,90 @@ impl super::Compiler {
     Ok(())
   }
 
+  fn begin_array_destructuring_iterator(
+    &mut self,
+    label: &str,
+  ) -> Result<(usize, usize, usize), crate::errors::CompilerError> {
+    self.emit_get_builtin_name("requireObjectCoercible");
+    self.emit(Op::Exchange, LINE);
+    self.emit(Op::Call, LINE);
+    self.emit_byte(1, LINE);
+
+    let iterator_slot = self.alloc_temp_local(label);
+    self.emit(Op::Copy, LINE);
+    self.emit_get_global_name("Symbol");
+    self.emit_constant(Value::String("iterator".to_string().into()), LINE);
+    self.emit(Op::GetProperty, LINE);
+    self.emit(Op::GetProperty, LINE);
+    self.emit(Op::CallBuiltin, LINE);
+    self.emit_byte(0, LINE);
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+
+    // IteratorDestructuringAssignmentEvaluation closes the iterator when any
+    // subsequent step completes abruptly. Keep the original completion while
+    // running IteratorClose; an abrupt close must not replace it.
+    let thrown_slot = self.alloc_temp_local("array_destructuring_thrown");
+    self.emit(Op::PushHandler, LINE);
+    let handler_jump = self.current_ip();
+    self.emit_byte(0, LINE);
+    self.emit_byte(0, LINE);
+    self.handler_depth += 1;
+    Ok((iterator_slot, thrown_slot, handler_jump))
+  }
+
+  fn finish_array_destructuring_iterator(
+    &mut self,
+    iterator_slot: usize,
+    thrown_slot: usize,
+    handler_jump: usize,
+    close_on_normal: bool,
+  ) -> Result<(), crate::errors::CompilerError> {
+    self.handler_depth = self.handler_depth.saturating_sub(1);
+    self.emit(Op::PopHandler, LINE);
+    // A rest element exhausts the iterator through iteratorToArray; the
+    // existing rest path deliberately has no separate normal close.
+    if close_on_normal {
+      self.emit(Op::LoadLocal, LINE);
+      self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+      self.emit(Op::IteratorClose, LINE);
+      self.emit(Op::Discard, LINE);
+    }
+    self.emit(Op::Jump, LINE);
+    let end_jump = self.current_ip();
+    self.emit_byte(0, LINE);
+    self.emit_byte(0, LINE);
+
+    self.patch_jump(handler_jump);
+    self.emit(Op::StoreLocal, LINE);
+    self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+
+    // Protect the close itself so that an abrupt IteratorClose preserves the
+    // completion that caused the destructuring operation to be closed.
+    self.emit(Op::PushHandler, LINE);
+    let close_handler_jump = self.current_ip();
+    self.emit_byte(0, LINE);
+    self.emit_byte(0, LINE);
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+    self.emit(Op::IteratorClose, LINE);
+    self.emit(Op::Discard, LINE);
+    self.emit(Op::PopHandler, LINE);
+    self.emit(Op::Jump, LINE);
+    let close_done_jump = self.current_ip();
+    self.emit_byte(0, LINE);
+    self.emit_byte(0, LINE);
+    self.patch_jump(close_handler_jump);
+    self.emit(Op::Discard, LINE);
+    self.patch_jump(close_done_jump);
+
+    self.emit(Op::LoadLocal, LINE);
+    self.emit_byte(self.slot_to_u8(thrown_slot)?, LINE);
+    self.emit(Op::Throw, LINE);
+    self.patch_jump(end_jump);
+    Ok(())
+  }
+
   pub(super) fn compile_assignment_target_maybe_default_oast(
     &mut self,
     target: &oast::AssignmentTargetMaybeDefault<'_>,
@@ -465,21 +551,8 @@ impl super::Compiler {
     &mut self,
     a: &oast::ArrayAssignmentTarget<'_>,
   ) -> Result<(), crate::errors::CompilerError> {
-    self.emit_get_builtin_name("requireObjectCoercible");
-    self.emit(Op::Exchange, LINE);
-    self.emit(Op::Call, LINE);
-    self.emit_byte(1, LINE);
-
-    let iterator_slot = self.alloc_temp_local("array_assign_iterator");
-    self.emit(Op::Copy, LINE);
-    self.emit_get_global_name("Symbol");
-    self.emit_constant(Value::String("iterator".to_string().into()), LINE);
-    self.emit(Op::GetProperty, LINE);
-    self.emit(Op::GetProperty, LINE);
-    self.emit(Op::CallBuiltin, LINE);
-    self.emit_byte(0, LINE);
-    self.emit(Op::StoreLocal, LINE);
-    self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+    let (iterator_slot, thrown_slot, handler_jump) =
+      self.begin_array_destructuring_iterator("array_assign_iterator")?;
 
     for el in &a.elements {
       self.emit(Op::LoadLocal, LINE);
@@ -517,12 +590,13 @@ impl super::Compiler {
       self.emit(Op::Call, LINE);
       self.emit_byte(1, LINE);
       self.compile_assignment_target_oast(&rest.target)?;
-    } else {
-      self.emit(Op::LoadLocal, LINE);
-      self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
-      self.emit(Op::IteratorClose, LINE);
-      self.emit(Op::Discard, LINE);
     }
+    self.finish_array_destructuring_iterator(
+      iterator_slot,
+      thrown_slot,
+      handler_jump,
+      a.rest.is_none(),
+    )?;
     Ok(())
   }
 
@@ -652,20 +726,8 @@ impl super::Compiler {
         self.compile_binding_pattern_assignment_oast(&a.left, kind)?;
       }
       oast::BindingPattern::ArrayPattern(a) => {
-        self.emit_get_builtin_name("requireObjectCoercible");
-        self.emit(Op::Exchange, LINE);
-        self.emit(Op::Call, LINE);
-        self.emit_byte(1, LINE);
-        let iterator_slot = self.alloc_temp_local("array_binding_iterator");
-        self.emit(Op::Copy, LINE);
-        self.emit_get_global_name("Symbol");
-        self.emit_constant(Value::String("iterator".to_string().into()), LINE);
-        self.emit(Op::GetProperty, LINE);
-        self.emit(Op::GetProperty, LINE);
-        self.emit(Op::CallBuiltin, LINE);
-        self.emit_byte(0, LINE);
-        self.emit(Op::StoreLocal, LINE);
-        self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
+        let (iterator_slot, thrown_slot, handler_jump) =
+          self.begin_array_destructuring_iterator("array_binding_iterator")?;
 
         for el in &a.elements {
           self.emit(Op::LoadLocal, LINE);
@@ -705,12 +767,13 @@ impl super::Compiler {
           self.emit(Op::Call, LINE);
           self.emit_byte(1, LINE);
           self.compile_binding_pattern_assignment_oast(&rest.argument, kind)?;
-        } else {
-          self.emit(Op::LoadLocal, LINE);
-          self.emit_byte(self.slot_to_u8(iterator_slot)?, LINE);
-          self.emit(Op::IteratorClose, LINE);
-          self.emit(Op::Discard, LINE);
         }
+        self.finish_array_destructuring_iterator(
+          iterator_slot,
+          thrown_slot,
+          handler_jump,
+          a.rest.is_none(),
+        )?;
       }
       oast::BindingPattern::ObjectPattern(o) => {
         self.emit_get_builtin_name("requireObjectCoercible");

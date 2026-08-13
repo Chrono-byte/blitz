@@ -856,13 +856,20 @@ impl RiscBuilder {
             line,
           );
         }
-        Op::Throw | Op::PushWithEnv | Op::Yield | Op::YieldStar | Op::AwaitPromise => {
+        Op::Throw | Op::PushWithEnv => {
           let source = load_location(&mut lowered, plan.get(instruction.input(0)?)?, 0, line);
           emit(
             &mut lowered,
             op_word(instruction.op) | encode_rd(source),
             line,
           );
+        }
+        Op::Yield | Op::YieldStar | Op::AwaitPromise => {
+          let destination = plan.get(instruction.output()?)?;
+          let source = load_location(&mut lowered, plan.get(instruction.input(0)?)?, 0, line);
+          let rd = destination_register(destination, source);
+          emit(&mut lowered, op_word(instruction.op) | encode_rd(rd), line);
+          store_location(&mut lowered, destination, rd, line);
         }
         Op::PopEnv | Op::PopHandler | Op::GeneratorInitDone => {
           emit(&mut lowered, op_word(instruction.op), line);
@@ -1455,6 +1462,28 @@ mod tests {
     );
   }
 
+  fn assert_suspend_stores_spilled_output(op: Op) {
+    let mut builder = RiscBuilder::new();
+    for _ in 0..9 {
+      builder.emit(Op::Undefined, 0, 1);
+    }
+    builder.emit(op, 0, 1);
+    builder.emit(Op::Return, 0, 1);
+
+    let chunk = RiscBuilder::finish(Chunk::default(), builder).expect("lower RISC chunk");
+    let suspend_ip = chunk
+      .code
+      .iter()
+      .position(|word| BytecodeOp::from_byte((word & 0xff) as u8) == Some(op.bytecode().unwrap()))
+      .expect("suspending operation");
+    assert_eq!(chunk.risc_value_spill_count, 1);
+    assert_eq!(
+      BytecodeOp::from_byte((chunk.code[suspend_ip + 1] & 0xff) as u8),
+      Some(Op::StoreSpill.bytecode().unwrap()),
+      "{op:?} must store its spilled output"
+    );
+  }
+
   #[test]
   fn relaxes_compare_branches_beyond_signed_i13() {
     let mut source = String::from("let value = 0; if (value === 0) {\n");
@@ -1475,5 +1504,20 @@ mod tests {
         && BytecodeOp::from_byte((words[2] & 0xff) as u8) == Some(BytecodeOp::Jump)
     });
     assert!(expanded, "expected a relaxed long compare branch");
+  }
+
+  #[test]
+  fn yield_stores_spilled_output_location() {
+    assert_suspend_stores_spilled_output(Op::Yield);
+  }
+
+  #[test]
+  fn yield_star_stores_spilled_output_location() {
+    assert_suspend_stores_spilled_output(Op::YieldStar);
+  }
+
+  #[test]
+  fn await_stores_spilled_output_location() {
+    assert_suspend_stores_spilled_output(Op::AwaitPromise);
   }
 }

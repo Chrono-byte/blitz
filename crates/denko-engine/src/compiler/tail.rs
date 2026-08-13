@@ -241,6 +241,54 @@ impl super::Compiler {
       return Ok(());
     }
 
+    if let oast::Expression::StaticMemberExpression(m) = &c.callee
+      && m.optional
+      && !matches!(&m.object, oast::Expression::Super(_))
+    {
+      self.compile_expr_oast(&m.object)?;
+      self.emit(Op::Copy, LINE);
+      self.emit(Op::JumpIfNullish, LINE);
+      let nullish = self.current_ip();
+      self.emit_jump_placeholder();
+      self.emit(Op::Copy, LINE);
+      self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
+      self.emit(Op::GetProperty, LINE);
+      let arg_count = self.compile_call_arguments(&c.arguments)?;
+      self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
+      self.emit(Op::Jump, LINE);
+      let end = self.current_ip();
+      self.emit_jump_placeholder();
+      self.patch_jump(nullish);
+      self.emit(Op::Discard, LINE);
+      self.emit(Op::Undefined, LINE);
+      self.patch_jump(end);
+      return Ok(());
+    }
+
+    if let oast::Expression::ComputedMemberExpression(m) = &c.callee
+      && m.optional
+      && !matches!(&m.object, oast::Expression::Super(_))
+    {
+      self.compile_expr_oast(&m.object)?;
+      self.emit(Op::Copy, LINE);
+      self.emit(Op::JumpIfNullish, LINE);
+      let nullish = self.current_ip();
+      self.emit_jump_placeholder();
+      self.emit(Op::Copy, LINE);
+      self.compile_expr_oast(&m.expression)?;
+      self.emit(Op::GetProperty, LINE);
+      let arg_count = self.compile_call_arguments(&c.arguments)?;
+      self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
+      self.emit(Op::Jump, LINE);
+      let end = self.current_ip();
+      self.emit_jump_placeholder();
+      self.patch_jump(nullish);
+      self.emit(Op::Discard, LINE);
+      self.emit(Op::Undefined, LINE);
+      self.patch_jump(end);
+      return Ok(());
+    }
+
     if let oast::Expression::StaticMemberExpression(m) = &c.callee {
       let _is_optional_call = c.optional;
 
@@ -337,16 +385,16 @@ impl super::Compiler {
       self.compile_expr_oast(&c.callee)?;
       self.emit(Op::Copy, LINE);
       self.emit(Op::JumpIfNullish, LINE);
-      let skip_nullish = self.current_ip();
+      let nullish = self.current_ip();
       self.emit_jump_placeholder();
-      self.emit(Op::Discard, LINE);
-      self.emit(Op::Null, LINE);
+      let arg_count = self.compile_call_arguments(&c.arguments)?;
+      self.emit_call_with_arg_count(Op::Call, arg_count)?;
       self.emit(Op::Jump, LINE);
       let end = self.current_ip();
       self.emit_jump_placeholder();
-      self.patch_jump(skip_nullish);
-      let arg_count = self.compile_call_arguments(&c.arguments)?;
-      self.emit_call_with_arg_count(Op::Call, arg_count)?;
+      self.patch_jump(nullish);
+      self.emit(Op::Discard, LINE);
+      self.emit(Op::Undefined, LINE);
       self.patch_jump(end);
       return Ok(());
     }

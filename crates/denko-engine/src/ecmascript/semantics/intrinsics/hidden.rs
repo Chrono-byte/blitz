@@ -237,6 +237,13 @@ pub(crate) fn install_hidden_builtins(intrinsics: &mut Intrinsics) {
     Value::Builtin(Rc::new(Vm::define_property_builtin)),
   );
   intrinsics.hidden_builtins.insert(
+    "toString".to_string(),
+    Value::Builtin(Rc::new(|vm, args| {
+      let value = args.first().cloned().unwrap_or(Value::Undefined);
+      Ok(Value::String(vm.to_string(&value)?))
+    })),
+  );
+  intrinsics.hidden_builtins.insert(
     "objectSetPrototypeOf".to_string(),
     Value::Builtin(Rc::new(|vm, args| {
       if args.len() < 2 {

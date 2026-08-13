@@ -36,6 +36,65 @@ mod test {
   use super::*;
 
   #[test]
+  fn abrupt_completions_run_all_finalizers_and_preserve_override_rules() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        var log = [];
+        function returnFromCatch() {
+          try { throw 1; } catch (error) { return 7; } finally { log.push("catch-finally"); }
+        }
+        function nestedReturn() {
+          try { try { return 8; } finally { log.push("inner"); } }
+          finally { log.push("outer"); }
+        }
+        function overrideReturn() {
+          try { return 1; } finally { log.push("override"); return 2; }
+        }
+        function overrideThrow() {
+          try { return 1; } finally { log.push("override-throw"); throw 6; }
+        }
+        function nestedCatchReturn() {
+          try {
+            try { throw 1; } catch (error) { return 9; }
+            finally { log.push("inner-catch"); }
+          } finally { log.push("outer-catch"); }
+        }
+        var breakCount = 0;
+        for (var i = 0; i < 3; i += 1) {
+          try { break; } finally { breakCount += 1; }
+        }
+        var continueCount = 0;
+        for (var j = 0; j < 3; j += 1) {
+          try { continue; } finally { continueCount += 1; }
+        }
+        var nestedBreakCount = 0;
+        for (var k = 0; k < 1; k += 1) {
+          try {
+            try { break; } finally { nestedBreakCount += 1; }
+          } finally { nestedBreakCount += 10; }
+        }
+        var caught;
+        try {
+          try { throw 3; } catch (error) { throw 4; } finally { log.push("throw-finally"); }
+        } catch (error) { caught = error; }
+        var overrideThrowCaught;
+        try { overrideThrow(); } catch (error) { overrideThrowCaught = error; }
+        globalThis.abrupt_finally_result = [
+          returnFromCatch(), nestedReturn(), overrideReturn(), nestedCatchReturn(), breakCount,
+          continueCount, nestedBreakCount, caught, overrideThrowCaught, log.join(",")
+        ].join("|");
+      "#
+    ));
+    assert_eq!(
+      vm.get_global("abrupt_finally_result"),
+      Some(Value::String(
+        "7|8|2|9|1|3|11|4|6|throw-finally,override-throw,catch-finally,inner,outer,override,inner-catch,outer-catch"
+          .into()
+      ))
+    );
+  }
+
+  #[test]
   fn byte_typed_arrays_share_array_buffer_storage() {
     let (vm, _) = run_script(crate::js!(
       r#"
@@ -1014,6 +1073,55 @@ mod test {
     ));
 
     assert_eq!(vm.get_global("for_of_close_ok"), Some(Value::Bool(true)));
+  }
+
+  #[test]
+  fn array_destructuring_closes_iterator_on_abrupt_binding_and_assignment() {
+    let (vm, _) = run_script(crate::js!(
+      r#"
+        var closeCount = 0;
+        var original = {};
+        var closeError = {};
+        function fail() { throw original; }
+        function iterable() {
+          return {
+            [Symbol.iterator]: function() {
+              var first = true;
+              return {
+                next: function() {
+                  if (first) {
+                    first = false;
+                    return { value: undefined, done: false };
+                  }
+                  return { done: true };
+                },
+                return: function() {
+                  closeCount += 1;
+                  throw closeError;
+                }
+              };
+            }
+          };
+        }
+
+        var declarationError;
+        try { var [declarationValue = fail()] = iterable(); }
+        catch (error) { declarationError = error; }
+
+        var assignmentValue;
+        var assignmentError;
+        try { [assignmentValue = fail()] = iterable(); }
+        catch (error) { assignmentError = error; }
+
+        globalThis.array_destructuring_close_result =
+          closeCount === 2 && declarationError === original && assignmentError === original;
+      "#
+    ));
+
+    assert_eq!(
+      vm.get_global("array_destructuring_close_result"),
+      Some(Value::Bool(true))
+    );
   }
 
   #[test]

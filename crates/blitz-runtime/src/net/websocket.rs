@@ -22,6 +22,7 @@ use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use hyper_util::rt::TokioTimer;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -37,6 +38,10 @@ pub const DEFAULT_COMMAND_CAPACITY: usize = 64;
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Default maximum number of concurrently active WebSocket handshakes.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
+/// Maximum time allowed for a peer to finish the HTTP upgrade request.
+pub const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum lifetime of a pre-upgrade HTTP connection.
+pub const DEFAULT_HTTP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(120);
 
 struct SpawnExecutor;
 
@@ -193,6 +198,7 @@ async fn accept_loop(
   let next_id = Arc::new(AtomicU64::new(1));
   let active = Arc::new(ActiveConnections::default());
   let connection_limit = Arc::new(Semaphore::new(DEFAULT_MAX_CONNECTIONS));
+  let websocket_limit = Arc::new(Semaphore::new(DEFAULT_MAX_CONNECTIONS));
   let mut connections = JoinSet::new();
 
   loop {
@@ -214,9 +220,18 @@ async fn accept_loop(
             let shutdown = shutdown.clone();
             let next_id = Arc::clone(&next_id);
             let active = Arc::clone(&active);
+            let websocket_limit = Arc::clone(&websocket_limit);
             connections.spawn(async move {
               let _permit = permit;
-              serve_http_connection(stream, events, options, shutdown, next_id, active).await;
+              serve_http_connection(
+                stream,
+                events,
+                options,
+                shutdown,
+                next_id,
+                active,
+                websocket_limit,
+              ).await;
             });
           }
           Err(_) => break,
@@ -238,6 +253,7 @@ async fn serve_http_connection(
   shutdown: watch::Receiver<bool>,
   next_id: Arc<AtomicU64>,
   active: Arc<ActiveConnections>,
+  websocket_limit: Arc<Semaphore>,
 ) {
   let service = service_fn(move |mut request: Request<Incoming>| {
     let events = events.clone();
@@ -245,11 +261,21 @@ async fn serve_http_connection(
     let shutdown = shutdown.clone();
     let next_id = Arc::clone(&next_id);
     let active = Arc::clone(&active);
+    let websocket_limit = Arc::clone(&websocket_limit);
     async move {
+      let Ok(permit) = websocket_limit.try_acquire_owned() else {
+        return Ok::<_, Infallible>(
+          Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(Empty::new())
+            .unwrap_or_else(|_| Response::new(Empty::new())),
+        );
+      };
       match fastwebsockets::upgrade::upgrade(&mut request) {
         Ok((response, upgrade)) => {
           active.start();
           tokio::spawn(async move {
+            let _permit = permit;
             if let Ok(socket) = upgrade.await {
               let id = next_id.fetch_add(1, Ordering::Relaxed);
               run_connection(id, socket, events, options, shutdown).await;
@@ -263,10 +289,14 @@ async fn serve_http_connection(
     }
   });
 
-  let connection = hyper::server::conn::http1::Builder::new()
+  let mut builder = hyper::server::conn::http1::Builder::new();
+  builder
+    .timer(TokioTimer::new())
+    .header_read_timeout(DEFAULT_HEADER_READ_TIMEOUT);
+  let connection = builder
     .serve_connection(TokioIo::new(stream), service)
     .with_upgrades();
-  let _result = connection.await;
+  let _result = timeout(DEFAULT_HTTP_CONNECTION_TIMEOUT, connection).await;
 }
 
 #[derive(Default)]
@@ -410,6 +440,7 @@ pub(crate) async fn run_upgrade(
   events: mpsc::Sender<WebSocketEvent>,
   options: WebSocketServerOptions,
   shutdown: watch::Receiver<bool>,
+  _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
   if let Ok(socket) = upgrade.await {
     run_connection(connection_id, socket, events, options, shutdown).await;

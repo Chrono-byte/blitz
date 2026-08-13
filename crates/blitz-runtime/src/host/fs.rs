@@ -2,7 +2,8 @@
 //! Lazy Effect-native filesystem host primitives.
 
 use std::cell::RefCell;
-use std::io;
+use std::fs::File;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -34,7 +35,7 @@ fn read(text: bool) -> BuiltinFn {
       Ok(path) => path,
       Err(error) => return effect_fail(vm, error),
     };
-    let thunk: BuiltinFn = Rc::new(move |vm, _args| match std::fs::read(&path) {
+    let thunk: BuiltinFn = Rc::new(move |vm, _args| match read_bounded(&path) {
       Ok(bytes) if text => match String::from_utf8(bytes) {
         Ok(value) => effect_succeed(vm, Value::String(value.into())),
         Err(error) => {
@@ -59,6 +60,21 @@ fn read(text: bool) -> BuiltinFn {
     });
     effect_suspend(vm, thunk)
   })
+}
+
+fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
+  let file = File::open(path)?;
+  let mut bytes = Vec::new();
+  file
+    .take(u64::try_from(MAX_FILE_BYTES).unwrap_or(u64::MAX) + 1)
+    .read_to_end(&mut bytes)?;
+  if bytes.len() > MAX_FILE_BYTES {
+    return Err(io::Error::new(
+      io::ErrorKind::FileTooLarge,
+      "file exceeds Blitz filesystem read limit",
+    ));
+  }
+  Ok(bytes)
 }
 
 fn write(text: bool) -> BuiltinFn {
@@ -252,4 +268,45 @@ fn fs_error(
   }
   set(&error, "message", Value::String(message.into()));
   error
+}
+
+#[cfg(test)]
+mod tests {
+  use std::io::{Seek, SeekFrom, Write};
+  use std::sync::atomic::{AtomicU64, Ordering};
+
+  use super::*;
+
+  static NEXT_TEST_FILE: AtomicU64 = AtomicU64::new(1);
+
+  fn test_path(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+      "blitz-fs-{label}-{}-{}",
+      std::process::id(),
+      NEXT_TEST_FILE.fetch_add(1, Ordering::Relaxed)
+    ))
+  }
+
+  #[test]
+  fn bounded_read_rejects_oversized_sparse_files() {
+    let path = test_path("read-limit");
+    let mut file = File::create(&path).expect("create sparse file");
+    file
+      .seek(SeekFrom::Start(MAX_FILE_BYTES as u64))
+      .expect("seek past read limit");
+    file.write_all(&[1]).expect("extend sparse file");
+    drop(file);
+
+    let error = read_bounded(&path).expect_err("oversized read must fail");
+    assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+    std::fs::remove_file(path).expect("remove sparse file");
+  }
+
+  #[test]
+  fn bounded_read_preserves_normal_file_contents() {
+    let path = test_path("read-control");
+    std::fs::write(&path, b"bounded").expect("write control file");
+    assert_eq!(read_bounded(&path).expect("read control file"), b"bounded");
+    std::fs::remove_file(path).expect("remove control file");
+  }
 }

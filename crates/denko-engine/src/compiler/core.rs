@@ -202,8 +202,35 @@ pub struct FinallyPatchState {
   pub did_return_slot: usize,
   /// List of jump offsets to patch for returns in the finally.
   pub return_jumps: Vec<usize>,
+  /// Return jumps emitted from the catch clause, which use the catch-side
+  /// finalizer copy rather than the normal path.
+  pub catch_return_jumps: Vec<usize>,
+  /// Jumps from an inner finalizer that must enter this finalizer.
+  pub entry_jumps: Vec<usize>,
+  /// Abrupt loop completions that must pass through this finalizer.
+  pub control_actions: Vec<FinallyControlAction>,
+  /// Handler depth before this try installed its exception handler.
+  pub handler_depth: usize,
+  /// Loop depth at which this try was entered.
+  pub loop_depth: usize,
   /// Whether we are currently inside the finalizer.
   pub in_finalizer: bool,
+  /// Whether statements are currently compiled in the catch clause.
+  pub in_catch: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct FinallyControlAction {
+  /// Boolean local set by the abrupt statement.
+  pub flag_slot: usize,
+  /// Whether this is a continue (otherwise it is a break).
+  pub is_continue: bool,
+  /// Target loop patch list.
+  pub loop_index: usize,
+  /// Optional label patch list; labels take precedence over loop_index.
+  pub label_index: Option<usize>,
+  /// Outer finalizer to enter before dispatching the control target.
+  pub next_finally: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -656,11 +683,6 @@ impl Compiler {
           names.insert(id.name.to_string());
         }
       }
-      oast::Statement::ClassDeclaration(c) => {
-        if let Some(id) = &c.id {
-          names.insert(id.name.to_string());
-        }
-      }
       oast::Statement::BlockStatement(b) => {
         for s in &b.body {
           self.add_var_names_from_statement(s, names);
@@ -677,6 +699,64 @@ impl Compiler {
       }
       oast::Statement::WithStatement(w) => {
         self.add_var_names_from_statement(&w.body, names);
+      }
+      oast::Statement::WhileStatement(w) => {
+        self.add_var_names_from_statement(&w.body, names);
+      }
+      oast::Statement::DoWhileStatement(d) => {
+        self.add_var_names_from_statement(&d.body, names);
+      }
+      oast::Statement::ForStatement(f) => {
+        if let Some(oast::ForStatementInit::VariableDeclaration(v)) = &f.init
+          && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var)
+        {
+          for declaration in &v.declarations {
+            self.add_var_names_from_binding(&declaration.id, names);
+          }
+        }
+        self.add_var_names_from_statement(&f.body, names);
+      }
+      oast::Statement::ForInStatement(f) => {
+        if let oast::ForStatementLeft::VariableDeclaration(v) = &f.left
+          && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var)
+        {
+          for declaration in &v.declarations {
+            self.add_var_names_from_binding(&declaration.id, names);
+          }
+        }
+        self.add_var_names_from_statement(&f.body, names);
+      }
+      oast::Statement::ForOfStatement(f) => {
+        if let oast::ForStatementLeft::VariableDeclaration(v) = &f.left
+          && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var)
+        {
+          for declaration in &v.declarations {
+            self.add_var_names_from_binding(&declaration.id, names);
+          }
+        }
+        self.add_var_names_from_statement(&f.body, names);
+      }
+      oast::Statement::SwitchStatement(s) => {
+        for case in &s.cases {
+          for statement in &case.consequent {
+            self.add_var_names_from_statement(statement, names);
+          }
+        }
+      }
+      oast::Statement::TryStatement(t) => {
+        for statement in &t.block.body {
+          self.add_var_names_from_statement(statement, names);
+        }
+        if let Some(handler) = &t.handler {
+          for statement in &handler.body.body {
+            self.add_var_names_from_statement(statement, names);
+          }
+        }
+        if let Some(finalizer) = &t.finalizer {
+          for statement in &finalizer.body {
+            self.add_var_names_from_statement(statement, names);
+          }
+        }
       }
       _ => {}
     }
@@ -734,6 +814,22 @@ impl Compiler {
       lexical_bindings: HashSet::new(),
       block_var_names,
     });
+    self.pre_declare_variables_oast_stmts(stmts);
+  }
+
+  /// Names that belong to the function/root environment. Block bindings and
+  /// compiler-generated temporaries still use frame slots, but must not become
+  /// observable bindings in the surrounding environment.
+  pub(crate) fn environment_slot_names(&self) -> Vec<Option<String>> {
+    let mut names = vec![None; self.locals.len()];
+    if let Some(function_scope) = self.scopes.first() {
+      for (name, &slot) in &function_scope.bindings {
+        if slot < names.len() && !name.starts_with("__") {
+          names[slot] = Some(name.clone());
+        }
+      }
+    }
+    names
   }
 
   /// Exits the current scope, popping it from the scope stack.

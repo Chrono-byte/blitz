@@ -21,6 +21,9 @@ use tokio::sync::{mpsc, watch};
 
 use super::event_loop::{EventRegistry, EventSender, ResourceHandle, ResourceRegistry};
 
+/// Maximum number of simultaneously active timers in one runtime.
+pub const MAX_ACTIVE_TIMERS: usize = 10_000;
+
 /// A monotonically allocated identifier for a host timer.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TimerId(u64);
@@ -166,6 +169,8 @@ pub enum TimerError {
   IdExhausted,
   /// The requested delay cannot be represented by [`Instant`].
   DelayOverflow,
+  /// The runtime already has the maximum number of active timers.
+  Capacity,
 }
 
 impl fmt::Display for TimerError {
@@ -176,6 +181,7 @@ impl fmt::Display for TimerError {
     match self {
       Self::IdExhausted => formatter.write_str("host timer identifiers are exhausted"),
       Self::DelayOverflow => formatter.write_str("host timer deadline overflowed"),
+      Self::Capacity => formatter.write_str("host timer capacity is exhausted"),
     }
   }
 }
@@ -438,6 +444,9 @@ where
     interval: Option<Duration>,
     referenced: bool,
   ) -> Result<TimerId, TimerError> {
+    if self.timers.len() >= MAX_ACTIVE_TIMERS {
+      return Err(TimerError::Capacity);
+    }
     let deadline = self
       .clock
       .deadline_after(delay)
@@ -655,6 +664,33 @@ mod tests {
       scheduler
         .handle_wakeup(&vm, TimerWakeup { id, deadline }, Instant::now())
         .is_none()
+    );
+  }
+
+  #[test]
+  fn active_timer_capacity_is_enforced_and_recovers_after_clear() {
+    let vm = test_vm();
+    let registry = new_wakeup_registry(1).expect("valid wakeup capacity");
+    let mut scheduler = TimerScheduler::new(registry.resources(), registry.sender());
+    for _ in 0..MAX_ACTIVE_TIMERS {
+      scheduler
+        .set_timeout(&vm, Duration::from_secs(60), false)
+        .expect("timer within capacity");
+    }
+    assert_eq!(
+      scheduler.set_timeout(&vm, Duration::from_secs(60), false),
+      Err(TimerError::Capacity)
+    );
+    let id = *scheduler
+      .timers
+      .keys()
+      .next()
+      .expect("active timer");
+    assert!(scheduler.clear_timer(id));
+    assert!(
+      scheduler
+        .set_timeout(&vm, Duration::from_secs(60), false)
+        .is_ok()
     );
   }
 }

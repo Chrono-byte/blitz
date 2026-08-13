@@ -13,6 +13,7 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use hyper_util::rt::TokioTimer;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -28,6 +29,10 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 pub const DEFAULT_REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum time a runtime handler may retain a request.
 pub const DEFAULT_HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum time allowed for an HTTP peer to finish sending request headers.
+pub const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum lifetime of an HTTP connection before an upgrade completes.
+pub const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// An HTTP request transferred to the VM thread.
 #[derive(Debug)]
@@ -85,6 +90,7 @@ struct PendingWebSocketUpgrade {
   connection_id: u64,
   response: Response<http_body_util::Empty<Bytes>>,
   upgrade: fastwebsockets::upgrade::UpgradeFut,
+  _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 #[derive(Debug)]
@@ -137,6 +143,7 @@ struct ServerContext {
   websocket_options: WebSocketServerOptions,
   websocket_shutdown: watch::Receiver<bool>,
   next_websocket_id: Arc<AtomicU64>,
+  websocket_limit: Arc<Semaphore>,
 }
 
 impl HttpServer {
@@ -199,6 +206,7 @@ async fn accept_loop(
     websocket_options,
     websocket_shutdown: shutdown.clone(),
     next_websocket_id: Arc::new(AtomicU64::new(1)),
+    websocket_limit: Arc::new(Semaphore::new(DEFAULT_MAX_CONNECTIONS)),
   };
   loop {
     tokio::select! {
@@ -237,11 +245,15 @@ async fn serve_connection(
 ) {
   let service = service_fn(move |request| handle_request(request, remote_addr, context.clone()));
   let mut builder = hyper::server::conn::http1::Builder::new();
-  builder.max_headers(100).max_buf_size(64 * 1024);
+  builder
+    .timer(TokioTimer::new())
+    .header_read_timeout(DEFAULT_HEADER_READ_TIMEOUT)
+    .max_headers(100)
+    .max_buf_size(64 * 1024);
   let connection = builder
     .serve_connection(TokioIo::new(stream), service)
     .with_upgrades();
-  let _result = connection.await;
+  let _result = timeout(DEFAULT_CONNECTION_TIMEOUT, connection).await;
 }
 
 async fn handle_request(
@@ -251,15 +263,21 @@ async fn handle_request(
 ) -> Result<Response<Full<Bytes>>, Infallible> {
   let mut request = request;
   let upgrade = if fastwebsockets::upgrade::is_upgrade_request(&request) {
-    fastwebsockets::upgrade::upgrade(&mut request)
-      .ok()
-      .map(|(response, upgrade)| PendingWebSocketUpgrade {
-        connection_id: context
-          .next_websocket_id
-          .fetch_add(1, Ordering::Relaxed),
-        response,
-        upgrade,
-      })
+    let permit = Arc::clone(&context.websocket_limit)
+      .try_acquire_owned()
+      .ok();
+    permit.and_then(|permit| {
+      fastwebsockets::upgrade::upgrade(&mut request)
+        .ok()
+        .map(|(response, upgrade)| PendingWebSocketUpgrade {
+          connection_id: context
+            .next_websocket_id
+            .fetch_add(1, Ordering::Relaxed),
+          response,
+          upgrade,
+          _permit: permit,
+        })
+    })
   } else {
     None
   };
@@ -332,6 +350,7 @@ async fn handle_request(
         context.websocket_events,
         context.websocket_options,
         context.websocket_shutdown,
+        pending._permit,
       ));
       let (parts, _body) = pending.response.into_parts();
       Ok(Response::from_parts(parts, Full::new(Bytes::new())))
@@ -350,18 +369,26 @@ fn trusted_authority(
     .ok()?
     .parse::<hyper::http::uri::Authority>()
     .ok()?;
+  authority_is_trusted(&authority, local_addr).then(|| authority.to_string())
+}
+
+fn authority_is_trusted(
+  authority: &hyper::http::uri::Authority,
+  local_addr: SocketAddr,
+) -> bool {
   if authority
     .port_u16()
     .is_some_and(|port| port != local_addr.port())
   {
-    return None;
+    return false;
   }
   let host = authority.host();
-  let trusted = host
+  host
     .parse::<std::net::IpAddr>()
-    .is_ok_and(|address| address == local_addr.ip() || address.is_loopback())
-    || (local_addr.ip().is_loopback() && host.eq_ignore_ascii_case("localhost"));
-  trusted.then(|| authority.to_string())
+    .is_ok_and(|address| {
+      address == local_addr.ip() || (local_addr.ip().is_loopback() && address.is_loopback())
+    })
+    || (local_addr.ip().is_loopback() && host.eq_ignore_ascii_case("localhost"))
 }
 
 async fn collect_body(mut body: Incoming) -> Result<Vec<u8>, HttpResponse> {
@@ -391,4 +418,33 @@ fn response(response: HttpResponse) -> Response<Full<Bytes>> {
   builder
     .body(Full::new(Bytes::from(response.body)))
     .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"failed to build response"))))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn public_listener_rejects_loopback_host_authority() {
+    let local = "0.0.0.0:8080".parse().expect("public listener");
+    let loopback = "127.0.0.1:8080"
+      .parse()
+      .expect("loopback authority");
+    assert!(!authority_is_trusted(&loopback, local));
+  }
+
+  #[test]
+  fn loopback_listener_accepts_loopback_authorities_on_its_port() {
+    let local = "127.0.0.1:8080"
+      .parse()
+      .expect("loopback listener");
+    let loopback = "localhost:8080"
+      .parse()
+      .expect("localhost authority");
+    assert!(authority_is_trusted(&loopback, local));
+    let wrong_port = "localhost:8081"
+      .parse()
+      .expect("wrong-port authority");
+    assert!(!authority_is_trusted(&wrong_port, local));
+  }
 }

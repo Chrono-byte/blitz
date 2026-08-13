@@ -74,14 +74,20 @@ impl super::Compiler {
     &mut self,
     prefix: &str,
   ) -> usize {
-    self.add_local_with_mirror(format!("__{}_{}", prefix, self.locals.len()), None, false)
+    let function_scope = self.current_function_scope_index();
+    self.add_local_in_scope(
+      function_scope,
+      format!("\0{}_{}", prefix, self.locals.len()),
+      None,
+      false,
+    )
   }
 
   pub(super) fn alloc_reusable_temp_local(
     &mut self,
     name: &str,
   ) -> usize {
-    let name = format!("__reusable_{name}");
+    let name = format!("\0reusable_{name}");
     self
       .locals
       .iter()
@@ -425,7 +431,13 @@ impl super::Compiler {
           .unwrap_or_default();
         self.emit_constant(Value::String(first.into()), LINE);
         for (i, expr) in t.expressions.iter().enumerate() {
+          // Apply ECMAScript ToString to each substitution before it is
+          // concatenated. In particular, ToString uses the string hint for
+          // objects and rejects Symbols.
+          self.emit_get_builtin_name("toString");
           self.compile_expr_oast(expr)?;
+          self.emit(Op::Call, LINE);
+          self.emit_byte(1, LINE);
           self.emit(Op::Add, LINE);
           let tail = t
             .quasis
@@ -501,198 +513,150 @@ impl super::Compiler {
         self.emit_byte(self.function_index_to_u8(idx)?, LINE);
       }
       OExpr::ObjectExpression(obj) => {
-        let mut count = 0usize;
-        let mut computed_indices: Vec<usize> = Vec::new();
-        let mut accessor_indices: Vec<usize> = Vec::new();
-        let mut spread_indices: Vec<usize> = Vec::new();
-        for (pi, prop) in obj.properties.iter().enumerate() {
-          if matches!(prop, oast::ObjectPropertyKind::SpreadProperty(_)) {
-            spread_indices.push(pi);
-            continue;
-          }
-          if let oast::ObjectPropertyKind::ObjectProperty(p) = prop {
-            if p.computed {
-              if !matches!(p.kind, oast::PropertyKind::Init) {
-                accessor_indices.push(pi);
-                continue;
-              }
-              let key_debug = format!("{:?}", p.key);
-              if key_debug.contains("Symbol") && key_debug.contains("iterator") {
-                self.emit_constant(
-                  Value::Symbol(
-                    crate::value::SymbolId::well_known_iterator(),
-                    Some("Symbol.iterator".to_string().into()),
-                  ),
-                  LINE,
-                );
-                if p.shorthand {
-                  match &p.key {
-                    oast::PropertyKey::StaticIdentifier(ident) => {
-                      self.emit_get_binding(ident.name.as_str());
-                    }
-                    oast::PropertyKey::Identifier(ident) => {
-                      self.emit_get_binding(ident.name.as_str());
-                    }
-                    _ => {
-                      self.emit(Op::Undefined, LINE);
-                    }
-                  }
-                } else {
-                  self.compile_expr_oast(&p.value)?;
-                }
-                count += 1;
-                continue;
-              }
-              computed_indices.push(pi);
-              continue;
-            }
-            if !matches!(p.kind, oast::PropertyKind::Init) {
-              accessor_indices.push(pi);
-              continue;
-            }
-            let key = match &p.key {
-              oast::PropertyKey::StaticIdentifier(ident) => ident.name.to_string(),
-              oast::PropertyKey::Identifier(ident) => ident.name.to_string(),
-              oast::PropertyKey::StringLiteral(s) => s.value.to_string(),
-              oast::PropertyKey::NumericLiteral(n) => super::numeric_property_key(n.value),
-              _ => continue,
-            };
-            self.emit_constant(Value::String(key.into()), LINE);
-            if p.shorthand {
-              match &p.key {
-                oast::PropertyKey::StaticIdentifier(ident) => {
-                  self.emit_get_binding(ident.name.as_str());
-                }
-                oast::PropertyKey::Identifier(ident) => {
-                  self.emit_get_binding(ident.name.as_str());
-                }
-                _ => {
-                  self.emit(Op::Undefined, LINE);
-                }
-              }
-            } else {
-              self.compile_expr_oast(&p.value)?;
-            }
-            count += 1;
-          }
-        }
+        // Start with an empty object and define each property as it is visited.
+        // In particular, do not collect static, computed, accessor, and spread
+        // properties into separate buckets: keys and values can have effects.
         self.emit(Op::BuildObject, LINE);
-        self.emit_byte(self.constant_index_to_u8(count)?, LINE);
+        self.emit_byte(0, LINE);
 
-        for idx in computed_indices {
-          if let oast::ObjectPropertyKind::ObjectProperty(p) = &obj.properties[idx] {
-            self.emit(Op::Copy, LINE);
+        for prop in &obj.properties {
+          match prop {
+            oast::ObjectPropertyKind::ObjectProperty(p)
+              if matches!(p.kind, oast::PropertyKind::Init) =>
+            {
+              self.emit(Op::Copy, LINE);
+              self.emit_get_builtin_name("objectDefineProperty");
+              self.emit(Op::Exchange, LINE);
 
-            let key_expr = p
-              .key
-              .as_expression()
-              .expect("computed key must be an expression");
-            self.compile_expr_oast(key_expr)?;
-
-            if p.shorthand {
-              match &p.key {
-                oast::PropertyKey::StaticIdentifier(ident) => {
-                  self.emit_get_binding(ident.name.as_str());
-                }
-                oast::PropertyKey::Identifier(ident) => {
-                  self.emit_get_binding(ident.name.as_str());
-                }
-                _ => {
-                  self.emit(Op::Undefined, LINE);
-                }
+              if p.computed {
+                let key = p
+                  .key
+                  .as_expression()
+                  .expect("computed property key must be an expression");
+                self.compile_expr_oast(key)?;
+              } else {
+                let key = match &p.key {
+                  oast::PropertyKey::StaticIdentifier(ident) => ident.name.to_string(),
+                  oast::PropertyKey::Identifier(ident) => ident.name.to_string(),
+                  oast::PropertyKey::StringLiteral(s) => s.value.to_string(),
+                  oast::PropertyKey::NumericLiteral(n) => super::numeric_property_key(n.value),
+                  _ => return Err(crate::errors::CompilerError::from("unsupported object key")),
+                };
+                self.emit_constant(Value::String(key.into()), LINE);
               }
-            } else {
-              self.compile_expr_oast(&p.value)?;
-            }
 
-            self.emit(Op::SetProperty, LINE);
-            self.emit(Op::Discard, LINE);
-          }
-        }
-
-        for idx in accessor_indices {
-          if let oast::ObjectPropertyKind::ObjectProperty(p) = &obj.properties[idx] {
-            let key_value = if p.computed {
-              None
-            } else {
-              Some(match &p.key {
-                oast::PropertyKey::StaticIdentifier(ident) => {
-                  Value::String(ident.name.to_string().into())
+              self.emit_constant(Value::String("value".to_string().into()), LINE);
+              if p.shorthand {
+                match &p.key {
+                  oast::PropertyKey::StaticIdentifier(ident) => {
+                    self.emit_get_binding(ident.name.as_str());
+                  }
+                  oast::PropertyKey::Identifier(ident) => {
+                    self.emit_get_binding(ident.name.as_str());
+                  }
+                  _ => self.emit(Op::Undefined, LINE),
                 }
-                oast::PropertyKey::Identifier(ident) => {
-                  Value::String(ident.name.to_string().into())
-                }
-                oast::PropertyKey::StringLiteral(s) => Value::String(s.value.to_string().into()),
-                oast::PropertyKey::NumericLiteral(n) => {
-                  Value::String(super::numeric_property_key(n.value).into())
-                }
-                _ => {
-                  return Err(crate::errors::CompilerError::from(
-                    "unsupported accessor key",
-                  ));
-                }
-              })
-            };
-            self.emit(Op::Copy, LINE);
-            self.emit_get_builtin_name("objectDefineProperty");
-            self.emit(Op::Exchange, LINE);
-            if let Some(ref key) = key_value {
-              self.emit_constant(key.clone(), LINE);
-            } else {
-              let key_expr = p
-                .key
-                .as_expression()
-                .expect("computed accessor key must be an expression");
-              self.compile_expr_oast(key_expr)?;
-            }
-
-            let descriptor_prop_name = match p.kind {
-              oast::PropertyKind::Get => "get",
-              oast::PropertyKind::Set => "set",
-              oast::PropertyKind::Init => {
-                return Err(crate::errors::CompilerError::from(
-                  "InternalCompilerError: unexpected property kind `Init` when building accessor descriptor",
-                ));
+              } else {
+                self.compile_expr_oast(&p.value)?;
               }
-            };
-            let method_name_owned = if let Some(Value::String(s)) = &key_value {
-              s.to_string_lossy()
-            } else {
-              "<accessor>".to_string()
-            };
-            self.emit_constant(Value::String(descriptor_prop_name.to_string().into()), LINE);
-            if let oast::Expression::FunctionExpression(f) = &p.value {
-              let self_name = f.id.as_ref().map(|id| id.name.as_str());
-              let (proto, _env_len) =
-                self.compile_function(&method_name_owned, self_name, f, None, false)?;
-              let idx = self.chunk.add_function(proto);
-              self.emit(Op::MakeClosure, LINE);
-              self.emit_byte(self.function_index_to_u8(idx)?, LINE);
-            } else {
-              self.compile_expr_oast(&p.value)?;
+              self.emit_constant(Value::String("writable".to_string().into()), LINE);
+              self.emit(Op::True, LINE);
+              self.emit_constant(Value::String("enumerable".to_string().into()), LINE);
+              self.emit(Op::True, LINE);
+              self.emit_constant(Value::String("configurable".to_string().into()), LINE);
+              self.emit(Op::True, LINE);
+              self.emit(Op::BuildObject, LINE);
+              self.emit_byte(4, LINE);
+              self.emit(Op::Call, LINE);
+              self.emit_byte(3, LINE);
+              self.emit(Op::Discard, LINE);
             }
-            self.emit_constant(Value::String("enumerable".to_string().into()), LINE);
-            self.emit_constant(Value::Bool(true), LINE);
-            self.emit_constant(Value::String("configurable".to_string().into()), LINE);
-            self.emit_constant(Value::Bool(true), LINE);
-            self.emit(Op::BuildObject, LINE);
-            self.emit_byte(3, LINE);
-            self.emit(Op::Call, LINE);
-            self.emit_byte(3, LINE);
-          }
-        }
+            oast::ObjectPropertyKind::ObjectProperty(p) => {
+              let key_value = if p.computed {
+                None
+              } else {
+                Some(match &p.key {
+                  oast::PropertyKey::StaticIdentifier(ident) => {
+                    Value::String(ident.name.to_string().into())
+                  }
+                  oast::PropertyKey::Identifier(ident) => {
+                    Value::String(ident.name.to_string().into())
+                  }
+                  oast::PropertyKey::StringLiteral(s) => Value::String(s.value.to_string().into()),
+                  oast::PropertyKey::NumericLiteral(n) => {
+                    Value::String(super::numeric_property_key(n.value).into())
+                  }
+                  _ => {
+                    return Err(crate::errors::CompilerError::from(
+                      "unsupported accessor key",
+                    ));
+                  }
+                })
+              };
 
-        for idx in spread_indices {
-          if let oast::ObjectPropertyKind::SpreadProperty(spread) = &obj.properties[idx] {
-            self.emit(Op::Copy, LINE);
-            self.emit_get_global_name("Object");
-            self.emit_constant(Value::String("assign".to_string().into()), LINE);
-            self.emit(Op::GetProperty, LINE);
-            self.emit(Op::Exchange, LINE);
-            self.compile_expr_oast(&spread.argument)?;
-            self.emit(Op::Call, LINE);
-            self.emit_byte(2, LINE);
-            self.emit(Op::Discard, LINE);
+              self.emit(Op::Copy, LINE);
+              self.emit_get_builtin_name("objectDefineProperty");
+              self.emit(Op::Exchange, LINE);
+              if let Some(key) = key_value.as_ref() {
+                self.emit_constant(key.clone(), LINE);
+              } else {
+                let key = p
+                  .key
+                  .as_expression()
+                  .expect("computed accessor key must be an expression");
+                self.compile_expr_oast(key)?;
+              }
+
+              let descriptor_prop_name = match p.kind {
+                oast::PropertyKind::Get => "get",
+                oast::PropertyKind::Set => "set",
+                oast::PropertyKind::Init => unreachable!(),
+              };
+              let method_name = key_value
+                .as_ref()
+                .and_then(|key| match key {
+                  Value::String(key) => Some(key.to_string_lossy()),
+                  _ => None,
+                })
+                .unwrap_or_else(|| "<accessor>".to_string());
+              self.emit_constant(Value::String(descriptor_prop_name.to_string().into()), LINE);
+              if let oast::Expression::FunctionExpression(f) = &p.value {
+                let self_name = f.id.as_ref().map(|id| id.name.as_str());
+                let (proto, _env_len) =
+                  self.compile_function(&method_name, self_name, f, None, false)?;
+                let idx = self.chunk.add_function(proto);
+                self.emit(Op::MakeClosure, LINE);
+                self.emit_byte(self.function_index_to_u8(idx)?, LINE);
+              } else {
+                self.compile_expr_oast(&p.value)?;
+              }
+              self.emit_constant(Value::String("enumerable".to_string().into()), LINE);
+              self.emit(Op::True, LINE);
+              self.emit_constant(Value::String("configurable".to_string().into()), LINE);
+              self.emit(Op::True, LINE);
+              self.emit(Op::BuildObject, LINE);
+              self.emit_byte(3, LINE);
+              self.emit(Op::Call, LINE);
+              self.emit_byte(3, LINE);
+              self.emit(Op::Discard, LINE);
+            }
+            oast::ObjectPropertyKind::SpreadProperty(spread) => {
+              // Evaluate the spread expression before doing any copying.
+              let source_slot = self.alloc_temp_local("object_spread");
+              self.compile_expr_oast(&spread.argument)?;
+              self.emit(Op::StoreLocal, LINE);
+              self.emit_byte(self.slot_to_u8(source_slot)?, LINE);
+              self.emit(Op::Copy, LINE);
+              self.emit_get_global_name("Object");
+              self.emit_constant(Value::String("assign".to_string().into()), LINE);
+              self.emit(Op::GetProperty, LINE);
+              self.emit(Op::Exchange, LINE);
+              self.emit(Op::LoadLocal, LINE);
+              self.emit_byte(self.slot_to_u8(source_slot)?, LINE);
+              self.emit(Op::Call, LINE);
+              self.emit_byte(2, LINE);
+              self.emit(Op::Discard, LINE);
+            }
           }
         }
       }
@@ -1281,9 +1245,10 @@ impl super::Compiler {
             oast::UnaryOperator::LogicalNot => self.emit(Op::Not, LINE),
             oast::UnaryOperator::UnaryNegation => self.emit(Op::Neg, LINE),
             oast::UnaryOperator::UnaryPlus => {
-              // Unary plus performs ToNumber while preserving negative zero.
-              self.emit(Op::Neg, LINE);
-              self.emit(Op::Neg, LINE);
+              // ToNumber rejects BigInt. Subtracting +0 applies the same
+              // numeric coercion while preserving the sign of -0.
+              self.emit_constant(Value::Number(0.0), LINE);
+              self.emit(Op::Sub, LINE);
             }
             oast::UnaryOperator::BitwiseNot => self.emit(Op::BitNot, LINE),
             oast::UnaryOperator::Void => {
@@ -1718,23 +1683,86 @@ impl super::Compiler {
               self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
               return Ok(());
             }
+            if let OExpr::StaticMemberExpression(m) = &c.callee
+              && c.optional
+              && !m.optional
+              && !matches!(&m.object, OExpr::Super(_))
+            {
+              self.compile_expr_oast(&m.object)?;
+              self.emit(Op::Copy, LINE);
+              self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
+              self.emit(Op::GetProperty, LINE);
+              self.emit(Op::Copy, LINE);
+              self.emit(Op::JumpIfNullish, LINE);
+              let nullish = self.current_ip();
+              self.emit_jump_placeholder();
+              let arg_count = self.compile_call_arguments(&c.arguments)?;
+              self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
+              self.emit(Op::Jump, LINE);
+              let end = self.current_ip();
+              self.emit_jump_placeholder();
+              self.patch_jump(nullish);
+              self.emit(Op::Discard, LINE);
+              self.emit(Op::Discard, LINE);
+              self.emit(Op::Undefined, LINE);
+              self.patch_jump(end);
+              return Ok(());
+            }
+            if let OExpr::StaticMemberExpression(m) = &c.callee
+              && m.optional
+              && !matches!(&m.object, OExpr::Super(_))
+            {
+              self.compile_expr_oast(&m.object)?;
+              self.emit(Op::Copy, LINE);
+              self.emit(Op::JumpIfNullish, LINE);
+              let nullish = self.current_ip();
+              self.emit_jump_placeholder();
+              self.emit(Op::Copy, LINE);
+              self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
+              self.emit(Op::GetProperty, LINE);
+              let arg_count = self.compile_call_arguments(&c.arguments)?;
+              self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
+              self.emit(Op::Jump, LINE);
+              let end = self.current_ip();
+              self.emit_jump_placeholder();
+              self.patch_jump(nullish);
+              self.emit(Op::Discard, LINE);
+              self.emit(Op::Undefined, LINE);
+              self.patch_jump(end);
+              return Ok(());
+            }
+            if let OExpr::ComputedMemberExpression(m) = &c.callee
+              && m.optional
+              && !matches!(&m.object, OExpr::Super(_))
+            {
+              self.compile_expr_oast(&m.object)?;
+              self.emit(Op::Copy, LINE);
+              self.emit(Op::JumpIfNullish, LINE);
+              let nullish = self.current_ip();
+              self.emit_jump_placeholder();
+              self.emit(Op::Copy, LINE);
+              self.compile_expr_oast(&m.expression)?;
+              self.emit(Op::GetProperty, LINE);
+              let arg_count = self.compile_call_arguments(&c.arguments)?;
+              self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
+              self.emit(Op::Jump, LINE);
+              let end = self.current_ip();
+              self.emit_jump_placeholder();
+              self.patch_jump(nullish);
+              self.emit(Op::Discard, LINE);
+              self.emit(Op::Undefined, LINE);
+              self.patch_jump(end);
+              return Ok(());
+            }
             let is_optional_call = c.optional;
             // Recursively compile the callee (which may be a member expression)
             self.compile_expr_oast(&c.callee)?;
-            let end = if is_optional_call {
+            let nullish = if is_optional_call {
               self.emit(Op::Copy, LINE);
               self.emit(Op::JumpIfNullish, LINE);
-              let skip_nullish = self.current_ip();
-              self.emit_byte(0, LINE);
-              self.emit_byte(0, LINE);
-              self.emit(Op::Discard, LINE);
-              self.emit(Op::Null, LINE);
-              self.emit(Op::Jump, LINE);
-              let end = self.current_ip();
-              self.emit_byte(0, LINE);
-              self.emit_byte(0, LINE);
-              self.patch_jump(skip_nullish);
-              Some(end)
+              let nullish = self.current_ip();
+              self.emit_jump_placeholder();
+              Some(nullish)
             } else {
               None
             };
@@ -1748,15 +1776,16 @@ impl super::Compiler {
                 arg_count += 1;
               }
             }
-            if is_optional_call {
-              self.emit(Op::Call, LINE);
-              self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
-              if let Some(end) = end {
-                self.patch_jump(end);
-              }
-            } else {
-              self.emit(Op::Call, LINE);
-              self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
+            self.emit(Op::Call, LINE);
+            self.emit_byte(self.constant_index_to_u8(arg_count)?, LINE);
+            if let Some(nullish) = nullish {
+              self.emit(Op::Jump, LINE);
+              let end = self.current_ip();
+              self.emit_jump_placeholder();
+              self.patch_jump(nullish);
+              self.emit(Op::Discard, LINE);
+              self.emit(Op::Undefined, LINE);
+              self.patch_jump(end);
             }
           }
           CE::PrivateFieldExpression(m) => {
@@ -1860,6 +1889,30 @@ impl super::Compiler {
           return Ok(());
         }
 
+        if let OExpr::StaticMemberExpression(m) = &c.callee
+          && m.optional
+          && !matches!(&m.object, OExpr::Super(_))
+        {
+          self.compile_expr_oast(&m.object)?;
+          self.emit(Op::Copy, LINE);
+          self.emit(Op::JumpIfNullish, LINE);
+          let nullish = self.current_ip();
+          self.emit_jump_placeholder();
+          self.emit(Op::Copy, LINE);
+          self.emit_constant(Value::String(m.property.name.to_string().into()), LINE);
+          self.emit(Op::GetProperty, LINE);
+          let arg_count = self.compile_call_arguments(&c.arguments)?;
+          self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
+          self.emit(Op::Jump, LINE);
+          let end = self.current_ip();
+          self.emit_jump_placeholder();
+          self.patch_jump(nullish);
+          self.emit(Op::Discard, LINE);
+          self.emit(Op::Undefined, LINE);
+          self.patch_jump(end);
+          return Ok(());
+        }
+
         if let OExpr::StaticMemberExpression(m) = &c.callee {
           let _is_optional_call = c.optional;
 
@@ -1885,6 +1938,30 @@ impl super::Compiler {
 
           let arg_count = self.compile_call_arguments(&c.arguments)?;
           self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
+          return Ok(());
+        }
+
+        if let OExpr::ComputedMemberExpression(m) = &c.callee
+          && m.optional
+          && !matches!(&m.object, OExpr::Super(_))
+        {
+          self.compile_expr_oast(&m.object)?;
+          self.emit(Op::Copy, LINE);
+          self.emit(Op::JumpIfNullish, LINE);
+          let nullish = self.current_ip();
+          self.emit_jump_placeholder();
+          self.emit(Op::Copy, LINE);
+          self.compile_expr_oast(&m.expression)?;
+          self.emit(Op::GetProperty, LINE);
+          let arg_count = self.compile_call_arguments(&c.arguments)?;
+          self.emit_call_with_arg_count(Op::CallBuiltin, arg_count)?;
+          self.emit(Op::Jump, LINE);
+          let end = self.current_ip();
+          self.emit_jump_placeholder();
+          self.patch_jump(nullish);
+          self.emit(Op::Discard, LINE);
+          self.emit(Op::Undefined, LINE);
+          self.patch_jump(end);
           return Ok(());
         }
 
@@ -1955,16 +2032,16 @@ impl super::Compiler {
           self.compile_expr_oast(&c.callee)?;
           self.emit(Op::Copy, LINE);
           self.emit(Op::JumpIfNullish, LINE);
-          let skip_nullish = self.current_ip();
+          let nullish = self.current_ip();
           self.emit_jump_placeholder();
-          self.emit(Op::Discard, LINE);
-          self.emit(Op::Null, LINE);
+          let arg_count = self.compile_call_arguments(&c.arguments)?;
+          self.emit_call_with_arg_count(Op::Call, arg_count)?;
           self.emit(Op::Jump, LINE);
           let end = self.current_ip();
           self.emit_jump_placeholder();
-          self.patch_jump(skip_nullish);
-          let arg_count = self.compile_call_arguments(&c.arguments)?;
-          self.emit_call_with_arg_count(Op::Call, arg_count)?;
+          self.patch_jump(nullish);
+          self.emit(Op::Discard, LINE);
+          self.emit(Op::Undefined, LINE);
           self.patch_jump(end);
           return Ok(());
         }

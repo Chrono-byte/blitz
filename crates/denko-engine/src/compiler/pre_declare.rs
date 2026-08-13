@@ -86,24 +86,44 @@ impl Compiler {
           let mut names: Vec<_> = names.into_iter().collect();
           names.sort();
           for name in names {
-            let slot = if let Some(slot) = self.resolve_local(&name) {
+            let is_var = matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
+            let slot = if is_var {
+              self.resolve_local(&name).unwrap_or_else(|| {
+                let mirror_global = self.is_root;
+                self.add_var_local(name.clone(), None, mirror_global)
+              })
+            } else if let Some(slot) = self
+              .scopes
+              .last()
+              .and_then(|scope| scope.bindings.get(&name).copied())
+            {
               slot
             } else {
-              let mirror_global =
-                self.is_root && matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var);
-              if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Var) {
-                self.add_var_local(name.clone(), None, mirror_global)
-              } else {
-                let slot = self.add_local_with_mirror(name.clone(), None, mirror_global);
-                self.mark_local_tdz(slot);
-                slot
-              }
+              let slot = self.add_local_with_mirror(name.clone(), None, false);
+              self.mark_local_tdz(slot);
+              self.add_lexical_binding(&name);
+              slot
             };
             if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Const) {
               self.mark_local_immutable(slot);
             }
           }
         }
+      }
+    }
+
+    // `var` declarations are instantiated for the whole function even when
+    // their declaration is nested in a statement. Lexical declarations are
+    // deliberately handled only by their own statement-list scope.
+    let mut nested_var_names = HashSet::new();
+    for stmt in stmts {
+      self.add_var_names_from_statement(stmt, &mut nested_var_names);
+    }
+    let mut nested_var_names: Vec<_> = nested_var_names.into_iter().collect();
+    nested_var_names.sort();
+    for name in nested_var_names {
+      if self.resolve_local(&name).is_none() {
+        self.add_var_local(name, None, self.is_root);
       }
     }
   }

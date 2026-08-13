@@ -747,6 +747,7 @@ fn timer_set_method(
   kind: TimerKind,
 ) -> BuiltinFn {
   Rc::new(move |vm, args| {
+    const MAX_TIMER_ARGUMENTS: usize = 1_024;
     let callback_index = if args.first().is_some_and(Value::is_callable) {
       0
     } else {
@@ -770,6 +771,9 @@ fn timer_set_method(
       Duration::try_from_secs_f64(delay / 1_000.0)
         .map_err(|_| RuntimeError::from("timer delay is outside the supported range"))?
     };
+    if args.len().saturating_sub(callback_index + 2) > MAX_TIMER_ARGUMENTS {
+      return Err(RuntimeError::from("timer argument capacity is exhausted"));
+    }
     let id = match kind {
       TimerKind::Timeout => state
         .scheduler
